@@ -14,6 +14,10 @@ import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './atomic-graph-replace.js';
 import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
 
 /**
@@ -438,6 +442,40 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
         throw error;
       }
       await this.markPostMutation([graphUri], options);
+    });
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'ChangelogStore',
+      );
+    }
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(input, options);
+    const touchedGraphs = rfc64AuthorCommitTouchedGraphs(input);
+    const referencedGraphs = [
+      ...touchedGraphs,
+      ...input.stateGuards.map(({ graphUri }) => graphUri),
+    ];
+    for (const graph of referencedGraphs) {
+      this.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
+    }
+    return this.runExclusive(async () => {
+      let result: Rfc64AuthorCommitCasResultV1;
+      try {
+        result = await this.inner.rfc64AuthorCommitCasV1!(input, options);
+      } catch (error) {
+        if (!isAtomicReplaceOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
+          this.flagReconcile('rfc64AuthorCommitCasV1(indeterminate-failure)');
+        }
+        throw error;
+      }
+      if (result === 'committed') await this.markPostMutation(touchedGraphs, options);
+      return result;
     });
   }
 
@@ -873,6 +911,15 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
       }
     }
   }
+}
+
+function rfc64AuthorCommitTouchedGraphs(input: Rfc64AuthorCommitCasInputV1): string[] {
+  return [...new Set([
+    input.sharedProjectionGraph,
+    input.authorSealGraph,
+    input.currentHeadGraph,
+    ...input.stateReplacements.map(({ graphUri }) => graphUri),
+  ])];
 }
 
 // ====================================================================

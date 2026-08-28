@@ -547,6 +547,17 @@ export function createListContextGraphsCacheInvalidatingStore(
             () => markProjectionDirty?.(undefined, graphUri),
           )
       : undefined,
+    // RFC-64 author publication moves a complete public-SWM projection and
+    // its bounded semantic control state through one backend CAS. Preserve the
+    // capability through this cache-invalidation decorator and invalidate only
+    // after a proven commit; a clean guard conflict changes nothing.
+    rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
+      ? (input, options) => invalidateAfterMutation(
+          () => innerStore.rfc64AuthorCommitCasV1!(input, options),
+          result => result === 'committed',
+          () => markProjectionDirty?.(),
+        )
+      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },

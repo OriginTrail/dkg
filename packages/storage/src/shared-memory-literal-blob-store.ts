@@ -13,6 +13,10 @@ import type {
   TripleStoreDecorator,
 } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './atomic-graph-replace.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
 export const SHARED_MEMORY_GRAPH_SUFFIX = '/_shared_memory';
@@ -150,6 +154,34 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       quads.map((quad) => this.externalizeInsertQuad(quad)),
     );
     await this.inner.replaceSubject(graphUri, subject, externalized, options);
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    const [sharedProjectionQuads, authorSealQuads, stateReplacements] = await Promise.all([
+      Promise.all(input.sharedProjectionQuads.map((quad) => this.externalizeInsertQuad(quad))),
+      Promise.all(input.authorSealQuads.map((quad) => this.externalizeInsertQuad(quad))),
+      Promise.all(input.stateReplacements.map(async (replacement) => ({
+        ...replacement,
+        quads: await Promise.all(
+          replacement.quads.map((quad) => this.externalizeInsertQuad(quad)),
+        ),
+      }))),
+    ]);
+    return this.inner.rfc64AuthorCommitCasV1({
+      ...input,
+      sharedProjectionQuads,
+      authorSealQuads,
+      stateReplacements,
+    }, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {

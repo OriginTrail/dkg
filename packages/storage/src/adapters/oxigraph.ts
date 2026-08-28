@@ -23,7 +23,10 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildRfc64AuthorCommitCasUpdateV1,
   isAtomicGraphReplaceStagingGraph,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
 } from '../atomic-graph-replace.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import {
@@ -429,6 +432,47 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    const guarded = rfc64AuthorCommitQuads(input).filter(
+      (quad) => !(quad.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(quad.graph)),
+    );
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.rfc64AuthorCommitCasV1',
+      });
+    }
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    try {
+      this.store.update(plan.update);
+    } catch (error) {
+      try {
+        this.store.update(plan.cleanup);
+      } catch {
+        // Preserve the semantic commit failure. Internal graphs stay hidden.
+      }
+      this.scheduleFlush();
+      throw error;
+    }
+    let committed: boolean;
+    try {
+      committed = this.store.query(plan.receiptAsk) === true;
+    } finally {
+      try {
+        this.store.update(plan.cleanup);
+      } catch {
+        // The semantic outcome is already known. Receipt cleanup is auxiliary.
+      }
+      this.scheduleFlush();
+    }
+    if (committed) {
+      this.writeGen.recordWrite({ kind: 'graphs', graphs: [...plan.touchedGraphs] });
+    }
+    return committed ? 'committed' : 'conflict';
+  }
+
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
     // Index-read enumeration shared with SparqlHttpStore — see the rationale on
@@ -540,6 +584,14 @@ export class OxigraphStore implements TripleStore {
     }
     await this.flushNow();
   }
+}
+
+function rfc64AuthorCommitQuads(input: Rfc64AuthorCommitCasInputV1): DKGQuad[] {
+  return [
+    ...input.sharedProjectionQuads,
+    ...input.authorSealQuads,
+    ...input.stateReplacements.flatMap(({ quads }) => quads),
+  ];
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

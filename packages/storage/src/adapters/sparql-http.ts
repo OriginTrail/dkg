@@ -52,7 +52,10 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildRfc64AuthorCommitCasUpdateV1,
   isAtomicGraphReplaceStagingGraph,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
 } from '../atomic-graph-replace.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import {
@@ -734,6 +737,50 @@ export class SparqlHttpStore implements TripleStore {
     });
   }
 
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (!this.atomicUpdates) {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'SparqlHttpStore',
+      );
+    }
+    assertQuadLiteralsMutf8Safe(rfc64AuthorCommitQuads(input), {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.rfc64AuthorCommitCasV1',
+    });
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    await this.runRemoteGraphMutation({
+      scope: { kind: 'graphs', graphs: [...plan.touchedGraphs] },
+      update: plan.update,
+      options: { ...options, source: options?.source ?? 'sparql-http.rfc64AuthorCommitCasV1' },
+      operation: 'rfc64AuthorCommitCasV1',
+      cleanup: {
+        update: plan.cleanup,
+        options: { ...options, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' },
+        operation: 'rfc64AuthorCommitCasV1',
+      },
+    });
+    try {
+      const receipt = await this.query(plan.receiptAsk, {
+        ...options,
+        source: 'sparql-http.rfc64AuthorCommitCasV1.receipt',
+      });
+      if (receipt.type !== 'boolean') {
+        throw new Error('SPARQL HTTP RFC-64 author commit receipt query returned a non-boolean result');
+      }
+      return receipt.value ? 'committed' : 'conflict';
+    } finally {
+      await this.postCleanupUpdate(
+        plan.cleanup,
+        { ...options, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' },
+        'rfc64AuthorCommitCasV1',
+      ).catch(() => undefined);
+    }
+  }
+
   /**
    * The only dispatch path for public remote mutations. The request owns its
    * write scope, HTTP dispatch, lifecycle transitions, graph-list invalidation,
@@ -1083,6 +1130,14 @@ export class SparqlHttpStore implements TripleStore {
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }
+}
+
+function rfc64AuthorCommitQuads(input: Rfc64AuthorCommitCasInputV1): DKGQuad[] {
+  return [
+    ...input.sharedProjectionQuads,
+    ...input.authorSealQuads,
+    ...input.stateReplacements.flatMap(({ quads }) => quads),
+  ];
 }
 
 function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {

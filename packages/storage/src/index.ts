@@ -21,6 +21,7 @@ export {
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   tryReplaceSubjectAtomically,
+  tryRfc64AuthorCommitCasV1,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
@@ -31,15 +32,25 @@ export {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildRfc64AuthorCommitCasUpdateV1,
   isAtomicGraphReplaceStagingGraph,
+  RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
+  RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1,
+  RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+  type Rfc64AuthorCommitCasUpdateV1,
+  type Rfc64AuthorCommitSubjectReplacementV1,
+  type Rfc64AuthorCommitValueGuardV1,
 } from './atomic-graph-replace.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
+  isRfc64AuthorCommitCasCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {

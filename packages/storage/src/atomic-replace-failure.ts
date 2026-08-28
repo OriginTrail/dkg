@@ -3,7 +3,7 @@ import type { TripleStoreCapability } from './unsupported-capability-error.js';
 
 export type AtomicReplaceCapability = Extract<
   TripleStoreCapability,
-  'replaceGraph' | 'replaceGraphAndSubject' | 'replaceSubject'
+  'replaceGraph' | 'replaceGraphAndSubject' | 'replaceSubject' | 'rfc64AuthorCommitCasV1'
 >;
 
 /**

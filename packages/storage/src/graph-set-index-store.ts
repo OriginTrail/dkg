@@ -15,6 +15,10 @@ import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './atomic-graph-replace.js';
 import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
@@ -35,6 +39,7 @@ export type GraphSetMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'rfc64AuthorCommitCasV1'
   | 'query'
   | 'update';
 
@@ -45,6 +50,7 @@ type TouchedGraphMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'rfc64AuthorCommitCasV1'
   | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
@@ -462,6 +468,36 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
   }
 
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'GraphSetIndexStore',
+      );
+    }
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(input, options);
+    let result: Rfc64AuthorCommitCasResultV1;
+    try {
+      result = await this.inner.rfc64AuthorCommitCasV1(input, options);
+    } catch (error) {
+      if (!isAtomicReplaceOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
+        this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
+      }
+      throw error;
+    }
+    if (result === 'conflict') return result;
+    this.bumpMutation();
+    await this.maintainTouchedGraphs(
+      rfc64AuthorCommitTouchedGraphs(input),
+      'rfc64AuthorCommitCasV1',
+      options,
+    );
+    return result;
+  }
+
   async listGraphs(options?: QueryOptions): Promise<string[]> {
     if (!this.enabled) {
       return (await this.inner.listGraphs(options)).filter(
@@ -743,6 +779,15 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // Observability hooks must not make already-committed store writes fail.
     }
   }
+}
+
+function rfc64AuthorCommitTouchedGraphs(input: Rfc64AuthorCommitCasInputV1): string[] {
+  return [...new Set([
+    input.sharedProjectionGraph,
+    input.authorSealGraph,
+    input.currentHeadGraph,
+    ...input.stateReplacements.map(({ graphUri }) => graphUri),
+  ])];
 }
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {

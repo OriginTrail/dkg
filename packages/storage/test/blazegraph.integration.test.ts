@@ -280,4 +280,77 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     },
     60_000,
   );
+
+  it(
+    'commits an RFC-64 author projection and guarded semantic state atomically',
+    async () => {
+      const projectionGraph = `${GRAPH}:rfc64:projection`;
+      const sealGraph = `${GRAPH}:rfc64:seals`;
+      const headGraph = `${GRAPH}:rfc64:heads`;
+      const stateGraph = `${GRAPH}:rfc64:state`;
+      const author = `urn:bg-int:${RUN}:rfc64:author`;
+      const seal = `urn:bg-int:${RUN}:rfc64:seal`;
+      const mutation = `urn:bg-int:${RUN}:rfc64:mutation`;
+      const oldHead = `urn:bg-int:${RUN}:rfc64:head:old`;
+      const newHead = `urn:bg-int:${RUN}:rfc64:head:new`;
+      const pValue = 'urn:bg-int:rfc64:value';
+      const pHead = 'urn:bg-int:rfc64:current-head';
+      const pGeneration = 'urn:bg-int:rfc64:generation';
+      const graphs = [projectionGraph, sealGraph, headGraph, stateGraph];
+      const input = {
+        sharedProjectionGraph: projectionGraph,
+        sharedProjectionQuads: [
+          { subject: `${author}:ka:1`, predicate: pValue, object: '"new-1"', graph: projectionGraph },
+          { subject: `${author}:ka:2`, predicate: pValue, object: '"new-2"', graph: projectionGraph },
+        ],
+        authorSealGraph: sealGraph,
+        authorSealSubject: seal,
+        authorSealQuads: [
+          { subject: seal, predicate: pValue, object: '"new-seal"', graph: sealGraph },
+        ],
+        currentHeadGraph: headGraph,
+        currentHeadSubject: author,
+        currentHeadPredicate: pHead,
+        expectedCurrentHeadObject: oldHead,
+        nextCurrentHeadObject: newHead,
+        stateGuards: [{
+          graphUri: stateGraph,
+          subject: mutation,
+          predicate: pGeneration,
+          expectedObject: '"1"',
+        }],
+        stateReplacements: [{
+          graphUri: stateGraph,
+          subject: mutation,
+          quads: [
+            { subject: mutation, predicate: pGeneration, object: '"2"', graph: stateGraph },
+          ],
+        }],
+      };
+
+      try {
+        await store.insert([
+          { subject: `${author}:ka:old`, predicate: pValue, object: '"old"', graph: projectionGraph },
+          { subject: seal, predicate: pValue, object: '"old-seal"', graph: sealGraph },
+          { subject: author, predicate: pHead, object: oldHead, graph: headGraph },
+          { subject: mutation, predicate: pGeneration, object: '"1"', graph: stateGraph },
+        ]);
+
+        await expect(store.rfc64AuthorCommitCasV1(input)).resolves.toBe('committed');
+        expect(await store.countQuads(projectionGraph)).toBe(2);
+        const head = await store.query(
+          `SELECT ?o WHERE { GRAPH <${headGraph}> { <${author}> <${pHead}> ?o } }`,
+        );
+        expect(head.type === 'bindings' ? head.bindings : []).toEqual([{ o: newHead }]);
+
+        // The old expected head is now stale: Blazegraph must prove a clean
+        // conflict and leave every already-committed target untouched.
+        await expect(store.rfc64AuthorCommitCasV1(input)).resolves.toBe('conflict');
+        expect(await store.countQuads(projectionGraph)).toBe(2);
+      } finally {
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+      }
+    },
+    60_000,
+  );
 });

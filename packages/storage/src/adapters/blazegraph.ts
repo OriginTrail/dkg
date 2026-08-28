@@ -32,7 +32,10 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildRfc64AuthorCommitCasUpdateV1,
   isAtomicGraphReplaceStagingGraph,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
 } from '../atomic-graph-replace.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
@@ -460,6 +463,47 @@ export class BlazegraphStore implements TripleStore {
     );
   }
 
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    assertQuadLiteralsMutf8Safe(rfc64AuthorCommitQuads(input), {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'BlazegraphStore.rfc64AuthorCommitCasV1',
+    });
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    try {
+      await this.sparqlUpdate(
+        plan.update,
+        { ...options, source: options?.source ?? 'blazegraph.rfc64AuthorCommitCasV1' },
+        'rfc64AuthorCommitCasV1',
+      );
+    } catch (error) {
+      await this.sparqlUpdate(
+        plan.cleanup,
+        { ...options, source: 'blazegraph.rfc64AuthorCommitCasV1.cleanup' },
+        'rfc64AuthorCommitCasV1',
+      ).catch(() => undefined);
+      throw error;
+    }
+    try {
+      const receipt = await this.query(plan.receiptAsk, {
+        ...options,
+        source: 'blazegraph.rfc64AuthorCommitCasV1.receipt',
+      });
+      if (receipt.type !== 'boolean') {
+        throw new Error('Blazegraph RFC-64 author commit receipt query returned a non-boolean result');
+      }
+      return receipt.value ? 'committed' : 'conflict';
+    } finally {
+      await this.sparqlUpdate(
+        plan.cleanup,
+        { ...options, source: 'blazegraph.rfc64AuthorCommitCasV1.cleanup' },
+        'rfc64AuthorCommitCasV1',
+      ).catch(() => undefined);
+    }
+  }
+
   // -------------------------------------------------------------------
   // Queries
   // -------------------------------------------------------------------
@@ -682,6 +726,14 @@ export class BlazegraphStore implements TripleStore {
       }
     });
   }
+}
+
+function rfc64AuthorCommitQuads(input: Rfc64AuthorCommitCasInputV1): DKGQuad[] {
+  return [
+    ...input.sharedProjectionQuads,
+    ...input.authorSealQuads,
+    ...input.stateReplacements.flatMap(({ quads }) => quads),
+  ];
 }
 
 // =====================================================================
