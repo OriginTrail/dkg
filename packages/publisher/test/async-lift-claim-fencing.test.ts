@@ -234,6 +234,41 @@ describe('async-lift claim fencing', () => {
     expect(replacement?.claim.claimToken).not.toBe(originalToken);
   });
 
+  it('always releases the processing marker when claim execution escapes with a persistence fault', async () => {
+    let failNextJobWrite = false;
+    let jobId = '';
+    const originalReplaceSubject = store.replaceSubject.bind(store);
+    store.replaceSubject = async (...args) => {
+      if (failNextJobWrite && args[1].includes(jobId)) {
+        failNextJobWrite = false;
+        throw new Error('injected job persistence fault');
+      }
+      await originalReplaceSubject(...args);
+    };
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        preflight: async () => {},
+        execute: async () => {
+          // The business failure is converted to a durable FAILED transition. Fail that write so
+          // processClaim must leave through its fault path, where marker cleanup is the invariant.
+          failNextJobWrite = true;
+          throw new Error('executor business failure');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageSnapshot();
+    jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    await expect(publisher.processNext('wallet-a')).rejects.toThrow('injected job persistence fault');
+
+    // An unreleased in-memory marker makes recovery skip this job forever in this instance. Once
+    // its durable lease expires, successful recovery therefore proves the finally cleanup ran.
+    now += 5 * 60_000 + 1;
+    await expect(publisher.recover()).resolves.toBe(1);
+    expect(await publisher.getStatus(jobId)).toMatchObject({ jobId, status: 'accepted' });
+  });
+
   it('does not let an expired worker write or send after another wallet reclaims the job', async () => {
     const executeEntered = deferred();
     const releaseExecute = deferred();
