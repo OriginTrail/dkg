@@ -23,6 +23,7 @@ const catalogRun: McpToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      projectId: { type: 'string' },
       selector: { type: 'string' },
       parameters: { type: 'object' },
     },
@@ -37,7 +38,7 @@ const dkgQuery: McpToolDefinition = {
   description: 'Run SPARQL',
   inputSchema: {
     type: 'object',
-    properties: { sparql: { type: 'string' } },
+    properties: { projectId: { type: 'string' }, sparql: { type: 'string' } },
     required: ['sparql'],
     additionalProperties: false,
   },
@@ -50,6 +51,7 @@ const catalogSave: McpToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      projectId: { type: 'string' },
       name: { type: 'string' },
       sparql: { type: 'string' },
     },
@@ -108,13 +110,23 @@ describe('DkgLocalLlmRuntime', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
       .mockResolvedValueOnce(answerResponse('One saved query: supply/lifecycle.'));
-    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
 
     const result = await runtime.run('Which DKG query catalog queries are saved?');
 
     expect(result.profile).toBe('catalog');
-    expect(result.toolCalls).toEqual([{ name: 'dkg_query_catalog_list', arguments: {} }]);
-    expect(mcp.callTool).toHaveBeenCalledWith({ name: 'dkg_query_catalog_list', arguments: {} });
+    expect(result.toolCalls).toEqual([{
+      name: 'dkg_query_catalog_list',
+      arguments: { projectId: 'testing' },
+    }]);
+    expect(mcp.callTool).toHaveBeenCalledWith({
+      name: 'dkg_query_catalog_list',
+      arguments: { projectId: 'testing' },
+    });
     const firstRequest = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
     expect(firstRequest.tool_choice).toBe('required');
     expect(firstRequest.tools.map((tool: { function: { name: string } }) => tool.function.name))
@@ -133,6 +145,7 @@ describe('DkgLocalLlmRuntime', () => {
     const runtime = await DkgLocalLlmRuntime.create({
       mcp,
       fetch: fetcher as typeof fetch,
+      projectId: 'testing',
       maxTokens: 1_024,
     });
 
@@ -154,13 +167,17 @@ describe('DkgLocalLlmRuntime', () => {
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', {}))
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', { selector: 'supply/lifecycle' }, 'call-2'))
       .mockResolvedValueOnce(answerResponse('Lifecycle evidence returned.'));
-    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
 
     const result = await runtime.run('Run the saved DKG query catalog query supply/lifecycle');
 
     expect(result.toolCalls).toEqual([{
       name: 'dkg_query_catalog_run',
-      arguments: { selector: 'supply/lifecycle' },
+      arguments: { projectId: 'testing', selector: 'supply/lifecycle' },
     }]);
     const retryRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
     expect(retryRequest.tools).toHaveLength(1);
@@ -181,7 +198,11 @@ describe('DkgLocalLlmRuntime', () => {
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', { selector: 'bad' }, 'call-bad'))
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', { selector: 'supply/lifecycle' }, 'call-good'))
       .mockResolvedValueOnce(answerResponse('Lifecycle evidence returned.'));
-    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
 
     await runtime.run('Run the saved DKG query catalog query supply/lifecycle');
 
@@ -215,12 +236,85 @@ describe('DkgLocalLlmRuntime', () => {
       .mockResolvedValueOnce(answerResponse('The selector is supply/lifecycle.'))
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}, 'call-2'))
       .mockResolvedValueOnce(answerResponse('It still exists.'));
-    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
     await runtime.run('Which DKG query catalog queries are saved?');
     const followUp = await runtime.run('Does that DKG query still exist?');
     expect(followUp.toolCalls).toHaveLength(1);
     const request = JSON.parse(String(fetcher.mock.calls[2][1]?.body));
     expect(request.messages[0].content).toContain('Prior turns below only resolve conversational references');
+  });
+
+  it('carries a catalog selector Context Graph from list evidence instead of a different session pin', async () => {
+    const mcp = makeMcp();
+    mcp.callTool
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'One query.' }],
+        structuredContent: {
+          contextGraphId: 'graph-from-evidence',
+          count: 1,
+          items: [{
+            selector: 'models/local/models-by-category',
+            slug: 'models-by-category',
+            name: 'Models by category',
+          }],
+        },
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: '| model |\n|---|\n| urn:model:1 |' }],
+      });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', { projectId: 'graph-from-evidence' }))
+      .mockResolvedValueOnce(answerResponse('The selector is models/local/models-by-category.'))
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', {
+        selector: 'models/local/models-by-category',
+        parameters: { category: 'decoder-only' },
+      }, 'call-2'))
+      .mockResolvedValueOnce(answerResponse('Found urn:model:1.'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'different-session-pin',
+    });
+
+    await runtime.run('List the catalog in graph-from-evidence.');
+    const result = await runtime.run('Run models/local/models-by-category for decoder-only.');
+
+    expect(result.toolCalls).toEqual([{
+      name: 'dkg_query_catalog_run',
+      arguments: {
+        projectId: 'graph-from-evidence',
+        selector: 'models/local/models-by-category',
+        parameters: { category: 'decoder-only' },
+      },
+    }]);
+    expect(mcp.callTool).toHaveBeenLastCalledWith({
+      name: 'dkg_query_catalog_run',
+      arguments: {
+        projectId: 'graph-from-evidence',
+        selector: 'models/local/models-by-category',
+        parameters: { category: 'decoder-only' },
+      },
+    });
+    const followUpRequest = JSON.parse(String(fetcher.mock.calls[2][1]?.body));
+    expect(followUpRequest.messages[0].content).toContain(
+      'Session Context Graph: different-session-pin (explicitly pinned for this LLM session)',
+    );
+  });
+
+  it('rejects a scoped MCP call without explicit, evidence, or session project scope', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}));
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+
+    await expect(runtime.run('List saved DKG queries.')).rejects.toThrow(
+      'requires an explicit Context Graph in local LLM mode',
+    );
+    expect(mcp.callTool).not.toHaveBeenCalled();
   });
 
   it('uses the one repair retry for malformed DKG SPARQL before calling MCP', async () => {
@@ -233,7 +327,11 @@ describe('DkgLocalLlmRuntime', () => {
         sparql: 'ASK { <urn:test:item> <schema:name> "x" }',
       }, 'call-2'))
       .mockResolvedValueOnce(answerResponse('Yes.'));
-    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
 
     const result = await runtime.run('Use DKG SPARQL ASK for urn:test:item');
 
@@ -241,7 +339,7 @@ describe('DkgLocalLlmRuntime', () => {
     expect(mcp.callTool).toHaveBeenCalledTimes(1);
     expect(mcp.callTool).toHaveBeenCalledWith({
       name: 'dkg_query',
-      arguments: { sparql: 'ASK { <urn:test:item> <schema:name> "x" }' },
+      arguments: { projectId: 'testing', sparql: 'ASK { <urn:test:item> <schema:name> "x" }' },
     });
     const retryRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
     expect(retryRequest.messages.at(-1).content).toContain('wrap absolute IRI');
@@ -260,7 +358,11 @@ describe('DkgLocalLlmRuntime', () => {
         sparql: 'SELECT ?model WHERE { ?model <rdf:type> <urn:test:Class> }',
       }, 'call-2'))
       .mockResolvedValueOnce(answerResponse('Found urn:test:item.'));
-    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
 
     const result = await runtime.run('Use DKG SPARQL to find urn:test:Class entities');
 
@@ -281,13 +383,17 @@ describe('DkgLocalLlmRuntime', () => {
       .mockResolvedValueOnce(toolResponse('dkg_query', { sparql: original }))
       .mockResolvedValueOnce(toolResponse('dkg_query', { sparql: corrected }, 'call-2'))
       .mockResolvedValueOnce(answerResponse('Found urn:test:item.'));
-    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
 
     await runtime.run('Use DKG SPARQL to find urn:test:Class entities by their exact description');
 
     expect(mcp.callTool).toHaveBeenNthCalledWith(2, {
       name: 'dkg_query',
-      arguments: { sparql: corrected },
+      arguments: { projectId: 'testing', sparql: corrected },
     });
     expect(corrected).toContain('"?x rdf:type legacy; schema:name untouched"');
   });
@@ -298,7 +404,11 @@ describe('DkgLocalLlmRuntime', () => {
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}, 'call-2'))
       .mockResolvedValueOnce(answerResponse('One saved query.'));
-    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
 
     const result = await runtime.run('Which DKG query catalog queries are saved?');
 
@@ -323,6 +433,7 @@ describe('DkgLocalLlmRuntime', () => {
       mcp,
       fetch: fetcher as typeof fetch,
       allowWrite: true,
+      projectId: 'testing',
     });
 
     const result = await runtime.run('Save a DKG query catalog query named Models for urn:test:Model');

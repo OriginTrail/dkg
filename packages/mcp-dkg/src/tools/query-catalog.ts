@@ -237,7 +237,10 @@ export function registerQueryCatalogTools(
       },
       inputSchema: {
         projectId: projectSchema,
-        selector: z.string().trim().min(1).describe('Prefer the selector returned by dkg_query_catalog_list.'),
+        selector: z.string().trim().min(1).describe(
+          'Prefer the selector returned by dkg_query_catalog_list. Selectors are scoped to a Context Graph, '
+          + 'so pass the same projectId used for that list call.',
+        ),
         parameters: z.record(parameterValueSchema).optional().default({}),
         limit: z.number().int().min(1).max(500).optional().default(100),
       },

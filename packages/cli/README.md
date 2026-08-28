@@ -314,6 +314,11 @@ dkg llm --interactive --model local-model
 dkg llm --project my-project "Which saved queries are available?"
 ```
 
+`--project` explicitly pins the LLM session; inherited `DKG_PROJECT` and the
+MCP config's first Context Graph are not silent agent scopes. Without a pin,
+name the exact Context Graph in each scoped request. Catalog selectors retain
+the graph scope of the `dkg_query_catalog_list` evidence that returned them.
+
 Each turn receives at most eight relevant MCP schemas and 18,000 serialized
 schema bytes by default instead of the complete tool surface. Relevance is
 ranked from the live MCP tool names, descriptions, and input schemas; use

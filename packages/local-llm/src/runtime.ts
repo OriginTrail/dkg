@@ -94,6 +94,10 @@ export interface DkgChatEvidence {
   name: string;
   arguments: Record<string, unknown>;
   result: string;
+  catalogScope?: {
+    projectId: string;
+    selectors: string[];
+  };
 }
 
 export interface DkgChatTurn {
@@ -142,6 +146,12 @@ function cloneTurn(turn: DkgChatTurn): DkgChatTurn {
       name: item.name,
       arguments: { ...item.arguments },
       result: item.result,
+      ...(item.catalogScope ? {
+        catalogScope: {
+          projectId: item.catalogScope.projectId,
+          selectors: [...item.catalogScope.selectors],
+        },
+      } : {}),
     })),
   };
 }
@@ -168,6 +178,75 @@ function toolResultText(result: { content?: unknown[] }): string {
     })
     .filter(Boolean)
     .join('\n');
+}
+
+function toolAcceptsProjectId(tool: McpToolDefinition): boolean {
+  const properties = tool.inputSchema.properties;
+  return Boolean(
+    properties
+    && typeof properties === 'object'
+    && !Array.isArray(properties)
+    && Object.hasOwn(properties, 'projectId'),
+  );
+}
+
+function structuredEvidence(value: string): Record<string, unknown> | undefined {
+  const marker = 'Structured DKG evidence (authoritative):';
+  const markerIndex = value.indexOf(marker);
+  if (markerIndex < 0) return undefined;
+  try {
+    const parsed = JSON.parse(value.slice(markerIndex + marker.length).trim());
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function catalogEvidenceMatchesSelector(evidence: DkgChatEvidence, selector: string): string | undefined {
+  if (evidence.name !== 'dkg_query_catalog_list') return undefined;
+  if (evidence.catalogScope?.selectors.includes(selector)) return evidence.catalogScope.projectId;
+  const structured = structuredEvidence(evidence.result);
+  const items = Array.isArray(structured?.items) ? structured.items : [];
+  const matches = items.some((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    const record = item as Record<string, unknown>;
+    return [record.selector, record.slug, record.name].some((value) => value === selector);
+  });
+  if (!matches) return undefined;
+  const structuredProjectId = typeof structured?.contextGraphId === 'string'
+    ? structured.contextGraphId.trim()
+    : '';
+  const argumentProjectId = typeof evidence.arguments.projectId === 'string'
+    ? evidence.arguments.projectId.trim()
+    : '';
+  return structuredProjectId || argumentProjectId || undefined;
+}
+
+function catalogScopeFromResult(
+  toolName: string,
+  args: Record<string, unknown>,
+  value: unknown,
+): DkgChatEvidence['catalogScope'] {
+  if (toolName !== 'dkg_query_catalog_list' || !value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const structured = value as Record<string, unknown>;
+  const projectId = typeof structured.contextGraphId === 'string'
+    ? structured.contextGraphId.trim()
+    : typeof args.projectId === 'string'
+      ? args.projectId.trim()
+      : '';
+  if (!projectId || !Array.isArray(structured.items)) return undefined;
+  const selectors = [...new Set(structured.items.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    return [record.selector, record.slug, record.name]
+      .filter((selector): selector is string => typeof selector === 'string' && Boolean(selector.trim()))
+      .map((selector) => selector.trim());
+  }))];
+  return selectors.length ? { projectId, selectors } : undefined;
 }
 
 function toolCallSignature(toolCall: ToolCall): string {
@@ -360,6 +439,12 @@ export class DkgLocalLlmRuntime {
         name: item.name,
         arguments: { ...item.arguments },
         result: compactText(item.result, Math.min(2_000, perField)),
+        ...(item.catalogScope ? {
+          catalogScope: {
+            projectId: item.catalogScope.projectId,
+            selectors: [...item.catalogScope.selectors],
+          },
+        } : {}),
       })),
     };
     this.sessionTurns.push(turn);
@@ -371,6 +456,25 @@ export class DkgLocalLlmRuntime {
       droppedTurns,
       evidence: turn.evidence.map((item) => ({ name: item.name, arguments: item.arguments })),
     });
+  }
+
+  private catalogEvidenceProjectId(
+    toolName: string,
+    args: Record<string, unknown>,
+    currentEvidence: DkgChatEvidence[],
+  ): string | undefined {
+    if (toolName !== 'dkg_query_catalog_run' || typeof args.selector !== 'string') return undefined;
+    const selector = args.selector.trim();
+    if (!selector) return undefined;
+    const evidenceNewestFirst = [
+      ...[...currentEvidence].reverse(),
+      ...[...this.sessionTurns].reverse().flatMap((turn) => [...turn.evidence].reverse()),
+    ];
+    for (const evidence of evidenceNewestFirst) {
+      const projectId = catalogEvidenceMatchesSelector(evidence, selector);
+      if (projectId) return projectId;
+    }
+    return undefined;
   }
 
   private async callLlama(
@@ -590,6 +694,22 @@ export class DkgLocalLlmRuntime {
         await scheduleRepair(`Invalid arguments for ${tool.name}: ${parsed.error}`, signature, tool.name);
         continue;
       }
+      if (toolAcceptsProjectId(tool) && parsed.args.projectId === undefined) {
+        const evidenceProjectId = this.catalogEvidenceProjectId(tool.name, parsed.args, sessionEvidence);
+        const projectId = evidenceProjectId ?? this.projectId;
+        if (!projectId) {
+          throw new Error(
+            `${tool.name} requires an explicit Context Graph in local LLM mode. `
+            + 'Name the exact graph in the request or restart with --project <id>; MCP configuration defaults are not used.',
+          );
+        }
+        parsed.args.projectId = projectId;
+        await this.trace.write('TOOL PROJECT SCOPE MATERIALIZED', {
+          tool: tool.name,
+          projectId,
+          source: evidenceProjectId ? 'catalog-evidence' : 'explicit-session-pin',
+        });
+      }
       const normalizedSignature = `${tool.name}:${stableJson(parsed.args)}`;
       const preflight = validateDkgToolCall(tool.name, parsed.args);
       if (!preflight.ok) {
@@ -687,7 +807,17 @@ export class DkgLocalLlmRuntime {
       });
       successfulSignatures.add(normalizedSignature);
       executed.push({ name: tool.name, arguments: parsed.args });
-      sessionEvidence.push({ name: tool.name, arguments: parsed.args, result: compactEvidence });
+      const catalogScope = catalogScopeFromResult(
+        tool.name,
+        parsed.args,
+        result.structuredContent,
+      );
+      sessionEvidence.push({
+        name: tool.name,
+        arguments: parsed.args,
+        result: compactEvidence,
+        ...(catalogScope ? { catalogScope } : {}),
+      });
       const originalSparql = String(parsed.args.sparql ?? '');
       const correctedSparql = rewriteCompactPredicatesForDkg(originalSparql);
       const queryNeedsStorageTermRetry = tool.name === 'dkg_query'

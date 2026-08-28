@@ -114,7 +114,10 @@ export function resolveLlmCommandOptions(
       || env.LLAMA_URL?.trim()
       || 'http://127.0.0.1:8080/v1/chat/completions',
     model: options.model?.trim() || env.DKG_LLM_MODEL?.trim() || env.LLAMA_MODEL?.trim() || 'local-model',
-    projectId: options.project?.trim() || env.DKG_PROJECT?.trim() || undefined,
+    // A shell-level DKG_PROJECT remains useful for the regular CLI/MCP
+    // workflow, but it is too easy to apply invisibly to an interactive
+    // multi-graph agent. Only --project explicitly pins an LLM session.
+    projectId: options.project?.trim() || undefined,
     profile: parseProfile(options.profile),
     allowWrite: options.allowWrite ?? false,
     adapterPaths,
@@ -205,7 +208,10 @@ export async function runLlmCommand(options: ResolvedLlmCommandOptions): Promise
     ...getDefaultEnvironment(),
   };
   environment.DKG_HOME = options.dkgHome;
-  if (options.projectId) environment.DKG_PROJECT = options.projectId;
+  // The runtime materializes every accepted projectId before invoking a
+  // scoped MCP tool. Do not let an inherited shell value become a silent
+  // fallback inside the child MCP server.
+  delete environment.DKG_PROJECT;
   if (options.adapterPaths.length) environment.DKG_ADAPTERS = options.adapterPaths.join(',');
 
   const transport = new StdioClientTransport({
@@ -301,7 +307,7 @@ export function registerLlmCommand(program: Command): void {
     .option('-i, --interactive', 'continue into a bounded interactive chat session')
     .option('--llama-url <url>', 'OpenAI-compatible chat-completions endpoint')
     .option('--model <name>', 'model value sent to the local endpoint')
-    .option('--project <id>', 'default DKG Context Graph')
+    .option('--project <id>', 'explicitly pin this LLM session to one DKG Context Graph')
     .option('--profile <name>', 'tool profile: auto | chat | status | catalog | read | write', 'auto')
     .option('--allow-write', 'expose relevant mutation tools; still requires explicit mutation intent')
     .option('--adapter <path...>', 'extra MCP adapter module path(s)')

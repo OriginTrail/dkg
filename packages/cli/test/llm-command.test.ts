@@ -32,6 +32,14 @@ describe('dkg llm options', () => {
     expect(options.interactive).toBe(true);
   });
 
+  it('does not silently pin an LLM session from an inherited DKG_PROJECT', () => {
+    const options = resolveLlmCommandOptions([], {}, {
+      DKG_HOME: '/tmp/dkg-llm-test',
+      DKG_PROJECT: 'stale-shell-project',
+    });
+    expect(options.projectId).toBeUndefined();
+  });
+
   it('requires explicit write opt-in and validates numeric/profile options', () => {
     const write = resolveLlmCommandOptions([], {
       profile: 'write',
@@ -72,6 +80,7 @@ describe('dkg llm options', () => {
     expect(help).toContain('--system-context-file');
     expect(help).toContain('--domain-profile');
     expect(help).toContain('--max-tool-json-bytes');
+    expect(help).toContain('explicitly pin this LLM session');
   });
 });
 

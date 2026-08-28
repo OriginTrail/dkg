@@ -410,6 +410,12 @@ Expected result:
 
 ## Terminal 3: start DKG chat
 
+For LLM chat, Context Graph scope is explicit. `--project` pins this session;
+the command does not treat an inherited `DKG_PROJECT` or the MCP configuration's
+first graph as an invisible fallback. Every scoped MCP call is logged with a
+materialized `projectId`. A query-catalog selector returned by `list` keeps that
+evidence graph for a subsequent `run`, even if the session pin is different.
+
 With a globally installed CLI:
 
 ```bash

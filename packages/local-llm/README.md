@@ -64,7 +64,7 @@ Continue only when the response is `{"status":"ok"}`.
 ### Terminal 2: start interactive DKG chat
 
 From the DKG repository root, start an interactive Qwen session against the
-`testing` Context Graph with:
+`testing` Context Graph with an explicit session pin:
 
 ```bash
 DKG_HOME=/Users/lupus/dkg-local \
@@ -90,6 +90,12 @@ pnpm dkg llm \
   --project testing \
   --model qwen3-8b-q4-k-m
 ```
+
+`--project` is an explicit LLM-session pin. The local-LLM command does not
+inherit `DKG_PROJECT` as an invisible default. A scoped tool call always carries
+`projectId` in the logged MCP arguments: the runtime copies it from exact
+catalog evidence first, then from the explicit session pin. Without either, the
+call is rejected instead of falling through to the first graph in DKG config.
 
 ## Real DKG benchmark
 
