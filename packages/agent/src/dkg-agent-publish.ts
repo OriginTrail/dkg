@@ -2267,9 +2267,9 @@ export class PublishMethods extends DKGAgentBase {
       publisherPeerId: this.node.peerId.toString(),
       publishContextGraphId: updateOnChainId ?? undefined,
       operationCtx: ctx,
-      onPhase,
-      // r10 (3877910013) — same one-unit hook forwarding at the update boundary (the spread's
-      // onPhase equals the local shorthand above; the hooks travel as one unit regardless).
+      // r10 (3877910013) — one-unit hook forwarding at the update boundary; the spread's
+      // required-keys type carries onPhase (= opts?.onPhase, the same value the local
+      // shorthand held), so no separate onPhase entry may precede it (TS2783).
       ...pickPublishLifecycleHooks(opts ?? {}),
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
