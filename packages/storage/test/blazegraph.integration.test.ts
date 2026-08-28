@@ -396,6 +396,34 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
         const winner = head.type === 'bindings' ? head.bindings[0]?.o : undefined;
         expect([newHead, competingHead]).toContain(winner);
         expect(await store.countQuads(projectionGraph)).toBe(winner === newHead ? 2 : 1);
+        const control = await store.query(
+          `SELECT ?seal ?kaState ?subgraphGeneration ?contextGraphGeneration ?applied WHERE {
+            GRAPH <${sealGraph}> { <${seal}> <${pValue}> ?seal }
+            GRAPH <${stateGraph}> {
+              <${kaState}> <${pValue}> ?kaState .
+              <${mutation}> <${pGeneration}> ?subgraphGeneration .
+              <${cgMutation}> <${pGeneration}> ?contextGraphGeneration .
+              <${appliedSet}> <${pValue}> ?applied .
+            }
+          }`,
+        );
+        expect(control.type === 'bindings' ? control.bindings : []).toEqual([
+          winner === newHead
+            ? {
+                seal: '"new-seal"',
+                kaState: newHead,
+                subgraphGeneration: '"2"',
+                contextGraphGeneration: '"11"',
+                applied: newHead,
+              }
+            : {
+                seal: '"competing-seal"',
+                kaState: competingHead,
+                subgraphGeneration: '"3"',
+                contextGraphGeneration: '"12"',
+                applied: competingHead,
+              },
+        ]);
       } finally {
         await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
       }

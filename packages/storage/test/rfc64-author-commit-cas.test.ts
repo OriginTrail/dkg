@@ -195,6 +195,14 @@ describe('RFC-64 certified author commit CAS v1', () => {
     await expect(multiValued.rfc64AuthorCommitCasV1!(authorCommitInput()))
       .resolves.toBe('conflict');
     expect(await objectFor(multiValued, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(OLD_HEAD);
+    expect(await objectFor(multiValued, SEAL_GRAPH, SEAL, P_VALUE)).toBe('"old-seal"');
+    expect(await objectFor(
+      multiValued,
+      PROJECTION_GRAPH,
+      'urn:test:rfc64:old',
+      P_VALUE,
+    )).toBe('"old"');
+    expect(await objectFor(multiValued, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(OLD_HEAD);
 
     const absent = new OxigraphStore();
     await seedOldState(absent);
@@ -212,6 +220,14 @@ describe('RFC-64 certified author commit CAS v1', () => {
     await seedOldState(present);
     await expect(present.rfc64AuthorCommitCasV1!(absentInput)).resolves.toBe('conflict');
     expect(await objectFor(present, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(OLD_HEAD);
+    expect(await objectFor(present, SEAL_GRAPH, SEAL, P_VALUE)).toBe('"old-seal"');
+    expect(await objectFor(
+      present,
+      PROJECTION_GRAPH,
+      'urn:test:rfc64:old',
+      P_VALUE,
+    )).toBe('"old"');
+    expect(await objectFor(present, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(OLD_HEAD);
   });
 
   it('rejects the second of two serial writers that use the same guarded head', async () => {
