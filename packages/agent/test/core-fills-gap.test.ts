@@ -53,9 +53,12 @@ import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
   VmReconcileDispatcher,
+  type OrdinalOutcome,
+  type OrdinalRecoveryTarget,
   type PendingOrdinalRecoveryResult,
 } from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
+import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -72,38 +75,24 @@ interface AgentInternals {
       isTargetCurrent?: () => boolean;
       deferActiveFetch?: boolean;
     },
-  ): Promise<{ status: string }>;
+  ): Promise<OrdinalOutcome>;
   recoverVmReconcileBatch(
     localCgId: string,
     onChainCgId: bigint,
-    targets: ReadonlyArray<{
-      localCgId: string;
-      onChainCgId: string;
-      ordinal: number;
-      ual: string;
-      merkleRoot: string;
-      kaId: string;
-      reason: 'no-swm' | 'verified-vm-metadata-pending';
-    }>,
+    targets: readonly OrdinalRecoveryTarget[],
     headBlock: number | undefined,
     isTargetCurrent: () => boolean,
     signal?: AbortSignal,
   ): Promise<PendingOrdinalRecoveryResult>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
-  runVmReconcileForCg(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
-    status: string;
-    attempted: boolean;
-    headOrdinal: number;
-    watermarkBefore: number;
-    watermarkAfter: number;
-  }>;
-  executeVmReconcileForCg(localCgId: string, source: 'live' | 'periodic' | 'manual'): Promise<{
-    status: string;
-    attempted: boolean;
-    headOrdinal: number;
-    watermarkBefore: number;
-    watermarkAfter: number;
-  }>;
+  runVmReconcileForCg(
+    localCgId: string,
+    source?: 'live' | 'periodic' | 'manual',
+  ): Promise<ContextGraphReconcileResult>;
+  executeVmReconcileForCg(
+    localCgId: string,
+    source: 'live' | 'periodic' | 'manual',
+  ): Promise<ContextGraphReconcileResult>;
   runVmReconcileSweep(): Promise<void>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: 'on-demand' | 'always-on'; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   gossipRegistered: Set<string>;
@@ -177,7 +166,7 @@ function vmRecoveryTarget(
   localCgId: string,
   ordinal: number,
   kaId = String(ordinal),
-) {
+): OrdinalRecoveryTarget {
   return {
     localCgId,
     onChainCgId: '1',
@@ -2282,28 +2271,26 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     chain.getContextGraphKCCount = async () => 12n;
 
-    (internals as any).reconcileChainOrdinal = async (
+    internals.reconcileChainOrdinal = async (
       localCgId: string,
       _onChainCgId: bigint,
       ordinal: number,
-    ) => localCgId === productiveCg
+    ): Promise<OrdinalOutcome> => localCgId === productiveCg
       ? { status: 'already', blockNumber: 0 }
       : {
           status: 'pending',
-          recovery: {
-            ordinal,
-            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${localCgId}-${ordinal}`,
-            kaId: String(ordinal),
-            reason: 'verified-vm-metadata-pending',
-          },
+          recovery: vmRecoveryTarget(localCgId, ordinal, `${localCgId}-${ordinal}`),
         };
-    (internals as any).recoverVmReconcileBatch = async (localCgId: string) => ({
+    internals.recoverVmReconcileBatch = async (
+      localCgId: string,
+    ): Promise<PendingOrdinalRecoveryResult> => ({
       outcomes: new Map(),
       attemptedOrdinals: localCgId === providerRecoveryCg || localCgId === ordinalRecoveryCg
         ? [0]
         : [],
       continuationOrdinal: localCgId === ordinalRecoveryCg ? 3 : undefined,
       hasImmediateRecoveryWork: localCgId === providerRecoveryCg,
+      cooldownOnly: false,
     });
 
     const liveTriggered: string[] = [];

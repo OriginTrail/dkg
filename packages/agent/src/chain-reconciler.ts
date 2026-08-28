@@ -87,6 +87,35 @@ export interface PendingOrdinalRecoveryResult {
   cooldownOnly?: boolean;
 }
 
+type PendingOrdinalRecoveryDisposition =
+  | { kind: 'not-attempted' }
+  | { kind: 'cooldown'; continuationOrdinal: number | undefined }
+  | { kind: 'ordinal-continuation'; continuationOrdinal: number }
+  | { kind: 'provider-continuation' }
+  | { kind: 'exhausted' };
+
+/**
+ * Normalize the recovery executor's compatibility result once at its boundary.
+ * Cursor and scheduling policy consume this semantic state instead of
+ * independently interpreting the legacy result fields.
+ */
+function recoveryDisposition(
+  result: PendingOrdinalRecoveryResult,
+): PendingOrdinalRecoveryDisposition {
+  if (result.cooldownOnly === true) {
+    return { kind: 'cooldown', continuationOrdinal: result.continuationOrdinal };
+  }
+  if (result.attemptedOrdinals.length === 0) return { kind: 'not-attempted' };
+  if (result.continuationOrdinal !== undefined) {
+    return {
+      kind: 'ordinal-continuation',
+      continuationOrdinal: result.continuationOrdinal,
+    };
+  }
+  if (result.hasImmediateRecoveryWork) return { kind: 'provider-continuation' };
+  return { kind: 'exhausted' };
+}
+
 export interface ChainReconcilerDeps {
   /** Chain-head ordinal for the CG (`getContextGraphKCCount`). */
   getKCCount: (onChainCgId: bigint) => Promise<number>;
@@ -152,8 +181,15 @@ export interface ReconcileResult {
   reconciled: number;
   pending: number;
   processed: number;
-  /** Canonical scheduling state after this bounded slice. */
-  continuation: 'none' | 'periodic' | 'immediate';
+  /**
+   * True when the bounded inventory has more work under the historical result
+   * contract. Retained for package-subpath compatibility; new scheduler code
+   * should consume `shouldContinueImmediately` instead.
+   * @deprecated Use `shouldContinueImmediately` for dispatch decisions.
+   */
+  hasMore: boolean;
+  /** Canonical two-way scheduling decision after this bounded slice. */
+  shouldContinueImmediately: boolean;
   /** True when this pass stopped because its captured chain binding changed. */
   staleTarget: boolean;
 }
@@ -175,9 +211,7 @@ interface OrdinalPassPlan {
   /** Derive the next durable scan cursor without conflating recovery order. */
   nextScanOrdinal: (input: {
     watermark: number;
-    recoveryContinuationOrdinal: number | undefined;
-    recoveryAttempted: boolean;
-    recoveryCooldownOnly: boolean;
+    recovery: PendingOrdinalRecoveryDisposition;
   }) => number | undefined;
 }
 
@@ -232,20 +266,21 @@ function planOrdinalPass(
     },
     nextScanOrdinal: ({
       watermark: currentWatermark,
-      recoveryContinuationOrdinal,
-      recoveryAttempted,
-      recoveryCooldownOnly,
+      recovery,
     }) => {
       if (usesRecentLane) {
         return hasUnvisitedCandidates
           ? Math.max(currentWatermark, historicalContinuationOrdinal)
           : currentWatermark;
       }
+      if (recovery.kind === 'ordinal-continuation') {
+        return Math.max(currentWatermark, recovery.continuationOrdinal);
+      }
       if (
-        recoveryContinuationOrdinal !== undefined
-        && (recoveryAttempted || recoveryCooldownOnly || !hasUnvisitedCandidates)
+        recovery.kind === 'cooldown'
+        && recovery.continuationOrdinal !== undefined
       ) {
-        return Math.max(currentWatermark, recoveryContinuationOrdinal);
+        return Math.max(currentWatermark, recovery.continuationOrdinal);
       }
       if (!hasUnvisitedCandidates) return currentWatermark;
       if (ordinals.length > 0) {
@@ -284,7 +319,8 @@ export async function reconcileContextGraph(
       reconciled: 0,
       pending: 0,
       processed: 0,
-      continuation: 'none',
+      hasMore: false,
+      shouldContinueImmediately: false,
       staleTarget: false,
     };
   }
@@ -310,10 +346,7 @@ export async function reconcileContextGraph(
   let reconciled = 0;
   let processed = 0;
   let staleTarget = false;
-  let recoveryContinuationOrdinal: number | undefined;
-  let recoveryAttempted = false;
-  let recoveryCooldownOnly = false;
-  let recoveryHasImmediateWork = false;
+  let recovery: PendingOrdinalRecoveryDisposition = { kind: 'not-attempted' };
   const outstandingBefore = ordinalsToReconcile(state, head);
   const configuredLimit = deps.maxOrdinalsPerPass;
   const passLimit = configuredLimit === undefined
@@ -402,7 +435,7 @@ export async function reconcileContextGraph(
       // ordinal order, so this changes latency rather than correctness.
       .sort(passPlan.compareRecoveryTargets);
     if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
-      const recovery = await deps.recoverPendingOrdinals(
+      const recoveryResult = await deps.recoverPendingOrdinals(
         localCgId,
         onChainCgId,
         recoveryTargets,
@@ -415,11 +448,10 @@ export async function reconcileContextGraph(
       if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
         staleTarget = true;
       } else {
-        for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
-        recoveryContinuationOrdinal = recovery.continuationOrdinal;
-        recoveryAttempted = recovery.attemptedOrdinals.length > 0;
-        recoveryCooldownOnly = recovery.cooldownOnly === true;
-        recoveryHasImmediateWork = recovery.hasImmediateRecoveryWork;
+        for (const [ordinal, outcome] of recoveryResult.outcomes) {
+          outcomes.set(ordinal, outcome);
+        }
+        recovery = recoveryDisposition(recoveryResult);
       }
     }
 
@@ -453,40 +485,32 @@ export async function reconcileContextGraph(
     // must never become the durable scan cursor: on a growing graph that would
     // move the cursor near the head and starve the untouched historical gap.
     // Advance only from the oldest-side slice. The recovery continuation still
-    // contributes to the continuation decision below, while pending outcomes remain in the
-    // inventory and are revisited on a later historical cycle.
+    // contributes to the continuation decision below, while pending outcomes
+    // remain in the inventory and are revisited on a later historical cycle.
     const nextScanOrdinal = passPlan.nextScanOrdinal({
       watermark: state.watermark,
-      recoveryContinuationOrdinal,
-      recoveryAttempted,
-      recoveryCooldownOnly,
+      recovery,
     });
     if (nextScanOrdinal !== undefined) state.scanOrdinal = nextScanOrdinal;
   }
 
   const pending = ordinalsToReconcile(state, head).length;
+  const recoveryAttempted = recovery.kind === 'ordinal-continuation'
+    || recovery.kind === 'provider-continuation'
+    || recovery.kind === 'exhausted';
+  const hasImmediateRecoveryContinuation = recovery.kind === 'ordinal-continuation'
+    || recovery.kind === 'provider-continuation';
   const hasMore = !headUnavailable
     && !staleTarget
-    && !recoveryCooldownOnly
+    && recovery.kind !== 'cooldown'
     && (
       recoveryAttempted
-        ? recoveryContinuationOrdinal !== undefined
-          || recoveryHasImmediateWork
+        ? hasImmediateRecoveryContinuation
           || hasUnvisitedCandidates
         : hasUnvisitedCandidates
     );
-  const hasImmediateRecoveryContinuation = recoveryAttempted
-    && !recoveryCooldownOnly
-    && (
-      recoveryContinuationOrdinal !== undefined
-      || recoveryHasImmediateWork
-    );
-  const continuation: ReconcileResult['continuation'] = staleTarget
-    || (hasMore && (reconciled > 0 || hasImmediateRecoveryContinuation))
-    ? 'immediate'
-    : hasMore
-      ? 'periodic'
-      : 'none';
+  const shouldContinueImmediately = staleTarget
+    || (hasMore && (reconciled > 0 || hasImmediateRecoveryContinuation));
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);
@@ -501,7 +525,8 @@ export async function reconcileContextGraph(
     reconciled,
     pending,
     processed,
-    continuation,
+    hasMore,
+    shouldContinueImmediately,
     staleTarget,
   };
 }

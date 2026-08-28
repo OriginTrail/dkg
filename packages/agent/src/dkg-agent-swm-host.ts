@@ -3413,7 +3413,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // The reconciler owns the continuation policy: productive slices, stale
       // bindings, and explicit provider rotations continue immediately, while
       // pending-only historical inventory yields to the periodic sweep.
-      if (isLifecycleCurrent() && result.continuation === 'immediate') {
+      if (isLifecycleCurrent() && result.shouldContinueImmediately) {
         this.vmReconcileDispatcher?.triggerLive(localCgId);
       } else if (isTargetCurrent()) {
         // RS heal is bounded, best-effort maintenance. Run it only after the
