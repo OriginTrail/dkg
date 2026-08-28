@@ -7,6 +7,7 @@ import {
   queryCatalogSubGraphFromScopeGraph,
 } from '@origintrail-official/dkg-core/query-catalog';
 import {
+  canonicalizeObjectTermForHash,
   classifySparqlOperation,
   validateSubGraphName,
   type GetView,
@@ -199,7 +200,12 @@ function normalizedUniqueQuads(quads: readonly Quad[]): Quad[] {
     const normalized = {
       subject: quad.subject,
       predicate: quad.predicate,
-      object: quad.object,
+      // Use the same backend-independent RDF term representation as V10
+      // assertion hashing before content-addressing or comparing a retry.
+      // Stores canonicalize valid literals on write (for example xsd:int to
+      // xsd:integer), so retaining the wire spelling here makes an exact retry
+      // look like unexpected data after the first store round trip.
+      object: canonicalizeObjectTermForHash(quad.object),
       graph: '',
     };
     byKey.set(canonicalQuadKey(normalized), normalized);

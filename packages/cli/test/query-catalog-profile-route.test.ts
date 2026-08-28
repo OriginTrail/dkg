@@ -499,6 +499,43 @@ describe('/api/profile/query-catalog/write', () => {
     );
   });
 
+  it('canonicalizes typed literals before content-addressing an idempotent retry', async () => {
+    const agent = fakeCatalogAgent();
+    const write = catalogWrite();
+    const xsdIntQuads = write.quads.map((quad) =>
+      quad.predicate === `${PROFILE_NS}rank`
+        ? {
+            ...quad,
+            object: quad.object.replace(
+              'http://www.w3.org/2001/XMLSchema#integer',
+              'http://www.w3.org/2001/XMLSchema#int',
+            ),
+          }
+        : quad);
+    const payload = { contextGraphId: CONTEXT_GRAPH_ID, quads: xsdIntQuads };
+
+    const first = writeContext(agent, payload);
+    await handleMemoryRoutes(first.context);
+    expect(first.response.statusCode).toBe(200);
+    const firstPayload = JSON.parse(first.response.body);
+    expect(agent._test.assertions.get(firstPayload.assertionName))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          predicate: `${PROFILE_NS}rank`,
+          object: expect.stringContaining('XMLSchema#integer'),
+        }),
+      ]));
+
+    const retry = writeContext(agent, payload);
+    await handleMemoryRoutes(retry.context);
+    expect(retry.response.statusCode).toBe(200);
+    expect(JSON.parse(retry.response.body)).toMatchObject({
+      assertionName: firstPayload.assertionName,
+      triplesWritten: 0,
+      alreadyExists: true,
+    });
+  });
+
   it('serializes concurrent retries of the same immutable payload', async () => {
     const agent = fakeCatalogAgent();
     const first = writeContext(agent);
