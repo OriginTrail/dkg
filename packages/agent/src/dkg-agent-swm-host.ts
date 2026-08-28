@@ -3410,13 +3410,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       target.cursor.scanOrdinal = workingCursor.scanOrdinal;
       const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
       this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
-      // Chain a trailing slice only when this slice advanced. A pending-only
-      // historical backlog must yield to the periodic sweep; otherwise one
-      // startup tick can repeatedly fetch content that cannot repair missing
-      // provenance. A stale target still receives its immediate binding retry.
-      const hasImmediateTrailingWork =
-        (result.hasMore && result.reconciled > 0) || result.staleTarget;
-      if (isLifecycleCurrent() && hasImmediateTrailingWork) {
+      // The reconciler owns the continuation policy: productive slices, stale
+      // bindings, and explicit provider rotations continue immediately, while
+      // pending-only historical inventory yields to the periodic sweep.
+      if (isLifecycleCurrent() && result.shouldContinueImmediately) {
         this.vmReconcileDispatcher?.triggerLive(localCgId);
       } else if (isTargetCurrent()) {
         // RS heal is bounded, best-effort maintenance. Run it only after the

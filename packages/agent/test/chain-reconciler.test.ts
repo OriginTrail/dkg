@@ -87,6 +87,7 @@ describe('reconcileContextGraph — sweep', () => {
       pending: 0,
       processed: 0,
       hasMore: false,
+      shouldContinueImmediately: false,
       staleTarget: false,
     });
     expect(headBlockReads).toBe(0);
@@ -486,6 +487,7 @@ describe('reconcileContextGraph — sweep', () => {
     const result = await reconcileContextGraph(deps, state, 'cg', 1n);
 
     expect(result.hasMore).toBe(true);
+    expect(result.shouldContinueImmediately).toBe(true);
     expect(state.scanOrdinal).toBe(0);
   });
 
@@ -681,6 +683,7 @@ describe('reconcileContextGraph — sweep', () => {
       reconciled: 0,
       staleTarget: true,
       hasMore: false,
+      shouldContinueImmediately: true,
     });
     expect(state.watermark).toBe(0);
     expect(state.scanOrdinal).toBe(0);

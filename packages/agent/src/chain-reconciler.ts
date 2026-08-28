@@ -152,8 +152,10 @@ export interface ReconcileResult {
   reconciled: number;
   pending: number;
   processed: number;
-  /** True when another bounded slice should be queued immediately. */
+  /** True when bounded inventory or recovery work remains after this slice. */
   hasMore: boolean;
+  /** Canonical scheduling decision for an immediate trailing dispatcher pass. */
+  shouldContinueImmediately: boolean;
   /** True when this pass stopped because its captured chain binding changed. */
   staleTarget: boolean;
 }
@@ -285,6 +287,7 @@ export async function reconcileContextGraph(
       pending: 0,
       processed: 0,
       hasMore: false,
+      shouldContinueImmediately: false,
       staleTarget: false,
     };
   }
@@ -475,6 +478,17 @@ export async function reconcileContextGraph(
           || hasUnvisitedCandidates
         : hasUnvisitedCandidates
     );
+  const hasImmediateRecoveryContinuation = recoveryAttempted
+    && !recoveryCooldownOnly
+    && (
+      recoveryContinuationOrdinal !== undefined
+      || recoveryHasImmediateWork
+    );
+  const shouldContinueImmediately = staleTarget
+    || (
+      hasMore
+      && (reconciled > 0 || hasImmediateRecoveryContinuation)
+    );
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);
@@ -490,6 +504,7 @@ export async function reconcileContextGraph(
     pending,
     processed,
     hasMore,
+    shouldContinueImmediately,
     staleTarget,
   };
 }
