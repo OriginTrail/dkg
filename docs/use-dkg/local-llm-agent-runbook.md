@@ -39,6 +39,9 @@ ready for the operator.
 Constraints:
 - Work from the active DKG installation or repository; do not clone another DKG.
 - Discover absolute executable paths. Do not assume a user-specific home path.
+- Use llama.cpp `llama-server` as the reference inference server. If it is not
+  installed, follow the macOS, Linux, or Windows section in
+  `docs/use-dkg/local-llm.md`; do not substitute another server silently.
 - Default to Qwen3-8B Q4_K_M unless the operator names another model.
 - Treat Bonsai Q1_0, 1-bit models, and other tool-weak models as catalog-first.
 - For a catalog-first model, do not start the final demo chat until a reviewed,
@@ -58,8 +61,11 @@ Procedure:
 2. If the daemon is stopped, run `dkg start`, then repeat `dkg status`.
 3. Run `dkg context-graph list`. Select the exact operator-provided Context
    Graph ID and export it as `DKG_PROJECT`; never infer it from a display name.
-4. Select the model from the model decision table in
-   `docs/use-dkg/local-llm-agent-runbook.md`.
+4. Locate `llama-server` with `command -v llama-server` on macOS/Linux or
+   `Get-Command llama-server.exe` on Windows. If it is missing, install it with
+   the platform instructions in `docs/use-dkg/local-llm.md`. Record the
+   resolved absolute path, then select the model from the model decision table
+   in this runbook.
 5. Run `dkg query-catalog list "$DKG_PROJECT"`.
 6. If the chosen model is catalog-first and the catalog is empty or untested,
    stop the final-chat startup. Use Qwen3-8B Q4_K_M, a deterministic generator,

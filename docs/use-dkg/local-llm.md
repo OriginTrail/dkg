@@ -21,6 +21,207 @@ If you are delegating setup to a coding agent, give it the dedicated
 copy-paste instruction, model decision table, Query Catalog gate, exact launch
 commands, and completion checks.
 
+## Proposal: use llama.cpp as the reference LLM server
+
+Use [`llama.cpp`](https://github.com/ggml-org/llama.cpp) and its
+`llama-server` executable as the default, documented local inference server for
+DKG.
+
+This selects the inference runtime, not the model family: `llama-server` can
+serve Qwen, Bonsai, Llama, and other compatible GGUF models. Qwen3-8B Q4_K_M
+remains the recommended model below.
+
+The boundary should remain explicit:
+
+- `llama-server` is an operator-managed process. DKG does not silently install,
+  upgrade, start, or stop it.
+- `dkg llm` owns the MCP client, tool discovery, DKG system context, routing,
+  schema validation, retry policy, bounded chat history, and text trace.
+- Do not bypass that harness by attaching the DKG MCP server directly through
+  llama.cpp's own MCP configuration. That would skip DKG's tested system
+  context, tool-budget routing, validation, retry, and readable interaction log.
+- The default endpoint is
+  `http://127.0.0.1:8080/v1/chat/completions`; `--llama-url` and `DKG_LLM_URL`
+  remain escape hatches for another compatible server.
+- A supported server build must provide `llama-server`, GGUF model loading,
+  Jinja chat templates, the OpenAI-compatible chat-completions endpoint, and
+  the public `/health` endpoint.
+- Keep the server bound to `127.0.0.1` by default. Remote or LAN exposure needs
+  an explicit authentication and network-security decision.
+
+This gives DKG one reproducible reference path across macOS, Linux, and
+Windows without making the local-LLM client llama.cpp-specific internally. The
+upstream server documents the OpenAI-compatible API and reports readiness with
+HTTP 200 plus `{"status":"ok"}`.
+
+## Install llama.cpp and llama-server
+
+Prefer an operating-system package for normal use. Build from source when a
+specific acceleration backend or an unreleased upstream fix is required. The
+canonical upstream references are the
+[`llama.cpp` installation guide](https://github.com/ggml-org/llama.cpp/blob/master/docs/install.md),
+[`build guide`](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md),
+and [`llama-server` guide](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
+### macOS
+
+Homebrew is the recommended installation:
+
+```bash
+brew install llama.cpp
+command -v llama-server
+llama-server --version
+```
+
+The Homebrew formula supports both Apple Silicon and Intel macOS. Apple Metal
+acceleration is enabled by default in upstream macOS builds.
+
+To build the server from source instead:
+
+```bash
+xcode-select --install
+brew install cmake git
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target llama-server --parallel
+./build/bin/llama-server --version
+```
+
+Use the resulting absolute path, normally
+`<llama.cpp>/build/bin/llama-server`, in the launch commands below.
+
+### Linux
+
+If Homebrew is already installed, the shortest supported path is:
+
+```bash
+brew install llama.cpp
+command -v llama-server
+llama-server --version
+```
+
+Conda is an official cross-platform alternative:
+
+```bash
+conda install -c conda-forge llama.cpp
+command -v llama-server
+llama-server --version
+```
+
+For an Ubuntu/Debian CPU build from source:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake git
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target llama-server --parallel
+./build/bin/llama-server --version
+```
+
+For NVIDIA acceleration, install a compatible NVIDIA driver and CUDA toolkit,
+then configure the same source checkout with the CUDA backend:
+
+```bash
+cmake -S . -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target llama-server --parallel
+./build/bin/llama-server --version
+```
+
+Use upstream prebuilt release assets or the backend-specific build guide for
+Vulkan, ROCm/HIP, SYCL, or OpenVINO rather than guessing backend flags.
+
+### Windows
+
+Open PowerShell and install the upstream Winget package:
+
+```powershell
+winget install llama.cpp
+```
+
+Open a new PowerShell after installation, then verify the executable:
+
+```powershell
+Get-Command llama-server.exe
+llama-server.exe --version
+```
+
+For a source build, install Visual Studio 2022 with the **Desktop development
+with C++** workload, including CMake and Git. In a **Developer PowerShell for
+VS 2022** run:
+
+```powershell
+git clone https://github.com/ggml-org/llama.cpp.git
+Set-Location llama.cpp
+cmake -S . -B build
+cmake --build build --config Release --target llama-server
+& .\build\bin\Release\llama-server.exe --version
+```
+
+If the selected CMake generator places the executable directly under
+`build\bin`, use that discovered path. For NVIDIA acceleration, prefer the
+matching CUDA prebuilt asset from the official
+[`llama.cpp` releases](https://github.com/ggml-org/llama.cpp/releases), or build
+with `-DGGML_CUDA=ON` after installing the CUDA toolkit.
+
+### Optional portable Docker server
+
+On a machine with Docker, the official CPU server image avoids a host build:
+
+```bash
+docker run --rm \
+  -p 127.0.0.1:8080:8080 \
+  ghcr.io/ggml-org/llama.cpp:server \
+  -hf Qwen/Qwen3-8B-GGUF:Q4_K_M \
+  -c 8192 \
+  --jinja \
+  --host 0.0.0.0 \
+  --port 8080
+```
+
+Use the upstream `server-cuda` image and `--gpus all` only on a correctly
+configured NVIDIA Docker host.
+
+### Optional Hugging Face CLI
+
+Public models used with `llama-server -hf` do not require a separate `hf`
+download step. Install the current `hf` CLI when a model is gated, private, or
+must be resolved to an explicit local GGUF path.
+
+macOS and Linux:
+
+```bash
+curl -LsSf https://hf.co/cli/install.sh | bash
+hf auth login
+hf auth whoami
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://hf.co/cli/install.ps1 | iex"
+hf auth login
+hf auth whoami
+```
+
+Do not put a Hugging Face token in a command line, repository file, or DKG
+interaction log. Use `hf auth login` or the `HF_TOKEN` environment variable.
+
+### Verify the server contract
+
+Start one of the models below, wait for loading to finish, and verify both
+readiness and the OpenAI-compatible surface:
+
+```bash
+curl -sS http://127.0.0.1:8080/health
+curl -sS http://127.0.0.1:8080/v1/models
+```
+
+Windows PowerShell can use `curl.exe` with the same URLs. Do not start
+`dkg llm` until `/health` returns HTTP 200 and `{"status":"ok"}`.
+
 ## Recommended model
 
 Use **Qwen3-8B Q4_K_M** as the default local model. It provided the strongest
