@@ -1,6 +1,8 @@
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from './abort-boundary.js';
+import { isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
+import { ChainProofRetrySchedule } from './chain-proof-retry-schedule.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -153,18 +155,6 @@ import {
  * - `'rolled-back-pre-send'` the write-ahead was attempted but the fsync/transition failed
  *                            and was rolled back to `'validated'`; the tx was never sent.
  */
-/**
- * GH#2270 PR-3 r18 (🔴 3816322914) — the chain-proof backoff schedule. Not configurable: these
- * govern how often a HELD job is re-asked, which is a protocol-pacing question rather than a
- * deployment one, and the two knobs that do vary by deployment (batch size, time budget) are on
- * the config. The ceiling matters as much as the growth — a job held across a long incident must
- * still be asked periodically, never deferred to effectively never.
- */
-const CHAIN_PROOF_BACKOFF_BASE_MS = 30_000;
-const CHAIN_PROOF_BACKOFF_MAX_MS = 10 * 60_000;
-/** Jitter as a FRACTION of the computed backoff, so spread scales with the wait it spreads. */
-const CHAIN_PROOF_BACKOFF_JITTER = 0.25;
-
 type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
 
 type BusinessOperationResult<T> =
@@ -218,7 +208,7 @@ function assertNoLegacyChainRecoveryResolver(config: AsyncLiftPublisherConfig): 
     'AsyncLiftPublisherConfig.chainRecoveryResolver was removed in GH#2270 PR-3: use '
     + '`chainProofResolver`, whose resolver takes an AsyncLiftChainProofLookup '
     + '({ txHash, walletId, nonce }) and returns an AsyncLiftChainProofResolution verdict '
-    + '(recovered / reverted / unrecognized / pending / not-found / inconclusive) instead of '
+    + '(recovered / reverted / unrecognized / pending-mempool / pending-awaiting-confirmation / not-found / inconclusive) instead of '
     + 'taking a job and returning a recovery result or null.',
   );
 }
@@ -474,7 +464,10 @@ export class TripleStoreAsyncLiftPublisher
    * one batch per pass. What must never happen is the inverse, and does not: skipping a job is a
    * pure no-op, so a DELAYED lookup can never itself authorize a resend.
    */
-  private readonly chainProofNextDueAt = new Map<string, { dueAt: number; attempts: number }>();
+  private readonly chainProofRetrySchedule = new ChainProofRetrySchedule({
+    now: () => this.now(),
+    rand: () => this.rand(),
+  });
   /**
    * r26 (🔴 3821028709) — jobs whose MUTATING recovery repair is currently running. A deadline
    * may stop the dispatcher waiting, but it must never let a second pass enter the same repair
@@ -518,7 +511,7 @@ export class TripleStoreAsyncLiftPublisher
    * Rotates the live-lane iteration start across passes. The pass deadline may truncate the walk,
    * and `list()` order is stable, so without rotation the same head jobs would be re-asked every
    * pass while the tail starved behind a slow resolver. In-memory for the same reason as
-   * `chainProofNextDueAt`: a restart resetting the rotation is safe, skipping is a pure no-op.
+   * the chain-proof retry schedule: a restart resetting the rotation is safe, skipping is a pure no-op.
    */
   private reconcilePassOffset = 0;
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
@@ -1412,7 +1405,8 @@ export class TripleStoreAsyncLiftPublisher
           const resolution = await this.resolveChainProofWithinSignal(origin.lookup, signal);
           if (resolution === null) { unresolved += 1; return; }
           if (resolution.status !== 'recovered') {
-            if (resolution.status === 'pending' || resolution.status === 'inconclusive') {
+            if (isPendingPublishTransactionStatus(resolution.status)
+              || resolution.status === 'inconclusive') {
               // Receipt not yet final at the operator's confirmation depth (or the read could
               // not settle): keep the hint and let the active cadence retry before settle does.
               unresolved += 1;
@@ -2352,7 +2346,9 @@ export class TripleStoreAsyncLiftPublisher
     // must not do either. The interrupted half above deliberately keeps running while paused: it
     // repairs jobs this node has ALREADY broadcast, where stopping would leave a live transaction
     // unreconciled — the phantom the pre-send write-ahead exists to make visible.
-    if (this.paused || !this.chainProofResolver) return 0;
+    if (this.paused) return 0;
+    const resolver = this.chainProofResolver;
+    if (!resolver) return 0;
 
     // r18 (🔴 3816322914) — this pass costs one RPC round trip PER HELD JOB, and
     // `AsyncLiftRunner.start()` awaits `recover()`. Unbounded, an incident that leaves a large
@@ -2371,7 +2367,12 @@ export class TripleStoreAsyncLiftPublisher
     // Bound 1 — only jobs whose backoff has elapsed. Jobs asked recently that established nothing
     // are deferred, so the population ROTATES through the batch rather than the head of the list
     // being re-asked every pass. No cursor is needed: the due times are the rotation.
-    const dueJobs = heldJobs.filter((job) => (this.chainProofNextDueAt.get(job.jobId)?.dueAt ?? 0) <= startedAt);
+    const withEvidence = heldJobs
+      .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
+      .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null)
+      .map(({ job, lookup }) => ({ job, lookup, identity: this.heldChainProofIncarnationKey(job, lookup) }));
+    const dueJobs = withEvidence.filter(({ job, identity }) =>
+      this.chainProofRetrySchedule.isDue(job.jobId, identity, startedAt));
 
     // r19 (🔴 3816490915) — the lookup is derived BEFORE the batch is taken, because a job that
     // cannot form one costs no round trip and must therefore cost no batch slot either. Deriving
@@ -2380,9 +2381,7 @@ export class TripleStoreAsyncLiftPublisher
     // actionable job behind them, permanently. That is strictly worse than the unbounded sweep it
     // replaced, which at least reached them. The derivation is pure and local, so paying it for
     // the whole due population buys the fix for nothing.
-    const dispatchable = dueJobs
-      .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
-      .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null);
+    const dispatchable = dueJobs;
 
     // r19 (🔴 3816490904) — one controller for the whole pass. Bound 3 as r18 shipped it only
     // gated whether the NEXT lookup started, which is not a ceiling: a resolver that never settles
@@ -2395,7 +2394,7 @@ export class TripleStoreAsyncLiftPublisher
     let dispatched = 0;
     try {
       // Bound 2 — at most one batch of RPCs per pass.
-      for (const { job, lookup } of dispatchable.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
+      for (const { job, lookup, identity } of dispatchable.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
         // Bound 3 — the wall-clock ceiling. Batch size bounds the CALL COUNT; when each call is slow
         // it is time that startup readiness actually depends on. Checked before each turn so a pass
         // cannot start a new round trip once the budget is spent; the rest are asked next cadence.
@@ -2406,15 +2405,19 @@ export class TripleStoreAsyncLiftPublisher
         // A job whose turn ended in an exception simply stays held and is asked again next tick,
         // which is the same disposition as any other unestablished answer.
         try {
-          const settled = await this.dispatchOneHeldJob(job, lookup, deadline);
-          dispatched += settled;
-          if (settled > 0) this.chainProofNextDueAt.delete(job.jobId);
-          else this.deferNextChainProofAttempt(job.jobId);
+          // Scheduling happens INSIDE dispatchOneHeldJob (r5 3882010299 — claim-locked with
+          // the identity re-read; r7 3882283830 — the helper reports only what this loop
+          // consumes: the settled count. Stale and deferred turns are 0 by construction, and
+          // their scheduling is the helper's/schedule's own business).
+          dispatched += await this.dispatchOneHeldJob(job, lookup, identity, resolver, deadline);
         } catch {
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
           // every pass and crowd out jobs that could actually settle.
-          this.deferNextChainProofAttempt(job.jobId);
+          // The exception path never re-read the record, so this deferral may be a superseded
+          // echo — which the schedule's incarnation keying makes harmless BY CONSTRUCTION (r6
+          // 3882185608): it can only address this incarnation's own entry, never the successor's.
+          this.chainProofRetrySchedule.defer(job.jobId, identity, 'default');
           continue;
         }
       }
@@ -2427,31 +2430,14 @@ export class TripleStoreAsyncLiftPublisher
     return dispatched;
   }
 
-  /**
-   * r18 (🔴 3816322914) — a turn that established nothing defers the next one, capped and
-   * jittered. Capped so a long-held job is still asked periodically rather than drifting to never;
-   * jittered so a population held by ONE incident — which is how they arrive — does not come due
-   * in lockstep and rebuild the thundering herd the batch bound exists to prevent.
-   */
-  private deferNextChainProofAttempt(jobId: string): void {
-    const attempts = (this.chainProofNextDueAt.get(jobId)?.attempts ?? 0) + 1;
-    const backoffMs = Math.min(
-      CHAIN_PROOF_BACKOFF_BASE_MS * 2 ** (attempts - 1),
-      CHAIN_PROOF_BACKOFF_MAX_MS,
-    );
-    this.chainProofNextDueAt.set(jobId, {
-      dueAt: this.now() + backoffMs + Math.floor(this.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
-      attempts,
-    });
-  }
-
   /** One held job's turn: ask the chain, then execute the disposition the policy module decides. */
   private async dispatchOneHeldJob(
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
+    identity: string,
+    resolver: NonNullable<TripleStoreAsyncLiftPublisher['chainProofResolver']>,
     deadline: AbortController,
   ): Promise<number> {
-    if (!this.chainProofResolver) return 0;
     // r19 (🔴 3816490904) — the signal goes to the resolver AND the wait is bounded here. A
     // resolver that honours the signal settles promptly and releases its socket; one that ignores
     // it is abandoned rather than awaited, which is worse for that socket but leaves the ceiling
@@ -2461,10 +2447,15 @@ export class TripleStoreAsyncLiftPublisher
     // semantics, and a successful lookup now removes its listener from the shared pass
     // controller instead of leaving it attached until the pass aborts.
     const resolution = await resolveWithinAbort(
-      (sig) => this.chainProofResolver!(lookup, sig ? { signal: sig } : undefined),
+      (sig) => resolver(lookup, sig ? { signal: sig } : undefined),
       deadline.signal,
     );
-    if (resolution === null) return 0;
+    if (resolution === null) {
+      // Deadline established nothing. Echo-safety is the schedule's key model (r6 3882185608):
+      // this write can only address this incarnation's own entry.
+      this.chainProofRetrySchedule.defer(job.jobId, identity, 'default');
+      return 0;
+    }
 
     // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
     // job. While it was in flight, an operator's `clearTerminalJob` or a client's fresh mandate
@@ -2475,11 +2466,29 @@ export class TripleStoreAsyncLiftPublisher
     // identical held job the chain was asked about — same failure identity, same transaction
     // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
     return this.claimCoordinator.runClaimJobTransaction(job.jobId, async (transaction) => {
+      // A verdict rejected at the identity boundary is discarded WHOLE — no disposition, no
+      // scheduling, not even the attempt count: its cadence metadata belongs to the same stale
+      // answer. r5 (3882010299) — the schedule mutation happens HERE, inside the same claim
+      // transaction as the re-read, so verification and mutation are one ownership boundary: a
+      // replace-and-re-fail serializes on this boundary, and a verdict that was current at the
+      // re-read stays current through its own scheduling write.
       if (transaction.kind === 'missing') return 0;
       const { current, scope } = transaction;
       if (!isFailedJob(current)) return 0;
       if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
-      return this.applyChainProofDisposition(current, scope, lookup, resolution, deadline);
+      const settled = await this.applyChainProofDisposition(current, scope, lookup, resolution, deadline);
+      if (settled > 0) {
+        this.chainProofRetrySchedule.settled(job.jobId, identity);
+        return settled;
+      }
+      // Scheduling-only, consumed exactly here — the phase never reaches
+      // `applyChainProofDisposition`, whose policy input remains the verdict STATUS alone.
+      this.chainProofRetrySchedule.defer(
+        job.jobId,
+        identity,
+        resolution.status === 'pending-awaiting-confirmation' ? 'awaiting-confirmations' : 'default',
+      );
+      return 0;
     });
   }
 
@@ -2494,12 +2503,26 @@ export class TripleStoreAsyncLiftPublisher
     current: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
   ): boolean {
-    if (current.failure.failedFromState !== before.failure.failedFromState) return false;
-    if (current.failure.code !== before.failure.code) return false;
-    if (current.timestamps.failedAt !== before.timestamps.failedAt) return false;
     const currentLookup = this.chainProofLookupFor(current);
     return currentLookup !== null
-      && chainProofLookupFingerprint(currentLookup) === chainProofLookupFingerprint(lookup);
+      && this.heldChainProofIncarnationKey(current, currentLookup)
+        === this.heldChainProofIncarnationKey(before, lookup);
+  }
+
+  /**
+   * THE one held-incarnation identity (r4 3881841027): the same four facts
+   * {@link isSameHeldFailedJob} has always compared — origin state, failure code, `failedAt`,
+   * and the derived transaction-evidence fingerprint — joined into one key and shared by the
+   * stale-verdict guard above AND the retry schedule, so the two boundaries cannot drift. A
+   * `failedAt`-less carrier record contributes a literal, mirroring the predicate's
+   * undefined === undefined behavior.
+   */
+  private heldChainProofIncarnationKey(
+    job: PersistedFailedJob,
+    lookup: AsyncLiftChainProofLookup,
+  ): string {
+    return `${job.failure.failedFromState}|${job.failure.code}|${job.timestamps.failedAt ?? 'u'}`
+      + `|${chainProofLookupFingerprint(lookup)}`;
   }
 
   /** Execute the disposition the policy module decides for a (re-verified) held job. */

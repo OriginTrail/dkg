@@ -236,6 +236,7 @@ export {
   isAssertionEntityPredicate,
 } from './entity-predicate.js';
 export { withRetry, type RetryOptions } from './retry.js';
+export { resolveWithinAbort } from './abort-boundary.js';
 export {
   RetryQueue,
   type RetryEntry,

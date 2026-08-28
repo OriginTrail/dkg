@@ -26,6 +26,8 @@ export default defineConfig({
       'test/async-lift-auto-retry-2270.test.ts',
       'test/async-lift-retry-disposition-2270.test.ts',
       'test/async-lift-chain-proof-dispatch-2270.test.ts',
+      'test/async-lift-chain-proof-cadence.test.ts',
+      'test/chain-proof-retry-schedule.test.ts',
       'test/async-lift-reconcile-demand.test.ts',
       'test/async-lift-wallet-release.test.ts',
       'test/async-lift-receipt-hint-core.test.ts',

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
-import { errorCode } from './evm-adapter-errors.js';
+import { createRpcTimeoutError, isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { isRetryableRpcError, sleep } from './evm-adapter-rpc.js';
 
 export interface ReceiptWaitTimeoutContext {
@@ -52,12 +51,16 @@ export async function waitForReceiptWithDeadline<TReceipt>(
     try {
       receipt = await options.getReceipt(options.txHash, { deadlineMs });
     } catch (err) {
-      // A deadline-capped endpoint pass may wrap its final per-attempt timeout
-      // as RPC_RECEIPT_LOOKUP_FAILED. Once that pass consumed the complete
-      // operation budget, the operation-level RPC_TIMEOUT is authoritative.
-      const deadlineLookupFailure = Date.now() >= deadlineMs
-        && errorCode(err) === 'RPC_RECEIPT_LOOKUP_FAILED';
-      if (!isRetryableRpcError(err) && !deadlineLookupFailure) throw err;
+      // A transport-class failure inside this budgeted wait consumes budget, never the
+      // operation: an exhausted endpoint pass (RPC_RECEIPT_LOOKUP_FAILED — classified
+      // non-retryable so ONE-SHOT lookups fail fast) or any other chain-namespaced
+      // transport code keeps polling until the deadline, exactly like a retryable blip.
+      // The tx may already be on the wire, so dying here with budget left would demote a
+      // healthy publish into the recovery lane over a single flaky poll tick. Once the
+      // deadline is consumed, the operation-level RPC_TIMEOUT below is authoritative,
+      // carrying the last transport error as cause. Everything outside the retryable and
+      // transport sets (deterministic classifications) still aborts immediately.
+      if (!isRetryableRpcError(err) && !isChainRpcTransportError(err)) throw err;
       if (Date.now() >= deadlineMs) {
         lastError = err;
         break;

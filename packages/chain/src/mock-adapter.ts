@@ -430,12 +430,19 @@ export class MockChainAdapter implements ChainAdapter {
     // declares the not-yet-final window.
     const unfinalized = this.unfinalizedTxHashes.has(txHash);
     const publish = await this.resolvePublishByTxHash(txHash);
-    if (publish) return unfinalized ? { status: 'pending' } : { status: 'confirmed', publish };
+    if (publish) {
+      // Parity with the EVM adapter: the phase classifies the pending answer, scheduling-only.
+      return unfinalized
+        ? { status: 'pending-awaiting-confirmation' }
+        : { status: 'confirmed', publish };
+    }
 
     switch (this.transactionStates.get(txHash)) {
-      case 'pending': return { status: 'pending' };
-      case 'reverted': return unfinalized ? { status: 'pending' } : { status: 'reverted' };
-      case 'mined': return unfinalized ? { status: 'pending' } : { status: 'unrecognized' };
+      case 'pending': return { status: 'pending-mempool' };
+      // The declared reverted/mined states imply a receipt exists, so their unfinalized window
+      // is the awaiting-confirmation shape — a classification, not a fabricated chain fact.
+      case 'reverted': return unfinalized ? { status: 'pending-awaiting-confirmation' } : { status: 'reverted' };
+      case 'mined': return unfinalized ? { status: 'pending-awaiting-confirmation' } : { status: 'unrecognized' };
       // Nothing in the event log, nothing declared: the mock genuinely does not
       // have this transaction, which is what `not-found` asserts.
       default: return { status: 'not-found' };

@@ -110,15 +110,19 @@ describe('receipt-hint lane: core and evidence', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
   });
 
-  it('does not release on a hint until the reconciler own proof says recovered', async () => {
-    // The hint authorizes nothing: while the chain answer is 'pending' (receipt not final at
-    // the operator's confirmation depth) the wallet stays locked, and the pass advertises the
-    // hinted job as pending work so the active cadence retries before settle.
+  it.each(['pending-mempool', 'pending-awaiting-confirmation'] as const)(
+    'does not release on a hint until the reconciler own proof says recovered (%s)',
+    async (pendingStatus) => {
+    // The hint authorizes nothing: while the chain answer is either pending shape the wallet
+    // stays locked, the job is not stamped, the pass advertises the hinted job as pending work
+    // (the hint is RETAINED, not deleted), and a later recovered verdict still consumes it —
+    // for BOTH pending statuses (r4 3881840736: the hint keep-arm is its own branch, so the
+    // cadence-path rows cannot cover it).
     let verdict: 'pending' | 'recovered' = 'pending';
     const { publisher, jobId, releaseTail } = await h.parkedHintScenario({
       config: {
         chainProofResolver: async () => (verdict === 'pending'
-          ? { status: 'pending' }
+          ? { status: pendingStatus }
           : recoveredResolution()),
       },
     });

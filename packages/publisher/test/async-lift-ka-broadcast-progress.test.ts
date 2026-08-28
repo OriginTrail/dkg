@@ -84,7 +84,7 @@ describe('KA async VM publish broadcast progress', () => {
     });
     const publisher = createPublisher({
       detachReceiptReconciliation: true,
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -194,7 +194,7 @@ describe('KA async VM publish broadcast progress', () => {
     });
     const publisher = createPublisher({
       detachReceiptReconciliation: true,
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
       chainProofCapableForWallet: () => false,
       knowledgeAssetVmPublishHandler: {

@@ -638,7 +638,8 @@ export function decideChainProofDisposition(
       // branch above refuses to take. The create-only rule therefore applies to both ways of
       // reaching a reset, not just to absence.
       return queuedLiftOperationKind(job) === 'update' ? { action: 'hold' } : { action: 'reset' };
-    case 'pending':
+    case 'pending-mempool':
+    case 'pending-awaiting-confirmation':
     case 'unrecognized':
     case 'inconclusive':
       return { action: 'hold' };
