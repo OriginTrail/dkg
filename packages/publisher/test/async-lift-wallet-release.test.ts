@@ -834,33 +834,23 @@ describe('async-lift wallet release channel', () => {
   });
 
   it('keeps a deadline-skipped hinted candidate pending when the budget went to a successful release', async () => {
-    // r4 (3877669330) - the sharp version of deadline truncation: candidate A's proof SUCCEEDS
-    // exactly as the budget expires (its recovery evidence resolves on the abort event itself,
-    // winning the race by listener order), so A contributes nothing to the unresolved count.
-    // Candidate B is then cut off by the abort. Without the truncation accounting the pass
-    // would report pendingWork:false, consuming the coalesced wake while B's wallet stays
-    // locked behind a parked executor.
+    // r4 (3877669330) - the sharp version of deadline truncation: candidate A's proof and
+    // release SUCCEED, but its lock deletion is slow enough that the pass budget expires while
+    // it completes (the release path deliberately never re-checks the signal mid-transition).
+    // A therefore contributes nothing to the unresolved count, and candidate B is cut off by
+    // the abort. Without the truncation accounting the pass would report pendingWork:false,
+    // consuming the coalesced wake while B's wallet stays locked behind a parked executor.
     let hinted = 0;
     const tails: Array<() => void> = [];
-    const evidence = {
-      inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-      finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-    } as never;
     const publisher = createPublisher({
       chainProofDispatchTimeBudgetMs: 150,
       detachReceiptReconciliation: true,
       chainProofResolver: async () => (
         { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
-      knowledgeAssetVmPublishRecoveryResolver: (
-        job: { claim?: { walletId?: string } },
-        _lookup: unknown,
-        _rec: unknown,
-        opts?: { signal?: AbortSignal },
-      ) => new Promise((resolve) => {
-        if (job.claim?.walletId !== 'wallet-1' || !opts?.signal) { resolve(evidence); return; }
-        if (opts.signal.aborted) { resolve(evidence); return; }
-        opts.signal.addEventListener('abort', () => resolve(evidence), { once: true });
-      }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({
@@ -886,8 +876,21 @@ describe('async-lift wallet release channel', () => {
     await publisher.processNext('wallet-2');
     await waitForCondition(() => hinted === 2, 'both executors must fire their hints');
 
+    // Installed AFTER the claims: wallet-1's lock deletion (the release) completes
+    // successfully but takes longer than the pass budget.
+    const originalDelete = store.deleteByPattern.bind(store);
+    let slowNextLockDelete = true;
+    (store as unknown as { deleteByPattern: typeof originalDelete }).deleteByPattern =
+      async (pattern: { subject?: string; graph?: string }) => {
+        if (slowNextLockDelete && pattern?.subject === walletLockSubject('wallet-1')) {
+          slowNextLockDelete = false;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        return originalDelete(pattern as never);
+      };
+
     try {
-      // A releases at the deadline; B is cut off. The pass must still be pending for B.
+      // A releases (slowly, past the deadline); B is cut off. The pass must stay pending for B.
       expect(await publisher.reconciliationScheduling.reconcile())
         .toEqual({ reconciled: 0, pendingWork: true });
       expect((await publisher.getStatus(jobA))?.status).toBe('included');
@@ -895,7 +898,7 @@ describe('async-lift wallet release channel', () => {
       expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
       await expectWalletLock('wallet-2', 'held');
 
-      // The next pass reaches B (fast resolvers for wallet-2) and releases it.
+      // The next pass reaches B and releases it.
       await publisher.reconcileTransactions();
       expect((await publisher.getStatus(jobB))?.status).toBe('included');
       await expectWalletLock('wallet-2', 'released');
