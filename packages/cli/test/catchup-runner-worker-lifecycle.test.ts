@@ -192,7 +192,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
       },
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.selectedShared.push(args);
-        return { kind: 'selected-shared-memory', shared: {}, selectedScopeComplete: true };
+        return { kind: 'selected-shared-memory', shared: {}, scopeComplete: true };
       },
       ...overrides,
     };
@@ -435,7 +435,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
         return {
           kind: 'selected-shared-memory',
           shared: { insertedDataTriples: 7 },
-          selectedScopeComplete: true,
+          scopeComplete: true,
         };
       },
     });
@@ -456,7 +456,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result).toEqual({
       kind: 'selected-shared-memory',
       shared: { insertedDataTriples: 7 },
-      selectedScopeComplete: true,
+      scopeComplete: true,
     });
   });
 
