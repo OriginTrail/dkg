@@ -1259,8 +1259,7 @@ export class TripleStoreAsyncLiftPublisher
         this.executorProofHints.delete(snapshot.jobId);
         continue;
       }
-      try {
-        await this.withJobTransitionLock(snapshot.jobId, async () => {
+      await this.withJobTransitionLock(snapshot.jobId, async () => {
           const current = await this.getStatus(snapshot.jobId);
           // 'included' is accepted deliberately (r2 3877540018): a prior attempt may have
           // persisted the included stamp and then failed the wallet-lock deletion. Restricting
@@ -1306,21 +1305,28 @@ export class TripleStoreAsyncLiftPublisher
           // The node has observed inclusion through its OWN canonical proof: stamp it
           // truthfully, then free the wallet (write-before-release — the poke must find
           // claim-visible state). A retry that already persisted 'included' skips the write.
-          if (recoverable.status === 'broadcast') {
-            await this.writeJob(
-              this.mergeJob(recoverable, 'included', { inclusion: resolved.inclusion }),
-              'included',
-            );
+          //
+          // r6 (3877748379) — the containment is deliberately NARROW: only this
+          // transition-and-release window is the retryable case (r2 3877540018 — a transient
+          // store failure here must cost the candidate's turn, not the pass; the hint
+          // survives and the next pass resumes). Resolver failures and programming errors
+          // are NOT contained: they propagate out of the pass to the runner's error path,
+          // where they are reported and backed off instead of becoming a silent active-cadence
+          // retry loop — the same observability the canonical walk's failures have.
+          try {
+            if (recoverable.status === 'broadcast') {
+              await this.writeJob(
+                this.mergeJob(recoverable, 'included', { inclusion: resolved.inclusion }),
+                'included',
+              );
+            }
+            await this.releaseWalletLockForJob(current);
+          } catch {
+            unresolved += 1;
+            return;
           }
-          await this.releaseWalletLockForJob(current);
           hint.proof = { recovery: resolution.recovery, resolved };
         });
-      } catch {
-        // r2 (3877540018) — a transient store failure mid-transition (e.g. the lock deletion
-        // after the included write) must cost this candidate's turn, not the whole pass. The
-        // hint survives, the job is reported pending, and the next pass retries the release.
-        unresolved += 1;
-      }
     }
     return unresolved;
   }

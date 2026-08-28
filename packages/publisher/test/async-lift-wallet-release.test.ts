@@ -1051,4 +1051,23 @@ describe('async-lift wallet release channel', () => {
     expect(proofAsks).toBe(1);
     expect(recoveryAsks).toBe(1);
   });
+
+  it('an unexpected resolver failure in the hint lane surfaces instead of silently retrying', async () => {
+    // r6 (3877748379) - the containment is scoped to the transition-and-release window (the
+    // r2-validated retryable case). A programming error in a resolver must NOT be swallowed
+    // into pending work: it propagates out of the pass to the runner's error path, exactly as
+    // canonical-walk failures do, so a tight silent retry loop cannot form.
+    const { publisher, jobId, releaseTail } = await parkedHintScenario({
+      config: {
+        chainProofResolver: () => { throw new TypeError('resolver programming error'); },
+      },
+    });
+    try {
+      await expect(publisher.reconcileTransactions()).rejects.toThrow('resolver programming error');
+      expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+      await expectWalletLock('wallet-1', 'held');
+    } finally {
+      releaseTail();
+    }
+  });
 });
