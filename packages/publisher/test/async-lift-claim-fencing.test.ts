@@ -331,6 +331,67 @@ describe('async-lift claim fencing', () => {
     expect(await publisher.getStatus(jobId)).toMatchObject({ jobId, status: 'accepted' });
   });
 
+  it('preserves the durable broadcast when publish-result persistence faults after send', async () => {
+    let failNextJobWrite = false;
+    let jobId = '';
+    const originalReplaceSubject = store.replaceSubject.bind(store);
+    store.replaceSubject = async (...args) => {
+      if (failNextJobWrite && args[1].includes(jobId)) {
+        failNextJobWrite = false;
+        throw new Error('injected post-send result persistence fault');
+      }
+      await originalReplaceSubject(...args);
+    };
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        preflight: async () => {},
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            nonce: 7,
+            operationKind: 'create',
+          });
+          // The pre-send WAL is durable. Fault the next job write, which is the successful
+          // result's broadcast -> included transition, after the transaction may be on-chain.
+          failNextJobWrite = true;
+          return {
+            kaId: 11n,
+            ual: 'did:dkg:mock:31337/0xdef/11',
+            merkleRoot: new Uint8Array([0xde, 0xf0]),
+            kaManifest: [],
+            status: 'confirmed' as const,
+            onChainResult: {
+              batchId: 11n,
+              startKAId: 11n,
+              endKAId: 11n,
+              txHash: KA_VM_EXECUTOR_TX_HASH,
+              blockNumber: 77,
+              blockTimestamp: 1700000077,
+              publisherAddress: '0x2222222222222222222222222222222222222222',
+            },
+          };
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageSnapshot();
+    jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    await expect(publisher.processNext('wallet-a'))
+      .rejects.toThrow('injected post-send result persistence fault');
+
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'broadcast',
+      broadcast: {
+        txHash: KA_VM_EXECUTOR_TX_HASH,
+        nonce: 7,
+        operationKind: 'create',
+      },
+    });
+    expect((await publisher.getStatus(jobId))?.failure).toBeUndefined();
+  });
+
   it('does not let an expired worker write or send after another wallet reclaims the job', async () => {
     const executeEntered = deferred();
     const releaseExecute = deferred();
