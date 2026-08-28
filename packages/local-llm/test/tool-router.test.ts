@@ -8,6 +8,8 @@ function tools(...names: string[]): McpToolDefinition[] {
 
 const surface = tools(
   'dkg_status',
+  'dkg_peer_info',
+  'dkg_wallet_balances',
   'dkg_list_context_graphs',
   'dkg_sub_graph_list',
   'dkg_query',
@@ -31,15 +33,17 @@ describe('tool router', () => {
     expect(route.tools).toEqual([]);
   });
 
-  it('selects only the compact catalog profile for saved-query discovery', () => {
+  it('ranks catalog tools first without exposing catalog mutations for discovery', () => {
     const route = routeTools({ prompt: 'Which DKG query catalog queries are saved?', tools: surface });
     expect(route.profile).toBe('catalog');
-    expect(route.tools.map((tool) => tool.name)).toEqual([
-      'dkg_status',
-      'dkg_list_context_graphs',
+    expect(route.tools.map((tool) => tool.name).slice(0, 2)).toEqual([
       'dkg_query_catalog_list',
       'dkg_query_catalog_run',
     ]);
+    expect(route.tools.map((tool) => tool.name)).not.toContain('dkg_query_catalog_save');
+    expect(route.tools).toHaveLength(8);
+    expect(route.jsonBytes).toBeGreaterThan(0);
+    expect(route.reason).toContain('Data-driven catalog route');
   });
 
   it('keeps general reads within the configured tool budget', () => {
@@ -70,7 +74,7 @@ describe('tool router', () => {
     });
     expect(route.profile).toBe('write');
     expect(route.tools.map((tool) => tool.name)).toContain('dkg_query_catalog_save');
-    expect(route.tools[0].name).toBe('dkg_query_catalog_save');
+    expect(route.tools[0].name).toBe('dkg_list_context_graphs');
     expect(route.tools.map((tool) => tool.name)).not.toContain('dkg_knowledge_asset_create');
   });
 
@@ -81,7 +85,31 @@ describe('tool router', () => {
       allowWrite: true,
     });
     expect(route.profile).toBe('write');
-    expect(route.tools[0].name).toBe('dkg_query_catalog_save');
+    expect(route.tools.map((tool) => tool.name)).toContain('dkg_query_catalog_save');
+  });
+
+  it('maps generic mutation verbs to metadata-compatible tool actions', () => {
+    const catalogUpdate = routeTools({
+      prompt: 'Update the saved DKG query catalog entry named Models',
+      tools: surface,
+      allowWrite: true,
+    });
+    expect(catalogUpdate.tools.map((tool) => tool.name)).toContain('dkg_query_catalog_save');
+
+    const partnerApply = routeTools({
+      prompt: 'Apply configuration 748387',
+      tools: [{
+        name: 'partner_apply_configuration',
+        description: 'Apply one approved configuration.',
+        inputSchema: { type: 'object' },
+        annotations: { readOnlyHint: false },
+      }],
+      allowWrite: true,
+      domainKeywords: ['configuration'],
+      additionalWriteToolNames: ['partner_apply_configuration'],
+    });
+    expect(partnerApply.profile).toBe('write');
+    expect(partnerApply.tools.map((tool) => tool.name)).toEqual(['partner_apply_configuration']);
   });
 
   it('does not expose on-chain registration for a local graph-create request', () => {
@@ -199,10 +227,115 @@ describe('tool router', () => {
     for (const prompt of [
       'What CGs do you see?',
       'Which context graphs are available?',
+      'Which locally joined graph projects are visible to this node?',
     ]) {
       const route = routeTools({ prompt, tools: surface });
       expect(route.profile).toBe('read');
       expect(route.tools[0]?.name).toBe('dkg_list_context_graphs');
+    }
+  });
+
+  it('ranks an unknown read-only adapter from discovered MCP metadata', () => {
+    const route = routeTools({
+      prompt: 'Which supplier provenance records are missing for configuration 748387?',
+      tools: [
+        ...surface,
+        {
+          name: 'partner_trace_product_lifecycle',
+          description: 'Trace configuration supplier provenance, inbound events, warehouse records, and shipments.',
+          inputSchema: {
+            type: 'object',
+            properties: { configurationId: { type: 'string' } },
+          },
+          annotations: { readOnlyHint: true },
+        },
+      ],
+      maxTools: 3,
+    });
+    expect(route.profile).toBe('read');
+    expect(route.tools[0]?.name).toBe('partner_trace_product_lifecycle');
+    expect(route.rankedTools[0]?.lexicalScore).toBeGreaterThan(0);
+  });
+
+  it('uses input-schema metadata when an adapter name is intentionally opaque', () => {
+    const route = routeTools({
+      prompt: 'Find configuration ID 748387',
+      tools: [{
+        name: 'partner_lookup',
+        description: 'Read one partner record.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            configurationId: { type: 'string', description: 'Approved Configuration ID' },
+          },
+        },
+        annotations: { readOnlyHint: true },
+      }],
+      maxTools: 1,
+    });
+    expect(route.profile).toBe('read');
+    expect(route.tools.map((tool) => tool.name)).toEqual(['partner_lookup']);
+  });
+
+  it('enforces both tool-count and serialized-schema budgets', () => {
+    const metadataTools: McpToolDefinition[] = [
+      {
+        name: 'partner_configuration_supplier_provenance',
+        description: 'Find configuration supplier provenance.',
+        inputSchema: { type: 'object' },
+        annotations: { readOnlyHint: true },
+      },
+      {
+        name: 'partner_archive_lookup',
+        description: `Configuration archive ${'padding '.repeat(2_000)}`,
+        inputSchema: { type: 'object' },
+        annotations: { readOnlyHint: true },
+      },
+    ];
+    const first = routeTools({
+      prompt: 'configuration supplier provenance',
+      tools: metadataTools,
+      maxTools: 1,
+    });
+    const bounded = routeTools({
+      prompt: 'configuration supplier provenance',
+      tools: metadataTools,
+      maxTools: 8,
+      maxJsonBytes: first.jsonBytes + 1,
+    });
+    expect(bounded.tools.map((tool) => tool.name))
+      .toEqual(['partner_configuration_supplier_provenance']);
+    expect(bounded.jsonBytes).toBeLessThanOrEqual(first.jsonBytes + 1);
+
+    const tooSmall = routeTools({
+      prompt: 'configuration archive',
+      tools: [metadataTools[1]],
+      maxJsonBytes: 100,
+    });
+    expect(tooSmall.tools).toEqual([]);
+    expect(tooSmall.jsonBytes).toBe(0);
+  });
+
+  it('does not reinterpret a generic creative request as a DKG write', () => {
+    const route = routeTools({ prompt: 'Write a haiku about rain', tools: surface });
+    expect(route.profile).toBe('chat');
+    expect(route.writeBlocked).toBe(false);
+    expect(route.tools).toEqual([]);
+  });
+
+  it('covers routing holdouts without phrase-specific allowlists', () => {
+    const cases = [
+      ['Show available CGs', 'dkg_list_context_graphs'],
+      ['Find RDF entities and their provenance', 'dkg_get_entity_sources'],
+      ['Show recent DKG tasks and decisions', 'dkg_query'],
+      ['Run a saved lifecycle query', 'dkg_query_catalog_run'],
+      ['Check DKG wallet balances and peer connectivity', 'dkg_status'],
+    ] as const;
+    for (const [prompt, expectedTool] of cases) {
+      const route = routeTools({ prompt, tools: surface });
+      expect(route.profile, prompt).not.toBe('chat');
+      expect(route.tools.map((tool) => tool.name), prompt).toContain(expectedTool);
+      expect(route.tools.some(isMutatingTool), prompt).toBe(false);
     }
   });
 

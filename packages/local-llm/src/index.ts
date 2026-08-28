@@ -33,16 +33,24 @@ export {
   dkgLocalLlmSystemContext,
 } from './system-context.js';
 export {
-  CATALOG_TOOL_NAMES,
-  READ_TOOL_NAMES,
-  STATUS_TOOL_NAMES,
-  WRITE_TOOL_NAMES,
+  classifyTool,
+  createToolRouter,
   isMutatingTool,
   routeTools,
   type ResolvedToolProfile,
+  type ToolCategory,
   type ToolProfile,
   type ToolRoute,
+  type ToolRouteRequest,
 } from './tool-router.js';
+export {
+  createRelevanceRanker,
+  tokenizeToolText,
+  type RelevanceDocument,
+  type RelevanceRankOptions,
+  type RelevanceRankResult,
+  type RelevanceRankedItem,
+} from './relevance-router.js';
 export {
   NOOP_TRACE,
   TextInteractionTrace,

@@ -314,16 +314,17 @@ dkg llm --interactive --model local-model
 dkg llm --project my-project "Which saved queries are available?"
 ```
 
-Each turn receives at most eight relevant MCP schemas by default instead of the
-complete tool surface. Status, query-catalog, and general reads are routed
-separately. The command validates tool arguments, permits one repair retry,
-bounds chat history, and writes a redacted owner-only text trace under
-`<DKG_HOME>/logs/local-llm`.
+Each turn receives at most eight relevant MCP schemas and 18,000 serialized
+schema bytes by default instead of the complete tool surface. Relevance is
+ranked from the live MCP tool names, descriptions, and input schemas; use
+`--max-tools` and `--max-tool-json-bytes` to change the bounds. The command
+validates tool arguments, permits one repair retry, bounds chat history, and
+writes a redacted owner-only text trace under `<DKG_HOME>/logs/local-llm`.
 
 Mutation tools are unavailable unless the operator passes `--allow-write`;
 even then, the prompt must explicitly request the mutation. Extra MCP adapters
 can be loaded with `--adapter`. `--domain-profile profile.json` supplies its
-literal routing keywords, read/write tool allowlists, and system-context
+literal routing keywords, read/write tool ranking hints, and system-context
 addendum without adding domain IDs or benchmark answers to the built-in core.
 For small experiments, `--tool` and `--system-context-file` expose the same
 seams separately.

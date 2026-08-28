@@ -33,6 +33,7 @@ export interface LlmCommandOptions {
   logFile?: string;
   maxToolCalls?: string;
   maxTools?: string;
+  maxToolJsonBytes?: string;
   maxEvidenceChars?: string;
   sessionTurns?: string;
   sessionChars?: string;
@@ -59,6 +60,7 @@ export interface ResolvedLlmCommandOptions {
   logFile?: string;
   maxToolCalls: number;
   maxToolsPerTurn: number;
+  maxToolJsonBytes: number;
   maxEvidenceChars: number;
   maxSessionTurns: number;
   maxSessionChars: number;
@@ -123,6 +125,7 @@ export function resolveLlmCommandOptions(
     logFile: options.logFile ? path.resolve(options.logFile) : undefined,
     maxToolCalls: positiveInteger('--max-tool-calls', options.maxToolCalls, 4),
     maxToolsPerTurn: positiveInteger('--max-tools', options.maxTools, 8),
+    maxToolJsonBytes: positiveInteger('--max-tool-json-bytes', options.maxToolJsonBytes, 18_000),
     maxEvidenceChars: positiveInteger('--max-evidence-chars', options.maxEvidenceChars, 12_000),
     maxSessionTurns: positiveInteger('--session-turns', options.sessionTurns, 6),
     maxSessionChars: positiveInteger('--session-chars', options.sessionChars, 8_000),
@@ -243,6 +246,7 @@ export async function runLlmCommand(options: ResolvedLlmCommandOptions): Promise
       maxTokens: options.maxTokens,
       maxToolCalls: options.maxToolCalls,
       maxToolsPerTurn: options.maxToolsPerTurn,
+      maxToolJsonBytes: options.maxToolJsonBytes,
       maxEvidenceChars: options.maxEvidenceChars,
       maxSessionTurns: options.maxSessionTurns,
       maxSessionChars: options.maxSessionChars,
@@ -308,6 +312,7 @@ export function registerLlmCommand(program: Command): void {
     .option('--log-file <path>', 'exact text trace file path')
     .option('--max-tool-calls <n>', 'successful tool-call limit per turn', '4')
     .option('--max-tools <n>', 'maximum tool schemas exposed per turn', '8')
+    .option('--max-tool-json-bytes <n>', 'maximum serialized tool-schema bytes exposed per turn', '18000')
     .option('--max-evidence-chars <n>', 'tool evidence characters sent back to the model', '12000')
     .option('--session-turns <n>', 'retained interactive turns', '6')
     .option('--session-chars <n>', 'prior-session context character limit', '8000')

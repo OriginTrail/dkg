@@ -35,8 +35,9 @@ The boundary should remain explicit:
 
 - `llama-server` is an operator-managed process. DKG does not silently install,
   upgrade, start, or stop it.
-- `dkg llm` owns the MCP client, tool discovery, DKG system context, routing,
-  schema validation, retry policy, bounded chat history, and text trace.
+- `dkg llm` owns the MCP client, tool discovery, metadata-driven relevance
+  routing, DKG system context, schema validation, retry policy, bounded chat
+  history, and text trace.
 - Do not bypass that harness by attaching the DKG MCP server directly through
   llama.cpp's own MCP configuration. That would skip DKG's tested system
   context, tool-budget routing, validation, retry, and readable interaction log.
@@ -474,8 +475,9 @@ and final answers with secrets redacted.
 
 ## Domain adapters
 
-Use a domain profile to add literal routing keywords, adapter tool names, and a
-domain-specific context addendum without patching the generic router:
+Use a domain profile to add literal routing keywords, adapter tool ranking
+hints, and a domain-specific context addendum without patching the generic
+router:
 
 ```bash
 dkg llm \

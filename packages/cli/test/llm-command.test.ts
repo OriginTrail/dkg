@@ -21,6 +21,7 @@ describe('dkg llm options', () => {
     expect(options.profile).toBe('auto');
     expect(options.allowWrite).toBe(false);
     expect(options.maxToolsPerTurn).toBe(8);
+    expect(options.maxToolJsonBytes).toBe(18_000);
     expect(options.dkgHome).toBe('/tmp/dkg-llm-test');
     expect(options.logDir).toBe('/tmp/dkg-llm-test/logs/local-llm');
   });
@@ -36,10 +37,12 @@ describe('dkg llm options', () => {
       profile: 'write',
       allowWrite: true,
       maxTools: '4',
+      maxToolJsonBytes: '9000',
     }, { DKG_HOME: '/tmp/dkg-llm-test' });
     expect(write.profile).toBe('write');
     expect(write.allowWrite).toBe(true);
     expect(write.maxToolsPerTurn).toBe(4);
+    expect(write.maxToolJsonBytes).toBe(9_000);
     expect(() => resolveLlmCommandOptions([], { profile: 'anything' }, { DKG_HOME: '/tmp/x' }))
       .toThrow('--profile');
     expect(() => resolveLlmCommandOptions([], { maxToolCalls: '0' }, { DKG_HOME: '/tmp/x' }))
@@ -68,6 +71,7 @@ describe('dkg llm options', () => {
     expect(help).toContain('--profile');
     expect(help).toContain('--system-context-file');
     expect(help).toContain('--domain-profile');
+    expect(help).toContain('--max-tool-json-bytes');
   });
 });
 

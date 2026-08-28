@@ -1,4 +1,5 @@
-import type { McpToolDefinition } from './schema.js';
+import { toOpenAiTool, type McpToolDefinition } from './schema.js';
+import { createRelevanceRanker, tokenizeToolText } from './relevance-router.js';
 
 export type ToolProfile = 'auto' | 'chat' | 'status' | 'catalog' | 'read' | 'write';
 export type ResolvedToolProfile = Exclude<ToolProfile, 'auto'>;
@@ -8,25 +9,42 @@ export interface ToolRoute {
   tools: McpToolDefinition[];
   reason: string;
   writeBlocked: boolean;
+  jsonBytes: number;
+  rankedTools: Array<{
+    name: string;
+    category: ToolCategory;
+    score: number;
+    lexicalScore: number;
+    pinned: boolean;
+  }>;
 }
 
-export const STATUS_TOOL_NAMES = [
+export type ToolCategory = 'discovery' | 'status' | 'catalog' | 'read' | 'write' | 'publish' | 'messaging';
+
+export interface ToolRouteRequest {
+  prompt: string;
+  profile?: ToolProfile;
+  allowWrite?: boolean;
+  maxTools?: number;
+  maxJsonBytes?: number;
+  additionalToolNames?: readonly string[];
+  additionalReadToolNames?: readonly string[];
+  additionalWriteToolNames?: readonly string[];
+  domainKeywords?: readonly string[];
+  hasPriorEvidence?: boolean;
+}
+
+/*
+ * Safety compatibility for the pre-annotation built-in MCP surface. These
+ * names never participate in relevance ranking. New and adapter tools must
+ * declare readOnlyHint; otherwise they fail closed as mutations.
+ */
+const LEGACY_UNANNOTATED_READ_TOOL_NAMES = new Set<string>([
   'dkg_status',
   'dkg_peer_info',
   'dkg_wallet_balances',
   'dkg_list_context_graphs',
   'dkg_sub_graph_list',
-] as const;
-
-export const CATALOG_TOOL_NAMES = [
-  'dkg_status',
-  'dkg_list_context_graphs',
-  'dkg_query_catalog_list',
-  'dkg_query_catalog_run',
-] as const;
-
-export const READ_TOOL_NAMES = [
-  ...STATUS_TOOL_NAMES,
   'dkg_query',
   'dkg_get_entity',
   'dkg_get_entity_sources',
@@ -40,9 +58,9 @@ export const READ_TOOL_NAMES = [
   'dkg_check_inbox',
   'dkg_query_catalog_list',
   'dkg_query_catalog_run',
-] as const;
+]);
 
-export const WRITE_TOOL_NAMES = [
+const LEGACY_UNANNOTATED_WRITE_TOOL_NAMES = new Set<string>([
   'dkg_context_graph_create',
   'dkg_context_graph_register',
   'dkg_subscribe',
@@ -58,36 +76,50 @@ export const WRITE_TOOL_NAMES = [
   'dkg_knowledge_asset_import_file',
   'dkg_send_message',
   'dkg_query_catalog_save',
-] as const;
-
-const KNOWN_READ_TOOLS = new Set<string>(READ_TOOL_NAMES);
-const KNOWN_WRITE_TOOLS = new Set<string>(WRITE_TOOL_NAMES);
-const DKG_SIGNAL = /\b(?:dkg|cgs?|context\s+graphs?|sub-?graphs?|knowledge\s+assets?|triples?|rdf|sparql|entities?|provenance|verifiable\s+memory|query[-\s]+catalogs?|saved\s+quer(?:y|ies)|peers?|wallet|inbox)\b/i;
-const STATUS_SIGNAL = /\b(?:status|health|healthy|peers?|wallet|balances?|joined\s+(?:context\s+)?graphs?)\b/i;
+]);
+const STATUS_SIGNAL = /\b(?:node\s+status|status|health|healthy|peers?|wallet|balances?|connectivity)\b/i;
 const CATALOG_SIGNAL = /\b(?:query[-\s]+catalog|saved\s+quer(?:y|ies)|catalog\s+quer(?:y|ies))\b/i;
-const WRITE_ACTION_SIGNAL = /\b(?:create|insert|add|write|update|save|publish|share|finalize|discard|delete|import|enrich|register|subscribe|send|mutate)\b/gi;
+const WRITE_ACTION_SIGNAL = /\b(?:create|insert|add|write|update|save|publish|share|finalize|discard|delete|import|enrich|register|subscribe|send|mutate|populate|pull|apply|approve|reject|cancel|reset)\b/gi;
+const WRITE_ACTION_TOKENS = new Set([
+  'create', 'insert', 'add', 'write', 'update', 'save', 'publish', 'share',
+  'finalize', 'discard', 'delete', 'import', 'enrich', 'register', 'subscribe',
+  'send', 'mutate', 'populate', 'pull', 'apply', 'approve', 'reject', 'cancel',
+  'reset', 'enrichment',
+]);
+const ACTION_EQUIVALENTS = new Map<string, readonly string[]>([
+  ['add', ['add', 'create', 'write']],
+  ['insert', ['insert', 'create', 'write']],
+  ['update', ['update', 'write', 'save']],
+  ['delete', ['delete', 'discard']],
+  ['enrich', ['enrich', 'enrichment', 'write']],
+  ['mutate', ['mutate', 'write']],
+  ['populate', ['populate', 'create', 'write']],
+]);
 const FOLLOW_UP_SIGNAL = /\b(?:it|its|that|those|them|their|same|previous|above|result|entity|asset|graph|query)\b/i;
+const CHAT_ONLY_SIGNAL = /^(?:hi|hello|hey|hey\s+there|good\s+(?:morning|afternoon|evening)|thanks?|thank\s+you)[\s!.?]*$/i;
 
 export function isMutatingTool(tool: McpToolDefinition): boolean {
-  if (KNOWN_WRITE_TOOLS.has(tool.name)) return true;
-  if (KNOWN_READ_TOOLS.has(tool.name)) return false;
-  if (tool.annotations?.destructiveHint === true) return true;
   if (tool.annotations?.readOnlyHint === true) return false;
   if (tool.annotations?.readOnlyHint === false) return true;
+  if (tool.annotations?.destructiveHint === true) return true;
+  if (LEGACY_UNANNOTATED_WRITE_TOOL_NAMES.has(tool.name)) return true;
+  if (LEGACY_UNANNOTATED_READ_TOOL_NAMES.has(tool.name)) return false;
   // Unknown adapter tools without MCP safety annotations fail closed. A name
   // heuristic can miss mutations such as `partner_apply` or `admin_reset`.
   return true;
 }
 
-function hasWriteIntent(
-  prompt: string,
-  tools: McpToolDefinition[],
-  hasDomainIntent: boolean,
-): boolean {
-  const namedMutation = tools.some((tool) =>
-    isMutatingTool(tool) && prompt.toLowerCase().includes(tool.name.toLowerCase()));
-  return namedMutation
-    || ((DKG_SIGNAL.test(prompt) || hasDomainIntent) && hasAffirmativeAction(prompt, WRITE_ACTION_SIGNAL));
+export function classifyTool(tool: McpToolDefinition): ToolCategory {
+  const name = tool.name.toLowerCase();
+  if (isMutatingTool(tool)) {
+    if (/send_message/.test(name)) return 'messaging';
+    if (/(subscribe|register|share|publish)/.test(name)) return 'publish';
+    return 'write';
+  }
+  if (/query_catalog/.test(name)) return 'catalog';
+  if (/(list_context_graphs|sub_graph_list)/.test(name)) return 'discovery';
+  if (/(^|_)status$|peer_info|wallet_balances/.test(name)) return 'status';
+  return 'read';
 }
 
 function includesKeyword(prompt: string, keywords: readonly string[]): boolean {
@@ -110,151 +142,207 @@ function hasAffirmativeAction(prompt: string, actionPattern: RegExp): boolean {
   return false;
 }
 
-function namesForReadPrompt(prompt: string): string[] {
-  const names = ['dkg_list_context_graphs', 'dkg_query_catalog_list', 'dkg_query_catalog_run'];
-  if (/\b(?:sparql|select|construct|ask|raw\s+query|triple)\b/i.test(prompt)) names.push('dkg_query');
-  if (/\b(?:entity|iri|uri|facts?|describe|neighbou?r)\b/i.test(prompt)) {
-    names.push('dkg_get_entity', 'dkg_get_entity_sources');
-  }
-  if (/\b(?:memory|search|find|lookup|retrieve|retrieval|relevant)\b/i.test(prompt)) names.push('dkg_memory_search');
-  if (/\b(?:activity|recent|decision|task|turn)\b/i.test(prompt)) names.push('dkg_list_activity');
-  if (/\b(?:agent|author|authored)\b/i.test(prompt)) names.push('dkg_get_agent');
-  if (/\b(?:asset|assertion|history|version)\b/i.test(prompt)) {
-    names.push('dkg_knowledge_asset_query', 'dkg_knowledge_asset_history');
-  }
-  if (/\b(?:sub-?graph|partition|slice)\b/i.test(prompt)) names.push('dkg_sub_graph_list');
-  if (/\b(?:inbox|message)\b/i.test(prompt)) names.push('dkg_check_inbox');
-  if (names.length === 3) names.push('dkg_memory_search', 'dkg_query', 'dkg_get_entity');
-  return names;
-}
-
-function namesForWritePrompt(prompt: string): string[] {
-  const names: string[] = [];
-  const contextGraphCreateIntent = /\b(?:create|add)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:dkg\s+)?context\s+graphs?\b|\bnew\s+(?:dkg\s+)?context\s+graphs?\b/i.test(prompt);
-  const subGraphCreateIntent = /\b(?:create|add)\s+(?:a\s+|an\s+)?(?:new\s+)?sub-?graphs?\b|\bnew\s+sub-?graphs?\b/i.test(prompt);
-  if (/\bquery[-\s]+catalog|saved\s+query/i.test(prompt)) {
-    if (/\bsave|update|create|add/i.test(prompt)) names.push('dkg_query_catalog_save');
-    names.push('dkg_query_catalog_list', 'dkg_query_catalog_run');
-  }
-  if (/\bcontext\s+graph/i.test(prompt)) {
-    if (contextGraphCreateIntent) names.push('dkg_context_graph_create');
-    if (/\bregister/i.test(prompt)) names.push('dkg_context_graph_register');
-  }
-  if (/\bsub-?graph/i.test(prompt)) {
-    if (subGraphCreateIntent) names.push('dkg_sub_graph_create');
-    names.push('dkg_sub_graph_list');
-  }
-  if (/\bsubscribe/i.test(prompt)) names.push('dkg_subscribe');
-  if (/\b(?:knowledge\s+asset|assertion|quads?|triples?|rdf)\b/i.test(prompt)) {
-    if (/\bcreate|insert|add/i.test(prompt)) names.push('dkg_knowledge_asset_create');
-    if (/\bwrite|update/i.test(prompt)) names.push('dkg_knowledge_asset_write');
-    if (/\bfinalize/i.test(prompt)) names.push('dkg_knowledge_asset_finalize');
-    if (hasAffirmativeAction(prompt, /\bshare\b/gi)) {
-      names.push('dkg_knowledge_asset_share');
+function negatedActionTokens(prompt: string): Set<string> {
+  const negated = new Set<string>();
+  for (const match of prompt.matchAll(WRITE_ACTION_SIGNAL)) {
+    const before = prompt.slice(Math.max(0, (match.index ?? 0) - 64), match.index);
+    if (/\b(?:do\s+not|don't|never)\b[^.!?;\n]{0,48}$/i.test(before)) {
+      negated.add(match[0].toLowerCase());
     }
-    if (hasAffirmativeAction(prompt, /\bpublish\b/gi)) {
-      names.push('dkg_knowledge_asset_publish');
-    }
-    if (/\bdiscard|delete/i.test(prompt)) names.push('dkg_knowledge_asset_discard');
-    if (/\bimport/i.test(prompt)) names.push('dkg_knowledge_asset_import_file');
-    if (/\benrich/i.test(prompt)) names.push('dkg_knowledge_asset_semantic_enrichment_write');
   }
-  if (/\b(?:send|message)\b/i.test(prompt)) names.push('dkg_send_message');
-  names.push('dkg_list_context_graphs', 'dkg_status');
-  return names;
+  return negated;
 }
 
-function selectByNames(
-  available: McpToolDefinition[],
-  names: readonly string[],
-  maxTools: number,
-): McpToolDefinition[] {
-  const order = new Map(names.map((name, index) => [name, index]));
-  return available
-    .filter((tool) => order.has(tool.name))
-    .sort((left, right) => order.get(left.name)! - order.get(right.name)!)
-    .slice(0, maxTools);
+function profileBoost(profile: ResolvedToolProfile, category: ToolCategory): number {
+  if (profile === 'write') {
+    if (['write', 'publish', 'messaging'].includes(category)) return 16;
+    if (category === 'discovery') return 12;
+    return 2;
+  }
+  if (profile === 'catalog') {
+    if (category === 'catalog') return 20;
+    if (category === 'discovery') return 6;
+    return category === 'read' ? 2 : 0;
+  }
+  if (profile === 'status') {
+    if (category === 'status') return 20;
+    if (category === 'discovery') return 10;
+    return category === 'read' ? 1 : 0;
+  }
+  if (profile === 'read') {
+    if (category === 'read') return 8;
+    if (category === 'discovery' || category === 'catalog') return 4;
+  }
+  return 0;
 }
 
-export function routeTools(options: {
-  prompt: string;
-  tools: McpToolDefinition[];
-  profile?: ToolProfile;
-  allowWrite?: boolean;
-  maxTools?: number;
-  additionalToolNames?: readonly string[];
-  additionalReadToolNames?: readonly string[];
-  additionalWriteToolNames?: readonly string[];
-  domainKeywords?: readonly string[];
-  hasPriorEvidence?: boolean;
-}): ToolRoute {
+function directObjectTokens(prompt: string, actionIndex: number, actionLength: number): Set<string> {
+  const tail = prompt.slice(actionIndex + actionLength, actionIndex + actionLength + 120)
+    .split(/[.!?;\n]/, 1)[0]
+    .split(/\b(?:in|inside|within|for|on|from|using|with|to)\b/i, 1)[0]
+    .replace(/\bsubgraphs?\b/gi, 'sub graph')
+    .replace(/\bcontextgraphs?\b/gi, 'context graph')
+    .replace(/\bknowledgeassets?\b/gi, 'knowledge asset');
+  return new Set(tokenizeToolText(tail));
+}
+
+function explicitlyRequestedMutationTools(
+  prompt: string,
+  tools: McpToolDefinition[],
+  pinnedWriteTools: ReadonlySet<string>,
+): Set<string> {
+  const allowed = new Set(pinnedWriteTools);
+  for (const match of prompt.matchAll(WRITE_ACTION_SIGNAL)) {
+    const before = prompt.slice(Math.max(0, (match.index ?? 0) - 64), match.index);
+    if (/\b(?:do\s+not|don't|never)\b[^.!?;\n]{0,48}$/i.test(before)) continue;
+    const action = match[0].toLowerCase();
+    const acceptedActions = new Set(ACTION_EQUIVALENTS.get(action) ?? [action]);
+    const targetTokens = directObjectTokens(prompt, match.index ?? 0, match[0].length);
+    const eligible = tools
+      .filter(isMutatingTool)
+      .map((tool) => {
+        const nameTokens = tokenizeToolText(tool.name);
+        const actionTokens = nameTokens.filter((token) => WRITE_ACTION_TOKENS.has(token));
+        const subjectTokens = nameTokens.filter((token) =>
+          token !== 'dkg' && !WRITE_ACTION_TOKENS.has(token));
+        const targetMatches = subjectTokens.filter((token) => targetTokens.has(token)).length;
+        return { tool, actionTokens, targetMatches };
+      })
+      .filter(({ actionTokens }) => actionTokens.some((token) => acceptedActions.has(token)));
+    const bestTargetMatches = Math.max(0, ...eligible.map(({ targetMatches }) => targetMatches));
+    for (const candidate of eligible) {
+      if (bestTargetMatches === 0 || candidate.targetMatches === bestTargetMatches) {
+        allowed.add(candidate.tool.name);
+      }
+    }
+  }
+  return allowed;
+}
+
+function createRoute(
+  tools: McpToolDefinition[],
+  ranker: ReturnType<typeof createRelevanceRanker<McpToolDefinition>>,
+  options: ToolRouteRequest,
+): ToolRoute {
   const prompt = options.prompt.trim();
-  const profile = options.profile ?? 'auto';
+  const requestedProfile = options.profile ?? 'auto';
   const allowWrite = options.allowWrite ?? false;
   const maxTools = options.maxTools ?? 8;
-  const explicitNames = namedTools(prompt, options.tools);
+  const maxJsonBytes = options.maxJsonBytes ?? 18_000;
+  const explicitNames = namedTools(prompt, tools);
   const domainIntent = includesKeyword(prompt, options.domainKeywords ?? []);
-  const writeIntent = hasWriteIntent(prompt, options.tools, domainIntent) || profile === 'write';
+  const priorFollowUp = Boolean(options.hasPriorEvidence && FOLLOW_UP_SIGNAL.test(prompt));
+  const metadataIntent = ranker.maxLexicalScore(prompt, WRITE_ACTION_TOKENS) > 0;
+  const hasToolIntent = metadataIntent || domainIntent || explicitNames.length > 0 || priorFollowUp;
+  const namedMutation = explicitNames.some((name) => {
+    const tool = tools.find((candidate) => candidate.name === name);
+    return tool ? isMutatingTool(tool) : false;
+  });
+  const writeIntent = requestedProfile === 'write'
+    || namedMutation
+    || (hasToolIntent && hasAffirmativeAction(prompt, WRITE_ACTION_SIGNAL));
   if (writeIntent && !allowWrite) {
     return {
       profile: 'chat',
       tools: [],
       reason: 'The prompt requests a mutation, but write tools are disabled.',
       writeBlocked: true,
+      jsonBytes: 0,
+      rankedTools: [],
     };
   }
 
   let resolved: ResolvedToolProfile;
-  if (profile !== 'auto') {
-    resolved = profile;
+  if (requestedProfile !== 'auto') {
+    resolved = requestedProfile;
+  } else if (CHAT_ONLY_SIGNAL.test(prompt) || !hasToolIntent) {
+    resolved = 'chat';
   } else if (writeIntent) {
     resolved = 'write';
   } else if (CATALOG_SIGNAL.test(prompt)) {
     resolved = 'catalog';
-  } else if (DKG_SIGNAL.test(prompt) && STATUS_SIGNAL.test(prompt)) {
+  } else if (STATUS_SIGNAL.test(prompt)) {
     resolved = 'status';
-  } else if (DKG_SIGNAL.test(prompt) || domainIntent || explicitNames.length > 0
-    || (options.hasPriorEvidence && FOLLOW_UP_SIGNAL.test(prompt))) {
-    resolved = 'read';
   } else {
-    resolved = 'chat';
+    resolved = 'read';
   }
 
   if (resolved === 'chat') {
-    return { profile: resolved, tools: [], reason: 'No DKG intent was detected.', writeBlocked: false };
+    return {
+      profile: resolved,
+      tools: [],
+      reason: 'No relevant MCP tool metadata matched the prompt.',
+      writeBlocked: false,
+      jsonBytes: 0,
+      rankedTools: [],
+    };
   }
 
-  const additional = options.additionalToolNames ?? [];
-  let desired: string[];
-  if (resolved === 'status') desired = [...STATUS_TOOL_NAMES];
-  else if (resolved === 'catalog') desired = [...CATALOG_TOOL_NAMES];
-  else if (resolved === 'read') {
-    desired = [
-      ...explicitNames,
-      ...(domainIntent ? options.additionalReadToolNames ?? [] : []),
-      ...namesForReadPrompt(prompt),
-      ...additional,
-      ...(!domainIntent ? options.additionalReadToolNames ?? [] : []),
-    ];
-  } else {
-    desired = [
-      ...explicitNames,
-      ...(domainIntent ? options.additionalWriteToolNames ?? [] : []),
-      ...namesForWritePrompt(prompt),
-      ...additional,
-      ...(options.additionalReadToolNames ?? []),
-      ...(!domainIntent ? options.additionalWriteToolNames ?? [] : []),
-    ];
+  const pinned = new Set([
+    ...explicitNames,
+    ...(options.additionalToolNames ?? []),
+    ...(domainIntent && resolved === 'write' ? options.additionalWriteToolNames ?? [] : []),
+    ...(domainIntent && resolved !== 'write' ? options.additionalReadToolNames ?? [] : []),
+  ]);
+  const explicitlyNamedMutations = new Set(explicitNames.filter((name) => {
+    const tool = tools.find((candidate) => candidate.name === name);
+    return tool ? isMutatingTool(tool) : false;
+  }));
+  const requestedMutations = explicitlyRequestedMutationTools(
+    prompt,
+    tools,
+    explicitlyNamedMutations,
+  );
+  const negated = negatedActionTokens(prompt);
+  const excluded = new Set(tools
+    .filter((tool) => isMutatingTool(tool)
+      && (resolved !== 'write' || !requestedMutations.has(tool.name)))
+    .map((tool) => tool.name));
+  for (const tool of tools) {
+    if (!isMutatingTool(tool)) continue;
+    const toolTokens = new Set(tool.name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+    if ([...negated].some((token) => toolTokens.has(token))) excluded.add(tool.name);
   }
-
-  const unique = [...new Set(desired)];
-  let tools = selectByNames(options.tools, unique, maxTools);
-  tools = tools.filter((tool) => (allowWrite && resolved === 'write') || !isMutatingTool(tool));
+  const ranked = ranker.rank({
+    query: prompt,
+    limit: maxTools,
+    jsonBudget: maxJsonBytes,
+    pinnedNames: pinned,
+    excludedNames: excluded,
+    anchorNames: resolved === 'write' ? ['dkg_list_context_graphs'] : [],
+    categoryBoost: (category) => profileBoost(resolved, category as ToolCategory),
+  });
 
   return {
     profile: resolved,
-    tools,
-    reason: `${resolved} profile selected from the prompt; ${tools.length} schema(s) fit the tool budget.`,
+    tools: ranked.selected.map((candidate) => candidate.item),
+    reason: `Data-driven ${resolved} route selected ${ranked.selected.length}/${tools.length} MCP schema(s) `
+      + `within ${ranked.jsonBytes}/${maxJsonBytes} JSON bytes.`,
     writeBlocked: false,
+    jsonBytes: ranked.jsonBytes,
+    rankedTools: ranked.selected.map((candidate) => ({
+      name: candidate.name,
+      category: candidate.category as ToolCategory,
+      score: candidate.score,
+      lexicalScore: candidate.lexicalScore,
+      pinned: candidate.pinned,
+    })),
   };
+}
+
+export function createToolRouter(tools: McpToolDefinition[]): (request: ToolRouteRequest) => ToolRoute {
+  const ranker = createRelevanceRanker(tools.map((tool) => ({
+    item: tool,
+    name: tool.name,
+    description: tool.description,
+    schema: tool.inputSchema,
+    category: classifyTool(tool),
+    jsonBytes: JSON.stringify(toOpenAiTool(tool)).length,
+  })));
+  return (request) => createRoute(tools, ranker, request);
+}
+
+export function routeTools(options: ToolRouteRequest & { tools: McpToolDefinition[] }): ToolRoute {
+  const { tools, ...request } = options;
+  return createToolRouter(tools)(request);
 }

@@ -8,8 +8,8 @@ import {
 } from './schema.js';
 import { dkgLocalLlmSystemContext } from './system-context.js';
 import {
+  createToolRouter,
   isMutatingTool,
-  routeTools,
   type ToolProfile,
 } from './tool-router.js';
 import { NOOP_TRACE, type InteractionTrace } from './text-trace.js';
@@ -75,6 +75,7 @@ export interface DkgLocalLlmOptions {
   maxTokens?: number;
   maxToolCalls?: number;
   maxToolsPerTurn?: number;
+  maxToolJsonBytes?: number;
   maxEvidenceChars?: number;
   maxSessionTurns?: number;
   maxSessionChars?: number;
@@ -237,12 +238,14 @@ export class DkgLocalLlmRuntime {
   private readonly maxTokens: number;
   private readonly maxToolCalls: number;
   private readonly maxToolsPerTurn: number;
+  private readonly maxToolJsonBytes: number;
   private readonly maxEvidenceChars: number;
   private readonly maxSessionTurns: number;
   private readonly maxSessionChars: number;
   private readonly requestTimeoutMs: number;
   private readonly trace: InteractionTrace;
   private readonly tools: McpToolDefinition[];
+  private readonly toolRouter: ReturnType<typeof createToolRouter>;
   private sessionTurns: DkgChatTurn[] = [];
   private sessionTurnCounter = 0;
 
@@ -262,12 +265,14 @@ export class DkgLocalLlmRuntime {
     this.maxTokens = positiveIntegerOption('maxTokens', options.maxTokens, 1_024);
     this.maxToolCalls = positiveIntegerOption('maxToolCalls', options.maxToolCalls, 4);
     this.maxToolsPerTurn = positiveIntegerOption('maxToolsPerTurn', options.maxToolsPerTurn, 8);
+    this.maxToolJsonBytes = positiveIntegerOption('maxToolJsonBytes', options.maxToolJsonBytes, 18_000);
     this.maxEvidenceChars = positiveIntegerOption('maxEvidenceChars', options.maxEvidenceChars, 12_000);
     this.maxSessionTurns = positiveIntegerOption('maxSessionTurns', options.maxSessionTurns, 6);
     this.maxSessionChars = positiveIntegerOption('maxSessionChars', options.maxSessionChars, 8_000);
     this.requestTimeoutMs = positiveIntegerOption('requestTimeoutMs', options.requestTimeoutMs, 120_000);
     this.trace = options.trace ?? NOOP_TRACE;
     this.tools = tools;
+    this.toolRouter = createToolRouter(tools);
   }
 
   static async create(options: DkgLocalLlmOptions): Promise<DkgLocalLlmRuntime> {
@@ -415,12 +420,12 @@ export class DkgLocalLlmRuntime {
     const prompt = userPrompt.trim();
     if (!prompt) throw new Error('A non-empty user prompt is required.');
 
-    const route = routeTools({
+    const route = this.toolRouter({
       prompt,
-      tools: this.tools,
       profile: this.profile,
       allowWrite: this.allowWrite,
       maxTools: this.maxToolsPerTurn,
+      maxJsonBytes: this.maxToolJsonBytes,
       additionalToolNames: this.additionalToolNames,
       additionalReadToolNames: this.domainProfile?.readTools,
       additionalWriteToolNames: this.domainProfile?.writeTools,
@@ -432,7 +437,9 @@ export class DkgLocalLlmRuntime {
       profile: route.profile,
       reason: route.reason,
       writeBlocked: route.writeBlocked,
+      jsonBytes: route.jsonBytes,
       exposedTools: route.tools.map((tool) => tool.name),
+      ranking: route.rankedTools,
     });
     if (route.writeBlocked) {
       throw new Error('The prompt requests a DKG mutation, but this runtime is read-only. Restart with allowWrite enabled.');
