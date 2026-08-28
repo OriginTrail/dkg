@@ -451,6 +451,7 @@ describe('async-lift wallet release channel', () => {
   async function parkedHintScenario(options: {
     hintTxHash?: string;
     tailAction?: 'park' | 'throw';
+    finalizeRecovered?: () => Promise<void>;
     config?: Partial<AsyncLiftPublisherConfig>;
   } = {}) {
     let releaseTail!: () => void;
@@ -482,7 +483,7 @@ describe('async-lift wallet release channel', () => {
           }
           await tailParked;
         },
-        finalizeRecovered: async () => {},
+        finalizeRecovered: options.finalizeRecovered ?? (async () => {}),
       },
     });
     await stageShareSnapshot();
@@ -932,5 +933,122 @@ describe('async-lift wallet release channel', () => {
     expect(out).toBe('won');
     expect(added).toHaveLength(1);
     expect(removed).toEqual(added);
+  });
+
+  it('a hanging hinted proof cannot starve an ordinary broadcast job out of the pass', async () => {
+    // r5 (3877726336) - the hint lane runs first but under a half-budget sub-deadline: hinted
+    // job A's proof never settles and ignores the signal, ordinary broadcast job B (no hint,
+    // executor settled) has instant resolvers. One pass must still reconcile B - the walk
+    // always keeps at least half the budget - while A stays pending.
+    let hinted = false;
+    const tails: Array<() => void> = [];
+    let executions = 0;
+    const publisher = createPublisher({
+      chainProofDispatchTimeBudgetMs: 300,
+      detachReceiptReconciliation: true,
+      chainProofResolver: (lookup: { walletId: string }) => (lookup.walletId === 'wallet-1'
+        ? new Promise(() => {})
+        : Promise.resolve({ status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never)),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          executions += 1;
+          // Captured at entry: the shared counter moves while this execution sleeps.
+          const myExecution = executions;
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          if (myExecution === 1) {
+            // Job A: hinted, executor tail parked - the hint lane's candidate.
+            input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+            hinted = true;
+            await new Promise<void>((resolve) => { tails.push(resolve); });
+          }
+          // Job B: NO hint; the executor fails post-write-ahead, settling immediately, so B is
+          // an ordinary live broadcast owned by the normal reconciliation walk.
+          throw new Error('post-write-ahead failure: recovery owns the record from here');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
+    );
+    await publisher.processNext('wallet-1');
+    await publisher.processNext('wallet-2');
+    await waitForCondition(() => hinted, 'the first executor must fire its hint');
+    await waitForCondition(() => executions === 2, 'the second executor must run');
+
+    try {
+      // One pass: A's hint eats its half-budget and stays pending; B still gets proven,
+      // finalized, and its wallet released in the SAME pass.
+      const outcome = await publisher.reconciliationScheduling.reconcile();
+      expect(outcome.reconciled).toBeGreaterThanOrEqual(1);
+      expect(outcome.pendingWork).toBe(true);
+      expect((await publisher.getStatus(jobB))?.status).toBe('finalized');
+      await expectWalletLock('wallet-2', 'released');
+      expect((await publisher.getStatus(jobA))?.status).toBe('broadcast');
+      await expectWalletLock('wallet-1', 'held');
+    } finally {
+      for (const release of tails) release();
+    }
+  });
+
+  it('a deferred local repair retries through the cached proof without new chain reads', async () => {
+    // r5 (3877726515) - after the early release, the settle-time repair can fail transiently
+    // (repair-deferred: the wallet is already free, the job stays tx-bearing). The retry must
+    // finalize through the CACHED proof - both chain-read counters stay at one across all
+    // three passes.
+    let proofAsks = 0;
+    let recoveryAsks = 0;
+    let repairAttempts = 0;
+    const { publisher, jobId, releaseTail } = await parkedHintScenario({
+      finalizeRecovered: async () => {
+        repairAttempts += 1;
+        if (repairAttempts === 1) throw new Error('transient local repair failure');
+      },
+      config: {
+        chainProofResolver: async () => {
+          proofAsks += 1;
+          return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+        },
+        knowledgeAssetVmPublishRecoveryResolver: async () => {
+          recoveryAsks += 1;
+          return {
+            inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+            finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+          } as never;
+        },
+      },
+    });
+
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('included');
+    await expectWalletLock('wallet-1', 'released');
+
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+
+    // Settle pass: the repair throws once - repair-deferred, job stays included and released.
+    await publisher.reconcileTransactions();
+    expect(repairAttempts).toBe(1);
+    expect((await publisher.getStatus(jobId))?.status).toBe('included');
+    await expectWalletLock('wallet-1', 'released');
+
+    // Retry pass: repair succeeds; the cached proof meant NO further chain reads anywhere.
+    await publisher.reconcileTransactions();
+    expect(repairAttempts).toBe(2);
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+    expect(proofAsks).toBe(1);
+    expect(recoveryAsks).toBe(1);
   });
 });

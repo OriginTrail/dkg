@@ -1961,9 +1961,26 @@ export class TripleStoreAsyncLiftPublisher
     // GH#2359 item 2 — hinted executor-owned jobs are proven and wallet-released FIRST: the
     // whole point of the hint is to free the wallet before the executor tail (and this walk)
     // finish. Unresolved hinted proofs hold the active cadence below.
+    //
+    // r5 (3877726336) — first, but never ALL of the budget: the hint lane runs under its own
+    // half-budget sub-deadline (also aborted by the pass deadline), so one perpetually hanging
+    // hinted lookup cannot consume every pass and starve ordinary live transactions whose own
+    // proofs would resolve immediately. The ordinary walk below always keeps at least half.
     let hintedUnresolved = 0;
+    const hintDeadline = new AbortController();
+    const hintTimer = setTimeout(
+      () => hintDeadline.abort(),
+      Math.max(1, Math.floor(this.chainProofDispatchTimeBudgetMs / 2)),
+    );
+    const onPassAbort = () => hintDeadline.abort();
+    deadline.signal.addEventListener('abort', onPassAbort, { once: true });
     try {
-      hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(inventory, deadline.signal);
+      try {
+        hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(inventory, hintDeadline.signal);
+      } finally {
+        clearTimeout(hintTimer);
+        deadline.signal.removeEventListener('abort', onPassAbort);
+      }
       for (let i = 0; i < rotatedTxBearing.length; i += 1) {
         if (deadline.signal.aborted) {
           remainingLive += rotatedTxBearing.length - i;

@@ -612,12 +612,16 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const createIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
 
     const underlying = (agent as any).publisher;
+    // r5 (3877726512) - IDENTITY, not just presence: the hook captured at the real handler
+    // boundary must be the SAME reference that reaches each underlying publisher entry point,
+    // so a substitution anywhere in the agent's option reconstructions cannot pass.
+    const handlerHooks: unknown[] = [];
     let createHookForwarded: unknown = 'unset';
     const createFired: string[] = [];
     const realPublish = underlying.publish.bind(underlying);
     underlying.publish = async (options: any) => {
       const original = options.onPublishConfirmed;
-      createHookForwarded = typeof original;
+      createHookForwarded = original;
       return realPublish({
         ...options,
         onPublishConfirmed: (confirmation: { txHash: string }) => {
@@ -630,8 +634,10 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
       knowledgeAssetVmPublishHandler: {
         preflight: ({ request }) => agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
-        execute: async ({ request, publishOptions }) =>
-          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+        execute: async ({ request, publishOptions }) => {
+          handlerHooks.push(publishOptions.onPublishConfirmed);
+          return agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions);
+        },
       },
     });
     const createJob = await asyncPublisher.enqueueKnowledgeAssetVmPublish(createIntent);
@@ -639,8 +645,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(createProcessed?.jobId).toBe(createJob);
     expect(createProcessed?.status).toBe('finalized');
     // The async publisher's injected hook survived every option reconstruction to the
-    // underlying publisher, and fired with the receipt hash.
-    expect(createHookForwarded).toBe('function');
+    // underlying publisher AS THE SAME REFERENCE, and fired with the receipt hash.
+    expect(typeof handlerHooks[0]).toBe('function');
+    expect(createHookForwarded).toBe(handlerHooks[0]);
     expect(createFired).toHaveLength(1);
     expect(createFired[0]).toMatch(/^0x[0-9a-f]+$/i);
 
@@ -660,7 +667,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const realUpdate = underlying.updateKnowledgeAssetFromSharedMemory.bind(underlying);
     underlying.updateKnowledgeAssetFromSharedMemory = async (kaId: bigint, options: any) => {
       const original = options.onPublishConfirmed;
-      updateHookForwarded = typeof original;
+      updateHookForwarded = original;
       return realUpdate(kaId, {
         ...options,
         onPublishConfirmed: (confirmation: { txHash: string }) => {
@@ -674,7 +681,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const updateProcessed = await asyncPublisher.processNext('wallet-1');
     expect(updateProcessed?.jobId).toBe(updateJob);
     expect(updateProcessed?.status).toBe('finalized');
-    expect(updateHookForwarded).toBe('function');
+    expect(typeof handlerHooks[1]).toBe('function');
+    expect(updateHookForwarded).toBe(handlerHooks[1]);
     expect(updateFired).toHaveLength(1);
     expect(updateFired[0]).toMatch(/^0x[0-9a-f]+$/i);
   }, 90_000);
