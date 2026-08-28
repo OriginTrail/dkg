@@ -26,6 +26,10 @@ router or weaken the runtime's read-only default.
 The package is a library. The umbrella `dkg llm` CLI owns MCP stdio lifecycle,
 configuration, and operator-facing write opt-in.
 
+For agent and operator copy/paste setup, model recommendations, and the required
+Query-Catalog-first workflow for small models, see
+[`Run a Local LLM with DKG`](../../docs/use-dkg/local-llm.md).
+
 ## Real DKG benchmark
 
 The bundled benchmark uses this production runtime, a real `dkg mcp serve`
