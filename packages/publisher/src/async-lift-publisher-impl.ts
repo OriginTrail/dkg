@@ -547,7 +547,7 @@ export class TripleStoreAsyncLiftPublisher
     canRetryFailedRecovery: (job) =>
       rawLiftRequestFromJobRequest(job.request) !== null && isHeldForChainProof(job),
     finalizeProvenPublish: async (job, scope, origin, recovery) =>
-      await scope.commitProofFinalization(job, async () => {
+      await scope.commitProofFinalization(async () => {
         const finalized = this.finalizeRecoveredJob(
           job,
           origin,
@@ -644,6 +644,7 @@ export class TripleStoreAsyncLiftPublisher
         toClaimed: (current, walletId) =>
           this.mergeJob(current, 'claimed', { claim: { walletId } }),
         writeJob: async (job, kind) => await this.writeJob(job, kind),
+        deleteJob: async (jobId) => await this.deleteJob(jobId),
         assertJobMatchesStatus: (job) => this.assertJobMatchesStatus(job),
         resetInterruptedClaim: (job) => {
           if (job.status !== 'claimed' && job.status !== 'validated') {
@@ -1385,12 +1386,13 @@ export class TripleStoreAsyncLiftPublisher
         this.executorProofHints.delete(snapshot.jobId);
         continue;
       }
-      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (scope) => {
-          const current = await this.getStatus(snapshot.jobId);
+      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
+          if (transaction.kind === 'missing') return;
+          const { current, scope } = transaction;
           // 'included' is accepted deliberately (r2 3877540018): a prior attempt may have
           // persisted the included stamp and then failed the wallet-lock deletion. Restricting
           // the lane to 'broadcast' would strand that wallet until the executor tail settles.
-          if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
+          if (current.status !== 'broadcast' && current.status !== 'included') return;
           const recoverable = current as LiftJobBroadcast | LiftJobIncluded;
           const persistedTxHash = recoverable.broadcast?.txHash;
           if (!persistedTxHash || persistedTxHash.toLowerCase() !== hint.txHash.toLowerCase()) {
@@ -1451,7 +1453,7 @@ export class TripleStoreAsyncLiftPublisher
             const included = recoverable.status === 'broadcast'
               ? this.mergeJob(recoverable, 'included', { inclusion: resolved.inclusion })
               : recoverable;
-            await scope.commitProofInclusion(current, included);
+            await scope.commitProofInclusion(included);
           } catch (error) {
             // r8 (3877817604) — transient is a HYPOTHESIS with a budget, not a verdict: the
             // first few failures are contained (the r2 retry case), but a persistently
@@ -1569,10 +1571,7 @@ export class TripleStoreAsyncLiftPublisher
         // Reset BEFORE release: the release poke is a one-shot claim invitation, so the
         // accepted state must already be claim-visible when it fires — the reverse order let
         // the woken loop find nothing and park while the reset committed unannounced.
-        await scope.commitRecoveryReset(
-          job,
-          this.resetJobToAccepted(job, 'broadcast', undefined),
-        );
+        await scope.commitRecoveryReset(this.resetJobToAccepted(job, 'broadcast', undefined));
         return true;
       }
       // Evidence-bearing (or 'included'): keep the signing wallet reserved.
@@ -1604,7 +1603,7 @@ export class TripleStoreAsyncLiftPublisher
     const resolution = await this.resolveChainProofWithinSignal(origin.lookup, options?.signal);
     if (resolution === null) return false;
     if (resolution.status === 'recovered') {
-      await scope.commitProofFinalization(job, async () => {
+      await scope.commitProofFinalization(async () => {
         const finalized = this.finalizeRecoveredJob(
           recoverable,
           origin,
@@ -1679,7 +1678,6 @@ export class TripleStoreAsyncLiftPublisher
           errorPayloadRef: `urn:dkg:publisher:error:${recoverable.jobId}:chain-proof-reverted`,
         });
         await scope.commitProofFailure(
-          recoverable,
           this.mergeJob(recoverable, 'failed', { failure: failure as any }),
         );
         return true;
@@ -1687,7 +1685,6 @@ export class TripleStoreAsyncLiftPublisher
       if (resolution.status === 'not-found' && queuedLiftOperationKind(recoverable) === 'create') {
         // Reset BEFORE release — see the evidence-free reset above for why the order matters.
         await scope.commitRecoveryReset(
-          recoverable,
           buildLiftJobAcceptedReset(recoverable, {
             now: this.now(),
             recoveredFrom: recoverable.status,
@@ -1798,7 +1795,7 @@ export class TripleStoreAsyncLiftPublisher
     const request = job.request.knowledgeAssetVmPublish;
 
     let incompleteOutcome: 'unresolved' | 'repair-deferred' = 'unresolved';
-    const finalized = await scope.commitProofFinalization(job, async () => {
+    const finalized = await scope.commitProofFinalization(async () => {
       // --- mutating phase: never raced, never abandoned ---
       // Nothing STARTS past the deadline; that is what bounds the pass in the common case.
       if (options?.signal?.aborted) return null;
@@ -2192,10 +2189,11 @@ export class TripleStoreAsyncLiftPublisher
             break;
           }
           const snapshot = rotatedTxBearing[i];
-          await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (scope) => {
-            const current = await this.getStatus(snapshot.jobId);
+          await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
+            if (transaction.kind === 'missing') return;
+            const { current, scope } = transaction;
             // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
-            if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
+            if (current.status !== 'broadcast' && current.status !== 'included') return;
             if (this.claimCoordinator.isProcessing(current.jobId)) return;
             if (
               await this.jobHandlerFor(current.request).recoverInterrupted(current, scope, { signal })
@@ -2275,9 +2273,10 @@ export class TripleStoreAsyncLiftPublisher
     );
     let recovered = 0;
     for (const snapshot of interrupted) {
-      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (scope) => {
-        const current = await this.getStatus(snapshot.jobId);
-        if (!current || (current.status !== 'claimed' && current.status !== 'validated')) return;
+      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
+        if (transaction.kind === 'missing') return;
+        const { current, scope } = transaction;
+        if (current.status !== 'claimed' && current.status !== 'validated') return;
         if (this.claimCoordinator.isProcessing(current.jobId)) return;
         // Cross-instance ownership cannot rely on the in-memory processing marker: production has
         // distinct
@@ -2287,7 +2286,6 @@ export class TripleStoreAsyncLiftPublisher
         if (await this.claimCoordinator.isJobOwnershipActive(current)) return;
         // Reset BEFORE release — the release poke must find the accepted state claim-visible.
         await scope.commitRecoveryReset(
-          current,
           this.resetJobToAccepted(current, current.status, getLiftJobTransactionEvidence(current)),
         );
         recovered += 1;
@@ -2469,14 +2467,13 @@ export class TripleStoreAsyncLiftPublisher
     // transitions serialize on, against a RE-READ of the record, and only when it is still the
     // identical held job the chain was asked about — same failure identity, same transaction
     // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
-    return this.claimCoordinator.runClaimTransaction(() =>
-      this.claimCoordinator.runJobTransaction(job.jobId, async (scope) => {
-        const current = await this.getStatus(job.jobId);
-        if (!current || !isFailedJob(current)) return 0;
-        if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
-        return this.applyChainProofDisposition(current, scope, lookup, resolution, deadline);
-      }),
-    );
+    return this.claimCoordinator.runClaimJobTransaction(job.jobId, async (transaction) => {
+      if (transaction.kind === 'missing') return 0;
+      const { current, scope } = transaction;
+      if (!isFailedJob(current)) return 0;
+      if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
+      return this.applyChainProofDisposition(current, scope, lookup, resolution, deadline);
+    });
   }
 
   /**
@@ -2548,7 +2545,6 @@ export class TripleStoreAsyncLiftPublisher
       }
       case 'refail_reverted': {
         await scope.commitProofFailure(
-          job,
           this.failProvenRevertedJob(job, disposition.failedFromState),
         );
         return 1;
@@ -2562,7 +2558,6 @@ export class TripleStoreAsyncLiftPublisher
         // evidence, and that holds unconditionally.
         // Reset BEFORE release — the release poke must find the accepted state claim-visible.
         await scope.commitRecoveryReset(
-          job,
           resetFailedLiftJobToAccepted(job, this.now(), { txHashAccounted: true }),
         );
         return 1;
@@ -2593,12 +2588,14 @@ export class TripleStoreAsyncLiftPublisher
 
   async cancel(jobId: string): Promise<void> {
     await this.ensureGraph();
-    await this.claimCoordinator.runJobTransaction(jobId, async (scope) => {
-      const job = await this.getRequiredJob(jobId);
-      if (job.status !== 'accepted') {
-        throw new Error(`Only accepted LiftJobs can be cancelled. Current status: ${job.status}`);
+    await this.claimCoordinator.runJobTransaction(jobId, async (transaction) => {
+      if (transaction.kind === 'missing') throw new Error(`LiftJob not found: ${jobId}`);
+      if (transaction.current.status !== 'accepted') {
+        throw new Error(
+          `Only accepted LiftJobs can be cancelled. Current status: ${transaction.current.status}`,
+        );
       }
-      await scope.commitRemoval(job, async () => await this.deleteJob(jobId));
+      await transaction.scope.commitRemoval();
     });
   }
 
@@ -2657,13 +2654,14 @@ export class TripleStoreAsyncLiftPublisher
     const jobs = await this.list({ status });
     let cleared = 0;
     for (const snapshot of jobs) {
-      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (scope) => {
-        const job = await this.getStatus(snapshot.jobId);
+      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
+        if (transaction.kind === 'missing') return;
+        const { current: job, scope } = transaction;
         // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose
         // pending tx recovery may still finalize), narrowed for the bulk lane by GH#2270's
         // evidence guard. `clearTerminalJob` keeps the unnarrowed predicate on purpose.
-        if (!job || !isBulkClearableTerminalLiftJob(job)) return;
-        await scope.commitRemoval(job, async () => await this.deleteJob(job.jobId));
+        if (!isBulkClearableTerminalLiftJob(job)) return;
+        await scope.commitRemoval();
         cleared += 1;
       });
     }
@@ -2691,25 +2689,24 @@ export class TripleStoreAsyncLiftPublisher
     // first lock; worker/recovery state changes use the second. Keeping this order
     // lets claim persist its job+wallet-lock ownership as one critical section
     // without deadlocking a concurrent targeted clear.
-    return this.claimCoordinator.runClaimTransaction(() =>
-      this.claimCoordinator.runJobTransaction(jobId, async (scope) => {
+    try {
+      return await this.claimCoordinator.runClaimJobTransaction(jobId, async (transaction) => {
         await this.ensureGraph();
-        const rows = expectBindings(
-          await this.store.query(
-            `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
-            { source: 'publisher.asyncLift.clearTerminalJob' },
-          ),
-        );
-        if (rows.length === 0) return { outcome: 'already_absent' };
-        // Parse defensively — a corrupt persisted payload must surface as rejected(malformed),
-        // never throw (parseJobPayload does an unguarded JSON.parse).
-        let job: LiftJob | null;
-        try {
-          job = this.parseJobPayload(rows[0]?.['payload']);
-        } catch {
-          return { outcome: 'rejected', reason: 'malformed' };
+        if (transaction.kind === 'missing') {
+          // Distinguish an absent subject from a present but malformed payload while still under
+          // the bound job lock. The coordinator's normal parsed read intentionally maps both to
+          // null; this endpoint's wire contract has separate outcomes.
+          const rows = expectBindings(
+            await this.store.query(
+              `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
+              { source: 'publisher.asyncLift.clearTerminalJob.missingCheck' },
+            ),
+          );
+          return rows.length === 0
+            ? { outcome: 'already_absent' }
+            : { outcome: 'rejected', reason: 'malformed' };
         }
-        if (job === null) return { outcome: 'rejected', reason: 'malformed' };
+        const { current: job, scope } = transaction;
         if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
         // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — ownership is resolved HERE, not at
         // the route. Doing it at the route meant an unsafe jobId reached a `getStatus` query before
@@ -2725,10 +2722,13 @@ export class TripleStoreAsyncLiftPublisher
         if (!isTargetedClearableLiftJob(job, options)) {
           return { outcome: 'rejected', reason: 'nonterminal' };
         }
-        await scope.commitRemoval(job, async () => await this.deleteJob(jobId));
+        await scope.commitRemoval();
         return { outcome: 'cleared' };
-      }),
-    );
+      });
+    } catch (error) {
+      if (error instanceof SyntaxError) return { outcome: 'rejected', reason: 'malformed' };
+      throw error;
+    }
   }
 
   private async ensureGraph(): Promise<void> {
@@ -3360,8 +3360,9 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedFailedJob,
     intent: ReacceptIntent,
   ): Promise<LiftJobAccepted> {
-    return await this.claimCoordinator.runJobTransaction(job.jobId, async (scope) => {
-      const current = await this.getRequiredJob(job.jobId);
+    return await this.claimCoordinator.runJobTransaction(job.jobId, async (transaction) => {
+      if (transaction.kind === 'missing') throw new Error(`LiftJob not found: ${job.jobId}`);
+      const { current, scope } = transaction;
       if (!isFailedJob(current)) {
         throw new Error(`Only failed LiftJobs can be reaccepted. Current status: ${current.status}`);
       }
@@ -3393,7 +3394,7 @@ export class TripleStoreAsyncLiftPublisher
           updatedAt: retriedAt,
         },
       };
-      return await scope.commitReaccept(current, reaccepted);
+      return await scope.commitReaccept(reaccepted);
     });
   }
 

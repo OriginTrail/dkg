@@ -37,17 +37,25 @@ export interface ActiveLiftJobClaimTransitionBoundary {
 }
 
 export interface LiftJobTransitionScope {
-  commit(job: LiftJob, kind: JournalKind): Promise<LiftJob>;
-  commitRecoveryReset(current: LiftJob, reset: LiftJobAccepted): Promise<LiftJobAccepted>;
-  commitProofInclusion(current: LiftJob, included: LiftJob): Promise<LiftJob>;
-  commitProofFailure(current: LiftJob, failed: LiftJob): Promise<LiftJob>;
+  commit(next: LiftJob, kind: JournalKind): Promise<LiftJob>;
+  commitRecoveryReset(reset: LiftJobAccepted): Promise<LiftJobAccepted>;
+  commitProofInclusion(included: LiftJob): Promise<LiftJob>;
+  commitProofFailure(failed: LiftJob): Promise<LiftJob>;
   commitProofFinalization(
-    current: LiftJob,
     finalize: () => Promise<LiftJob | null>,
   ): Promise<LiftJob | null>;
-  commitReaccept(current: LiftJob, accepted: LiftJobAccepted): Promise<LiftJobAccepted>;
-  commitRemoval(current: LiftJob, remove: () => Promise<void>): Promise<void>;
+  commitReaccept(accepted: LiftJobAccepted): Promise<LiftJobAccepted>;
+  commitRemoval(): Promise<void>;
 }
+
+/** One atomic per-job read under the lock that owns its transition scope. */
+export type LiftJobTransaction =
+  | { readonly kind: 'missing' }
+  | {
+    readonly kind: 'present';
+    readonly current: LiftJob;
+    readonly scope: LiftJobTransitionScope;
+  };
 
 export interface ActiveLiftJobClaimMutations {
   update(
@@ -136,6 +144,7 @@ export interface AsyncLiftClaimCoordinatorDependencies {
     job: LiftJob,
     kind: JournalKind,
   ) => Promise<void>;
+  readonly deleteJob: (jobId: string) => Promise<void>;
   readonly assertJobMatchesStatus: (job: LiftJob) => void;
   readonly resetInterruptedClaim: (job: LiftJob) => LiftJobAccepted;
   readonly notifyWalletRelease: (walletId: string) => void;
@@ -312,7 +321,7 @@ export class AsyncLiftClaimCoordinator {
       if (await this.isJobOwnershipActive(current)) return current;
 
       const reset = this.dependencies.resetInterruptedClaim(current);
-      return await this.createTransitionScope().commitRecoveryReset(current, reset);
+      return await this.createTransitionScope(current).commitRecoveryReset(reset);
     }));
   }
 
@@ -321,8 +330,13 @@ export class AsyncLiftClaimCoordinator {
    * Lease renewal, shape validation, the durable job write, and wallet synchronization cannot
    * be assembled independently by publisher call sites.
    */
-  private async commitTransition(job: LiftJob, kind: JournalKind): Promise<LiftJob> {
-    const next = this.renewActiveOwnership(job);
+  private async commitTransition(
+    current: LiftJob,
+    candidate: LiftJob,
+    kind: JournalKind,
+  ): Promise<LiftJob> {
+    this.assertSameJob(current, candidate);
+    const next = this.renewActiveOwnership(candidate);
     this.dependencies.assertJobMatchesStatus(next);
     await this.dependencies.writeJob(next, kind);
     await this.persistOwnershipState(next);
@@ -467,16 +481,29 @@ export class AsyncLiftClaimCoordinator {
     return await this.withClaimLock(operation);
   }
 
-  /** Serialize a non-session operation for one job without exposing the lock primitive. */
+  /** Lock, re-read, and bind one job to a scope that cannot release or commit another job. */
   async runJobTransaction<T>(
     jobId: string,
-    operation: (scope: LiftJobTransitionScope) => Promise<T>,
+    operation: (transaction: LiftJobTransaction) => Promise<T>,
   ): Promise<T> {
     await this.dependencies.ensureGraph();
     return await this.withJobTransitionLock(
       jobId,
-      async () => await operation(this.createTransitionScope()),
+      async () => {
+        const current = await this.dependencies.getStatus(jobId);
+        return await operation(current
+          ? { kind: 'present', current, scope: this.createTransitionScope(current) }
+          : { kind: 'missing' });
+      },
     );
+  }
+
+  /** Canonical global-claim -> per-job transaction, with the same bound re-read. */
+  async runClaimJobTransaction<T>(
+    jobId: string,
+    operation: (transaction: LiftJobTransaction) => Promise<T>,
+  ): Promise<T> {
+    return await this.withClaimLock(() => this.runJobTransaction(jobId, operation));
   }
 
   /** Canonical administrative transition boundary: lock, re-read, and validate live ownership. */
@@ -488,7 +515,7 @@ export class AsyncLiftClaimCoordinator {
     return await this.withJobTransitionLock(jobId, async () => {
       const current = await this.getRequiredJob(jobId);
       await this.assertActiveClaimLock(current);
-      return await transition(current, this.createTransitionScope());
+      return await transition(current, this.createTransitionScope(current));
     });
   }
 
@@ -505,21 +532,21 @@ export class AsyncLiftClaimCoordinator {
         throw this.createStaleClaimError(current, `claim authority ended in ${current.status}`);
       }
       await this.assertActiveClaimLock(current);
-      return await transition(current, this.createTransitionScope());
+      return await transition(current, this.createTransitionScope(current));
     });
   }
 
-  private createTransitionScope(): LiftJobTransitionScope {
+  private createTransitionScope(current: LiftJob): LiftJobTransitionScope {
     return {
-      commit: async (job, kind) => await this.commitTransition(job, kind),
-      commitRecoveryReset: async (current, reset) => {
+      commit: async (next, kind) => await this.commitTransition(current, next, kind),
+      commitRecoveryReset: async (reset) => {
         this.assertLifecycleTransition(current, reset, 'accepted');
         // Reset must be claim-visible before the one-shot wallet-release notification fires.
         await this.dependencies.writeJob(reset, 'recover-reset');
         await this.releaseJobOwnership(current);
         return reset;
       },
-      commitProofInclusion: async (current, included) => {
+      commitProofInclusion: async (included) => {
         this.assertLifecycleTransition(current, included, 'included');
         // Inclusion becomes visible before release so a woken worker never observes an active
         // transaction as claimable. An already-included retry only repeats the release.
@@ -529,14 +556,14 @@ export class AsyncLiftClaimCoordinator {
         await this.releaseJobOwnership(current);
         return included;
       },
-      commitProofFailure: async (current, failed) => {
+      commitProofFailure: async (failed) => {
         this.assertLifecycleTransition(current, failed, 'failed');
         // Canonical chain proof ends nonce ownership even if the local failure write must retry.
         await this.releaseJobOwnership(current);
         await this.dependencies.writeJob(failed, 'failed');
         return failed;
       },
-      commitProofFinalization: async (current, finalize) => {
+      commitProofFinalization: async (finalize) => {
         // Proof authorizes immediate wallet reuse. Local repair and terminal persistence may then
         // retry independently without serializing a later transaction behind this nonce.
         await this.releaseJobOwnership(current);
@@ -546,17 +573,25 @@ export class AsyncLiftClaimCoordinator {
         await this.dependencies.writeJob(finalized, 'recovered-finalize');
         return finalized;
       },
-      commitReaccept: async (current, accepted) => {
+      commitReaccept: async (accepted) => {
         this.assertLifecycleTransition(current, accepted, 'accepted');
         await this.releaseJobOwnership(current);
         await this.dependencies.writeJob(accepted, 'reaccept');
         return accepted;
       },
-      commitRemoval: async (current, remove) => {
+      commitRemoval: async () => {
         await this.releaseJobOwnership(current);
-        await remove();
+        await this.dependencies.deleteJob(current.jobId);
       },
     };
+  }
+
+  private assertSameJob(current: LiftJob, next: LiftJob): void {
+    if (next.jobId !== current.jobId) {
+      throw new Error(
+        `Lifecycle transition cannot replace LiftJob ${current.jobId} with ${next.jobId}`,
+      );
+    }
   }
 
   private assertLifecycleTransition(
@@ -564,11 +599,7 @@ export class AsyncLiftClaimCoordinator {
     next: LiftJob,
     expectedStatus: LiftJobState,
   ): void {
-    if (next.jobId !== current.jobId) {
-      throw new Error(
-        `Lifecycle transition cannot replace LiftJob ${current.jobId} with ${next.jobId}`,
-      );
-    }
+    this.assertSameJob(current, next);
     if (next.status !== expectedStatus) {
       throw new Error(
         `Lifecycle transition for LiftJob ${current.jobId} expected ${expectedStatus}, got ${next.status}`,

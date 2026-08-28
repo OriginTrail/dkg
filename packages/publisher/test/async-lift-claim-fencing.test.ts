@@ -7,6 +7,7 @@ import {
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
 import type { RawLiftRequest } from '../src/lift-job.js';
+import { AsyncLiftClaimCoordinator } from '../src/async-lift-claim-session.js';
 import {
   KA_VM_EXECUTOR_TX_HASH,
   KA_VM_KA_UAL,
@@ -94,6 +95,36 @@ describe('async-lift claim fencing', () => {
     };
     return { captured: captured.promise, release: release.resolve };
   }
+
+  it('binds a transaction scope to the job re-read under its lock', async () => {
+    const publisher = createPublisher();
+    const firstId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-a',
+      now: () => now,
+    });
+    const secondId = await seedLegacyRawLiftTestJob(store, {
+      ...rawLiftRequest(),
+      shareOperationId: 'share-op-2',
+    }, {
+      idGenerator: () => 'job-b',
+      now: () => now,
+    });
+    const firstBefore = await publisher.getStatus(firstId);
+    const secondBefore = await publisher.getStatus(secondId);
+    if (!secondBefore) throw new Error('expected second job');
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    await expect(coordinator.runJobTransaction(firstId, async (transaction) => {
+      if (transaction.kind === 'missing') throw new Error('expected first job');
+      // The scope is bound to job-a even though job-b has the same broad LiftJob type.
+      return await transaction.scope.commit(secondBefore, 'reaccept');
+    })).rejects.toThrow('cannot replace LiftJob job-a with job-b');
+
+    expect(await publisher.getStatus(firstId)).toEqual(firstBefore);
+    expect(await publisher.getStatus(secondId)).toEqual(secondBefore);
+  });
 
   it('does not recover a live pre-broadcast claim owned by another publisher instance', async () => {
     const executor = createPublisher();

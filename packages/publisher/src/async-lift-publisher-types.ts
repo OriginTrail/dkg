@@ -166,7 +166,8 @@ export interface AsyncLiftPublisher {
     request: KnowledgeAssetVmPublishRequest,
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string>;
-  claimNext(walletId: string): Promise<ActiveLiftJobClaim | null>;
+  /** Legacy acquisition shape; fenced workers narrow this on ClaimSessionAsyncLiftPublisher. */
+  claimNext(walletId: string): Promise<LiftJob | null>;
   /** Optional v10.0.15 worker-ownership capability; older structural implementations omit it. */
   openClaimSession?(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
   /** Optional v10.0.15 administrative capability; legacy by-id methods remain compatible. */
@@ -256,6 +257,7 @@ export interface AsyncLiftPublisher {
 
 /** Publisher with the fenced worker-session and explicit administrative capabilities. */
 export interface ClaimSessionAsyncLiftPublisher extends AsyncLiftPublisher {
+  claimNext(walletId: string): Promise<ActiveLiftJobClaim | null>;
   openClaimSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
   readonly administrative: AsyncLiftAdministrativeMutations;
 }
