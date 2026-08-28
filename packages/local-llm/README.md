@@ -25,3 +25,47 @@ router or weaken the runtime's read-only default.
 
 The package is a library. The umbrella `dkg llm` CLI owns MCP stdio lifecycle,
 configuration, and operator-facing write opt-in.
+
+## Real DKG benchmark
+
+The bundled benchmark uses this production runtime, a real `dkg mcp serve`
+child, a real DKG daemon/store, and a real OpenAI-compatible local model. It
+creates persistent local data, so `--allow-write` is mandatory and each run
+should use unique graph/asset names.
+
+```bash
+# Terminal 1: start DKG from this checkout
+DKG_HOME=/Users/lupus/dkg-local \
+  node packages/cli/dist/cli.js daemon-foreground-worker
+
+# Terminal 2: start llama.cpp with one model
+/Users/lupus/projects/llama.cpp/build/bin/llama-server \
+  -hf Qwen/Qwen3-8B-GGUF:Q4_K_M -ngl 999 -c 8192 \
+  --flash-attn on --jinja --temp 0.15 --top-p 0.9 --repeat-penalty 1.05
+
+# Terminal 3: run 8 core scenarios plus 5 holdouts
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
+DKG_HOME=/Users/lupus/dkg-local \
+DKG_CLI_PATH="$PWD/packages/cli/dist/cli.js" \
+pnpm --filter @origintrail-official/dkg-local-llm benchmark:dkg -- \
+  --allow-write \
+  --graph-id "dkg-llm-qwen8-$RUN_ID" \
+  --asset-name "model-families-qwen8-$RUN_ID" \
+  --model qwen3-8b-q4-k-m \
+  --label "qwen3-8b-q4-k-m-$RUN_ID"
+```
+
+The suite covers Context Graph creation, two subgraphs, model-authored RDF,
+asset retrieval, raw SPARQL, parameterized query-catalog save/list/run, and five
+generalization holdouts. Prerequisite fixture repairs are tagged `source:
+"fixture"` and excluded from model scores, so an early write failure cannot
+turn every later read into a cascade failure. The output directory contains:
+
+- `interaction.log` — complete readable, redacted request/tool/result trace;
+- `results.json` — phase scores plus every guarded MCP call;
+- `report.md` — compact comparison table and independent DKG verification.
+
+The guard permits only local benchmark mutations (graph/subgraph creation,
+Working Memory asset write/finalize, and catalog save). Share, publish,
+registration, messaging, and destructive operations are blocked even when the
+runtime is in benchmark write mode.

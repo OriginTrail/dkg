@@ -15,9 +15,11 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
+    "benchmark:dkg": "pnpm build && node benchmark/real-dkg.mjs",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1",
     "@types/node": "^22",
     "vitest": "^4.0.18"
   },

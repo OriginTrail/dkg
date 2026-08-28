@@ -122,8 +122,14 @@ function namesForWritePrompt(prompt: string): string[] {
   if (/\bquery\s+catalog|saved\s+query/i.test(prompt)) {
     names.push('dkg_query_catalog_list', 'dkg_query_catalog_run', 'dkg_query_catalog_save');
   }
-  if (/\bcontext\s+graph/i.test(prompt)) names.push('dkg_context_graph_create', 'dkg_context_graph_register');
-  if (/\bsub-?graph/i.test(prompt)) names.push('dkg_sub_graph_list', 'dkg_sub_graph_create');
+  if (/\bcontext\s+graph/i.test(prompt)) {
+    if (/\bcreate|add|new/i.test(prompt)) names.push('dkg_context_graph_create');
+    if (/\bregister/i.test(prompt)) names.push('dkg_context_graph_register');
+  }
+  if (/\bsub-?graph/i.test(prompt)) {
+    names.push('dkg_sub_graph_list');
+    if (/\bcreate|add|new/i.test(prompt)) names.push('dkg_sub_graph_create');
+  }
   if (/\bsubscribe/i.test(prompt)) names.push('dkg_subscribe');
   if (/\b(?:knowledge\s+asset|assertion|quads?|triples?|rdf)\b/i.test(prompt)) {
     if (/\bcreate|insert|add/i.test(prompt)) names.push('dkg_knowledge_asset_create');

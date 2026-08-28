@@ -69,6 +69,21 @@ describe('tool router', () => {
     expect(route.tools.map((tool) => tool.name)).not.toContain('dkg_knowledge_asset_create');
   });
 
+  it('does not expose on-chain registration for a local graph-create request', () => {
+    const route = routeTools({
+      prompt: 'Create a new DKG context graph',
+      tools: tools(
+        'dkg_status',
+        'dkg_list_context_graphs',
+        'dkg_context_graph_create',
+        'dkg_context_graph_register',
+      ),
+      allowWrite: true,
+    });
+    expect(route.tools.map((tool) => tool.name)).toContain('dkg_context_graph_create');
+    expect(route.tools.map((tool) => tool.name)).not.toContain('dkg_context_graph_register');
+  });
+
   it('uses MCP annotations for adapter tools that are not in the built-in lists', () => {
     expect(isMutatingTool({
       name: 'partner_lookup',
