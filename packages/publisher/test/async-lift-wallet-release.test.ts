@@ -831,4 +831,75 @@ describe('async-lift wallet release channel', () => {
       for (const release of tails) release();
     }
   });
+
+  it('keeps a deadline-skipped hinted candidate pending when the budget went to a successful release', async () => {
+    // r4 (3877669330) - the sharp version of deadline truncation: candidate A's proof SUCCEEDS
+    // exactly as the budget expires (its recovery evidence resolves on the abort event itself,
+    // winning the race by listener order), so A contributes nothing to the unresolved count.
+    // Candidate B is then cut off by the abort. Without the truncation accounting the pass
+    // would report pendingWork:false, consuming the coalesced wake while B's wallet stays
+    // locked behind a parked executor.
+    let hinted = 0;
+    const tails: Array<() => void> = [];
+    const evidence = {
+      inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+      finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+    } as never;
+    const publisher = createPublisher({
+      chainProofDispatchTimeBudgetMs: 150,
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => (
+        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+      knowledgeAssetVmPublishRecoveryResolver: (
+        job: { claim?: { walletId?: string } },
+        _lookup: unknown,
+        _rec: unknown,
+        opts?: { signal?: AbortSignal },
+      ) => new Promise((resolve) => {
+        if (job.claim?.walletId !== 'wallet-1' || !opts?.signal) { resolve(evidence); return; }
+        if (opts.signal.aborted) { resolve(evidence); return; }
+        opts.signal.addEventListener('abort', () => resolve(evidence), { once: true });
+      }),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          hinted += 1;
+          await new Promise<void>((resolve) => { tails.push(resolve); });
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
+    );
+    await publisher.processNext('wallet-1');
+    await publisher.processNext('wallet-2');
+    await waitForCondition(() => hinted === 2, 'both executors must fire their hints');
+
+    try {
+      // A releases at the deadline; B is cut off. The pass must still be pending for B.
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 0, pendingWork: true });
+      expect((await publisher.getStatus(jobA))?.status).toBe('included');
+      await expectWalletLock('wallet-1', 'released');
+      expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
+      await expectWalletLock('wallet-2', 'held');
+
+      // The next pass reaches B (fast resolvers for wallet-2) and releases it.
+      await publisher.reconcileTransactions();
+      expect((await publisher.getStatus(jobB))?.status).toBe('included');
+      await expectWalletLock('wallet-2', 'released');
+    } finally {
+      for (const release of tails) release();
+    }
+  });
 });
