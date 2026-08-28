@@ -86,8 +86,7 @@ describe('reconcileContextGraph — sweep', () => {
       reconciled: 0,
       pending: 0,
       processed: 0,
-      hasMore: false,
-      shouldContinueImmediately: false,
+      continuation: 'none',
       staleTarget: false,
     });
     expect(headBlockReads).toBe(0);
@@ -217,7 +216,11 @@ describe('reconcileContextGraph — sweep', () => {
       [20, 21, 22, 23, 24],
     ]);
     expect([r1.processed, r2.processed, r3.processed]).toEqual([10, 10, 5]);
-    expect([r1.hasMore, r2.hasMore, r3.hasMore]).toEqual([true, true, false]);
+    expect([r1.continuation, r2.continuation, r3.continuation]).toEqual([
+      'periodic',
+      'periodic',
+      'none',
+    ]);
     expect(state.scanOrdinal).toBe(0);
   });
 
@@ -246,7 +249,11 @@ describe('reconcileContextGraph — sweep', () => {
       [3, 4, 5, 16, 17, 18, 19, 20, 21, 22],
       [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     ]);
-    expect([first.hasMore, second.hasMore, third.hasMore]).toEqual([true, true, false]);
+    expect([first.continuation, second.continuation, third.continuation]).toEqual([
+      'immediate',
+      'immediate',
+      'none',
+    ]);
     expect([first.watermark, second.watermark, third.watermark]).toEqual([3, 6, 30]);
     expect(state.scanOrdinal).toBe(30);
   });
@@ -423,7 +430,7 @@ describe('reconcileContextGraph — sweep', () => {
     const state = createCursorState(0);
 
     const first = await reconcileContextGraph(deps, state, 'cg', 1n);
-    expect(first.hasMore).toBe(true);
+    expect(first.continuation).toBe('immediate');
     expect(state.watermark).toBe(3);
     expect(state.scanOrdinal).toBe(3);
 
@@ -461,7 +468,7 @@ describe('reconcileContextGraph — sweep', () => {
     const state = createCursorState(0);
 
     const first = await reconcileContextGraph(deps, state, 'cg', 1n);
-    expect(first.hasMore).toBe(true);
+    expect(first.continuation).toBe('immediate');
     expect(state.scanOrdinal).toBe(1);
 
     await reconcileContextGraph(deps, state, 'cg', 1n);
@@ -486,9 +493,36 @@ describe('reconcileContextGraph — sweep', () => {
 
     const result = await reconcileContextGraph(deps, state, 'cg', 1n);
 
-    expect(result.hasMore).toBe(true);
-    expect(result.shouldContinueImmediately).toBe(true);
+    expect(result.continuation).toBe('immediate');
     expect(state.scanOrdinal).toBe(0);
+  });
+
+  it('schedules another pass for an untouched recovery continuation ordinal', async () => {
+    const targets = [recoveryTarget(0), recoveryTarget(1)];
+    const { deps } = makeDeps({
+      getKCCount: async () => 2,
+      maxOrdinalsPerPass: 2,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: targets[ordinal]!,
+      }),
+      recoverPendingOrdinals: async () => ({
+        outcomes: new Map([[0, {
+          status: 'pending',
+          recovery: targets[0]!,
+        } as OrdinalOutcome]]),
+        attemptedOrdinals: [0],
+        continuationOrdinal: 1,
+        hasImmediateRecoveryWork: false,
+      }),
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(result.reconciled).toBe(0);
+    expect(result.continuation).toBe('immediate');
+    expect(state.scanOrdinal).toBe(1);
   });
 
   it('preserves the next recovery target across a cooldown-only pass', async () => {
@@ -530,12 +564,12 @@ describe('reconcileContextGraph — sweep', () => {
     const state = createCursorState(0);
 
     const first = await reconcileContextGraph(deps, state, 'cg', 1n);
-    expect(first.hasMore).toBe(true);
+    expect(first.continuation).toBe('immediate');
     expect(state.watermark).toBe(0);
     expect(state.scanOrdinal).toBe(1);
 
     const cooldown = await reconcileContextGraph(deps, state, 'cg', 1n);
-    expect(cooldown.hasMore).toBe(false);
+    expect(cooldown.continuation).toBe('none');
     expect(state.scanOrdinal).toBe(1);
 
     await reconcileContextGraph(deps, state, 'cg', 1n);
@@ -575,7 +609,7 @@ describe('reconcileContextGraph — sweep', () => {
     const state = createCursorState(0);
 
     const first = await reconcileContextGraph(deps, state, 'cg', 1n);
-    expect(first.hasMore).toBe(true);
+    expect(first.continuation).toBe('immediate');
     expect(state.scanOrdinal).toBe(10);
 
     pass += 1;
@@ -611,12 +645,12 @@ describe('reconcileContextGraph — sweep', () => {
     const state = createCursorState(0);
 
     const first = await reconcileContextGraph(deps, state, 'cg', 1n);
-    expect(first.hasMore).toBe(true);
+    expect(first.continuation).toBe('immediate');
     expect(state.scanOrdinal).toBe(10);
 
     pass += 1;
     const second = await reconcileContextGraph(deps, state, 'cg', 1n);
-    expect(second.hasMore).toBe(true);
+    expect(second.continuation).toBe('immediate');
     expect(state.scanOrdinal).toBe(20);
 
     pass += 1;
@@ -629,7 +663,7 @@ describe('reconcileContextGraph — sweep', () => {
     ]);
     expect(third.watermark).toBe(0);
     expect(third.pending).toBe(1);
-    expect(third.hasMore).toBe(false);
+    expect(third.continuation).toBe('none');
     expect(state.ahead.size).toBe(24);
     expect(state.scanOrdinal).toBe(0);
   });
@@ -657,7 +691,7 @@ describe('reconcileContextGraph — sweep', () => {
     expect(attempts).toEqual([[0, 1], [2, 3], [4, 5]]);
     expect(result.watermark).toBe(0);
     expect(result.pending).toBe(1);
-    expect(result.hasMore).toBe(false);
+    expect(result.continuation).toBe('none');
     expect(state.ahead.size).toBe(5);
   });
 
@@ -682,8 +716,7 @@ describe('reconcileContextGraph — sweep', () => {
       processed: 1,
       reconciled: 0,
       staleTarget: true,
-      hasMore: false,
-      shouldContinueImmediately: true,
+      continuation: 'immediate',
     });
     expect(state.watermark).toBe(0);
     expect(state.scanOrdinal).toBe(0);
@@ -720,7 +753,7 @@ describe('reconcileContextGraph — sweep', () => {
 
     expect(result.staleTarget).toBe(true);
     expect(result.reconciled).toBe(0);
-    expect(result.hasMore).toBe(false);
+    expect(result.continuation).toBe('immediate');
     expect(state.watermark).toBe(0);
     expect(state.scanOrdinal).toBe(0);
     expect(persisted).toEqual([]);

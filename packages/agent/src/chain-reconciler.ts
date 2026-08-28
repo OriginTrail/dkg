@@ -152,10 +152,8 @@ export interface ReconcileResult {
   reconciled: number;
   pending: number;
   processed: number;
-  /** True when bounded inventory or recovery work remains after this slice. */
-  hasMore: boolean;
-  /** Canonical scheduling decision for an immediate trailing dispatcher pass. */
-  shouldContinueImmediately: boolean;
+  /** Canonical scheduling state after this bounded slice. */
+  continuation: 'none' | 'periodic' | 'immediate';
   /** True when this pass stopped because its captured chain binding changed. */
   staleTarget: boolean;
 }
@@ -286,8 +284,7 @@ export async function reconcileContextGraph(
       reconciled: 0,
       pending: 0,
       processed: 0,
-      hasMore: false,
-      shouldContinueImmediately: false,
+      continuation: 'none',
       staleTarget: false,
     };
   }
@@ -456,7 +453,7 @@ export async function reconcileContextGraph(
     // must never become the durable scan cursor: on a growing graph that would
     // move the cursor near the head and starve the untouched historical gap.
     // Advance only from the oldest-side slice. The recovery continuation still
-    // contributes to `hasMore` below, while pending outcomes remain in the
+    // contributes to the continuation decision below, while pending outcomes remain in the
     // inventory and are revisited on a later historical cycle.
     const nextScanOrdinal = passPlan.nextScanOrdinal({
       watermark: state.watermark,
@@ -484,11 +481,12 @@ export async function reconcileContextGraph(
       recoveryContinuationOrdinal !== undefined
       || recoveryHasImmediateWork
     );
-  const shouldContinueImmediately = staleTarget
-    || (
-      hasMore
-      && (reconciled > 0 || hasImmediateRecoveryContinuation)
-    );
+  const continuation: ReconcileResult['continuation'] = staleTarget
+    || (hasMore && (reconciled > 0 || hasImmediateRecoveryContinuation))
+    ? 'immediate'
+    : hasMore
+      ? 'periodic'
+      : 'none';
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);
@@ -503,8 +501,7 @@ export async function reconcileContextGraph(
     reconciled,
     pending,
     processed,
-    hasMore,
-    shouldContinueImmediately,
+    continuation,
     staleTarget,
   };
 }

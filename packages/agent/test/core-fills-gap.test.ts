@@ -2247,13 +2247,14 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(recoveryBatches).toEqual([[1, 2]]);
   });
 
-  it('yields pending-only history but chains productive and provider-continuation slices', async () => {
+  it('yields pending-only history but chains productive and both recovery continuations', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'CoreFillTrailingSliceGate', chainAdapter: chain });
     stubNode(agent);
     const internals = agent as unknown as AgentInternals;
     const pendingCg = 'pending-historical-slice';
-    const recoveryCg = 'provider-continuation-slice';
+    const providerRecoveryCg = 'provider-continuation-slice';
+    const ordinalRecoveryCg = 'ordinal-continuation-slice';
     const productiveCg = 'productive-historical-slice';
     internals.subscribedContextGraphs.set(pendingCg, {
       subscribed: false,
@@ -2267,10 +2268,16 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       onChainId: '326',
       lastReconciledOrdinal: 0,
     });
-    internals.subscribedContextGraphs.set(recoveryCg, {
+    internals.subscribedContextGraphs.set(providerRecoveryCg, {
       subscribed: false,
       coreHosted: true,
       onChainId: '327',
+      lastReconciledOrdinal: 0,
+    });
+    internals.subscribedContextGraphs.set(ordinalRecoveryCg, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '328',
       lastReconciledOrdinal: 0,
     });
     chain.getContextGraphKCCount = async () => 12n;
@@ -2292,9 +2299,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         };
     (internals as any).recoverVmReconcileBatch = async (localCgId: string) => ({
       outcomes: new Map(),
-      attemptedOrdinals: localCgId === recoveryCg ? [0] : [],
-      continuationOrdinal: undefined,
-      hasImmediateRecoveryWork: localCgId === recoveryCg,
+      attemptedOrdinals: localCgId === providerRecoveryCg || localCgId === ordinalRecoveryCg
+        ? [0]
+        : [],
+      continuationOrdinal: localCgId === ordinalRecoveryCg ? 3 : undefined,
+      hasImmediateRecoveryWork: localCgId === providerRecoveryCg,
     });
 
     const liveTriggered: string[] = [];
@@ -2313,17 +2322,31 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     expect(liveTriggered).toEqual([]);
 
-    const recoveryResult = await internals.executeVmReconcileForCg(recoveryCg, 'periodic');
-    expect(recoveryResult).toMatchObject({
+    const providerRecoveryResult = await internals.executeVmReconcileForCg(
+      providerRecoveryCg,
+      'periodic',
+    );
+    expect(providerRecoveryResult).toMatchObject({
       attempted: true,
       watermarkBefore: 0,
       watermarkAfter: 0,
     });
-    expect(liveTriggered).toEqual([recoveryCg]);
+    expect(liveTriggered).toEqual([providerRecoveryCg]);
+
+    const ordinalRecoveryResult = await internals.executeVmReconcileForCg(
+      ordinalRecoveryCg,
+      'periodic',
+    );
+    expect(ordinalRecoveryResult).toMatchObject({
+      attempted: true,
+      watermarkBefore: 0,
+      watermarkAfter: 0,
+    });
+    expect(liveTriggered).toEqual([providerRecoveryCg, ordinalRecoveryCg]);
 
     const productiveResult = await internals.executeVmReconcileForCg(productiveCg, 'periodic');
     expect(productiveResult.watermarkAfter).toBe(10);
-    expect(liveTriggered).toEqual([recoveryCg, productiveCg]);
+    expect(liveTriggered).toEqual([providerRecoveryCg, ordinalRecoveryCg, productiveCg]);
   });
 
   it('targets the authenticated curator without running the global connection-prime walk', async () => {
