@@ -117,6 +117,33 @@ describe('RFC-64 SWM recovery authorization', () => {
     });
   });
 
+  it('revalidates multiple public graphs with one locale-independent ordering', () => {
+    const upper = 'B';
+    const lower = 'a';
+    const publicTargets = [upper, lower].map((contextGraphId) => ({
+      contextGraphId,
+      lane: 'selected-public' as const,
+    }));
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      selectedPublicContextGraphIds: () => [upper, lower],
+      selectedPublicAdmissionSnapshot: () => ({
+        contextGraphIds: [upper, lower],
+        phase: 'retry-required',
+      }),
+      configuredRecoveryPlan: (providerPeerId) => ({
+        providerPeerId,
+        targets: publicTargets,
+      }),
+    }));
+    const authorized = coordinator.authorize({
+      providerPeerId: PROVIDER,
+      targets: publicTargets,
+    });
+
+    expect(authorized).not.toBeNull();
+    expect(() => coordinator.revalidate(authorized!)).not.toThrow();
+  });
+
   it('fails closed when provider admission is revoked before execution', () => {
     let accepted = true;
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({

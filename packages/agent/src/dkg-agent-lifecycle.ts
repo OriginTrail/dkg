@@ -747,6 +747,7 @@ function selectedSharedMemoryExecutionResult(
     kind: 'selected-shared-memory' as const,
     shared,
     scopeComplete,
+    selectedScopeComplete: scopeComplete,
     targetDiagnostics: Object.freeze({
       selectedPublic: Object.freeze({
         completed: selectedPublicCompleted,

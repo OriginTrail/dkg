@@ -55,6 +55,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
       });
       expect(recovery.scopeComplete).toBe(true);
+      expect(recovery.selectedScopeComplete).toBe(recovery.scopeComplete);
       expect(recovery.targetDiagnostics).toEqual({
         selectedPublic: { completed: 0, total: 0 },
         ordinaryPrivate: { completed: 1, total: 1 },

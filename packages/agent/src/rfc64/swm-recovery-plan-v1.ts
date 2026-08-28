@@ -28,6 +28,11 @@ type Rfc64RecoveryConfigV1 = Readonly<
   Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1
 >;
 
+/** Locale-independent ordering shared by recovery plans and admission state. */
+export function compareRfc64ContextGraphIdsV1(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /**
  * Private recovery replaces the whole local graph, so redundant complete
  * providers cannot all be writers. The operator-pinned list order elects one
@@ -87,7 +92,7 @@ export function resolveRfc64PeerSwmRecoveryPlanV1(
   return Object.freeze({
     providerPeerId,
     targets: Object.freeze([...byContextGraph]
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => compareRfc64ContextGraphIdsV1(left, right))
       .map(([contextGraphId, lane]) => Object.freeze({ contextGraphId, lane }))),
   });
 }
@@ -129,7 +134,7 @@ export function canonicalizeRfc64SwmRecoveryTargetsV1(
     lanes.set(contextGraphId, lane);
   }
   return Object.freeze([...lanes]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareRfc64ContextGraphIdsV1(left, right))
     .map(([contextGraphId, lane]) => Object.freeze({ contextGraphId, lane })));
 }
 

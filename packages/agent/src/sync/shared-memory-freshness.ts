@@ -48,6 +48,8 @@ interface SelectedSharedMemorySyncResultBase {
   readonly shared: SharedMemorySyncResult;
   /** The sole terminal verdict consumed by generic orchestration. */
   readonly scopeComplete: boolean;
+  /** @deprecated Use `scopeComplete`; retained for patch-release compatibility. */
+  readonly selectedScopeComplete: boolean;
   /** Per-lane counts are diagnostic evidence, never competing verdicts. */
   readonly targetDiagnostics: Readonly<{
     selectedPublic: Readonly<{ completed: number; total: number }>;
