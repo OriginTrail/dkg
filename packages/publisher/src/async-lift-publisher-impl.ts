@@ -1315,6 +1315,14 @@ export class TripleStoreAsyncLiftPublisher
             signal,
           );
           if (!resolved) { unresolved += 1; return; }
+          // r18 (3878212037) — the evidence must BIND to the persisted transaction before
+          // anything durable happens with it: an inclusion for some other hash must never be
+          // stamped into this record or cached. A mismatch is treated as unresolved — nothing
+          // persisted, nothing cached — so the next pass performs fresh canonical reads.
+          if (resolved.inclusion.txHash.toLowerCase() !== persistedTxHash.toLowerCase()) {
+            unresolved += 1;
+            return;
+          }
           // The node has observed inclusion through its OWN canonical proof: stamp it
           // truthfully, then free the wallet (write-before-release — the poke must find
           // claim-visible state). A retry that already persisted 'included' skips the write.
@@ -1537,6 +1545,11 @@ export class TripleStoreAsyncLiftPublisher
           cachedProof?.resolved,
         );
         if (outcome === 'finalized') this.executorProofHints.delete(job.jobId);
+        // r18 (3878212037) — a deferred repair may mean the repair REJECTED this evidence, not
+        // just that the store hiccuped. Cached evidence must not outlive that doubt: drop it so
+        // the retry performs fresh canonical reads (a later corrected chain answer can then
+        // repair the job instead of the cache replaying the rejected evidence forever).
+        if (outcome === 'repair-deferred') this.executorProofHints.delete(job.jobId);
         return outcome === 'finalized';
       }
       // Any non-recovered verdict supersedes the hint: the chain (not the executor's claim)

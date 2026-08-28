@@ -536,11 +536,13 @@ describe('async-lift receipt-hint lane', () => {
     }
   });
 
-  it('a deferred local repair retries through the cached proof without new chain reads', async () => {
-    // r5 (3877726515) - after the early release, the settle-time repair can fail transiently
-    // (repair-deferred: the wallet is already free, the job stays tx-bearing). The retry must
-    // finalize through the CACHED proof - both chain-read counters stay at one across all
-    // three passes.
+  it('a deferred local repair retries with FRESH chain reads, never the possibly-rejected cache', async () => {
+    // r5 (3877726515) + r18 (3878212037) - after the early release, the settle-time repair can
+    // fail (repair-deferred: the wallet is already free, the job stays tx-bearing). A deferred
+    // repair may mean the repair REJECTED the evidence, so the cache is dropped: the retry
+    // re-reads canonically (counters go 1 -> 2) and a corrected chain answer can repair the
+    // job instead of the cache replaying rejected evidence forever. (The success path's
+    // single payment of reads is pinned by the accounting row above.)
     let proofAsks = 0;
     let recoveryAsks = 0;
     let repairAttempts = 0;
@@ -568,18 +570,20 @@ describe('async-lift receipt-hint lane', () => {
     releaseTail();
     await publisher.drainDetachedExecutions();
 
-    // Settle pass: the repair throws once - repair-deferred, job stays included and released.
+    // Settle pass: the repair throws once - repair-deferred, job stays included and released,
+    // and the possibly-rejected cache is dropped.
     await publisher.reconcileTransactions();
     expect(repairAttempts).toBe(1);
     expect((await publisher.getStatus(jobId))?.status).toBe('included');
     await expectWalletLock('wallet-1', 'released');
 
-    // Retry pass: repair succeeds; the cached proof meant NO further chain reads anywhere.
+    // Retry pass: FRESH canonical reads (the cache did not outlive the rejection), repair
+    // succeeds, finalized.
     await publisher.reconcileTransactions();
     expect(repairAttempts).toBe(2);
     expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
-    expect(proofAsks).toBe(1);
-    expect(recoveryAsks).toBe(1);
+    expect(proofAsks).toBe(2);
+    expect(recoveryAsks).toBe(2);
   });
 
   it('an unexpected resolver failure in the hint lane surfaces instead of silently retrying', async () => {
@@ -912,5 +916,42 @@ describe('async-lift receipt-hint lane', () => {
     } finally {
       releaseTails();
     }
+  });
+
+  it('unbound recovery evidence is never stamped or cached; the next pass reads fresh', async () => {
+    // r18 (3878212037) - the resolver returns structurally valid evidence whose inclusion hash
+    // does not match the queued transaction. Nothing durable may happen with it: no included
+    // stamp, no release, no cache. The next pass re-reads, gets corrected evidence, and
+    // proceeds normally.
+    let recoveryAsks = 0;
+    const { publisher, jobId, releaseTail } = await parkedHintScenario({
+      config: {
+        knowledgeAssetVmPublishRecoveryResolver: async () => {
+          recoveryAsks += 1;
+          if (recoveryAsks === 1) {
+            const bad = kaVmRecoveryEvidence(`0x${'99'.repeat(32)}` as `0x${string}`);
+            return bad;
+          }
+          return kaVmRecoveryEvidence();
+        },
+      },
+    });
+
+    // Pass 1: mismatched evidence - no stamp, no release, nothing cached.
+    expect(await publisher.reconciliationScheduling.reconcile())
+      .toEqual({ reconciled: 0, pendingWork: true });
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+    await expectWalletLock('wallet-1', 'held');
+
+    // Pass 2: fresh read returns bound evidence - stamped and released.
+    await publisher.reconcileTransactions();
+    expect(recoveryAsks).toBe(2);
+    expect((await publisher.getStatus(jobId))?.status).toBe('included');
+    await expectWalletLock('wallet-1', 'released');
+
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
   });
 });
