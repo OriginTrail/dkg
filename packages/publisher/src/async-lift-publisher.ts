@@ -1,5 +1,6 @@
 export type {
   AsyncLiftAdmissionContext,
+  ActiveLiftJobClaim,
   AsyncLiftDetailedRetrier,
   AsyncLiftRetryOutcome,
   AsyncLiftRetryStateReader,

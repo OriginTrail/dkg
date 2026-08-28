@@ -3,6 +3,8 @@ import type {
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   LiftJobBroadcast,
+  LiftJobClaimed,
+  LiftJobClaimMetadata,
   LiftJobFinalizationMetadata,
   LiftJobIncluded,
   LiftJobInclusionMetadata,
@@ -76,6 +78,20 @@ export class StaleLiftJobClaimError extends Error {
   }
 }
 
+/**
+ * A newly acquired queue claim with ownership fields required at the type boundary.
+ *
+ * The persisted job shape keeps claim tokens optional for legacy records. A live worker must
+ * never operate on that broad shape: acquisition upgrades it to this handle, and every
+ * worker-side mutation carries the same immutable wallet/token pair back to the queue.
+ */
+export type ActiveLiftJobClaim = LiftJobClaimed & {
+  readonly claim: LiftJobClaimMetadata & {
+    readonly claimToken: string;
+    readonly claimLeaseExpiresAt: number;
+  };
+};
+
 /** #1828 — the immutable facts a client retains to recover a lost VM-publish admission. */
 export interface IntentLookupInput {
   readonly contextGraphId: string;
@@ -122,7 +138,11 @@ export interface AsyncLiftPublisher {
     request: KnowledgeAssetVmPublishRequest,
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string>;
-  claimNext(walletId: string): Promise<LiftJob | null>;
+  claimNext(walletId: string): Promise<ActiveLiftJobClaim | null>;
+  /**
+   * Administrative/compatibility mutation by exact job id. Runtime workers use the owned-claim
+   * path inside `processNext`, where the claim token is mandatory and revalidated on every write.
+   */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
   list(filter?: { status?: LiftJobState }): Promise<LiftJob[]>;

@@ -1912,7 +1912,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     const jobId = await publisher.seedLegacyRawLift(request());
-    await publisher.claimNext('wallet-1');
+    const claim = await publisher.claimNext('wallet-1');
+    expect(claim).not.toBeNull();
     await publisher.update(jobId, 'validated', {
       validation: {
         canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
@@ -1927,7 +1928,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
 
     await expect(Promise.all([
-      (publisher as any).recordRpcAccepted(jobId, { txHash, nonce: 4 }),
+      (publisher as any).recordRpcAccepted(claim, { txHash, nonce: 4 }),
       publisher.reconcileTransactions(),
     ])).resolves.toBeDefined();
     expect(await publisher.getStatus(jobId)).toMatchObject({
