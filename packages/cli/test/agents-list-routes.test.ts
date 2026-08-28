@@ -45,6 +45,7 @@ describe('parseAgentsListQuery (GH#310)', () => {
     expect(q('framework=OpenClaw')).toEqual({ framework: 'OpenClaw' });
     expect(q('skill_type=ImageAnalysis')).toEqual({ skillType: 'ImageAnalysis' });
     expect(q('connectionStatus=connected')).toEqual({ connectionStatus: 'connected' });
+    expect(q('connectionStatus=disconnected')).toEqual({ connectionStatus: 'disconnected' });
     expect(q('connectionStatus=self')).toEqual({ connectionStatus: 'self' });
     expect(q('local=true')).toEqual({ local: true });
     expect(q('local=false')).toEqual({ local: false });
@@ -413,6 +414,15 @@ describe('GET /api/agents (GH#310)', () => {
     expect(body.agents[0]).toMatchObject({ peerId: 'peer-self', connectionStatus: 'self' });
   });
 
+  it('local=false excludes the node\'s own agent', async () => {
+    const { status, body } = await getAgents(fakeAgent(), '?local=false');
+    expect(status).toBe(200);
+    expect(body.agents.map((agent: any) => agent.peerId)).toEqual([
+      'peer-conn',
+      'peer-gone',
+    ]);
+  });
+
   it('requires the canonical default profile and current peer binding for self', async () => {
     const localAddress = '0x1111111111111111111111111111111111111111';
     const secondaryLocalAddress = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -499,6 +509,12 @@ describe('GET /api/agents (GH#310)', () => {
     const { status, body } = await getAgents(fakeAgent(), '?connectionStatus=connected');
     expect(status).toBe(200);
     expect(body.agents.map((a: any) => a.peerId)).toEqual(['peer-conn']);
+  });
+
+  it('connectionStatus=disconnected returns only offline peers', async () => {
+    const { status, body } = await getAgents(fakeAgent(), '?connectionStatus=disconnected');
+    expect(status).toBe(200);
+    expect(body.agents.map((agent: any) => agent.peerId)).toEqual(['peer-gone']);
   });
 
   it('forwards framework and intersects skill offerings through the route', async () => {
