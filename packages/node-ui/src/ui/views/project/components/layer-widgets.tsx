@@ -173,6 +173,7 @@ function LayerActionShell({ title, footnote, context, result, error, extras, chi
 interface LayerActionProps {
   count: number;
   contextGraphId: string;
+  includeQueryCatalog?: boolean;
   onComplete?: () => void;
   /** Lift the latest outcome to the parent strip so it survives this widget
    * unmounting when the promoted/published layer empties (entityCount → 0). */
@@ -180,7 +181,7 @@ interface LayerActionProps {
 }
 
 /** WM → SWM bulk-promote CTA. Off-chain; never touches the PCA eligibility probe. */
-export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
+export function PromoteWidget({ count, contextGraphId, includeQueryCatalog = false, onComplete, onResult }: LayerActionProps) {
   const { busy, result, error, run } = useLayerAction(onResult, onComplete);
   const promote = useCallback(() => {
     // Issue #864 — track the in-flight assertion so a mid-loop failure surfaces "<name>: …"
@@ -190,7 +191,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
       async () => {
         // The share route seals and transfers each complete KA atomically. It is
         // off-chain, so no client-side CG pre-registration is needed.
-        const assertions = await listAssertions(contextGraphId, 'wm');
+        const assertions = await listAssertions(contextGraphId, 'wm', { includeQueryCatalog });
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
@@ -217,7 +218,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
         return typed ? typed.message : (err?.message ?? 'Action failed');
       },
     );
-  }, [contextGraphId, run]);
+  }, [contextGraphId, includeQueryCatalog, run]);
 
   if (count === 0) return null;
   const color = '#f59e0b';
@@ -246,7 +247,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
 
 /** SWM → VM publish CTA. Consumes the PCA spend-gate (`useVmPublishGate`) for the DANGER
  *  gate + the eligibility chip, and owns the confirmed post-publish discount badge (B8). */
-export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
+export function PublishVmWidget({ count, contextGraphId, includeQueryCatalog = false, onComplete, onResult }: LayerActionProps) {
   const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
   const { busy, result, error, run } = useLayerAction(onResult, onComplete);
   // Pure-policy hook: gate decision + resolved eligibility. ALL presentation lives here.
@@ -269,7 +270,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         // per-assertion vm/publish path. No pre-register: the daemon runs preconditions first
         // and only auto-registers on its CG_NOT_REGISTERED retry, so a doomed publish never
         // burns gas.
-        const assertions = await listAssertions(contextGraphId, 'swm');
+        const assertions = await listAssertions(contextGraphId, 'swm', { includeQueryCatalog });
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
         if (r.published > 0) {
@@ -286,7 +287,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
       // describePromoteError → null for publish errors). Never says "an assertion".
       (err: any) => err?.message ?? 'Action failed',
     );
-  }, [contextGraphId, run, gate.blocked]);
+  }, [contextGraphId, includeQueryCatalog, run, gate.blocked]);
 
   if (count === 0) return null;
   const noun = layerNoun('swm', count).toLowerCase();
@@ -335,12 +336,13 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
 
 // ─── Horizontal widget strip (stats + types + CTA) for the Entities tab ──
 
-export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, contextGraphId, onComplete }: {
+export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, contextGraphId, includeQueryCatalog = false, onComplete }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
   entityCount: number;
   tripleCount: number;
   contextGraphId?: string;
+  includeQueryCatalog?: boolean;
   onComplete?: () => void;
 }) {
   // Latest promote/publish outcome, lifted from the action widget so the "✓ Promoted
@@ -385,8 +387,8 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
       {(layer === 'wm' || layer === 'swm') && contextGraphId && (
         <div className="v10-layer-widgets-strip-action">
           {layer === 'wm'
-            ? <PromoteWidget count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />
-            : <PublishVmWidget count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />}
+            ? <PromoteWidget count={entityCount} contextGraphId={contextGraphId} includeQueryCatalog={includeQueryCatalog} onComplete={onComplete} onResult={setLastAction} />
+            : <PublishVmWidget count={entityCount} contextGraphId={contextGraphId} includeQueryCatalog={includeQueryCatalog} onComplete={onComplete} onResult={setLastAction} />}
         </div>
       )}
     </div>

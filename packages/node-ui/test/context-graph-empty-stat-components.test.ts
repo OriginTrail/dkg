@@ -41,6 +41,7 @@ const {
 
 const {
   AssertionsList,
+  LayerContent,
   LayerGraphPanel,
   VerifiableMemoryHeroBanner,
 } = await import('../src/ui/views/project/components.js');
@@ -476,6 +477,27 @@ describe('Context Graph shared empty/stat patterns', () => {
     await unmount();
   });
 
+  it('threads query-catalog visibility into the assertions listing', async () => {
+    apiMocks.listAssertions.mockResolvedValueOnce([]);
+    const { container, unmount } = await render(
+      React.createElement(AssertionsList, {
+        contextGraphId: 'cg-test',
+        layer: 'swm',
+        includeQueryCatalog: true,
+        onComplete: vi.fn(),
+      }),
+    );
+
+    await waitForText(container, 'No Shared Working Memory assertions listed yet.');
+    expect(apiMocks.listAssertions).toHaveBeenCalledWith(
+      'cg-test',
+      'swm',
+      { includeQueryCatalog: true },
+    );
+
+    await unmount();
+  });
+
   it('keeps graph and VM empty states inside the shared content gutter', async () => {
     const { container, unmount } = await render(
       React.createElement(React.Fragment, null,
@@ -499,6 +521,52 @@ describe('Context Graph shared empty/stat patterns', () => {
     expect(container.querySelector('.v10-layer-expand-body.entities-tab > .v10-vm-hero')).toBeTruthy();
     expect(container.textContent).toContain('No triples in Working Memory');
     expect(container.textContent).toContain('No Knowledge Assets yet.');
+
+    await unmount();
+  });
+
+  it('offers an opt-in query-catalog visibility checkbox on WM/SWM layers', async () => {
+    const onVisibilityChange = vi.fn();
+    const memory = {
+      entities: new Map(),
+      entityList: [],
+      allTriples: [],
+      graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+      loading: false,
+      error: null,
+      partial: false,
+      layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
+      refresh: vi.fn(),
+    } as any;
+    const { container, unmount } = await render(
+      React.createElement(LayerContent, {
+        layer: 'swm',
+        entities: [],
+        tripleCount: 0,
+        layerTriples: [],
+        contextGraphId: 'cg-test',
+        memory,
+        activeTab: 'graph',
+        onTabChange: vi.fn(),
+        onSelectEntity: vi.fn(),
+        showQueryCatalog: false,
+        onShowQueryCatalogChange: onVisibilityChange,
+      }),
+    );
+
+    const checkbox = container.querySelector(
+      '.v10-query-catalog-visibility input[type="checkbox"]',
+    ) as HTMLInputElement | null;
+    expect(checkbox).toBeTruthy();
+    expect(checkbox?.checked).toBe(false);
+    expect(container.textContent).toContain('Show query catalog');
+
+    await act(async () => {
+      checkbox?.click();
+    });
+    expect(onVisibilityChange).toHaveBeenCalledWith(true);
 
     await unmount();
   });

@@ -170,6 +170,8 @@ export function LayerContent({
   onNodeClick,
   footer,
   swmAttribution,
+  showQueryCatalog = false,
+  onShowQueryCatalogChange,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
@@ -187,6 +189,9 @@ export function LayerContent({
    *  through to `LayerGraphPanel` to avoid a duplicate SPARQL query
    *  when the same data is already loaded for the Overview feed. */
   swmAttribution?: SwmAttributionsResult;
+  /** Opt-in visibility for the query-catalog KA stored in the reserved meta subgraph. */
+  showQueryCatalog?: boolean;
+  onShowQueryCatalogChange?: (show: boolean) => void;
 }) {
   const config = LAYER_CONFIG[layer];
   const itemsLabel = layerNoun(layer, 2);
@@ -222,6 +227,16 @@ export function LayerContent({
           className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
           onClick={handleTab('docs')}
         >Documents</button>
+        {layer !== 'vm' && onShowQueryCatalogChange && (
+          <label className="v10-query-catalog-visibility">
+            <input
+              type="checkbox"
+              checked={showQueryCatalog}
+              onChange={(event) => onShowQueryCatalogChange(event.target.checked)}
+            />
+            <span>Show query catalog</span>
+          </label>
+        )}
       </div>
 
       {activeTab === 'items' && (
@@ -261,6 +276,7 @@ export function LayerContent({
                 entityCount={entityCount}
                 tripleCount={tripleCount}
                 contextGraphId={contextGraphId}
+                includeQueryCatalog={showQueryCatalog}
                 onComplete={memory.refresh}
               />
               <EntityList
@@ -280,6 +296,7 @@ export function LayerContent({
           <AssertionsList
             contextGraphId={contextGraphId}
             layer={layer}
+            includeQueryCatalog={showQueryCatalog}
             onComplete={memory.refresh}
             scrollKey={`layer:${layer}:assertions`}
           />
@@ -394,15 +411,16 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
 
 // Small helper: compute unique triples for a given layer slice of memory.
 
-export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }: {
+export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
   contextGraphId: string;
   layer: 'wm' | 'swm';
+  includeQueryCatalog?: boolean;
   onComplete: () => void;
   scrollKey?: string;
 }) {
   const { data: assertions, loading, refresh } = useFetch(
-    () => listAssertions(contextGraphId, layer),
-    [contextGraphId, layer],
+    () => listAssertions(contextGraphId, layer, { includeQueryCatalog }),
+    [contextGraphId, layer, includeQueryCatalog],
     0
   );
   // Deterministic Option-1 UAL per assertion (dkg:reservedUal), shown next to
@@ -637,6 +655,8 @@ export function LayerDetailView({
   activeTab,
   onTabChange,
   swmAttribution,
+  showQueryCatalog = false,
+  onShowQueryCatalogChange,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   memory: ReturnType<typeof useMemoryEntities>;
@@ -648,6 +668,8 @@ export function LayerDetailView({
   /** Codex Code6 (PR #656) — pass-through of the parent's shared
    *  SWM attribution result. */
   swmAttribution?: SwmAttributionsResult;
+  showQueryCatalog?: boolean;
+  onShowQueryCatalogChange?: (show: boolean) => void;
 }) {
   const config = LAYER_CONFIG[layer];
   // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
@@ -683,6 +705,8 @@ export function LayerDetailView({
           onSelectEntity={onSelectEntity}
           onNodeClick={onNodeClick}
           swmAttribution={swmAttribution}
+          showQueryCatalog={showQueryCatalog}
+          onShowQueryCatalogChange={onShowQueryCatalogChange}
         />
       </div>
     </div>

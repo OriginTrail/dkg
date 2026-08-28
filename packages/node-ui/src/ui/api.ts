@@ -1218,7 +1218,11 @@ export interface AssertionInfo {
 export async function listAssertions(
   contextGraphId: string,
   layer: 'wm' | 'swm' = 'wm',
+  opts: { includeQueryCatalog?: boolean } = {},
 ): Promise<AssertionInfo[]> {
+  const includeQueryCatalog = opts.includeQueryCatalog ?? false;
+  const shouldIncludeMetaAssertion = (subGraph: string | undefined, name: string): boolean =>
+    subGraph !== 'meta' || (includeQueryCatalog && name.startsWith('query-catalog-'));
   if (layer === 'swm') {
     // SWM membership comes from the canonical `dkg:memoryLayer "SWM"` lifecycle
     // marker in `<cg>/_meta` (flipped from "WM" by promote) — NOT from
@@ -1240,12 +1244,15 @@ export async function listAssertions(
     // assertions would otherwise linger in the Shared-Memory list. The pointer
     // lives on the lifecycle-URN form; key the exclusion by (subGraph, name) so
     // the data-graph-URI marker row for the same assertion is dropped too.
+    const metaFilter = includeQueryCatalog
+      ? ''
+      : 'FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))';
     const sparql = `SELECT ?g ?vm WHERE {
       GRAPH <${metaGraph}> {
         ?g <http://dkg.io/ontology/memoryLayer> "SWM"
         OPTIONAL { ?g <http://dkg.io/ontology/vmCurrentAssertion> ?vm }
       }
-      FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))
+      ${metaFilter}
     }`;
     const data = await executeQuery(sparql, { contextGraphId });
     const bindings: any[] = data?.result?.bindings ?? [];
@@ -1280,7 +1287,7 @@ export async function listAssertions(
         continue;
       }
       if (!name) continue;
-      if (subGraph === 'meta') continue;
+      if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
       const key = `${subGraph ?? ''} ${name}`;
       rows.push({ key, name, subGraph, g });
       if (vm) published.add(key);
@@ -1373,7 +1380,9 @@ export async function listAssertions(
   // match would also drop a perfectly valid WM assertion whose *name* is
   // `_meta` (names may start with `_`). The parser below keys on the parsed
   // sub-graph segment (`=== 'meta'`), which is fully name-safe.
-  const metaFilter = `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
+  const metaFilter = includeQueryCatalog
+    ? ''
+    : `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
   const listSparql = `SELECT ?g WHERE {
     GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" }
     ${metaFilter}
@@ -1489,7 +1498,7 @@ export async function listAssertions(
     // is UI configuration, not user knowledge, and must never reach the
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
-    if (subGraph === 'meta') continue;
+    if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
     const key = `${subGraph ?? ''}\0${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
