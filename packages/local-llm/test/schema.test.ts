@@ -75,4 +75,42 @@ describe('local argument validation', () => {
       allOf: [{ type: 'number', minimum: 1 }, { type: 'number', maximum: 4 }],
     })).toEqual([]);
   });
+
+  it('enforces constraints behind accepted local refs', () => {
+    const referenced = normalizeToolForLlama({
+      name: 'referenced',
+      inputSchema: {
+        $defs: {
+          nested: {
+            type: 'object',
+            properties: { label: { type: 'string', minLength: 3 } },
+            required: ['label'],
+          },
+          input: {
+            type: 'object',
+            properties: {
+              projectId: { type: 'string' },
+              rank: { type: 'integer', minimum: 1, maximum: 10 },
+              nested: { $ref: '#/$defs/nested' },
+            },
+            required: ['projectId', 'nested'],
+          },
+        },
+        $ref: '#/$defs/input',
+      },
+    }).tool;
+
+    const missing = parseAndValidateToolArguments({ rank: 0, nested: {} }, referenced);
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.error).toContain('projectId: required argument is missing');
+      expect(missing.error).toContain('minimum is 1');
+      expect(missing.error).toContain('nested.label: required argument is missing');
+    }
+    expect(parseAndValidateToolArguments({
+      projectId: 'cg-1',
+      rank: 5,
+      nested: { label: 'ok!' },
+    }, referenced).ok).toBe(true);
+  });
 });

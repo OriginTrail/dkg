@@ -153,13 +153,55 @@ function typeMatches(value: unknown, expected: string): boolean {
   return typeof value === expected;
 }
 
-export function validateAgainstSchema(value: unknown, schema: unknown, path = '$'): string[] {
+function resolveLocalSchemaRef(rootSchema: unknown, ref: string): unknown {
+  if (!ref.startsWith('#/')) return undefined;
+  let pointer: string;
+  try {
+    pointer = decodeURIComponent(ref.slice(2));
+  } catch {
+    return undefined;
+  }
+  let current: unknown = rootSchema;
+  for (const rawSegment of pointer.split('/')) {
+    const segment = rawSegment.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (!current || typeof current !== 'object' || Array.isArray(current)
+      || !Object.prototype.hasOwnProperty.call(current, segment)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function validateSchemaValue(
+  value: unknown,
+  schema: unknown,
+  path: string,
+  rootSchema: unknown,
+  resolvingRefs: ReadonlySet<string>,
+): string[] {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
   const definition = schema as JsonSchema;
 
+  const ref = definition.$ref;
+  if (typeof ref === 'string') {
+    const target = resolveLocalSchemaRef(rootSchema, ref);
+    if (target === undefined) return [`${path}: unresolved local JSON Schema ref ${ref}`];
+    if (resolvingRefs.has(ref)) return [`${path}: recursive local JSON Schema ref ${ref} is unsupported`];
+    const nextRefs = new Set(resolvingRefs).add(ref);
+    const referencedErrors = validateSchemaValue(value, target, path, rootSchema, nextRefs);
+    const siblingSchema = { ...definition };
+    delete siblingSchema.$ref;
+    return [
+      ...referencedErrors,
+      ...validateSchemaValue(value, siblingSchema, path, rootSchema, resolvingRefs),
+    ];
+  }
+
   for (const keyword of ['anyOf', 'oneOf'] as const) {
     if (Array.isArray(definition[keyword])) {
-      const branches = definition[keyword].map((branch) => validateAgainstSchema(value, branch, path));
+      const branches = definition[keyword].map((branch) =>
+        validateSchemaValue(value, branch, path, rootSchema, resolvingRefs));
       const matching = branches.filter((errors) => errors.length === 0).length;
       if ((keyword === 'anyOf' && matching === 0) || (keyword === 'oneOf' && matching !== 1)) {
         return [`${path}: does not match ${keyword} (${branches.flat().join('; ')})`];
@@ -170,7 +212,9 @@ export function validateAgainstSchema(value: unknown, schema: unknown, path = '$
 
   const errors: string[] = [];
   if (Array.isArray(definition.allOf)) {
-    for (const branch of definition.allOf) errors.push(...validateAgainstSchema(value, branch, path));
+    for (const branch of definition.allOf) {
+      errors.push(...validateSchemaValue(value, branch, path, rootSchema, resolvingRefs));
+    }
   }
   const types = Array.isArray(definition.type)
     ? definition.type.filter((item): item is string => typeof item === 'string')
@@ -216,7 +260,13 @@ export function validateAgainstSchema(value: unknown, schema: unknown, path = '$
       errors.push(`${path}: allows at most ${definition.maxItems} item(s)`);
     }
     value.forEach((item, index) => {
-      errors.push(...validateAgainstSchema(item, definition.items, `${path}[${index}]`));
+      errors.push(...validateSchemaValue(
+        item,
+        definition.items,
+        `${path}[${index}]`,
+        rootSchema,
+        resolvingRefs,
+      ));
     });
   }
 
@@ -232,7 +282,13 @@ export function validateAgainstSchema(value: unknown, schema: unknown, path = '$
     }
     for (const [key, child] of Object.entries(record)) {
       if (key in properties) {
-        errors.push(...validateAgainstSchema(child, properties[key], `${path}.${key}`));
+        errors.push(...validateSchemaValue(
+          child,
+          properties[key],
+          `${path}.${key}`,
+          rootSchema,
+          resolvingRefs,
+        ));
       } else if (definition.additionalProperties === false) {
         errors.push(`${path}.${key}: unexpected argument`);
       }
@@ -240,6 +296,10 @@ export function validateAgainstSchema(value: unknown, schema: unknown, path = '$
   }
 
   return errors;
+}
+
+export function validateAgainstSchema(value: unknown, schema: unknown, path = '$'): string[] {
+  return validateSchemaValue(value, schema, path, schema, new Set());
 }
 
 export function parseAndValidateToolArguments(

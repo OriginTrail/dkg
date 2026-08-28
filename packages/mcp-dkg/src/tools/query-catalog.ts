@@ -440,6 +440,9 @@ export function registerQueryCatalogTools(
         catalogName: z.string().trim().min(1).max(160).optional().default(USER_QUERY_CATALOG_NAME),
         catalogDescription: z.string().trim().min(1).max(2_000).optional().default(USER_QUERY_CATALOG_DESCRIPTION),
         resultColumn: z.string().trim().min(1).optional(),
+        queryId: z.string().trim().min(1).max(160).optional().describe(
+          'Stable caller-owned query identity. Reuse it to update the same saved query after renaming or moving it.',
+        ),
         rank: z.number().int().min(0).max(1_000_000).optional().default(99),
         catalogRank: z.number().int().min(0).max(1_000_000).optional().default(999),
         parameters: z.array(parameterDefinitionSchema).max(50).optional().default([]),
@@ -461,6 +464,7 @@ export function registerQueryCatalogTools(
           catalogName: input.catalogName,
           catalogDescription: input.catalogDescription,
           resultColumn: input.resultColumn,
+          queryId: input.queryId,
           rank: input.rank,
           catalogRank: input.catalogRank,
           parameters: input.parameters,

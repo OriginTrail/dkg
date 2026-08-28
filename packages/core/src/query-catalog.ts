@@ -1,5 +1,7 @@
 import { GET_VIEWS, type GetView } from './memory-model.js';
 import { contextGraphSubGraphUri, validateSubGraphName } from './constants.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import {
   assertQueryCatalogTemplate,
   normalizeQueryCatalogParameters,
@@ -470,6 +472,10 @@ export function queryCatalogProfileUri(
   return `urn:dkg:profile:${encodeURIComponent(contextGraphId)}:${kind}:${encodeURIComponent(slug)}`;
 }
 
+function queryCatalogIdentityDigest(value: string): string {
+  return bytesToHex(sha256(utf8ToBytes(value)));
+}
+
 function literal(value: string): string {
   return JSON.stringify(value);
 }
@@ -492,11 +498,19 @@ export function buildQueryCatalogWrite(input: {
   catalogRank: number;
   parameters?: unknown;
   view?: GetView;
+  /** Stable caller-owned identity. Reuse it to update a query after renaming or moving it. */
+  queryId?: string;
 }): {
   savedQuery: QueryCatalogItem & { queryUri: string; catalogUri: string };
   quads: QueryCatalogWriteQuad[];
 } {
-  const slug = `${queryCatalogSlug(input.name)}-${input.rank.toString(36)}`;
+  const explicitQueryId = input.queryId?.trim();
+  const identity = explicitQueryId || JSON.stringify([
+    input.subGraph,
+    input.catalogSlug,
+    input.name,
+  ]);
+  const slug = `${queryCatalogSlug(explicitQueryId || input.name)}-${queryCatalogIdentityDigest(identity)}`;
   const catalogUri = queryCatalogProfileUri(input.contextGraphId, 'catalog', input.catalogSlug);
   const queryUri = queryCatalogProfileUri(input.contextGraphId, 'query', slug);
   const parameters = normalizeQueryCatalogParameters(input.parameters);

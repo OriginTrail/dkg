@@ -186,6 +186,41 @@ describe('query catalog codec', () => {
     ], { contextGraphId: 'test' })).toThrow(/conflicting scopeGraph and forSubGraph/);
   });
 
+  it('uses collision-resistant query identities while preserving explicit updates', () => {
+    const build = (overrides: Partial<Parameters<typeof buildQueryCatalogWrite>[0]> = {}) =>
+      buildQueryCatalogWrite({
+        contextGraphId: 'test',
+        name: 'Revenue / Q1',
+        sparql: 'SELECT * WHERE {}',
+        subGraph: 'finance',
+        catalogSlug: 'reports',
+        catalogName: 'Reports',
+        rank: 99,
+        catalogRank: 20,
+        ...overrides,
+      });
+
+    const first = build();
+    const collidingName = build({ name: 'Revenue Q1' });
+    const otherCatalog = build({ catalogSlug: 'audits', catalogName: 'Audits' });
+    expect(new Set([
+      first.savedQuery.queryUri,
+      collidingName.savedQuery.queryUri,
+      otherCatalog.savedQuery.queryUri,
+    ])).toHaveLength(3);
+
+    const explicit = build({ queryId: 'quarterly-revenue' });
+    const explicitUpdate = build({
+      queryId: 'quarterly-revenue',
+      name: 'Quarterly revenue (updated)',
+      catalogSlug: 'board-reports',
+      subGraph: 'reporting',
+      rank: 1,
+    });
+    expect(explicitUpdate.savedQuery.queryUri).toBe(explicit.savedQuery.queryUri);
+    expect(explicitUpdate.savedQuery.queryUri).not.toBe(first.savedQuery.queryUri);
+  });
+
   it('prepares one rendered request with exact view and subgraph scope', () => {
     expect(prepareQueryCatalogExecution({
       sparql: 'SELECT * WHERE { BIND({{id}} AS ?id) }',
