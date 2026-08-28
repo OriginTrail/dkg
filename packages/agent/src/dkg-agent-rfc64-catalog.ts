@@ -217,7 +217,7 @@ export interface PublishAuthorCatalogExactSetSuccessorParamsV1 {
   readonly previousHead: Rfc64StagedAuthorCatalogHeadRefV1;
   readonly author: Rfc64CatalogAuthorSignerV1;
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
-  /** Complete 1..1024-row live set; input order does not affect the signed head. */
+  /** Complete 0..1024-row live set; input order does not affect the signed head. */
   readonly assets: readonly Rfc64CatalogSuccessorAssetInputV1[];
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt?: TimestampMsV1;
@@ -592,10 +592,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }) as Readonly<AuthorCatalogScopeV1>;
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
     const predecessorScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
-    const signedBucketRowCount = produced.publication.bucket?.payload.rows.length.toString();
+    const signedBucketRowCount = produced.publication.bucket?.payload.rows.length.toString() ?? '0';
     if (
-      signedBucketRowCount === undefined
-      || signedBucketRowCount !== head.payload.totalRows
+      signedBucketRowCount !== head.payload.totalRows
+      || (head.payload.totalRows === '0' && produced.publication.bucket !== null)
+      || (head.payload.totalRows !== '0' && produced.publication.bucket === null)
       || catalogScopeDigest !== predecessorScopeDigest
       || produced.assets.some(
         (asset) => asset.projection.catalogScopeDigest !== catalogScopeDigest,

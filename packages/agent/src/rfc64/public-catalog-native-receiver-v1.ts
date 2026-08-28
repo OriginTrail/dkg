@@ -801,55 +801,64 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'successor directory path is invalid', cause);
     }
+    const isEmptyTarget = expectedRowCount === 0;
     if (
       descriptor.rowCount !== head.payload.totalRows
-      || descriptor.bucketDigest === ZERO_DIGEST32_V1
+      || (isEmptyTarget && (
+        descriptor.bucketDigest !== ZERO_DIGEST32_V1
+        || descriptor.byteLength !== '0'
+      ))
+      || (!isEmptyTarget && descriptor.bucketDigest === ZERO_DIGEST32_V1)
     ) {
       fail(
         'catalog-native-receiver-slice',
-        'bounded receiver requires one non-empty bucket containing the exact head row count',
+        'bounded receiver requires the canonical empty descriptor or one bucket containing the exact head row count',
       );
     }
 
-    const fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
-      remotePeerId,
-      scope,
-      AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
-      descriptor.bucketDigest,
-      signal,
-    );
-    if (fetchedBucket === null) {
-      fail('catalog-native-receiver-not-found', 'successor catalog bucket was not found');
-    }
-    let bucket: SignedAuthorCatalogBucketEnvelopeV1;
-    try {
-      assertSignedAuthorCatalogBucketEnvelopeV1(fetchedBucket.envelope);
-      bucket = fetchedBucket.envelope;
-      assertAuthorCatalogBucketScopeBindingV1(
-        bucket.payload,
-        deriveAuthorCatalogScopeFromHeadV1(head.payload),
+    let fetchedBucket: FetchedRfc64PublicCatalogObjectV1 | null = null;
+    let bucket: SignedAuthorCatalogBucketEnvelopeV1 | null = null;
+    if (!isEmptyTarget) {
+      fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
+        remotePeerId,
+        scope,
+        AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
+        descriptor.bucketDigest,
+        signal,
       );
-      if (
-        bucket.issuer !== head.issuer
-        || bucket.objectDigest !== descriptor.bucketDigest
-        || bucket.payload.bucketId !== descriptor.bucketId
-        || bucket.payload.rows.length !== expectedRowCount
-        || bucket.payload.rows.length.toString() !== descriptor.rowCount
-        || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
-          !== descriptor.byteLength
-      ) {
-        throw new Error('bucket differs from its verified directory descriptor');
+      if (fetchedBucket === null) {
+        fail('catalog-native-receiver-not-found', 'successor catalog bucket was not found');
       }
-    } catch (cause) {
-      fail('catalog-native-receiver-catalog', 'catalog bucket is not bound to its directory', cause);
+      try {
+        assertSignedAuthorCatalogBucketEnvelopeV1(fetchedBucket.envelope);
+        bucket = fetchedBucket.envelope;
+        assertAuthorCatalogBucketScopeBindingV1(
+          bucket.payload,
+          deriveAuthorCatalogScopeFromHeadV1(head.payload),
+        );
+        if (
+          bucket.issuer !== head.issuer
+          || bucket.objectDigest !== descriptor.bucketDigest
+          || bucket.payload.bucketId !== descriptor.bucketId
+          || bucket.payload.rows.length !== expectedRowCount
+          || bucket.payload.rows.length.toString() !== descriptor.rowCount
+          || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
+            !== descriptor.byteLength
+        ) {
+          throw new Error('bucket differs from its verified directory descriptor');
+        }
+      } catch (cause) {
+        fail('catalog-native-receiver-catalog', 'catalog bucket is not bound to its directory', cause);
+      }
+      await this.stageVerifiedControlObjectV1(
+        fetchedBucket,
+        'verified successor bucket could not be staged for restart-safe recovery',
+      );
     }
-    await this.stageVerifiedControlObjectV1(
-      fetchedBucket,
-      'verified successor bucket could not be staged for restart-safe recovery',
-    );
+    const targetRows = bucket?.payload.rows ?? Object.freeze([]);
     try {
       assertRfc64PublicCatalogExactSetBundleBytesV1(
-        bucket.payload.rows.map((row) => row.transfer.byteLength),
+        targetRows.map((row) => row.transfer.byteLength),
       );
     } catch (cause) {
       fail(
@@ -868,8 +877,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       readonly projectionBytes: Uint8Array;
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
-    for (const row of bucket.payload.rows) {
+    for (const row of targetRows) {
       throwIfAborted(signal);
+      if (bucket === null || fetchedBucket === null) {
+        fail('catalog-native-receiver-catalog', 'non-empty catalog target lost its bucket proof');
+      }
       let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
       let authorshipCapability: VerifiedAuthorCatalogRowAuthorshipV1;
       try {
@@ -1027,7 +1039,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         // decision. Requiring target.previousHeadDigest here made the first
         // retry after a successful cold bootstrap fail despite exact durable
         // target state.
-        ? Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })))
+        ? Object.freeze(targetRows.map((row) => Object.freeze({ ...row })))
         : await loadExactAppliedPredecessorRows(
           this.options.controlObjects,
           head,
@@ -1054,12 +1066,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       // Every exact bundle crossed its immutable durability barrier directly
       // after verification above. This preserves restart/failover progress
       // without making a staged-only head authoritative.
-      await this.options.controlObjects.stageVerifiedObjects([
+      const verifiedObjects = [
         fetchedDelegation,
         fetchedHead,
         fetchedDirectory,
-        fetchedBucket,
-      ]);
+      ];
+      if (fetchedBucket !== null) verifiedObjects.push(fetchedBucket);
+      await this.options.controlObjects.stageVerifiedObjects(verifiedObjects);
     } catch (cause) {
       fail(
         'catalog-native-receiver-catalog',
@@ -1714,14 +1727,14 @@ function assertBoundedSuccessorHead(head: SignedAuthorCatalogHeadEnvelopeV1): nu
     || head.payload.bucketCount !== '1'
     || head.payload.directoryHeight !== '0'
     || !Number.isSafeInteger(totalRows)
-    || totalRows < 1
+    || totalRows < 0
     || totalRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
     || head.payload.version === '0'
     || head.payload.previousHeadDigest === null
   ) {
     fail(
       'catalog-native-receiver-slice',
-      `bounded receiver requires 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} root-lane rows in one non-genesis successor bucket`,
+      `bounded receiver requires 0..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} root-lane rows in one non-genesis successor`,
     );
   }
   return totalRows;

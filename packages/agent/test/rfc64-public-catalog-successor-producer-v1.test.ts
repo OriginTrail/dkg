@@ -219,7 +219,53 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(stageVerifiedObjects).toHaveBeenCalledTimes(3);
   });
 
-  it('rejects empty, oversized, and duplicate exact sets before signing or staging', async () => {
+  it('produces the canonical zero-row successor for the final removal', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageOne(
+      { head: genesis.head, directoryPath: genesis.directoryPath, bucket: null },
+      authorization,
+    );
+    let stagedObjects: readonly { envelope: { objectType: string } }[] = [];
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async (input) => {
+      stagedObjects = input;
+      return Object.freeze({
+        durable: true as const,
+        namespaceDurability: 'test-exact-durable' as never,
+        objects: Object.freeze([]),
+      });
+    });
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    const removed = await producer.produceAndStageExactSet({
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      previousBucket: first.publication.bucket,
+      assets: [],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+
+    expect(removed.publication.head.payload).toMatchObject({
+      totalRows: '0',
+      version: '2',
+      previousHeadDigest: first.publication.head.objectDigest,
+    });
+    expect(removed.publication.bucket).toBeNull();
+    expect(removed.assets).toEqual([]);
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stagedObjects.map(({ envelope }) => envelope.objectType)).toEqual([
+      AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+      AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+    ]);
+  });
+
+  it('rejects oversized and duplicate exact sets before signing or staging', async () => {
     const { genesis, authorization } = await producerHistory();
     const signDigest = vi.fn(async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
     const stageKaBundle = vi.fn(durableBundleReceipt);
@@ -243,10 +289,6 @@ describe('RFC-64 public/open one-row successor producer', () => {
       catalogIssuerAuthorization: authorization,
     };
 
-    await expect(producer.produceAndStageExactSet({
-      ...common,
-      assets: [],
-    })).rejects.toMatchObject({ code: 'catalog-successor-producer-input' });
     await expect(producer.produceAndStageExactSet({
       ...common,
       assets: Array.from({ length: 1025 }, () => asset),

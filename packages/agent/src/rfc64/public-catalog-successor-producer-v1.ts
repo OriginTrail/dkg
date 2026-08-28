@@ -149,6 +149,7 @@ export interface ProduceAndStagePublicOpenExactSetSuccessorInputV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
   readonly previousDirectoryPath: readonly SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
   readonly previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null;
+  /** Complete 0..1024-row live set; zero rows is the canonical final removal. */
   readonly assets: readonly Rfc64PublicCatalogSuccessorAssetInputV1[];
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt: TimestampMsV1;
@@ -246,7 +247,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     });
   }
 
-  /** Build and durably stage one complete, canonical 1..1024-row live set. */
+  /** Build and durably stage one complete, canonical 0..1024-row live set. */
   async produceAndStageExactSet(
     input: ProduceAndStagePublicOpenExactSetSuccessorInputV1,
   ): Promise<ProducedAndStagedPublicOpenExactSetSuccessorV1> {
@@ -296,14 +297,16 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     }
 
     const producedBucket = publication.bucket;
+    const producedRows = producedBucket?.payload.rows ?? [];
     if (
       publication.head.payload.bucketCount !== '1'
       || publication.head.payload.directoryHeight !== '0'
       || publication.head.payload.totalRows !== String(preparedAssets.length)
       || publication.head.payload.version === '0'
       || publication.head.payload.previousHeadDigest === null
-      || producedBucket === null
-      || producedBucket.payload.rows.length !== preparedAssets.length
+      || (preparedAssets.length === 0 && producedBucket !== null)
+      || (preparedAssets.length > 0 && producedBucket === null)
+      || producedRows.length !== preparedAssets.length
     ) {
       fail(
         'catalog-successor-producer-verification',
@@ -311,7 +314,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    const verifiedAssets = producedBucket.payload.rows.map((producedRow, index) => {
+    const verifiedAssets = producedRows.map((producedRow, index) => {
       const prepared = preparedAssets[index];
       if (prepared === undefined || producedRow.kaId !== prepared.row.kaId) {
         fail(
@@ -392,26 +395,30 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           envelope.objectDigest,
           `directory path node ${index}`,
         ));
-      const bucketSignature = requiredSignature(
-        signaturesByDigest,
-        producedBucket.objectDigest,
-        'catalog bucket',
-      );
-      authorship = producedBucket.payload.rows.map((row) =>
-        readVerifiedAuthorCatalogRowAuthorshipV1(verifyAuthorCatalogRowAuthorshipV1({
-          catalogIssuerDelegation: authorization.catalogIssuerDelegation,
-          catalogIssuerDelegationSignature,
-          parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
-          catalogHead: publication.head,
-          catalogHeadSignature: headSignature,
-          directoryPathEnvelopes: publication.directoryPath,
-          directoryPathSignatures,
-          directoryPathProof,
-          catalogBucket: producedBucket,
-          catalogBucketSignature: bucketSignature,
-          targetKaId: row.kaId,
-        })),
-      );
+      if (producedBucket === null) {
+        authorship = Object.freeze([]);
+      } else {
+        const bucketSignature = requiredSignature(
+          signaturesByDigest,
+          producedBucket.objectDigest,
+          'catalog bucket',
+        );
+        authorship = producedBucket.payload.rows.map((row) =>
+          readVerifiedAuthorCatalogRowAuthorshipV1(verifyAuthorCatalogRowAuthorshipV1({
+            catalogIssuerDelegation: authorization.catalogIssuerDelegation,
+            catalogIssuerDelegationSignature,
+            parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
+            catalogHead: publication.head,
+            catalogHeadSignature: headSignature,
+            directoryPathEnvelopes: publication.directoryPath,
+            directoryPathSignatures,
+            directoryPathProof,
+            catalogBucket: producedBucket,
+            catalogBucketSignature: bucketSignature,
+            targetKaId: row.kaId,
+          })),
+        );
+      }
     } catch (cause) {
       fail(
         'catalog-successor-producer-verification',
@@ -490,10 +497,10 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
   ) {
     fail('catalog-successor-producer-input', 'assets must be a dense Array without properties');
   }
-  if (assets.length < 1 || assets.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
+  if (assets.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
     fail(
       'catalog-successor-producer-input',
-      `assets must contain 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} entries`,
+      `assets must contain 0..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} entries`,
     );
   }
   const snapshots: PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1[] = [];

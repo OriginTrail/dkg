@@ -759,6 +759,26 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       lifecycleAgentAddress: AUTHOR,
       shareOperationId,
     })).resolves.toMatchObject({ status: 'existing', attempts: 1 });
+    const firstCatalogReconcile = await author
+      .reconcileRfc64PublicCatalogFromSwmInventoryV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+      });
+    expect(firstCatalogReconcile).toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      targetAssetCount: 1,
+      appliedHead: { catalogVersion: '1', inventoryRowCount: '1' },
+    });
+    await expect(author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({
+      status: 'existing',
+      successorsApplied: 0,
+      targetAssetCount: 1,
+      appliedHead: { catalogVersion: '1', inventoryRowCount: '1' },
+    });
     expect(author.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
       attemptedUpserts: 3,
       appliedUpserts: 1,
@@ -798,6 +818,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toMatchObject({
       head: { payload: { version: '1', totalRows: '0' } },
       rows: [],
+    });
+    await expect(restarted.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      targetAssetCount: 0,
+      appliedHead: { catalogVersion: '2', inventoryRowCount: '0' },
     });
     await expect(restarted.removeRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -1913,6 +1942,94 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     ));
   }, 60_000);
 
+  it('reconciles deterministic multi-step add, replacement, removal, and replay targets', async () => {
+    const author = await startNativeAgent('r1-1-exact-reconcile-author');
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const scope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    }) as const;
+    const firstSeal = await authorSeal(71n);
+    const secondSeal = await authorSeal(72n);
+    const firstAsset = Object.freeze({
+      assertionCoordinate: 'r1-1-first' as never,
+      projectionBytes: PROJECTION,
+      seal: firstSeal,
+    });
+    const secondAsset = Object.freeze({
+      assertionCoordinate: 'r1-1-second' as never,
+      projectionBytes: PROJECTION,
+      seal: secondSeal,
+    });
+    const common = {
+      scope,
+      author: AUTHOR_WALLET,
+      deployment: NATIVE_DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [secondAsset, firstAsset],
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 2,
+      targetAssetCount: 2,
+      appliedHead: { catalogVersion: '2', inventoryRowCount: '2' },
+    });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [firstAsset, secondAsset],
+    })).resolves.toMatchObject({
+      status: 'existing',
+      successorsApplied: 0,
+      appliedHead: { catalogVersion: '2', inventoryRowCount: '2' },
+    });
+
+    const firstV2 = Object.freeze({
+      ...firstAsset,
+      seal: Object.freeze({ ...firstSeal, assertionVersion: '2' }) as never,
+    });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [firstV2, secondAsset],
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      appliedHead: { catalogVersion: '3', inventoryRowCount: '2' },
+    });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [firstV2],
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      appliedHead: { catalogVersion: '4', inventoryRowCount: '1' },
+    });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [],
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      targetAssetCount: 0,
+      appliedHead: { catalogVersion: '5', inventoryRowCount: '0' },
+    });
+  }, 60_000);
+
   registerM0RecoveryScenario('cold-restart', rfc64M0RecoveryTitle('cold-restart'), async () => {
     const author = await startNativeAgent(
       'bootstrap-author',
@@ -2585,6 +2702,70 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       applied: 3,
       dedupedAlreadyApplied: 1,
     });
+
+    const oneRow = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: successor.headObjectDigest,
+        signatureVariantDigest: successor.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [firstAsset],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: '1773900003000' as TimestampMsV1,
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    const empty = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: oneRow.headObjectDigest,
+        signatureVariantDigest: oneRow.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: '1773900004000' as TimestampMsV1,
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(empty).toMatchObject({
+      inventoryRowCount: '0',
+      signedBucketRowCount: '0',
+      assets: [],
+    });
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      empty.headObjectDigest,
+    )).toBeNull();
+    expect(receiver.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      empty.headObjectDigest,
+    )).toMatchObject({
+      catalogHeadDigest: empty.headObjectDigest,
+      inventoryRowCount: 0,
+      activatedTripleCount: 0,
+      rows: [],
+      removedRowCount: 1,
+      appliedHeadStatus: 'applied',
+    });
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: empty.headObjectDigest,
+      catalogVersion: '4',
+      inventoryRowCount: '0',
+    });
+    for (const kaNumber of [7, 8]) {
+      const swmGraph = contextGraphLayerUri(
+        CONTEXT_GRAPH_ID,
+        MemoryLayer.SharedWorkingMemory,
+        AUTHOR,
+        kaNumber,
+      );
+      await expect(receiver.store.query(
+        `SELECT ?s WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } } LIMIT 1`,
+      )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
+    }
   }, 60_000);
 
   it('preserves a single-provider discovery error without aggregation', async () => {
