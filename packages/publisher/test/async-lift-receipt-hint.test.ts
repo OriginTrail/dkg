@@ -62,6 +62,7 @@ describe('async-lift receipt-hint lane', () => {
   async function parkedHintScenario(options: {
     hintTxHash?: string;
     tailAction?: 'park' | 'throw';
+    operationKind?: 'create' | 'update';
     finalizeRecovered?: () => Promise<void>;
     config?: Partial<AsyncLiftPublisherConfig>;
   } = {}) {
@@ -81,7 +82,7 @@ describe('async-lift receipt-hint lane', () => {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({
             txHash: KA_VM_EXECUTOR_TX_HASH,
-            operationKind: 'create',
+            operationKind: options.operationKind ?? 'create',
           });
           input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
           await new Promise((resolve) => setTimeout(resolve, 10));
@@ -782,5 +783,48 @@ describe('async-lift receipt-hint lane', () => {
     } finally {
       releaseTail();
     }
+  });
+
+  it('releases and finalizes an UPDATE through the hint lane with the update lookup intact', async () => {
+    // r11 (3877968154) - the lane must carry the update-only facts: the durable marker makes
+    // queuedLiftOperationKind answer 'update', the proof lookup must be the update variant with
+    // the intended root (the request's sealMerkleRoot), the wallet releases before the executor
+    // tail settles, and the settle-time finalize consumes the cached update evidence with no
+    // further chain reads.
+    const lookups: Array<{ operationKind?: string; intendedUpdateRoot?: string }> = [];
+    let proofAsks = 0;
+    let recoveryAsks = 0;
+    const { publisher, jobId, releaseTail } = await parkedHintScenario({
+      operationKind: 'update',
+      config: {
+        chainProofResolver: async (lookup: { operationKind?: string; intendedUpdateRoot?: string }) => {
+          proofAsks += 1;
+          lookups.push({ operationKind: lookup.operationKind, intendedUpdateRoot: lookup.intendedUpdateRoot });
+          return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+        },
+        knowledgeAssetVmPublishRecoveryResolver: async () => {
+          recoveryAsks += 1;
+          return {
+            inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+            finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+          } as never;
+        },
+      },
+    });
+
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('included');
+    await expectWalletLock('wallet-1', 'released');
+    expect(lookups).toHaveLength(1);
+    expect(lookups[0].operationKind).toBe('update');
+    // The intended root rides the update lookup: the request's seal root, exactly.
+    expect(lookups[0].intendedUpdateRoot?.toLowerCase()).toBe(`0x${'12'.repeat(32)}`);
+
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+    expect(proofAsks).toBe(1);
+    expect(recoveryAsks).toBe(1);
   });
 });

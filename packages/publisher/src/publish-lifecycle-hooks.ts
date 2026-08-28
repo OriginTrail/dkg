@@ -8,7 +8,18 @@ import type { PublishLifecycleHooks } from './publisher.js';
  * contract it implements: consumers forwarding {@link PublishLifecycleHooks} across their own
  * boundaries (the agent's queued execution) use the same picker.
  */
-export function pickPublishLifecycleHooks(source: PublishLifecycleHooks): PublishLifecycleHooks {
+/**
+ * r11 (3877968250) — the picker's return type requires EVERY key of the contract to be present
+ * (values may be undefined), so adding a hook to {@link PublishLifecycleHooks} without adding
+ * it here fails compilation instead of silently dropping the new hook at every boundary.
+ */
+type CompletePublishLifecycleHooks = {
+  [K in keyof Required<PublishLifecycleHooks>]: PublishLifecycleHooks[K];
+};
+
+export function pickPublishLifecycleHooks(
+  source: PublishLifecycleHooks,
+): CompletePublishLifecycleHooks {
   return {
     onPhase: source.onPhase,
     onBeforeBroadcast: source.onBeforeBroadcast,
