@@ -3178,13 +3178,17 @@ export class TripleStoreAsyncLiftPublisher
 
   private parseJobPayload(binding?: string): LiftJob | null {
     if (!binding) return null;
-    const payload = parseLiteral(binding);
-    if (typeof payload !== 'string') return null;
-    const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
-    return {
-      ...parsed,
-      request: normalizePersistedLiftJobRequest(parsed.request),
-    } as LiftJob;
+    try {
+      const payload = parseLiteral(binding);
+      if (typeof payload !== 'string') return null;
+      const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
+      return {
+        ...parsed,
+        request: normalizePersistedLiftJobRequest(parsed.request),
+      } as LiftJob;
+    } catch {
+      return null;
+    }
   }
 
   // r4 (3877669534) — the canonical transition API expresses the one union-member-specific

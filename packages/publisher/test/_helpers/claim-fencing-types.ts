@@ -13,6 +13,8 @@ declare const legacyClaimedWithoutFence: LiftJobClaimed;
 declare const activeClaim: ActiveLiftJobClaim;
 
 publisher.openClaimSession(activeClaim);
+const narrowedClaim: Promise<ActiveLiftJobClaim | null> = publisher.claimNext('wallet-1');
+void narrowedClaim;
 // @ts-expect-error An accepted record cannot manufacture live worker authority.
 publisher.openClaimSession(accepted);
 // @ts-expect-error A legacy claimed record without a required token/lease is not active authority.
