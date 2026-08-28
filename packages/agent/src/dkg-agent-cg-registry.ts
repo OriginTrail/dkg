@@ -451,20 +451,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
     }
 
-    if (registrationStatus === 'unregistered') return null;
-    if (registrationStatus?.startsWith('registering:')) {
-      throw new Error(
-        `Context graph "${contextGraphId}" has an interrupted on-chain registration attempt ` +
-        'without a durable receipt binding. Refusing to submit another transaction; recover or ' +
-        'clear the original attempt after verifying its chain outcome.',
-      );
-    }
-
-    // An exact receipt persisted by this registration attempt and the local
-    // registration state both outrank a subscription learned from chain
-    // discovery. Reused deployment labels can leave that subscription pointing
-    // at an older numeric slot. It remains authoritative for established or
-    // legacy graphs that do not carry an explicit local attempt state.
+    // An exact receipt persisted by this registration attempt outranks the
+    // durable subscription binding. The latter remains authoritative when no
+    // receipt exists: it is the canonical owner for an already admitted local
+    // graph and must be liveness-checked instead of silently re-minted.
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
     const currentBinding = this.contextGraphBindingState.currentBindingFor(
       contextGraphId,
@@ -472,6 +462,15 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     );
     if (currentBinding?.bindingKind === 'authoritative') {
       return currentBinding.onChainId;
+    }
+
+    if (registrationStatus === 'unregistered') return null;
+    if (registrationStatus?.startsWith('registering:')) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has an interrupted on-chain registration attempt ` +
+        'without a durable receipt binding. Refusing to submit another transaction; recover or ' +
+        'clear the original attempt after verifying its chain outcome.',
+      );
     }
     return this.getContextGraphOnChainId(contextGraphId);
   }
