@@ -64,15 +64,15 @@ export class ChainProofRetrySchedule {
   }
 
   /**
-   * A turn that established nothing defers the next one — for the incarnation the inventory
-   * admitted. A defer whose identity disagrees with the index is a superseded echo (a resolver
-   * that rejected or settled late, after the record moved on) and is dropped whole: it can
-   * address neither the successor's entry (foreign key) nor the index (isDue-only authority).
+   * A turn that established nothing defers the next one — writing ONLY this incarnation's own
+   * entry. A superseded echo therefore cannot reach a successor's schedule by construction, and
+   * it does not touch the index either (isDue is the index's only writer): the echo's dead
+   * entry is pruned at the next authoritative due check. A guard comparing the caller against
+   * the index was removed as REDUNDANT (r6/r7 mutant evidence: no observable its removal
+   * changes — the key model plus the isDue self-heal already deliver the invariant).
    */
   defer(jobId: string, identity: string, cadence: ChainProofRetryCadence): void {
-    const known = this.currentIncarnation.get(jobId);
-    if (known !== undefined && known !== identity) return;
-    this.currentIncarnation.set(jobId, identity);
+    void jobId;
     const prior = this.entries.get(identity);
     const attempts = (prior ? prior.attempts : 0) + 1;
     const capMs = cadence === 'awaiting-confirmations'
