@@ -31,7 +31,7 @@
  */
 import {
   discoveredAgentIdentityKey,
-  resolveDiscoveredAgentIdentityConflicts,
+  groupDiscoveredAgentIdentityRows,
   type DiscoveredAgent,
 } from '@origintrail-official/dkg-agent';
 import { toAgentDid } from '@origintrail-official/dkg-core';
@@ -178,9 +178,10 @@ export class AgentsCursorError extends Error {
  *
  * No `limit` and no `cursor` returns the rows untouched, in their original
  * order — the compatibility contract for parameterless callers. Paginated
- * requests resolve conflicting rows for one identity deterministically and
- * order by a digest of the canonical agent URI. Mutable profile fields never
- * affect page position.
+ * requests keep every exact-distinct binding for one identity in the same page
+ * and order identity groups by a digest of the canonical agent URI. `limit`
+ * counts identities, so a conflicted identity can contribute multiple rows.
+ * Mutable profile fields never affect page position.
  */
 export function paginateAgentRows(
   rows: DiscoveredAgent[],
@@ -202,11 +203,11 @@ export function paginateAgentRows(
     );
   }
 
-  const keyed = resolveDiscoveredAgentIdentityConflicts(rows)
-    .map((row) => ({
-      row,
+  const keyed = groupDiscoveredAgentIdentityRows(rows)
+    .map((group) => ({
+      group,
       digest: createHash('sha256')
-        .update(discoveredAgentIdentityKey(row), 'utf8')
+        .update(group.identity, 'utf8')
         .digest('hex'),
     }))
     .sort((a, b) => (a.digest < b.digest ? -1 : a.digest > b.digest ? 1 : 0));
@@ -216,11 +217,11 @@ export function paginateAgentRows(
     ? keyed
     : keyed.filter((k) => k.digest > decodedCursor.digest);
   if (query.limit === undefined || after.length <= query.limit) {
-    return { rows: after.map((k) => k.row) };
+    return { rows: after.flatMap((k) => k.group.rows) };
   }
   const page = after.slice(0, query.limit);
   return {
-    rows: page.map((k) => k.row),
+    rows: page.flatMap((k) => k.group.rows),
     nextCursor: encodeCursor(fingerprint, page[page.length - 1]!.digest),
   };
 }

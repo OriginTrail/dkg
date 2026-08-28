@@ -78,19 +78,42 @@ function discoveredAgentRowKey(agent: DiscoveredAgent): string {
   ]);
 }
 
-/** Resolve conflicting public rows behind the agent-layer identity policy. */
-export function resolveDiscoveredAgentIdentityConflicts(
+export interface DiscoveredAgentIdentityRows {
+  identity: string;
+  rows: DiscoveredAgent[];
+}
+
+/**
+ * Group exact-distinct public bindings behind their stable canonical identity.
+ *
+ * The registry does not currently expose provenance that can prove which of two peer bindings is
+ * authoritative. Discarding either binding would therefore invent a winner. Keep every distinct
+ * binding together; consumers can page identities without splitting or repeating the group.
+ */
+export function groupDiscoveredAgentIdentityRows(
   agents: readonly DiscoveredAgent[],
-): DiscoveredAgent[] {
-  const rowByIdentity = new Map<string, DiscoveredAgent>();
+): DiscoveredAgentIdentityRows[] {
+  const rowsByIdentity = new Map<string, Map<string, DiscoveredAgent>>();
   for (const agent of agents) {
     const identity = discoveredAgentIdentityKey(agent);
-    const existing = rowByIdentity.get(identity);
-    if (!existing || discoveredAgentRowKey(agent) < discoveredAgentRowKey(existing)) {
-      rowByIdentity.set(identity, agent);
+    const normalized: DiscoveredAgent = {
+      ...agent,
+      agentUri: identity,
+      ...(agent.multiaddrs ? { multiaddrs: [...agent.multiaddrs].sort() } : {}),
+    };
+    let rows = rowsByIdentity.get(identity);
+    if (!rows) {
+      rows = new Map<string, DiscoveredAgent>();
+      rowsByIdentity.set(identity, rows);
     }
+    rows.set(discoveredAgentRowKey(normalized), normalized);
   }
-  return [...rowByIdentity.values()];
+  return [...rowsByIdentity].map(([identity, rows]) => ({
+    identity,
+    rows: [...rows]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([, row]) => row),
+  }));
 }
 
 export interface DiscoveredOffering {

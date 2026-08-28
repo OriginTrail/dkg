@@ -193,16 +193,47 @@ describe('paginateAgentRows (GH#310)', () => {
     expect(new Set(collected)).toEqual(new Set(many.map((agent) => agent.agentUri)));
   });
 
-  it('resolves conflicting rows for one stable identity before pagination', () => {
+  it('keeps conflicting rows for one stable identity together during pagination', () => {
     const canonical = row();
     const conflict = row({ name: 'zeta', peerId: 'peer-conflict' });
     const forward = paginateAgentRows([canonical, conflict, many[2]!], { limit: 2 });
     const reverse = paginateAgentRows([conflict, canonical, many[2]!], { limit: 2 });
     for (const page of [forward, reverse]) {
-      expect(page.rows).toHaveLength(2);
+      expect(page.rows).toHaveLength(3);
       expect(new Set(page.rows.map((agent) => agent.agentUri)).size).toBe(2);
-      expect(page.rows.find((agent) => agent.agentUri === canonical.agentUri)).toEqual(canonical);
+      expect(page.rows.filter((agent) => agent.agentUri === canonical.agentUri))
+        .toEqual([canonical, conflict]);
     }
+    expect(reverse).toEqual(forward);
+  });
+
+  it('does not discard or repeat stale/current peer bindings for one DID across pages', () => {
+    const current = row({
+      name: 'zeta',
+      peerId: 'peer-new',
+      lastSeen: '2026-08-28T12:00:00.000Z',
+    });
+    const stale = row({
+      name: 'alpha',
+      peerId: 'peer-old',
+      lastSeen: '2025-08-28T12:00:00.000Z',
+    });
+    const pages: ReturnType<typeof paginateAgentRows>[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = paginateAgentRows(
+        [many[2]!, stale, many[3]!, current],
+        { limit: 1, ...(cursor ? { cursor } : {}) },
+      );
+      pages.push(page);
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    const identityPages = pages.filter((page) =>
+      page.rows.some((agent) => agent.agentUri === current.agentUri));
+    expect(identityPages).toHaveLength(1);
+    expect(identityPages[0]!.rows.map((agent) => agent.peerId).sort())
+      .toEqual(['peer-new', 'peer-old']);
   });
 
   it('collapses mixed-case EVM DIDs without changing peer-ID case', () => {
@@ -220,7 +251,10 @@ describe('paginateAgentRows (GH#310)', () => {
       many[2]!,
     ], { limit: 2 });
     expect(page.rows.filter((agent) => discoveredAgentIdentityKey(agent) === lowerDid))
-      .toEqual([expect.objectContaining({ name: 'alpha', peerId: 'peer-lower' })]);
+      .toEqual([
+        expect.objectContaining({ agentUri: lowerDid, name: 'alpha', peerId: 'peer-lower' }),
+        expect.objectContaining({ agentUri: lowerDid, name: 'zeta', peerId: 'peer-mixed' }),
+      ]);
   });
 
   it('omits nextCursor on the final exactly-full page', () => {

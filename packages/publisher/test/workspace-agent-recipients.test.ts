@@ -11,6 +11,7 @@ import {
   contextGraphMetaUri,
   encodeWorkspaceEncryptionKey,
   generateWorkspaceRecipientEncryptionKey,
+  toAgentDid,
   workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
 import { resolveWorkspaceAgentRecipients } from '../src/index.js';
@@ -67,6 +68,7 @@ async function insertAgentEncryptionKey(
     omitAlgorithm?: boolean;
     omitProof?: boolean;
     keyFill?: number;
+    subject?: string;
   } = {},
 ): Promise<{ publicKeyBytes: Uint8Array; keyId: string }> {
   const recipientKey = generateWorkspaceRecipientEncryptionKey(
@@ -85,15 +87,16 @@ async function insertAgentEncryptionKey(
     publicKeyBytes,
   });
   const proof = proofSigner.signingKey.sign(ethers.hashMessage(proofPayload)).serialized;
+  const subject = options.subject ?? agentUri(wallet.address);
   const quads = [{
-    subject: agentUri(wallet.address),
+    subject,
     predicate: DKG_PUBLIC_ENCRYPTION_KEY,
     object: `"${publicEncryptionKey}"`,
     graph: 'did:dkg:system/agents',
   }];
   if (!options.omitAlgorithm) {
     quads.push({
-      subject: agentUri(wallet.address),
+      subject,
       predicate: DKG_ENCRYPTION_KEY_ALGORITHM,
       object: `"${options.algorithm ?? WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519}"`,
       graph: 'did:dkg:system/agents',
@@ -101,7 +104,7 @@ async function insertAgentEncryptionKey(
   }
   if (!options.omitProof) {
     quads.push({
-      subject: agentUri(wallet.address),
+      subject,
       predicate: DKG_ENCRYPTION_KEY_PROOF,
       object: `"${proof}"`,
       graph: 'did:dkg:system/agents',
@@ -183,6 +186,38 @@ describe('resolveWorkspaceAgentRecipients', () => {
     expect(resolution.recipients).toHaveLength(1);
     expect(resolution.recipients[0]?.recipientId).toBe(agentUri(wallet.address));
     expect(resolution.recipients[0]?.encryptionKeyAlgorithm).toBe(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519);
+  });
+
+  it('resolves a key registered only under the canonical lowercase agent DID', async () => {
+    const store = new OxigraphStore();
+    const wallet = new ethers.Wallet(`0x${'0'.repeat(63)}1`);
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const key = await insertAgentEncryptionKey(store, wallet, {
+      subject: toAgentDid(wallet.address),
+    });
+
+    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
+
+    expect(resolution.recipients).toHaveLength(1);
+    expect(resolution.recipients[0]?.recipientKeyId).toBe(key.keyId);
+  });
+
+  it('deduplicates one verified key stored under canonical and historical DID aliases', async () => {
+    const store = new OxigraphStore();
+    const wallet = new ethers.Wallet(`0x${'0'.repeat(63)}1`);
+    expect(agentUri(wallet.address)).not.toBe(toAgentDid(wallet.address));
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const historical = await insertAgentEncryptionKey(store, wallet, { keyFill: 8 });
+    const canonical = await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 8,
+      subject: toAgentDid(wallet.address),
+    });
+    expect(canonical.keyId).toBe(historical.keyId);
+
+    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
+
+    expect(resolution.recipients).toHaveLength(1);
+    expect(resolution.recipients[0]?.recipientKeyId).toBe(historical.keyId);
   });
 
   it('resolves AGENTS-graph private declarations through the sender-key recipient path', async () => {
