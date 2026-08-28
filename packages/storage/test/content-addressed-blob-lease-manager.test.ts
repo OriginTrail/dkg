@@ -93,4 +93,27 @@ describe('ContentAddressedBlobLeaseManager', () => {
     expect(creates).toBe(2);
     expect(blobs.get('race')).toBe('value');
   });
+
+  it('rejects double release and cross-manager scope use without corrupting leases', async () => {
+    const blobs = new Map<string, string>();
+    const options = {
+      createOrVerify: async (hash: string, value: string) => {
+        const created = !blobs.has(hash);
+        blobs.set(hash, value);
+        return created;
+      },
+      remove: async (hash: string) => { blobs.delete(hash); },
+    };
+    const owner = new ContentAddressedBlobLeaseManager(options);
+    const stranger = new ContentAddressedBlobLeaseManager(options);
+    const scope = owner.createScope();
+    await owner.acquire('owned', 'value', scope);
+
+    await expect(stranger.acquire('owned', 'value', scope))
+      .rejects.toThrow(/different manager/);
+    await owner.release(scope, true);
+    await expect(owner.release(scope, false)).rejects.toThrow(/already been released/);
+    await expect(owner.acquire('owned', 'value', scope)).rejects.toThrow(/already been released/);
+    expect(blobs.get('owned')).toBe('value');
+  });
 });

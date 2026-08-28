@@ -1,4 +1,4 @@
-export interface ContentAddressedBlobLease {
+interface ContentAddressedBlobLease {
   readonly hash: string;
   users: number;
   preserve: boolean;
@@ -7,7 +7,17 @@ export interface ContentAddressedBlobLease {
   ready: Promise<void>;
 }
 
-export type ContentAddressedBlobLeaseScope = Map<string, ContentAddressedBlobLease>;
+declare const CONTENT_ADDRESSED_BLOB_LEASE_SCOPE: unique symbol;
+
+/** Opaque one-shot lifecycle token owned by the manager that created it. */
+export interface ContentAddressedBlobLeaseScope {
+  readonly [CONTENT_ADDRESSED_BLOB_LEASE_SCOPE]: true;
+}
+
+interface ContentAddressedBlobLeaseScopeState {
+  readonly leases: Map<string, ContentAddressedBlobLease>;
+  released: boolean;
+}
 
 export interface ContentAddressedBlobLeaseManagerOptions {
   /** Create or verify the blob, returning true only when this call created it. */
@@ -22,11 +32,17 @@ export interface ContentAddressedBlobLeaseManagerOptions {
  */
 export class ContentAddressedBlobLeaseManager {
   private readonly active = new Map<string, ContentAddressedBlobLease>();
+  private readonly scopes = new WeakMap<
+    ContentAddressedBlobLeaseScope,
+    ContentAddressedBlobLeaseScopeState
+  >();
 
   constructor(private readonly options: ContentAddressedBlobLeaseManagerOptions) {}
 
   createScope(): ContentAddressedBlobLeaseScope {
-    return new Map();
+    const scope = Object.freeze(Object.create(null)) as ContentAddressedBlobLeaseScope;
+    this.scopes.set(scope, { leases: new Map(), released: false });
+    return scope;
   }
 
   async acquire(
@@ -34,7 +50,8 @@ export class ContentAddressedBlobLeaseManager {
     value: string,
     scope: ContentAddressedBlobLeaseScope,
   ): Promise<void> {
-    const scoped = scope.get(hash);
+    const scopeState = this.requireOpenScope(scope);
+    const scoped = scopeState.leases.get(hash);
     if (scoped) {
       await scoped.ready;
       return;
@@ -52,7 +69,7 @@ export class ContentAddressedBlobLeaseManager {
       this.active.set(hash, lease);
     }
     lease.users += 1;
-    scope.set(hash, lease);
+    scopeState.leases.set(hash, lease);
 
     const state = lease;
     // Chain creation behind pending cleanup. A writer arriving while a losing
@@ -67,8 +84,12 @@ export class ContentAddressedBlobLeaseManager {
   }
 
   async release(scope: ContentAddressedBlobLeaseScope, preserve: boolean): Promise<void> {
+    const scopeState = this.requireOpenScope(scope);
+    // Close ownership before awaiting cleanup so concurrent/double releases
+    // cannot decrement the same leases twice.
+    scopeState.released = true;
     const cleanup: Promise<void>[] = [];
-    for (const state of scope.values()) {
+    for (const state of scopeState.leases.values()) {
       state.preserve ||= preserve;
       state.users -= 1;
       if (state.users !== 0) continue;
@@ -89,5 +110,18 @@ export class ContentAddressedBlobLeaseManager {
       }));
     }
     await Promise.all(cleanup);
+  }
+
+  private requireOpenScope(
+    scope: ContentAddressedBlobLeaseScope,
+  ): ContentAddressedBlobLeaseScopeState {
+    const state = this.scopes.get(scope);
+    if (!state) {
+      throw new Error('Content-addressed blob lease scope belongs to a different manager');
+    }
+    if (state.released) {
+      throw new Error('Content-addressed blob lease scope has already been released');
+    }
+    return state;
   }
 }
