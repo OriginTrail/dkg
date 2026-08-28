@@ -1938,6 +1938,52 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
   });
 
+  it('treats exact RPC acceptance as a no-op after another instance reconciles finality', async () => {
+    const txHash = '0xbbb' as `0x${string}`;
+    const worker = createPublisher();
+    const reconciler = createPublisher({
+      chainProof: {
+        status: 'recovered',
+        recovery: {
+          inclusion: { txHash, blockNumber: 7 },
+          finalization: {
+            txHash,
+            ual: 'did:dkg:mock:31337/0xbbb/7',
+            batchId: '7',
+            startKAId: '7',
+            endKAId: '7',
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+          },
+        },
+      },
+    });
+    const jobId = await worker.seedLegacyRawLift(request());
+    const claim = await worker.claimNext('wallet-1');
+    if (!claim) throw new Error('expected claim');
+    await worker.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await worker.update(jobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1', nonce: 4 },
+    });
+
+    expect(await reconciler.reconcileTransactions()).toBe(1);
+    await expect(
+      (worker as any).recordRpcAccepted(claim, { txHash, nonce: 4 }),
+    ).resolves.toBeUndefined();
+    expect(await worker.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'finalized',
+      broadcast: { txHash },
+    });
+  });
+
   it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {
     const publisher = createPublisher({ chainProof: { status: 'inconclusive' } });
     const broadcastId = await publisher.seedLegacyRawLift(request());

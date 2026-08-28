@@ -57,6 +57,21 @@ export type LiftJobTransaction =
     readonly scope: LiftJobTransitionScope;
   };
 
+/**
+ * A worker checkpoint may observe proof advancing its exact claim before the callback runs.
+ * Advanced records are deliberately read-only: only a still-owned record receives commit scope.
+ */
+export type ActiveLiftJobCheckpoint =
+  | {
+    readonly kind: 'advanced';
+    readonly current: Extract<LiftJob, { readonly status: 'included' | 'finalized' }>;
+  }
+  | {
+    readonly kind: 'owned';
+    readonly current: LiftJob;
+    readonly scope: LiftJobTransitionScope;
+  };
+
 export interface ActiveLiftJobClaimMutations {
   update(
     current: LiftJob,
@@ -132,6 +147,33 @@ export type AsyncLiftClaimProcessingOutcome =
   | { readonly kind: 'processed'; readonly job: LiftJob }
   | { readonly kind: 'replaced'; readonly job: LiftJob }
   | { readonly kind: 'recovered'; readonly job: LiftJob | null };
+
+export type LiftJobOwnershipMode = 'released' | 'lease-bound' | 'proof-bound';
+
+/** The single lifecycle policy for whether and how a job owns its signing wallet. */
+export function classifyLiftJobOwnershipMode(job: LiftJob): LiftJobOwnershipMode {
+  switch (job.status) {
+    case 'accepted':
+    case 'finalized':
+      return 'released';
+    case 'claimed':
+    case 'validated':
+      return 'lease-bound';
+    case 'broadcast':
+    case 'included':
+      return 'proof-bound';
+    case 'failed':
+      if (!isHeldForChainProof(job)) return 'released';
+      // A legacy/incomplete held failure can prove that some transaction existed without naming
+      // its signer. It may keep the current claim only by lease; expiry cannot be ignored until
+      // durable evidence binds the transaction to this wallet.
+      return liftJobCheckedSigner(job) ? 'proof-bound' : 'lease-bound';
+    default: {
+      const exhaustive: never = job;
+      return exhaustive;
+    }
+  }
+}
 
 export interface AsyncLiftClaimCoordinatorDependencies {
   readonly ensureGraph: () => Promise<void>;
@@ -345,12 +387,7 @@ export class AsyncLiftClaimCoordinator {
 
   private renewActiveOwnership(job: LiftJob): LiftJob {
     if (!job.claim) return job;
-    if (
-      job.status !== 'claimed'
-      && job.status !== 'validated'
-      && job.status !== 'broadcast'
-      && job.status !== 'included'
-    ) return job;
+    if (classifyLiftJobOwnershipMode(job) === 'released') return job;
 
     const now = this.config.now();
     return {
@@ -367,7 +404,7 @@ export class AsyncLiftClaimCoordinator {
   }
 
   private async assertActiveClaimLock(job: LiftJob): Promise<void> {
-    if (!this.requiresActiveClaimLock(job)) return;
+    if (classifyLiftJobOwnershipMode(job) === 'released') return;
     const walletId = job.claim?.walletId;
     if (!walletId) throw this.createStaleClaimError(job, 'missing claim wallet');
     const currentLock = await this.readWalletLock(walletId);
@@ -405,13 +442,7 @@ export class AsyncLiftClaimCoordinator {
     if (!walletId) return;
     const currentLock = await this.readWalletLock(walletId);
 
-    if (
-      job.status === 'claimed'
-      || job.status === 'validated'
-      || job.status === 'broadcast'
-      || job.status === 'included'
-      || (isFailedJob(job) && isHeldForChainProof(job))
-    ) {
+    if (classifyLiftJobOwnershipMode(job) !== 'released') {
       if (!currentLock) {
         throw this.createStaleClaimError(job, `missing active wallet lock for ${walletId}`);
       }
@@ -460,14 +491,7 @@ export class AsyncLiftClaimCoordinator {
         const currentLock = await this.readWalletLock(walletId);
         if (!currentLock || currentLock.jobId !== jobId) return;
         const job = await this.dependencies.getStatus(jobId);
-        const proofBoundOwner = !!job && this.isProofBoundWalletOwner(currentLock, job, walletId);
-        const stale =
-          (!proofBoundOwner && (currentLock.expiresAt ?? 0) <= now)
-          || !job
-          || job.status === 'accepted'
-          || (!proofBoundOwner && job.status === 'failed')
-          || job.status === 'finalized'
-          || job.claim?.walletId !== walletId;
+        const stale = !job || !this.isUsableActiveLock(currentLock, job, now);
         if (!stale) return;
         expiredWallets.push(walletId);
         await this.deleteWalletLock(walletId);
@@ -533,6 +557,33 @@ export class AsyncLiftClaimCoordinator {
       }
       await this.assertActiveClaimLock(current);
       return await transition(current, this.createTransitionScope(current));
+    });
+  }
+
+  /**
+   * Worker checkpoint boundary for a callback that can be made obsolete by chain proof. The exact
+   * claim fence is checked in both branches, while only a still-active owner receives write access.
+   */
+  async runOwnedCheckpointTransaction<T>(
+    claim: ActiveLiftJobClaim,
+    operation: (checkpoint: ActiveLiftJobCheckpoint) => Promise<T>,
+  ): Promise<T> {
+    await this.dependencies.ensureGraph();
+    return await this.withJobTransitionLock(claim.jobId, async () => {
+      const current = await this.getRequiredJob(claim.jobId);
+      this.assertClaimFence(current, claim);
+      if (current.status === 'included' || current.status === 'finalized') {
+        return await operation({ kind: 'advanced', current });
+      }
+      if (current.status === 'failed') {
+        throw this.createStaleClaimError(current, `claim authority ended in ${current.status}`);
+      }
+      await this.assertActiveClaimLock(current);
+      return await operation({
+        kind: 'owned',
+        current,
+        scope: this.createTransitionScope(current),
+      });
     });
   }
 
@@ -729,46 +780,36 @@ export class AsyncLiftClaimCoordinator {
     const lock = await this.readWalletLock(walletId);
     if (!lock || lock.status !== 'active') return false;
     const job = await this.dependencies.getStatus(lock.jobId);
-    if (job && this.isProofBoundWalletOwner(lock, job, walletId)) return true;
-    return (lock.expiresAt ?? 0) > this.config.now();
+    return job !== null && this.isUsableActiveLock(lock, job);
   }
 
-  private requiresActiveClaimLock(job: LiftJob): boolean {
-    return job.status === 'claimed'
-      || job.status === 'validated'
-      || job.status === 'broadcast'
-      || job.status === 'included';
-  }
-
-  private isUsableActiveLock(lock: WalletLockSnapshot, job: LiftJob): boolean {
-    if (lock.status !== 'active') return false;
-    if (!this.lockMatchesJob(lock, job)) return false;
-    if (job.status === 'broadcast' || job.status === 'included') return true;
-    if (
-      isFailedJob(job)
-      && isHeldForChainProof(job)
-      && liftJobCheckedSigner(job) === job.claim?.walletId
-    ) return true;
-    if (lock.expiresAt !== undefined && lock.expiresAt <= this.config.now()) return false;
-    return true;
-  }
-
-  private isProofBoundWalletOwner(
+  private isUsableActiveLock(
     lock: WalletLockSnapshot,
     job: LiftJob,
-    walletId: string,
+    now = this.config.now(),
   ): boolean {
+    if (lock.status !== 'active') return false;
     if (!this.lockMatchesJob(lock, job)) return false;
-    if (job.status === 'broadcast' || job.status === 'included') {
-      return job.broadcast.walletId === walletId;
+    switch (classifyLiftJobOwnershipMode(job)) {
+      case 'released':
+        return false;
+      case 'lease-bound':
+        return (lock.expiresAt ?? 0) > now;
+      case 'proof-bound':
+        return this.proofBoundWalletId(job) === lock.walletId;
     }
-    return isFailedJob(job)
-      && isHeldForChainProof(job)
-      && liftJobCheckedSigner(job) === walletId;
+  }
+
+  /** Extract proof identity only; ownership policy itself lives in the classifier above. */
+  private proofBoundWalletId(job: LiftJob): string | undefined {
+    if (job.status === 'broadcast' || job.status === 'included') return job.broadcast.walletId;
+    if (isFailedJob(job)) return liftJobCheckedSigner(job);
+    return undefined;
   }
 
   private lockMatchesJob(lock: WalletLockSnapshot, job: LiftJob): boolean {
     if (lock.jobId !== job.jobId) return false;
+    if (job.claim?.walletId && lock.walletId !== job.claim.walletId) return false;
     if (job.claim?.claimToken) return lock.claimToken === job.claim.claimToken;
     return !lock.claimToken;
   }

@@ -1251,14 +1251,21 @@ export class TripleStoreAsyncLiftPublisher
     claim: ActiveLiftJobClaim,
     record: PreBroadcastRecord,
   ): Promise<void> {
-    await this.claimCoordinator.transitionOwned(claim, async (current, scope) => {
+    await this.claimCoordinator.runOwnedCheckpointTransaction(claim, async (checkpoint) => {
       const jobId = claim.jobId;
-      if (current.status !== 'broadcast') {
-        // Independent reconciliation may have already advanced the exact job.
+      if (checkpoint.kind === 'advanced') {
+        // Independent reconciliation may have already advanced the exact transaction. This
+        // branch is intentionally read-only; stale callbacks never regain mutation authority.
         if (
-          (current.status === 'included' || current.status === 'finalized')
-          && current.broadcast?.txHash === record.txHash
+          checkpoint.current.broadcast?.txHash === record.txHash
         ) return;
+        throw new Error(
+          `RPC-accepted tx ${record.txHash} does not match advanced LiftJob ${jobId} transaction `
+          + `${checkpoint.current.broadcast?.txHash ?? '(none)'}`,
+        );
+      }
+      const { current, scope } = checkpoint;
+      if (current.status !== 'broadcast') {
         throw new Error(`Cannot record RPC acceptance for LiftJob ${jobId} in state ${current.status}`);
       }
       if (current.broadcast.txHash !== record.txHash) {

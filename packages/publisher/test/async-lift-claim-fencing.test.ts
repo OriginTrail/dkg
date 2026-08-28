@@ -2,12 +2,17 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import {
+  createLiftJobFailureMetadata,
   StaleLiftJobClaimError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
-import type { RawLiftRequest } from '../src/lift-job.js';
-import { AsyncLiftClaimCoordinator } from '../src/async-lift-claim-session.js';
+import type { LiftJob, RawLiftRequest } from '../src/lift-job.js';
+import {
+  AsyncLiftClaimCoordinator,
+  classifyLiftJobOwnershipMode,
+  type LiftJobOwnershipMode,
+} from '../src/async-lift-claim-session.js';
 import {
   KA_VM_EXECUTOR_TX_HASH,
   KA_VM_KA_UAL,
@@ -124,6 +129,73 @@ describe('async-lift claim fencing', () => {
 
     expect(await publisher.getStatus(firstId)).toEqual(firstBefore);
     expect(await publisher.getStatus(secondId)).toEqual(secondBefore);
+  });
+
+  it('classifies every lift-job state through one ownership policy', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-ownership-matrix',
+      now: () => now,
+    });
+    const accepted = await publisher.getStatus(jobId);
+    if (!accepted || accepted.status !== 'accepted') throw new Error('expected accepted job');
+    const claimed = await publisher.claimNext('wallet-a');
+    if (!claimed) throw new Error('expected claimed job');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    const validated = await publisher.getStatus(jobId);
+    if (!validated || validated.status !== 'validated') throw new Error('expected validated job');
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-a', nonce: 4 },
+    });
+    const broadcast = await publisher.getStatus(jobId);
+    if (!broadcast || broadcast.status !== 'broadcast') throw new Error('expected broadcast job');
+
+    const included = {
+      ...broadcast,
+      status: 'included',
+      inclusion: { txHash: KA_VM_EXECUTOR_TX_HASH, blockNumber: 7 },
+    } satisfies LiftJob;
+    const finalized = {
+      ...included,
+      status: 'finalized',
+      finalization: { txHash: KA_VM_EXECUTOR_TX_HASH },
+    } satisfies LiftJob;
+    const heldFailure = {
+      ...broadcast,
+      status: 'failed',
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'broadcast',
+        code: 'rpc_unavailable',
+        message: 'RPC result unknown',
+        errorPayloadRef: 'urn:error:rpc-unknown',
+      }),
+    } satisfies LiftJob;
+    const releasedFailure = {
+      ...broadcast,
+      status: 'failed',
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'broadcast',
+        code: 'tx_reverted',
+        message: 'Transaction reverted',
+        errorPayloadRef: 'urn:error:tx-reverted',
+      }),
+    } satisfies LiftJob;
+    const cases = [
+      ['accepted', accepted, 'released'],
+      ['claimed', claimed, 'lease-bound'],
+      ['validated', validated, 'lease-bound'],
+      ['broadcast', broadcast, 'proof-bound'],
+      ['included', included, 'proof-bound'],
+      ['finalized', finalized, 'released'],
+      ['failed-held', heldFailure, 'proof-bound'],
+      ['failed-proven-ineffective', releasedFailure, 'released'],
+    ] satisfies ReadonlyArray<readonly [string, LiftJob, LiftJobOwnershipMode]>;
+
+    expect(Object.fromEntries(
+      cases.map(([name, job]) => [name, classifyLiftJobOwnershipMode(job)]),
+    )).toEqual(Object.fromEntries(
+      cases.map(([name, , expected]) => [name, expected]),
+    ));
   });
 
   it('does not recover a live pre-broadcast claim owned by another publisher instance', async () => {
