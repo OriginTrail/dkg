@@ -69,10 +69,10 @@ describe('RFC-64 SWM recovery authorization', () => {
       isCatalogReady: () => catalogReady,
     }));
 
-    expect(coordinator.isCatalogReady(PROVIDER)).toBe(false);
+    expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(false);
     expect(coordinator.authorize(mixedPlan())).toBeNull();
     catalogReady = true;
-    expect(coordinator.isCatalogReady(PROVIDER)).toBe(true);
+    expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(true);
     expect(coordinator.authorize(mixedPlan())).not.toBeNull();
   });
 

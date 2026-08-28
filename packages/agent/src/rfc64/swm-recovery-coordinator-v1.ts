@@ -36,14 +36,21 @@ export interface Rfc64SwmRecoveryCoordinatorDependenciesV1 {
 export class Rfc64SwmRecoveryCoordinatorV1 {
   constructor(private readonly deps: Rfc64SwmRecoveryCoordinatorDependenciesV1) {}
 
-  isCatalogReady(providerPeerId: string): boolean {
-    return this.deps.admission.isCatalogReady(providerPeerId);
+  admitSelectedPublic(
+    providerPeerId: string,
+    contextGraphIds: readonly string[],
+  ): boolean {
+    return this.deps.admission.isCatalogReady(providerPeerId)
+      && this.deps.admission.requestSelectedPublicAdmission(
+        providerPeerId,
+        contextGraphIds,
+      );
   }
 
   authorize(
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
   ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
-    if (!this.isCatalogReady(recoveryPlan.providerPeerId)) return null;
+    if (!this.deps.admission.isCatalogReady(recoveryPlan.providerPeerId)) return null;
     const selectedPublic = new Set(this.deps.admission.selectedPublicContextGraphIds());
     const canonicalTargets = canonicalizeRfc64SwmRecoveryTargetsV1(recoveryPlan.targets);
     if (canonicalTargets === null) return null;
@@ -64,10 +71,7 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       .filter(({ lane }) => lane === 'selected-public')
       .map(({ contextGraphId }) => contextGraphId);
     const publicAccepted = requestedPublic.length > 0
-      && this.deps.admission.requestSelectedPublicAdmission(
-        recoveryPlan.providerPeerId,
-        requestedPublic,
-      );
+      && this.admitSelectedPublic(recoveryPlan.providerPeerId, requestedPublic);
     const acceptedTargets = eligible.filter(
       ({ lane }) => lane === 'ordinary-private' || publicAccepted,
     );
@@ -85,7 +89,7 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     if (
       !this.deps.admission.isStarted()
       || !this.deps.admission.isPeerAccepted(authorized.providerPeerId)
-      || !this.isCatalogReady(authorized.providerPeerId)
+      || !this.deps.admission.isCatalogReady(authorized.providerPeerId)
     ) {
       throw new Error('RFC-64 SWM recovery provider is not admitted or catalog-ready');
     }

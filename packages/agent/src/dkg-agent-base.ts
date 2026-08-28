@@ -1589,11 +1589,14 @@ export class DKGAgentBase {
    * involved.
    */
   protected readonly queuedSyncOnConnectPeers = new Set<string>();
+  /** Generic owners whose delayed run must survive an RFC-64 exact-plan upgrade. */
+  protected readonly queuedOrdinarySyncOnConnectPeers = new Set<string>();
   protected readonly pendingRfc64SwmRecoveries = new Map<
     string,
     Readonly<{
       plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
       handleSyncError: (remotePeer: string, error: unknown) => void;
+      replayOrdinarySync: boolean;
     }>
   >();
   /** Typed RFC-64 admission and current-configuration validation boundary. */

@@ -286,6 +286,9 @@ export interface SelectedProviderSelectionAgent {
   lastSyncProgressAt: Map<string, number>;
   syncReconcilerBackoff: Map<string, unknown>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
+  rfc64SwmRecoveryCoordinatorV1: {
+    admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;
+  };
   getPeerProtocols: () => Promise<string[]>;
   planSharedMemorySyncContextGraphs: (
     peerId?: string,

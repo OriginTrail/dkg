@@ -1380,6 +1380,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
     expect(ordering).toEqual(['connect', 'catalog-start', 'catalog-complete', 'swm']);
+    await receiver.stop();
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
   });
 
   it('does not admit SWM recovery when shutdown aborts the catalog phase', async () => {
@@ -1433,6 +1435,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await receiver.stop();
 
     expect(queue).not.toHaveBeenCalled();
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
   });
 
   it('schedules a pre-connected private complete provider on the ordinary SWM lane', async () => {

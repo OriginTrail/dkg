@@ -164,7 +164,8 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /** Accept pinned policies and start the first bounded provider pass. */
   startRfc64PublicCatalogBootstrapV1(this: DKGAgent, ctx: OperationContext): void {
     const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
-    if (config === undefined || STATES.has(this)) return;
+    const previous = STATES.get(this);
+    if (config === undefined || (previous !== undefined && !previous.closed)) return;
     const service = this.rfc64PublicCatalogServiceV1;
     if (service === undefined) {
       throw new Error('RFC-64 bootstrap requires the public catalog service');
@@ -268,7 +269,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     }
     state.abortController?.abort(new Error('RFC-64 public catalog bootstrap closing'));
     await state.run?.catch(() => undefined);
-    STATES.delete(this);
   }
 
   /**
