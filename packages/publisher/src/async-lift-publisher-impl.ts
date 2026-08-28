@@ -1,5 +1,5 @@
 import type { PreBroadcastRecord } from './publisher.js';
-import { bestEffortNotify } from './publisher.js';
+import { bestEffortNotify } from './best-effort-notify.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
