@@ -30,6 +30,37 @@ For agent and operator copy/paste setup, model recommendations, and the required
 Query-Catalog-first workflow for small models, see
 [`Run a Local LLM with DKG`](../../docs/use-dkg/local-llm.md).
 
+## Interactive chat from a source checkout
+
+Start the DKG daemon and `llama-server` first. From the DKG repository root,
+this machine can then start an interactive Qwen session against the `testing`
+Context Graph with:
+
+```bash
+DKG_HOME=/Users/lupus/dkg-local \
+pnpm dkg llm \
+  --interactive \
+  --project testing \
+  --model qwen3-8b-q4-k-m \
+  --allow-write
+```
+
+`pnpm dkg` runs the source checkout's built CLI from
+`packages/cli/dist/cli.js`. Build the workspace first if that file is absent or
+stale.
+
+`--allow-write` exposes relevant mutation tools, but a mutation still requires
+an explicit user request. Omit `--allow-write` for the recommended read-only
+chat:
+
+```bash
+DKG_HOME=/Users/lupus/dkg-local \
+pnpm dkg llm \
+  --interactive \
+  --project testing \
+  --model qwen3-8b-q4-k-m
+```
+
 ## Real DKG benchmark
 
 The bundled benchmark uses this production runtime, a real `dkg mcp serve`
