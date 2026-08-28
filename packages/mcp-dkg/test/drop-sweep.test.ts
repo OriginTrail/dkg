@@ -30,7 +30,7 @@
  *    and confirming the schema does NOT reject it.
  *
  * The drop-sweep + tool-count test registers every production-side tool
- * module (all 7 register functions, mirroring `src/index.ts`) so the
+ * module (all 8 register functions, mirroring `src/index.ts`) so the
  * assertions run against the full surface. Adding a new register function in
  * production without adding it here means this file silently under-covers — an
  * explicit regression in the next wave's W?-Q audit.
@@ -42,6 +42,7 @@ import { registerMemorySearchTool } from '../src/tools/memory-search.js';
 import { registerSetupTools } from '../src/tools/setup.js';
 import { registerHealthTools } from '../src/tools/health.js';
 import { registerChatTools } from '../src/tools/chat.js';
+import { registerQueryCatalogTools } from '../src/tools/query-catalog.js';
 import { FakeServer, FakeClient, makeConfig } from './harness.js';
 
 /**
@@ -80,7 +81,7 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
     server = new FakeServer();
     const client = new FakeClient();
     const config = makeConfig();
-    // Mirror src/index.ts (all 7 register* calls). If a new register* call lands
+    // Mirror src/index.ts (all 8 register* calls). If a new register* call lands
     // in production, add it here too.
     registerReadTools(server.asMcpServer(), client.asDkgClient(), config);
     registerAssertionTools(server.asMcpServer(), client.asDkgClient(), config);
@@ -88,6 +89,7 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
     registerSetupTools(server.asMcpServer(), client.asDkgClient(), config);
     registerHealthTools(server.asMcpServer(), client.asDkgClient(), config);
     registerChatTools(server.asMcpServer(), client.asDkgClient(), config);
+    registerQueryCatalogTools(server.asMcpServer(), client.asDkgClient(), config);
   });
 
   it.each(DROPPED_TOOLS)('does not register %s', (name) => {
@@ -123,8 +125,11 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
   // with optional quads + alsoShareSwm [D3], so the count drops by exactly 2.
   // PCA-agent CG registration: +1 explicit on-chain registration tool, taking
   // the full surface from 29 → 30.
-  it('registered surface contains exactly 30 tools (full production surface, post-PR locked count)', () => {
-    expect(server.tools.size).toBe(30);
+  // Query-catalog MCP facade: +3 contract-backed tools (list / run / save),
+  // taking the complete production surface from 30 → 33. List and run are
+  // read-only; save is an explicit local-state mutation.
+  it('registered surface contains exactly 33 tools (full production surface, post-PR locked count)', () => {
+    expect(server.tools.size).toBe(33);
   });
 });
 
