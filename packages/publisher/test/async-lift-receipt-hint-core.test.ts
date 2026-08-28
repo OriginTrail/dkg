@@ -118,7 +118,7 @@ describe('receipt-hint lane: core and evidence', () => {
     const { publisher, jobId, releaseTail } = await h.parkedHintScenario({
       config: {
         chainProofResolver: async () => (verdict === 'pending'
-          ? { status: 'pending' }
+          ? { status: 'pending-mempool' }
           : recoveredResolution()),
       },
     });

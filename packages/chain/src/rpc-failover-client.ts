@@ -41,7 +41,7 @@
 
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
-import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
+import { withSpan, getMetrics, withRetry } from '@origintrail-official/dkg-core';
 import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
@@ -250,6 +250,51 @@ export function resolveCapMs(policy: ReadPolicy, providerCount: number): number 
   if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
   if (providerCount <= 1) return undefined;
   return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
+}
+
+/**
+ * Poll EVERY configured provider once, in parallel, giving each endpoint ONE in-place retry for
+ * transient failures before it counts as unable to answer (PR #2373 r3 3880005809). Endpoint
+ * classification, retry delay, and cancellation live HERE in the transport layer — domain reads
+ * keep only their per-endpoint construction and their decision over the settled views.
+ *
+ * Returns one slot per provider (`null` where the endpoint could not answer even after its
+ * retry), or `null` for the WHOLE poll when the signal aborts — the abort COMPLETES the call
+ * rather than waiting out a stalled endpoint. The retry rides the canonical core `withRetry`
+ * (abort-aware sleep), so deterministic failures — whatever `isRetryable` rejects — surface
+ * immediately as an unanswered slot with no second ask.
+ */
+export async function readAllProvidersWithTransientRetry<T>(
+  providers: readonly JsonRpcProvider[],
+  readOne: (provider: JsonRpcProvider) => Promise<T | null>,
+  opts: {
+    retryDelayMs: number;
+    isRetryable: (err: unknown) => boolean;
+    signal?: AbortSignal;
+  },
+): Promise<Array<T | null> | null> {
+  if (opts.signal?.aborted) return null;
+  const aborted = opts.signal
+    ? new Promise<null>((resolve) => {
+        opts.signal?.addEventListener('abort', () => resolve(null), { once: true });
+      })
+    : null;
+  const withOneTransientRetry = (provider: JsonRpcProvider) => withRetry(
+    () => readOne(provider),
+    {
+      maxAttempts: 2,
+      baseDelayMs: opts.retryDelayMs,
+      maxDelayMs: opts.retryDelayMs,
+      jitter: 0,
+      isRetryable: opts.isRetryable,
+      signal: opts.signal,
+    },
+  );
+  const poll = Promise.allSettled(providers.map(withOneTransientRetry))
+    .then((settled) => settled.map((r) => (r.status === 'fulfilled' ? r.value : null)));
+  const result = aborted ? await Promise.race([poll, aborted]) : await poll;
+  if (!result || opts.signal?.aborted) return null;
+  return result;
 }
 
 export class RpcFailoverClient {

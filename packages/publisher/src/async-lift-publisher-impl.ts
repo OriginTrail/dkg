@@ -1,6 +1,7 @@
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from './abort-boundary.js';
+import { ChainProofRetrySchedule, chainProofScheduleIdentity } from './chain-proof-retry-schedule.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -148,31 +149,6 @@ import {
  * - `'rolled-back-pre-send'` the write-ahead was attempted but the fsync/transition failed
  *                            and was rolled back to `'validated'`; the tx was never sent.
  */
-/**
- * GH#2270 PR-3 r18 (🔴 3816322914) — the chain-proof backoff schedule. Not configurable: these
- * govern how often a HELD job is re-asked, which is a protocol-pacing question rather than a
- * deployment one, and the two knobs that do vary by deployment (batch size, time budget) are on
- * the config. The ceiling matters as much as the growth — a job held across a long incident must
- * still be asked periodically, never deferred to effectively never.
- */
-const CHAIN_PROOF_BACKOFF_BASE_MS = 30_000;
-const CHAIN_PROOF_BACKOFF_MAX_MS = 10 * 60_000;
-/**
- * The tighter ceiling for an `awaiting-confirmations` pending verdict (receipt observed, depth
- * not reached). That answer changes block by block, so the anti-herd ladder above — built for
- * questions whose answer may not change for hours — would charge up to ten minutes for a state
- * typically moments from resolution. This value is the TRUE post-jitter ceiling: the ladder
- * base is capped at `ceiling / (1 + jitter)` so the jittered delay can never exceed it, while
- * jitter keeps its spread below the ceiling. Scheduling-only: the phase never reaches a
- * disposition.
- */
-const CHAIN_PROOF_AWAITING_CONFIRMATIONS_BACKOFF_MAX_MS = 2 * 60_000;
-/** Jitter as a FRACTION of the computed backoff, so spread scales with the wait it spreads. */
-const CHAIN_PROOF_BACKOFF_JITTER = 0.25;
-const CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS = Math.floor(
-  CHAIN_PROOF_AWAITING_CONFIRMATIONS_BACKOFF_MAX_MS / (1 + CHAIN_PROOF_BACKOFF_JITTER),
-);
-
 type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
 
 /**
@@ -217,7 +193,7 @@ function assertNoLegacyChainRecoveryResolver(config: AsyncLiftPublisherConfig): 
     'AsyncLiftPublisherConfig.chainRecoveryResolver was removed in GH#2270 PR-3: use '
     + '`chainProofResolver`, whose resolver takes an AsyncLiftChainProofLookup '
     + '({ txHash, walletId, nonce }) and returns an AsyncLiftChainProofResolution verdict '
-    + '(recovered / reverted / unrecognized / pending / not-found / inconclusive) instead of '
+    + '(recovered / reverted / unrecognized / pending-mempool / pending-awaiting-confirmation / not-found / inconclusive) instead of '
     + 'taking a job and returning a recovery result or null.',
   );
 }
@@ -475,7 +451,10 @@ export class TripleStoreAsyncLiftPublisher
    * one batch per pass. What must never happen is the inverse, and does not: skipping a job is a
    * pure no-op, so a DELAYED lookup can never itself authorize a resend.
    */
-  private readonly chainProofNextDueAt = new Map<string, { dueAt: number; attempts: number }>();
+  private readonly chainProofRetrySchedule = new ChainProofRetrySchedule({
+    now: () => this.now(),
+    rand: () => this.rand(),
+  });
   /**
    * r26 (🔴 3821028709) — jobs whose MUTATING recovery repair is currently running. A deadline
    * may stop the dispatcher waiting, but it must never let a second pass enter the same repair
@@ -521,7 +500,7 @@ export class TripleStoreAsyncLiftPublisher
    * Rotates the live-lane iteration start across passes. The pass deadline may truncate the walk,
    * and `list()` order is stable, so without rotation the same head jobs would be re-asked every
    * pass while the tail starved behind a slow resolver. In-memory for the same reason as
-   * `chainProofNextDueAt`: a restart resetting the rotation is safe, skipping is a pure no-op.
+   * the chain-proof retry schedule: a restart resetting the rotation is safe, skipping is a pure no-op.
    */
   private reconcilePassOffset = 0;
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
@@ -1303,7 +1282,9 @@ export class TripleStoreAsyncLiftPublisher
           const resolution = await this.resolveChainProofWithinSignal(origin.lookup, signal);
           if (resolution === null) { unresolved += 1; return; }
           if (resolution.status !== 'recovered') {
-            if (resolution.status === 'pending' || resolution.status === 'inconclusive') {
+            if (resolution.status === 'pending-mempool'
+              || resolution.status === 'pending-awaiting-confirmation'
+              || resolution.status === 'inconclusive') {
               // Receipt not yet final at the operator's confirmation depth (or the read could
               // not settle): keep the hint and let the active cadence retry before settle does.
               unresolved += 1;
@@ -2221,7 +2202,8 @@ export class TripleStoreAsyncLiftPublisher
     // Bound 1 — only jobs whose backoff has elapsed. Jobs asked recently that established nothing
     // are deferred, so the population ROTATES through the batch rather than the head of the list
     // being re-asked every pass. No cursor is needed: the due times are the rotation.
-    const dueJobs = heldJobs.filter((job) => (this.chainProofNextDueAt.get(job.jobId)?.dueAt ?? 0) <= startedAt);
+    const dueJobs = heldJobs.filter((job) =>
+      this.chainProofRetrySchedule.isDue(job.jobId, chainProofScheduleIdentity(job), startedAt));
 
     // r19 (🔴 3816490915) — the lookup is derived BEFORE the batch is taken, because a job that
     // cannot form one costs no round trip and must therefore cost no batch slot either. Deriving
@@ -2259,18 +2241,19 @@ export class TripleStoreAsyncLiftPublisher
           const outcome = await this.dispatchOneHeldJob(job, lookup, deadline);
           if (outcome.kind === 'settled') {
             dispatched += outcome.jobs;
-            this.chainProofNextDueAt.delete(job.jobId);
+            this.chainProofRetrySchedule.settled(job.jobId);
           } else if (outcome.kind === 'defer') {
-            this.deferNextChainProofAttempt(job.jobId, { cadence: outcome.cadence });
+            this.chainProofRetrySchedule.defer(job.jobId, chainProofScheduleIdentity(job), outcome.cadence);
           }
           // 'stale': the verdict was about a record that no longer exists, so it may not touch
-          // the successor's schedule — not even the attempt count. The successor's cadence is
-          // earned by its own turns.
+          // the successor's schedule — not even the attempt count. The schedule's identity
+          // awareness closes the other half (r2 3879930149): the predecessor's accumulated
+          // ladder can neither delay the successor's dueness nor seed its attempt count.
         } catch {
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
           // every pass and crowd out jobs that could actually settle.
-          this.deferNextChainProofAttempt(job.jobId);
+          this.chainProofRetrySchedule.defer(job.jobId, chainProofScheduleIdentity(job), 'default');
           continue;
         }
       }
@@ -2281,34 +2264,6 @@ export class TripleStoreAsyncLiftPublisher
       deadline.abort();
     }
     return dispatched;
-  }
-
-  /**
-   * r18 (🔴 3816322914) — a turn that established nothing defers the next one, capped and
-   * jittered. Capped so a long-held job is still asked periodically rather than drifting to never;
-   * jittered so a population held by ONE incident — which is how they arrive — does not come due
-   * in lockstep and rebuild the thundering herd the batch bound exists to prevent.
-   */
-  private deferNextChainProofAttempt(
-    jobId: string,
-    opts?: { cadence?: 'awaiting-confirmations' | 'default' },
-  ): void {
-    const attempts = (this.chainProofNextDueAt.get(jobId)?.attempts ?? 0) + 1;
-    // The awaiting-confirmations cadence tightens only the CEILING: growth and jitter are
-    // unchanged, so a population held by one incident still spreads, and the ONE attempt count
-    // stays shared across passes that alternate between phases. The tight lane caps the ladder
-    // BASE at ceiling/(1+jitter), so 2 minutes is the true post-jitter bound.
-    const capMs = opts?.cadence === 'awaiting-confirmations'
-      ? CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS
-      : CHAIN_PROOF_BACKOFF_MAX_MS;
-    const backoffMs = Math.min(
-      CHAIN_PROOF_BACKOFF_BASE_MS * 2 ** (attempts - 1),
-      capMs,
-    );
-    this.chainProofNextDueAt.set(jobId, {
-      dueAt: this.now() + backoffMs + Math.floor(this.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
-      attempts,
-    });
   }
 
   /** One held job's turn: ask the chain, then execute the disposition the policy module decides. */
@@ -2360,7 +2315,7 @@ export class TripleStoreAsyncLiftPublisher
     if (settled > 0) return { kind: 'settled', jobs: settled };
     return {
       kind: 'defer',
-      cadence: resolution.status === 'pending' && resolution.phase === 'awaiting-confirmations'
+      cadence: resolution.status === 'pending-awaiting-confirmation'
         ? 'awaiting-confirmations'
         : 'default',
     };

@@ -18,6 +18,7 @@ import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { PublishTransactionResolution } from '@origintrail-official/dkg-chain';
 import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
@@ -474,21 +475,17 @@ export interface AsyncKnowledgeAssetVmPublishJobHandler {
  * guessing, which is why nothing may collapse into it that the chain actually answered.
  */
 export type AsyncLiftChainProofResolution =
-  /** The chain carries a publish, mapped to evidence this node can finalize with. */
+  /** The chain carries a publish, mapped to evidence this node can finalize with — the
+   *  publisher-side image of the chain contract's `confirmed`. */
   | { status: 'recovered'; recovery: AsyncLiftPublisherRecoveryResult }
-  /** Mined with a failure receipt: the transaction is accounted for and published nothing. */
-  | { status: 'reverted' }
-  /** Mined and successful, but carrying no publish the adapter recognizes. Not absence. */
-  | { status: 'unrecognized' }
-  /** Not yet a mined verdict. Never absence. The optional `phase` mirrors the chain contract:
-   *  a SCHEDULING-ONLY classification (`mempool` = no receipt observed; `awaiting-confirmations`
-   *  = receipt observed, depth not reached) that may tighten the re-ask cadence and nothing
-   *  else — no disposition, stamp, or release may consume it. Absent = legacy producer, treated
-   *  as `mempool` cadence-wise. */
-  | { status: 'pending'; phase?: 'mempool' | 'awaiting-confirmations' }
-  /** The node was asked for the TRANSACTION and does not have it: the only proven absence. */
-  | { status: 'not-found' }
-  /** Nothing was established. Never absence, never proof. */
+  /**
+   * Every non-confirmed chain verdict is the CHAIN contract, not a copy (r2 3879930), so the
+   * boundary has one owner: `reverted`, `unrecognized`, `pending` (with its optional
+   * scheduling-only `phase`), and `not-found` — semantics documented on
+   * {@link PublishTransactionResolution}. A resolver passes them through verbatim.
+   */
+  | Exclude<PublishTransactionResolution, { status: 'confirmed' }>
+  /** Publisher-only: nothing was established. Never absence, never proof. */
   | { status: 'inconclusive' };
 
 /**

@@ -16,8 +16,7 @@ import {
   decodeKnowledgeAssetMerkleRootCount,
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
-import { isContractViewRetryable } from './rpc-failover-client.js';
-import { withRetry } from '@origintrail-official/dkg-core';
+import { isContractViewRetryable, readAllProvidersWithTransientRetry } from './rpc-failover-client.js';
 
 /** One in-place retry per endpoint for transient transport blips in the unanimity poll. */
 const VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS = 250;
@@ -170,41 +169,21 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         blockNumber,
       };
     };
-    // r14 (3814017390) — the cancellation boundary is honoured rather than accepted and ignored:
-    // an already-aborted signal never starts the poll, and an abort mid-poll is what the caller
-    // gets back. The wider point — that this is a second orchestration path next to the canonical
-    // transport — is answered on that thread and queued with the recovery-mixin extraction.
-    if (options.signal?.aborted) return null;
-    // An abort must COMPLETE the call, not merely be observed after every endpoint has settled:
-    // one stalled provider would otherwise hold the caller for as long as it stalls.
-    const aborted = options.signal
-      ? new Promise<null>((resolve) => {
-          options.signal?.addEventListener('abort', () => resolve(null), { once: true });
-        })
-      : null;
-    // A transient transport blip on ONE endpoint must not void the whole unanimity poll: the
-    // endpoint is retried once in place (via the canonical abort-aware retry primitive, policy
-    // configured at this call site) before it counts as unable to answer. The unanimity
-    // predicate below is UNTOUCHED — r12's rule keeps its exact meaning ("every configured
-    // endpoint reports a complete view"), judged over the retried answer. Deterministic
-    // classifications (CALL_EXCEPTION and the rest of the non-retryable set) still disqualify
-    // immediately: re-asking cannot change their answer, and second-guessing them here would
-    // weaken the currency decision this poll authorizes.
-    const readOneWithTransientRetry = (provider: JsonRpcProvider) => withRetry(
-      () => readOne(provider),
-      {
-        maxAttempts: 2,
-        baseDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
-        maxDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
-        jitter: 0,
-        isRetryable: isContractViewRetryable,
-        signal: options.signal,
-      },
-    );
-    const poll = Promise.allSettled(this.providers.map(readOneWithTransientRetry));
-    const settled = aborted ? await Promise.race([poll, aborted]) : await poll;
-    if (!settled || options.signal?.aborted) return null;
-    const views = settled.flatMap((r) => (r.status === 'fulfilled' && r.value ? [r.value] : []));
+    // r14 (3814017390) / r3 (3880005809) — endpoint retry, cancellation, and settlement are the
+    // TRANSPORT layer's job: `readAllProvidersWithTransientRetry` polls every endpoint in
+    // parallel, gives each ONE in-place retry for transient failures (deterministic
+    // classifications like CALL_EXCEPTION disqualify with no second ask — re-asking cannot
+    // change their answer), and completes on abort rather than waiting out a stalled endpoint.
+    // This method keeps only what is domain: the per-endpoint pinned read above, and the
+    // unanimity decision below — r12's rule keeps its exact meaning ("every configured endpoint
+    // reports a complete view"), judged over the retried answers.
+    const settled = await readAllProvidersWithTransientRetry(this.providers, readOne, {
+      retryDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
+      isRetryable: isContractViewRetryable,
+      signal: options.signal,
+    });
+    if (!settled) return null;
+    const views = settled.flatMap((view) => (view ? [view] : []));
     // r12 (3813506086) — the poll must be UNANIMOUS. Taking the highest block among the endpoints
     // that happened to answer does not establish currency: the endpoint whose read failed is
     // exactly the one that might have been ahead, so a stale-but-complete view would win and an
