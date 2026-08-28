@@ -170,7 +170,13 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   const includePartitions = layer === 'wm' && sparql === defaultSparql;
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions),
+    () => executeQuery(sparql, {
+      contextGraphId,
+      includeSharedMemory: includeShared,
+      graphSuffix,
+      view: queryView,
+      includeContextGraphPartitions: includePartitions,
+    }),
     [sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions],
     0
   );

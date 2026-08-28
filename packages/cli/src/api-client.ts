@@ -25,6 +25,8 @@ import type {
   CatchupStatusResponse,
   CatchupStatusWireResponse,
 } from './catchup-status.js';
+import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
+import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -52,8 +54,10 @@ export type ContextGraphJoinPolicyUpdate =
     };
 
 export type QueryResult =
-  | { type: 'bindings'; bindings: Array<Record<string, string>> }
-  | { type: 'boolean'; value: boolean }
+  | PublicQueryResult<
+      Record<string, string>,
+      { subject: string; predicate: string; object: string; graph: string }
+    >
   | { type?: undefined; [key: string]: unknown };
 
 export interface PreSignedAuthorAttestationPayload {
@@ -1510,7 +1514,7 @@ export class ApiClient {
     });
   }
 
-  async readQueryCatalog(contextGraphId: string): Promise<{ result: QueryResult }> {
+  async readQueryCatalog(contextGraphId: string): Promise<QueryCatalogReadResponse> {
     return this.post('/api/profile/query-catalog/read', { contextGraphId });
   }
 

@@ -867,6 +867,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onTabChange={tab => handleSubGraphTabChange(activeSubGraph, tab)}
             initialEnabledLayers={subGraphInitialEnabledLayers ?? undefined}
             onEnabledLayersChange={handleDetailEnabledLayersChange}
+            onOpenQueryCatalog={() => {
+              setActiveSubGraphSync(null);
+              setActiveLayer('query');
+            }}
           />
         </>
       )}

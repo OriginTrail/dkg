@@ -987,6 +987,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1
         version: 1.27.1(zod@3.25.76)
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
       '@origintrail-official/dkg-rdf-utils':
         specifier: workspace:*
         version: link:../rdf-utils

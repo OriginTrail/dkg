@@ -9,6 +9,14 @@ import {
   put,
   del,
 } from './http.js';
+import type { GetView } from '@origintrail-official/dkg-core';
+import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
+import type {
+  PublicQueryQuad,
+  PublicQueryResponse,
+  PublicQueryResult,
+} from '@origintrail-official/dkg-core/query-result';
+import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
 // keep working (barrel), and the PCA client from its extracted module.
@@ -600,9 +608,56 @@ export async function importFile(
 // identical `/api/query` POSTs for the WM/SWM/VM fan-out against a
 // multi-GB Oxigraph store. Each duplicate adds seconds of wall time on
 // large stores. Inflight dedup collapses the dupes to one.
-const inflightQuery = new Map<string, Promise<{ result: any }>>();
+export type QueryExecutionResult = PublicQueryResult;
+export type QueryExecutionResponse = PublicQueryResponse;
 
-export function postQueryDeduped(body: Record<string, unknown>): Promise<{ result: any }> {
+export function normalizeQueryExecutionResponse(
+  response: unknown,
+  sparql: string,
+): QueryExecutionResponse {
+  const envelope = response && typeof response === 'object' && !Array.isArray(response)
+    ? response as Record<string, unknown>
+    : {};
+  const candidate = envelope.result ?? envelope.results;
+  const raw = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : {};
+
+  if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
+    return { result: { type: 'boolean', value: raw.value } };
+  }
+  if (raw.type === 'quads' && Array.isArray(raw.quads)) {
+    return { result: { type: 'quads', quads: raw.quads as PublicQueryQuad[] } };
+  }
+  if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
+    return { result: { type: 'bindings', bindings: raw.bindings as Array<Record<string, unknown>> } };
+  }
+
+  const operation = classifySparqlOperation(sparql);
+  const bindings = Array.isArray(raw.bindings)
+    ? raw.bindings as Array<Record<string, unknown>>
+    : [];
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const term = bindings[0]?.result;
+    const value = term && typeof term === 'object' && !Array.isArray(term)
+      ? (term as { value?: unknown }).value
+      : term;
+    return { result: { type: 'boolean', value: String(value).toLowerCase() === 'true' } };
+  }
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return {
+      result: {
+        type: 'quads',
+        quads: Array.isArray(raw.quads) ? raw.quads as PublicQueryQuad[] : [],
+      },
+    };
+  }
+  return { result: { type: 'bindings', bindings } };
+}
+
+const inflightQuery = new Map<string, Promise<QueryExecutionResponse>>();
+
+export function postQueryDeduped(body: Record<string, unknown>): Promise<QueryExecutionResponse> {
   const key = JSON.stringify(body);
   const existing = inflightQuery.get(key);
   if (existing) return existing;
@@ -617,7 +672,7 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
       const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
       throw new HttpError(res.status, msg, errBody);
     }
-    return res.json() as Promise<{ result: any }>;
+    return normalizeQueryExecutionResponse(await res.json(), String(body.sparql ?? ''));
   })().finally(() => {
     inflightQuery.delete(key);
   });
@@ -625,21 +680,23 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
   return promise;
 }
 
+export type QueryExecutionView = GetView;
+
+export interface QueryExecutionOptions {
+  contextGraphId?: string;
+  subGraphName?: string;
+  includeSharedMemory?: boolean;
+  graphSuffix?: '_shared_memory';
+  view?: QueryExecutionView;
+  /** Include assertion partitions for callers whose query constrains them. */
+  includeContextGraphPartitions?: boolean;
+}
+
 export const executeQuery = (
   sparql: string,
-  contextGraphId?: string,
-  includeSharedMemory?: boolean,
-  graphSuffix?: '_shared_memory',
-  view?: 'verified-memory' | 'shared-working-memory',
-  // Opt the CG-scoped allow-list into the assertion partitions. Without it the
-  // daemon restricts `GRAPH ?g { … }` to the static set
-  // { <cg>, <cg>/_meta, <cg>/_shared_memory_meta } (see the long note on
-  // `listWmAssertions`), so a `GRAPH ?g` enumeration of WM content comes back
-  // empty. Callers that read raw partition triples (e.g. the WM layer view)
-  // pass `true`.
-  includeContextGraphPartitions?: boolean,
+  options: QueryExecutionOptions = {},
 ) =>
-  postQueryDeduped({ sparql, contextGraphId, includeSharedMemory, graphSuffix, view, includeContextGraphPartitions });
+  postQueryDeduped({ sparql, ...options });
 
 /**
  * Map of assertion name → deterministic Option-1 UAL (`dkg:reservedUal`,
@@ -655,7 +712,7 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
           <http://dkg.io/ontology/reservedUal> ?ual .
     }
   }`;
-  const data = await executeQuery(sparql, contextGraphId);
+  const data = await executeQuery(sparql, { contextGraphId });
   const map: Record<string, string> = {};
   for (const b of (data?.result?.bindings ?? [])) {
     const name = typeof b.name === 'string' ? b.name : b.name?.value;
@@ -679,6 +736,13 @@ export const writeProfileQueryCatalog = (
   post<any>('/api/profile/query-catalog/write', {
     contextGraphId,
     quads,
+  });
+
+export type ProfileQueryCatalogReadResponse = QueryCatalogReadResponse;
+
+export const readProfileQueryCatalog = (contextGraphId: string) =>
+  post<ProfileQueryCatalogReadResponse>('/api/profile/query-catalog/read', {
+    contextGraphId,
   });
 
 // --- Knowledge Assets (OT-RFC-43 §10.5 — GitHub-shaped KA surface) ---
@@ -1183,7 +1247,7 @@ export async function listAssertions(
       }
       FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))
     }`;
-    const data = await executeQuery(sparql, contextGraphId);
+    const data = await executeQuery(sparql, { contextGraphId });
     const bindings: any[] = data?.result?.bindings ?? [];
     const published = new Set<string>();
     const rows: Array<{ key: string; name: string; subGraph?: string; g: string }> = [];
@@ -1426,7 +1490,7 @@ export async function listAssertions(
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
     if (subGraph === 'meta') continue;
-    const key = `${subGraph ?? ''} ${name}`;
+    const key = `${subGraph ?? ''}\0${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const cnt = countByGraph.get(g);

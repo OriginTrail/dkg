@@ -24,6 +24,8 @@ import {
   fetchSuccessRates,
   fetchExtractionStatus,
   executeQuery,
+  readProfileQueryCatalog,
+  writeProfileQueryCatalog,
   listAssertions,
   ensureContextGraphOnChain,
   fetchAssertionUals,
@@ -311,11 +313,59 @@ describe('UI API tests', () => {
 
   describe('POST endpoints', () => {
     it('executeQuery sends sparql and contextGraphId', async () => {
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-1');
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-1' });
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
       const body = JSON.parse(call?.body ?? '{}');
       expect(body.sparql).toBe('SELECT * WHERE { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('cg-1');
+    });
+
+    it('executeQuery sends the daemon working-memory view', async () => {
+      await executeQuery(
+        'SELECT ?incident WHERE { ?incident ?p ?o }',
+        { contextGraphId: 'cg-listenerboi', view: 'working-memory' },
+      );
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
+      expect(JSON.parse(call?.body ?? '{}').view).toBe('working-memory');
+    });
+
+    it('executeQuery maps named scope and partition options into the request body', async () => {
+      await executeQuery('SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }', {
+        contextGraphId: 'cg-scoped',
+        subGraphName: 'incidents',
+        view: 'shared-working-memory',
+        includeSharedMemory: true,
+        includeContextGraphPartitions: true,
+      });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        sparql: 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }',
+        contextGraphId: 'cg-scoped',
+        subGraphName: 'incidents',
+        view: 'shared-working-memory',
+        includeSharedMemory: true,
+        includeContextGraphPartitions: true,
+      });
+    });
+
+    it('readProfileQueryCatalog uses the dedicated profile endpoint', async () => {
+      await readProfileQueryCatalog('cg-listenerboi');
+      const call = requestLog.find(
+        r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/read'),
+      );
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-listenerboi' });
+    });
+
+    it('writeProfileQueryCatalog sends catalog quads to the dedicated endpoint', async () => {
+      const quads = [{ subject: 'urn:q', predicate: 'urn:p', object: '"value"', graph: '' }];
+      await writeProfileQueryCatalog('cg-listenerboi', quads);
+      const call = requestLog.find(
+        r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/write'),
+      );
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-listenerboi',
+        quads,
+      });
     });
 
     it('knowledgeAssetPublish rejects non-decimal publisher identity overrides before POSTing', async () => {
@@ -771,11 +821,11 @@ describe('UI API tests', () => {
   describe('executeQuery in-flight dedup', () => {
     it('coalesces concurrent identical queries to one /api/query POST', async () => {
       const results = await Promise.all([
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
       ]);
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
@@ -783,14 +833,36 @@ describe('UI API tests', () => {
       expect(queryCalls).toHaveLength(1);
       expect(results).toHaveLength(5);
       for (const r of results) {
-        expect(r).toEqual({ result: { bindings: [] } });
+        expect(r).toEqual({ result: { type: 'bindings', bindings: [] } });
       }
+    });
+
+    it('normalizes current and legacy query result shapes at the API boundary', async () => {
+      responseOverrides.push(
+        {
+          match: (url) => url.startsWith('/api/query'),
+          status: 200,
+          body: { result: { bindings: [{ result: 'false' }] } },
+        },
+        {
+          match: (url) => url.startsWith('/api/query'),
+          status: 200,
+          body: { result: { type: 'quads', quads: [{ subject: 's', predicate: 'p', object: 'o' }] } },
+        },
+      );
+
+      await expect(executeQuery('ASK { ?s ?p ?o }')).resolves.toEqual({
+        result: { type: 'boolean', value: false },
+      });
+      await expect(executeQuery('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }')).resolves.toEqual({
+        result: { type: 'quads', quads: [{ subject: 's', predicate: 'p', object: 'o' }] },
+      });
     });
 
     it('does not coalesce when args differ', async () => {
       await Promise.all([
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-a'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-b'),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-a' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-b' }),
       ]);
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
@@ -799,8 +871,8 @@ describe('UI API tests', () => {
     });
 
     it('issues a fresh fetch once the prior request has settled', async () => {
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-sequential');
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-sequential');
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-sequential' });
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-sequential' });
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
       );

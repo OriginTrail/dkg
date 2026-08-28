@@ -62,8 +62,22 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC, getMetrics } from '@origintrail-official/dkg-core';
+import {
+  decodeQueryCatalogBindings,
+  QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
+} from '@origintrail-official/dkg-core/query-catalog';
+
+function listenerBoiLegacyQueryCatalogView(
+  queryIri: string,
+  catalogIri: string,
+): import('@origintrail-official/dkg-core').GetView | undefined {
+  return queryIri.startsWith('urn:listenerboi:query:')
+    || catalogIri.startsWith('urn:listenerboi:catalog:')
+    ? 'working-memory'
+    : undefined;
+}
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -237,8 +251,13 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  respondIfStoreUnavailable,
   respondIfChainRpcTransportError,
 } from '../http-utils.js';
+import {
+  createStoreQueryRequestLifecycle,
+  isApiQueryCallerDisconnected,
+} from '../store-query-lifecycle.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -586,7 +605,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
 
       const literalSize = validateWritableQuadLiteralSizes("quads", normalized);
       if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
-      await agent.store.insert(normalized);
+      await agent.store.insert(normalized, {
+        source: 'daemon.profile.queryCatalog.insert',
+      });
       return jsonResponse(res, 200, {
         ok: true,
         contextGraphId: resolvedContextGraphId,
@@ -609,10 +630,27 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const contextGraphId = parsed.contextGraphId;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
+    const catalogReadCallerAgentAddress = requestToken
+      ? agent.resolveAgentByToken(requestToken)
+      : undefined;
+    const catalogReadIsNodeAdmin = !!requestToken
+      && validTokens.has(requestToken)
+      && catalogReadCallerAgentAddress === undefined;
+    if (
+      !catalogReadIsNodeAdmin
+      && !(await agent.canReadContextGraph(contextGraphId, {
+        callerAgentAddress: catalogReadCallerAgentAddress,
+      }))
+    ) {
+      return jsonResponse(res, 403, {
+        error: `Not authorized to read query catalog for context graph "${contextGraphId}".`,
+      });
+    }
+
     const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
     const query = `PREFIX prof: <http://dkg.io/ontology/profile/>
 PREFIX schema: <http://schema.org/>
-SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?rank ?catalogName ?catalogDescription ?catalogRank
+SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?queryParameters ?executionView ?view ?rank ?catalogName ?catalogDescription ?catalogRank
 WHERE {
   GRAPH <${graph}> {
     ?q a prof:SavedQuery ;
@@ -622,29 +660,103 @@ WHERE {
     OPTIONAL { ?q prof:displayName ?name }
     OPTIONAL { ?q schema:description ?description }
     OPTIONAL { ?q prof:resultColumn ?resultColumn }
+    OPTIONAL { ?q prof:queryParameters ?queryParameters }
+    OPTIONAL { ?q prof:executionView ?executionView }
+    OPTIONAL { ?q prof:view ?view }
     OPTIONAL { ?q prof:rank ?rank }
     OPTIONAL { ?catalog prof:displayName ?catalogName }
     OPTIONAL { ?catalog schema:description ?catalogDescription }
     OPTIONAL { ?catalog prof:rank ?catalogRank }
   }
-}`;
+}
+ORDER BY ?q
+LIMIT 5001`;
 
+    const queryLifecycle = createStoreQueryRequestLifecycle(
+      req,
+      res,
+      'api.profile.query_catalog.read',
+    );
+    let result;
     try {
-      const result = await agent.store.query(query);
-      const bindings = result.type === "bindings" ? result.bindings : [];
-      return jsonResponse(res, 200, {
-        contextGraphId,
-        graph,
-        result: {
-          type: "bindings",
-          bindings,
-        },
+      result = await agent.store.query(query, {
+        signal: queryLifecycle.signal,
+        priority: queryLifecycle.priority,
+        source: queryLifecycle.source,
+        maxResponseBytes: 1024 * 1024,
       });
     } catch (err: any) {
-      return jsonResponse(res, 400, {
+      if (isApiQueryCallerDisconnected(err) || queryLifecycle.signal.aborted) {
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      if (respondIfStoreUnavailable(res, err) !== null) return;
+      if (err?.code === 'STORE_RESPONSE_TOO_LARGE') {
+        return jsonResponse(res, 413, {
+          error: err?.message ?? 'Query catalog response exceeded the byte limit',
+          code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+          limitBytes: 1024 * 1024,
+          ...(typeof err?.actualBytes === 'number' ? { actualBytes: err.actualBytes } : {}),
+        });
+      }
+      return jsonResponse(res, 500, {
         error: err?.message ?? "Query catalog read failed",
       });
+    } finally {
+      queryLifecycle.dispose();
     }
+
+    if (result.type !== 'bindings') {
+      return jsonResponse(res, 500, {
+        error: `Query catalog SELECT returned unexpected result type: ${result.type}`,
+        code: 'QUERY_CATALOG_INVALID_RESULT_TYPE',
+      });
+    }
+    const rawBindings = result.bindings;
+    if (rawBindings.length > 5000) {
+      return jsonResponse(res, 413, {
+        error: 'Query catalog result exceeds the 5000-row limit.',
+        code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+        limitRows: 5000,
+      });
+    }
+    let items;
+    try {
+      items = decodeQueryCatalogBindings(rawBindings, {
+        legacyView: listenerBoiLegacyQueryCatalogView,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 422, {
+        error: err?.message ?? 'Stored query catalog data is invalid',
+        code: 'QUERY_CATALOG_INVALID_DATA',
+      });
+    }
+    const payload = {
+      schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
+      capabilities: QUERY_CATALOG_READ_CAPABILITIES,
+      contextGraphId,
+      graph,
+      items,
+      result: {
+        type: "bindings" as const,
+        // Additive compatibility field: preserve the exact SELECT rows older
+        // clients received, including RDF lexical forms and duplicates. The
+        // decoded/deduplicated contract lives exclusively in `items`.
+        bindings: rawBindings,
+      },
+    };
+    const responseBytes = Buffer.byteLength(JSON.stringify(payload));
+    getMetrics().storeQueryResultRows.record(rawBindings.length, { source: 'api.profile.query_catalog.read' });
+    getMetrics().storeQueryResultBytesEstimate.record(responseBytes, { source: 'api.profile.query_catalog.read' });
+    if (responseBytes > 1024 * 1024) {
+      return jsonResponse(res, 413, {
+        error: 'Query catalog response exceeds the 1 MiB serialized-response limit.',
+        code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+        limitBytes: 1024 * 1024,
+        actualBytes: responseBytes,
+      });
+    }
+    return jsonResponse(res, 200, payload);
   }
 
   // POST /api/shared-memory/catchup

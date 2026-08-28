@@ -58,7 +58,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -108,7 +108,6 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import {
-  getApiQueryPriority,
   type ApiQueryPriority,
 } from '../api-query-priority.js';
 export {
@@ -333,6 +332,11 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import {
+  API_QUERY_CALLER_DISCONNECTED,
+  createStoreQueryRequestLifecycle,
+  type StoreQueryRequestLifecycle,
+} from '../store-query-lifecycle.js';
 
 
 // Keep these in sync with VerifyCollector's hard enforcement in
@@ -340,22 +344,9 @@ import type { RequestContext } from './context.js';
 // HTTP input is rejected before the agent starts VERIFY work.
 const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
-const API_QUERY_CALLER_DISCONNECTED = 'API_QUERY_CALLER_DISCONNECTED';
-
-export interface ApiQueryRequestLifecycle {
-  readonly signal: AbortSignal;
+export interface ApiQueryRequestLifecycle extends StoreQueryRequestLifecycle {
   readonly priority: ApiQueryPriority;
   readonly source: 'api.query';
-  dispose(): void;
-}
-
-class ApiQueryCallerDisconnectedError extends Error {
-  readonly code = API_QUERY_CALLER_DISCONNECTED;
-
-  constructor() {
-    super('API query caller disconnected');
-    this.name = 'ApiQueryCallerDisconnectedError';
-  }
 }
 
 /**
@@ -367,25 +358,34 @@ export function createApiQueryRequestLifecycle(
   req: IncomingMessage,
   res: ServerResponse,
 ): ApiQueryRequestLifecycle {
-  const controller = new AbortController();
-  const abortDisconnectedQuery = () => {
-    if (!controller.signal.aborted) {
-      controller.abort(new ApiQueryCallerDisconnectedError());
-    }
-  };
-  req.once('aborted', abortDisconnectedQuery);
-  res.once('close', abortDisconnectedQuery);
-  if (req.aborted || res.destroyed) abortDisconnectedQuery();
+  return createStoreQueryRequestLifecycle(req, res, 'api.query') as ApiQueryRequestLifecycle;
+}
 
-  return {
-    signal: controller.signal,
-    priority: getApiQueryPriority(),
-    source: 'api.query',
-    dispose() {
-      req.removeListener('aborted', abortDisconnectedQuery);
-      res.removeListener('close', abortDisconnectedQuery);
-    },
-  };
+type LegacyApiQueryResult = {
+  bindings: Array<Record<string, string>>;
+  quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+};
+
+export type PublicApiQueryResult = import('@origintrail-official/dkg-core').PublicQueryResult<
+  Record<string, string>,
+  { subject: string; predicate: string; object: string; graph: string }
+>;
+
+/** Normalize the legacy engine shape at the public daemon boundary. */
+export function normalizePublicApiQueryResult(
+  sparql: string,
+  result: LegacyApiQueryResult,
+): PublicApiQueryResult {
+  const operation = classifySparqlOperation(sparql);
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return { type: 'quads', quads: result.quads ?? [], bindings: [] };
+  }
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const raw = result.bindings[0]?.result;
+    const value = String(raw).toLowerCase() === 'true';
+    return { type: 'boolean', value, bindings: [{ result: String(value) }] };
+  }
+  return { type: 'bindings', bindings: result.bindings };
 }
 
 function parseVerifyTimeoutMs(
@@ -676,9 +676,17 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
-      tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
+      const publicResult = normalizePublicApiQueryResult(sparql, result);
+      const resultCount = publicResult.type === 'bindings'
+        ? publicResult.bindings.length
+        : publicResult.type === 'quads'
+          ? publicResult.quads.length
+          : publicResult.type === 'boolean'
+            ? 1
+            : 0;
+      tracker.complete(ctx, { tripleCount: resultCount });
       return jsonResponse(res, 200, {
-        result,
+        result: publicResult,
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
       });
     } catch (err: any) {
