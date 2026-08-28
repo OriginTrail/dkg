@@ -17,7 +17,11 @@ const surface = tools(
   'dkg_query_catalog_list',
   'dkg_query_catalog_run',
   'dkg_query_catalog_save',
+  'dkg_context_graph_create',
+  'dkg_sub_graph_create',
   'dkg_knowledge_asset_create',
+  'dkg_knowledge_asset_share',
+  'dkg_knowledge_asset_publish',
 );
 
 describe('tool router', () => {
@@ -66,7 +70,18 @@ describe('tool router', () => {
     });
     expect(route.profile).toBe('write');
     expect(route.tools.map((tool) => tool.name)).toContain('dkg_query_catalog_save');
+    expect(route.tools[0].name).toBe('dkg_query_catalog_save');
     expect(route.tools.map((tool) => tool.name)).not.toContain('dkg_knowledge_asset_create');
+  });
+
+  it('treats hyphenated query-catalog as the same write intent', () => {
+    const route = routeTools({
+      prompt: 'Save a parameterized DKG query-catalog entry',
+      tools: surface,
+      allowWrite: true,
+    });
+    expect(route.profile).toBe('write');
+    expect(route.tools[0].name).toBe('dkg_query_catalog_save');
   });
 
   it('does not expose on-chain registration for a local graph-create request', () => {
@@ -82,6 +97,42 @@ describe('tool router', () => {
     });
     expect(route.tools.map((tool) => tool.name)).toContain('dkg_context_graph_create');
     expect(route.tools.map((tool) => tool.name)).not.toContain('dkg_context_graph_register');
+  });
+
+  it('does not mistake an existing graph/subgraph scope for graph creation', () => {
+    const route = routeTools({
+      prompt:
+        'In context graph benchmark and subgraph products, create a knowledge asset. '
+        + 'Do not share or publish it.',
+      tools: surface,
+      allowWrite: true,
+    });
+    const names = route.tools.map((tool) => tool.name);
+    expect(names).toContain('dkg_knowledge_asset_create');
+    expect(names).not.toContain('dkg_context_graph_create');
+    expect(names).not.toContain('dkg_sub_graph_create');
+    expect(names).not.toContain('dkg_knowledge_asset_share');
+    expect(names).not.toContain('dkg_knowledge_asset_publish');
+  });
+
+  it('keeps a read request read-only when mutation words are explicitly negated', () => {
+    const route = routeTools({
+      prompt: 'Describe the DKG knowledge asset. Do not share or publish it.',
+      tools: surface,
+    });
+    expect(route.profile).toBe('read');
+    expect(route.writeBlocked).toBe(false);
+  });
+
+  it('still exposes subgraph creation for an explicit subgraph-create request', () => {
+    const route = routeTools({
+      prompt: 'Create a new subgraph in DKG context graph benchmark',
+      tools: surface,
+      allowWrite: true,
+    });
+    const names = route.tools.map((tool) => tool.name);
+    expect(names).toContain('dkg_sub_graph_create');
+    expect(names).not.toContain('dkg_context_graph_create');
   });
 
   it('uses MCP annotations for adapter tools that are not in the built-in lists', () => {

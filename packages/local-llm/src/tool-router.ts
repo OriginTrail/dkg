@@ -62,10 +62,10 @@ export const WRITE_TOOL_NAMES = [
 
 const KNOWN_READ_TOOLS = new Set<string>(READ_TOOL_NAMES);
 const KNOWN_WRITE_TOOLS = new Set<string>(WRITE_TOOL_NAMES);
-const DKG_SIGNAL = /\b(?:dkg|context\s+graph|sub-?graph|knowledge\s+asset|triples?|rdf|sparql|entity|provenance|verifiable\s+memory|query\s+catalog|saved\s+quer(?:y|ies)|peer|wallet|inbox)\b/i;
+const DKG_SIGNAL = /\b(?:dkg|context\s+graph|sub-?graph|knowledge\s+asset|triples?|rdf|sparql|entity|provenance|verifiable\s+memory|query[-\s]+catalog|saved\s+quer(?:y|ies)|peer|wallet|inbox)\b/i;
 const STATUS_SIGNAL = /\b(?:status|health|healthy|peer|wallet|balance|joined|available|list|which)\b/i;
-const CATALOG_SIGNAL = /\b(?:query\s+catalog|saved\s+quer(?:y|ies)|catalog\s+quer(?:y|ies))\b/i;
-const WRITE_SIGNAL = /\b(?:create|insert|add|write|update|save|publish|share|finalize|discard|delete|import|enrich|register|subscribe|send|mutate)\b/i;
+const CATALOG_SIGNAL = /\b(?:query[-\s]+catalog|saved\s+quer(?:y|ies)|catalog\s+quer(?:y|ies))\b/i;
+const WRITE_ACTION_SIGNAL = /\b(?:create|insert|add|write|update|save|publish|share|finalize|discard|delete|import|enrich|register|subscribe|send|mutate)\b/gi;
 const FOLLOW_UP_SIGNAL = /\b(?:it|its|that|those|them|their|same|previous|above|result|entity|asset|graph|query)\b/i;
 
 export function isMutatingTool(tool: McpToolDefinition): boolean {
@@ -84,7 +84,8 @@ function hasWriteIntent(
 ): boolean {
   const namedMutation = tools.some((tool) =>
     isMutatingTool(tool) && prompt.toLowerCase().includes(tool.name.toLowerCase()));
-  return namedMutation || ((DKG_SIGNAL.test(prompt) || hasDomainIntent) && WRITE_SIGNAL.test(prompt));
+  return namedMutation
+    || ((DKG_SIGNAL.test(prompt) || hasDomainIntent) && hasAffirmativeAction(prompt, WRITE_ACTION_SIGNAL));
 }
 
 function includesKeyword(prompt: string, keywords: readonly string[]): boolean {
@@ -97,6 +98,14 @@ function namedTools(prompt: string, tools: McpToolDefinition[]): string[] {
   return tools
     .filter((tool) => lower.includes(tool.name.toLowerCase()))
     .map((tool) => tool.name);
+}
+
+function hasAffirmativeAction(prompt: string, actionPattern: RegExp): boolean {
+  for (const match of prompt.matchAll(actionPattern)) {
+    const before = prompt.slice(Math.max(0, (match.index ?? 0) - 64), match.index);
+    if (!/\b(?:do\s+not|don't|never)\b[^.!?;\n]{0,48}$/i.test(before)) return true;
+  }
+  return false;
 }
 
 function namesForReadPrompt(prompt: string): string[] {
@@ -118,30 +127,38 @@ function namesForReadPrompt(prompt: string): string[] {
 }
 
 function namesForWritePrompt(prompt: string): string[] {
-  const names = ['dkg_status', 'dkg_list_context_graphs'];
-  if (/\bquery\s+catalog|saved\s+query/i.test(prompt)) {
-    names.push('dkg_query_catalog_list', 'dkg_query_catalog_run', 'dkg_query_catalog_save');
+  const names: string[] = [];
+  const contextGraphCreateIntent = /\b(?:create|add)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:dkg\s+)?context\s+graphs?\b|\bnew\s+(?:dkg\s+)?context\s+graphs?\b/i.test(prompt);
+  const subGraphCreateIntent = /\b(?:create|add)\s+(?:a\s+|an\s+)?(?:new\s+)?sub-?graphs?\b|\bnew\s+sub-?graphs?\b/i.test(prompt);
+  if (/\bquery[-\s]+catalog|saved\s+query/i.test(prompt)) {
+    if (/\bsave|update|create|add/i.test(prompt)) names.push('dkg_query_catalog_save');
+    names.push('dkg_query_catalog_list', 'dkg_query_catalog_run');
   }
   if (/\bcontext\s+graph/i.test(prompt)) {
-    if (/\bcreate|add|new/i.test(prompt)) names.push('dkg_context_graph_create');
+    if (contextGraphCreateIntent) names.push('dkg_context_graph_create');
     if (/\bregister/i.test(prompt)) names.push('dkg_context_graph_register');
   }
   if (/\bsub-?graph/i.test(prompt)) {
+    if (subGraphCreateIntent) names.push('dkg_sub_graph_create');
     names.push('dkg_sub_graph_list');
-    if (/\bcreate|add|new/i.test(prompt)) names.push('dkg_sub_graph_create');
   }
   if (/\bsubscribe/i.test(prompt)) names.push('dkg_subscribe');
   if (/\b(?:knowledge\s+asset|assertion|quads?|triples?|rdf)\b/i.test(prompt)) {
     if (/\bcreate|insert|add/i.test(prompt)) names.push('dkg_knowledge_asset_create');
     if (/\bwrite|update/i.test(prompt)) names.push('dkg_knowledge_asset_write');
     if (/\bfinalize/i.test(prompt)) names.push('dkg_knowledge_asset_finalize');
-    if (/\bshare/i.test(prompt)) names.push('dkg_knowledge_asset_share');
-    if (/\bpublish/i.test(prompt)) names.push('dkg_knowledge_asset_publish');
+    if (hasAffirmativeAction(prompt, /\bshare\b/gi)) {
+      names.push('dkg_knowledge_asset_share');
+    }
+    if (hasAffirmativeAction(prompt, /\bpublish\b/gi)) {
+      names.push('dkg_knowledge_asset_publish');
+    }
     if (/\bdiscard|delete/i.test(prompt)) names.push('dkg_knowledge_asset_discard');
     if (/\bimport/i.test(prompt)) names.push('dkg_knowledge_asset_import_file');
     if (/\benrich/i.test(prompt)) names.push('dkg_knowledge_asset_semantic_enrichment_write');
   }
   if (/\b(?:send|message)\b/i.test(prompt)) names.push('dkg_send_message');
+  names.push('dkg_list_context_graphs', 'dkg_status');
   return names;
 }
 

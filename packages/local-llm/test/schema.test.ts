@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizeToolForLlama,
   parseAndValidateToolArguments,
+  toOpenAiTool,
   validateAgainstSchema,
   type McpToolDefinition,
 } from '../src/schema.js';
@@ -36,6 +37,21 @@ describe('llama.cpp schema compatibility', () => {
       name: 'unsafe',
       inputSchema: { type: 'object', patternProperties: {} },
     })).toThrow('unsupported JSON Schema keyword');
+  });
+
+  it('removes maxLength only from the llama grammar copy and keeps local enforcement', () => {
+    const normalized = normalizeToolForLlama({
+      name: 'bounded',
+      inputSchema: {
+        type: 'object',
+        properties: { text: { type: 'string', minLength: 1, maxLength: 3 } },
+        required: ['text'],
+      },
+    }).tool;
+    const grammarSchema = toOpenAiTool(normalized).function.parameters;
+    expect((grammarSchema.properties as Record<string, Record<string, unknown>>).text)
+      .toEqual({ type: 'string', minLength: 1 });
+    expect(parseAndValidateToolArguments({ text: 'four' }, normalized).ok).toBe(false);
   });
 });
 

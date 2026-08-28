@@ -14,6 +14,10 @@ import {
 } from './tool-router.js';
 import { NOOP_TRACE, type InteractionTrace } from './text-trace.js';
 import type { DkgLocalLlmDomainProfile } from './domain-profile.js';
+import {
+  rewriteCompactPredicatesForDkg,
+  validateDkgToolCall,
+} from './dkg-tool-validation.js';
 
 export interface McpClientLike {
   listTools(): Promise<{ tools: McpToolDefinition[] }>;
@@ -105,6 +109,7 @@ export interface DkgChatSessionInfo {
 }
 
 const ARGUMENT_ERROR = /\b(argument|invalid|validation|schema|required|unexpected)\b/i;
+const EMPTY_DKG_QUERY_RESULT = /^(?:\(no results\)|false)$/i;
 const SESSION_CONTEXT = `BOUNDED CHAT SESSION
 Prior turns below only resolve conversational references. They are not current DKG evidence.
 For a DKG follow-up, call an available read tool and ground the new answer in its result.`;
@@ -454,19 +459,29 @@ export class DkgLocalLlmRuntime {
     let finalOnly = false;
     let truncationRetryUsed = false;
 
-    const scheduleRepair = async (reason: string, signature: string, toolName?: string) => {
+    const scheduleRepair = async (
+      reason: string,
+      signature: string,
+      toolName?: string,
+      options: { requireTool?: boolean; instruction?: string } = {},
+    ) => {
       if (repairUsed) throw new Error(`${reason} One-retry limit reached.`);
       repairUsed = true;
       previousFailedSignature = signature;
       pinnedToolName = toolName;
-      requireTool = true;
+      requireTool = options.requireTool ?? true;
       messages.push({
         role: 'user',
-        content: toolName
+        content: options.instruction ?? (toolName
           ? `${reason} Retry ${toolName} once with changed arguments that exactly match its schema.`
-          : `${reason} Retry once with exactly one available tool call and no prose.`,
+          : `${reason} Retry once with exactly one available tool call and no prose.`),
       });
-      await this.trace.write('RETRY SCHEDULED', { reason, signature, pinnedToolName });
+      await this.trace.write('RETRY SCHEDULED', {
+        reason,
+        signature,
+        pinnedToolName,
+        requireTool,
+      });
     };
 
     for (let round = 1; round <= this.maxToolCalls + 4; round++) {
@@ -546,8 +561,47 @@ export class DkgLocalLlmRuntime {
         continue;
       }
       const normalizedSignature = `${tool.name}:${stableJson(parsed.args)}`;
+      const preflight = validateDkgToolCall(tool.name, parsed.args);
+      if (!preflight.ok) {
+        await scheduleRepair(
+          `DKG preflight rejected ${tool.name}: ${preflight.errors.join('; ')}`,
+          normalizedSignature,
+          tool.name,
+        );
+        continue;
+      }
       if (successfulSignatures.has(normalizedSignature)) {
-        throw new Error(`The model repeated an already successful tool call: ${normalizedSignature}`);
+        const nextMutation = route.profile === 'write'
+          ? route.tools.find((candidate) =>
+              isMutatingTool(candidate)
+              && !executed.some((item) => item.name === candidate.name))
+          : undefined;
+        if (nextMutation) {
+          await scheduleRepair(
+            `The model repeated an already successful discovery call: ${normalizedSignature}`,
+            normalizedSignature,
+            nextMutation.name,
+            {
+              instruction:
+                `Discovery already succeeded. The router selected ${nextMutation.name} as the relevant authorized mutation that has not run yet. `
+                + `Call ${nextMutation.name} now with arguments from the user's request that exactly match its schema; do not repeat a discovery tool.`,
+            },
+          );
+          continue;
+        }
+        await scheduleRepair(
+          `The model repeated an already successful tool call: ${normalizedSignature}`,
+          normalizedSignature,
+          undefined,
+          {
+            requireTool: false,
+            instruction:
+              `The exact call ${normalizedSignature} already succeeded. Do not call it again with those arguments. `
+              + `Already completed tool names: ${executed.map((item) => item.name).join(', ') || 'none'}. `
+              + 'If the original request still needs work, call the requested next tool with valid arguments; otherwise answer now from the evidence already returned.',
+          },
+        );
+        continue;
       }
 
       const callId = toolCall.id || `dkg-tool-${round}`;
@@ -593,6 +647,31 @@ export class DkgLocalLlmRuntime {
       successfulSignatures.add(normalizedSignature);
       executed.push({ name: tool.name, arguments: parsed.args });
       sessionEvidence.push({ name: tool.name, arguments: parsed.args, result: compactEvidence });
+      const originalSparql = String(parsed.args.sparql ?? '');
+      const correctedSparql = rewriteCompactPredicatesForDkg(originalSparql);
+      const queryNeedsStorageTermRetry = tool.name === 'dkg_query'
+        && EMPTY_DKG_QUERY_RESULT.test(resultText.trim())
+        && correctedSparql !== originalSparql;
+      if (queryNeedsStorageTermRetry && !repairUsed) {
+        const correctedArgs = {
+          ...parsed.args,
+          sparql: correctedSparql,
+        };
+        await scheduleRepair(
+          `${tool.name} executed but returned ${JSON.stringify(resultText.trim())}. `
+            + 'Retry once without changing the requested entities, literals, project, subgraph, or view. '
+            + 'DKG quad writes preserve compact predicate strings: match a requested/stored rdf:type or schema:category as <rdf:type> or <schema:category>, rather than SPARQL shorthand or an expanded prefix.',
+          normalizedSignature,
+          tool.name,
+          {
+            instruction:
+              `${tool.name} returned no matching evidence using expanded/shorthand predicates. `
+              + `Retry exactly once with this storage-term-preserving argument object: ${stableJson(correctedArgs)}. `
+              + 'Do not change the project, subgraph, view, entities, literals, variables, ordering, or limits.',
+          },
+        );
+        continue;
+      }
       previousFailedSignature = undefined;
       pinnedToolName = undefined;
       requireTool = false;

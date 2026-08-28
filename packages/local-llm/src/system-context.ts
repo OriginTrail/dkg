@@ -34,8 +34,11 @@ TOOL PROTOCOL
 - Use only the tools supplied in this request and arguments allowed by their JSON schema.
 - Emit exactly one tool call per assistant round. Never emit prose and a tool call together.
 - Copy identifiers exactly from the user or prior tool evidence. Never guess IDs.
+- If the user already supplied an exact graph, subgraph, asset, or selector, do not call discovery merely to revalidate it; proceed with the requested read or mutation.
 - Prefer the query catalog for recurring domain questions: list entries first when the selector or parameters are unknown, then run the exact saved query.
 - Never invent a query-catalog selector or parameter. If catalog discovery has no matching query, report that before considering a generic query tool.
+- SPARQL must be raw text without Markdown fences. Wrap every absolute IRI in angle brackets, for example <urn:example:item>.
+- DKG quad writes preserve predicate strings. When evidence names a stored predicate literally as rdf:type or schema:category, match it as <rdf:type> or <schema:category>; do not replace it with the SPARQL "a" shorthand or an expanded namespace unless the evidence uses that expanded IRI.
 - After sufficient evidence is collected, stop calling tools and answer from the returned fields.
 - ${writeRule}
 

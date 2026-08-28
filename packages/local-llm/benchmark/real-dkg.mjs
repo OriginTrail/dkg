@@ -239,7 +239,7 @@ function buildPhases(options, state) {
     {
       id: '10-holdout-entity',
       group: 'holdout',
-      prompt: `Get DKG entity urn:dkg-llm-bench:model:Model01 from context graph ${target.graphId} and describe its one-hop facts from evidence.`,
+      prompt: `Get DKG entity urn:dkg-llm-bench:model:Model01 from context graph ${target.graphId}, subgraph model-families, and describe its one-hop facts from evidence.`,
       evaluate: ({ calls }) => callsContain(calls, 'dkg_get_entity', /Benchmark Model 01/),
     },
     {

@@ -3,6 +3,12 @@ export {
   type DkgLocalLlmDomainProfile,
 } from './domain-profile.js';
 export {
+  rewriteCompactPredicatesForDkg,
+  validateDkgToolCall,
+  validateSparqlForDkg,
+  type DkgToolValidationResult,
+} from './dkg-tool-validation.js';
+export {
   DkgLocalLlmRuntime,
   normalizeFinalAnswer,
   type DkgChatEvidence,

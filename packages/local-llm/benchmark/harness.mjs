@@ -40,7 +40,10 @@ export function validateBenchmarkCall(name, args, target, source = 'model') {
   if (name === 'dkg_sub_graph_create' && args.contextGraphId !== target.graphId) {
     errors.push(`contextGraphId must equal ${target.graphId}`);
   }
-  if (PROJECT_TOOLS.has(name) && args.projectId !== target.graphId) {
+  // projectId is optional on the real MCP surface. The benchmark MCP process
+  // is itself pinned to target.graphId through DKG_PROJECT, so omission is
+  // both safe and contract-valid; only an explicit escape is rejected.
+  if (PROJECT_TOOLS.has(name) && args.projectId !== undefined && args.projectId !== target.graphId) {
     errors.push(`projectId must equal ${target.graphId}`);
   }
   const assetMutation = ['dkg_knowledge_asset_create', 'dkg_knowledge_asset_write', 'dkg_knowledge_asset_finalize']

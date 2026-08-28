@@ -118,13 +118,28 @@ export function normalizeToolForLlama(tool: McpToolDefinition): {
   return { tool: { ...tool, inputSchema }, changes };
 }
 
+function schemaForLlamaGrammar(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(schemaForLlamaGrammar);
+  if (!value || typeof value !== 'object') return value;
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    // llama.cpp's JSON-Schema-to-GBNF compiler fails to parse nested tool
+    // schemas containing maxLength (confirmed against the real catalog-save
+    // schema). Keep the bound in McpToolDefinition for local validation, but
+    // omit it from the grammar-only copy sent to the model.
+    if (key === 'maxLength') continue;
+    output[key] = schemaForLlamaGrammar(child);
+  }
+  return output;
+}
+
 export function toOpenAiTool(tool: McpToolDefinition): OpenAiToolDefinition {
   return {
     type: 'function',
     function: {
       name: tool.name,
       description: tool.description ?? '',
-      parameters: tool.inputSchema,
+      parameters: schemaForLlamaGrammar(tool.inputSchema) as JsonSchema,
     },
   };
 }

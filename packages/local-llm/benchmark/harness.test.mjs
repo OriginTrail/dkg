@@ -25,6 +25,16 @@ describe('real-DKG benchmark guard', () => {
     ]);
   });
 
+  it('allows omitted optional projectId but rejects an explicit graph escape', () => {
+    expect(validateBenchmarkCall('dkg_query_catalog_run', {
+      selector: 'models/by-category',
+    }, target)).toEqual([]);
+    expect(validateBenchmarkCall('dkg_query_catalog_run', {
+      projectId: 'other',
+      selector: 'models/by-category',
+    }, target)).toContain('projectId must equal bench-1');
+  });
+
   it('rejects publish even when a model asks for it', async () => {
     const delegate = {
       async listTools() { return { tools: [] }; },
