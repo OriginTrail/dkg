@@ -26,14 +26,20 @@ const token = (await readFile(tokenFile, 'utf8'))
 if (!token) throw new Error(`No bearer token found in ${tokenFile}`);
 
 async function api(method, endpoint, body) {
-  const response = await fetch(`${daemonUrl}${endpoint}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const request = body === undefined
+    ? {
+        method,
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    : {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      };
+  const response = await fetch(`${daemonUrl}${endpoint}`, request);
   const text = await response.text();
   let payload;
   try {
