@@ -638,6 +638,7 @@ import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './star
 import {
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
+  resolveRfc64SelectedRecoveryContextGraphIdsV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64PeerSwmRecoveryPlanV1,
 } from './rfc64/swm-recovery-plan-v1.js';
@@ -661,7 +662,7 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   return resolveSyncGlobalBackpressure({
     ...config,
     selectedRecoveryContextGraphIds: [...new Set([
-      ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
+      ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
         config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
       ),
       ...edgeSelectedContextGraphIds,

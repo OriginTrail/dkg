@@ -28,6 +28,16 @@ type Rfc64RecoveryConfigV1 = Readonly<
   Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1
 >;
 
+/** Graphs reserved by an accepted policy with at least one complete provider. */
+export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
+  config: Rfc64RecoveryConfigV1 | undefined,
+): readonly string[] {
+  if (config === undefined) return Object.freeze([]);
+  return Object.freeze(acceptedPoliciesV1(config)
+    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.length > 0)
+    .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
+}
+
 /** Private graphs that need SWM recovery without entering durable sync scope. */
 export function resolveRfc64PrivateRecoveryContextGraphIdsV1(
   config: Rfc64RecoveryConfigV1 | undefined,
