@@ -1707,9 +1707,15 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
   });
 
   it('preserves the transaction hash when post-broadcast receipt lookup exhausts RPC endpoints', async () => {
+    // Exhausted receipt passes are transport failures, so the wait now polls them out to its
+    // OPERATION deadline instead of dying on the first one (a tx already on the wire must not be
+    // abandoned over a flaky tick). The durable-retry contract this row pins is unchanged where
+    // it matters: the terminal error still carries the transaction hash — as the operation-level
+    // RPC_TIMEOUT, with repeated lookups on every endpoint proving the wait actually retried.
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
       rpcUrls: ['https://backup.example'],
+      receiptTimeoutMs: 5_000,
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '55'.repeat(32);
@@ -1748,13 +1754,16 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       signer,
       'create on-chain context graph',
     )).rejects.toMatchObject({
-      code: 'RPC_RECEIPT_LOOKUP_FAILED',
+      code: 'RPC_TIMEOUT',
       txHash,
     });
     expect(populateTransaction.calls).toHaveLength(1);
     expect(signPopulatedTransaction.calls).toHaveLength(1);
     expect(primaryProvider.broadcastTransaction.calls).toContainEqual([signedTx]);
     expect(backupProvider.broadcastTransaction.calls).toEqual([]);
+    // The wait retried past the first exhausted pass: multiple lookups per endpoint.
+    expect(primaryProvider.getTransactionReceipt.calls.length).toBeGreaterThanOrEqual(2);
+    expect(backupProvider.getTransactionReceipt.calls.length).toBeGreaterThanOrEqual(2);
     expect(primaryProvider.getTransactionReceipt.calls).toContainEqual([txHash]);
     expect(backupProvider.getTransactionReceipt.calls).toContainEqual([txHash]);
   });

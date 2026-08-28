@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * All-provider polling primitive, in its own focused transport module (r4 3881841032: the
+ * failover client stays the sequential state machine; this is the parallel fan-out mode). One
+ * poll asks EVERY configured provider in parallel, gives each endpoint ONE in-place retry for
+ * transient failures (via core's canonical abort-aware `withRetry` — deterministic failures
+ * surface immediately as an unanswered slot), and completes on abort rather than waiting out a
+ * stalled endpoint. Domain callers keep their per-endpoint read construction and their decision
+ * over the settled views (r3 3880005809).
+ *
+ * Returns one slot per provider (`null` where the endpoint could not answer even after its
+ * retry), or `null` for the WHOLE poll when the signal aborts. The abort listener is removed in
+ * a finally block (r4 3881841018): a successful poll leaves NOTHING attached to the
+ * caller-owned signal, so repeated reads against one long-lived controller accumulate no
+ * listeners.
+ */
+
+import { resolveWithinAbort, withRetry } from '@origintrail-official/dkg-core';
+
+export async function readAllProvidersWithTransientRetry<TProvider, TResult>(
+  providers: readonly TProvider[],
+  readOne: (provider: TProvider) => Promise<TResult | null>,
+  opts: {
+    retryDelayMs: number;
+    isRetryable: (err: unknown) => boolean;
+    signal?: AbortSignal;
+  },
+): Promise<Array<TResult | null> | null> {
+  // The abort race and its listener lifecycle are the SHARED boundary's job (r6 3882186074):
+  // this module keeps only provider-polling policy. `resolveWithinAbort` owns the pre-start
+  // check, the null-on-abort completion, and finally-removed listener hygiene.
+  const withOneTransientRetry = (provider: TProvider) => withRetry(
+    () => readOne(provider),
+    {
+      maxAttempts: 2,
+      baseDelayMs: opts.retryDelayMs,
+      maxDelayMs: opts.retryDelayMs,
+      jitter: 0,
+      isRetryable: opts.isRetryable,
+      signal: opts.signal,
+    },
+  );
+  const result = await resolveWithinAbort(
+    () => Promise.allSettled(providers.map(withOneTransientRetry))
+      .then((settled) => settled.map((r) => (r.status === 'fulfilled' ? r.value : null))),
+    opts.signal,
+  );
+  if (!result || opts.signal?.aborted) return null;
+  return result;
+}

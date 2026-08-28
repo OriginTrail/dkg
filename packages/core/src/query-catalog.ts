@@ -1,5 +1,7 @@
-import { GET_VIEWS, type GetView } from './memory-model.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { contextGraphSubGraphUri, validateSubGraphName } from './constants.js';
+import { GET_VIEWS, type GetView } from './memory-model.js';
 import {
   assertQueryCatalogTemplate,
   normalizeQueryCatalogParameters,
@@ -470,6 +472,10 @@ export function queryCatalogProfileUri(
   return `urn:dkg:profile:${encodeURIComponent(contextGraphId)}:${kind}:${encodeURIComponent(slug)}`;
 }
 
+function queryCatalogIdentityDigest(value: string): string {
+  return bytesToHex(sha256(utf8ToBytes(value)));
+}
+
 function literal(value: string): string {
   return JSON.stringify(value);
 }
@@ -496,10 +502,21 @@ export function buildQueryCatalogWrite(input: {
   savedQuery: QueryCatalogItem & { queryUri: string; catalogUri: string };
   quads: QueryCatalogWriteQuad[];
 } {
-  const slug = `${queryCatalogSlug(input.name)}-${input.rank.toString(36)}`;
+  const parameters = normalizeQueryCatalogParameters(input.parameters);
+  const identity = JSON.stringify({
+    subGraph: input.subGraph,
+    catalogSlug: input.catalogSlug,
+    name: input.name,
+    description: input.description,
+    sparql: input.sparql,
+    resultColumn: input.resultColumn,
+    rank: input.rank,
+    parameters,
+    view: input.view,
+  });
+  const slug = `${queryCatalogSlug(input.name)}-${queryCatalogIdentityDigest(identity)}`;
   const catalogUri = queryCatalogProfileUri(input.contextGraphId, 'catalog', input.catalogSlug);
   const queryUri = queryCatalogProfileUri(input.contextGraphId, 'query', slug);
-  const parameters = normalizeQueryCatalogParameters(input.parameters);
   const scopeGraph = queryCatalogScopeGraphUri(input.contextGraphId, input.subGraph);
   assertQueryCatalogTemplate(input.sparql, parameters);
   const quads: QueryCatalogWriteQuad[] = [

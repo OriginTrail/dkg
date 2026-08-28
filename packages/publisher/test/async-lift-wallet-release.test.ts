@@ -222,7 +222,7 @@ describe('async-lift wallet release channel', () => {
       detachReceiptReconciliation: true,
       chainProofResolver: async () => {
         proofAsks += 1;
-        if (proofAsks < 2) return { status: 'pending' };
+        if (proofAsks < 2) return { status: 'pending-mempool' };
         return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
       },
       knowledgeAssetVmPublishRecoveryResolver: async () => ({

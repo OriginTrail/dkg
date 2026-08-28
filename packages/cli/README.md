@@ -296,10 +296,43 @@ modes auto-renewal can't recover from:
 | `dkg wallet` | Show operational wallet addresses and balances |
 | `dkg set-ask <amount>` | Set the node's on-chain ask (TRAC per KB·epoch) |
 | `dkg openclaw setup` | Install and configure the OpenClaw adapter |
+| `dkg llm [prompt...]` | Ground a local OpenAI-compatible model in the DKG MCP tools; no prompt starts interactive chat |
 | `dkg update` | Update the node software from npm (blue-green slots for Core nodes) |
 | `dkg rollback` | Roll back to the previous software slot |
 
 Run `dkg <command> --help` for per-command options.
+
+### Local LLM over DKG MCP
+
+Start an OpenAI-compatible local endpoint such as `llama-server`, then run:
+
+```bash
+# Interactive, read-only by default
+dkg llm --interactive --model local-model
+
+# One-shot query-catalog discovery against a selected Context Graph
+dkg llm --project my-project "Which saved queries are available?"
+```
+
+`--project` explicitly pins the LLM session; inherited `DKG_PROJECT` and the
+MCP config's first Context Graph are not silent agent scopes. Without a pin,
+name the exact Context Graph in each scoped request. Catalog selectors retain
+the graph scope of the `dkg_query_catalog_list` evidence that returned them.
+
+Each turn receives at most eight relevant MCP schemas and 18,000 serialized
+schema bytes by default instead of the complete tool surface. Relevance is
+ranked from the live MCP tool names, descriptions, and input schemas; use
+`--max-tools` and `--max-tool-json-bytes` to change the bounds. The command
+validates tool arguments, permits one repair retry, bounds chat history, and
+writes a redacted owner-only text trace under `<DKG_HOME>/logs/local-llm`.
+
+Mutation tools are unavailable unless the operator passes `--allow-write`;
+even then, the prompt must explicitly request the mutation. Extra MCP adapters
+can be loaded with `--adapter`. `--domain-profile profile.json` supplies its
+literal routing keywords, read/write tool ranking hints, and system-context
+addendum without adding domain IDs or benchmark answers to the built-in core.
+For small experiments, `--tool` and `--system-context-file` expose the same
+seams separately.
 
 NPM/dist-tag auto-update is the recommended production path. Advanced Core nodes
 can opt into daemon-polled git updates with `autoUpdate.source: "git"`,

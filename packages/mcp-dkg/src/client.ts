@@ -11,6 +11,10 @@ import {
   type PublicQueryResponse,
   type PublicQueryResult,
 } from '@origintrail-official/dkg-core';
+import type {
+  QueryCatalogReadResponse,
+  QueryCatalogWriteQuad,
+} from '@origintrail-official/dkg-core/query-catalog';
 
 export interface SparqlBinding {
   [key: string]: {
@@ -30,6 +34,20 @@ export interface SparqlQuad {
 
 export type SparqlResult = PublicQueryResult<SparqlBinding, SparqlQuad>;
 export type QueryResponse = PublicQueryResponse<SparqlBinding, SparqlQuad>;
+
+export interface QueryCatalogWriteResponse {
+  ok: true;
+  contextGraphId: string;
+  graph: string;
+  subGraphName: 'meta';
+  assertionName: string;
+  assertionUri: string;
+  scopeGraphs: string[];
+  scopeGraph?: string;
+  queryCount: number;
+  triplesWritten: number;
+  alreadyExists: boolean;
+}
 
 function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResult {
   const raw = result && typeof result === 'object' && !Array.isArray(result)
@@ -490,6 +508,35 @@ export class DkgClient {
 
     const r = await this.request<{ result?: unknown }>('POST', '/api/query', body);
     return normalizeDaemonQueryResult(r.result, args.sparql);
+  }
+
+  // ── Query catalog ────────────────────────────────────────────
+  /** Read the versioned/capability-bearing query-catalog DTO. */
+  async readQueryCatalog(contextGraphId: string): Promise<QueryCatalogReadResponse> {
+    return this.request<QueryCatalogReadResponse>(
+      'POST',
+      '/api/profile/query-catalog/read',
+      { contextGraphId: normalizeContextGraphId(contextGraphId) },
+    );
+  }
+
+  /**
+   * Write canonical catalog RDF through the daemon's guarded profile route.
+   * The daemon owns authorization, validation, and immutable assertion
+   * persistence; MCP deliberately does not write the store itself.
+   */
+  async writeQueryCatalog(args: {
+    contextGraphId: string;
+    quads: QueryCatalogWriteQuad[];
+  }): Promise<QueryCatalogWriteResponse> {
+    return this.request<QueryCatalogWriteResponse>(
+      'POST',
+      '/api/profile/query-catalog/write',
+      {
+        contextGraphId: normalizeContextGraphId(args.contextGraphId),
+        quads: args.quads,
+      },
+    );
   }
 
   /**

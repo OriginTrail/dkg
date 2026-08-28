@@ -144,6 +144,10 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
+  'packages/local-llm': {
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/okf': {
     lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
@@ -201,6 +205,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/graph-viz': ['kosava_supporting'],
   'packages/epcis': ['kosava_supporting'],
   'packages/mcp-dkg': ['kosava_supporting'],
+  'packages/local-llm': ['kosava_supporting'],
   'packages/okf': ['kosava_supporting'],
   'packages/adapter-hermes': ['kosava_supporting'],
   'packages/adapter-openclaw': ['kosava_supporting'],
