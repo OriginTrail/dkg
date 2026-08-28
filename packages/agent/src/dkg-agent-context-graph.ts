@@ -130,6 +130,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -994,7 +995,10 @@ export class ContextGraphMethods extends DKGAgentBase {
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
       { source: 'agent.contextGraph.register.status' },
     );
-    if (statusResult.type === 'bindings' && statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered') {
+    const registrationStatus = statusResult.type === 'bindings'
+      ? statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '')
+      : undefined;
+    if (registrationStatus === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
     }
@@ -1144,7 +1148,22 @@ export class ContextGraphMethods extends DKGAgentBase {
     // A local OnChainId triple alone is not enough — devnet restarts and
     // partial failures can leave ontology id "1" while the chain slot is
     // inactive, which would skip registration and strand publishes.
-    const existingOnChainId = await this.getContextGraphOnChainId(id);
+    // An explicit local `unregistered` marker is authoritative for this
+    // registration attempt. Do not run the historical name-hash resolver in
+    // that state: Context Graph names are not globally unique, so another
+    // deployment can legitimately have one or more on-chain graphs with the
+    // same hash. Reverse-resolving here would either adopt somebody else's
+    // numeric id or fail on an ambiguous set before this graph can register.
+    //
+    // Preserve a durable numeric subscription binding when present. That
+    // covers a process interruption after the chain receipt was persisted but
+    // before the registration-status projection was flipped.
+    const localOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
+    const existingOnChainId = registrationStatus === 'unregistered'
+      ? (localOnChainId && isCanonicalPositiveContextGraphId(localOnChainId)
+          ? localOnChainId
+          : null)
+      : await this.getContextGraphOnChainId(id);
     if (existingOnChainId) {
       let onChainLive = false;
       if (typeof this.chain.isContextGraphActiveOnChain === 'function') {

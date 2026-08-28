@@ -17,6 +17,42 @@ afterAll(async () => {
 describe('Genesis Knowledge', () => {
 
 
+    it('registers an explicitly unregistered local graph without reverse-binding a colliding name hash', async () => {
+      const store = new OxigraphStore();
+      const chain = new CapturingContextGraphChainAdapter();
+      const ambiguousLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+        .mockRejectedValue(new Error(
+          'resolveContextGraphIdByNameHash: ambiguous name hash; getNameHash commits it to 2 numeric ids',
+        ));
+      const agent = await DKGAgent.create({
+        name: 'RegistrationNameCollisionBot',
+        store,
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+
+      const curatorAddress = ethers.getAddress(chain.signerAddress);
+      await agent.createContextGraph({
+        id: 'shared-deployment-label',
+        name: 'Shared deployment label',
+        accessPolicy: 1,
+        publishPolicy: 1,
+        callerAgentAddress: curatorAddress,
+      });
+
+      await expect(agent.registerContextGraph('shared-deployment-label', {
+        accessPolicy: 1,
+        publishPolicy: 1,
+        callerAgentAddress: curatorAddress,
+      })).resolves.toMatchObject({ onChainId: expect.any(String) });
+
+      expect(ambiguousLookup).not.toHaveBeenCalled();
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
+      await agent.stop().catch(() => {});
+    });
+
+
   	  it('requires address-scoped curator authority for on-chain registration', async () => {
       const store = new OxigraphStore();
       const chain = new CapturingContextGraphChainAdapter();
