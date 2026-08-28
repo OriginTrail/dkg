@@ -245,6 +245,26 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.due('job', B)).toBe(true);
   });
 
+  it('a late same-owner deferral cannot roll recency BACK — the intermediate stale pass stays refused', () => {
+    // PR #2380 r8 (🟡 3883811952) — deferTurn keeps max(turn token, entry token): B's turn from
+    // t1 defers AFTER a newer pass refreshed B's recency at t3. Writing the turn's own token
+    // would regress recency to t1 and let the intermediate stale pass t2 reclaim the slot,
+    // resetting B's earned ladder.
+    const h = harness();
+    const t1 = h.schedule.beginPass(h.now());
+    const turnB = t1.observe('job', B);
+    expect(turnB).not.toBeNull();
+    const t2 = h.schedule.beginPass(h.now()); // stale pass for A, opened between B's turns
+    const t3 = h.schedule.beginPass(h.now());
+    expect(t3.observe('job', B)).not.toBeNull(); // recency refreshed to t3
+    turnB!.defer('default'); // late deferral from t1: must not regress recency below t3
+    expect(t2.observe('job', A)).toBeNull(); // t2 < t3: still refused
+    h.advance(29_999);
+    expect(h.due('job', B)).toBe(false); // B's ladder intact on its own entry
+    h.advance(1);
+    expect(h.due('job', B)).toBe(true);
+  });
+
   it('a STALE due check cannot reclaim ownership from a newer incarnation — token order, no clock needed', () => {
     // The ordering authority is the token, so the same-millisecond tie a clock would allow
     // cannot occur — this row never advances the clock at all.

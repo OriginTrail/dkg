@@ -452,6 +452,8 @@ describe('GH#2270 chain-proof cadence', () => {
       // erases B's deferral, and re-asks before 30s — both assertions below go red.
       let releaseStalled!: () => void;
       const stalled = new Promise<void>((resolve) => { releaseStalled = resolve; });
+      let signalStalled!: () => void;
+      const stalledEntered = new Promise<void>((resolve) => { signalStalled = resolve; });
       let asks = 0;
       const publisher = h.createPublisher({
         chainProofDispatchBatchSize: 1,
@@ -473,13 +475,17 @@ describe('GH#2270 chain-proof cadence', () => {
       impl.recoverInterruptedPreBroadcastJobs = async (inventory: unknown) => {
         if (firstLaneCall) {
           firstLaneCall = false;
+          signalStalled();
           await stalled;
         }
         return originalLane(inventory);
       };
 
-      const passA = publisher.recover(); // snapshot taken (predecessor incarnation), then stalled
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      const passA = publisher.recover();
+      // r8 (🔴 3883812279) — an explicit handshake, not a sleep: the patched lane runs strictly
+      // AFTER acquisition, so this await proves pass A holds its predecessor snapshot (and its
+      // token) before the record is replaced below.
+      await stalledEntered;
 
       const current = await publisher.getStatus(jobId);
       const successor = {
@@ -531,6 +537,29 @@ describe('GH#2270 chain-proof cadence', () => {
       };
       await Promise.all([publisher.recover(), publisher.recover()]);
       expect(events).toEqual(['enter', 'exit', 'enter', 'exit']);
+    });
+
+    it("recover() itself sweeps residue a truncated pass left behind", async () => {
+      // r8 (🟡 3883812096) — the dispatcher's prune CALL is the wiring under test (the sweep
+      // semantics are the schedule's own rows): batch size 0 lets a pass observe the held job
+      // (installing its entry) without ever dispatching the turn, and the job is then cleared,
+      // so no dispatch can ever release the slot. The next recover()'s sweep must collect it.
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 0,
+        rand: () => 0,
+        chainProofResolver: async () => ({ status: 'pending-mempool' }),
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+      const schedule = (publisher as unknown as {
+        chainProofRetrySchedule: { retainedEntryCount(): number };
+      }).chainProofRetrySchedule;
+
+      await publisher.recover(); // observed + installed, batch 0: never dispatched
+      expect(schedule.retainedEntryCount()).toBe(1);
+
+      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { requestedBy: 'operator' } });
+      await publisher.recover(); // empty held population: the sweep collects the residue
+      expect(schedule.retainedEntryCount()).toBe(0);
     });
 
     it('a failed inventory acquisition does not poison the chain — the next pass reads fresh', async () => {
