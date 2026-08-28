@@ -1,4 +1,5 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export { AGENT_DID_PREFIX, normalizeAgentDid } from './agent-identity.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,

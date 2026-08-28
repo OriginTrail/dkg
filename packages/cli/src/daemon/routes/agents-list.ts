@@ -32,6 +32,7 @@
 import {
   discoveredAgentIdentityKey,
   discoveredAgentRowKey,
+  normalizeAgentDid,
   type DiscoveredAgent,
 } from '@origintrail-official/dkg-agent';
 import { createHash } from 'node:crypto';
@@ -304,8 +305,8 @@ export async function handleAgentsListRoute(ctx: RequestContext): Promise<void> 
   // remote row reusing any local wallet therefore cannot become `self`.
   const defaultAgentAddress = agent.getDefaultAgentAddress();
   const defaultAgentAddressLower = defaultAgentAddress?.toLowerCase();
-  const defaultAgentUri = defaultAgentAddressLower
-    ? `did:dkg:agent:${defaultAgentAddressLower}`
+  const defaultAgentUri = defaultAgentAddress
+    ? normalizeAgentDid(`did:dkg:agent:${defaultAgentAddress}`)
     : undefined;
   const isLocalAgent = (candidate: typeof filteredAgents[number]): boolean =>
     defaultAgentAddressLower !== undefined

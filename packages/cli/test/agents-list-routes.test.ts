@@ -5,6 +5,11 @@ import {
 } from '../src/daemon/routes/agents-list.js';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import {
+  discoveredAgentIdentityKey,
+  discoveredAgentRowKey,
+  normalizeAgentDid,
+} from '@origintrail-official/dkg-agent';
 
 // GH#310 — GET /api/agents returned the full network registry (~750 agents,
 // ~150 KB) with no pagination, no connection filter and no way to ask only
@@ -190,10 +195,37 @@ describe('paginateAgentRows (GH#310)', () => {
   });
 
   it('resolves conflicting rows for one stable identity before pagination', () => {
+    const canonical = row();
     const conflict = row({ name: 'zeta', peerId: 'peer-conflict' });
-    const page = paginateAgentRows([row(), conflict, many[2]!], { limit: 2 });
-    expect(page.rows).toHaveLength(2);
-    expect(new Set(page.rows.map((agent) => agent.agentUri)).size).toBe(2);
+    const expected = discoveredAgentRowKey(canonical) < discoveredAgentRowKey(conflict)
+      ? canonical
+      : conflict;
+
+    const forward = paginateAgentRows([canonical, conflict, many[2]!], { limit: 2 });
+    const reverse = paginateAgentRows([conflict, canonical, many[2]!], { limit: 2 });
+    for (const page of [forward, reverse]) {
+      expect(page.rows).toHaveLength(2);
+      expect(new Set(page.rows.map((agent) => agent.agentUri)).size).toBe(2);
+      expect(page.rows.find((agent) => agent.agentUri === canonical.agentUri)).toEqual(expected);
+    }
+  });
+
+  it('collapses mixed-case EVM DIDs without changing peer-ID case', () => {
+    const lowerAddress = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+    const mixedAddress = '0xAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCd';
+    const lowerDid = `did:dkg:agent:${lowerAddress}`;
+    const mixedDid = `did:dkg:agent:${mixedAddress}`;
+    const peerDid = 'did:dkg:agent:12D3KooWCaseSensitivePeerABC';
+
+    expect(discoveredAgentIdentityKey(row({ agentUri: mixedDid }))).toBe(lowerDid);
+    expect(normalizeAgentDid(peerDid)).toBe(peerDid);
+    const page = paginateAgentRows([
+      row({ agentUri: mixedDid, name: 'zeta', peerId: 'peer-mixed' }),
+      row({ agentUri: lowerDid, name: 'alpha', peerId: 'peer-lower' }),
+      many[2]!,
+    ], { limit: 2 });
+    expect(page.rows.filter((agent) => discoveredAgentIdentityKey(agent) === lowerDid))
+      .toEqual([expect.objectContaining({ name: 'alpha', peerId: 'peer-lower' })]);
   });
 
   it('omits nextCursor on the final exactly-full page', () => {
@@ -335,6 +367,12 @@ describe('GET /api/agents (GH#310)', () => {
         agentAddress: secondaryLocalAddress,
       },
       {
+        agentUri: `did:dkg:agent:${localAddress}`,
+        name: 'stale-default-profile-binding',
+        peerId: 'peer-remote-default',
+        agentAddress: localAddress,
+      },
+      {
         agentUri: 'did:dkg:agent/foreign',
         name: 'foreign-spoof',
         peerId: 'peer-self',
@@ -361,6 +399,36 @@ describe('GET /api/agents (GH#310)', () => {
         connectionStatus: 'self',
       });
     }
+
+    const { body } = await getAgents(agent);
+    expect(body.agents.find((candidate: any) => candidate.peerId === 'peer-remote-default'))
+      .toMatchObject({
+        agentAddress: localAddress,
+        connectionStatus: 'disconnected',
+      });
+  });
+
+  it('recognizes the canonical local profile through a mixed-case EVM DID', async () => {
+    const lowerAddress = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+    const mixedAddress = '0xAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCd';
+    const agent = fakeAgent({
+      getDefaultAgentAddress: () => lowerAddress,
+      findAgents: async () => [{
+        agentUri: `did:dkg:agent:${mixedAddress}`,
+        name: 'mixed-case-local',
+        peerId: 'peer-self',
+        agentAddress: mixedAddress,
+      }],
+    });
+
+    const { status, body } = await getAgents(agent, '?connectionStatus=self');
+    expect(status).toBe(200);
+    expect(body.agents).toEqual([
+      expect.objectContaining({
+        agentUri: `did:dkg:agent:${mixedAddress}`,
+        connectionStatus: 'self',
+      }),
+    ]);
   });
 
   it('connectionStatus=connected returns only live peers', async () => {

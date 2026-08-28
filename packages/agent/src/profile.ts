@@ -4,6 +4,7 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   isPublicLikeAddress,
 } from '@origintrail-official/dkg-core';
+import { AGENT_DID_PREFIX, normalizeAgentDid } from './agent-identity.js';
 
 /**
  * Canonicalise the DID subject for an agent.
@@ -22,10 +23,7 @@ import {
  * address.
  */
 export function canonicalAgentDidSubject(raw: string): string {
-  if (/^0x[0-9a-fA-F]{40}$/.test(raw)) {
-    return raw.toLowerCase();
-  }
-  return raw;
+  return normalizeAgentDid(`${AGENT_DID_PREFIX}${raw}`).slice(AGENT_DID_PREFIX.length);
 }
 
 /**
@@ -172,8 +170,9 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   // A-12: normalise the DID subject so profile + endorsement subjects
   // converge for the same wallet regardless of the source casing. See
   // `canonicalAgentDidSubject` for rationale.
-  const didSubject = canonicalAgentDidSubject(config.agentAddress ?? config.peerId);
-  const entity = `did:dkg:agent:${didSubject}`;
+  const entity = normalizeAgentDid(
+    `${AGENT_DID_PREFIX}${config.agentAddress ?? config.peerId}`,
+  );
   const quads: Quad[] = [];
   const role = config.nodeRole ?? 'edge';
 

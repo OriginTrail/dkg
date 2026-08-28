@@ -1,6 +1,7 @@
 import type { QueryEngine, QueryResult } from '@origintrail-official/dkg-query';
 import { DKG_ONTOLOGY, escapeSparqlLiteral, assertSafeIri, sparqlIri } from '@origintrail-official/dkg-core';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
+import { normalizeAgentDid } from './agent-identity.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';
 const DKG = 'https://dkg.network/ontology#';
@@ -41,8 +42,7 @@ export interface DiscoveredAgent {
 export function discoveredAgentIdentityKey(
   agent: Pick<DiscoveredAgent, 'agentUri'>,
 ): string {
-  const match = /^(did:dkg:agent:)(0x[0-9a-fA-F]{40})$/.exec(agent.agentUri);
-  return match ? `${match[1]}${match[2]!.toLowerCase()}` : agent.agentUri;
+  return normalizeAgentDid(agent.agentUri);
 }
 
 /** Explicit exact-row key for the current public DiscoveredAgent model. */
