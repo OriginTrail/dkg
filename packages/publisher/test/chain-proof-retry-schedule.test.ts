@@ -150,13 +150,30 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.schedule.retainedEntryCount()).toBe(0); // settlement clears the slot entirely
   });
 
-  it('a successor observation replaces the predecessor entry — never leaks it', () => {
+  it('a successor observation replaces the predecessor entry with an ownership marker', () => {
     const h = harness();
     h.schedule.defer('job', A, 'default');
     expect(h.schedule.retainedEntryCount()).toBe(1);
-    expect(h.schedule.isDue('job', B, h.now())).toBe(true); // replaces A's entry
-    expect(h.schedule.retainedEntryCount()).toBe(0);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true); // replaces A's entry with B's marker
+    expect(h.schedule.retainedEntryCount()).toBe(1); // ownership is never vacant
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true); // marker: still due until B defers
     h.schedule.defer('job', B, 'default');
     expect(h.schedule.retainedEntryCount()).toBe(1);
+  });
+
+  it('a stale echo cannot claim the slot between successor observation and its first deferral', () => {
+    // PR #2380 r1 (🔴 3882686189 / 3882686193) — the exact interleaving: defer(A); isDue(B);
+    // late defer(A) echo; defer(B). The ownership marker rejects the echo, so B's first earned
+    // deferral lands and B waits its base delay — exactly one entry retained throughout.
+    const h = harness();
+    h.schedule.defer('job', A, 'default');
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true); // B observed: marker installed
+    h.schedule.defer('job', A, 'default'); // stale echo into the marker window: dropped
+    h.schedule.defer('job', B, 'default'); // B's OWN first deferral: attempt 1, 30s
+    expect(h.schedule.retainedEntryCount()).toBe(1);
+    h.advance(29_999);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(false); // B's backoff was NOT discarded
+    h.advance(1);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true);
   });
 });

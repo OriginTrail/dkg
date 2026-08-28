@@ -55,12 +55,13 @@ export class ChainProofRetrySchedule {
     const entry = this.entries.get(jobId);
     if (!entry) return true;
     if (entry.identity !== identity) {
-      // Successor observation: the predecessor's schedule is REPLACED by immediate dueness —
-      // and deleted here, so the successor's own first deferral finds the slot free rather
-      // than being dropped against a leftover. (A rare echo racing into the freed slot before
-      // that deferral is transient and self-correcting: the next due check replaces it; the
-      // slot model keeps it bounded either way.)
-      this.entries.delete(jobId);
+      // Successor observation installs an immediately-due OWNERSHIP MARKER (PR #2380 r1
+      // 3882686189/3882686193): deleting the slot instead would open an unowned window a stale
+      // echo could claim, silently discarding the successor's first earned deferral. The marker
+      // keeps exactly one entry per job, keeps the successor immediately due until it defers,
+      // starts its ladder at zero, and makes a stale write unrepresentable across the WHOLE
+      // dispatch interval — ownership is never vacant.
+      this.entries.set(jobId, { identity, attempts: 0, dueAt: atMs });
       return true;
     }
     return entry.dueAt <= atMs;
