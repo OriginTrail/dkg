@@ -92,6 +92,34 @@ export type ActiveLiftJobClaim = LiftJobClaimed & {
   };
 };
 
+/**
+ * The mutation authority for one acquired claim.
+ *
+ * Runtime workers retain this session rather than a bare job id. Every mutation is fenced by
+ * the immutable wallet/token pair in {@link claim}; a recovered or re-claimed job therefore
+ * rejects the stale session before it can change queue truth.
+ */
+export interface ActiveLiftJobClaimSession {
+  readonly claim: ActiveLiftJobClaim;
+  update(status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
+  recordPublishResult(
+    publishResult: PublishResult,
+    options?: { publicByteSize?: number },
+  ): Promise<LiftJob>;
+  recordExecutionFailure(failedFromState: LiftJobState, error: unknown): Promise<LiftJob>;
+}
+
+/** Explicit by-id compatibility surface for control-plane callers, never runtime workers. */
+export interface AsyncLiftAdministrativeMutations {
+  updateById(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
+  recordPublishResultById(
+    jobId: string,
+    publishResult: PublishResult,
+    options?: { publicByteSize?: number },
+  ): Promise<LiftJob>;
+  recordPublishFailureById(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
+}
+
 /** #1828 — the immutable facts a client retains to recover a lost VM-publish admission. */
 export interface IntentLookupInput {
   readonly contextGraphId: string;
@@ -139,16 +167,23 @@ export interface AsyncLiftPublisher {
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string>;
   claimNext(walletId: string): Promise<ActiveLiftJobClaim | null>;
+  openClaimSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
+  readonly administrative: AsyncLiftAdministrativeMutations;
   /**
    * Administrative/compatibility mutation by exact job id. Runtime workers use the owned-claim
-   * path inside `processNext`, where the claim token is mandatory and revalidated on every write.
+   * session returned by {@link openClaimSession}, where the claim token is mandatory and
+   * revalidated on every write.
+   *
+   * @deprecated Prefer `administrative.updateById`; workers must use `openClaimSession`.
    */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
   list(filter?: { status?: LiftJobState }): Promise<LiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<LiftJob | null>;
+  /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
+  /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
   recover(): Promise<number>;
   /** Reconcile interrupted work without restarting the runner. Older implementations can omit it. */

@@ -1,6 +1,8 @@
 export type {
   AsyncLiftAdmissionContext,
   ActiveLiftJobClaim,
+  ActiveLiftJobClaimSession,
+  AsyncLiftAdministrativeMutations,
   AsyncLiftDetailedRetrier,
   AsyncLiftRetryOutcome,
   AsyncLiftRetryStateReader,

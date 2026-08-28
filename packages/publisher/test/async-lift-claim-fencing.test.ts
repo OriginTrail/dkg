@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import {
+  StaleLiftJobClaimError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
+import type { RawLiftRequest } from '../src/lift-job.js';
 import {
   KA_VM_EXECUTOR_TX_HASH,
+  KA_VM_KA_UAL,
   KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
@@ -14,6 +18,7 @@ import {
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
+import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
   let resolve!: () => void;
@@ -50,6 +55,24 @@ describe('async-lift claim fencing', () => {
       store,
       graphManager: new GraphManager(store),
     });
+  }
+
+  function rawLiftRequest(): RawLiftRequest {
+    return {
+      swmId: 'swm-1',
+      namespace: 'default',
+      contextGraphId: 'music-social',
+      shareOperationId: 'share-op-1',
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: KA_VM_KA_UAL,
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
+      scope: 'full',
+      transitionType: 'CREATE',
+      authority: { type: 'owner', proofRef: 'proof:owner:1' },
+    };
   }
 
   function gateNextSweepInventory(): {
@@ -90,6 +113,30 @@ describe('async-lift claim fencing', () => {
         walletId: 'wallet-a',
         claimToken: claimed?.claim?.claimToken,
       },
+    });
+  });
+
+  it('mints a fresh token for a same-wallet reclaim even when the clock does not advance', async () => {
+    const publisher = createPublisher();
+    await stageSnapshot();
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const firstClaim = await publisher.claimNext('wallet-a');
+    if (!firstClaim) throw new Error('expected first claim');
+    const staleSession = publisher.openClaimSession(firstClaim);
+    await staleSession.recordExecutionFailure('claimed', new Error('workspace unavailable'));
+
+    expect(await publisher.retry({ status: 'failed' })).toBe(1);
+    const replacement = await publisher.claimNext('wallet-a');
+    expect(replacement).toMatchObject({ jobId, claim: { walletId: 'wallet-a' } });
+    expect(replacement?.claim.claimToken).not.toBe(firstClaim.claim.claimToken);
+    expect(now).toBe(1_000);
+
+    await expect(staleSession.update('validated', { validation: KA_VM_VALIDATION }))
+      .rejects.toBeInstanceOf(StaleLiftJobClaimError);
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'claimed',
+      claim: { claimToken: replacement?.claim.claimToken },
     });
   });
 
@@ -212,6 +259,96 @@ describe('async-lift claim fencing', () => {
     expect(await recovery.getStatus(jobId)).toMatchObject({
       status: 'claimed',
       claim: { walletId: 'wallet-b', claimToken: replacement?.claim?.claimToken },
+    });
+  });
+
+  it('fences a stale raw-lift worker before its write-ahead or send', async () => {
+    const executeEntered = deferred();
+    const releaseExecute = deferred();
+    let sends = 0;
+    const staleExecutor = createPublisher({
+      publishExecutor: async (input) => {
+        executeEntered.resolve();
+        await releaseExecute.promise;
+        await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+        sends += 1;
+        throw new Error('stale raw-lift send must not happen');
+      },
+    });
+    const recovery = createPublisher();
+    await stageSnapshot();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      now: () => now,
+      idGenerator: () => `job-${++ids}`,
+    });
+
+    const staleRun = staleExecutor.processNext('wallet-a');
+    await executeEntered.promise;
+    expect(await recovery.getStatus(jobId)).toMatchObject({ status: 'validated' });
+
+    now += 5 * 60_000 + 1;
+    expect(await recovery.recover()).toBe(1);
+    const replacement = await recovery.claimNext('wallet-b');
+    expect(replacement).toMatchObject({ jobId, status: 'claimed', claim: { walletId: 'wallet-b' } });
+
+    releaseExecute.resolve();
+    await expect(staleRun).resolves.toMatchObject({
+      jobId,
+      status: 'claimed',
+      claim: { walletId: 'wallet-b', claimToken: replacement?.claim.claimToken },
+    });
+    expect(sends).toBe(0);
+    expect(await recovery.getStatus(jobId)).toMatchObject({
+      status: 'claimed',
+      claim: { walletId: 'wallet-b', claimToken: replacement?.claim.claimToken },
+    });
+  });
+
+  it('keeps no-op validation and finalization in one owned transition', async () => {
+    const validatedLockWrite = deferred();
+    const releaseValidatedLockWrite = deferred();
+    const originalReplaceSubject = store.replaceSubject.bind(store);
+    let walletWrites = 0;
+    store.replaceSubject = async (...args) => {
+      if (
+        args[0] === DEFAULT_WALLET_LOCK_GRAPH_URI
+        && args[1] === walletLockSubject('wallet-a')
+        && ++walletWrites === 2
+      ) {
+        validatedLockWrite.resolve();
+        await releaseValidatedLockWrite.promise;
+      }
+      await originalReplaceSubject(...args);
+    };
+
+    const executor = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        preflight: async () => ({ action: 'noop' }),
+        execute: async () => {
+          throw new Error('execute must not run for a no-op');
+        },
+      },
+    });
+    const recovery = createPublisher();
+    const jobId = await executor.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const run = executor.processNext('wallet-a');
+    await validatedLockWrite.promise;
+
+    now += 5 * 60_000 + 1;
+    const sweep = gateNextSweepInventory();
+    const recoveryRun = recovery.recover();
+    await sweep.captured;
+    sweep.release();
+    // Let recovery queue for the job transition lock while the no-op session still owns it.
+    await Promise.resolve();
+    releaseValidatedLockWrite.resolve();
+
+    await expect(run).resolves.toMatchObject({ jobId, status: 'finalized' });
+    await expect(recoveryRun).resolves.toBe(0);
+    expect(await recovery.getStatus(jobId)).toMatchObject({
+      status: 'finalized',
+      validation: { swmQuadCount: 0 },
+      finalization: { mode: 'noop' },
     });
   });
 
