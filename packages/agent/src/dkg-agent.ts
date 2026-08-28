@@ -3013,7 +3013,12 @@ export class DKGAgent extends DKGAgentBase {
           { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
           createOperationContext('share'),
         );
-        const { promotedCount, gossipMessage, promotedAllRoots, shareOperationId } = await agent.publisher.assertionPromote(
+        const {
+          promotedCount,
+          gossipPayload,
+          promotedAllRoots,
+          shareOperationId,
+        } = await agent.publisher.assertionPromote(
           contextGraphId, name, promoteAgentAddress,
           {
             ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
@@ -3022,7 +3027,7 @@ export class DKGAgent extends DKGAgentBase {
             confirmBeforeCommit,
           },
         );
-        if (gossipMessage) {
+        if (gossipPayload) {
           try {
             // Preserve the immutable operation id through the fan-out seam.
             // Direct share() already does this; assertion promotion previously
@@ -3030,7 +3035,7 @@ export class DKGAgent extends DKGAgentBase {
             // not be correlated for imported (including Markdown) KAs.
             await agent.publishWorkspaceGossip(
               contextGraphId,
-              gossipMessage,
+              gossipPayload,
               createOperationContext('share'),
               gossipSigner,
               shareOperationId,

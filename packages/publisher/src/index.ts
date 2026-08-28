@@ -99,8 +99,16 @@ export {
   type CASCondition,
 } from './dkg-publisher.js';
 export {
+  createCapturedWorkspaceGossipPayload,
+  createResolveCurrentWorkspaceGossipPayload,
+  parseEncodedWorkspaceGossipPayload,
+  type EncodedWorkspaceGossipPayload,
+} from './workspace-gossip-payload.js';
+export {
   resolveWorkspaceAgentRecipients,
   resolveWorkspaceAgentRecipientKeys,
+  projectWorkspaceAgentRecipientFanout,
+  type WorkspaceAgentRecipientFanoutSnapshot,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolver,
