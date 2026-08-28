@@ -759,11 +759,60 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       lifecycleAgentAddress: AUTHOR,
       shareOperationId,
     })).resolves.toMatchObject({ status: 'existing', attempts: 1 });
+    const firstCatalogReconcile = await author
+      .reconcileRfc64PublicCatalogFromSwmInventoryV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+      });
+    expect(firstCatalogReconcile).toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      targetAssetCount: 1,
+      appliedHead: { catalogVersion: '1', inventoryRowCount: '1' },
+    });
+    await expect(author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({
+      status: 'existing',
+      successorsApplied: 0,
+      targetAssetCount: 1,
+      appliedHead: { catalogVersion: '1', inventoryRowCount: '1' },
+    });
     expect(author.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
       attemptedUpserts: 3,
       appliedUpserts: 1,
       existingUpserts: 1,
       failed: 1,
+    });
+
+    const appliedBeforeWorkspaceDrift = author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store: author.store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: canonicalSeal.kaUal,
+      assertionVersion: canonicalSeal.assertionVersion,
+      shareOperationId: 'different-durable-workspace-operation',
+    });
+    await expect(author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).rejects.toThrow(/durable catalog asset could not be resolved/u);
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toEqual(appliedBeforeWorkspaceDrift);
+    await storeKnowledgeAssetWorkspaceHead({
+      store: author.store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: canonicalSeal.kaUal,
+      assertionVersion: canonicalSeal.assertionVersion,
+      shareOperationId,
     });
 
     await author.stop();
@@ -798,6 +847,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toMatchObject({
       head: { payload: { version: '1', totalRows: '0' } },
       rows: [],
+    });
+    await expect(restarted.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      targetAssetCount: 0,
+      appliedHead: { catalogVersion: '2', inventoryRowCount: '0' },
     });
     await expect(restarted.removeRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -850,6 +908,158 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
     })?.rows).toEqual([]);
+
+    // A catalog reconciliation must fence the complete inventory snapshot it
+    // resolved. Otherwise a slow one-row pass can land after a newer two-row
+    // pass and regress the signed applied head back to the stale set.
+    await restarted.store.insert(buildAssertionSealQuads({
+      assertionUri,
+      metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      merkleRoot: seal.merkleRoot,
+      authorAddress: seal.authorAddress,
+      authorAttestationR: seal.authorAttestationR,
+      authorAttestationVS: seal.authorAttestationVS,
+      authorSchemeVersion: seal.authorSchemeVersion,
+      chainId: seal.chainId,
+      kav10Address: seal.kav10Address,
+      reservedKaId: seal.reservedKaId!,
+      finalizedAtIso: seal.finalizedAtIso,
+      contentScopeVersion: seal.contentScopeVersion!,
+      kaUal: seal.kaUal!,
+      assertionVersion: seal.assertionVersion!,
+      publicTripleCount: seal.publicTripleCount!,
+      privateTripleCount: seal.privateTripleCount!,
+    }));
+    const restartedGraphManager = new GraphManager(restarted.store);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: restarted.store,
+      graphManager: restartedGraphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      kaUal: canonicalSeal.kaUal,
+      assertionVersion: canonicalSeal.assertionVersion,
+      quads: publicQuads,
+      privateTripleCount: 0,
+      publisherPeerId: restarted.peerId,
+      accessPolicy: 'public',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-07-19T12:35:00.000Z'),
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store: restarted.store,
+      graphManager: restartedGraphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: canonicalSeal.kaUal,
+      assertionVersion: canonicalSeal.assertionVersion,
+      shareOperationId,
+    });
+    await expect(restarted.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    })).resolves.toMatchObject({ status: 'applied' });
+    await expect(restarted.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({ targetAssetCount: 1 });
+
+    const secondAssertionCoordinate = 'swm-only-shadow-second';
+    const secondShareOperationId = 'swm-only-shadow-operation-second';
+    const secondCanonicalSeal = await authorSeal(22n, publicQuads);
+    const secondSeal = assertionSealFromCanonical(secondCanonicalSeal);
+    const secondAssertionUri = contextGraphAssertionUri(
+      CONTEXT_GRAPH_ID,
+      AUTHOR,
+      secondAssertionCoordinate,
+    );
+    await restarted.store.insert(buildAssertionSealQuads({
+      assertionUri: secondAssertionUri,
+      metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      merkleRoot: secondSeal.merkleRoot,
+      authorAddress: secondSeal.authorAddress,
+      authorAttestationR: secondSeal.authorAttestationR,
+      authorAttestationVS: secondSeal.authorAttestationVS,
+      authorSchemeVersion: secondSeal.authorSchemeVersion,
+      chainId: secondSeal.chainId,
+      kav10Address: secondSeal.kav10Address,
+      reservedKaId: secondSeal.reservedKaId!,
+      finalizedAtIso: secondSeal.finalizedAtIso,
+      contentScopeVersion: secondSeal.contentScopeVersion!,
+      kaUal: secondSeal.kaUal!,
+      assertionVersion: secondSeal.assertionVersion!,
+      publicTripleCount: secondSeal.publicTripleCount!,
+      privateTripleCount: secondSeal.privateTripleCount!,
+    }));
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: restarted.store,
+      graphManager: restartedGraphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: secondShareOperationId,
+      kaUal: secondCanonicalSeal.kaUal,
+      assertionVersion: secondCanonicalSeal.assertionVersion,
+      quads: publicQuads,
+      privateTripleCount: 0,
+      publisherPeerId: restarted.peerId,
+      accessPolicy: 'public',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-07-19T12:36:00.000Z'),
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store: restarted.store,
+      graphManager: restartedGraphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: secondCanonicalSeal.kaUal,
+      assertionVersion: secondCanonicalSeal.assertionVersion,
+      shareOperationId: secondShareOperationId,
+    });
+
+    const originalResolveCatalogAsset = (restarted as any)
+      .resolveRfc64SwmInventoryCatalogAssetV1.bind(restarted);
+    let releaseStaleReconcile!: () => void;
+    let markStaleReconcileEntered!: () => void;
+    const staleGate = new Promise<void>((resolve) => { releaseStaleReconcile = resolve; });
+    const staleEntered = new Promise<void>((resolve) => { markStaleReconcileEntered = resolve; });
+    const resolveCatalogAssetSpy = vi.spyOn(
+      restarted as any,
+      'resolveRfc64SwmInventoryCatalogAssetV1',
+    ).mockImplementationOnce(async (...args: unknown[]) => {
+      markStaleReconcileEntered();
+      await staleGate;
+      return originalResolveCatalogAsset(...args);
+    });
+    const staleReconcile = restarted.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+    await staleEntered;
+    let secondRecordSettled = false;
+    const secondRecord = restarted.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: secondAssertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: secondShareOperationId,
+    }).finally(() => { secondRecordSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(secondRecordSettled).toBe(false);
+    const currentReconcile = secondRecord.then(() => (
+      restarted.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+      })
+    ));
+    releaseStaleReconcile();
+    await expect(staleReconcile).resolves.toMatchObject({ targetAssetCount: 1 });
+    await expect(secondRecord).resolves.toMatchObject({ status: 'applied' });
+    await expect(currentReconcile).resolves.toMatchObject({
+      targetAssetCount: 2,
+      appliedHead: { inventoryRowCount: '2' },
+    });
+    resolveCatalogAssetSpy.mockRestore();
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ inventoryRowCount: '2' });
   }, 60_000);
 
   it('normalizes legacy and selected auto-publish into one internal policy', () => {
@@ -1913,6 +2123,116 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     ));
   }, 60_000);
 
+  it('reconciles deterministic multi-step add, replacement, removal, and replay targets', async () => {
+    const author = await startNativeAgent('r1-1-exact-reconcile-author');
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const scope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    }) as const;
+    const firstSeal = await authorSeal(71n);
+    const secondSeal = await authorSeal(72n);
+    const firstAsset = Object.freeze({
+      assertionCoordinate: 'r1-1-first' as never,
+      projectionBytes: PROJECTION,
+      seal: firstSeal,
+    });
+    const secondAsset = Object.freeze({
+      assertionCoordinate: 'r1-1-second' as never,
+      projectionBytes: PROJECTION,
+      seal: secondSeal,
+    });
+    const common = {
+      scope,
+      author: AUTHOR_WALLET,
+      deployment: NATIVE_DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [secondAsset, firstAsset],
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 2,
+      targetAssetCount: 2,
+      appliedHead: { catalogVersion: '2', inventoryRowCount: '2' },
+    });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [firstAsset, secondAsset],
+    })).resolves.toMatchObject({
+      status: 'existing',
+      successorsApplied: 0,
+      appliedHead: { catalogVersion: '2', inventoryRowCount: '2' },
+    });
+
+    const firstV2 = Object.freeze({
+      ...firstAsset,
+      seal: Object.freeze({ ...firstSeal, assertionVersion: '2' }) as never,
+    });
+    const appliedBeforeInvalidReplacement = author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [{
+        ...firstAsset,
+        seal: Object.freeze({ ...firstSeal, assertionVersion: '3' }) as never,
+      }, secondAsset],
+    })).rejects.toThrow(/not the next assertion version/u);
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [{
+        ...firstV2,
+        assertionCoordinate: 'r1-1-renamed-first' as never,
+      }, secondAsset],
+    })).rejects.toThrow(/not the next assertion version/u);
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toEqual(appliedBeforeInvalidReplacement);
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [firstV2, secondAsset],
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      appliedHead: { catalogVersion: '3', inventoryRowCount: '2' },
+    });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [firstV2],
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      appliedHead: { catalogVersion: '4', inventoryRowCount: '1' },
+    });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [],
+    })).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      targetAssetCount: 0,
+      appliedHead: { catalogVersion: '5', inventoryRowCount: '0' },
+    });
+  }, 60_000);
+
   registerM0RecoveryScenario('cold-restart', rfc64M0RecoveryTitle('cold-restart'), async () => {
     const author = await startNativeAgent(
       'bootstrap-author',
@@ -2585,6 +2905,70 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       applied: 3,
       dedupedAlreadyApplied: 1,
     });
+
+    const oneRow = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: successor.headObjectDigest,
+        signatureVariantDigest: successor.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [firstAsset],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: '1773900003000' as TimestampMsV1,
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    const empty = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: oneRow.headObjectDigest,
+        signatureVariantDigest: oneRow.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: '1773900004000' as TimestampMsV1,
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(empty).toMatchObject({
+      inventoryRowCount: '0',
+      signedBucketRowCount: '0',
+      assets: [],
+    });
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      empty.headObjectDigest,
+    )).toBeNull();
+    expect(receiver.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      empty.headObjectDigest,
+    )).toMatchObject({
+      catalogHeadDigest: empty.headObjectDigest,
+      inventoryRowCount: 0,
+      activatedTripleCount: 0,
+      rows: [],
+      removedRowCount: 1,
+      appliedHeadStatus: 'applied',
+    });
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: empty.headObjectDigest,
+      catalogVersion: '4',
+      inventoryRowCount: '0',
+    });
+    for (const kaNumber of [7, 8]) {
+      const swmGraph = contextGraphLayerUri(
+        CONTEXT_GRAPH_ID,
+        MemoryLayer.SharedWorkingMemory,
+        AUTHOR,
+        kaNumber,
+      );
+      await expect(receiver.store.query(
+        `SELECT ?s WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } } LIMIT 1`,
+      )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
+    }
   }, 60_000);
 
   it('preserves a single-provider discovery error without aggregation', async () => {

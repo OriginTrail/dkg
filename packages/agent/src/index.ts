@@ -41,6 +41,7 @@ export {
 } from './rfc64/recoverable-author-attestation-v1.js';
 export * from './rfc64/author-catalog-producer.js';
 export * from './rfc64/swm-author-inventory-producer-v1.js';
+export * from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
@@ -160,6 +161,14 @@ export type {
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
 } from './dkg-agent-rfc64-catalog.js';
+export type {
+  ReconcileRfc64PublicRootCatalogExactSetParamsV1,
+  ReconcileRfc64PublicRootCatalogExactSetResultV1,
+} from './dkg-agent-rfc64-catalog-upsert.js';
+export type {
+  ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
+  ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
+} from './dkg-agent-rfc64-catalog-auto-publish.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
