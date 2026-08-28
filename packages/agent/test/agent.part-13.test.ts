@@ -85,6 +85,51 @@ describe('Genesis Knowledge', () => {
     });
 
 
+    it('clears a proven pre-broadcast failure so a corrected retry can submit once', async () => {
+      class FailBeforeBroadcastOnceChain extends CapturingContextGraphChainAdapter {
+        private failNext = true;
+
+        override async createOnChainContextGraph(
+          params: CreateOnChainContextGraphParams,
+        ): Promise<CreateOnChainContextGraphResult> {
+          if (this.failNext) {
+            this.failNext = false;
+            throw new Error('injected gas-estimation failure before broadcast');
+          }
+          return super.createOnChainContextGraph(params);
+        }
+      }
+
+      const store = new OxigraphStore();
+      const chain = new FailBeforeBroadcastOnceChain();
+      const agent = await DKGAgent.create({
+        name: 'RegistrationPreBroadcastRetryBot',
+        store,
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const curatorAddress = ethers.getAddress(chain.signerAddress);
+
+      await agent.createContextGraph({
+        id: 'pre-broadcast-retry',
+        name: 'Pre-broadcast retry',
+        callerAgentAddress: curatorAddress,
+      });
+      await expect(agent.registerContextGraph('pre-broadcast-retry', {
+        callerAgentAddress: curatorAddress,
+      })).rejects.toThrow(/before broadcast/);
+      await expect((agent as any).getContextGraphRegistrationStatus('pre-broadcast-retry'))
+        .resolves.toBe('unregistered');
+
+      await expect(agent.registerContextGraph('pre-broadcast-retry', {
+        callerAgentAddress: curatorAddress,
+      })).resolves.toMatchObject({ onChainId: '1' });
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
+      await agent.stop().catch(() => {});
+    });
+
+
     it('rejects an interrupted attempt with a stale unproven meta id before chain submission', async () => {
       const store = new OxigraphStore();
       const chain = new CapturingContextGraphChainAdapter();
@@ -110,9 +155,14 @@ describe('Genesis Knowledge', () => {
         object: '"7"',
         graph: metaGraph,
       }]);
-      await (agent as any).beginContextGraphRegistrationAttempt(
+      const attemptStatus = await (agent as any).beginContextGraphRegistrationAttempt(
         contextGraphId,
         'unregistered',
+      );
+      await (agent as any).persistContextGraphRegistrationBroadcast(
+        contextGraphId,
+        attemptStatus,
+        `0x${'ab'.repeat(32)}`,
       );
 
       await expect(agent.registerContextGraph(contextGraphId, {
@@ -123,10 +173,12 @@ describe('Genesis Knowledge', () => {
     });
 
 
-    it('recovers a durable receipt binding after later projection failure', async () => {
-      const store = new OxigraphStore();
+    it('recovers a durable receipt binding after reopening storage', async () => {
+      const persistentDir = await mkdtemp(join(tmpdir(), 'dkg-registration-recovery-'));
+      const persistentPath = join(persistentDir, 'store.nq');
+      const store = new OxigraphStore(persistentPath);
       const chain = new CapturingContextGraphChainAdapter();
-      const agent = await DKGAgent.create({
+      let agent = await DKGAgent.create({
         name: 'RegistrationReceiptRecoveryBot',
         store,
         chainAdapter: chain,
@@ -148,8 +200,61 @@ describe('Genesis Knowledge', () => {
       await expect(agent.registerContextGraph('receipt-binding-recovery', { callerAgentAddress: curatorAddress }))
         .rejects.toThrow(/injected post-receipt projection failure/);
       completeProjection.mockRestore();
+
+      await agent.stop().catch(() => {});
+      agent = await DKGAgent.create({
+        name: 'RegistrationReceiptRecoveryRestartedBot',
+        store: new OxigraphStore(persistentPath),
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
       await expect(agent.registerContextGraph('receipt-binding-recovery', { callerAgentAddress: curatorAddress }))
         .resolves.toMatchObject({ onChainId: '1' });
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
+      await agent.stop().catch(() => {});
+      await rm(persistentDir, { recursive: true, force: true });
+    });
+
+
+    it('auto-publish preflight completes a receipt-backed interrupted projection', async () => {
+      const store = new OxigraphStore();
+      const chain = new CapturingContextGraphChainAdapter();
+      const agent = await DKGAgent.create({
+        name: 'RegistrationPublishRecoveryBot',
+        store,
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const contextGraphId = 'receipt-publish-recovery';
+      const curatorAddress = ethers.getAddress(chain.signerAddress);
+
+      await agent.createContextGraph({
+        id: contextGraphId,
+        name: 'Receipt publish recovery',
+        callerAgentAddress: curatorAddress,
+      });
+      const completeProjection = vi.spyOn(
+        agent as any,
+        'completeContextGraphRegistrationProjection',
+      ).mockRejectedValueOnce(new Error('injected post-receipt projection failure'));
+
+      await expect(agent.registerContextGraph(contextGraphId, {
+        callerAgentAddress: curatorAddress,
+      })).rejects.toThrow(/injected post-receipt projection failure/);
+      completeProjection.mockRestore();
+
+      await expect((agent as any).ensureRegisteredForPublish(contextGraphId, {
+        callerAgentAddress: curatorAddress,
+      })).resolves.toBeUndefined();
+      await expect((agent as any).getContextGraphRegistrationStatus(contextGraphId))
+        .resolves.toBe('registered');
+      const subscription = (agent as any).subscribedContextGraphs.get(contextGraphId);
+      expect(subscription?.onChainId).toBe('1');
+      expect(subscription?.onChainHash).toBe(
+        ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+      );
       expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
       await agent.stop().catch(() => {});
     });

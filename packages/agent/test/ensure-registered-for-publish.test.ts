@@ -20,10 +20,9 @@ type Stub = Record<string, any>;
  * tests stub. It forwards BOTH stored fields and stays fail-loud. */
 function makeStub(overrides: Stub = {}): Stub {
   return {
+    getContextGraphRegistrationStatus: async () => 'unregistered',
     getContextGraphOnChainId: async () => null,
-    resolveContextGraphRegistrationOnChainId: async function (contextGraphId: string) {
-      return this.getContextGraphOnChainId(contextGraphId);
-    },
+    resolveContextGraphRegistrationOnChainId: async () => null,
     getStoredContextGraphRegistrationOptions: async () => ({}),
     registerContextGraph: async () => undefined,
     ...overrides,
@@ -38,11 +37,38 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
   it('short-circuits (no register) when an on-chain id already exists', async () => {
     const registerCalls: any[] = [];
     const stub = makeStub({
-      getContextGraphOnChainId: async () => 42n,
+      getContextGraphRegistrationStatus: async () => 'registered',
+      resolveContextGraphRegistrationOnChainId: async () => 42n,
       registerContextGraph: async (...a: any[]) => { registerCalls.push(a); },
     });
     await callEnsure(stub, 'cg-already');
     expect(registerCalls.length).toBe(0); // idempotent — no second mint
+  });
+
+  it('finalizes a receipt-backed interrupted registration instead of treating its id as complete', async () => {
+    const registerCalls: any[][] = [];
+    const stub = makeStub({
+      getContextGraphRegistrationStatus: async () => 'registering:attempt-1',
+      resolveContextGraphRegistrationOnChainId: async () => 42n,
+      registerContextGraph: async (...args: any[]) => { registerCalls.push(args); },
+    });
+
+    await callEnsure(stub, 'cg-receipt-backed');
+
+    expect(registerCalls).toEqual([['cg-receipt-backed', {}]]);
+  });
+
+  it('registers an explicit-unregistered graph even when the legacy lookup sees a colliding id', async () => {
+    const registerCalls: any[][] = [];
+    const stub = makeStub({
+      getContextGraphOnChainId: async () => 99n,
+      resolveContextGraphRegistrationOnChainId: async () => null,
+      registerContextGraph: async (...args: any[]) => { registerCalls.push(args); },
+    });
+
+    await callEnsure(stub, 'cg-colliding-label');
+
+    expect(registerCalls).toEqual([['cg-colliding-label', {}]]);
   });
 
   it('(a) reads stored options for the EXACT publish cg id, then forwards its publishPolicy / publishAuthorityAccountId + callerAgentAddress into registerContextGraph', async () => {
@@ -103,12 +129,17 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
   });
 
   it('(b) race-confirm: registerContextGraph throws "already registered on-chain" AND an id now exists ⇒ RETURNS (swallows)', async () => {
-    let onChainIdCalls = 0;
+    let statusCalls = 0;
+    let resolverCalls = 0;
     const stub = makeStub({
       // First call (the pre-check) → null; second call (the race confirm) → truthy.
-      getContextGraphOnChainId: async () => {
-        onChainIdCalls += 1;
-        return onChainIdCalls >= 2 ? 7n : null;
+      getContextGraphRegistrationStatus: async () => {
+        statusCalls += 1;
+        return statusCalls >= 2 ? 'registered' : 'unregistered';
+      },
+      resolveContextGraphRegistrationOnChainId: async () => {
+        resolverCalls += 1;
+        return resolverCalls >= 2 ? 7n : null;
       },
       registerContextGraph: async () => {
         throw new Error('Context graph "cg-race" is already registered on-chain.');
@@ -117,12 +148,12 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
 
     // Must NOT throw — the concurrent publisher won the race; the CG IS registered.
     await expect(callEnsure(stub, 'cg-race')).resolves.toBeUndefined();
-    expect(onChainIdCalls).toBeGreaterThanOrEqual(2); // it re-checked after the throw
+    expect(resolverCalls).toBeGreaterThanOrEqual(2); // it re-checked after the throw
   });
 
   it('(b) race-confirm: "already registered" but the id is STILL falsy ⇒ RETHROWS', async () => {
     const stub = makeStub({
-      getContextGraphOnChainId: async () => null, // never resolves to a truthy id
+      resolveContextGraphRegistrationOnChainId: async () => null,
       registerContextGraph: async () => {
         throw new Error('Context graph "cg-noid" is already registered on-chain.');
       },
@@ -132,7 +163,7 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
 
   it('(b) a genuine registration failure (NOT "already registered") always RETHROWS', async () => {
     const stub = makeStub({
-      getContextGraphOnChainId: async () => null,
+      resolveContextGraphRegistrationOnChainId: async () => null,
       registerContextGraph: async () => {
         throw new Error('insufficient TRAC to register context graph');
       },

@@ -126,4 +126,38 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
     // but leave a stray CORE_OP→ContextGraphs approval, which this catches.
     expect(await approvalCount(coreOpAddress, fromBlock + 1)).toBe(0);
   });
+
+  it('checkpoints the exact signed registration hash before broadcast', async () => {
+    await setDeposit(0n);
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    let checkpointedHash: string | undefined;
+
+    const result = await adapter.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      onBroadcast: ({ txHash }) => {
+        checkpointedHash = txHash;
+      },
+    });
+
+    expect(checkpointedHash).toBe(result.hash);
+  });
+
+  it('does not broadcast when the registration write-ahead hook fails', async () => {
+    await setDeposit(0n);
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    let checkpointedHash: string | undefined;
+
+    await expect(adapter.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      onBroadcast: ({ txHash }) => {
+        checkpointedHash = txHash;
+        throw new Error('injected registration checkpoint failure');
+      },
+    })).rejects.toThrow(/checkpoint failure/);
+
+    expect(checkpointedHash).toMatch(/^0x[0-9a-fA-F]{64}$/);
+    expect(await provider.getTransaction(checkpointedHash!)).toBeNull();
+  });
 });

@@ -854,6 +854,66 @@ export class ContextGraphMethods extends DKGAgentBase {
   }
 
   /**
+   * Complete every local and peer-visible consequence of a confirmed Context
+   * Graph registration. Fresh receipts and interrupted-receipt recovery share
+   * this path so publish preflight never treats a half-projected binding as
+   * fully registered.
+   */
+  async finalizeContextGraphRegistration(
+    this: DKGAgent,
+    id: string,
+    onChainId: string,
+    nameHash: string,
+  ): Promise<void> {
+    const ctx = createOperationContext('system');
+    const contextGraphUri = `did:dkg:context-graph:${id}`;
+    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+
+    await this.completeContextGraphRegistrationProjection(id, onChainId, nameHash);
+    this.invalidateListContextGraphsCache();
+    this.contextGraphMetaProjection.markDirty(id);
+
+    const sub = this.subscribedContextGraphs.get(id);
+    if (sub) {
+      const next = { ...sub, onChainHash: nameHash };
+      this.bindSubscriptionOnChainId(id, next, onChainId);
+      this.setContextGraphSubscription(id, next, { persist: false });
+      this.subscribeToContextGraph(id, {
+        trackSyncScope: true,
+        syncMode: 'always-on',
+      });
+      if (!next.subscribed) {
+        this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
+      }
+      this.persistContextGraphSubscription(id);
+    }
+
+    // Registration status is in _meta and propagates through authenticated
+    // sync. The ontology binding is also broadcast so already-subscribed peers
+    // can discover the immutable numeric slot immediately.
+    try {
+      const onChainNquad = `<${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> "${onChainId}" <${ontologyGraph}> .`;
+      const ontologyTopic = contextGraphPublishTopic(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const regMsg = encodePublishRequest({
+        ual: `did:dkg:context-graph:${id}`,
+        nquads: new TextEncoder().encode(onChainNquad),
+        contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        kas: [],
+        publisherIdentity: this.wallet.keypair.publicKey,
+        publisherAddress: '',
+        startKAId: 0,
+        endKAId: 0,
+        chainId: '',
+        publisherSignatureR: new Uint8Array(0),
+        publisherSignatureVs: new Uint8Array(0),
+      });
+      await this.gossip.publish(ontologyTopic, regMsg);
+    } catch (err) {
+      this.log.debug(ctx, `Registration gossip broadcast failed (peers may not be subscribed yet): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
    * Register an existing context graph on-chain. This is the explicit upgrade
    * step that unlocks Verifiable Memory, chain-based discovery, and economic
    * participation. Requires native gas. Direct registration also requires the
@@ -1169,7 +1229,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       if (onChainLive) {
         this.log.info(ctx, `Context graph "${id}" already has on-chain ID ${existingOnChainId} — skipping chain call`);
         const recoveredNameHash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
-        await this.completeContextGraphRegistrationProjection(
+        await this.finalizeContextGraphRegistration(
           id,
           existingOnChainId,
           recoveredNameHash,
@@ -1181,18 +1241,12 @@ export class ContextGraphMethods extends DKGAgentBase {
         ctx,
         `Context graph "${id}" has local on-chain id ${existingOnChainId} but it is not active on-chain — re-registering`,
       );
-      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-      await this.store.deleteByPattern({
-        graph: ontologyGraph,
-        subject: contextGraphUri,
-        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-      });
+      await this.resetInactiveContextGraphRegistration(id);
       const sub = this.subscribedContextGraphs.get(id);
       if (sub) {
         this.forceClearVmReconcileStateForContextGraph(id);
         this.setContextGraphSubscription(id, { ...sub, onChainId: undefined, lastReconciledOrdinal: 0 });
       }
-      await this.resetInactiveContextGraphRegistration(id);
       registrationStatus = 'unregistered';
     }
 
@@ -1432,14 +1486,37 @@ export class ContextGraphMethods extends DKGAgentBase {
       id,
       registrationStatus,
     );
-    const result = await this.registerContextGraphOnChain({
-      accessPolicy: resolvedLocalAccessPolicy,
-      publishPolicy,
-      ...(publishAuthority ? { publishAuthority } : {}),
-      ...(isPcaCurated ? { publishAuthorityAccountId } : {}),
-      participantAgents,
-      nameHash,
-    });
+    let broadcastCheckpointed = false;
+    let result: CreateOnChainContextGraphResult;
+    try {
+      result = await this.registerContextGraphOnChain({
+        accessPolicy: resolvedLocalAccessPolicy,
+        publishPolicy,
+        ...(publishAuthority ? { publishAuthority } : {}),
+        ...(isPcaCurated ? { publishAuthorityAccountId } : {}),
+        participantAgents,
+        nameHash,
+        onBroadcast: async ({ txHash }) => {
+          await this.persistContextGraphRegistrationBroadcast(
+            id,
+            registrationAttemptStatus,
+            txHash,
+          );
+          broadcastCheckpointed = true;
+        },
+      });
+    } catch (err) {
+      if (
+        !broadcastCheckpointed
+        && this.chain.contextGraphRegistrationWriteAhead === true
+      ) {
+        await this.resetUnbroadcastContextGraphRegistrationAttempt(
+          id,
+          registrationAttemptStatus,
+        );
+      }
+      throw err;
+    }
     const onChainId = result.contextGraphId.toString();
 
     // Persist the exact receipt provenance before any fallible projection
@@ -1454,60 +1531,12 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);
 
-    // Update _meta with registered status and the member-syncable on-chain
-    // binding.  The ontology copy remains for system-graph discovery, while
-    // the authenticated CG-local copy lets a late member learn the immutable
-    // slot from the curator's private `_meta` snapshot.  A private joiner may
-    // have missed the one-shot ontology gossip emitted below and must not be
-    // left unable to start chain-driven VM reconciliation as a result.
-    await this.completeContextGraphRegistrationProjection(id, onChainId, nameHash);
-    this.invalidateListContextGraphsCache();
-    this.contextGraphMetaProjection.markDirty(id);
+    await this.finalizeContextGraphRegistration(id, onChainId, nameHash);
     // We no longer persist `publishAuthorityAccountId` locally even on
     // success (Codex PR #502 round-6 follow-through): with the
     // stored-value fallback gone, nothing reads it. A CG can only
     // register on-chain once anyway — re-reads of the stored id
     // wouldn't be useful.
-
-    // Update in-memory subscription record and ensure we're subscribed
-    const sub = this.subscribedContextGraphs.get(id);
-    if (sub) {
-      const next = { ...sub, onChainHash: nameHash };
-      this.bindSubscriptionOnChainId(id, next, onChainId);
-      this.setContextGraphSubscription(id, next, { persist: false });
-      this.subscribeToContextGraph(id, {
-        trackSyncScope: true,
-        syncMode: 'always-on',
-      });
-      if (!next.subscribed) {
-        this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
-      }
-      this.persistContextGraphSubscription(id);
-    }
-
-    // Registration status is in _meta — it propagates to peers via sync, not
-    // gossip, so that only the authenticated sync path can update it.
-    // Broadcast the ontology-graph OnChainId quad so peers see the link.
-    try {
-      const onChainNquad = `<${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> "${onChainId}" <${ontologyGraph}> .`;
-      const ontologyTopic = contextGraphPublishTopic(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-      const regMsg = encodePublishRequest({
-        ual: `did:dkg:context-graph:${id}`,
-        nquads: new TextEncoder().encode(onChainNquad),
-        contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
-        kas: [],
-        publisherIdentity: this.wallet.keypair.publicKey,
-        publisherAddress: '',
-        startKAId: 0,
-        endKAId: 0,
-        chainId: '',
-        publisherSignatureR: new Uint8Array(0),
-        publisherSignatureVs: new Uint8Array(0),
-      });
-      await this.gossip.publish(ontologyTopic, regMsg);
-    } catch (err) {
-      this.log.debug(ctx, `Registration gossip broadcast failed (peers may not be subscribed yet): ${err instanceof Error ? err.message : String(err)}`);
-    }
 
     return { onChainId };
   }

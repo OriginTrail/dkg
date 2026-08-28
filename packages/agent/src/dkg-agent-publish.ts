@@ -4220,8 +4220,12 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     opts?: { callerAgentAddress?: string },
   ): Promise<void> {
-    const existingOnChainId = await this.resolveContextGraphRegistrationOnChainId(contextGraphId);
-    if (existingOnChainId) return;
+    const registrationStatus = await this.getContextGraphRegistrationStatus(contextGraphId);
+    const existingOnChainId = await this.resolveContextGraphRegistrationOnChainId(
+      contextGraphId,
+      registrationStatus,
+    );
+    if (existingOnChainId && registrationStatus === 'registered') return;
     // #1085 — the publish path has no request-body policy, so it reads the
     // stored create-time policy + PCA directly from the canonical store reader
     // and forwards BOTH. Deliberately NOT wrapped in a catch: a stored-read
@@ -4250,7 +4254,8 @@ export class PublishMethods extends DKGAgentBase {
       // id; this only swallows the benign concurrent-winner rejection.
       if (
         /already registered on-chain/i.test(err?.message ?? String(err)) &&
-        (await this.resolveContextGraphRegistrationOnChainId(contextGraphId))
+        (await this.getContextGraphRegistrationStatus(contextGraphId)) === 'registered' &&
+        (await this.resolveContextGraphRegistrationOnChainId(contextGraphId, 'registered'))
       ) {
         return;
       }

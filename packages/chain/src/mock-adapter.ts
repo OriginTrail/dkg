@@ -170,6 +170,7 @@ function applyV10UpdateContext(
  */
 export class MockChainAdapter implements ChainAdapter {
   readonly chainType = 'evm' as const;
+  readonly contextGraphRegistrationWriteAhead = true as const;
   readonly chainId: string;
   readonly signerAddress: string;
 
@@ -1278,6 +1279,16 @@ export class MockChainAdapter implements ChainAdapter {
         throw new Error(`Mock: invalid nameHash ${params.nameHash}`);
       }
       nameHash = params.nameHash.toLowerCase();
+    }
+
+    const preBroadcastTxHash = this.peekTxHash();
+    try {
+      await params.onBroadcast?.({ txHash: preBroadcastTxHash });
+    } catch (hookErr) {
+      throw new Error(
+        'chain:writeahead hook failed before mock context-graph registration broadcast: ' +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
     }
 
     const contextGraphId = this.nextContextGraphId++;

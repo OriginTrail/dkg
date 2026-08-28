@@ -56,7 +56,10 @@ type ContractWriteSender = (
   args: readonly unknown[],
   signer: Wallet,
   label: string,
-  opts?: { gasLimitBufferBps?: number },
+  opts?: {
+    gasLimitBufferBps?: number;
+    onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  },
 ) => Promise<ethers.TransactionReceipt>;
 
 type SerializedSignerWriteContext = {
@@ -609,6 +612,8 @@ export class EVMChainAdapterBase {
   }
 
   readonly chainType = 'evm' as const;
+
+  readonly contextGraphRegistrationWriteAhead = true as const;
 
   readonly chainId: string;
 
@@ -1866,7 +1871,10 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: {
+      gasLimitBufferBps?: number;
+      onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+    },
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(signer, (ctx) =>
       ctx.sendContractTransaction(contract, method, args, signer, label, opts),
@@ -1912,7 +1920,10 @@ export class EVMChainAdapterBase {
     // observed estimate-vs-execution spread is small here but unbounded in
     // production with many CGs/KCs. When set, we estimate once and inflate
     // the limit by `gasLimitBufferBps` basis points so the drift can't OOG.
-    opts?: { gasLimitBufferBps?: number },
+    opts?: {
+      gasLimitBufferBps?: number;
+      onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+    },
   ): Promise<ethers.TransactionReceipt> {
     // Parent span for the whole send. Broadcast + receipt-wait open their own
     // nested spans/metrics (chain.tx_submit / chain.tx_wait) inside
@@ -1924,10 +1935,18 @@ export class EVMChainAdapterBase {
         // Populate+sign with per-endpoint failover (shared with the V10 path),
         // then broadcast+confirm the single signed tx. Split so `onBroadcast`
         // (the WAL checkpoint) can sit between sign and broadcast for V10 callers.
-        const { signedTx, txHash } = await this.populateAndSignAcrossProviders(
+        const { signedTx, txHash, nonce } = await this.populateAndSignAcrossProviders(
           contract, method, args, signer, label, opts,
         );
         span.setAttribute('dkg.tx_hash', txHash);
+        try {
+          await opts?.onBroadcast?.({ txHash, ...(nonce === undefined ? {} : { nonce }) });
+        } catch (hookErr) {
+          throw new Error(
+            `chain:writeahead hook failed before ${label} broadcast: ` +
+            `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+          );
+        }
         return this.sendSignedTransactionAndWait(signedTx, txHash, label);
       },
       { attributes: { 'rpc.method': 'eth_sendRawTransaction', 'dkg.chain_id': this.chainId } },

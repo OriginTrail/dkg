@@ -489,17 +489,26 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
     const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
     const attemptStatus = `registering:${randomUUID()}`;
+    const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+    const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
     const expectedPattern = expectedStatus === undefined
       ? `FILTER NOT EXISTS { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?existingStatus } }`
       : `GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" }`;
-    const deletePattern = expectedStatus === undefined
-      ? ''
-      : `DELETE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" } }`;
     const updated = await tryUpdateWithTouchedGraphs(
       this.store,
-      `${deletePattern}
+      `DELETE { GRAPH <${cgMetaGraph}> {
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" .
+         <${contextGraphUri}> <${onChainIdPredicate}> ?oldId .
+         <${contextGraphUri}> <${onChainHashPredicate}> ?oldNameHash .
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash .
+       } }
        INSERT { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ${sparqlString(attemptStatus)} } }
-       WHERE { ${expectedPattern} }`,
+       WHERE {
+         ${expectedPattern}
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${onChainIdPredicate}> ?oldId } }
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${onChainHashPredicate}> ?oldNameHash } }
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash } }
+       }`,
       [cgMetaGraph],
       { source: 'agent.contextGraph.registrationAttempt.begin' },
     );
@@ -514,6 +523,104 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       );
     }
     return attemptStatus;
+  }
+
+  /** Persist the exact signed transaction hash before registration broadcast. */
+  async persistContextGraphRegistrationBroadcast(
+    this: DKGAgent,
+    contextGraphId: string,
+    attemptStatus: string,
+    txHash: string,
+  ): Promise<void> {
+    if (!attemptStatus.startsWith('registering:')) {
+      throw new Error(`Invalid Context Graph registration attempt state: ${attemptStatus}`);
+    }
+    if (!/^0x[0-9a-fA-F]+$/.test(txHash)) {
+      throw new Error(`Invalid Context Graph registration transaction hash: ${txHash}`);
+    }
+    const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
+    const updated = await tryUpdateWithTouchedGraphs(
+      this.store,
+      `DELETE { GRAPH <${cgMetaGraph}> {
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash .
+       } }
+       INSERT { GRAPH <${cgMetaGraph}> {
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ${sparqlString(txHash.toLowerCase())} .
+       } }
+       WHERE {
+         GRAPH <${cgMetaGraph}> {
+           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ${sparqlString(attemptStatus)} .
+           OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash }
+         }
+       }`,
+      [cgMetaGraph],
+      { source: 'agent.contextGraph.registrationAttempt.broadcast' },
+    );
+    if (!updated) {
+      throw new Error('Context Graph registration broadcast persistence requires atomic SPARQL UPDATE support.');
+    }
+    await this.store.flush?.({ source: 'agent.contextGraph.registrationAttempt.broadcast.flush' });
+    const checkpoint = await this.store.query(
+      `SELECT DISTINCT ?txHash WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ${sparqlString(attemptStatus)} ;
+            <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?txHash .
+        }
+      }`,
+      { source: 'agent.contextGraph.registrationAttempt.broadcast.verify' },
+    );
+    const hashes = checkpoint.type === 'bindings'
+      ? [...new Set(checkpoint.bindings
+        .map((binding) => binding['txHash']?.replace(/^"|"$/g, '').toLowerCase())
+        .filter((hash): hash is string => typeof hash === 'string'))]
+      : [];
+    if (hashes.length !== 1 || hashes[0] !== txHash.toLowerCase()) {
+      throw new Error(
+        `Context graph "${contextGraphId}" registration broadcast was not durably checkpointed`,
+      );
+    }
+  }
+
+  /** Roll back only this exact attempt when the adapter proves no broadcast occurred. */
+  async resetUnbroadcastContextGraphRegistrationAttempt(
+    this: DKGAgent,
+    contextGraphId: string,
+    attemptStatus: string,
+  ): Promise<void> {
+    if (!attemptStatus.startsWith('registering:')) {
+      throw new Error(`Invalid Context Graph registration attempt state: ${attemptStatus}`);
+    }
+    const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
+    const updated = await tryUpdateWithTouchedGraphs(
+      this.store,
+      `DELETE { GRAPH <${cgMetaGraph}> {
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ${sparqlString(attemptStatus)} .
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash .
+       } }
+       INSERT { GRAPH <${cgMetaGraph}> {
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" .
+       } }
+       WHERE {
+         GRAPH <${cgMetaGraph}> {
+           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ${sparqlString(attemptStatus)} .
+           OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash }
+         }
+       }`,
+      [cgMetaGraph],
+      { source: 'agent.contextGraph.registrationAttempt.resetUnbroadcast' },
+    );
+    if (!updated) {
+      throw new Error('Context Graph registration pre-broadcast reset requires atomic SPARQL UPDATE support.');
+    }
+    await this.store.flush?.({ source: 'agent.contextGraph.registrationAttempt.resetUnbroadcast.flush' });
+    const status = await this.getContextGraphRegistrationStatus(contextGraphId);
+    if (status !== 'unregistered') {
+      throw new Error(
+        `Context graph "${contextGraphId}" pre-broadcast registration reset did not commit`,
+      );
+    }
   }
 
   /** Persist exact post-receipt provenance before any other local projection. */

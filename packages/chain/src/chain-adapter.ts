@@ -583,6 +583,11 @@ export interface CreateOnChainContextGraphParams {
    * surface forward-compatible.
    */
   nameHash?: string;
+  /**
+   * Write-ahead hook invoked after the registration transaction is signed and
+   * immediately before it is broadcast. A thrown error aborts the broadcast.
+   */
+  onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
 }
 
 export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'contextGraphId'> {
@@ -1114,6 +1119,14 @@ export interface ChainAdapter {
    * `chainId` (single in-memory deployment per process).
    */
   deploymentId: string;
+
+  /**
+   * Proves that `createOnChainContextGraph` invokes its `onBroadcast` hook
+   * immediately before every possible broadcast. Callers may roll back a
+   * write-ahead attempt after an error only when this capability is present
+   * and the hook was never reached.
+   */
+  readonly contextGraphRegistrationWriteAhead?: true;
 
   /**
    * OPTIONAL RPC-usage capability: drain the raw JSON-RPC request counts

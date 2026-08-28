@@ -467,6 +467,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         createArgs,
         this.signer,
         'create on-chain context graph',
+        { onBroadcast: params.onBroadcast },
       );
 
     // OT-RFC-53: when the registration deposit is active, createContextGraph
