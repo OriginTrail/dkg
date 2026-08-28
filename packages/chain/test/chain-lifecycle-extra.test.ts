@@ -414,7 +414,7 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
         try {
           const sent = await wallet.sendTransaction({ to: wallet.address, value: 0n });
           txHash = sent.hash;
-          expect(await adapter.resolvePublishTransaction(txHash)).toEqual({ status: 'pending' });
+          expect(await adapter.resolvePublishTransaction(txHash)).toEqual({ status: 'pending', phase: 'mempool' });
         } finally {
           await provider.send('evm_setAutomine', [true]);
         }

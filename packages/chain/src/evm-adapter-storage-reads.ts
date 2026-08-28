@@ -17,7 +17,7 @@ import {
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
-import { sleep } from './evm-adapter-rpc.js';
+import { withRetry } from '@origintrail-official/dkg-core';
 
 /** One in-place retry per endpoint for transient transport blips in the unanimity poll. */
 const VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS = 250;
@@ -183,22 +183,24 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         })
       : null;
     // A transient transport blip on ONE endpoint must not void the whole unanimity poll: the
-    // endpoint is retried once in place before it counts as unable to answer. The unanimity
+    // endpoint is retried once in place (via the canonical abort-aware retry primitive, policy
+    // configured at this call site) before it counts as unable to answer. The unanimity
     // predicate below is UNTOUCHED — r12's rule keeps its exact meaning ("every configured
     // endpoint reports a complete view"), judged over the retried answer. Deterministic
     // classifications (CALL_EXCEPTION and the rest of the non-retryable set) still disqualify
     // immediately: re-asking cannot change their answer, and second-guessing them here would
     // weaken the currency decision this poll authorizes.
-    const readOneWithTransientRetry = async (provider: JsonRpcProvider) => {
-      try {
-        return await readOne(provider);
-      } catch (err) {
-        if (!isContractViewRetryable(err) || options.signal?.aborted) throw err;
-        await sleep(VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS);
-        if (options.signal?.aborted) return null;
-        return await readOne(provider);
-      }
-    };
+    const readOneWithTransientRetry = (provider: JsonRpcProvider) => withRetry(
+      () => readOne(provider),
+      {
+        maxAttempts: 2,
+        baseDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
+        maxDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
+        jitter: 0,
+        isRetryable: isContractViewRetryable,
+        signal: options.signal,
+      },
+    );
     const poll = Promise.allSettled(this.providers.map(readOneWithTransientRetry));
     const settled = aborted ? await Promise.race([poll, aborted]) : await poll;
     if (!settled || options.signal?.aborted) return null;

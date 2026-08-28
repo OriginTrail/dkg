@@ -51,7 +51,7 @@ describe('resolvePublishTransaction gates every mined verdict on finality [PR#23
     const resolution = await chain.resolvePublishTransaction(TX_HASH);
 
     // The observation marker reports the mined-but-not-deep receipt; the VERDICT stays pending.
-    expect(resolution).toEqual({ status: 'pending', observedReceipt: { blockNumber: 123 } });
+    expect(resolution).toEqual({ status: 'pending', phase: 'awaiting-confirmations' });
     expect(resolution.status).not.toBe('reverted');
   });
 
@@ -79,9 +79,9 @@ describe('resolvePublishTransaction gates every mined verdict on finality [PR#23
     });
 
     expect(await unrecognized.resolvePublishTransaction(TX_HASH))
-      .toEqual({ status: 'pending', observedReceipt: { blockNumber: 123 } });
+      .toEqual({ status: 'pending', phase: 'awaiting-confirmations' });
     expect(await confirmed.resolvePublishTransaction(TX_HASH))
-      .toEqual({ status: 'pending', observedReceipt: { blockNumber: 123 } });
+      .toEqual({ status: 'pending', phase: 'awaiting-confirmations' });
   });
 
   it('REJECTS when the finality read itself fails — a gate that cannot answer resolves nothing', async () => {
@@ -257,10 +257,12 @@ describe('MockChainAdapter finality parity [PR#2300 r1]', () => {
     const mock = new MockChainAdapter('mock:31337', WALLET);
     mock.__setTransactionState(TX_HASH, 'reverted');
     mock.__setTransactionUnfinalized(TX_HASH);
-    expect(await mock.resolvePublishTransaction(TX_HASH)).toEqual({ status: 'pending' });
+    expect(await mock.resolvePublishTransaction(TX_HASH))
+      .toEqual({ status: 'pending', phase: 'awaiting-confirmations' });
 
     mock.__setTransactionState(TX_HASH, 'mined');
-    expect(await mock.resolvePublishTransaction(TX_HASH)).toEqual({ status: 'pending' });
+    expect(await mock.resolvePublishTransaction(TX_HASH))
+      .toEqual({ status: 'pending', phase: 'awaiting-confirmations' });
 
     // Finality arrives; the underlying verdicts come back exactly as before.
     mock.__setTransactionUnfinalized(TX_HASH, false);
@@ -293,10 +295,7 @@ describe('MockChainAdapter finality parity [PR#2300 r1]', () => {
 
     mock.__setTransactionUnfinalized(published.txHash);
     const gated = await mock.resolvePublishTransaction(published.txHash);
-    expect(gated).toEqual({
-      status: 'pending',
-      observedReceipt: { blockNumber: expect.any(Number) },
-    });
+    expect(gated).toEqual({ status: 'pending', phase: 'awaiting-confirmations' });
     expect(gated.status).not.toBe('confirmed');
 
     mock.__setTransactionUnfinalized(published.txHash, false);

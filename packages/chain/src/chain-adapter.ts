@@ -281,11 +281,14 @@ export type PublishTransactionResolution =
    * publish contracts lands here too.
    */
   | { status: 'unrecognized' }
-  /** The node holds the transaction and has not mined it yet — or has observed a receipt that
-   *  does not yet carry the operator-selected confirmation depth. Never absence. An observed
-   *  receipt is reported via `observedReceipt` as a SCHEDULING-ONLY fact (callers may tighten
-   *  their re-ask cadence on it); the verdict stays `pending` and the marker is never evidence. */
-  | { status: 'pending'; observedReceipt?: { readonly blockNumber: number } }
+  /** Not yet a mined verdict. Never absence. `phase` classifies WHY, as a SCHEDULING-ONLY
+   *  fact (callers may tighten their re-ask cadence on `awaiting-confirmations`): `mempool`
+   *  means no receipt has been observed; `awaiting-confirmations` means a receipt exists but
+   *  does not yet carry the operator-selected confirmation depth. The phase is deliberately a
+   *  classification, not evidence — it carries no chain facts, and it is OPTIONAL so legacy
+   *  producers that answer a bare `pending` stay valid (consumers treat absent as `mempool`
+   *  cadence-wise, the conservative choice). */
+  | { status: 'pending'; phase?: 'mempool' | 'awaiting-confirmations' }
   /** The node has neither the receipt nor the transaction: the only proven absence. */
   | { status: 'not-found' };
 
