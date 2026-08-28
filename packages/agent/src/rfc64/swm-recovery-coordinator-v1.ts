@@ -52,7 +52,7 @@ export interface Rfc64SwmRecoveryExecutionPortV1 {
   readonly getPeerProtocols: (providerPeerId: string) => Promise<string[]>;
   readonly syncRecoveryRequest: (
     request: Readonly<Rfc64SwmRecoveryExecutionRequestV1>,
-  ) => Promise<SelectedSharedMemorySyncResult>;
+  ) => Promise<Rfc64SwmRecoveryExecutionResultV1>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly onPeerSkippedNoSync: (providerPeerId: string) => void;
   readonly onPeerSynced: (
@@ -60,6 +60,11 @@ export interface Rfc64SwmRecoveryExecutionPortV1 {
     outcome: SyncOnConnectPeerOutcome | undefined,
     onSyncAccounting: ((outcome: SyncOnConnectPeerOutcome) => void) | undefined,
   ) => void;
+}
+
+export interface Rfc64SwmRecoveryExecutionResultV1 extends SelectedSharedMemorySyncResult {
+  /** Terminal verdict for every authorized public and private target. */
+  readonly recoveryPlanComplete: boolean;
 }
 
 export interface Rfc64SwmRecoveryExecutionRequestV1 {
@@ -193,6 +198,7 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       selectedSharedMemoryLane: {
         getContextGraphIds: () => authorized.targets.map(({ contextGraphId }) => contextGraphId),
         syncFromPeer: () => this.syncAuthorizedPlan(authorized),
+        isScopeComplete: (result) => result.recoveryPlanComplete === true,
       },
       logInfo: this.deps.execution.logInfo,
       onPeerSkippedNoSync: (peerId) => this.deps.execution.onPeerSkippedNoSync(peerId),
@@ -204,7 +210,7 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
 
   private async syncAuthorizedPlan(
     authorized: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-  ): Promise<SelectedSharedMemorySyncResult> {
+  ): Promise<Rfc64SwmRecoveryExecutionResultV1> {
     if (
       !this.deps.admission.isStarted()
       || !this.deps.admission.isPeerAccepted(authorized.providerPeerId)

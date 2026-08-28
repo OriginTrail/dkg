@@ -850,21 +850,27 @@ export class DKGAgent extends DKGAgentBase {
       execution: {
         syncingPeers: () => this.syncingPeers,
         getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
-        syncRecoveryRequest: (request) => this.syncSelectedSharedMemoryFromPeerDetailed(
-          request.providerPeerId,
-          [...request.eligibleContextGraphIds],
-          {
-            stopOnBackoffWorthyFailure: true,
-            source: 'on-connect',
-            sharedMemorySyncPlan: {
-              publicContextGraphIds: [...request.publicContextGraphIds],
-              privateRecoverFromCurator: [...request.privateRecoverFromCurator],
-              eligibleContextGraphIds: [...request.eligibleContextGraphIds],
+        syncRecoveryRequest: async (request) => {
+          const result = await this.syncSelectedSharedMemoryFromPeerDetailed(
+            request.providerPeerId,
+            [...request.eligibleContextGraphIds],
+            {
+              stopOnBackoffWorthyFailure: true,
+              source: 'on-connect',
+              sharedMemorySyncPlan: {
+                publicContextGraphIds: [...request.publicContextGraphIds],
+                privateRecoverFromCurator: [...request.privateRecoverFromCurator],
+                eligibleContextGraphIds: [...request.eligibleContextGraphIds],
+              },
+              priority: 2_000,
+              selectedSwmPriority: true,
             },
-            priority: 2_000,
-            selectedSwmPriority: true,
-          },
-        ),
+          );
+          return {
+            ...result,
+            recoveryPlanComplete: result.recoveryPlanComplete === true,
+          };
+        },
         logInfo: (ctx, message) => this.log.info(ctx, message),
         onPeerSkippedNoSync: (peerId) => this.skippedNoSyncPeers.add(peerId),
         onPeerSynced: (peerId, outcome, onSyncAccounting) => {

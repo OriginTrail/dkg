@@ -698,6 +698,8 @@ interface SharedMemorySyncExecution {
   readonly shared: SharedMemorySyncResult;
   /** Null for ordinary/private SWM; boolean only for the selected public lane. */
   readonly selectedScopeComplete: boolean | null;
+  /** Null for ordinary callers; boolean for the exact selected RFC-64 request. */
+  readonly recoveryPlanComplete: boolean | null;
 }
 
 type InFlightSyncPageFetch = {
@@ -6823,6 +6825,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       kind: 'selected-shared-memory',
       shared: execution.shared,
       selectedScopeComplete: execution.selectedScopeComplete === true,
+      recoveryPlanComplete: execution.recoveryPlanComplete === true,
     };
   }
 
@@ -6837,9 +6840,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const execution = (
       shared: SharedMemorySyncResult,
       selectedScopeComplete = false,
+      recoveryPlanComplete = false,
     ): SharedMemorySyncExecution => ({
       shared,
       selectedScopeComplete: selectedRequest ? selectedScopeComplete : null,
+      recoveryPlanComplete: selectedRequest ? recoveryPlanComplete : null,
     });
     if (!durableSyncEnabled(this.config)) {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
@@ -7114,6 +7119,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       const publicSet = new Set(publicContextGraphIds);
       const privateRecoverySet = new Set(privateRecoverFromCurator);
+      const completedPrivateRecovery = new Set<string>();
       const selectedContinuationUnits: SelectedSwmContinuationUnit[] = [];
       const work: ContextGraphSyncWork<SharedMemorySyncResult>[] = [];
       for (const contextGraphId of plan.eligibleContextGraphIds) {
@@ -7156,6 +7162,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // so every requester lane shares the same orchestration loop.
               if (recovered.completed) {
                 result.completedPhases = 1;
+                completedPrivateRecovery.add(contextGraphId);
               } else {
                 result.failedPhases = 1;
                 result.backoffWorthyFailures = 1;
@@ -7252,7 +7259,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Selected RFC-64 SWM continuation from ${remotePeerId.slice(-8)} stopped on local backpressure`,
           );
         }
-        return execution(initialSummary);
+        const privateScopeComplete = completedPrivateRecovery.size
+          === privateRecoverySet.size;
+        const recoveryPlanComplete = selectedRequest
+          && publicContextGraphIds.length === 0
+          && privateScopeComplete
+          && sameStringArray(plan.eligibleContextGraphIds, contextGraphIds)
+          && (initialSummary.deferredBackpressure ?? 0) === 0;
+        return execution(initialSummary, false, recoveryPlanComplete);
       }
 
       const continuationExecution = await runSelectedSwmContinuations({
@@ -7322,6 +7336,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const selectedScopeComplete = selectedContinuationUnits.length
         === expectedSelectedContextGraphs.size
         && continuationExecution.incompleteContextGraphIds.length === 0;
+      const recoveryPlanComplete = selectedScopeComplete
+        && completedPrivateRecovery.size === privateRecoverySet.size
+        && sameStringArray(plan.eligibleContextGraphIds, contextGraphIds);
       if (selectedScopeComplete) {
         this.selectedSwmBootstrapAdmission.markTransferTerminal(selectedBootstrapOwner!);
       }
@@ -7334,6 +7351,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           continuationExecution.freshnessResolution,
         ),
         selectedScopeComplete,
+        recoveryPlanComplete,
       );
     };
 

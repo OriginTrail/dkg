@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  runSelectedSharedMemoryRetry,
+  runSyncOnConnect,
+} from '../src/sync/on-connect/sync-on-connect.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import {
@@ -21,6 +24,70 @@ import {
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
+  it('accounts a real complete private-only no-op without reconciler backoff', async () => {
+    const publicCg = 'unselected-public-control';
+    const privateCg = '0x1111111111111111111111111111111111111111/private-complete-noop';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg, private: privateCg },
+      manifest: snapshotManifest(publicCg, 0),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      reportEmptyResponse: true,
+    });
+
+    try {
+      const recovery = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [privateCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [],
+            privateRecoverFromCurator: [privateCg],
+            eligibleContextGraphIds: [privateCg],
+          },
+        },
+      );
+      expect(recovery.shared.insertedTriples).toBe(0);
+      expect(recovery.shared.completedPhases).toBe(1);
+      expect(recovery.selectedScopeComplete).toBe(false);
+      expect(recovery.recoveryPlanComplete).toBe(true);
+
+      const backoff = new Map<string, unknown>();
+      const accountingAgent = {
+        lastSuccessfulSyncAt: new Map<string, number>(),
+        lastSyncProgressAt: new Map<string, number>(),
+        recordSyncReconcilerFailure: (peerId: string) => {
+          backoff.set(peerId, { failures: 1 });
+        },
+        log: { info: () => {} },
+      };
+      await LifecycleSyncMethods.prototype.accountSyncAttemptWithReconciler.call(
+        accountingAgent as never,
+        PEER,
+        {} as never,
+        (onSyncAccounting) => runSelectedSharedMemoryRetry({
+          remotePeer: PEER,
+          syncingPeers: new Set(),
+          getPeerProtocols: async () => [PROTOCOL_SYNC],
+          selectedSharedMemoryLane: {
+            getContextGraphIds: () => [privateCg],
+            syncFromPeer: async () => recovery,
+            isScopeComplete: (result) => result.recoveryPlanComplete === true,
+          },
+          onPeerSynced: (_peerId, outcome) => {
+            if (outcome) onSyncAccounting(outcome);
+          },
+          logInfo: () => {},
+        }),
+      );
+
+      expect(backoff.has(PEER)).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('uses balanced recency only through the selected production lifecycle', async () => {
     const publicCg = 'selected-balanced-recency';
     const createManifest = () => {

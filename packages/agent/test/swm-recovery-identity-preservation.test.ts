@@ -451,19 +451,29 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     expect(await headIds(store)).toEqual(['"op-local"']);
   });
 
-  it('still adopts the curator identity for a genuinely changed share (discriminator polarity)', async () => {
+  it('replaces stale equal-count content and adopts the curator identity for a changed share', async () => {
     const store = new OxigraphStore();
     stores.push(store);
     await seedLocal(store);
-    // Same version, different digest: the marker-only predicate still skips
-    // the graph (it is digest-blind — the pre-existing F2 weakness), but the
-    // preservation decision compares the OPERATION rows and must refuse:
-    // curator authority for genuine changes is today's behavior, and
-    // preserving here could mask a real policy or content change.
+    // Same version and triple count, but a different digest. The production
+    // recovery caller must pass the content guard through to the materializer
+    // so the stale assertion graph is replaced rather than marker-skipped.
     const result = await recoverContextGraphSwm(identityDeps(store, [...curatorChanged.meta]));
     expect(result.completed).toBe(true);
     expect(await headIds(store)).toEqual(['"storage-ack-y"']);
     expect(await opSubjectExists(store, localShare.operationSubject)).toBe(false);
+    const graph = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${curatorChanged.assertionGraph}> { ?s ?p ?o } }`,
+    );
+    expect(graph.type).toBe('quads');
+    if (graph.type === 'quads') {
+      expect(graph.quads.map(({ subject, predicate, object }) => ({ subject, predicate, object })))
+        .toEqual(curatorChanged.payload.map(({ subject, predicate, object }) => ({
+          subject,
+          predicate,
+          object,
+        })));
+    }
   });
 
   it('still installs the curator head when the local head is absent (G7 repair preserved)', async () => {

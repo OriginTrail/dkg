@@ -35,6 +35,7 @@ function completeSelectedResult() {
       deniedPhases: 0,
     },
     selectedScopeComplete: true,
+    recoveryPlanComplete: true,
   };
 }
 
@@ -159,6 +160,41 @@ describe('RFC-64 SWM recovery coordinator', () => {
       privateRecoverFromCurator: [PRIVATE],
     });
     expect(handleError).not.toHaveBeenCalled();
+  });
+
+  it('accounts a complete private-only no-op without claiming public completion', async () => {
+    const privatePlan = {
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' as const }],
+    };
+    const onSyncAccounting = vi.fn();
+    const deps = dependencies({
+      admission: {
+        configuredRecoveryPlan: () => privatePlan,
+        selectedPublicAdmissionSnapshot: () => null,
+      },
+      execution: {
+        syncRecoveryRequest: vi.fn(async () => ({
+          ...completeSelectedResult(),
+          selectedScopeComplete: false,
+          recoveryPlanComplete: true,
+        })),
+      },
+    });
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
+    const authorized = coordinator.authorize(privatePlan);
+    expect(authorized).not.toBeNull();
+
+    await expect(coordinator.execute(authorized!, onSyncAccounting)).resolves.toBe('synced');
+
+    expect(deps.execution.onPeerSynced).toHaveBeenCalledWith(
+      PROVIDER,
+      { fresh: false, progress: true },
+      onSyncAccounting,
+    );
+    // A completed recovery phase is reconnect progress even when it inserts
+    // zero triples; whole-plan completion independently proves terminality.
+    expect(onSyncAccounting).toHaveBeenCalledWith({ fresh: false, progress: true });
   });
 
   it('forwards a queued run failure with its exact provider', async () => {

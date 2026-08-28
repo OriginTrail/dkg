@@ -484,6 +484,7 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
   kind: 'selected-shared-memory';
   shared: SharedMemorySyncResult;
   selectedScopeComplete: boolean;
+  recoveryPlanComplete?: boolean;
 }> => {
   const method = LifecycleSyncMethods.prototype.syncSelectedSharedMemoryFromPeerDetailed as unknown as (
     this: SelectedSwmLifecycleAgentFixture,
@@ -494,6 +495,7 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
     kind: 'selected-shared-memory';
     shared: SharedMemorySyncResult;
     selectedScopeComplete: boolean;
+    recoveryPlanComplete?: boolean;
   }>;
   return method.call(agent, PEER, contextGraphIds, options);
 };

@@ -26,6 +26,8 @@ interface SelectedSharedMemorySyncLane {
     peerId: string,
     contextGraphIds: string[],
   ) => Promise<SelectedSharedMemorySyncResult>;
+  /** Override only when the lane owns a wider scope than selected public SWM. */
+  isScopeComplete?: (result: SelectedSharedMemorySyncResult) => boolean;
 }
 
 type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
@@ -226,10 +228,12 @@ export async function runSelectedSharedMemoryRetry(
       `Retrying ${contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
     );
     const selected = await selectedSharedMemoryLane.syncFromPeer(remotePeer, contextGraphIds);
+    const scopeComplete = selectedSharedMemoryLane.isScopeComplete?.(selected)
+      ?? selected.selectedScopeComplete;
     const accounting = classifySyncResult(
       selected.shared,
       'shared',
-      selected.selectedScopeComplete,
+      scopeComplete,
     );
     logInfo(
       ctx,
@@ -247,7 +251,7 @@ export async function runSelectedSharedMemoryRetry(
     // whole peer fresh: durable and unrelated CG work were intentionally not
     // run. Explicit incomplete/no-progress remains silent so reconciler
     // accounting grows its bounded retry backoff.
-    const selectedRetryResolved = selected.selectedScopeComplete
+    const selectedRetryResolved = scopeComplete
       && !accounting.backoffWorthyFailure
       && !accounting.failed
       && !accounting.denied;
@@ -309,14 +313,17 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
         ? result
         : undefined;
     const syncResult = (selectedResult?.shared ?? result) as SyncFromPeerResult;
-    const complete = selectedResult?.selectedScopeComplete ?? (
+    const complete = selectedResult !== undefined
+      ? selectedSharedMemoryLane?.isScopeComplete?.(selectedResult)
+        ?? selectedResult.selectedScopeComplete
+      : (
       phase === 'durable'
       && typeof result !== 'number'
       && 'complete' in result
       && typeof result.complete === 'boolean'
         ? result.complete
         : undefined
-    );
+      );
     const accounting = classifySyncResult(syncResult, phase, complete);
     madeProgress = madeProgress || accounting.madeProgress;
     sawDeniedPhase = sawDeniedPhase || accounting.denied;
