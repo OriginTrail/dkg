@@ -21,7 +21,6 @@ import {
 } from '../src/async-lift-control-plane.js';
 import {
   KA_VM_EXECUTOR_TX_HASH,
-  KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
 } from './_helpers/ka-vm-publish.js';
