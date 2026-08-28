@@ -107,6 +107,40 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
     expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'update' }]);
   });
 
+  it('a throwing onPublishConfirmed listener does not fail the update [GH#2359 r2]', async () => {
+    // The update dispatch is its own invocation site after the transaction already succeeded:
+    // its failure isolation needs its own regression row (r2 3877540275).
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+
+    const result = await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onPublishConfirmed: () => { throw new Error('listener exploded'); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+  });
+
+  it('an ASYNC-rejecting onPublishConfirmed listener does not fail the update or leak a rejection [GH#2359 r2]', async () => {
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+
+    const result = await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onPublishConfirmed: async () => { throw new Error('async listener exploded'); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+    // Give a detached rejection a macrotask to surface if it was going to.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
   it('fires onPublishConfirmed once for an update, before its post-receipt store writes [GH#2359 r1]', async () => {
     // Same contract as the publish path: one firing, the receipt hash the chain returned, and
     // fired before the update writes its quads locally — the sync-query capture inside the

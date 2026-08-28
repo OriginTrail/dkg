@@ -731,4 +731,43 @@ describe('async-lift wallet release channel', () => {
     const hints = (publisher as unknown as { executorProofHints: Map<string, unknown> }).executorProofHints;
     expect(hints.size).toBe(0);
   });
+
+  it('retries a wallet release that failed after the included stamp', async () => {
+    // r2 (3877540018) - persistence can succeed and the lock deletion then fail transiently.
+    // That intermediate state (included, lock still held, executor still parked) must cost one
+    // candidate turn, not the pass, and must stay retryable: a later pass re-proves and
+    // completes the release instead of stranding the wallet until the tail settles.
+    const { publisher, jobId, releaseTail } = await parkedHintScenario();
+    const job2 = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'albums-next' }));
+    // Installed AFTER the claim (claiming rewrites the lock subject too): the next deletion of
+    // this wallet's lock is the early lane's release, and only that one fails.
+    const originalDelete = store.deleteByPattern.bind(store);
+    let failNextLockDelete = true;
+    (store as unknown as { deleteByPattern: typeof originalDelete }).deleteByPattern =
+      async (pattern: { subject?: string; graph?: string }) => {
+        if (failNextLockDelete && pattern?.subject === walletLockSubject('wallet-1')) {
+          failNextLockDelete = false;
+          throw new Error('transient store failure on lock deletion');
+        }
+        return originalDelete(pattern as never);
+      };
+    try {
+      // Pass 1: proof + included stamp land, the lock deletion fails. The pass survives and
+      // reports the job pending.
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 0, pendingWork: true });
+      expect((await publisher.getStatus(jobId))?.status).toBe('included');
+      await expectWalletLock('wallet-1', 'held');
+
+      // Pass 2: included-with-hint is retryable; the release completes.
+      await publisher.reconcileTransactions();
+      expect((await publisher.getStatus(jobId))?.status).toBe('included');
+      await expectWalletLock('wallet-1', 'released');
+
+      // The wallet is genuinely claimable again BEFORE the executor tail ever settles.
+      expect((await publisher.claimNext('wallet-1'))?.jobId).toBe(job2);
+    } finally {
+      releaseTail();
+    }
+  });
 });
