@@ -296,10 +296,35 @@ modes auto-renewal can't recover from:
 | `dkg wallet` | Show operational wallet addresses and balances |
 | `dkg set-ask <amount>` | Set the node's on-chain ask (TRAC per KB·epoch) |
 | `dkg openclaw setup` | Install and configure the OpenClaw adapter |
+| `dkg llm [prompt...]` | Ground a local OpenAI-compatible model in the DKG MCP tools; no prompt starts interactive chat |
 | `dkg update` | Update the node software from npm (blue-green slots for Core nodes) |
 | `dkg rollback` | Roll back to the previous software slot |
 
 Run `dkg <command> --help` for per-command options.
+
+### Local LLM over DKG MCP
+
+Start an OpenAI-compatible local endpoint such as `llama-server`, then run:
+
+```bash
+# Interactive, read-only by default
+dkg llm --interactive --model local-model
+
+# One-shot query-catalog discovery against a selected Context Graph
+dkg llm --project my-project "Which saved queries are available?"
+```
+
+Each turn receives at most eight relevant MCP schemas by default instead of the
+complete tool surface. Status, query-catalog, and general reads are routed
+separately. The command validates tool arguments, permits one repair retry,
+bounds chat history, and writes a redacted owner-only text trace under
+`<DKG_HOME>/logs/local-llm`.
+
+Mutation tools are unavailable unless the operator passes `--allow-write`;
+even then, the prompt must explicitly request the mutation. Extra MCP adapters
+can be loaded with `--adapter`, while `--tool` and `--system-context-file`
+provide a generic domain-profile seam without adding domain IDs or benchmark
+answers to the built-in system context.
 
 NPM/dist-tag auto-update is the recommended production path. Advanced Core nodes
 can opt into daemon-polled git updates with `autoUpdate.source: "git"`,
