@@ -17,6 +17,7 @@ import {
 import {
   CONTROL_LOCKED_JOB,
   DEFAULT_WALLET_LOCK_GRAPH_URI,
+  jobSubject,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import {
@@ -966,5 +967,61 @@ describe('async-lift receipt-hint lane', () => {
     await publisher.drainDetachedExecutions();
     await publisher.reconcileTransactions();
     expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+  });
+
+  it('a failed included write releases nothing and the next pass completes write-before-release', async () => {
+    // r20 (3878410966) - the other half of the transition window: the included WRITE itself
+    // fails. Nothing may release (write-before-release is the invariant), the hint stays
+    // retryable, and the next pass persists the stamp before freeing the wallet.
+    const { publisher, jobId, releaseTail } = await parkedHintScenario();
+    const originalReplace = store.replaceSubject.bind(store);
+    let failNextJobWrite = true;
+    (store as unknown as { replaceSubject: typeof originalReplace }).replaceSubject =
+      async (graphUri: string, subject: string, quads: never) => {
+        if (failNextJobWrite && subject === jobSubject(jobId)) {
+          failNextJobWrite = false;
+          throw new Error('transient store failure on the included write');
+        }
+        return originalReplace(graphUri, subject, quads);
+      };
+    try {
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 0, pendingWork: true });
+      expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+      await expectWalletLock('wallet-1', 'held');
+
+      await publisher.reconcileTransactions();
+      expect((await publisher.getStatus(jobId))?.status).toBe('included');
+      await expectWalletLock('wallet-1', 'released');
+    } finally {
+      releaseTail();
+    }
+  });
+
+  it('a lone walk lane gets the full pass budget, not the competing-lanes split', async () => {
+    // r20 (3878410728) - with no receipt hints there is nothing to reserve budget for: an
+    // ordinary proof that needs more than half the pass must still complete in one pass, even
+    // on a walk-leading turn.
+    const { publisher, jobId, releaseTail } = await parkedHintScenario({
+      hintTxHash: undefined,
+      tailAction: 'throw',
+      config: {
+        chainProofDispatchTimeBudgetMs: 100,
+        chainProofResolver: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          return recoveredResolution();
+        },
+      },
+    });
+    // The throw-mode executor settles immediately, so the job is an ordinary live broadcast;
+    // its hint is consumed/dropped by settle-path territory rules. Force a walk-leading turn.
+    (publisher as unknown as { hintLaneLeads: boolean }).hintLaneLeads = false;
+    (publisher as unknown as { executorProofHints: Map<string, unknown> }).executorProofHints.clear();
+    await publisher.drainDetachedExecutions();
+
+    const outcome = await publisher.reconciliationScheduling.reconcile();
+    expect(outcome.reconciled).toBeGreaterThanOrEqual(1);
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+    releaseTail();
   });
 });

@@ -2058,15 +2058,26 @@ export class TripleStoreAsyncLiftPublisher
         bounded?.dispose();
       }
     };
+    // r20 (3878410728) — the half-budget split (and the lead toggle) apply only when BOTH
+    // lanes actually have eligible work this pass: a lone lane gets the full absolute budget,
+    // and empty passes do not consume alternation turns.
+    const hintLaneHasWork = this.executorProofHints.size > 0
+      && inventory.some((snapshot) => {
+        const hint = this.executorProofHints.get(snapshot.jobId);
+        return hint !== undefined && hint.proof === undefined
+          && this.detachedExecutions.has(snapshot.jobId);
+      });
+    const walkLaneHasWork = rotatedTxBearing.length > 0;
+    const lanesCompete = hintLaneHasWork && walkLaneHasWork;
     const hintLeads = this.hintLaneLeads;
-    this.hintLaneLeads = !this.hintLaneLeads;
+    if (lanesCompete) this.hintLaneLeads = !this.hintLaneLeads;
     try {
       if (hintLeads) {
-        await runHintLane(true);
-        await runWalkLane(false);
+        if (hintLaneHasWork) await runHintLane(lanesCompete);
+        if (walkLaneHasWork) await runWalkLane(false);
       } else {
-        await runWalkLane(true);
-        await runHintLane(false);
+        if (walkLaneHasWork) await runWalkLane(lanesCompete);
+        if (hintLaneHasWork) await runHintLane(false);
       }
     } finally {
       clearTimeout(passTimer);
