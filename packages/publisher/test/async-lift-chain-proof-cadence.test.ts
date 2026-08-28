@@ -539,12 +539,14 @@ describe('GH#2270 chain-proof cadence', () => {
       expect(events).toEqual(['enter', 'exit', 'enter', 'exit']);
     });
 
-    it('one hung read promotes ONE head — queued successors stay single-file, no burst bypass', async () => {
+    it("a hung owner promotes ONE head at a time — the lease clock runs from the owner's START, not the waiter's entry", async () => {
       // r12 (🔴 3884393225) — the cap is a lease on the OWNER's execution, not a per-waiter
-      // entry timer: with per-waiter timers, B and C queued during A's hang both bypass at
+      // entry timer: with entry-relative timers, B and C queued during A's hang both bypass at
       // ~the same instant and their reads overlap, re-opening the capture-order inversion
-      // (a higher-token stale capture can replace a newly deferred entry). With the lease, A's
-      // expiry promotes exactly B; C follows only after B settles (or B's own fresh lease).
+      // (a higher-token stale capture can replace a newly deferred entry). B's read is held
+      // open here so the two clocks are distinguishable: C must still be fenced at t=99 (its
+      // entry-relative timer would long have fired) and is promoted only at t=100, when B —
+      // promoted at t=50 — has held the seam for its own full 50ms lease.
       const publisher = h.createPublisher({
         chainProofDispatchBatchSize: 1,
         rand: () => 0,
@@ -554,16 +556,20 @@ describe('GH#2270 chain-proof cadence', () => {
       await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
 
       const events: string[] = [];
+      let releaseB!: () => void;
+      const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
       const originalList = publisher.list.bind(publisher);
       let listCalls = 0;
       (publisher as { list: typeof publisher.list }).list = async (filter) => {
         listCalls += 1;
-        if (listCalls === 1) {
+        const call = listCalls;
+        if (call === 1) {
           return new Promise(() => undefined); // A: hangs forever
         }
-        events.push('enter');
+        events.push(`enter${call}`);
+        if (call === 2) await gateB; // B: held open across C's would-be bypass window
         const result = await originalList(filter);
-        events.push('exit');
+        events.push(`exit${call}`);
         return result;
       };
 
@@ -574,11 +580,17 @@ describe('GH#2270 chain-proof cadence', () => {
         const passB = publisher.recover(); // head waiter
         const passC = publisher.recover(); // queued behind B, NOT behind A
         await vi.advanceTimersByTimeAsync(49);
-        expect(events).toEqual([]); // both still fenced behind A's live lease
-        await vi.advanceTimersByTimeAsync(1); // A's lease expires: B alone is promoted
-        await passB;
-        await passC; // C ran only after B settled
-        expect(events).toEqual(['enter', 'exit', 'enter', 'exit']); // strictly single-file
+        expect(events).toEqual([]); // both fenced behind A's live lease
+        await vi.advanceTimersByTimeAsync(1); // t=50: A's lease expires — B ALONE is promoted
+        expect(events).toEqual(['enter2']);
+        await vi.advanceTimersByTimeAsync(49); // t=99: C's entry-relative clock is long past 50…
+        expect(events).toEqual(['enter2']); // …but C is fenced until B's OWN lease runs out
+        await vi.advanceTimersByTimeAsync(1); // t=100: B held the seam 50ms — C is promoted
+        await passC;
+        expect(events).toEqual(['enter2', 'enter3', 'exit3']);
+        releaseB();
+        await passB; // the bypassed-but-healthy B still completes, fenced older
+        expect(events).toEqual(['enter2', 'enter3', 'exit3', 'exit2']);
       } finally {
         vi.useRealTimers();
       }
