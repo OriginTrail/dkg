@@ -445,7 +445,6 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (
         ids.length === 1
         && (registrationStatus === 'registered'
-          || registrationStatus?.startsWith('registering:') === true
           || hasReceiptProvenance)
       ) {
         return ids[0];

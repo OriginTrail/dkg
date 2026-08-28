@@ -85,6 +85,44 @@ describe('Genesis Knowledge', () => {
     });
 
 
+    it('rejects an interrupted attempt with a stale unproven meta id before chain submission', async () => {
+      const store = new OxigraphStore();
+      const chain = new CapturingContextGraphChainAdapter();
+      const agent = await DKGAgent.create({
+        name: 'RegistrationStaleMetaFailClosedBot',
+        store,
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const contextGraphId = 'stale-meta-fail-closed';
+      const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+      const metaGraph = contextGraphMetaUri(contextGraphId);
+
+      await agent.createContextGraph({
+        id: contextGraphId,
+        name: 'Stale meta fail closed',
+        callerAgentAddress: ethers.getAddress(chain.signerAddress),
+      });
+      await store.insert([{
+        subject: contextGraphUri,
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        object: '"7"',
+        graph: metaGraph,
+      }]);
+      await (agent as any).beginContextGraphRegistrationAttempt(
+        contextGraphId,
+        'unregistered',
+      );
+
+      await expect(agent.registerContextGraph(contextGraphId, {
+        callerAgentAddress: ethers.getAddress(chain.signerAddress),
+      })).rejects.toThrow(/interrupted on-chain registration attempt/);
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
+      await agent.stop().catch(() => {});
+    });
+
+
     it('recovers a durable receipt binding after later projection failure', async () => {
       const store = new OxigraphStore();
       const chain = new CapturingContextGraphChainAdapter();
