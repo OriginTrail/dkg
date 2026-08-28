@@ -62,7 +62,7 @@ describe('async-lift reconciliation demand channel', () => {
 
   it('reports pass outcomes that track each job state: pendingWork only for unowned live transactions', async () => {
     const publisher = createPublisher({
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
     });
     await stageShareSnapshot();
@@ -129,7 +129,7 @@ describe('async-lift reconciliation demand channel', () => {
 
     // The same record on a resolver-equipped publisher over the same store IS active work.
     const equipped = createPublisher({
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
     });
     expect(await equipped.reconciliationScheduling.reconcile()).toEqual({ reconciled: 0, pendingWork: true });
@@ -140,7 +140,7 @@ describe('async-lift reconciliation demand channel', () => {
     const executionGate = new Promise<void>((resolve) => { releaseExecution = resolve; });
     const publisher = createPublisher({
       detachReceiptReconciliation: true,
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -182,7 +182,7 @@ describe('async-lift reconciliation demand channel', () => {
 
   it('pokes the listener for an ambiguous post-write-ahead failure only at the ownership boundary', async () => {
     const publisher = createPublisher({
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -217,7 +217,7 @@ describe('async-lift reconciliation demand channel', () => {
 
   it('a stale detach from a superseded owner does not tear down the current attachment', async () => {
     const publisher = createPublisher({
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -249,7 +249,7 @@ describe('async-lift reconciliation demand channel', () => {
 
   it('survives a listener that throws without touching job state', async () => {
     const publisher = createPublisher({
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -336,7 +336,7 @@ describe('async-lift reconciliation demand channel', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(saturatedStore, {
       now: () => ++now,
       idGenerator: () => `job-${++ids}`,
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -376,7 +376,7 @@ describe('async-lift reconciliation demand channel', () => {
       chainProofResolver: async (lookup) => {
         const txHash = (lookup as { txHash?: string }).txHash;
         if (txHash === txA) return { status: 'recovered', recovery: { txHash: txA } } as never;
-        return { status: 'pending' };
+        return { status: 'pending-mempool' };
       },
       knowledgeAssetVmPublishRecoveryResolver: async () => ({
         inclusion: { blockNumber: 1, txHash: txA },
@@ -456,7 +456,7 @@ describe('async-lift reconciliation demand channel', () => {
       recoveryLookupTimeoutMs: 1_000,
       chainProofResolver: async (lookup) => {
         resolverAsks.push((lookup as { txHash?: string }).txHash ?? 'unknown');
-        return { status: 'pending' };
+        return { status: 'pending-mempool' };
       },
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
     });
@@ -496,7 +496,7 @@ describe('async-lift reconciliation demand channel', () => {
     // r3-1 follow-up (branarakic 3873026014) — the lanes share one list() snapshot; per-tick
     // inventory cost must not scale with the number of lanes.
     const publisher = createPublisher({
-      chainProofResolver: async () => ({ status: 'pending' }),
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
     });
     await stageShareSnapshot();
@@ -523,7 +523,7 @@ describe('async-lift reconciliation demand channel', () => {
     const publisher = createPublisher({
       chainProofResolver: async (lookup) => {
         resolverAsks.push((lookup as { txHash?: string }).txHash ?? 'unknown');
-        return { status: 'pending' };
+        return { status: 'pending-mempool' };
       },
       knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
@@ -580,7 +580,7 @@ describe('async-lift reconciliation demand channel', () => {
       // cadence, never the parked idle sweep.
       chainProofResolver: async () => {
         proofAsks += 1;
-        if (proofAsks < 2) return { status: 'pending' };
+        if (proofAsks < 2) return { status: 'pending-mempool' };
         return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
       },
       knowledgeAssetVmPublishRecoveryResolver: async () => ({

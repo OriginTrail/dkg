@@ -86,7 +86,7 @@ const RECOVERED: AsyncLiftChainProofResolution = {
 };
 
 /** The three verdicts that establish nothing about the transaction. */
-const UNRESOLVED_VERDICTS = ['pending', 'unrecognized', 'inconclusive'] as const;
+const UNRESOLVED_VERDICTS = ['pending-mempool', 'pending-awaiting-confirmation', 'unrecognized', 'inconclusive'] as const;
 
 describe('GH#2270 proof-first chain dispatcher', () => {
   const h = createAsyncLift2270Harness();
@@ -1673,4 +1673,5 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(asked).toEqual([`wallet-tx-${onlyJob}`, `wallet-tx-${onlyJob}`]);
     });
   });
+
 });

@@ -576,7 +576,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     const { receipt, publish } = await this.readPublishReceipt(txHash, options);
     if (receipt) {
       if (!(await this.isReceiptBlockFinalAndCanonical(receipt, options))) {
-        return { status: 'pending' };
+        // Mined but not yet at the operator-selected confirmation depth: a pending shape of
+        // its own, SCHEDULING-ONLY (it tightens the caller's re-ask cadence, never evidence).
+        return { status: 'pending-awaiting-confirmation' };
       }
       if (receipt.status !== 1) return { status: 'reverted' };
       return publish ? { status: 'confirmed', publish } : { status: 'unrecognized' };
@@ -584,7 +586,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     // The SECOND step, paid only on this surface and only when there is no receipt — it is what
     // separates a transaction the node is holding from one it has never seen.
     const transaction = await this.getTransactionWithFailover(txHash, options);
-    return transaction ? { status: 'pending' } : { status: 'not-found' };
+    return transaction ? { status: 'pending-mempool' } : { status: 'not-found' };
   }
 
   /**

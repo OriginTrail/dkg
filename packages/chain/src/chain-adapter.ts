@@ -281,10 +281,43 @@ export type PublishTransactionResolution =
    * publish contracts lands here too.
    */
   | { status: 'unrecognized' }
-  /** The node holds the transaction and has not mined it yet. Never absence. */
-  | { status: 'pending' }
+  /** Not yet a mined verdict: the node holds the transaction in its MEMPOOL, no receipt
+   *  observed. Never absence. Also the answer for a resolver that cannot tell the two pending
+   *  shapes apart — it maps to the conservative default re-ask cadence. */
+  | { status: 'pending-mempool' }
+  /** Not yet a mined verdict: a receipt IS observed but does not yet carry the
+   *  operator-selected confirmation depth — an answer changing block by block, which callers
+   *  may re-ask on a tighter cadence. The two pending statuses are flat siblings (r2 human
+   *  review) and the split is SCHEDULING-ONLY: no disposition, stamp, or release may
+   *  distinguish them. */
+  | { status: 'pending-awaiting-confirmation' }
   /** The node has neither the receipt nor the transaction: the only proven absence. */
   | { status: 'not-found' };
+
+/**
+ * The chain observations whose meaning is IDENTICAL on every consumer surface (r7 3882283837):
+ * a mined revert, a mined-but-unrecognized publish, and the two pending shapes say the same
+ * thing wherever they appear, so higher layers may embed them verbatim. Deliberately EXCLUDES
+ * `confirmed` (the publisher maps it to proof-carrying `recovered`) and `not-found` (the
+ * publisher's absence member is PROOF-QUALIFIED — its resolver only earns it behind the
+ * finality-snapshot rules — so that shape must be owned and documented at the resolver
+ * boundary, never inherited structurally).
+ */
+export type PublishTransactionObservation = Exclude<
+  PublishTransactionResolution,
+  { status: 'confirmed' } | { status: 'not-found' }
+>;
+
+/**
+ * THE semantic category "still pending" in one place (r4 3881840996): consumers that care only
+ * that no mined verdict exists yet — not which pending shape it is — use this predicate instead
+ * of repeating the two-status disjunction. Deliberately a plain string predicate so publisher-
+ * side unions that embed these members can use it too. Only cadence-selecting code reads the
+ * specific status.
+ */
+export function isPendingPublishTransactionStatus(status: string): boolean {
+  return status === 'pending-mempool' || status === 'pending-awaiting-confirmation';
+}
 
 export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOptions {
   /** Persisted block identity supplied during replay canonicality checks. */
