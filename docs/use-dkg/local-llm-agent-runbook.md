@@ -15,6 +15,79 @@ Query Catalog policy, and smoke tests have all been checked.
 For architecture, troubleshooting, and benchmark details, see
 [`Run a Local LLM with DKG`](local-llm.md).
 
+## Install the default llama.cpp server
+
+`llama-server` from [`llama.cpp`](https://github.com/ggml-org/llama.cpp) is the
+default local inference server for this runbook. This selects the runtime, not
+the model family: the same server runs the recommended Qwen GGUF model.
+
+An agent must detect the operating system, execute the corresponding install,
+resolve the absolute executable path, and verify it before continuing.
+
+### macOS
+
+Use the upstream Homebrew package:
+
+```bash
+brew install llama.cpp
+export LLAMA_SERVER="$(command -v llama-server)"
+"$LLAMA_SERVER" --version
+```
+
+If Homebrew is unavailable, install it first or use the source-build procedure
+in the full [`local LLM guide`](local-llm.md#macos). Metal acceleration is
+enabled by default in upstream macOS builds.
+
+### Linux
+
+If Conda is already available, use the official conda-forge package:
+
+```bash
+conda install -c conda-forge llama.cpp
+export LLAMA_SERVER="$(command -v llama-server)"
+"$LLAMA_SERVER" --version
+```
+
+On Ubuntu or Debian without Conda, build the server from source:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake git
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target llama-server --parallel
+export LLAMA_SERVER="$(pwd)/build/bin/llama-server"
+"$LLAMA_SERVER" --version
+```
+
+For an NVIDIA build, install the CUDA toolkit and configure with
+`-DGGML_CUDA=ON`; see the full [`Linux instructions`](local-llm.md#linux).
+
+### Windows
+
+Open PowerShell and install the upstream Winget package:
+
+```powershell
+winget install llama.cpp
+```
+
+Open a new PowerShell so `PATH` is refreshed, then resolve and verify the
+executable:
+
+```powershell
+$env:LLAMA_SERVER = (Get-Command llama-server.exe).Source
+& $env:LLAMA_SERVER --version
+```
+
+If Winget is unavailable or a custom CUDA build is required, use the Visual
+Studio or release-binary procedure in the full
+[`Windows instructions`](local-llm.md#windows).
+
+Do not silently replace `llama-server` with Ollama, LM Studio, vLLM, or another
+runtime. Another server is allowed only when the operator explicitly chooses
+it and its OpenAI-compatible endpoint passes the same DKG smoke tests.
+
 ## Model decision table
 
 | Model | `llama-server` model selector | `dkg llm --model` value | Real-DKG score | Use |
@@ -40,8 +113,8 @@ Constraints:
 - Work from the active DKG installation or repository; do not clone another DKG.
 - Discover absolute executable paths. Do not assume a user-specific home path.
 - Use llama.cpp `llama-server` as the reference inference server. If it is not
-  installed, follow the macOS, Linux, or Windows section in
-  `docs/use-dkg/local-llm.md`; do not substitute another server silently.
+  installed, follow "Install the default llama.cpp server" in this runbook;
+  do not substitute another server silently.
 - Default to Qwen3-8B Q4_K_M unless the operator names another model.
 - Treat Bonsai Q1_0, 1-bit models, and other tool-weak models as catalog-first.
 - For a catalog-first model, do not start the final demo chat until a reviewed,
@@ -53,48 +126,47 @@ Constraints:
 - Run one llama-server on port 8080 at a time.
 
 Procedure:
-1. Detect whether this is an installed DKG or a source checkout. For an
+1. Detect macOS, Linux, or Windows. Install `llama-server` with the matching
+   section in this runbook, set `LLAMA_SERVER` to its absolute path, and run
+   `llama-server --version`. Do not continue if the executable cannot run.
+2. Detect whether this is an installed DKG or a source checkout. For an
    installed DKG, run `dkg doctor --json`, `dkg --version`, and `dkg status`.
    In a source checkout, build the CLI, MCP, and local-LLM packages and use
    `node packages/cli/dist/cli.js` anywhere this runbook says `dkg`. Resolve
    install skew, build failures, or daemon errors before continuing.
-2. If the daemon is stopped, run `dkg start`, then repeat `dkg status`.
-3. Run `dkg context-graph list`. Select the exact operator-provided Context
+3. If the daemon is stopped, run `dkg start`, then repeat `dkg status`.
+4. Run `dkg context-graph list`. Select the exact operator-provided Context
    Graph ID and export it as `DKG_PROJECT`; never infer it from a display name.
-4. Locate `llama-server` with `command -v llama-server` on macOS/Linux or
-   `Get-Command llama-server.exe` on Windows. If it is missing, install it with
-   the platform instructions in `docs/use-dkg/local-llm.md`. Record the
-   resolved absolute path, then select the model from the model decision table
-   in this runbook.
-5. Run `dkg query-catalog list "$DKG_PROJECT"`.
-6. If the chosen model is catalog-first and the catalog is empty or untested,
+5. Select the model from the model decision table in this runbook.
+6. Run `dkg query-catalog list "$DKG_PROJECT"`.
+7. If the chosen model is catalog-first and the catalog is empty or untested,
    stop the final-chat startup. Use Qwen3-8B Q4_K_M, a deterministic generator,
    or a domain engineer to define the catalog. Queries must be read-only,
    parameterized, pinned to the correct Context Graph/sub-graph/view, and based
    on the domain schema rather than benchmark answer fixtures.
-7. During an operator-approved catalog-build session, start `dkg llm` with
+8. During an operator-approved catalog-build session, start `dkg llm` with
    `--profile write --allow-write`. Ask it explicitly to validate each proposed
    SPARQL query against DKG evidence and save it with
    `dkg_query_catalog_save`. `--allow-write` is temporary and only authorizes
    the requested catalog saves.
-8. Verify the result independently with
+9. Verify the result independently with
    `dkg query-catalog list "$DKG_PROJECT"`, then run every saved selector with
    representative values:
    `dkg query-catalog run "$DKG_PROJECT" <selector> --param name=value`.
    Fix or remove any selector that errors or returns the wrong result shape.
-9. Start the selected llama-server with an 8192-token context, Jinja templates,
+10. Start the selected llama-server with an 8192-token context, Jinja templates,
    temperature 0.15, top-p 0.9, repeat penalty 1.05, host 127.0.0.1, and port
    8080. Wait for the model-loaded message.
-10. Run `curl -sS http://127.0.0.1:8080/health` and require `{"status":"ok"}`.
-11. Start the final chat with `dkg llm --interactive --project "$DKG_PROJECT"`.
+11. Run `curl -sS http://127.0.0.1:8080/health` and require `{"status":"ok"}`.
+12. Start the final chat with `dkg llm --interactive --project "$DKG_PROJECT"`.
     For catalog-first models also pass `--profile catalog`; do not pass
     `--allow-write`. For the default Qwen model use `--profile auto`.
-12. Smoke test: ordinary `hello` must not call DKG; a node-status question must
+13. Smoke test: ordinary `hello` must not call DKG; a node-status question must
     call `dkg_status`; a saved-query question must call
     `dkg_query_catalog_list`; running a selector must call
     `dkg_query_catalog_run`; an unsupported request must report the catalog gap
     instead of inventing SPARQL.
-13. Run `/log` in the chat. Report the exact log path, selected Context Graph,
+14. Run `/log` in the chat. Report the exact log path, selected Context Graph,
     model, catalog selectors tested, and smoke-test results to the operator.
 
 Do not call the setup complete if any required command, catalog validation, or
