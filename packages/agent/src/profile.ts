@@ -2,9 +2,11 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
+  canonicalAgentDidSubject,
   isPublicLikeAddress,
+  toAgentDid,
 } from '@origintrail-official/dkg-core';
-import { AGENT_DID_PREFIX, normalizeAgentDid } from './agent-identity.js';
+export { canonicalAgentDidSubject } from '@origintrail-official/dkg-core';
 
 /**
  * Canonicalise the DID subject for an agent.
@@ -22,10 +24,6 @@ import { AGENT_DID_PREFIX, normalizeAgentDid } from './agent-identity.js';
  * peer-id subject and we must not silently rewrite it to look like an
  * address.
  */
-export function canonicalAgentDidSubject(raw: string): string {
-  return normalizeAgentDid(`${AGENT_DID_PREFIX}${raw}`).slice(AGENT_DID_PREFIX.length);
-}
-
 /**
  * Filter a node's live libp2p multiaddrs down to the set worth
  * publishing in the agent profile.
@@ -170,9 +168,7 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   // A-12: normalise the DID subject so profile + endorsement subjects
   // converge for the same wallet regardless of the source casing. See
   // `canonicalAgentDidSubject` for rationale.
-  const entity = normalizeAgentDid(
-    `${AGENT_DID_PREFIX}${config.agentAddress ?? config.peerId}`,
-  );
+  const entity = toAgentDid(config.agentAddress ?? config.peerId);
   const quads: Quad[] = [];
   const role = config.nodeRole ?? 'edge';
 

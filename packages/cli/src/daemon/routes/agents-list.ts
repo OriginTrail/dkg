@@ -31,10 +31,10 @@
  */
 import {
   discoveredAgentIdentityKey,
-  discoveredAgentRowKey,
-  normalizeAgentDid,
+  resolveDiscoveredAgentIdentityConflicts,
   type DiscoveredAgent,
 } from '@origintrail-official/dkg-agent';
+import { toAgentDid } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { jsonResponse } from '../http-utils.js';
 import type { RequestContext } from './context.js';
@@ -202,18 +202,12 @@ export function paginateAgentRows(
     );
   }
 
-  const rowByIdentity = new Map<string, DiscoveredAgent>();
-  for (const row of rows) {
-    const identity = discoveredAgentIdentityKey(row);
-    const existing = rowByIdentity.get(identity);
-    if (!existing || discoveredAgentRowKey(row) < discoveredAgentRowKey(existing)) {
-      rowByIdentity.set(identity, row);
-    }
-  }
-  const keyed = [...rowByIdentity.entries()]
-    .map(([identity, row]) => ({
+  const keyed = resolveDiscoveredAgentIdentityConflicts(rows)
+    .map((row) => ({
       row,
-      digest: createHash('sha256').update(identity, 'utf8').digest('hex'),
+      digest: createHash('sha256')
+        .update(discoveredAgentIdentityKey(row), 'utf8')
+        .digest('hex'),
     }))
     .sort((a, b) => (a.digest < b.digest ? -1 : a.digest > b.digest ? 1 : 0));
   // Strictly-after: the cursor names a position, not a row, so a row deleted
@@ -306,7 +300,7 @@ export async function handleAgentsListRoute(ctx: RequestContext): Promise<void> 
   const defaultAgentAddress = agent.getDefaultAgentAddress();
   const defaultAgentAddressLower = defaultAgentAddress?.toLowerCase();
   const defaultAgentUri = defaultAgentAddress
-    ? normalizeAgentDid(`did:dkg:agent:${defaultAgentAddress}`)
+    ? toAgentDid(defaultAgentAddress)
     : undefined;
   const isLocalAgent = (candidate: typeof filteredAgents[number]): boolean =>
     defaultAgentAddressLower !== undefined

@@ -1,8 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import type { QueryEngine } from '@origintrail-official/dkg-query';
-import { DiscoveryClient } from '../src/discovery.js';
+import {
+  DiscoveryClient,
+  resolveDiscoveredAgentIdentityConflicts,
+} from '../src/discovery.js';
 
 describe('DiscoveryClient.findAgents distinct-row boundary', () => {
+  it('resolves identity conflicts independently of binding order', () => {
+    const canonical = {
+      agentUri: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+      name: 'alpha',
+      peerId: 'peer-alpha',
+    };
+    const conflict = { ...canonical, name: 'zeta', peerId: 'peer-zeta' };
+
+    expect(resolveDiscoveredAgentIdentityConflicts([canonical, conflict])).toEqual([canonical]);
+    expect(resolveDiscoveredAgentIdentityConflicts([conflict, canonical])).toEqual([canonical]);
+  });
+
   it('requests DISTINCT rows and collapses bindings that normalize identically', async () => {
     let issuedQuery = '';
     const duplicate = {

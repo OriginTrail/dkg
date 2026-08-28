@@ -1,5 +1,4 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-export { AGENT_DID_PREFIX, normalizeAgentDid } from './agent-identity.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
@@ -28,7 +27,7 @@ export { ProfileManager } from './profile-manager.js';
 export {
   DiscoveryClient,
   discoveredAgentIdentityKey,
-  discoveredAgentRowKey,
+  resolveDiscoveredAgentIdentityConflicts,
   type DiscoveredAgent,
   type DiscoveredOffering,
   type SkillSearchOptions,

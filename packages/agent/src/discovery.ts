@@ -1,7 +1,12 @@
 import type { QueryEngine, QueryResult } from '@origintrail-official/dkg-query';
-import { DKG_ONTOLOGY, escapeSparqlLiteral, assertSafeIri, sparqlIri } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  escapeSparqlLiteral,
+  assertSafeIri,
+  normalizeAgentDid,
+  sparqlIri,
+} from '@origintrail-official/dkg-core';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
-import { normalizeAgentDid } from './agent-identity.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';
 const DKG = 'https://dkg.network/ontology#';
@@ -46,7 +51,20 @@ export function discoveredAgentIdentityKey(
 }
 
 /** Explicit exact-row key for the current public DiscoveredAgent model. */
-export function discoveredAgentRowKey(agent: DiscoveredAgent): string {
+const DISCOVERED_AGENT_ROW_FIELDS = {
+  agentUri: true,
+  name: true,
+  peerId: true,
+  framework: true,
+  nodeRole: true,
+  relayAddress: true,
+  agentAddress: true,
+  multiaddrs: true,
+  lastSeen: true,
+} satisfies Record<keyof DiscoveredAgent, true>;
+
+function discoveredAgentRowKey(agent: DiscoveredAgent): string {
+  void DISCOVERED_AGENT_ROW_FIELDS;
   return JSON.stringify([
     discoveredAgentIdentityKey(agent),
     agent.name,
@@ -58,6 +76,21 @@ export function discoveredAgentRowKey(agent: DiscoveredAgent): string {
     agent.multiaddrs ? [...agent.multiaddrs].sort() : null,
     agent.lastSeen ?? null,
   ]);
+}
+
+/** Resolve conflicting public rows behind the agent-layer identity policy. */
+export function resolveDiscoveredAgentIdentityConflicts(
+  agents: readonly DiscoveredAgent[],
+): DiscoveredAgent[] {
+  const rowByIdentity = new Map<string, DiscoveredAgent>();
+  for (const agent of agents) {
+    const identity = discoveredAgentIdentityKey(agent);
+    const existing = rowByIdentity.get(identity);
+    if (!existing || discoveredAgentRowKey(agent) < discoveredAgentRowKey(existing)) {
+      rowByIdentity.set(identity, agent);
+    }
+  }
+  return [...rowByIdentity.values()];
 }
 
 export interface DiscoveredOffering {

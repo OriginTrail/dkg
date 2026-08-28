@@ -7,9 +7,8 @@ import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import {
   discoveredAgentIdentityKey,
-  discoveredAgentRowKey,
-  normalizeAgentDid,
 } from '@origintrail-official/dkg-agent';
+import { normalizeAgentDid } from '@origintrail-official/dkg-core';
 
 // GH#310 — GET /api/agents returned the full network registry (~750 agents,
 // ~150 KB) with no pagination, no connection filter and no way to ask only
@@ -197,16 +196,12 @@ describe('paginateAgentRows (GH#310)', () => {
   it('resolves conflicting rows for one stable identity before pagination', () => {
     const canonical = row();
     const conflict = row({ name: 'zeta', peerId: 'peer-conflict' });
-    const expected = discoveredAgentRowKey(canonical) < discoveredAgentRowKey(conflict)
-      ? canonical
-      : conflict;
-
     const forward = paginateAgentRows([canonical, conflict, many[2]!], { limit: 2 });
     const reverse = paginateAgentRows([conflict, canonical, many[2]!], { limit: 2 });
     for (const page of [forward, reverse]) {
       expect(page.rows).toHaveLength(2);
       expect(new Set(page.rows.map((agent) => agent.agentUri)).size).toBe(2);
-      expect(page.rows.find((agent) => agent.agentUri === canonical.agentUri)).toEqual(expected);
+      expect(page.rows.find((agent) => agent.agentUri === canonical.agentUri)).toEqual(canonical);
     }
   });
 

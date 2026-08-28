@@ -33,7 +33,7 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { CIPHERTEXT_CHUNK_SIZE_BYTES } from './dkg-agent-constants.js';
 import { InvalidContentError, type PublishAsyncQuadEnvelope } from './dkg-agent-types.js';
-export { normalizeAgentDid } from './agent-identity.js';
+export { normalizeAgentDid } from '@origintrail-official/dkg-core';
 
 // ── Publish-payload normalisation ─────────────────────────────────────
 
