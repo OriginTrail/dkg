@@ -22,9 +22,8 @@ import {
   normalizeRfc64AuthorCommitCasV1,
 } from './rfc64-author-commit-cas.js';
 import {
-  ContentAddressedBlobLeaseManager,
-  type ContentAddressedBlobLeaseScope,
-} from './content-addressed-blob-lease-manager.js';
+  ContentAddressedBlobSingleFlight,
+} from './content-addressed-blob-single-flight.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
 export const SHARED_MEMORY_GRAPH_SUFFIX = '/_shared_memory';
@@ -57,7 +56,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
-  private readonly blobLeases: ContentAddressedBlobLeaseManager;
+  private readonly blobWrites: ContentAddressedBlobSingleFlight;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -70,7 +69,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.innerStore = inner;
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
-    this.blobLeases = new ContentAddressedBlobLeaseManager({
+    this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
     });
   }
@@ -174,17 +173,13 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     // The manifest is also the sole source for decorator traversal: adding a
     // semantic role to the protocol plan cannot silently bypass blob mapping.
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    return this.withBlobLeaseScope(
-      async (scope) => {
-        const mappedInput = await mapRfc64AuthorCommitCasV1(manifest, {
-          mapQuad: (quad) => this.externalizeInsertQuad(quad, scope),
-          mapObject: (object, context) => context.kind === 'expected'
-            ? this.translateGuardObject(context.graphUri, object)
-            : this.externalizeScalarObject(context.graphUri, object!, scope),
-        });
-        return this.inner.rfc64AuthorCommitCasV1!(mappedInput, options);
-      },
-    );
+    const mappedInput = await mapRfc64AuthorCommitCasV1(manifest, {
+      mapQuad: (quad) => this.externalizeInsertQuad(quad),
+      mapObject: (object, context) => context.kind === 'expected'
+        ? this.translateGuardObject(context.graphUri, object)
+        : this.externalizeScalarObject(context.graphUri, object!),
+    });
+    return this.inner.rfc64AuthorCommitCasV1(mappedInput, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
@@ -256,33 +251,19 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     quads: readonly Quad[],
     work: (externalized: Quad[]) => Promise<T>,
   ): Promise<T> {
-    return this.withBlobLeaseScope(async (scope) => {
-      const externalized = await Promise.all(
-        quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
-      );
-      return work(externalized);
-    });
-  }
-
-  private async withBlobLeaseScope<T>(
-    work: (scope: ContentAddressedBlobLeaseScope) => Promise<T>,
-  ): Promise<T> {
-    const scope = this.blobLeases.createScope();
-    try {
-      return await work(scope);
-    } finally {
-      await this.blobLeases.release(scope);
-    }
+    const externalized = await Promise.all(
+      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    );
+    return work(externalized);
   }
 
   private async externalizeInsertQuad(
     quad: Quad,
-    scope: ContentAddressedBlobLeaseScope,
   ): Promise<Quad> {
     if (!shouldExternalizeLiteral(quad, this.thresholdBytes)) return quad;
 
     const hash = sha256Term(quad.object);
-    await this.blobLeases.acquire(hash, quad.object, scope);
+    await this.blobWrites.createOrVerify(hash, quad.object);
     return { ...quad, object: externalLiteralRefTerm(hash) };
   }
 
@@ -303,11 +284,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   private async externalizeScalarObject(
     graphUri: string,
     object: string,
-    scope: ContentAddressedBlobLeaseScope,
   ): Promise<string> {
     if (!shouldExternalizeScalar(graphUri, object, this.thresholdBytes)) return object;
     const hash = sha256Term(object);
-    await this.blobLeases.acquire(hash, object, scope);
+    await this.blobWrites.createOrVerify(hash, object);
     return externalLiteralRefTerm(hash);
   }
 
@@ -387,7 +367,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     return rewritten === sparql ? undefined : rewritten;
   }
 
-  private async writeBlobFile(hash: string, term: string): Promise<boolean> {
+  private async writeBlobFile(hash: string, term: string): Promise<void> {
     await mkdir(this.blobDir, { recursive: true });
     const path = this.blobPath(hash);
 
@@ -396,13 +376,12 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     } catch (err) {
       if (isNodeError(err, 'EEXIST')) {
         await this.readBlob(hash);
-        return false;
+        return;
       }
       throw err;
     }
 
     await this.readBlob(hash);
-    return true;
   }
 
   private async readBlob(hash: string): Promise<string> {

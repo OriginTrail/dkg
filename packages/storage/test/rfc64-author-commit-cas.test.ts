@@ -5,12 +5,14 @@ import {
   RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   SparqlHttpStore,
+  type Rfc64AuthorCommitCasInputV1,
+} from '../src/index.js';
+import {
   buildRfc64AuthorCommitCasUpdateV1,
   executeRfc64AuthorCommitCasV1,
   mapRfc64AuthorCommitCasV1,
   normalizeRfc64AuthorCommitCasV1,
-  type Rfc64AuthorCommitCasInputV1,
-} from '../src/index.js';
+} from '../src/rfc64-author-commit-cas.js';
 import {
   APPLIED_SET,
   AUTHOR,

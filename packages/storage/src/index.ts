@@ -36,28 +36,18 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+/**
+ * Stable caller contract for one bounded RFC-64 author commit. Compilation,
+ * receipt execution, normalization, and decorator mapping stay module-internal.
+ */
 export {
-  buildRfc64AuthorCommitCasUpdateV1,
-  executeRfc64AuthorCommitCasV1,
-  mapRfc64AuthorCommitCasV1,
-  normalizeRfc64AuthorCommitCasV1,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1,
   RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
   type Rfc64AuthorCommitCasInputV1,
-  type Rfc64AuthorCommitCasExecutionV1,
-  type Rfc64AuthorCommitCasMapperV1,
   type Rfc64AuthorCommitCasResultV1,
-  type Rfc64AuthorCommitCasUpdateV1,
-  type Rfc64AuthorCommitCurrentHeadPlanV1,
-  type Rfc64AuthorCommitGraphReplacementPlanV1,
-  type Rfc64AuthorCommitGuardPlanV1,
-  type Rfc64AuthorCommitSemanticRoleV1,
-  type NormalizedRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitStateTransitionV1,
-  type Rfc64AuthorCommitSubjectReplacementPlanV1,
   type Rfc64AuthorCommitSubjectReplacementV1,
-  type Rfc64AuthorCommitValueGuardV1,
 } from './rfc64-author-commit-cas.js';
 export {
   UnsupportedTripleStoreCapabilityError,
