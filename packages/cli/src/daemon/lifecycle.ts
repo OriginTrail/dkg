@@ -312,6 +312,7 @@ import {
   type NpmVersionResult,
   resolveLatestNpmVersion,
   compareSemver,
+  deriveAutoUpdateVersionStatus,
   acquireUpdateLock,
   releaseUpdateLock,
 } from './auto-update.js';
@@ -2818,16 +2819,13 @@ export async function runDaemonInner(
       commit: nodeCommit,
       role: config.nodeRole ?? "edge",
       autoUpdate: autoUpdateEnabled,
-      versionStatus: () => {
-        if (!autoUpdateEnabled) return "disabled";
-        if (daemonState.isUpdating) return "updating";
-        if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
-        // A pinned channel with no acceptable target is NOT healthy "latest" —
-        // surface it distinctly so central monitoring can flag an unpublished /
-        // rejected channel instead of seeing a falsely-current node.
-        if (daemonState.lastUpdateCheck.channelTargetMissing) return "channel-missing";
-        return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
-      },
+      versionStatus: () => deriveAutoUpdateVersionStatus({
+        autoUpdateEnabled,
+        isUpdating: daemonState.isUpdating,
+        checkedAt: daemonState.lastUpdateCheck.checkedAt,
+        channelTargetMissing: daemonState.lastUpdateCheck.channelTargetMissing,
+        upToDate: daemonState.lastUpdateCheck.upToDate,
+      }),
     });
     logPusher.start();
     log(

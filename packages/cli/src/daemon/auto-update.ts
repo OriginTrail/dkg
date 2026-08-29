@@ -498,6 +498,34 @@ export function deriveUpdateCheckState(
   };
 }
 
+export type AutoUpdateVersionStatus =
+  | "disabled"
+  | "updating"
+  | "unknown"
+  | "channel-missing"
+  | "latest"
+  | "behind";
+
+/**
+ * Pure projection used by the remote log stream's `versionStatus` callback.
+ * Keep the missing-channel check ahead of the ordinary up-to-date result: a
+ * pinned channel with no acceptable target has nothing to install, but it is
+ * still an operator-visible configuration/publication problem.
+ */
+export function deriveAutoUpdateVersionStatus(params: {
+  autoUpdateEnabled: boolean;
+  isUpdating: boolean;
+  checkedAt: number;
+  channelTargetMissing: boolean;
+  upToDate: boolean;
+}): AutoUpdateVersionStatus {
+  if (!params.autoUpdateEnabled) return "disabled";
+  if (params.isUpdating) return "updating";
+  if (params.checkedAt === 0) return "unknown";
+  if (params.channelTargetMissing) return "channel-missing";
+  return params.upToDate ? "latest" : "behind";
+}
+
 /**
  * Install a specific version of the CLI package into a blue-green slot via npm.
  * The slot contains a minimal package.json; `npm install` fetches the
