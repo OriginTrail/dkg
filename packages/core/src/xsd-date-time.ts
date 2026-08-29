@@ -20,6 +20,23 @@ interface XsdDateTimeCanonicalizationPolicy {
   readonly yearOutput: 'xsd' | 'ecmascript-iso';
 }
 
+declare const CANONICAL_ISO_UTC_MILLIS_V1_BRAND: unique symbol;
+export type CanonicalIsoUtcMillisV1 = string & {
+  readonly [CANONICAL_ISO_UTC_MILLIS_V1_BRAND]: true;
+};
+
+/** Exact UTC millisecond lexical contract shared by persisted protocol rows. */
+export function assertCanonicalIsoUtcMillisV1(
+  value: unknown,
+): asserts value is CanonicalIsoUtcMillisV1 {
+  if (
+    typeof value !== 'string'
+    || canonicalizeXsdDateTimeValue(value, 'assertion-seal') !== value
+  ) {
+    throw new Error('value must be a real YYYY-MM-DDTHH:mm:ss.sssZ UTC instant');
+  }
+}
+
 type XsdDateTimeCanonicalizationMode =
   | 'term'
   | 'assertion-seal'

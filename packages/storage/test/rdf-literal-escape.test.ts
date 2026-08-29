@@ -51,7 +51,7 @@ describe('RDF binding literal escaping', () => {
       typed: expectedBindings[0].typed,
       xsdString: expectedBindings[0].plain,
     }]);
-    expect(formatSparqlJsonBindings({})).toEqual([]);
+    expect(() => formatSparqlJsonBindings({})).toThrow(/SPARQL JSON response\.head/u);
   });
 
   it('returns exact valid N-term bindings after an Oxigraph round trip', async () => {

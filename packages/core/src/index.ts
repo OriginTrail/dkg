@@ -77,6 +77,7 @@ export {
   isPlainRecord,
   snapshotExactDataRecord,
 } from './sync-wire-objects.js';
+export * from './typed-rdf-store-row-v1.js';
 export * from './event-bus.js';
 export * from './backpressure-observability.js';
 export {

@@ -5,11 +5,12 @@ import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
-import type {
-  Rfc64SemanticReadOperationV1,
-  Rfc64SemanticStoreRowV1,
-} from '@origintrail-official/dkg-core';
-import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
+import { certifyRfc64SemanticReadStoreV1 } from '../rfc64-semantic-read-capability.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+} from '../rfc64-author-commit-cas.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -93,6 +94,33 @@ function asAbortError(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
+function waitForRespawnOrAbort(
+  respawn: Promise<void>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!signal) return respawn;
+  if (signal.aborted) return Promise.reject(asAbortError(signal.reason));
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      action();
+    };
+    const onAbort = () => finish(() => reject(asAbortError(signal.reason)));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    respawn.then(
+      () => finish(resolve),
+      (cause) => finish(() => reject(cause)),
+    );
+  });
+}
+
 /**
  * Side-effect-free read methods. ONLY these are bounded by the per-op timeout:
  * rejecting a read after the bound is a clean, determinate failure (nothing was
@@ -151,13 +179,6 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
-
-  rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV1,
-    options?: Pick<TripleStoreQueryOptions, 'signal'>,
-  ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
-    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
-  }
 
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.
@@ -261,6 +282,7 @@ export class OxigraphWorkerStore implements TripleStore {
     this.workerPath = workerPath;
     this.persistPath = persistPath;
     this.spawnWorker();
+    certifyRfc64SemanticReadStoreV1(this);
   }
 
   /**
@@ -537,7 +559,10 @@ export class OxigraphWorkerStore implements TripleStore {
     method: string,
     args: unknown[],
   ): Promise<T> {
-    while (this.respawnPromise) await this.respawnPromise;
+    while (this.respawnPromise) {
+      await waitForRespawnOrAbort(this.respawnPromise, signal);
+    }
+    if (signal?.aborted) throw asAbortError(signal.reason);
     return this.postToWorker<T>(timeoutMs, signal, method, args);
   }
 
@@ -699,6 +724,17 @@ export class OxigraphWorkerStore implements TripleStore {
     // single-message commit, same contract as insert/replaceGraph.
     await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
       this.call('replaceSubject', graphUri, subject, quads));
+  }
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: TripleStoreQueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (options?.signal?.aborted) throw asAbortError(options.signal.reason);
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    return this.runTrackedWrite(
+      { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
+      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', input),
+    );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
