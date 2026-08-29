@@ -21,9 +21,11 @@ import {
   rfc64CatalogTrack2ModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64CatalogActivationConfigV1,
+  resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveRfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import {
   snapshotRfc64CatalogBootstrapConfigV1,
@@ -309,6 +311,27 @@ describe('RFC-64 private catalog activation', () => {
     expect(rfc64CatalogRolloutModeForContextGraphV1(disabled, PUBLIC_CG)).toBe('legacy');
     expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(disabled, PUBLIC_CG)).toBe(true);
     expect(rfc64CatalogTrack2ModeForContextGraphV1(disabled, PUBLIC_CG)).toBe('catalog');
+  });
+
+  it('normalizes the previous release disabled resolved activation shapes', () => {
+    expect(resolveRfc64PublicCatalogActivationInputV1({
+      enabled: false,
+      selectedContextGraphs: [],
+    } as never, chainIdentity)).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
+    });
+    expect(resolveRfc64CatalogActivationInputV1({
+      enabled: false,
+      selectedContextGraphs: [],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [],
+    } as never, chainIdentity)).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
+    });
   });
 
   it('projects one legacy sync authority and never uses the kill switch as fallback', () => {

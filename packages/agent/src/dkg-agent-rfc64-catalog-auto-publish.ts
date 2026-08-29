@@ -69,10 +69,8 @@ import {
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
-import {
-  rfc64CatalogKillSwitchActiveV1,
-  rfc64CatalogRolloutModeForContextGraphV1,
-} from './rfc64/public-catalog-activation-config-v1.js';
+import { resolveRfc64CatalogAuthorityDecisionV1 } from
+  './rfc64/public-catalog-activation-config-v1.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -688,13 +686,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     subGraphName: string | null | undefined,
   ): ResolvedRfc64AcceptedPublicRootLaneV1 | null {
     const rollout = this.config.rfc64CatalogRollout;
-    if (
-      rfc64CatalogKillSwitchActiveV1(rollout)
-      || (
-        rollout.selectedContextGraphs.includes(contextGraphId)
-        && rfc64CatalogRolloutModeForContextGraphV1(rollout, contextGraphId) === 'legacy'
-      )
-    ) return null;
+    if (!resolveRfc64CatalogAuthorityDecisionV1(
+      rollout,
+      contextGraphId,
+    ).authoringAllowed) return null;
     const policy = this.config.rfc64PublicCatalogAutoPublishPolicy;
     if (
       policy === undefined

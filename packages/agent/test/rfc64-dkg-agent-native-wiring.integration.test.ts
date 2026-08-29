@@ -94,8 +94,6 @@ import {
   type FinalizedVmLoopbackFixtureConfigV1,
 } from './support/rfc64-finalized-vm-loopback-fixture.js';
 import { RFC64_M0_RECOVERY_SCENARIO_MANIFEST } from '../scripts/rfc64-m0-recovery-manifest.mjs';
-import { Rfc64PublicCatalogSuccessorProducerV1 } from
-  '../src/rfc64/public-catalog-successor-producer-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -510,263 +508,6 @@ function privateCatalogRoster(
 }
 
 ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
-  it('enforces legacy, shadow, catalog, and kill-switch authority at startup', async () => {
-    const policy = buildOpenOwnerContextGraphPolicyV1({
-      networkId: NETWORK_ID,
-      contextGraphId: CONTEXT_GRAPH_ID,
-      ownerAddress: AUTHOR,
-    });
-    const activation = (
-      mode: 'legacy' | 'shadow' | 'catalog',
-      killSwitch = false,
-    ): Rfc64PublicCatalogActivationInputV1 => ({
-      deploymentProfile: NATIVE_DEPLOYMENT,
-      rollout: {
-        killSwitch,
-        contextGraphModes: { [CONTEXT_GRAPH_ID]: mode },
-      },
-      bootstrap: {
-        acceptedPublicPolicies: [{
-          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-          targets: [],
-        }],
-        retryIntervalMs: 1_000,
-      },
-    });
-
-    const legacy = await startNativeAgentWithOptions({
-      name: 'rollout-legacy',
-      activation: activation('legacy'),
-    });
-    expect(legacy.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
-    expect(legacy.rfc64PublicCatalogStatsV1()).toBeNull();
-    expect(legacy.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();
-
-    const shadow = await startNativeAgentWithOptions({
-      name: 'rollout-shadow',
-      activation: activation('shadow'),
-    });
-    expect(shadow.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
-    expect(shadow.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
-    expect(shadow.readRfc64PublicCatalogBootstrapStatusV1()).not.toBeNull();
-
-    const catalog = await startNativeAgentWithOptions({
-      name: 'rollout-catalog',
-      activation: activation('catalog'),
-    });
-    expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
-    await expect(catalog.planSharedMemorySyncContextGraphs(
-      undefined,
-      [CONTEXT_GRAPH_ID],
-      createOperationContext('sync'),
-    )).resolves.toMatchObject({ targets: [] });
-    expect(catalog.isRfc64SelectedVmReconcileContextGraph(CONTEXT_GRAPH_ID)).toBe(true);
-    expect(catalog.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
-    expect(catalog.readRfc64PublicCatalogBootstrapStatusV1()).not.toBeNull();
-
-    const stopped = await startNativeAgentWithOptions({
-      name: 'rollout-kill-switch',
-      activation: activation('catalog', true),
-    });
-    expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
-    expect(stopped.isRfc64SelectedVmReconcileContextGraph(CONTEXT_GRAPH_ID)).toBe(true);
-    expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
-    expect(stopped.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();
-  }, 30_000);
-
-  it('keeps complete-provider recovery live when every selected CG is legacy-mode', async () => {
-    const providerPeerId = '12D3KooWAllLegacyCompleteProvider';
-    const policy = buildOpenOwnerContextGraphPolicyV1({
-      networkId: NETWORK_ID,
-      contextGraphId: CONTEXT_GRAPH_ID,
-      ownerAddress: AUTHOR,
-    });
-    let connect!: ReturnType<typeof vi.spyOn>;
-    let queue!: ReturnType<typeof vi.spyOn>;
-    const legacy = await startNativeAgentWithOptions({
-      name: 'rollout-all-legacy-complete-provider',
-      activation: {
-        deploymentProfile: NATIVE_DEPLOYMENT,
-        rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'legacy' } },
-        bootstrap: {
-          acceptedPublicPolicies: [{
-            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-            targets: [],
-            completeSwmProviders: [providerPeerId],
-          }],
-        },
-      },
-      beforeStart: (agent) => {
-        connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-        queue = vi.spyOn(agent, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
-          .mockReturnValue(true);
-      },
-    });
-    await legacy.whenRfc64PublicCatalogBootstrapIdleV1();
-
-    expect(legacy.rfc64PublicCatalogStatsV1()).toBeNull();
-    expect(legacy.readRfc64PublicCatalogBootstrapStatusV1()).toMatchObject({
-      pass: 1,
-      targets: [],
-    });
-    expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
-    expect(queue).toHaveBeenCalledWith(
-      expect.objectContaining({
-        providerPeerId,
-        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
-      }),
-      expect.any(Function),
-      0,
-    );
-  });
-
-  it('rejects persisted successor authoring before writes in legacy and kill-switch modes', async () => {
-    const policy = buildOpenOwnerContextGraphPolicyV1({
-      networkId: NETWORK_ID,
-      contextGraphId: CONTEXT_GRAPH_ID,
-      ownerAddress: AUTHOR,
-    });
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-authoring-guard-'));
-    tempDirs.push(dataDir);
-    const persistentStorePath = join(dataDir, 'oxigraph');
-    const activation = (
-      mode: 'legacy' | 'catalog',
-      killSwitch = false,
-    ): Rfc64PublicCatalogActivationInputV1 => ({
-      deploymentProfile: NATIVE_DEPLOYMENT,
-      rollout: {
-        killSwitch,
-        contextGraphModes: { [CONTEXT_GRAPH_ID]: mode },
-      },
-      bootstrap: {
-        acceptedPublicPolicies: [{
-          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-          targets: [],
-        }],
-      },
-    });
-    const author = await startNativeAgentWithOptions({
-      name: 'rollout-authoring-catalog',
-      existingDataDir: dataDir,
-      persistentStorePath,
-      activation: activation('catalog'),
-    });
-    const genesis = await author.publishOpenAuthorCatalogGenesisV1({
-      networkId: NETWORK_ID,
-      contextGraphId: CONTEXT_GRAPH_ID,
-      author: AUTHOR_WALLET,
-      peers: [],
-      issuedAt: FIXED_HEAD_ISSUED_AT,
-      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
-      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
-    });
-    const successorInput = {
-      previousHead: {
-        objectDigest: genesis.headObjectDigest,
-        signatureVariantDigest: genesis.signatureVariantDigest,
-      },
-      author: AUTHOR_WALLET,
-      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
-      assets: [{
-        assertionCoordinate: 'rollout-authoring-guard' as never,
-        projectionBytes: PROJECTION,
-        seal: await authorSeal(81n),
-      }],
-      deployment: NATIVE_DEPLOYMENT,
-      issuedAt: SUCCESSOR_ISSUED_AT,
-      peers: [],
-    };
-    await author.stop();
-    agents.splice(agents.indexOf(author), 1);
-
-    const legacy = await startNativeAgentWithOptions({
-      name: 'rollout-authoring-legacy',
-      existingDataDir: dataDir,
-      persistentStorePath,
-      activation: activation('legacy'),
-    });
-    const producer = vi.spyOn(
-      Rfc64PublicCatalogSuccessorProducerV1.prototype,
-      'produceAndStageExactSet',
-    );
-    await expect(legacy.publishAuthorCatalogExactSetSuccessorV1(successorInput))
-      .rejects.toThrow(/authoring is disabled for legacy-mode CG/u);
-    expect(producer).not.toHaveBeenCalled();
-    await legacy.stop();
-    agents.splice(agents.indexOf(legacy), 1);
-
-    const stopped = await startNativeAgentWithOptions({
-      name: 'rollout-authoring-kill-switch',
-      existingDataDir: dataDir,
-      persistentStorePath,
-      activation: activation('catalog', true),
-    });
-    await expect(stopped.publishAuthorCatalogExactSetSuccessorV1(successorInput))
-      .rejects.toThrow(/disabled by the Track-2 kill switch/u);
-    expect(producer).not.toHaveBeenCalled();
-  }, 60_000);
-
-  it('cold-bootstraps a valid shadow head as staged-only with no applied head', async () => {
-    const policy = buildOpenOwnerContextGraphPolicyV1({
-      networkId: NETWORK_ID,
-      contextGraphId: CONTEXT_GRAPH_ID,
-      ownerAddress: AUTHOR,
-    });
-    const author = await startNativeAgentWithOptions({
-      name: 'rollout-shadow-bootstrap-author',
-      activation: {
-        deploymentProfile: NATIVE_DEPLOYMENT,
-        autoPublish: {
-          peers: [],
-          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
-        },
-        bootstrap: {
-          acceptedPublicPolicies: [{
-            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-            targets: [],
-          }],
-        },
-      },
-    });
-    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
-    const published = await author.recordRfc64PublicCatalogAssetV1({
-      contextGraphId: CONTEXT_GRAPH_ID,
-      assertionCoordinate: 'rollout-shadow-bootstrap' as never,
-      publicQuads: PROJECTION_QUADS,
-      seal: assertionSealFromCanonical(await authorSeal(82n, PROJECTION_QUADS)),
-    });
-    expect(published).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
-    const shadow = await startNativeAgentWithOptions({
-      name: 'rollout-shadow-bootstrap-receiver',
-      activation: {
-        deploymentProfile: NATIVE_DEPLOYMENT,
-        rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' } },
-        bootstrap: {
-          acceptedPublicPolicies: [{
-            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-            targets: [{ authorAddress: AUTHOR, providers: [author.peerId] }],
-          }],
-        },
-      },
-    });
-    await connectBothWays(author, shadow);
-    await vi.waitFor(() => {
-      expect(shadow.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
-        mode: 'shadow',
-        outcome: 'shadow-staged',
-        providerPeerId: author.peerId,
-        appliedHeadDigest: null,
-        stagedHeadDigest: published?.currentCatalogHeadDigest,
-        catalogVersion: '1',
-        inventoryRowCount: '1',
-      });
-    }, { timeout: 20_000, interval: 100 });
-    expect(shadow.readRfc64AppliedCatalogHeadV1({
-      catalogScopeDigest: catalogScopeDigest(),
-      authorAddress: AUTHOR,
-    })).toBeNull();
-  }, 30_000);
-
   it('preserves the EVM default chain identity for a no-admin chain config', async () => {
     const operational = ethers.Wallet.createRandom();
     const agent = await DKGAgent.create({
@@ -1405,7 +1146,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).rejects.toThrow(/selected graphs differ from the bootstrap manifest/u);
   });
 
-  it('projects raw selected activation into direct agent durable sync scope', async () => {
+  it('projects raw selected activation out of the legacy durable sync scope', async () => {
     const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -1425,7 +1166,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       },
     });
 
-    expect((agent as any).config.syncContextGraphs).toContain(CONTEXT_GRAPH_ID);
+    expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
   });
 
   it('keeps a private catalog selection out of the legacy durable sync scope', async () => {
@@ -1469,7 +1210,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
   });
 
-  it('projects a manifest-selected activation without an explicit enabled switch', async () => {
+  it('projects a manifest-selected activation to catalog authority by default', async () => {
     const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -1488,7 +1229,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       },
     });
 
-    expect((agent as any).config.syncContextGraphs).toContain(CONTEXT_GRAPH_ID);
+    expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
     expect((agent as any).config.rfc64PublicCatalogBootstrap).toBeDefined();
   });
 
@@ -1660,6 +1401,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       rfc64CatalogActivation: {
         enabled: true,
         deploymentProfile: NATIVE_DEPLOYMENT,
+        rollout: { contextGraphModes: { [policy.contextGraphId]: 'legacy' } },
         accessPolicyAuthority: {
           localAgentAddress: AUTHOR,
           peerAgentBindings: [{ peerId: providerPeerId, agentAddress: AUTHOR }],
@@ -2516,17 +2258,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
   }, 60_000);
 
   registerM0RecoveryScenario('cold-restart', rfc64M0RecoveryTitle('cold-restart'), async () => {
-    const author = await startNativeAgent(
-      'bootstrap-author',
-      NATIVE_DEPLOYMENT,
-      undefined,
-      undefined,
-      undefined,
-      {
+    const author = await startNativeAgentWithOptions({
+      name: 'bootstrap-author',
+      networkIdentityChainId: NETWORK_ID,
+      autoPublish: {
         peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
-    );
+    });
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     const accepted = author.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -2576,6 +2315,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: receiverDataDir,
       bootstrap,
       persistentStorePath,
+      networkIdentityChainId: NETWORK_ID,
     });
     await connectBothWays(author, receiver);
     await vi.waitFor(() => {
@@ -2603,6 +2343,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: receiverDataDir,
       bootstrap,
       persistentStorePath,
+      networkIdentityChainId: NETWORK_ID,
     });
     await connectBothWays(author, restarted);
     await vi.waitFor(() => {
@@ -2756,7 +2497,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     ).mockResolvedValueOnce({
       completionOutcome: 'applied',
       currentCatalogHeadDigest: appliedHeadDigest,
-      stagedHeadDigest: null,
       appliedHead: {
         catalogScopeDigest: catalogScopeDigest(),
         authorAddress: AUTHOR,

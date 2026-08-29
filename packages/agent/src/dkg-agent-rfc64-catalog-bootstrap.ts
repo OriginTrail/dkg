@@ -25,10 +25,7 @@ import { Rfc64CatalogSynchronizationErrorV1 } from
 import { resolveRfc64PeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
-  rfc64CatalogKillSwitchActiveV1,
-  rfc64CatalogRolloutModeForContextGraphV1,
-  rfc64CatalogTrack2ModeForContextGraphV1,
-  rfc64LegacySyncAuthorityActiveForContextGraphV1,
+  resolveRfc64CatalogAuthorityDecisionV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
@@ -164,11 +161,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     contextGraphId: string,
   ): readonly string[] {
     if (
-      this.config.rfc64CatalogRollout.selectedContextGraphs.includes(contextGraphId)
-      && rfc64CatalogRolloutModeForContextGraphV1(
+      !resolveRfc64CatalogAuthorityDecisionV1(
         this.config.rfc64CatalogRollout,
         contextGraphId,
-      ) === 'catalog'
+      ).legacySyncAllowed
     ) return Object.freeze([]);
     const config = this.config.rfc64CatalogBootstrap
       ?? this.config.rfc64PublicCatalogBootstrap;
@@ -190,13 +186,11 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       targets: policyTargets,
       completeSwmProviders = [],
       } = accepted;
-      const mode = rfc64CatalogTrack2ModeForContextGraphV1(
+      const authority = resolveRfc64CatalogAuthorityDecisionV1(
         this.config.rfc64CatalogRollout,
         policyEnvelope.payload.contextGraphId,
       );
-      if (mode === 'legacy' || rfc64CatalogKillSwitchActiveV1(
-        this.config.rfc64CatalogRollout,
-      )) return [];
+      if (!authority.track2Enabled) return [];
       if (service === undefined) {
         throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
       }
@@ -206,7 +200,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         roster: accepted.rosterEnvelope?.payload,
       });
       return policyTargets.map((target) => ({
-        mode,
+        mode: authority.mode as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
         scope: Object.freeze({
           networkId: policyEnvelope.payload.networkId,
           contextGraphId: policyEnvelope.payload.contextGraphId,
@@ -229,18 +223,16 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       completeSwmProviders = [],
     }) => (
       completeSwmProviders.length > 0
-      && rfc64LegacySyncAuthorityActiveForContextGraphV1(
+      && resolveRfc64CatalogAuthorityDecisionV1(
         this.config.rfc64CatalogRollout,
         policyEnvelope.payload.contextGraphId,
-      )
+      ).legacySyncAllowed
     ));
-    const hasTrack2Policy = !rfc64CatalogKillSwitchActiveV1(
-      this.config.rfc64CatalogRollout,
-    ) && config.acceptedPolicies.some(({ policyEnvelope }) => (
-      rfc64CatalogTrack2ModeForContextGraphV1(
+    const hasTrack2Policy = config.acceptedPolicies.some(({ policyEnvelope }) => (
+      resolveRfc64CatalogAuthorityDecisionV1(
         this.config.rfc64CatalogRollout,
         policyEnvelope.payload.contextGraphId,
-      ) !== 'legacy'
+      ).track2Enabled
     ));
     if (!hasTrack2Policy && !hasLegacyRecoveryProviders) return;
     const state: BootstrapStateV1 = {
@@ -354,10 +346,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     try {
       const legacyRecoveryConfig = Object.freeze({
         acceptedPolicies: Object.freeze(state.config.acceptedPolicies.filter(
-          ({ policyEnvelope }) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
+          ({ policyEnvelope }) => resolveRfc64CatalogAuthorityDecisionV1(
             this.config.rfc64CatalogRollout,
             policyEnvelope.payload.contextGraphId,
-          ),
+          ).legacySyncAllowed,
         )),
         ...(state.config.retryIntervalMs === undefined
           ? {}
@@ -449,22 +441,32 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         ) {
           throw new Error('RFC-64 catalog bootstrap unexpectedly completed as staged-only');
         }
-        target.outcome = target.mode === 'shadow' ? 'shadow-staged' : 'applied';
-        target.completionReason = null;
-        target.providerPeerId = synchronized.appliedProviderPeerId
+        const providerPeerId = synchronized.appliedProviderPeerId
           ?? synchronized.providerPeerIds[0]
           ?? null;
-        target.attempts = synchronized.providerAttempts;
-        target.appliedHeadDigest = target.mode === 'catalog'
-          ? synchronized.currentCatalogHeadDigest
-          : null;
-        target.stagedHeadDigest = target.mode === 'shadow'
-          ? synchronized.stagedHeadDigest
-          : null;
-        target.catalogVersion = synchronized.catalogVersion;
-        target.inventoryRowCount = synchronized.inventoryRowCount;
-        target.lastError = null;
-        target.updatedAtMs = Date.now();
+        const completion = synchronized.completionOutcome === 'staged-only'
+          ? Object.freeze({
+            outcome: 'shadow-staged' as const,
+            appliedHeadDigest: null,
+            stagedHeadDigest: synchronized.stagedHeadDigest,
+          })
+          : Object.freeze({
+            outcome: 'applied' as const,
+            appliedHeadDigest: synchronized.appliedHead.currentCatalogHeadDigest,
+            stagedHeadDigest: null,
+          });
+        Object.assign(target, completion, {
+          completionReason: null,
+          providerPeerId,
+          // Preserve the public field's existing discovery-provider contract.
+          // Reconciliation attempts remain internal evidence and never change
+          // the meaning of this status between success and failure.
+          attempts: target.providers.length,
+          catalogVersion: synchronized.catalogVersion,
+          inventoryRowCount: synchronized.inventoryRowCount,
+          lastError: null,
+          updatedAtMs: Date.now(),
+        });
         return;
       }
       // A null result means the bounded provider loop completed without a
