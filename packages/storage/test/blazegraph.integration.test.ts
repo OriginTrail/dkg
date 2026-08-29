@@ -388,10 +388,9 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
         expect([newHead, competingHead]).toContain(winner);
         expect(await store.countQuads(projectionGraph)).toBe(winner === newHead ? 2 : 1);
         const control = await store.query(
-          `SELECT ?seal ?kaState ?subgraphGeneration ?contextGraphGeneration ?applied WHERE {
+          `SELECT ?seal ?subgraphGeneration ?contextGraphGeneration ?applied WHERE {
             GRAPH <${sealGraph}> { <${seal}> <${pValue}> ?seal }
             GRAPH <${stateGraph}> {
-              <${kaState}> <${pValue}> ?kaState .
               <${mutation}> <${pGeneration}> ?subgraphGeneration .
               <${cgMutation}> <${pGeneration}> ?contextGraphGeneration .
               <${appliedSet}> <${pValue}> ?applied .
@@ -402,14 +401,12 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
           winner === newHead
             ? {
                 seal: '"new-seal"',
-                kaState: newHead,
                 subgraphGeneration: '"2"',
                 contextGraphGeneration: '"11"',
                 applied: newHead,
               }
             : {
                 seal: '"competing-seal"',
-                kaState: competingHead,
                 subgraphGeneration: '"3"',
                 contextGraphGeneration: '"12"',
                 applied: competingHead,

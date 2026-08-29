@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { assertExactKeys, isPlainRecord } from '../src/sync-wire-objects.js';
+import { snapshotExactDataRecord } from '../src/strict-data-boundary.js';
 
 describe('RFC-64 sync wire object helpers', () => {
   it('accepts ordinary and null-prototype records', () => {
@@ -55,5 +56,13 @@ describe('RFC-64 sync wire object helpers', () => {
     expect(() => assertExactKeys(accessor, ['value'], 'fixture')).toThrow(
       /enumerable data properties/,
     );
+  });
+
+  it('exposes only exact snapshotting through the deliberate cross-package boundary', async () => {
+    expect(snapshotExactDataRecord({ value: 'ok' }, ['value'], 'fixture'))
+      .toEqual({ value: 'ok' });
+    const root = await import('../src/index.js') as Record<string, unknown>;
+    expect(root).not.toHaveProperty('snapshotExactDataRecord');
+    expect(root).not.toHaveProperty('isPlainRecord');
   });
 });

@@ -1,12 +1,12 @@
 import {
   compileRfc64SemanticReadOperationV1,
   decodeRfc64SemanticRecordStoreRowsV1,
-  snapshotExactDataRecord,
   Rfc64SemanticReadManifestErrorV1,
   type DecodedRfc64SemanticRecordV1,
   type Rfc64SemanticRecordCoordinateV1,
   type Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
+import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
 import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
 import {
