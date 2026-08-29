@@ -79,19 +79,14 @@ describe('TripleStoreAsyncPromoteQueue', () => {
    */
   function makeFlushBlockingStore(base: OxigraphStore): {
     store: TripleStore;
-    arm: () => void;
-    flushStarted: Promise<void>;
-    releaseFlush: () => void;
+    arm: () => { flushStarted: Promise<void>; releaseFlush: () => void };
   } {
-    let blockNextFlush = false;
-    let flushStartedResolve!: () => void;
-    let releaseFlushResolve!: () => void;
-    const flushStarted = new Promise<void>((resolve) => {
-      flushStartedResolve = resolve;
-    });
-    const flushRelease = new Promise<void>((resolve) => {
-      releaseFlushResolve = resolve;
-    });
+    let activeGate: {
+      flushStarted: Promise<void>;
+      flushStartedResolve: () => void;
+      flushRelease: Promise<void>;
+      releaseFlush: () => void;
+    } | null = null;
     const store: TripleStore = {
       createGraph: (graphUri) => base.createGraph(graphUri),
       dropGraph: (graphUri) => base.dropGraph(graphUri),
@@ -105,10 +100,11 @@ describe('TripleStoreAsyncPromoteQueue', () => {
       countQuads: (graphUri) => base.countQuads(graphUri),
       close: () => base.close(),
       flush: async () => {
-        if (blockNextFlush) {
-          flushStartedResolve();
-          await flushRelease;
-          blockNextFlush = false;
+        const gate = activeGate;
+        if (gate) {
+          gate.flushStartedResolve();
+          await gate.flushRelease;
+          if (activeGate === gate) activeGate = null;
         }
         await base.flush?.();
       },
@@ -116,10 +112,18 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     return {
       store,
       arm: () => {
-        blockNextFlush = true;
+        if (activeGate) throw new Error('flush gate is already armed');
+        let flushStartedResolve!: () => void;
+        let releaseFlush!: () => void;
+        const flushStarted = new Promise<void>((resolve) => {
+          flushStartedResolve = resolve;
+        });
+        const flushRelease = new Promise<void>((resolve) => {
+          releaseFlush = resolve;
+        });
+        activeGate = { flushStarted, flushStartedResolve, flushRelease, releaseFlush };
+        return { flushStarted, releaseFlush };
       },
-      flushStarted,
-      releaseFlush: () => releaseFlushResolve(),
     };
   }
 
@@ -432,16 +436,16 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
   it('5b. list({ state: ["running"] }) waits for an in-flight claim flush before exposing the running row', async () => {
     const base = new OxigraphStore();
-    const { store: blockingStore, arm, flushStarted, releaseFlush } = makeFlushBlockingStore(base);
-    const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
+    const controlled = makeFlushBlockingStore(base);
+    const queue = new TripleStoreAsyncPromoteQueue(controlled.store, {
       now: () => now,
       idGenerator: () => `job-${++idCounter}`,
     });
 
     await queue.enqueue(makeRequest());
-    arm();
+    const gate = controlled.arm();
     const claimPromise = queue.claimNext('worker-1');
-    await flushStarted;
+    await gate.flushStarted;
 
     let listSettled = false;
     const listPromise = queue.list({ state: ['running'] }).finally(() => {
@@ -450,7 +454,7 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(listSettled).toBe(false);
 
-    releaseFlush();
+    gate.releaseFlush();
     const [claimed, running] = await Promise.all([claimPromise, listPromise]);
     expect(claimed?.state).toBe('running');
     expect(running).toHaveLength(1);
@@ -459,16 +463,17 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
   it('5c. getStats() waits for an in-flight claim flush before counting the running row', async () => {
     const base = new OxigraphStore();
-    const { store: blockingStore, arm, flushStarted, releaseFlush } = makeFlushBlockingStore(base);
+    const controlled = makeFlushBlockingStore(base);
+    const blockingStore = controlled.store;
     const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
       now: () => now,
       idGenerator: () => `job-${++idCounter}`,
     });
 
     await queue.enqueue(makeRequest());
-    arm();
+    const gate = controlled.arm();
     const claimPromise = queue.claimNext('worker-1');
-    await flushStarted;
+    await gate.flushStarted;
 
     let statsSettled = false;
     const statsPromise = queue.getStats().finally(() => {
@@ -477,7 +482,7 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(statsSettled).toBe(false);
 
-    releaseFlush();
+    gate.releaseFlush();
     const [claimed, stats] = await Promise.all([claimPromise, statsPromise]);
     expect(claimed?.state).toBe('running');
     expect(stats.running).toBe(1);
@@ -678,11 +683,11 @@ describe('TripleStoreAsyncPromoteQueue', () => {
       onWorkAvailable: () => notifications.push('wake'),
     });
 
-    controlled.arm();
+    const enqueueGate = controlled.arm();
     const enqueueing = queue.enqueue(makeRequest());
-    await controlled.flushStarted;
+    await enqueueGate.flushStarted;
     expect(notifications).toEqual([]);
-    controlled.releaseFlush();
+    enqueueGate.releaseFlush();
     const jobId = await enqueueing;
     expect(notifications).toEqual(['wake']);
 
@@ -695,7 +700,12 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     });
     expect(notifications).toEqual(['wake']);
 
-    await queue.recover(jobId);
+    const recoveryGate = controlled.arm();
+    const recovering = queue.recover(jobId);
+    await recoveryGate.flushStarted;
+    expect(notifications).toEqual(['wake']);
+    recoveryGate.releaseFlush();
+    await recovering;
     expect(notifications).toEqual(['wake', 'wake']);
 
     detach();

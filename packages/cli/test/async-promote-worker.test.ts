@@ -1151,6 +1151,39 @@ describe('createPromoteWorkerSupervisor', () => {
     expect((await queue.getStats()).succeeded).toBe(1);
   });
 
+  it('drains a backlog larger than worker concurrency from a single resume wake', async () => {
+    await queue.pause();
+    await queue.enqueue(makeRequest('backlog-a'));
+    await queue.enqueue(makeRequest('backlog-b'));
+    await queue.enqueue(makeRequest('backlog-c'));
+
+    const allPromoted = deferred();
+    const promoted: string[] = [];
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        promoted.push(request.assertionName);
+        if (promoted.length === 3) allPromoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'backlog',
+    });
+    await sup.start();
+
+    await queue.resume();
+    await Promise.race([
+      allPromoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('backlog drain timed out')), 2_000)),
+    ]);
+    await sup.stop();
+
+    expect([...promoted].sort()).toEqual(['backlog-a', 'backlog-b', 'backlog-c']);
+    expect((await queue.getStats()).succeeded).toBe(3);
+  });
+
   it('stops probing remaining idle slots after the first empty claim', async () => {
     let claimCalls = 0;
     const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
