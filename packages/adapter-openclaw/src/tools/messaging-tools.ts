@@ -8,32 +8,6 @@
 import type { OpenClawTool } from '../types.js';
 import type { DkgToolHost } from './tool-host.js';
 
-/**
- * Tool arg -> daemon query parameter for dkg_find_agents (GH#310). One
- * compiler-checked map; values are forwarded VERBATIM (String() only), so a
- * malformed model value reaches the daemon and surfaces its 400 instead of
- * silently widening the query.
- */
-export const FIND_AGENTS_ARG_WIRE_KEYS = {
-  framework: 'framework',
-  skill_type: 'skill_type',
-  connection_status: 'connectionStatus',
-  local: 'local',
-  limit: 'limit',
-  cursor: 'cursor',
-} as const;
-
-export function rawFindAgentsQuery(args: Record<string, unknown>): string {
-  const params = new URLSearchParams();
-  for (const arg of Object.keys(FIND_AGENTS_ARG_WIRE_KEYS) as Array<keyof typeof FIND_AGENTS_ARG_WIRE_KEYS>) {
-    const value = args[arg];
-    if (value !== undefined && value !== null && value !== '') {
-      params.set(FIND_AGENTS_ARG_WIRE_KEYS[arg], String(value));
-    }
-  }
-  return params.toString();
-}
-
 export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
   return [
     {

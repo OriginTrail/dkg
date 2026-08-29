@@ -98,7 +98,7 @@ import type { DkgToolHost } from './tools/tool-host.js';
 import { buildNodeTools } from './tools/node-tools.js';
 import { buildContextGraphTools } from './tools/context-graph-tools.js';
 import { buildQueryTools } from './tools/query-tools.js';
-import { rawFindAgentsQuery,  buildMessagingTools } from './tools/messaging-tools.js';
+import {  buildMessagingTools } from './tools/messaging-tools.js';
 import { buildAssertionTools } from './tools/assertion-tools.js';
 import { buildMemoryTools } from './tools/memory-tools.js';
 
@@ -3060,7 +3060,7 @@ export class DkgNodePlugin {
       // folding) or dropping a bad value would turn the daemon's 400 into a
       // silently different query — `limit: 0` becoming "no limit" is the
       // full ~150 KB registry.
-      const result = await this.client.getAgentsByQuery(rawFindAgentsQuery(args));
+      const result = await this.client.getAgentsUnvalidated(args);
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);

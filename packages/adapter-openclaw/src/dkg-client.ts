@@ -7,6 +7,13 @@
  */
 
 import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
+import {
+  serializeAgentListOptions,
+  serializeRawAgentListArgs,
+  type AgentListOptions,
+} from './agent-list.js';
+
+export type { AgentListOptions } from './agent-list.js';
 
 /**
  * Typed daemon HTTP error. Carries the response `status` and the parsed JSON
@@ -17,26 +24,6 @@ import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
  * with the existing `responded NNN` substring checks (e.g. the chat-turns 404
  * probe and the `wm/import-file` 404 path).
  */
-/** Strict options for {@link DkgClient.getAgents} (GH#310). */
-export interface AgentListOptions {
-  framework?: string;
-  skillType?: string;
-  connectionStatus?: 'self' | 'connected' | 'disconnected';
-  local?: boolean;
-  limit?: number;
-  cursor?: string;
-}
-
-/** Option -> query parameter. `satisfies` keeps the map total. */
-const AGENT_LIST_OPTION_WIRE_KEYS = {
-  framework: 'framework',
-  skillType: 'skill_type',
-  connectionStatus: 'connectionStatus',
-  local: 'local',
-  limit: 'limit',
-  cursor: 'cursor',
-} as const satisfies Record<keyof AgentListOptions, string>;
-
 export class DkgDaemonHttpError extends Error {
   readonly status: number;
   readonly body?: unknown;
@@ -991,30 +978,28 @@ export class DkgDaemonClient {
   // ---------------------------------------------------------------------------
 
   /**
-   * List agents (GH#310), strictly typed for SDK callers. Serialization goes
-   * through one compiler-checked key map, so an option added without a wire
-   * spelling is a compile error. Untrusted model-produced values do NOT come
-   * through here — the tool boundary serializes them itself and uses
-   * {@link getAgentsByQuery}, keeping raw strings out of this contract.
+   * List agents (GH#310), strictly typed for SDK callers. Serialization
+   * lives in the agent-list boundary module (src/agent-list.ts) and is
+   * shared with {@link getAgentsUnvalidated}, so both paths speak one wire
+   * vocabulary. The deprecated `skill_type` alias keeps pre-GH#310 callers
+   * working.
    */
   async getAgents(options?: AgentListOptions): Promise<{ agents: any[]; nextCursor?: string }> {
-    const params = new URLSearchParams();
-    if (options) {
-      for (const key of Object.keys(AGENT_LIST_OPTION_WIRE_KEYS) as Array<keyof AgentListOptions>) {
-        const value = options[key];
-        if (value !== undefined) params.set(AGENT_LIST_OPTION_WIRE_KEYS[key], String(value));
-      }
-    }
-    return this.getAgentsByQuery(params.toString());
+    return this.agentsRequest(serializeAgentListOptions(options ?? {}));
   }
 
   /**
-   * Tool-boundary escape hatch: a pre-serialized agents query forwarded
-   * AS-IS, so the daemon — the single validator — sees exactly what the
-   * caller supplied and its 400 is the caller's signal. `limit: 0` coerced
-   * or dropped client-side would instead return the full ~150 KB registry.
+   * The dkg_find_agents tool boundary: UNVALIDATED model-produced arguments,
+   * serialized verbatim by the shared boundary module, so the daemon — the
+   * single validator — sees exactly what the model supplied and its 400 is
+   * the caller's signal. `limit: 0` coerced or dropped client-side would
+   * instead return the full ~150 KB registry.
    */
-  async getAgentsByQuery(queryString: string): Promise<{ agents: any[]; nextCursor?: string }> {
+  async getAgentsUnvalidated(args: Record<string, unknown>): Promise<{ agents: any[]; nextCursor?: string }> {
+    return this.agentsRequest(serializeRawAgentListArgs(args));
+  }
+
+  private async agentsRequest(queryString: string): Promise<{ agents: any[]; nextCursor?: string }> {
     return this.get(`/api/agents${queryString ? `?${queryString}` : ''}`);
   }
 

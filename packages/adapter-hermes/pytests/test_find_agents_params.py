@@ -38,6 +38,12 @@ def test_schema_advertises_the_310_filters(plugin_module):
     for key in ("framework", "skill_type", "connection_status", "local", "limit", "cursor"):
         assert key in props, f"dkg_find_agents schema is missing {key}"
     assert props["connection_status"]["enum"] == ["self", "connected", "disconnected"]
+    # The machine-readable constraints ARE the contract: without them the
+    # schema invites values the daemon rejects with a guaranteed 400.
+    assert props["limit"]["type"] == "integer"
+    assert props["limit"]["minimum"] == 1
+    assert props["local"]["type"] == "boolean"
+    assert props["cursor"]["type"] == "string"
 
 
 def test_handler_maps_snake_case_args_to_daemon_params(provider):

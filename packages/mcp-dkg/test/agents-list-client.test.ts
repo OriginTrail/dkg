@@ -41,15 +41,10 @@ describe('DkgClient agents-list serialization', () => {
     expect(urls[0]!.endsWith('/api/agents')).toBe(true);
   });
 
-  it('the row type states the route invariants at compile time', () => {
-    // Identity + enrichment are daemon guarantees — required, not optional.
-    // @ts-expect-error a row without identity fields must not type-check
-    const missingIdentity: AgentListRow = { connectionStatus: 'connected' };
-    // @ts-expect-error a status the endpoint cannot emit must not type-check
-    const badStatus: AgentListRow = fullRow({ connectionStatus: 'connecting' });
-    void missingIdentity;
-    void badStatus;
-    // Known fields read without casts; unknown extras stay reachable.
+  it('known fields read without casts; unknown extras stay reachable', () => {
+    // The compile-time half of this contract (required identity, closed
+    // status union) lives in test-d/agent-list-row.test-d.ts, which runs
+    // under tsc via the vitest typecheck lane — here the types are stripped.
     const row = fullRow({ futureField: 1 });
     expect(row.peerId).toBe('p1');
     expect(row.futureField).toBe(1);

@@ -703,31 +703,49 @@ describe('DkgDaemonClient', () => {
     expect(result.nextCursor).toBe('n1');
   });
 
-  it('getAgentsByQuery forwards a raw query verbatim AND surfaces the daemon 400', async () => {
+  it('getAgentsUnvalidated serializes raw args verbatim AND surfaces the daemon 400', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ error: '"limit" must be a positive integer' }), { status: 400 }),
     );
     // The rejection IS the contract: if the client swallowed the 400 into
     // {agents: []}, malformed filters would look like successful empty
     // queries and the whole validation chain would be silent.
-    await expect(client.getAgentsByQuery('limit=10junk&local=ture'))
-      .rejects.toThrow(/responded 400.*positive integer/);
+    await expect(client.getAgentsUnvalidated({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+      connection_status: 'onnected',
+      limit: '10junk',
+      local: 'ture',
+    })).rejects.toThrow(/responded 400.*positive integer/);
     const url = fetchCalls[0][0] as string;
+    // The pre-existing filters go through the SAME boundary as the new ones.
+    expect(url).toContain('framework=OpenClaw');
+    expect(url).toContain('skill_type=ImageAnalysis');
+    expect(url).toContain('connectionStatus=onnected');
     expect(url).toContain('limit=10junk');
     expect(url).toContain('local=ture');
   });
 
-  it('the strict getAgents contract rejects raw model values at compile time', () => {
-    // Raw strings belong to the tool boundary (rawFindAgentsQuery +
-    // getAgentsByQuery), never to the SDK surface.
-    // @ts-expect-error limit must be a number
-    const badLimit = () => client.getAgents({ limit: '10junk' });
-    // @ts-expect-error local must be a boolean
-    const badLocal = () => client.getAgents({ local: 'ture' });
-    // @ts-expect-error snake_case belongs to the wire, not the options
-    const snake = () => client.getAgents({ skill_type: 'ImageAnalysis' });
-    void badLimit; void badLocal; void snake;
+  it('legacy skill_type callers keep working, and a conflicting pair is loud', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    // Pre-GH#310 spelling, unchanged behavior on the wire.
+    await client.getAgents({ skill_type: 'ImageAnalysis' });
+    expect(fetchCalls[0][0] as string).toContain('skill_type=ImageAnalysis');
+    // Both spellings with different values cannot silently pick one.
+    await expect(client.getAgents({ skillType: 'A', skill_type: 'B' }))
+      .rejects.toThrow(/Conflicting skill filters/);
   });
+
+  it('typed and tool-originated requests share one wire mapping', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    await client.getAgents({ skillType: 'X', connectionStatus: 'connected', local: false, limit: 5 });
+    await client.getAgentsUnvalidated({ skill_type: 'X', connection_status: 'connected', local: false, limit: 5 });
+    const typedQs = (fetchCalls[0][0] as string).split('?')[1];
+    const rawQs = (fetchCalls[1][0] as string).split('?')[1];
+    expect(typedQs).toBe(rawQs);
+  });
+
 
   it('getSkills should GET /api/skills', async () => {
     fetchResponses.push(
