@@ -3,11 +3,9 @@ import {
   LIFT_AUTHORITY_TYPES,
   LIFT_TRANSITION_TYPES,
 } from './lift-job.js';
-import { LIFT_JOB_IMMUTABLE_FIELDS } from './lift-job.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
-  LiftJob,
   PersistedLiftJob,
   LiftJobAccepted,
   LiftJobHex,
@@ -385,36 +383,6 @@ export function createKnowledgeAssetVmPublishJobRequest(
     jobType: 'knowledge-asset-vm-publish',
     knowledgeAssetVmPublish: request,
   };
-}
-
-/**
- * Enforce {@link LIFT_JOB_IMMUTABLE_FIELDS} at the WRITE boundary.
- *
- * That list said these fields never change; nothing checked it, and the transition merge spread a
- * caller's patch straight over the record. Harmless-looking while the set was identity and budget,
- * it became an AUTHORIZATION hole when `admission` joined: whoever can pass an `admission` through
- * a transition can move the right to run the destructive pending-transaction clear onto themselves.
- *
- * Compares the EFFECTIVE post-merge value against the current one, never the shape of the patch.
- * Reasoning about the patch is what made the first two versions of this guard wrong: an explicit
- * `undefined` is spread rather than skipped, and an omitted nested key only survives where the
- * merge deep-merges that object -- true for `timestamps`, false for `retries`, which is replaced
- * wholesale. Reading the merge's own output cannot drift from the merge.
- */
-export function assertNoImmutableLiftJobFieldChange(current: LiftJob, next: LiftJob): void {
-  for (const field of LIFT_JOB_IMMUTABLE_FIELDS) {
-    const [head, nested] = field.split('.') as [keyof LiftJob, string | undefined];
-    const read = (job: LiftJob): unknown => {
-      const value = (job as unknown as Record<string, unknown>)[head as string];
-      return nested ? (value as Record<string, unknown> | undefined)?.[nested] : value;
-    };
-    const before = read(current);
-    const after = read(next);
-    if (JSON.stringify(before) === JSON.stringify(after)) continue;
-    throw new Error(
-      `LiftJob ${current.jobId}: ${field} is immutable and cannot be changed by a transition`,
-    );
-  }
 }
 
 export function isKnowledgeAssetVmPublishJobRequest(

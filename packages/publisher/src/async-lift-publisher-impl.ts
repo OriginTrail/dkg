@@ -19,13 +19,11 @@ import type { PhaseCallback, PublishResult } from './publisher.js';
 import { resolveEffectiveAsyncLiftRetryTuning } from './async-lift-retry-tuning.js';
 import {
   LIFT_JOB_STATES,
-  assertLiftJobTransition,
   createLiftJobFailureMetadata,
   type LiftJob,
   type LiftJobCompatibility,
   type PersistedLiftJob,
   type LiftJobFailureCode,
-  type LiftJobFailureMetadata,
   type LiftJobAccepted,
   type LiftJobClaimed,
   type LiftJobBroadcast,
@@ -136,7 +134,6 @@ import {
   liftJobCheckedNonce,
   liftJobCheckedSigner,
   liftJobOperationKindMarker,
-  assertNoImmutableLiftJobFieldChange,
   buildLiftJobAcceptedReset,
   pinnedPublishIdentityKaId,
   queuedLiftOperationKind,
@@ -155,6 +152,7 @@ import {
   assertCanonicalLiftJobPayload,
   type LiftJobPayloadDecodeResult,
 } from './lift-job-payload-codec.js';
+import { buildCanonicalLiftJobTransition } from './lift-job-state-model.js';
 
 /**
  * #1864 — outcome of the KA VM-publish pre-send write-ahead boundary
@@ -489,7 +487,7 @@ export class TripleStoreAsyncLiftPublisher
    * constructor body so the resolved lease value is passed directly.
    */
   private readonly reconciliationSnapshotCoordinator: ReconciliationSnapshotCoordinator<
-    LiftJob[],
+    PersistedLiftJob[],
     ChainProofSchedulePass
   >;
   /**
@@ -3332,230 +3330,7 @@ export class TripleStoreAsyncLiftPublisher
     status: LiftJobState,
     data: Partial<LiftJob> & { inclusion?: LiftJobInclusionMetadata },
   ): LiftJob {
-    const now = this.now();
-    if (current.status !== status) assertLiftJobTransition(current.status, status);
-
-    const patched = {
-      ...current,
-      ...data,
-    };
-    const patchedTimestamps = {
-      ...current.timestamps,
-      ...(data.timestamps ?? {}),
-    };
-    const timestamps = {
-      ...patchedTimestamps,
-      claimedAt: status === 'claimed' ? (patchedTimestamps.claimedAt ?? now) : patchedTimestamps.claimedAt,
-      validatedAt: status === 'validated' ? (patchedTimestamps.validatedAt ?? now) : patchedTimestamps.validatedAt,
-      broadcastAt: status === 'broadcast' ? (patchedTimestamps.broadcastAt ?? now) : patchedTimestamps.broadcastAt,
-      includedAt: status === 'included' ? (patchedTimestamps.includedAt ?? now) : patchedTimestamps.includedAt,
-      finalizedAt: status === 'finalized' ? (patchedTimestamps.finalizedAt ?? now) : patchedTimestamps.finalizedAt,
-      failedAt: status === 'failed' ? (patchedTimestamps.failedAt ?? now) : patchedTimestamps.failedAt,
-      updatedAt: now,
-    };
-    const base = {
-      jobId: patched.jobId,
-      jobSlug: patched.jobSlug,
-      request: patched.request,
-      ...(patched.admission !== undefined ? { admission: patched.admission } : {}),
-      timestamps,
-      retries: patched.retries,
-      ...(patched.controlPlane !== undefined ? { controlPlane: patched.controlPlane } : {}),
-    };
-    const baseWithRecovery = {
-      ...base,
-      ...(patched.recovery !== undefined ? { recovery: patched.recovery } : {}),
-    };
-    const requiredMetadata = <T>(value: T | undefined, field: string): T => {
-      if (value === undefined) {
-        throw new Error(`LiftJob ${current.jobId}: ${field} is required for ${status}`);
-      }
-      return value;
-    };
-
-    let next: LiftJob;
-    switch (status) {
-      case 'accepted':
-        next = { ...baseWithRecovery, status: 'accepted' };
-        break;
-      case 'claimed':
-        next = {
-          ...baseWithRecovery,
-          status: 'claimed',
-          claim: requiredMetadata(patched.claim, 'claim'),
-        };
-        break;
-      case 'validated':
-        next = {
-          ...baseWithRecovery,
-          status: 'validated',
-          claim: requiredMetadata(patched.claim, 'claim'),
-          validation: requiredMetadata(patched.validation, 'validation'),
-        };
-        break;
-      case 'broadcast':
-        next = {
-          ...baseWithRecovery,
-          status: 'broadcast',
-          claim: requiredMetadata(patched.claim, 'claim'),
-          validation: requiredMetadata(patched.validation, 'validation'),
-          broadcast: requiredMetadata(patched.broadcast, 'broadcast'),
-        };
-        break;
-      case 'included':
-        next = {
-          ...baseWithRecovery,
-          status: 'included',
-          claim: requiredMetadata(patched.claim, 'claim'),
-          validation: requiredMetadata(patched.validation, 'validation'),
-          broadcast: requiredMetadata(patched.broadcast, 'broadcast'),
-          inclusion: requiredMetadata(patched.inclusion, 'inclusion'),
-        };
-        break;
-      case 'finalized': {
-        const claim = requiredMetadata(patched.claim, 'claim');
-        const validation = requiredMetadata(patched.validation, 'validation');
-        const finalization = requiredMetadata(patched.finalization, 'finalization');
-        if (finalization.mode === 'local') {
-          next = {
-            ...baseWithRecovery,
-            status: 'finalized',
-            claim,
-            validation,
-            finalization: { ...finalization, mode: 'local' },
-          };
-          break;
-        }
-        if (finalization.mode === 'noop') {
-          next = {
-            ...baseWithRecovery,
-            status: 'finalized',
-            claim,
-            validation,
-            finalization: { ...finalization, mode: 'noop' },
-          };
-          break;
-        }
-        next = {
-          ...baseWithRecovery,
-          status: 'finalized',
-          claim,
-          validation,
-          broadcast: requiredMetadata(patched.broadcast, 'broadcast'),
-          inclusion: requiredMetadata(patched.inclusion, 'inclusion'),
-          finalization,
-        };
-        break;
-      }
-      case 'failed': {
-        const failure: LiftJobFailureMetadata = requiredMetadata(patched.failure, 'failure');
-        const recovery = patched.recovery;
-        if (failure.failedFromState === 'accepted') {
-          if (recovery !== undefined) {
-            throw new Error(`LiftJob ${current.jobId}: recovery is forbidden for accepted failure`);
-          }
-          next = {
-            ...base,
-            status: 'failed',
-            failure: { ...failure, failedFromState: 'accepted' },
-          };
-          break;
-        }
-        if (recovery !== undefined && recovery.action !== 'reset_to_accepted') {
-          throw new Error(`LiftJob ${current.jobId}: failed jobs require reset_to_accepted recovery`);
-        }
-        const failedBase = {
-          ...base,
-          ...(recovery !== undefined ? { recovery } : {}),
-          status: 'failed' as const,
-        };
-        if (failure.failedFromState === 'claimed') {
-          next = {
-            ...failedBase,
-            claim: requiredMetadata(patched.claim, 'claim'),
-            failure: { ...failure, failedFromState: 'claimed' },
-          };
-          break;
-        }
-        if (failure.failedFromState === 'validated') {
-          next = {
-            ...failedBase,
-            claim: requiredMetadata(patched.claim, 'claim'),
-            validation: requiredMetadata(patched.validation, 'validation'),
-            failure: { ...failure, failedFromState: 'validated' },
-          };
-          break;
-        }
-        if (failure.failedFromState === 'broadcast') {
-          const claim = requiredMetadata(patched.claim, 'claim');
-          const validation = requiredMetadata(patched.validation, 'validation');
-          next = patched.broadcast === undefined
-            ? {
-                ...failedBase,
-                claim,
-                validation,
-                failure: { ...failure, failedFromState: 'broadcast' },
-              }
-            : {
-                ...failedBase,
-                claim,
-                validation,
-                broadcast: patched.broadcast,
-                failure: { ...failure, failedFromState: 'broadcast' },
-              };
-          break;
-        }
-        const claim = requiredMetadata(patched.claim, 'claim');
-        const validation = requiredMetadata(patched.validation, 'validation');
-        next = patched.broadcast === undefined
-          ? {
-              ...failedBase,
-              claim,
-              validation,
-              failure: { ...failure, failedFromState: 'included' },
-            }
-          : {
-              ...failedBase,
-              claim,
-              validation,
-              broadcast: patched.broadcast,
-              inclusion: requiredMetadata(patched.inclusion, 'inclusion'),
-              failure: { ...failure, failedFromState: 'included' },
-            };
-        break;
-      }
-    }
-
-    // A caller may redundantly echo metadata already present on the source (several legacy
-    // administrative paths do), but it cannot inject destination-forbidden progress. Comparing
-    // the explicit patch with both source and authoritative target distinguishes those cases.
-    const progressFields = [
-      'claim',
-      'validation',
-      'broadcast',
-      'inclusion',
-      'finalization',
-      'failure',
-      'recovery',
-    ] as const;
-    const patchRecord = data as unknown as Record<string, unknown>;
-    const sourceRecord = current as unknown as Record<string, unknown>;
-    const targetRecord = next as unknown as Record<string, unknown>;
-    for (const field of progressFields) {
-      const supplied = patchRecord[field];
-      if (supplied === undefined) continue;
-      if (JSON.stringify(supplied) === JSON.stringify(targetRecord[field])) continue;
-      // Source-state metadata may be echoed in a cross-state administrative payload (including a
-      // less-normalized inclusion that omits the txHash already carried by the source). The target
-      // constructor still drops it; only a field absent from both source and target is injection.
-      if (sourceRecord[field] !== undefined) continue;
-      throw new Error(`LiftJob ${current.jobId}: ${field} is forbidden for status ${status}`);
-    }
-
-    // Check immutability against the authoritative target record, including replacement semantics
-    // for retries and explicit undefined values supplied by administrative callers.
-    assertNoImmutableLiftJobFieldChange(current, next);
-    return next;
+    return buildCanonicalLiftJobTransition(current, status, data, this.now());
   }
 
   /**

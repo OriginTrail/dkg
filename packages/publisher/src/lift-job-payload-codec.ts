@@ -8,7 +8,6 @@ import {
   LIFT_TRANSITION_TYPES,
   type LiftJob,
   type LiftJobAdmissionMetadata,
-  type LiftJobBase,
   type LiftJobBroadcastMetadata,
   type LiftJobClaimMetadata,
   type LiftJobCompatibility,
@@ -16,7 +15,6 @@ import {
   type LiftJobFailureMetadata,
   type LiftJobFinalizationMetadata,
   type LiftJobHex,
-  type LiftJobInclusionMetadata,
   type LiftJobPersistedFailure,
   type LiftJobRecoveryMetadata,
   type LiftJobRecoveryFinalizedFromChain,
@@ -28,25 +26,22 @@ import {
 } from './lift-job.js';
 import { parseLiteral } from './async-lift-control-plane.js';
 import { normalizePersistedLiftJobRequest } from './async-lift-publisher-utils.js';
+import {
+  canonicalLiftJobBase,
+  canonicalLiftJobBaseWithoutRecovery,
+  canonicalLiftJobFailureRecovery,
+  canonicalLiftJobInclusion,
+  projectCanonicalLiftJob,
+  rejectDefinedLiftJobFields,
+  requiredLiftJobField,
+  type StructurallyValidLiftJobInclusion,
+  type StructurallyValidLiftJobPayload,
+} from './lift-job-state-model.js';
 
-/**
- * A fully decoded persisted payload whose status is deliberately still an arbitrary string.
- * Every field exposed here has been parsed into its canonical runtime type; state membership and
- * the exact cross-state field contract are applied before the decoder returns to its caller.
- */
-export type StructurallyValidLiftJobPayload = Omit<LiftJobBase, 'status'> & {
-  readonly status: string;
-  readonly claim?: LiftJobClaimMetadata;
-  readonly validation?: LiftJobValidationMetadata;
-  readonly broadcast?: LiftJobBroadcastMetadata;
-  readonly inclusion?: StructurallyValidLiftJobInclusion;
-  readonly finalization?: LiftJobFinalizationMetadata;
-  readonly failure?: LiftJobFailureMetadata;
-};
-
-type StructurallyValidLiftJobInclusion = Omit<LiftJobInclusionMetadata, 'txHash'> & {
-  readonly txHash?: LiftJobHex;
-};
+export {
+  projectCanonicalLiftJob as canonicalLiftJobPayload,
+  type StructurallyValidLiftJobPayload,
+} from './lift-job-state-model.js';
 
 export type LiftJobPayloadDecodeResult =
   | { readonly kind: 'absent' }
@@ -90,60 +85,17 @@ function classifyKnownLiftJobPayload(job: StructurallyValidLiftJobPayload): Know
     case 'failed':
       return parsePersistedFailed(job);
     default: {
-      const canonical = canonicalLiftJobPayload(job);
+      const canonical = projectCanonicalLiftJob(job);
       if (canonical === null) throw new Error(`Unsupported LiftJob status: ${job.status}`);
       return canonicalPayload(canonical);
     }
   }
 }
 
-/**
- * Construct a current writable lifecycle union member. Compatibility projections are deliberately
- * excluded: callers use this at every write boundary before durable state can be changed.
- */
-export function canonicalLiftJobPayload(job: StructurallyValidLiftJobPayload): LiftJob | null {
-  switch (job.status) {
-    case 'accepted':
-      rejectDefined(job, ['claim', 'validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
-      return { ...base(job), status: 'accepted' };
-    case 'claimed':
-      rejectDefined(job, ['validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
-      return { ...base(job), status: 'claimed', claim: required(job.claim, 'claim') };
-    case 'validated':
-      rejectDefined(job, ['broadcast', 'inclusion', 'finalization', 'failure']);
-      return {
-        ...base(job),
-        status: 'validated',
-        claim: required(job.claim, 'claim'),
-        validation: required(job.validation, 'validation'),
-      };
-    case 'broadcast':
-      return parseCanonicalBroadcast(job);
-    case 'included': {
-      rejectDefined(job, ['finalization', 'failure']);
-      const broadcast = required(job.broadcast, 'broadcast');
-      return {
-        ...base(job),
-        status: 'included',
-        claim: required(job.claim, 'claim'),
-        validation: required(job.validation, 'validation'),
-        broadcast,
-        inclusion: canonicalInclusion(required(job.inclusion, 'inclusion'), broadcast),
-      };
-    }
-    case 'finalized':
-      return parseCanonicalFinalized(job);
-    case 'failed':
-      return parseCanonicalFailed(job);
-    default:
-      return null;
-  }
-}
-
 /** Validate an in-memory write candidate with the same structural and state schemas as restart. */
 export function assertCanonicalLiftJobPayload(value: unknown): LiftJob {
   const job = parseStructuralPayload(value);
-  const canonical = canonicalLiftJobPayload(job);
+  const canonical = projectCanonicalLiftJob(job);
   if (canonical === null) throw new Error(`Unsupported LiftJob status: ${job.status}`);
   return canonical;
 }
@@ -171,217 +123,56 @@ function compatibilityPayload(job: LiftJobCompatibility): KnownLiftJobPayload {
   return { kind: 'compatibility', job };
 }
 
+function requiredCanonicalProjection(job: StructurallyValidLiftJobPayload): LiftJob {
+  const canonical = projectCanonicalLiftJob(job);
+  if (canonical === null) throw new Error(`Unsupported LiftJob status: ${job.status}`);
+  return canonical;
+}
+
 function parseStructuralPayload(value: unknown): StructurallyValidLiftJobPayload {
   return structuralPayloadParser(value, 'payload');
 }
 
-function base(job: StructurallyValidLiftJobPayload): Omit<LiftJobBase, 'status'> {
-  return {
-    jobId: job.jobId,
-    jobSlug: job.jobSlug,
-    request: job.request,
-    ...(job.admission ? { admission: job.admission } : {}),
-    timestamps: job.timestamps,
-    retries: job.retries,
-    ...(job.recovery ? { recovery: job.recovery } : {}),
-    ...(job.controlPlane ? { controlPlane: job.controlPlane } : {}),
-  };
-}
-
-function baseWithoutRecovery(
-  job: StructurallyValidLiftJobPayload,
-): Omit<LiftJobBase, 'status' | 'recovery'> {
-  const { recovery: _recovery, ...withoutRecovery } = base(job);
-  return withoutRecovery;
-}
-
-function parseCanonicalBroadcast(job: StructurallyValidLiftJobPayload): LiftJob {
-  rejectDefined(job, ['inclusion', 'finalization', 'failure']);
-  return {
-    ...base(job),
-    status: 'broadcast',
-    claim: required(job.claim, 'claim'),
-    validation: required(job.validation, 'validation'),
-    broadcast: required(job.broadcast, 'broadcast'),
-  };
-}
-
 function parsePersistedBroadcast(job: StructurallyValidLiftJobPayload): KnownLiftJobPayload {
   try {
-    return canonicalPayload(parseCanonicalBroadcast(job));
+    return canonicalPayload(requiredCanonicalProjection(job));
   } catch (canonicalError) {
-    rejectDefined(job, ['validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
+    rejectDefinedLiftJobFields(job, ['validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
     if (job.request.jobType !== 'lift') throw canonicalError;
     return compatibilityPayload({
-      ...base(job),
+      ...canonicalLiftJobBase(job),
       status: 'broadcast',
       request: job.request,
-      claim: required(job.claim, 'claim'),
+      claim: requiredLiftJobField(job.claim, 'claim'),
     });
   }
 }
 
-function parseCanonicalFinalized(job: StructurallyValidLiftJobPayload): LiftJob {
-  rejectDefined(job, ['failure']);
-  const claim = required(job.claim, 'claim');
-  const validation = required(job.validation, 'validation');
-  const finalization = required(job.finalization, 'finalization');
-  if (finalization.mode === 'noop') {
-    rejectDefined(job, ['broadcast', 'inclusion']);
-    return {
-      ...base(job),
-      status: 'finalized',
-      claim,
-      validation,
-      finalization: { ...finalization, mode: 'noop' },
-    };
-  }
-  if (finalization.mode === 'local') {
-    rejectDefined(job, ['broadcast', 'inclusion']);
-    return {
-      ...base(job),
-      status: 'finalized',
-      claim,
-      validation,
-      finalization: { ...finalization, mode: 'local' },
-    };
-  }
-  const { mode, ...publishedFields } = finalization;
-  const broadcast = required(job.broadcast, 'broadcast');
-  return {
-    ...base(job),
-    status: 'finalized',
-    claim,
-    validation,
-    broadcast,
-    inclusion: canonicalInclusion(required(job.inclusion, 'inclusion'), broadcast),
-    finalization: { ...publishedFields, ...(mode === 'published' ? { mode } : {}) },
-  };
-}
-
 function parsePersistedFinalized(job: StructurallyValidLiftJobPayload): KnownLiftJobPayload {
   try {
-    return canonicalPayload(parseCanonicalFinalized(job));
+    return canonicalPayload(requiredCanonicalProjection(job));
   } catch (canonicalError) {
-    rejectDefined(job, ['failure']);
-    const finalization = required(job.finalization, 'finalization');
+    rejectDefinedLiftJobFields(job, ['failure']);
+    const finalization = requiredLiftJobField(job.finalization, 'finalization');
     if (finalization.mode !== 'noop' && finalization.mode !== 'local') throw canonicalError;
     const broadcast = job.broadcast;
     return compatibilityPayload({
-      ...base(job),
+      ...canonicalLiftJobBase(job),
       status: 'finalized',
-      claim: required(job.claim, 'claim'),
-      validation: required(job.validation, 'validation'),
+      claim: requiredLiftJobField(job.claim, 'claim'),
+      validation: requiredLiftJobField(job.validation, 'validation'),
       ...(broadcast ? { broadcast } : {}),
       ...(job.inclusion && broadcast
-        ? { inclusion: canonicalInclusion(job.inclusion, broadcast) }
+        ? { inclusion: canonicalLiftJobInclusion(job.inclusion, broadcast) }
         : {}),
       finalization: { ...finalization, mode: finalization.mode },
     });
   }
 }
 
-function parseCanonicalFailed(job: StructurallyValidLiftJobPayload): LiftJob {
-  rejectDefined(job, ['finalization']);
-  const failure = required(job.failure, 'failure');
-  const recovery = canonicalFailureRecovery(job.recovery);
-  switch (failure.failedFromState) {
-    case 'accepted':
-      rejectDefined(job, ['claim', 'validation', 'broadcast', 'inclusion', 'recovery']);
-      return {
-        ...baseWithoutRecovery(job),
-        status: 'failed',
-        failure: { ...failure, failedFromState: 'accepted' },
-      };
-    case 'claimed': {
-      rejectDefined(job, ['validation', 'broadcast', 'inclusion']);
-      return {
-        ...baseWithoutRecovery(job),
-        ...(recovery ? { recovery } : {}),
-        status: 'failed',
-        claim: required(job.claim, 'claim'),
-        failure: { ...failure, failedFromState: 'claimed' },
-      };
-    }
-    case 'validated': {
-      rejectDefined(job, ['broadcast', 'inclusion']);
-      return {
-        ...baseWithoutRecovery(job),
-        ...(recovery ? { recovery } : {}),
-        status: 'failed',
-        claim: required(job.claim, 'claim'),
-        validation: required(job.validation, 'validation'),
-        failure: { ...failure, failedFromState: 'validated' },
-      };
-    }
-    case 'broadcast': {
-      rejectDefined(job, ['inclusion']);
-      const claim = required(job.claim, 'claim');
-      const validation = required(job.validation, 'validation');
-      const failure = required(job.failure, 'failure');
-      if (job.broadcast === undefined) {
-        return {
-          ...baseWithoutRecovery(job),
-          ...(recovery ? { recovery } : {}),
-          status: 'failed',
-          claim,
-          validation,
-          failure: { ...failure, failedFromState: 'broadcast' },
-        };
-      }
-      return {
-        ...baseWithoutRecovery(job),
-        ...(recovery ? { recovery } : {}),
-        status: 'failed',
-        claim,
-        validation,
-        broadcast: job.broadcast,
-        failure: { ...failure, failedFromState: 'broadcast' },
-      };
-    }
-    case 'included': {
-      const validation = required(job.validation, 'validation');
-      const claim = required(job.claim, 'claim');
-      const failure = required(job.failure, 'failure');
-      if (job.broadcast === undefined) {
-        rejectDefined(job, ['inclusion']);
-        return {
-          ...baseWithoutRecovery(job),
-          ...(recovery ? { recovery } : {}),
-          status: 'failed',
-          claim,
-          validation,
-          failure: { ...failure, failedFromState: 'included' },
-        };
-      }
-      const broadcast = job.broadcast;
-      return {
-        ...baseWithoutRecovery(job),
-        ...(recovery ? { recovery } : {}),
-        status: 'failed',
-        claim,
-        validation,
-        broadcast,
-        inclusion: canonicalInclusion(required(job.inclusion, 'inclusion'), broadcast),
-        failure: { ...failure, failedFromState: 'included' },
-      };
-    }
-  }
-}
-
-function canonicalFailureRecovery(
-  recovery: LiftJobRecoveryMetadata | undefined,
-): LiftJobRecoveryResetToAccepted | undefined {
-  if (recovery === undefined) return undefined;
-  if (recovery.action !== 'reset_to_accepted') {
-    throw new Error('failed jobs may carry only reset_to_accepted recovery provenance');
-  }
-  return recovery;
-}
-
 function parsePersistedFailed(job: StructurallyValidLiftJobPayload): KnownLiftJobPayload {
   try {
-    return canonicalPayload(parseCanonicalFailed(job));
+    return canonicalPayload(requiredCanonicalProjection(job));
   } catch (canonicalError) {
     try {
       return compatibilityPayload(parsePersistedFailureCompatibility(job));
@@ -396,25 +187,28 @@ function parsePersistedFailed(job: StructurallyValidLiftJobPayload): KnownLiftJo
 function parsePersistedFailureCompatibility(
   job: StructurallyValidLiftJobPayload,
 ): LiftJobPersistedFailure {
-  rejectDefined(job, ['finalization']);
-  const failure = required(job.failure, 'failure');
+  rejectDefinedLiftJobFields(job, ['finalization']);
+  const failure = requiredLiftJobField(job.failure, 'failure');
 
   if (job.recovery?.action === 'finalized_from_chain') {
     if (failure.failedFromState !== 'included') throw new Error('unsupported legacy recovery origin');
-    const broadcast = required(job.broadcast, 'broadcast');
+    const broadcast = requiredLiftJobField(job.broadcast, 'broadcast');
     return {
-      ...base(job),
+      ...canonicalLiftJobBase(job),
       status: 'failed',
-      claim: required(job.claim, 'claim'),
-      validation: required(job.validation, 'validation'),
+      claim: requiredLiftJobField(job.claim, 'claim'),
+      validation: requiredLiftJobField(job.validation, 'validation'),
       broadcast,
-      inclusion: canonicalInclusion(required(job.inclusion, 'inclusion'), broadcast),
+      inclusion: canonicalLiftJobInclusion(
+        requiredLiftJobField(job.inclusion, 'inclusion'),
+        broadcast,
+      ),
       failure: { ...failure, failedFromState: 'included' },
       recovery: job.recovery,
     };
   }
 
-  const recovery = canonicalFailureRecovery(job.recovery);
+  const recovery = canonicalLiftJobFailureRecovery(job.recovery);
   if (failure.failedFromState === 'accepted') {
     throw new Error('accepted-origin failures have no compatibility projection');
   }
@@ -422,27 +216,27 @@ function parsePersistedFailureCompatibility(
   if (job.broadcast !== undefined) {
     const broadcast = job.broadcast;
     return {
-      ...baseWithoutRecovery(job),
+      ...canonicalLiftJobBaseWithoutRecovery(job),
       ...(recovery ? { recovery } : {}),
       status: 'failed',
       ...(job.claim ? { claim: job.claim } : {}),
       ...(job.validation ? { validation: job.validation } : {}),
       broadcast,
       ...(job.inclusion
-        ? { inclusion: canonicalInclusion(job.inclusion, broadcast) }
+        ? { inclusion: canonicalLiftJobInclusion(job.inclusion, broadcast) }
         : {}),
       failure: { ...failure, failedFromState: failure.failedFromState },
     };
   }
 
-  rejectDefined(job, ['inclusion']);
+  rejectDefinedLiftJobFields(job, ['inclusion']);
   if (
     job.claim === undefined
     && job.validation === undefined
     && job.broadcast === undefined
   ) {
     return {
-      ...baseWithoutRecovery(job),
+      ...canonicalLiftJobBaseWithoutRecovery(job),
       ...(recovery ? { recovery } : {}),
       status: 'failed',
       failure: { ...failure, failedFromState: failure.failedFromState },
@@ -454,7 +248,7 @@ function parsePersistedFailureCompatibility(
     && recovery.walletIdChecked === undefined
   ) {
     return {
-      ...baseWithoutRecovery(job),
+      ...canonicalLiftJobBaseWithoutRecovery(job),
       status: 'failed',
       ...(job.validation ? { validation: job.validation } : {}),
       failure: { ...failure, failedFromState: failure.failedFromState },
@@ -467,7 +261,7 @@ function parsePersistedFailureCompatibility(
   }
   if (failure.failedFromState === 'claimed' && job.validation !== undefined) {
     return {
-      ...baseWithoutRecovery(job),
+      ...canonicalLiftJobBaseWithoutRecovery(job),
       ...(recovery ? { recovery } : {}),
       status: 'failed',
       ...(job.claim ? { claim: job.claim } : {}),
@@ -481,7 +275,7 @@ function parsePersistedFailureCompatibility(
     && job.validation !== undefined
   ) {
     return {
-      ...baseWithoutRecovery(job),
+      ...canonicalLiftJobBaseWithoutRecovery(job),
       ...(recovery ? { recovery } : {}),
       status: 'failed',
       validation: job.validation,
@@ -673,13 +467,6 @@ function parseInclusion(value: unknown): StructurallyValidLiftJobInclusion {
   return inclusionParser(value, 'inclusion');
 }
 
-function canonicalInclusion(
-  inclusion: StructurallyValidLiftJobInclusion,
-  broadcast: LiftJobBroadcastMetadata,
-): LiftJobInclusionMetadata {
-  return { ...inclusion, txHash: inclusion.txHash ?? broadcast.txHash };
-}
-
 const finalizationParser = objectParser<LiftJobFinalizationMetadata>({
   mode: optional(enumParser(['published', 'noop', 'local'] as const)),
   txHash: optional(hexParser),
@@ -740,20 +527,6 @@ function parseFailure(value: unknown): LiftJobFailureMetadata {
 
 function malformed(reason: string): LiftJobPayloadDecodeResult {
   return { kind: 'malformed', reason };
-}
-
-function required<T>(value: T | undefined, path: string): T {
-  if (value === undefined) throw new Error(`${path} is required`);
-  return value;
-}
-
-function rejectDefined(
-  job: StructurallyValidLiftJobPayload,
-  fields: ReadonlyArray<keyof StructurallyValidLiftJobPayload>,
-): void {
-  for (const field of fields) {
-    if (job[field] !== undefined) throw new Error(`${String(field)} is forbidden for status ${job.status}`);
-  }
 }
 
 function expectRecord(value: unknown, path: string): Record<string, unknown> {

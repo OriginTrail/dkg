@@ -96,9 +96,11 @@ describe('GH#2270 proof-first chain dispatcher', () => {
 
   /** Counts every SEND, so a row can prove the dispatcher never caused one. */
   let sends = 0;
+  let chainProofLookups: AsyncLiftChainProofLookup[] = [];
 
   beforeEach(() => {
     sends = 0;
+    chainProofLookups = [];
   });
 
   function dispatcher(
@@ -106,7 +108,10 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     config: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainProofResolver'> = {},
   ) {
     return createPublisher({
-      chainProofResolver: async () => verdict,
+      chainProofResolver: async (lookup) => {
+        chainProofLookups.push(lookup);
+        return verdict;
+      },
       knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async () => {
@@ -238,6 +243,9 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect((walletQuadsBefore as { bindings: unknown[] }).bindings).not.toHaveLength(0);
 
       expect(await publisher.recover()).toBe(0);
+      expect(chainProofLookups.map(({ txHash, walletId }) => ({ txHash, walletId }))).toEqual([
+        { txHash: TX_HASH, walletId },
+      ]);
 
       const stillHeld = expectFailed(await publisher.getStatus(failed.jobId));
       expect(stillHeld.validation).toBeUndefined();
