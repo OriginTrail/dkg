@@ -1251,6 +1251,45 @@ describe('rootless graph-scoped KA lifecycle', () => {
       .resolves.toEqual({ action: 'execute' });
   }, 60_000);
 
+  it('queued async VM preflight rejects a present SWM lifecycle pointer that mismatches the queued seal', async () => {
+    const agent = await createAgent('QueuedAsyncVmMismatchedSwmPointerBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Mismatched SWM Pointer E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-mismatched-swm-pointer';
+    const root = `${ENTITY_BASE}:queued-async-mismatched-swm-pointer`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Mismatched SWM Pointer"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    const queuedSealBare = intent.sealMerkleRoot.replace(/^0x/, '');
+    const mismatchedSwmRoot = `${queuedSealBare[0] === '0' ? '1' : '0'}${queuedSealBare.slice(1)}`;
+    const agentAddress = agent.defaultAgentAddress ?? agent.peerId;
+    const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, name);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    await (agent as any).store.deleteByPattern({
+      subject: lifecycleUri,
+      predicate: SWM_CURRENT_ASSERTION_PRED,
+      graph: metaGraph,
+    });
+    await (agent as any).store.insert([{
+      subject: lifecycleUri,
+      predicate: SWM_CURRENT_ASSERTION_PRED,
+      object: `"${mismatchedSwmRoot}"`,
+      graph: metaGraph,
+    }]);
+
+    const contradictoryProjection = await agent.assertion.history(CG_ID, name);
+    expect(contradictoryProjection?.swmCurrentAssertion).toBe(mismatchedSwmRoot);
+    expect(contradictoryProjection?.currentShareOperationId).toBe(intent.shareOperationId);
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
+      .rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+  }, 60_000);
+
   it('async VM publish fails stale when the named KA is shared again before execution', async () => {
     const agent = await createAgent('QueuedAsyncVmStaleAfterReshareBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Stale After Reshare E2E' });

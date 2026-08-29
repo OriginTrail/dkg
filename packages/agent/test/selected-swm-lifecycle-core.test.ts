@@ -745,6 +745,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.lastSuccessfulSyncAt = new Map([[PEER, Date.now()]]);
       queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
       queueAgent.catchupOnConnectAt = new Map<string, number>();
+      queueAgent.rfc64ExactCatchupOnConnectAt = new Map<string, number>();
       queueAgent.syncOnConnectPeerScheduler = null;
       queueAgent.getSyncOnConnectPeerScheduler =
         LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;
