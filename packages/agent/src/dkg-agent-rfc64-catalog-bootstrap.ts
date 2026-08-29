@@ -373,11 +373,22 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       // target synchronization contains them in its status and this phase still
       // queues every provider that was successfully connected above.
       for (const providerPeerId of connectedCompleteSwmProviders) {
+        const recoveryPlan = resolveRfc64PeerSwmRecoveryPlanV1(
+          state.config,
+          providerPeerId,
+        );
+        this.rfc64SwmRecoveryCoordinatorV1.refreshSelectedPublic(
+          providerPeerId,
+          recoveryPlan.targets
+            .filter(({ lane }) => lane === 'selected-public')
+            .map(({ contextGraphId }) => contextGraphId),
+          this.config.syncReconcilerTiming.stalenessThresholdMs,
+        );
         // A pre-existing connection has no new connection:open event. One
         // immutable provider plan owns admission for every selected graph,
         // including mixed public/private providers.
         this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-          resolveRfc64PeerSwmRecoveryPlanV1(state.config, providerPeerId),
+          recoveryPlan,
           (_peerId, error) => {
             this.log.warn(
               state.ctx,

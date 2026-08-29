@@ -13,6 +13,11 @@ export interface Rfc64SwmRecoveryAdmissionPortV1 {
   readonly selectedPublicContextGraphIds: () => readonly string[];
   readonly requestSelectedPublicAdmission:
     (providerPeerId: string, contextGraphIds: readonly string[]) => boolean;
+  readonly refreshSelectedPublicAdmission: (
+    providerPeerId: string,
+    contextGraphIds: readonly string[],
+    minimumTerminalAgeMs: number,
+  ) => boolean;
   readonly selectedPublicAdmissionSnapshot: (providerPeerId: string) => Readonly<{
     contextGraphIds: readonly string[];
     phase: 'retry-required' | 'terminal';
@@ -44,6 +49,19 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       && this.deps.admission.requestSelectedPublicAdmission(
         providerPeerId,
         contextGraphIds,
+      );
+  }
+
+  refreshSelectedPublic(
+    providerPeerId: string,
+    contextGraphIds: readonly string[],
+    minimumTerminalAgeMs: number,
+  ): boolean {
+    return this.deps.admission.isCatalogReady(providerPeerId)
+      && this.deps.admission.refreshSelectedPublicAdmission(
+        providerPeerId,
+        contextGraphIds,
+        minimumTerminalAgeMs,
       );
   }
 
