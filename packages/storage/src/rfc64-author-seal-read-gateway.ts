@@ -1,7 +1,7 @@
 import {
   compileRfc64AuthorSealReadOperationV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
-  snapshotExactDataRecord,
+  Rfc64AuthorSealReadManifestErrorV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type DecodedCanonicalGraphScopedAuthorSealRowsV1,
 } from '@origintrail-official/dkg-core';
@@ -12,6 +12,7 @@ import {
 } from './rfc64-closed-bindings-read-runner.js';
 import {
   isRfc64ExactBindingsReadCapabilityV1,
+  Rfc64ExactBindingsReadResultErrorV1,
   type Rfc64ExactBindingsReadCapabilityV1,
 } from './rfc64-exact-bindings-read-capability.js';
 import { findTripleStoreCapability, type TripleStore } from './triple-store.js';
@@ -73,44 +74,39 @@ export class SyncAuthorSealStoreV1 {
     input: unknown,
     options: Rfc64AuthorSealReadOptionsV1,
   ): Promise<Rfc64AuthorSealReadResultV1> {
-    const request = snapshotRequest(input);
+    let operation;
+    try {
+      operation = compileRfc64AuthorSealReadOperationV1(input);
+    } catch (cause) {
+      if (cause instanceof Rfc64AuthorSealReadManifestErrorV1) {
+        fail('rfc64-author-seal-read-request', cause.message, cause);
+      }
+      throw cause;
+    }
     const readOptions = snapshotOptions(options);
-    const operation = compileRfc64AuthorSealReadOperationV1(request);
-    return runRfc64ClosedBindingsReadV1({
-      options: readOptions,
-      deadlineLabel: 'RFC-64 author-seal read',
-      dispatch: (signal) => this.capability.rfc64ExactBindingsReadV1(
-        operation,
-        { signal },
-      ),
-      decode: (rows) => decodeCanonicalGraphScopedAuthorSealRowsV1(
-        rows,
-        operation.coordinate,
-      ),
-      absent: (): Rfc64AuthorSealReadResultV1 => Object.freeze({ kind: 'absent' }),
-      present: (decoded): Rfc64AuthorSealReadResultV1 => Object.freeze({
-        kind: 'seal',
-        decoded,
-      }),
-      invalidResult: (message, cause) => fail(
-        'rfc64-author-seal-read-result',
-        message,
-        cause,
-      ),
-    });
+    try {
+      const decoded = await runRfc64ClosedBindingsReadV1({
+        options: readOptions,
+        deadlineLabel: 'RFC-64 author-seal read',
+        dispatch: (signal) => this.capability.rfc64ExactBindingsReadV1(
+          operation,
+          { signal },
+        ),
+        decode: (rows) => decodeCanonicalGraphScopedAuthorSealRowsV1(
+          rows,
+          operation.coordinate,
+        ),
+      });
+      return decoded === undefined
+        ? Object.freeze({ kind: 'absent' })
+        : Object.freeze({ kind: 'seal', decoded });
+    } catch (cause) {
+      if (cause instanceof Rfc64ExactBindingsReadResultErrorV1) {
+        fail('rfc64-author-seal-read-result', cause.message, cause);
+      }
+      throw cause;
+    }
   }
-}
-
-function snapshotRequest(input: unknown): Rfc64AuthorSealReadRequestV1 {
-  const request = snapshotExactRecord(
-    input,
-    ['coordinate'],
-    'RFC-64 author-seal read request',
-    'rfc64-author-seal-read-request',
-  );
-  return Object.freeze({
-    coordinate: request.coordinate as CanonicalGraphScopedAuthorSealCoordinateV1,
-  });
 }
 
 function snapshotOptions(input: unknown): Rfc64AuthorSealReadOptionsV1 {
@@ -120,19 +116,6 @@ function snapshotOptions(input: unknown): Rfc64AuthorSealReadOptionsV1 {
     'RFC-64 author-seal read options',
     (message, cause) => fail('rfc64-author-seal-read-options', message, cause),
   ) as Rfc64AuthorSealReadOptionsV1;
-}
-
-function snapshotExactRecord(
-  input: unknown,
-  expectedKeys: readonly string[],
-  label: string,
-  code: Rfc64AuthorSealReadGatewayErrorCodeV1,
-): Readonly<Record<string, unknown>> {
-  try {
-    return snapshotExactDataRecord(input, expectedKeys, label);
-  } catch (cause) {
-    fail(code, `${label} has an invalid field set`, cause);
-  }
 }
 
 function fail(

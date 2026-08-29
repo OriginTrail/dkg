@@ -101,7 +101,7 @@ describe('RFC-64 shared-projection stream manifest v1', () => {
       publicTripleCount: '12977',
       signedByteCeiling: 16,
       protocolByteCeiling: RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
-      resultKind: 'quad-stream',
+      resultKind: 'canonical-line-byte-stream',
       concurrencyClass: 'rfc64-shared-projection-v1',
     });
     expect(operation.commitmentSubject).toBe(

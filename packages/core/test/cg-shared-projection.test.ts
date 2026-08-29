@@ -364,7 +364,7 @@ describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
       assertionMerkleRoot: '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
       publicTripleCount: '3', privateTripleCount: '0', privateMerkleRoot: null,
     });
-    expectFailure(() => verifyProjection(wrongCount), 'projection-public-count');
+    expectFailure(() => verifyProjection(wrongCount), 'projection-public-count-mismatch');
 
     const wrongRoot = makeFixture(PUBLIC, {
       assertionMerkleRoot: ZERO_DIGEST,

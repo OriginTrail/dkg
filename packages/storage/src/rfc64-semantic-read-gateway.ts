@@ -1,7 +1,7 @@
 import {
   compileRfc64SemanticReadOperationV1,
   decodeRfc64SemanticRecordStoreRowsV1,
-  snapshotExactDataRecord,
+  Rfc64SemanticReadManifestErrorV1,
   type DecodedRfc64SemanticRecordV1,
   type Rfc64SemanticRecordCoordinateV1,
 } from '@origintrail-official/dkg-core';
@@ -12,7 +12,8 @@ import {
 } from './rfc64-closed-bindings-read-runner.js';
 import {
   isRfc64ExactBindingsReadCapabilityV1,
-  type Rfc64ExactBindingsReadCapabilityV1,
+  isRfc64SemanticReadCapabilityV1,
+  Rfc64ExactBindingsReadResultErrorV1,
 } from './rfc64-exact-bindings-read-capability.js';
 import {
   findTripleStoreCapability,
@@ -62,67 +63,73 @@ export class Rfc64SemanticReadGatewayErrorV1 extends Error {
  * closed manifest immediately before execution.
  */
 export class SyncSemanticStoreV1 {
-  private readonly capability: Rfc64ExactBindingsReadCapabilityV1;
+  private readonly dispatch: (
+    operation: ReturnType<typeof compileRfc64SemanticReadOperationV1>,
+    signal: AbortSignal | undefined,
+  ) => Promise<readonly import('@origintrail-official/dkg-core').Rfc64SemanticStoreRowV1[]>;
 
   constructor(store: TripleStore) {
-    const capability = findTripleStoreCapability(
+    const exactCapability = findTripleStoreCapability(
       store,
       isRfc64ExactBindingsReadCapabilityV1,
     );
-    if (!capability) {
+    if (exactCapability) {
+      this.dispatch = (operation, signal) => exactCapability.rfc64ExactBindingsReadV1(
+        operation,
+        { signal },
+      );
+      return;
+    }
+    const legacyCapability = findTripleStoreCapability(
+      store,
+      isRfc64SemanticReadCapabilityV1,
+    );
+    if (!legacyCapability) {
       fail(
         'rfc64-semantic-read-capability',
         'triple store has no certified RFC-64 semantic read capability',
       );
     }
-    this.capability = capability;
+    this.dispatch = (operation, signal) => legacyCapability.rfc64SemanticReadV1(
+      operation,
+      { signal },
+    );
   }
 
   async read(
     input: unknown,
     options: Rfc64SemanticReadOptionsV1,
   ): Promise<Rfc64SemanticReadResultV1> {
-    const request = snapshotRequest(input);
+    let operation;
+    try {
+      operation = compileRfc64SemanticReadOperationV1(input);
+    } catch (cause) {
+      if (cause instanceof Rfc64SemanticReadManifestErrorV1) {
+        fail('rfc64-semantic-read-request', cause.message, cause);
+      }
+      throw cause;
+    }
     const readOptions = snapshotOptions(options);
-    const operation = compileRfc64SemanticReadOperationV1({
-      coordinate: request.coordinate,
-    });
-
-    return runRfc64ClosedBindingsReadV1({
-      options: readOptions,
-      deadlineLabel: 'RFC-64 semantic read',
-      dispatch: (signal) => this.capability.rfc64ExactBindingsReadV1(
-        operation,
-        { signal },
-      ),
-      decode: (rows) => decodeRfc64SemanticRecordStoreRowsV1(
-        rows,
-        operation.coordinate,
-      ),
-      absent: (): Rfc64SemanticReadResultV1 => Object.freeze({ kind: 'absent' }),
-      present: (decoded): Rfc64SemanticReadResultV1 => Object.freeze({
-        kind: 'record',
-        decoded,
-      }),
-      invalidResult: (message, cause) => fail(
-        'rfc64-semantic-read-result',
-        message,
-        cause,
-      ),
-    });
+    try {
+      const decoded = await runRfc64ClosedBindingsReadV1({
+        options: readOptions,
+        deadlineLabel: 'RFC-64 semantic read',
+        dispatch: (signal) => this.dispatch(operation, signal),
+        decode: (rows) => decodeRfc64SemanticRecordStoreRowsV1(
+          rows,
+          operation.coordinate,
+        ),
+      });
+      return decoded === undefined
+        ? Object.freeze({ kind: 'absent' })
+        : Object.freeze({ kind: 'record', decoded });
+    } catch (cause) {
+      if (cause instanceof Rfc64ExactBindingsReadResultErrorV1) {
+        fail('rfc64-semantic-read-result', cause.message, cause);
+      }
+      throw cause;
+    }
   }
-}
-
-function snapshotRequest(input: unknown): Rfc64SemanticReadRequestV1 {
-  const request = snapshotExactRecord(
-    input,
-    ['coordinate'],
-    'RFC-64 semantic read request',
-    'rfc64-semantic-read-request',
-  );
-  return Object.freeze({
-    coordinate: request.coordinate as Rfc64SemanticRecordCoordinateV1,
-  });
 }
 
 function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
@@ -132,19 +139,6 @@ function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
     'RFC-64 semantic read options',
     (message, cause) => fail('rfc64-semantic-read-options', message, cause),
   ) as Rfc64SemanticReadOptionsV1;
-}
-
-function snapshotExactRecord(
-  input: unknown,
-  expectedKeys: readonly string[],
-  label: string,
-  code: Rfc64SemanticReadGatewayErrorCodeV1,
-): Readonly<Record<string, unknown>> {
-  try {
-    return snapshotExactDataRecord(input, expectedKeys, label);
-  } catch (cause) {
-    fail(code, `${label} has an invalid field set`, cause);
-  }
 }
 
 function fail(

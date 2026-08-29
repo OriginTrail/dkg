@@ -208,6 +208,38 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(manifest.referencedGraphs).toEqual(manifest.touchedGraphs);
   });
 
+  it('maps the exported legacy contract through the operation-only canonical plan', async () => {
+    const manifest = normalizeRfc64AuthorCommitCasV1(legacyAuthorCommitInput());
+    expect(manifest).not.toHaveProperty('mode');
+    expect(manifest).not.toHaveProperty('currentHead');
+    expect(manifest.predicateReplacements).toHaveLength(1);
+
+    const mapped = await mapRfc64AuthorCommitCasV1(manifest, {
+      mapQuad: (value, context) => ({
+        ...value,
+        object: `"mapped:${context.role}:${context.roleIndex}"`,
+      }),
+      mapObject: (value, context) => value === null
+        ? null
+        : `<urn:test:mapped:${context.role}:${context.kind}>`,
+    });
+
+    expect(mapped).not.toHaveProperty('currentHead');
+    if ('currentHead' in mapped) throw new Error('expected mapped legacy input');
+    expect(mapped.expectedCurrentHeadObject)
+      .toBe('<urn:test:mapped:currentHead:expected>');
+    expect(mapped.nextCurrentHeadObject).toBe('<urn:test:mapped:currentHead:next>');
+    expect(mapped.kaStateDigest).toMatchObject({
+      expectedObject: '<urn:test:mapped:kaStateDigest:expected>',
+      quads: [{ object: '"mapped:kaStateDigest:0"' }],
+    });
+    expect(mapped.sealInvalidations).toEqual([{
+      graphUri: SEAL_GRAPH,
+      subject: INVALIDATED_SEAL,
+      quads: [],
+    }]);
+  });
+
   it('returns a clean conflict and changes no semantic target when any guard is stale', async () => {
     const store = new OxigraphStore();
     await seedOldState(store);

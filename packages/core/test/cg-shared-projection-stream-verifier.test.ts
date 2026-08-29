@@ -71,11 +71,14 @@ describe('core cg-shared-v1 incremental verifier', () => {
   it('accepts canonical LF lines without changing their bytes and isolates ownership', () => {
     const verifier = createVerifier();
     const [first, second] = splitLines(BYTES);
-    const accepted = verifier.pushCanonicalLine(first);
+    const bufferInput = Buffer.from(first);
+    const accepted = verifier.pushCanonicalLine(bufferInput);
 
     expect(accepted).toEqual(first);
-    expect(accepted).not.toBe(first);
+    expect(accepted).not.toBe(bufferInput);
+    expect(Buffer.isBuffer(accepted)).toBe(false);
     first.fill(0x7f);
+    bufferInput.fill(0x5f);
     accepted.fill(0x6f);
     expect(() => verifier.pushCanonicalLine(second)).not.toThrow();
     expect(() => verifier.finalize()).not.toThrow();
@@ -97,20 +100,29 @@ describe('core cg-shared-v1 incremental verifier', () => {
     expect(() => verifier.push(TRIPLES[0])).toThrow(CgSharedProjectionError);
   });
 
-  it('exposes stable count reasons without parsing diagnostic text', () => {
+  it('exposes discriminated count codes without optional state', () => {
     const overflow = createVerifier({ triples: [TRIPLES[0]] });
     overflow.push(TRIPLES[0]);
-    expectProjectionReason(
+    expectProjectionCountCode(
       () => overflow.push(TRIPLES[1]),
-      'public-count-overflow',
+      'projection-public-count-overflow',
     );
 
     const mismatch = createVerifier();
     mismatch.push(TRIPLES[0]);
-    expectProjectionReason(
+    expectProjectionCountCode(
       () => mismatch.finalize(),
-      'public-count-mismatch',
+      'projection-public-count-mismatch',
     );
+  });
+
+  it('refuses an oversized raw term before canonicalization allocation', () => {
+    const verifier = createVerifier({ rawInputByteCeiling: 1024 });
+    expect(() => verifier.push({
+      subject: 'urn:a',
+      predicate: 'urn:p',
+      object: `"${'0'.repeat(2048)}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+    })).toThrow(expect.objectContaining({ code: 'projection-resource-refused' }));
   });
 
   it.each([
@@ -134,6 +146,7 @@ describe('core cg-shared-v1 incremental verifier', () => {
 function createVerifier(options: {
   triples?: readonly { subject: string; predicate: string; object: string }[];
   byteCeiling?: number;
+  rawInputByteCeiling?: number;
 } = {}) {
   const triples = options.triples ?? TRIPLES;
   const bytes = encodeCanonicalCgSharedPublicRootProjectionV1(triples);
@@ -142,6 +155,9 @@ function createVerifier(options: {
     expectedPublicTripleCount: String(triples.length) as CountV1,
     expectedProjectionDigest: computeKaProjectionDigestV1(bytes),
     byteCeiling: options.byteCeiling ?? bytes.byteLength,
+    ...(options.rawInputByteCeiling === undefined
+      ? {}
+      : { rawInputByteCeiling: options.rawInputByteCeiling }),
   });
 }
 
@@ -166,17 +182,17 @@ function splitLines(bytes: Uint8Array): Uint8Array[] {
   return lines;
 }
 
-function expectProjectionReason(
+function expectProjectionCountCode(
   action: () => unknown,
-  reason: 'public-count-overflow' | 'public-count-mismatch',
+  code: 'projection-public-count-overflow' | 'projection-public-count-mismatch',
 ): void {
   try {
     action();
   } catch (error) {
     expect(error).toBeInstanceOf(CgSharedProjectionError);
-    expect(error).toHaveProperty('code', 'projection-public-count');
-    expect(error).toHaveProperty('reason', reason);
+    expect(error).toHaveProperty('code', code);
+    expect(error).not.toHaveProperty('reason');
     return;
   }
-  throw new Error(`expected ${reason}`);
+  throw new Error(`expected ${code}`);
 }

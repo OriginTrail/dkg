@@ -3,16 +3,15 @@ import {
   RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
   compileRfc64SharedProjectionStreamOperationV1,
   createCgSharedProjectionStreamVerifierV1,
-  snapshotExactDataRecord,
   type Digest32V1,
   type Rfc64SharedProjectionStreamOperationV1,
   type Rfc64SharedProjectionStreamTemplateInputV1,
 } from '@origintrail-official/dkg-core';
+import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
 import { openLazyAbortableStream } from './abortable-stream-work-lifecycle.js';
 import {
   isRfc64SharedProjectionStreamCapabilityV1,
-  type Rfc64CanonicalProjectionLineV1,
   type Rfc64SharedProjectionStreamCapabilityV1,
 } from './rfc64-shared-projection-stream-capability.js';
 import {
@@ -110,7 +109,7 @@ export class SyncSharedProjectionStoreV1 {
     callerSignal: AbortSignal | undefined,
     deadlineAt: number,
   ): AsyncGenerator<Uint8Array, void, undefined> {
-    const source = openLazyAbortableStream<Rfc64CanonicalProjectionLineV1>({
+    const source = openLazyAbortableStream<Uint8Array>({
       deadlineAt,
       signal: callerSignal,
       timeoutMessage: 'RFC-64 shared-projection stream deadline exceeded',
@@ -135,7 +134,7 @@ export class SyncSharedProjectionStoreV1 {
   }
 
   private async *validateStream(
-    source: AsyncIterable<Rfc64CanonicalProjectionLineV1>,
+    source: AsyncIterable<Uint8Array>,
     commitmentSubject: string,
     expectedTripleCount: Rfc64SharedProjectionStreamOperationV1['publicTripleCount'],
     expectedDigest: Digest32V1,
@@ -236,10 +235,10 @@ function projectionFailureMessage(cause: unknown): string {
         return 'adapter projection stream is not in canonical byte order';
       case 'projection-duplicate':
         return 'adapter returned a duplicate projection triple';
-      case 'projection-public-count':
-        return error.reason === 'public-count-overflow'
-          ? 'adapter exceeded the author-sealed public triple count'
-          : 'projection stream triple count differs from the author seal';
+      case 'projection-public-count-overflow':
+        return 'adapter exceeded the author-sealed public triple count';
+      case 'projection-public-count-mismatch':
+        return 'projection stream triple count differs from the author seal';
       case 'projection-digest':
         return 'projection stream digest differs from the catalog row';
       case 'projection-resource-refused':
