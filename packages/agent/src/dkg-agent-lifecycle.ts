@@ -6600,8 +6600,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // One policy shared with the responder and durable requester: this lane
     // admits only public payload plus top-level durable meta, never RFC-64
     // control records, WM/SWM, private data, or another context graph.
-    const isForeignGraph = (graph: string): boolean =>
-      !isLegacySyncGraphAdmittedV1(graph, contextGraphId, 'changelog');
+    const isGraphAdmitted = (graph: string): boolean =>
+      isLegacySyncGraphAdmittedV1(graph, contextGraphId, 'changelog');
     const worker = this.getOrCreateSyncVerifyWorker();
 
     const outcome = await runChangelogSync({
@@ -6623,7 +6623,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // after collection.
       //
       // `plane: 'durable'` is exact rather than approximate: `runChangelogLane`
-      // admits only public Context Graphs, and `isForeignGraph` rejects the
+      // admits only public Context Graphs, and `isGraphAdmitted` rejects the
       // `/_shared_memory` and `/_private` planes, so everything this lane
       // transfers is durable. Shared-memory content defers to `runResync`,
       // which is separately instrumented as `transport=legacy`.
@@ -6711,7 +6711,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // branch). Fold its result in, and report completeness so the driver only advances
       // the cursor to headSeq when the resync verifiably fetched everything below it.
       runResync: async (dropCandidates) => {
-        const pendingDrops = [...new Set(dropCandidates)].filter((graph) => !isForeignGraph(graph));
+        const pendingDrops = [...new Set(dropCandidates)].filter(isGraphAdmitted);
         let dropsReconciled = pendingDrops.length === 0;
         let curatorAuthoritative = false;
         if (pendingDrops.length > 0) {
@@ -6761,8 +6761,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logWarn: (m) => this.log.warn(ctx, m),
       applyPage: async (page) => {
         // Parse the page's upsert records per plane (parseAndFilter validates + CG-filters).
-        const dataRecs = page.records.filter((r) => r.op === 'upsert' && !r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
-        const metaRecs = page.records.filter((r) => r.op === 'upsert' && r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
+        const dataRecs = page.records.filter((r) => r.op === 'upsert' && !r.graph.endsWith('/_meta') && isGraphAdmitted(r.graph));
+        const metaRecs = page.records.filter((r) => r.op === 'upsert' && r.graph.endsWith('/_meta') && isGraphAdmitted(r.graph));
         const recordQuadCountByGraph = new Map<string, number>();
         const metaGraphsWithRoot = new Set<string>();
         const dataQuads: Quad[] = [];
@@ -6807,7 +6807,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           records: page.records,
           nextSeq: page.nextSeq,
           priorSeq: page.priorSeq,
-          isForeignGraph,
+          isGraphAdmitted,
           verifiedByGraph,
           recordQuadCountByGraph,
           metaGraphsWithRoot,

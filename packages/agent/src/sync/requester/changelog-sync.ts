@@ -40,7 +40,7 @@ export function planPageApply(params: {
   records: ChangelogDeltaRecord[]; // ascending by seq (wire decoder guarantees)
   nextSeq: number;
   priorSeq: number;
-  isForeignGraph: (graph: string) => boolean;
+  isGraphAdmitted: (graph: string) => boolean;
   /** graph → VERIFIED quads (processDurableBatch verifiedData+verifiedMeta, grouped by .graph). */
   verifiedByGraph: Map<string, Quad[]>;
   /** graph → parsed record quad count (pre-verify) — to detect partial/whole rejection & empties. */
@@ -64,7 +64,7 @@ export function planPageApply(params: {
   // before any write; the bounded-stall path will reconcile it by full sync.
   const seenGraphs = new Set<string>();
   const hasDuplicateGraph = params.records.some((record) => {
-    if (params.isForeignGraph(record.graph)) return false;
+    if (!params.isGraphAdmitted(record.graph)) return false;
     if (seenGraphs.has(record.graph)) return true;
     seenGraphs.add(record.graph);
     return false;
@@ -90,7 +90,7 @@ export function planPageApply(params: {
   const unsafeMetadataReplacement = params.records.find((record) => {
     if (
       record.op !== 'upsert'
-      || params.isForeignGraph(record.graph)
+      || !params.isGraphAdmitted(record.graph)
       || !record.graph.endsWith('/_meta')
     ) return false;
     return (params.recordQuadCountByGraph.get(record.graph) ?? 0) > 0;
@@ -119,7 +119,7 @@ export function planPageApply(params: {
   };
 
   for (const rec of params.records) {
-    if (params.isForeignGraph(rec.graph)) {
+    if (!params.isGraphAdmitted(rec.graph)) {
       // A well-behaved responder never emits a foreign/reserved graph; if one leaks, skip
       // it but treat its seq as consumed (resolved) so the cursor cannot wedge.
       continue;
