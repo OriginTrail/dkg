@@ -65,15 +65,21 @@ describe('RFC-64 SWM recovery authorization', () => {
 
   it('blocks every recovery authorization until the catalog phase is ready', () => {
     let catalogReady = false;
+    const requestSelectedPublicAdmission = vi.fn(() => true);
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
       isCatalogReady: () => catalogReady,
+      requestSelectedPublicAdmission,
     }));
 
     expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(false);
     expect(coordinator.authorize(mixedPlan())).toBeNull();
+    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
     catalogReady = true;
     expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(true);
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledWith(PROVIDER, [PUBLIC]);
     expect(coordinator.authorize(mixedPlan())).not.toBeNull();
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledTimes(2);
   });
 
   it('drops a terminal public scope while retaining the same provider private lane', () => {
