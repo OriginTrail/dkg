@@ -23,10 +23,8 @@ import {
   assertQuadLiteralsMutf8Safe,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
-  type Rfc64SemanticReadOperationV1,
-  type Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
-import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
+import { certifyRfc64SemanticReadStoreV1 } from '../rfc64-semantic-read-capability.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -226,13 +224,6 @@ function createStoreOperationDeadline(
 export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
-  rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV1,
-    options?: Pick<QueryOptions, 'signal'>,
-  ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
-    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
-  }
-
   private readonly url: string;
   private readonly operationTimeoutMs: number;
   private readonly scheduler: StorePriorityScheduler;
@@ -241,6 +232,7 @@ export class BlazegraphStore implements TripleStore {
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
+    certifyRfc64SemanticReadStoreV1(this);
   }
 
   private runStoreWork<T>(

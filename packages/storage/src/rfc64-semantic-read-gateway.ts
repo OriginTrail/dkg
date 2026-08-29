@@ -1,6 +1,7 @@
 import {
   compileRfc64SemanticReadOperationV1,
   decodeRfc64SemanticRecordStoreRowsV1,
+  Rfc64SemanticReadManifestErrorV1,
   type DecodedRfc64SemanticRecordV1,
   type Rfc64SemanticRecordCoordinateV1,
   type Rfc64SemanticStoreRowV1,
@@ -80,62 +81,43 @@ export class SyncSemanticStoreV1 {
     input: unknown,
     options: Rfc64SemanticReadOptionsV1,
   ): Promise<Rfc64SemanticReadResultV1> {
-    const request = snapshotRequest(input);
-    const readOptions = snapshotOptions(options);
-    const operation = compileRfc64SemanticReadOperationV1({
-      coordinate: request.coordinate,
-    });
-
-    const deadlineAt = performance.now() + readOptions.timeoutMs;
-    const deadlineSignal = AbortSignal.timeout(readOptions.timeoutMs);
-    const signalScope = composeAbortSignals(readOptions.signal, deadlineSignal);
+    let operation;
     try {
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
+      operation = compileRfc64SemanticReadOperationV1(input);
+    } catch (cause) {
+      if (cause instanceof Rfc64SemanticReadManifestErrorV1) {
+        fail('rfc64-semantic-read-request', cause.message, cause);
+      }
+      throw cause;
+    }
+    const readOptions = snapshotOptions(options);
+    const deadline = new Rfc64SemanticReadDeadlineScope(readOptions);
+    try {
       let rows: readonly Rfc64SemanticStoreRowV1[];
       try {
-        rows = await this.capability.rfc64SemanticReadV1(operation, {
-          signal: signalScope.signal,
-        });
+        rows = await deadline.waitFor(() => this.capability.rfc64SemanticReadV1(
+          operation,
+          { signal: deadline.signal },
+        ));
       } catch (cause) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
         if (cause instanceof Rfc64SemanticReadCapabilityResultErrorV1) {
           fail('rfc64-semantic-read-result', cause.message, cause);
         }
         throw cause;
       }
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
       if (rows.length === 0) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
         return Object.freeze({ kind: 'absent' });
       }
-      let decoded: DecodedRfc64SemanticRecordV1;
-      try {
-        decoded = decodeRfc64SemanticRecordStoreRowsV1(rows, operation.coordinate);
-      } catch (cause) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
-        throw cause;
-      }
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
+      const decoded = decodeRfc64SemanticRecordStoreRowsV1(rows, operation.coordinate);
+      deadline.check();
       return Object.freeze({
         kind: 'record',
         decoded,
       });
     } finally {
-      signalScope.dispose();
+      deadline.dispose();
     }
   }
-}
-
-function snapshotRequest(input: unknown): Rfc64SemanticReadRequestV1 {
-  const request = snapshotExactRecord(
-    input,
-    ['coordinate'],
-    'RFC-64 semantic read request',
-    'rfc64-semantic-read-request',
-  );
-  return Object.freeze({
-    coordinate: request.coordinate as Rfc64SemanticRecordCoordinateV1,
-  });
 }
 
 function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
@@ -203,13 +185,52 @@ function isRecordWithOwnKey(input: unknown, key: string): boolean {
     && Object.prototype.hasOwnProperty.call(input, key);
 }
 
-function assertBeforeDeadline(
-  signal: AbortSignal | undefined,
-  deadlineAt: number,
-): void {
-  signal?.throwIfAborted();
-  if (performance.now() >= deadlineAt) {
-    throw new DOMException('RFC-64 semantic read deadline exceeded', 'TimeoutError');
+class Rfc64SemanticReadDeadlineScope {
+  private readonly deadlineAt: number;
+  private readonly signalScope: ReturnType<typeof composeAbortSignals>;
+
+  constructor(options: Rfc64SemanticReadOptionsV1) {
+    this.deadlineAt = performance.now() + options.timeoutMs;
+    this.signalScope = composeAbortSignals(
+      options.signal,
+      AbortSignal.timeout(options.timeoutMs),
+    );
+  }
+
+  get signal(): AbortSignal {
+    return this.signalScope.signal as AbortSignal;
+  }
+
+  check(): void {
+    this.signal.throwIfAborted();
+    if (performance.now() >= this.deadlineAt) {
+      throw new DOMException('RFC-64 semantic read deadline exceeded', 'TimeoutError');
+    }
+  }
+
+  async waitFor<T>(start: () => Promise<T>): Promise<T> {
+    this.check();
+    const operation = start();
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(this.signal.reason);
+      this.signal.addEventListener('abort', onAbort, { once: true });
+      if (this.signal.aborted) onAbort();
+    });
+    try {
+      const result = await Promise.race([operation, aborted]);
+      this.check();
+      return result;
+    } catch (cause) {
+      this.check();
+      throw cause;
+    } finally {
+      if (onAbort) this.signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  dispose(): void {
+    this.signalScope.dispose();
   }
 }
 

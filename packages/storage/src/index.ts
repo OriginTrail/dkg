@@ -148,7 +148,6 @@ export {
   type Rfc64SemanticReadResultV1,
 } from './rfc64-semantic-read-gateway.js';
 export {
-  executeRfc64SemanticReadCapabilityV1,
   isRfc64SemanticReadCapabilityV1,
   type Rfc64SemanticReadCapabilityV1,
 } from './rfc64-semantic-read-capability.js';

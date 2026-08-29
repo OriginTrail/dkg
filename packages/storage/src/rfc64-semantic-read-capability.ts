@@ -10,6 +10,9 @@ import {
 } from '@origintrail-official/dkg-rdf-utils';
 
 import type { QueryOptions, QueryResult, TripleStore } from './triple-store.js';
+import { SparqlJsonResultsShapeError } from './adapters/sparql-json-results.js';
+
+const certifiedRfc64SemanticReadStoresV1 = new WeakSet<object>();
 
 export interface Rfc64SemanticReadCapabilityV1 {
   rfc64SemanticReadV1(
@@ -19,8 +22,8 @@ export interface Rfc64SemanticReadCapabilityV1 {
 }
 
 export class Rfc64SemanticReadCapabilityResultErrorV1 extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
     this.name = 'Rfc64SemanticReadCapabilityResultErrorV1';
   }
 }
@@ -30,18 +33,48 @@ export class Rfc64SemanticReadCapabilityResultErrorV1 extends Error {
  * read manifest. The capability boundary returns backend-neutral typed rows,
  * never a generic SPARQL result.
  */
-export async function executeRfc64SemanticReadCapabilityV1(
+async function executeRfc64SemanticReadCapabilityV1(
   store: Pick<TripleStore, 'query'>,
   operation: Rfc64SemanticReadOperationV1,
   options: Pick<QueryOptions, 'signal'> = {},
 ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
-  const result = await store.query(operation.sparql, {
-    source: `rfc64.semantic.${operation.queryId}`,
-    priority: 'background',
-    signal: options.signal,
-    maxResponseBytes: operation.responseByteCeiling,
-  });
+  let result: QueryResult;
+  try {
+    result = await store.query(operation.sparql, {
+      source: `rfc64.semantic.${operation.queryId}`,
+      priority: 'background',
+      signal: options.signal,
+      maxResponseBytes: operation.responseByteCeiling,
+    });
+  } catch (cause) {
+    if (cause instanceof SparqlJsonResultsShapeError) {
+      throw new Rfc64SemanticReadCapabilityResultErrorV1(
+        'semantic read received malformed SPARQL JSON results',
+        { cause },
+      );
+    }
+    throw cause;
+  }
   return normalizeRfc64SemanticReadResultV1(result, operation);
+}
+
+/**
+ * Internal declarative opt-in used only by adapters whose RFC-64 read
+ * conformance is covered by the storage certification suite. The generic
+ * TripleStore contract intentionally does not expose this method.
+ */
+export function certifyRfc64SemanticReadStoreV1(store: TripleStore): void {
+  if (certifiedRfc64SemanticReadStoresV1.has(store)) return;
+  Object.defineProperty(store, 'rfc64SemanticReadV1', {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: (
+      operation: Rfc64SemanticReadOperationV1,
+      options?: Pick<QueryOptions, 'signal'>,
+    ) => executeRfc64SemanticReadCapabilityV1(store, operation, options),
+  });
+  certifiedRfc64SemanticReadStoresV1.add(store);
 }
 
 export function isRfc64SemanticReadCapabilityV1(
@@ -49,8 +82,9 @@ export function isRfc64SemanticReadCapabilityV1(
 ): candidate is Rfc64SemanticReadCapabilityV1 {
   return candidate !== null
     && typeof candidate === 'object'
-    && typeof (candidate as Partial<Rfc64SemanticReadCapabilityV1>)
-      .rfc64SemanticReadV1 === 'function';
+    && certifiedRfc64SemanticReadStoresV1.has(candidate)
+    && typeof Object.getOwnPropertyDescriptor(candidate, 'rfc64SemanticReadV1')?.value
+      === 'function';
 }
 
 function normalizeRfc64SemanticReadResultV1(

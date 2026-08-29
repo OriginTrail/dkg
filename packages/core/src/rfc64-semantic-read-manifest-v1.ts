@@ -73,7 +73,12 @@ export function compileRfc64SemanticReadOperationV1(
   input: unknown,
 ): Rfc64SemanticReadOperationV1 {
   const request = snapshotInput(input);
-  const coordinate = snapshotRfc64SemanticRecordCoordinateV1(request.coordinate);
+  let coordinate: Rfc64SemanticRecordCoordinateV1;
+  try {
+    coordinate = snapshotRfc64SemanticRecordCoordinateV1(request.coordinate);
+  } catch (cause) {
+    fail('semantic read coordinate is invalid', cause);
+  }
   const queryId = queryIdForRecordType(coordinate.recordType);
   const address = deriveRfc64SemanticRecordAddressFromCoordinateV1(coordinate);
   const expectedRowCount = RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1[coordinate.recordType];
