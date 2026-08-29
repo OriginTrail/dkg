@@ -1642,7 +1642,15 @@ describe('sync responder pagination interleaving', () => {
     const membershipChange = await memo.get({ refresh: true, refreshGeneration: 'graph-added' });
     expect(membershipChange).not.toBe(initial);
     expect(membershipChange).toEqual(['urn:graph:a', 'urn:graph:b', 'urn:graph:c']);
-    expect(calls).toBe(3);
+
+    // Preserve the old deduplication contract: a malformed duplicate listing
+    // cannot make a same-length equality check retain absent graphs.
+    generation += 1;
+    graphs = ['urn:graph:a', 'urn:graph:a', 'urn:graph:b'];
+    const duplicateListing = await memo.get({ refresh: true, refreshGeneration: 'graph-removed' });
+    expect(duplicateListing).not.toBe(membershipChange);
+    expect(duplicateListing).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(4);
   });
 
   it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {
