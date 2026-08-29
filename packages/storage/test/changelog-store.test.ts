@@ -26,6 +26,10 @@ import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import { StoreOperationTimeoutError } from '../src/store-operation-timeout.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from '../src/rfc64-author-commit-cas.js';
 
 const G1 = 'http://ex.org/g1';
 const G2 = 'http://ex.org/g2';
@@ -33,6 +37,41 @@ const G3 = 'http://ex.org/g3';
 
 function q(subject: string, graph: string, object = '"x"'): Quad {
   return { subject, predicate: 'http://ex.org/p', object, graph };
+}
+
+function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasInputV1 {
+  const stateGraph = 'urn:test:changelog:rfc64:state';
+  const transition = (role: string) => ({
+    graphUri: stateGraph,
+    subject: `urn:test:changelog:rfc64:${role}`,
+    predicate: 'urn:test:changelog:rfc64:value',
+    expectedObject: null,
+    quads: [q(`urn:test:changelog:rfc64:${role}`, stateGraph, `"${role}"`)],
+  });
+  return {
+    sharedProjectionGraph: 'did:dkg:context-graph:changelog-rfc64/_shared_memory',
+    sharedProjectionQuads: [q(
+      'urn:test:changelog:rfc64:projection',
+      'did:dkg:context-graph:changelog-rfc64/_shared_memory',
+    )],
+    authorSealGraph: 'urn:test:changelog:rfc64:seals',
+    authorSealSubject: 'urn:test:changelog:rfc64:seal',
+    authorSealQuads: [q(
+      'urn:test:changelog:rfc64:seal',
+      'urn:test:changelog:rfc64:seals',
+      '"seal"',
+    )],
+    currentHeadGraph: 'urn:test:changelog:rfc64:heads',
+    currentHeadSubject: 'urn:test:changelog:rfc64:author',
+    currentHeadPredicate: 'urn:test:changelog:rfc64:current-head',
+    expectedCurrentHeadObject: null,
+    nextCurrentHeadObject: 'urn:test:changelog:rfc64:catalog:new',
+    kaStateDigest: transition('ka-state'),
+    subgraphMutationGeneration: transition('subgraph-generation'),
+    contextGraphMutationGeneration: transition('context-graph-generation'),
+    appliedSet: transition('applied-set'),
+    sealInvalidations: [],
+  };
 }
 
 /** Delegating TripleStore that records insert() call shapes and can inject failures. */
@@ -63,6 +102,15 @@ class SpyStore implements TripleStore {
   update(sparql: string, options?: UpdateOptions) { return this.inner.update!(sparql, options); }
   countQuads(g?: string, options?: QueryOptions) { return this.inner.countQuads(g, options); }
   close() { return this.inner.close(); }
+}
+
+class Rfc64CapableSpyStore extends SpyStore {
+  rfc64AuthorCommitCalls = 0;
+
+  async rfc64AuthorCommitCasV1(): Promise<Rfc64AuthorCommitCasResultV1> {
+    this.rfc64AuthorCommitCalls += 1;
+    return 'committed';
+  }
 }
 
 class NotStartedTimeoutAtomicReplaceStore extends SpyStore {
@@ -514,6 +562,59 @@ describe('ChangelogStore — reserved-graph write protection', () => {
       `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${CHANGELOG_GRAPH}> { ?s ?p ?o } }`,
     );
     expect(res.type).toBe('bindings');
+    await base.close();
+  });
+
+  it('rejects every RFC-64 manifest role that targets the reserved changelog plane', async () => {
+    const base = new OxigraphStore();
+    const inner = new Rfc64CapableSpyStore(base);
+    const log = new ChangelogStore(inner);
+    await log.insert([q('http://ex.org/seed', G1)]);
+    const recordsBefore = await log.readChanges(0, 100);
+    const baseInput = rfc64AuthorCommitInput();
+    const reservedQuad = (subject: string, object = '"reserved"') =>
+      q(subject, CHANGELOG_GRAPH, object);
+    const cases: Array<readonly [string, Rfc64AuthorCommitCasInputV1]> = [
+      ['projection', {
+        ...baseInput,
+        sharedProjectionGraph: CHANGELOG_GRAPH,
+        sharedProjectionQuads: [reservedQuad('urn:test:changelog:rfc64:projection')],
+      }],
+      ['author seal', {
+        ...baseInput,
+        authorSealGraph: CHANGELOG_GRAPH,
+        authorSealQuads: [reservedQuad(baseInput.authorSealSubject, '"seal"')],
+      }],
+      ['current head', { ...baseInput, currentHeadGraph: CHANGELOG_GRAPH }],
+      ...([
+        'kaStateDigest',
+        'subgraphMutationGeneration',
+        'contextGraphMutationGeneration',
+        'appliedSet',
+      ] as const).map((role) => [role, {
+        ...baseInput,
+        [role]: {
+          ...baseInput[role],
+          graphUri: CHANGELOG_GRAPH,
+          quads: [reservedQuad(baseInput[role].subject, `"${role}"`)],
+        },
+      }] as const),
+      ['seal invalidation', {
+        ...baseInput,
+        sealInvalidations: [{
+          graphUri: CHANGELOG_GRAPH,
+          subject: 'urn:test:changelog:rfc64:stale-seal',
+          quads: [],
+        }],
+      }],
+    ];
+
+    for (const [role, input] of cases) {
+      await expect(log.rfc64AuthorCommitCasV1(input), role).rejects.toThrow(/reserved/i);
+      expect(inner.rfc64AuthorCommitCalls, role).toBe(0);
+      expect(await log.headSeq(), role).toBe(1);
+      expect(await log.readChanges(0, 100), role).toEqual(recordsBefore);
+    }
     await base.close();
   });
 });
