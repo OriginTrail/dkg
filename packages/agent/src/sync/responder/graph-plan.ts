@@ -38,7 +38,7 @@ import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
-import { isLegacySyncGraphAdmittedV1 } from '../legacy-sync-graph-admission.js';
+import { isLegacySyncGraphCandidateV1 } from '../legacy-sync-graph-candidate.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -1436,7 +1436,7 @@ function createAdmissionContext(
   const cgPrefix = contextGraphDataGraphUri(contextGraphId);
   const topMetaGraph = contextGraphMetaGraphUri(contextGraphId);
   const isCandidateGraph = (graph: string): boolean => {
-    return isLegacySyncGraphAdmittedV1(
+    return isLegacySyncGraphCandidateV1(
       graph,
       contextGraphId,
       opts.includeTopMeta ? 'changelog' : 'durable-data',

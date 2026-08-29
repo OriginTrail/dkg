@@ -5,8 +5,12 @@ import {
 
 export type LegacySyncLane = 'durable-data' | 'changelog';
 
-/** The changelog additionally carries the top-level durable meta graph. */
-export function isLegacySyncGraphAdmittedV1(
+/**
+ * Static namespace eligibility for a legacy sync graph. Store-dependent
+ * admission (assertion membership and child-CG rejection) remains a separate
+ * responder boundary.
+ */
+export function isLegacySyncGraphCandidateV1(
   graph: string,
   contextGraphId: string,
   lane: LegacySyncLane,

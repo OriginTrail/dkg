@@ -27,28 +27,57 @@ export type TypedRdfStoreRowErrorCodeV1 =
   | 'row-term'
   | 'row-too-large';
 
+export type TypedRdfStoreRowErrorReasonV1 =
+  | Readonly<{ readonly kind: 'invalid-iri'; readonly field: string }>
+  | Readonly<{ readonly kind: 'unsupported-literal-datatype'; readonly datatypeIri: string }>
+  | Readonly<{ readonly kind: 'invalid-field-set'; readonly context: string }>
+  | Readonly<{ readonly kind: 'non-data-property'; readonly field: string }>
+  | Readonly<{ readonly kind: 'other' }>;
+
 export class TypedRdfStoreRowErrorV1 extends Error {
-  constructor(readonly code: TypedRdfStoreRowErrorCodeV1, message: string, options: ErrorOptions = {}) {
+  readonly reason: TypedRdfStoreRowErrorReasonV1;
+
+  constructor(
+    readonly code: TypedRdfStoreRowErrorCodeV1,
+    message: string,
+    options: ErrorOptions & { readonly reason?: TypedRdfStoreRowErrorReasonV1 } = {},
+  ) {
     super(message, options);
     this.name = 'TypedRdfStoreRowErrorV1';
+    this.reason = Object.freeze(options.reason ?? { kind: 'other' });
   }
 }
 
 export function typedRdfNamedNodeV1(value: string): TypedRdfStoreObjectV1 {
-  if (!isSafeIri(value)) throw new TypedRdfStoreRowErrorV1('row-term', 'named-node value must be one bare safe IRI');
+  if (!isSafeIri(value)) throw new TypedRdfStoreRowErrorV1(
+    'row-term',
+    'named-node value must be one bare safe IRI',
+    { reason: { kind: 'invalid-iri', field: 'named-node value' } },
+  );
   return Object.freeze({ kind: 'named-node' as const, value });
 }
 
 export function typedRdfLiteralV1(value: string, datatypeIri: string): TypedRdfStoreObjectV1 {
-  if (!isSafeIri(datatypeIri)) throw new TypedRdfStoreRowErrorV1('row-term', 'literal datatype must be one bare safe IRI');
+  if (!isSafeIri(datatypeIri)) throw new TypedRdfStoreRowErrorV1(
+    'row-term',
+    'literal datatype must be one bare safe IRI',
+    { reason: { kind: 'invalid-iri', field: 'literal datatype' } },
+  );
   return Object.freeze({ kind: 'literal' as const, value, datatypeIri });
 }
 
 export function snapshotTypedRdfStoreRowV1(input: unknown): TypedRdfStoreRowV1 {
   const row = snapshotClosed(input, ['graphIri', 'object', 'predicateIri', 'subjectIri'], 'typed RDF store row');
   for (const key of ['subjectIri', 'predicateIri', 'graphIri'] as const) {
-    if (typeof row[key] !== 'string' || !isSafeIri(row[key])) {
-      throw new TypedRdfStoreRowErrorV1('row-term', `${key} must be one bare safe IRI`);
+    if (typeof row[key] !== 'string') {
+      throw new TypedRdfStoreRowErrorV1('row-schema', `${key} must be a string`);
+    }
+    if (!isSafeIri(row[key])) {
+      throw new TypedRdfStoreRowErrorV1(
+        'row-term',
+        `${key} must be one bare safe IRI`,
+        { reason: { kind: 'invalid-iri', field: key } },
+      );
     }
   }
   if (!isPlainRecord(row.object)) {
@@ -145,6 +174,12 @@ export function renderTypedRdfStoreRowV1(
       throw new TypedRdfStoreRowErrorV1(
         'row-term',
         `unsupported literal datatype ${row.object.datatypeIri}`,
+        {
+          reason: {
+            kind: 'unsupported-literal-datatype',
+            datatypeIri: row.object.datatypeIri,
+          },
+        },
       );
     }
     const literal = JSON.stringify(row.object.value);
@@ -191,14 +226,22 @@ function snapshotClosed(input: unknown, keys: readonly string[], label: string):
   try {
     return snapshotExactDataRecord(input, keys, label);
   } catch (cause) {
-    throw new TypedRdfStoreRowErrorV1('row-schema', `${label} has an invalid field set`, { cause });
+    throw new TypedRdfStoreRowErrorV1(
+      'row-schema',
+      `${label} has an invalid field set`,
+      { cause, reason: { kind: 'invalid-field-set', context: label } },
+    );
   }
 }
 
 function ownDataProperty(value: Readonly<Record<string, unknown>>, key: string): unknown {
   const descriptor = Object.getOwnPropertyDescriptor(value, key);
   if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-    throw new TypedRdfStoreRowErrorV1('row-schema', `${key} must be an enumerable data property`);
+    throw new TypedRdfStoreRowErrorV1(
+      'row-schema',
+      `${key} must be an enumerable data property`,
+      { reason: { kind: 'non-data-property', field: key } },
+    );
   }
   return descriptor.value;
 }
