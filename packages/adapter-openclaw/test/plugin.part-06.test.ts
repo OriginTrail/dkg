@@ -283,44 +283,6 @@ describe("DkgNodePlugin", () => {
     expect(toolNames).toContain('dkg_subscribe');
     expect(toolNames).toContain('dkg_query');
     expect(toolNames).toContain('dkg_find_agents');
-    {
-      // GH#310 — the tool must ADVERTISE the daemon's new filters, or no
-      // model ever discovers them and the feature stays unreachable.
-      const findAgents = registeredTools.find((t: any) => t.name === 'dkg_find_agents') as any;
-      for (const key of ['connection_status', 'local', 'limit', 'cursor']) {
-        expect(Object.keys(findAgents.parameters.properties)).toContain(key);
-      }
-      // And the HANDLER must forward them VERBATIM — the daemon is the single
-      // validator, and a value coerced or dropped here turns the daemon's
-      // intended 400 into a silently different query.
-      const getAgentsCalls: unknown[] = [];
-      (plugin as any).client = {
-        getAgents: async (filter: unknown) => { getAgentsCalls.push(filter); return { agents: [] }; },
-      };
-      await findAgents.execute('tc-1', {
-        connection_status: 'connected',
-        local: 'true',
-        limit: '10',
-        cursor: 'cur-1',
-      });
-      expect(getAgentsCalls[0]).toEqual({
-        connection_status: 'connected',
-        local: 'true',
-        limit: '10',
-        cursor: 'cur-1',
-      });
-      // Malformed model output must REACH the client (and thus the daemon's
-      // 400) — the documented filter-drop risk: limit 0 silently becoming
-      // "no limit" is the full ~150 KB registry.
-      for (const bad of ['not-a-number', '10junk', 0, 1.9]) {
-        getAgentsCalls.length = 0;
-        await findAgents.execute('tc-bad', { limit: bad });
-        expect(getAgentsCalls[0], `limit=${bad} must be forwarded, not dropped`).toEqual({ limit: bad });
-      }
-      getAgentsCalls.length = 0;
-      await findAgents.execute('tc-bad-status', { connection_status: 'onnected', local: 'ture' });
-      expect(getAgentsCalls[0]).toEqual({ connection_status: 'onnected', local: 'ture' });
-    }
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');

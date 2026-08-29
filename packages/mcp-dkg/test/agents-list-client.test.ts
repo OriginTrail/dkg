@@ -39,14 +39,21 @@ describe('DkgClient agents-list serialization', () => {
     expect(url).toContain('local=false');
   });
 
-  it('listAgentsPage() carries limit/cursor out and nextCursor back', async () => {
-    const { client, urls } = makeClient({ agents: [{ name: 'a' }], nextCursor: 'n1' });
-    const page = await client.listAgentsPage({ connectionStatus: 'self', limit: 5, cursor: 'c0' });
+  it('listAgentsPage() carries limit/cursor out and nextCursor back, and the cursor continues', async () => {
+    const { client, urls } = makeClient({ agents: [{ name: 'a', peerId: 'p1' }], nextCursor: 'n1' });
+    const page = await client.listAgentsPage({ connectionStatus: 'self', skillType: 'ImageAnalysis', limit: 5, cursor: 'c0' });
     expect(urls[0]).toContain('connectionStatus=self');
+    // The camelCase option maps to the daemon's snake_case parameter.
+    expect(urls[0]).toContain('skill_type=ImageAnalysis');
     expect(urls[0]).toContain('limit=5');
     expect(urls[0]).toContain('cursor=c0');
-    expect(page.agents).toEqual([{ name: 'a' }]);
+    // Rows are typed: known fields need no cast.
+    expect(page.agents[0]!.peerId).toBe('p1');
     expect(page.nextCursor).toBe('n1');
+
+    // The returned cursor is directly usable for the next call.
+    await client.listAgentsPage({ connectionStatus: 'self', skillType: 'ImageAnalysis', limit: 5, cursor: page.nextCursor });
+    expect(urls[1]).toContain('cursor=n1');
   });
 
   it('listAgentsPage() omits nextCursor on a final page', async () => {

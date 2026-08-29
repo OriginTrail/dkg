@@ -471,32 +471,15 @@ export class DkgClient {
    * bare array would make 10-of-11 rows indistinguishable from a complete
    * result.
    */
-  async listAgents(options: {
-    framework?: string;
-    connectionStatus?: 'self' | 'connected' | 'disconnected';
-    local?: boolean;
-  } = {}): Promise<unknown[]> {
-    const { agents } = await this.listAgentsPage(options);
+  async listAgents(filters: AgentListFilters = {}): Promise<AgentListRow[]> {
+    const { agents } = await this.listAgentsPage(filters);
     return agents;
   }
 
   /** One page of the agent registry, with the state needed to continue it. */
-  async listAgentsPage(options: {
-    framework?: string;
-    connectionStatus?: 'self' | 'connected' | 'disconnected';
-    local?: boolean;
-    limit?: number;
-    /** Opaque cursor from a previous page. Repeat the same filters. */
-    cursor?: string;
-  } = {}): Promise<{ agents: unknown[]; nextCursor?: string }> {
-    const params = new URLSearchParams();
-    if (options.framework !== undefined) params.set('framework', options.framework);
-    if (options.connectionStatus !== undefined) params.set('connectionStatus', options.connectionStatus);
-    if (options.local !== undefined) params.set('local', String(options.local));
-    if (options.limit !== undefined) params.set('limit', String(options.limit));
-    if (options.cursor !== undefined) params.set('cursor', options.cursor);
-    const qs = params.toString();
-    const r = await this.request<{ agents?: unknown[]; nextCursor?: string }>(
+  async listAgentsPage(options: AgentListPageOptions = {}): Promise<AgentListPage> {
+    const qs = serializeAgentListQuery(options);
+    const r = await this.request<{ agents?: AgentListRow[]; nextCursor?: string }>(
       'GET',
       `/api/agents${qs ? `?${qs}` : ''}`,
     );
@@ -1382,4 +1365,52 @@ export function bindingValue(cell: SparqlBinding[string] | undefined): string {
   if (cell == null) return '';
   if (typeof cell === 'string') return cell;
   return cell.value ?? '';
+}
+
+/** Filters accepted by every agent-list call. Maps 1:1 onto GET /api/agents. */
+export interface AgentListFilters {
+  framework?: string;
+  /** Serialized as the daemon's `skill_type` parameter. */
+  skillType?: string;
+  connectionStatus?: 'self' | 'connected' | 'disconnected';
+  local?: boolean;
+}
+
+/** {@link AgentListFilters} plus the truncating/pagination controls. */
+export interface AgentListPageOptions extends AgentListFilters {
+  limit?: number;
+  /** Opaque cursor from a previous page. Repeat the same filters. */
+  cursor?: string;
+}
+
+/** A registry row as the daemon returns it, enriched with connection state. */
+export interface AgentListRow {
+  agentUri?: string;
+  name?: string;
+  peerId?: string;
+  framework?: string;
+  nodeRole?: string;
+  connectionStatus?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentListPage {
+  agents: AgentListRow[];
+  nextCursor?: string;
+}
+
+/**
+ * The ONE serializer both agent-list methods share — the daemon 400s on
+ * unknown parameter names, so this mapping is a hard contract, and two
+ * copies of it would drift.
+ */
+function serializeAgentListQuery(options: AgentListPageOptions): string {
+  const params = new URLSearchParams();
+  if (options.framework !== undefined) params.set('framework', options.framework);
+  if (options.skillType !== undefined) params.set('skill_type', options.skillType);
+  if (options.connectionStatus !== undefined) params.set('connectionStatus', options.connectionStatus);
+  if (options.local !== undefined) params.set('local', String(options.local));
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.cursor !== undefined) params.set('cursor', options.cursor);
+  return params.toString();
 }

@@ -703,11 +703,15 @@ describe('DkgDaemonClient', () => {
     expect(result.nextCursor).toBe('n1');
   });
 
-  it('getAgents serializes malformed values verbatim so the daemon can 400 them', async () => {
+  it('getAgents serializes malformed values verbatim AND surfaces the daemon 400', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ error: '"limit" must be a positive integer' }), { status: 400 }),
     );
-    await client.getAgents({ limit: '10junk', local: 'ture' }).catch(() => {});
+    // The rejection IS the contract: if getAgents swallowed the 400 into
+    // {agents: []}, malformed filters would look like successful empty
+    // queries and the whole validation chain would be silent.
+    await expect(client.getAgents({ limit: '10junk', local: 'ture' }))
+      .rejects.toThrow(/responded 400.*positive integer/);
     const url = fetchCalls[0][0] as string;
     expect(url).toContain('limit=10junk');
     expect(url).toContain('local=ture');
