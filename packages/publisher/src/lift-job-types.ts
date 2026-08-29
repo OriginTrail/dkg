@@ -318,16 +318,33 @@ export interface LiftJobInclusionMetadata {
   readonly blockTimestamp?: number;
 }
 
+/** Opaque identifiers emitted by non-EVM/test backends, kept separate from numeric chain IDs. */
+export interface LiftJobOpaqueFinalizationIdentifiers {
+  readonly batchId?: string;
+  readonly startKAId?: string;
+  readonly endKAId?: string;
+}
+
 export interface LiftJobFinalizationMetadata {
   readonly mode?: 'published' | 'noop' | 'local';
   readonly txHash?: LiftJobHex;
   readonly ual?: string;
-  /** Chain adapters and test/dev backends may use opaque identifiers rather than bigint text. */
+  readonly batchId?: LiftJobBigInt;
+  readonly startKAId?: LiftJobBigInt;
+  readonly endKAId?: LiftJobBigInt;
+  readonly opaqueIdentifiers?: LiftJobOpaqueFinalizationIdentifiers;
+  readonly publisherAddress?: LiftJobHex;
+}
+
+/** Adapter-facing finalization input; canonical LiftJob output separates opaque identifiers. */
+export type LiftJobFinalizationInput = Omit<
+  LiftJobFinalizationMetadata,
+  'batchId' | 'startKAId' | 'endKAId'
+> & {
   readonly batchId?: string;
   readonly startKAId?: string;
   readonly endKAId?: string;
-  readonly publisherAddress?: LiftJobHex;
-}
+};
 
 export interface LiftJobControlPlaneRefs {
   readonly jobRef?: string;

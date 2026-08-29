@@ -6,7 +6,7 @@ import type {
   LiftJobBroadcast,
   LiftJobClaimed,
   LiftJobClaimMetadata,
-  LiftJobFinalizationMetadata,
+  LiftJobFinalizationInput,
   LiftJobIncluded,
   LiftJobInclusionMetadata,
   LiftJobHex,
@@ -453,7 +453,7 @@ export interface CanonicalUpdateEvidence {
 
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
-  finalization: LiftJobFinalizationMetadata;
+  finalization: LiftJobFinalizationInput;
   /** Present exactly when the verdict came from canonical UPDATE recognition. */
   canonicalUpdate?: CanonicalUpdateEvidence;
 }

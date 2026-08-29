@@ -25,13 +25,12 @@ import {
   type PersistedLiftJob,
   type LiftJobFailureCode,
   type LiftJobAccepted,
-  type LiftJobClaimed,
   type LiftJobBroadcast,
   type LiftJobBroadcastMetadata,
   type LiftJobHex,
   type LiftJobIncluded,
   type LiftJobInclusionMetadata,
-  type LiftJobFinalizationMetadata,
+  type LiftJobFinalizationInput,
   type LiftJobRecoveryMetadata,
   type LiftJobRequest,
   type LiftJobState,
@@ -152,7 +151,13 @@ import {
   assertCanonicalLiftJobPayload,
   type LiftJobPayloadDecodeResult,
 } from './lift-job-payload-codec.js';
-import { buildCanonicalLiftJobTransition } from './lift-job-state-model.js';
+import {
+  buildCanonicalLiftJobAdministrativeTransition,
+  buildCanonicalRevertedLiftJobFailure,
+  canonicalLiftJobFinalizationMetadata,
+  type LiftJobTransitionPatch,
+  type LiftJobTransitionPatchFor,
+} from './lift-job-state-model.js';
 
 /**
  * #1864 — outcome of the KA VM-publish pre-send write-ahead boundary
@@ -760,7 +765,7 @@ export class TripleStoreAsyncLiftPublisher
     status: LiftJobState,
     data: Partial<LiftJob> = {},
   ): Promise<void> {
-    const next = this.buildTransitionJob(current, status, data);
+    const next = buildCanonicalLiftJobAdministrativeTransition(current, status, data, this.now());
     this.assertJobMatchesStatus(next);
     if (next.status === 'finalized') {
       await this.promoteFinalizedPrivateStaging(next);
@@ -775,7 +780,7 @@ export class TripleStoreAsyncLiftPublisher
   ): Promise<void> {
     await this.ensureGraph();
     await this.claimCoordinator.transitionAdministrative(jobId, async (current, scope) => {
-      const next = this.buildTransitionJob(current, status, data);
+      const next = buildCanonicalLiftJobAdministrativeTransition(current, status, data, this.now());
       this.assertJobMatchesStatus(next);
       if (next.status === 'finalized') {
         await this.promoteFinalizedPrivateStaging(next);
@@ -1726,7 +1731,7 @@ export class TripleStoreAsyncLiftPublisher
           errorPayloadRef: `urn:dkg:publisher:error:${recoverable.jobId}:chain-proof-reverted`,
         });
         await scope.commitProofFailure(
-          this.buildTransitionJob(recoverable, 'failed', { failure: failure as any }),
+          this.buildTransitionJob(recoverable, 'failed', { failure }),
         );
         return true;
       }
@@ -2146,7 +2151,7 @@ export class TripleStoreAsyncLiftPublisher
     failure: AsyncLiftPublishFailureInput,
   ): Promise<LiftJob> {
     const next = this.scheduleRetryIfEligible(this.buildTransitionJob(current, 'failed', {
-      failure: mapPublishExceptionToLiftJobFailure(failure) as any,
+      failure: mapPublishExceptionToLiftJobFailure(failure),
     }));
     this.assertJobMatchesStatus(next);
     return await scope.commit(next, 'failed');
@@ -3145,7 +3150,7 @@ export class TripleStoreAsyncLiftPublisher
         errorPayloadRef: `urn:dkg:publisher:error:${current.jobId}`,
       });
       const failed = this.scheduleRetryIfEligible(
-        this.buildTransitionJob(current, 'failed', { failure: failure as any }),
+        this.buildTransitionJob(current, 'failed', { failure }),
       );
       this.assertJobMatchesStatus(failed);
       return await scope.commit(failed, 'failed');
@@ -3314,23 +3319,17 @@ export class TripleStoreAsyncLiftPublisher
 
   // Target-state constructors select only metadata legal for the destination. No transition can
   // accidentally carry a prior state's progress fields into the new durable union member.
-  private buildTransitionJob(
-    current: LiftJobAccepted,
-    status: 'claimed',
-    data: { claim: { walletId: string } },
-  ): LiftJobClaimed;
-  private buildTransitionJob(
-    current: LiftJobBroadcast,
-    status: 'included',
-    data: { inclusion: LiftJobInclusionMetadata },
-  ): LiftJobIncluded;
-  private buildTransitionJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob;
+  private buildTransitionJob<State extends LiftJobState>(
+    current: LiftJob,
+    status: State,
+    data: LiftJobTransitionPatchFor<State>,
+  ): Extract<LiftJob, { status: State }>;
   private buildTransitionJob(
     current: LiftJob,
     status: LiftJobState,
-    data: Partial<LiftJob> & { inclusion?: LiftJobInclusionMetadata },
+    data: LiftJobTransitionPatch,
   ): LiftJob {
-    return buildCanonicalLiftJobTransition(current, status, data, this.now());
+    return buildCanonicalLiftJobAdministrativeTransition(current, status, data, this.now());
   }
 
   /**
@@ -3504,7 +3503,7 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedLiftJob,
     origin: ChainRecoveryOrigin,
     inclusion: LiftJobInclusionMetadata,
-    finalization: LiftJobFinalizationMetadata,
+    finalization: LiftJobFinalizationInput,
   ): LiftJob {
     const now = this.now();
     const { failure: _dropped, ...withoutFailure } = job as PersistedLiftJob & { failure?: unknown };
@@ -3526,7 +3525,7 @@ export class TripleStoreAsyncLiftPublisher
       status: 'finalized',
       ...(broadcast ? { broadcast } : {}),
       inclusion,
-      finalization,
+      finalization: canonicalLiftJobFinalizationMetadata(finalization),
       recovery: {
         action: 'finalized_from_chain',
         recoveredFromStatus: origin.recoveredFromStatus,
@@ -3561,7 +3560,7 @@ export class TripleStoreAsyncLiftPublisher
       },
     });
 
-    return this.buildTransitionJob(job, 'failed', { failure: failure as any });
+    return this.buildTransitionJob(job, 'failed', { failure });
   }
 
   /**
@@ -3614,18 +3613,8 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedFailedJob,
     failedFromState: 'broadcast' | 'included',
   ): LiftJob | null {
-    const canonicalOrigin = failedFromState === 'included'
-      && job.claim !== undefined
-      && job.validation !== undefined
-      && job.broadcast !== undefined
-      && job.inclusion !== undefined
-      ? 'included'
-      : job.claim !== undefined && job.validation !== undefined && job.broadcast !== undefined
-        ? 'broadcast'
-        : null;
-    if (canonicalOrigin === null) return null;
     const failure = createLiftJobFailureMetadata({
-      failedFromState: canonicalOrigin,
+      failedFromState,
       code: 'tx_reverted',
       message:
         `LiftJob ${job.jobId} previously failed as ${job.failure.code}; chain recovery resolved its `
@@ -3633,37 +3622,7 @@ export class TripleStoreAsyncLiftPublisher
         + 'The transaction published nothing, so this job no longer holds its lifecycle subject.',
       errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:chain-proof-reverted`,
     });
-    const common = {
-      jobId: job.jobId,
-      jobSlug: job.jobSlug,
-      request: job.request,
-      ...(job.admission ? { admission: job.admission } : {}),
-      status: 'failed' as const,
-      timestamps: {
-        ...job.timestamps,
-        failedAt: this.now(),
-        updatedAt: this.now(),
-      },
-      retries: job.retries,
-      ...(job.controlPlane ? { controlPlane: job.controlPlane } : {}),
-    };
-    if (canonicalOrigin === 'included') {
-      return {
-        ...common,
-        claim: job.claim!,
-        validation: job.validation!,
-        broadcast: job.broadcast!,
-        inclusion: job.inclusion!,
-        failure: { ...failure, failedFromState: 'included' },
-      };
-    }
-    return {
-      ...common,
-      claim: job.claim!,
-      validation: job.validation!,
-      broadcast: job.broadcast!,
-      failure: { ...failure, failedFromState: 'broadcast' },
-    };
+    return buildCanonicalRevertedLiftJobFailure(job, failure, this.now());
   }
 
   private failKnowledgeAssetInconclusiveRecovery(job: LiftJobBroadcast | LiftJobIncluded): LiftJob {
@@ -3677,7 +3636,7 @@ export class TripleStoreAsyncLiftPublisher
       errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:ka-recovery-inconclusive`,
     });
 
-    return this.buildTransitionJob(job, 'failed', { failure: failure as any });
+    return this.buildTransitionJob(job, 'failed', { failure });
   }
 
   private async finalizeNoopPublish(claim: ActiveLiftJobClaim): Promise<LiftJob> {

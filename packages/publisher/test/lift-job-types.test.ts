@@ -2,11 +2,13 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import type {
   LiftJob,
   LiftJobAccepted,
+  LiftJobBigInt,
   LiftJobBroadcast,
   LiftJobFailed,
   LiftJobFailedFromBroadcast,
   LiftJobFailedFromIncluded,
   LiftJobFinalized,
+  LiftJobFinalizationMetadata,
   LiftJobRequest,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
@@ -474,7 +476,39 @@ describe('LiftJob request and record types', () => {
     };
 
     expect(finalized.finalization.batchId).toBe('99');
+    expect(BigInt(finalized.finalization.batchId!)).toBe(99n);
+    expectTypeOf<LiftJobFinalizationMetadata['batchId']>()
+      .toEqualTypeOf<LiftJobBigInt | undefined>();
     expect(failed.failure.errorPayloadRef).toBe('urn:dkg:publisher:error:job-4');
+  });
+
+  it('rejects opaque finalization identifiers at the durable runtime boundary', () => {
+    const finalized: LiftJobFinalized = {
+      jobId: 'job-opaque-finalization',
+      jobSlug: 'music-social/person-profile/create/op-opaque/rihana',
+      request: rawJobRequest(rawLift({ shareOperationId: 'op-opaque' })),
+      status: 'finalized',
+      timestamps: { acceptedAt: 1, finalizedAt: 2, updatedAt: 2 },
+      retries: { retryCount: 0, maxRetries: 3 },
+      claim: { walletId: 'wallet-opaque' },
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 1,
+        authorityProofRef: 'proof:owner:opaque',
+        transitionType: 'CREATE',
+      },
+      finalization: { mode: 'local' },
+    };
+    const opaque = {
+      ...finalized,
+      finalization: { ...finalized.finalization, batchId: 'batch-opaque' },
+    };
+
+    expect(decodeLiftJobPayload(literal(JSON.stringify(opaque)))).toMatchObject({
+      kind: 'malformed',
+      reason: expect.stringContaining('finalization.batchId must be serialized integer text'),
+    });
   });
 
   it('supports chain-driven recovery from included jobs', () => {

@@ -8,6 +8,7 @@ import {
   LIFT_TRANSITION_TYPES,
   type LiftJob,
   type LiftJobAdmissionMetadata,
+  type LiftJobBigInt,
   type LiftJobBroadcastMetadata,
   type LiftJobClaimMetadata,
   type LiftJobCompatibility,
@@ -15,6 +16,7 @@ import {
   type LiftJobFailureMetadata,
   type LiftJobFinalizationMetadata,
   type LiftJobHex,
+  type LiftJobOpaqueFinalizationIdentifiers,
   type LiftJobPersistedFailure,
   type LiftJobRecoveryMetadata,
   type LiftJobRecoveryFinalizedFromChain,
@@ -325,6 +327,13 @@ const nonEmptyStringParser: RuntimeParser<string> = expectNonEmptyString;
 const numberParser: RuntimeParser<number> = expectFiniteNumber;
 const booleanParser: RuntimeParser<boolean> = expectBoolean;
 const hexParser: RuntimeParser<LiftJobHex> = expectHexString;
+const bigintStringParser: RuntimeParser<LiftJobBigInt> = (value, path) => {
+  const parsed = expectString(value, path);
+  if (!/^-?(?:0|[1-9]\d*)$/.test(parsed)) {
+    throw new Error(`${path} must be serialized integer text`);
+  }
+  return parsed as LiftJobBigInt;
+};
 const stringArrayParser: RuntimeParser<readonly string[]> = expectStringArray;
 const operationKindParser: RuntimeParser<'create' | 'update'> = (value, path) =>
   expectEnum(value, ['create', 'update'] as const, path);
@@ -467,13 +476,20 @@ function parseInclusion(value: unknown): StructurallyValidLiftJobInclusion {
   return inclusionParser(value, 'inclusion');
 }
 
+const opaqueFinalizationIdentifiersParser = objectParser<LiftJobOpaqueFinalizationIdentifiers>({
+  batchId: optional(stringParser),
+  startKAId: optional(stringParser),
+  endKAId: optional(stringParser),
+});
+
 const finalizationParser = objectParser<LiftJobFinalizationMetadata>({
   mode: optional(enumParser(['published', 'noop', 'local'] as const)),
   txHash: optional(hexParser),
   ual: optional(stringParser),
-  batchId: optional(stringParser),
-  startKAId: optional(stringParser),
-  endKAId: optional(stringParser),
+  batchId: optional(bigintStringParser),
+  startKAId: optional(bigintStringParser),
+  endKAId: optional(bigintStringParser),
+  opaqueIdentifiers: optional(opaqueFinalizationIdentifiersParser),
   publisherAddress: optional(hexParser),
 });
 

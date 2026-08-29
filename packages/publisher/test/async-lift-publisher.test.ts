@@ -2127,6 +2127,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
+    expect(job?.finalization?.batchId).toBeUndefined();
+    expect(job?.finalization?.opaqueIdentifiers?.batchId).toBe('batch-1');
     expect(job?.recovery?.action).toBe('finalized_from_chain');
     expect(job?.recovery?.recoveredFromStatus).toBe('broadcast');
     expect(job?.timestamps?.failedAt).toBeUndefined();
@@ -2186,6 +2188,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
+    expect(job?.finalization?.batchId).toBeUndefined();
+    expect(job?.finalization?.opaqueIdentifiers?.batchId).toBe('batch-2');
     expect(job?.recovery?.action).toBe('finalized_from_chain');
     expect(job?.recovery?.recoveredFromStatus).toBe('included');
     expect(job?.timestamps?.failedAt).toBeUndefined();

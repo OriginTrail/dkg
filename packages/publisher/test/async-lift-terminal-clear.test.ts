@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
+import { createLiftJobFailureMetadata } from '../src/lift-job.js';
 import {
   CONTROL_PAYLOAD,
   DEFAULT_CONTROL_GRAPH_URI,
@@ -57,7 +58,14 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const jobId = await driveToValidated(p, o, admission);
     await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.update(jobId, 'included', { broadcast: bx, inclusion: inc });
-    await p.update(jobId, 'finalized', { broadcast: bx, inclusion: inc, finalization: { mode: 'local' } });
+    await p.update(jobId, 'finalized', {
+      finalization: {
+        mode: 'published',
+        txHash: bx.txHash,
+        ual: kaVmPublishRequest(o).kaUal,
+        batchId: '1',
+      },
+    });
     return jobId;
   }
   // Terminal, non-retryable (tx_reverted → fail_job): clearable, retry() won't touch it.
@@ -160,6 +168,31 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await p.update(broadcast, 'broadcast', { broadcast: bx });
     expect(await p.clearTerminalJob(broadcast)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
+  });
+
+  it('cannot relabel a broadcast failure to erase its transaction or release its wallet', async () => {
+    const p = createPublisher();
+    const broadcast = await driveToValidated(p, { name: 'evidence-owner' });
+    await p.update(broadcast, 'broadcast', { broadcast: bx });
+    const waiting = await p.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'waiting-for-wallet' }),
+    );
+
+    await expect(p.update(broadcast, 'failed', {
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'claimed',
+        code: 'workspace_unavailable',
+        message: 'mislabelled administrative failure',
+        errorPayloadRef: 'urn:error:mislabelled-broadcast',
+      }),
+    })).rejects.toThrow(/cannot discard broadcast transaction evidence/);
+
+    expect(await p.getStatus(broadcast)).toMatchObject({
+      status: 'broadcast',
+      broadcast: { txHash: bx.txHash, walletId: bx.walletId },
+    });
+    expect(await p.claimNext('wallet-1')).toBeNull();
+    expect(await p.claimNext('wallet-2')).toMatchObject({ jobId: waiting });
   });
 
   it('lets only the admission owner explicitly clear one broadcast job', async () => {

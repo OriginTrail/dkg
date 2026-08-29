@@ -142,17 +142,8 @@ describe('#1829 admission journal append (writeJob hook)', () => {
   it('clear(finalized) does not remove journal entries', async () => {
     const publisher = createPublisher();
     const jobId = await driveToValidated(publisher);
-    // Force a local no-op finalize so the job reaches 'finalized' without a chain tx.
-    await publisher.update(jobId, 'broadcast', {
-      broadcast: KA_VM_BROADCAST_TX,
-    });
-    await publisher.update(jobId, 'included', {
-      broadcast: KA_VM_BROADCAST_TX,
-      inclusion: KA_VM_INCLUSION,
-    });
+    // A local finalization is valid only before transaction evidence exists.
     await publisher.update(jobId, 'finalized', {
-      broadcast: KA_VM_BROADCAST_TX,
-      inclusion: KA_VM_INCLUSION,
       finalization: { mode: 'local' },
     });
     const projected = await publisher.getStatus(jobId);
@@ -257,11 +248,7 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     // First job driven to a TERMINAL state so it no longer occupies the subject and a
     // fresh enqueue admits a genuine successor (rather than dedup returning the same job).
     const first = await driveToValidated(publisher);
-    const bx = KA_VM_BROADCAST_TX;
-    const inc = KA_VM_INCLUSION;
-    await publisher.update(first, 'broadcast', { broadcast: bx });
-    await publisher.update(first, 'included', { broadcast: bx, inclusion: inc });
-    await publisher.update(first, 'finalized', { broadcast: bx, inclusion: inc, finalization: { mode: 'local' } });
+    await publisher.update(first, 'finalized', { finalization: { mode: 'local' } });
 
     // Successor for the SAME lifecycle subject continues the lineage seq (starts > 0).
     const second = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
