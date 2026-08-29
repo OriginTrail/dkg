@@ -7,26 +7,42 @@ import { multiaddr } from '@multiformats/multiaddr';
 import {
   DKGAgent,
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  buildOpenOwnerContextGraphPolicyV1,
   produceDirectAuthorCatalogIssuerDelegationV1,
   produceEmptyAuthorCatalogGenesisV1,
+  unsignedOpenContextGraphPolicyEnvelopeV1,
+  type Rfc64CatalogRolloutModeV1,
+  type Rfc64PublicCatalogActivationInputV1,
 } from '@origintrail-official/dkg-agent';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import {
-  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  MockChainAdapter,
+  verifyControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
+import {
+  assertCanonicalEvmAddress,
+  assertContextGraphIdV1,
+  assertUnsignedContextGraphPolicyEnvelopeV1,
   computeNetworkId,
   computeControlSignatureVariantDigestHex,
   createOperationContext,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
   type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
+  GraphManager,
   OxigraphStore,
   quadsToNQuads,
   type Quad,
 } from '@origintrail-official/dkg-storage';
+import {
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '../../packages/publisher/src/index.js';
 import { ethers } from 'ethers';
 
 import {
@@ -39,6 +55,16 @@ import {
   inspectGate1ProductCapabilities,
   requireGate1ProductMethod,
 } from './product-capabilities.js';
+import {
+  GATE1_ASSERTION_ROOT,
+  GATE1_AUTHOR_ADDRESS,
+  GATE1_DEPLOYMENT,
+  GATE1_KA_ID,
+  GATE1_KA_UAL,
+  GATE1_NETWORK_ID,
+  GATE1_PROJECTION_NQUADS,
+  GATE1_PROJECTION_QUADS,
+} from './fixture.js';
 
 const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
@@ -47,6 +73,7 @@ const rolloutModeInput = process.env.DKG_RFC64_ROLLOUT_MODE;
 const rolloutContextGraphId = process.env.DKG_RFC64_ROLLOUT_CONTEXT_GRAPH_ID;
 const rolloutOwnerAddressInput = process.env.DKG_RFC64_ROLLOUT_OWNER_ADDRESS;
 const rolloutKillSwitchInput = process.env.DKG_RFC64_ROLLOUT_KILL_SWITCH;
+const rolloutCompleteSwmProvider = process.env.DKG_RFC64_ROLLOUT_COMPLETE_SWM_PROVIDER;
 if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE1_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
@@ -73,15 +100,19 @@ if (
     'rollout mode requires DKG_RFC64_ROLLOUT_CONTEXT_GRAPH_ID and a lowercase EVM owner',
   );
 }
+if (rolloutContextGraphId !== undefined) {
+  assertContextGraphIdV1(rolloutContextGraphId, 'rollout contextGraphId');
+}
+if (rolloutOwnerAddress !== undefined) {
+  assertCanonicalEvmAddress(rolloutOwnerAddress, 'rollout owner address');
+}
 if (rolloutMode === null && rolloutKillSwitch) {
   throw new Error('rollout kill switch requires DKG_RFC64_ROLLOUT_MODE');
 }
-const RFC64_GATE1_DEPLOYMENT = Object.freeze({
-  networkId: 'otp:20430',
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
-});
 let agent: DKGAgent | undefined;
+let vmChain: Gate1VmChainAdapter | undefined;
+let agentStore: OxigraphStore | undefined;
+const vmReplicationEvents: unknown[] = [];
 let stopping = false;
 let commandTail = Promise.resolve();
 
@@ -142,7 +173,12 @@ async function boot(): Promise<void> {
       rolloutKillSwitch,
       rolloutContextGraphId!,
       rolloutOwnerAddress!,
+      rolloutCompleteSwmProvider,
     );
+  vmChain = rolloutActivation !== null && role === 'receiver'
+    ? await Gate1VmChainAdapter.create(rolloutContextGraphId!)
+    : undefined;
+  const store = new OxigraphStore(join(dataDir, 'store.nq'));
   const created = await DKGAgent.create({
     name: `RFC64Gate1${role}`,
     dataDir,
@@ -150,23 +186,26 @@ async function boot(): Promise<void> {
     listenPort: 0,
     bootstrapPeers: [],
     nodeRole: 'edge',
-    store: new OxigraphStore(join(dataDir, 'store.nq')),
+    store,
     syncSharedMemoryOnConnect: false,
-    syncReconcilerEnabled: false,
+    syncReconcilerEnabled: vmChain !== undefined,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
+    onReplicationEvent: (event) => { vmReplicationEvents.push(event); },
+    ...(vmChain === undefined ? {} : { chainAdapter: vmChain }),
     ...(rolloutActivation === null ? {
-      rfc64CatalogDeploymentProfile: RFC64_GATE1_DEPLOYMENT as never,
+      rfc64CatalogDeploymentProfile: GATE1_DEPLOYMENT,
     } : {
       networkIdentity: {
         networkId: await computeNetworkId(),
-        chainId: RFC64_GATE1_DEPLOYMENT.networkId,
+        chainId: GATE1_DEPLOYMENT.networkId,
       },
-      rfc64PublicCatalogActivation: rolloutActivation as never,
+      rfc64PublicCatalogActivation: rolloutActivation,
     }),
   });
   agent = created;
+  agentStore = store;
   await created.start();
   const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
   if (tcp === undefined) throw new Error('real DKGAgent exposed no TCP multiaddr');
@@ -297,10 +336,15 @@ async function handle(command: Command): Promise<void> {
         input.contextGraphId,
         'rolloutStatus.contextGraphId',
       );
+      const completeProviderPeerId = requiredString(
+        input.completeProviderPeerId,
+        'rolloutStatus.completeProviderPeerId',
+      );
       const manualSwmPlan = await currentAgent.planSharedMemorySyncContextGraphs(
-        undefined,
+        completeProviderPeerId,
         [contextGraphId],
         createOperationContext('sync'),
+        { requireCompleteProviderMatch: true },
       );
       emitOperationResult(command, {
         bootstrapStarted: currentAgent.readRfc64PublicCatalogBootstrapStatusV1() !== null,
@@ -310,6 +354,72 @@ async function handle(command: Command): Promise<void> {
         vmChainInventorySelected:
           currentAgent.isRfc64SelectedVmReconcileContextGraph(contextGraphId),
       });
+      return;
+    }
+    case 'vmReconcile': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'vmReconcile input');
+      const contextGraphId = requiredString(
+        input.contextGraphId,
+        'vmReconcile.contextGraphId',
+      );
+      const chain = vmChain;
+      if (chain === undefined) throw new Error('rollout VM chain fixture is unavailable');
+      const readsBefore = chain.snapshotReadCounts();
+      const eventCursor = vmReplicationEvents.length;
+      const result = await currentAgent.runVmReconcileForCg(contextGraphId, 'manual');
+      emitOperationResult(command, {
+        chainReadDelta: subtractCounts(chain.snapshotReadCounts(), readsBefore),
+        replicationEvents: vmReplicationEvents.slice(eventCursor),
+        result,
+      });
+      return;
+    }
+    case 'seedVmSourceSwm': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'seedVmSourceSwm input');
+      const contextGraphId = requiredString(
+        input.contextGraphId,
+        'seedVmSourceSwm.contextGraphId',
+      );
+      const store = agentStore;
+      if (store === undefined) throw new Error('rollout store fixture is unavailable');
+      const scope = createGraphKnowledgeAssetScope(GATE1_KA_UAL, '1');
+      const graphManager = new GraphManager(store);
+      const publicQuads = GATE1_PROJECTION_QUADS;
+      const swmGraph = knowledgeAssetLayerGraphUri(
+        contextGraphId,
+        MemoryLayer.SharedWorkingMemory,
+        scope,
+      );
+      await store.replaceGraph(
+        swmGraph,
+        publicQuads.map((quad) => ({ ...quad, graph: swmGraph })),
+      );
+      const shareOperationId = 'rfc64-rollout-vm-source-v1';
+      await storeKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId,
+        shareOperationId,
+        kaUal: GATE1_KA_UAL,
+        assertionVersion: '1',
+        quads: publicQuads,
+        privateTripleCount: 0,
+        publisherPeerId: currentAgent.peerId,
+        accessPolicy: 'public',
+        agentAddress: GATE1_AUTHOR_ADDRESS,
+        timestamp: new Date('2026-07-19T12:34:56.789Z'),
+      });
+      await storeKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager,
+        contextGraphId,
+        kaUal: GATE1_KA_UAL,
+        assertionVersion: '1',
+        shareOperationId,
+      });
+      emitOperationResult(command, { swmGraph, tripleCount: publicQuads.length });
       return;
     }
     case 'stagedHeadReadback': {
@@ -408,54 +518,146 @@ function parseBooleanEnvironment(input: string | undefined, label: string): bool
 }
 
 function buildRolloutActivation(
-  mode: 'legacy' | 'shadow' | 'catalog',
+  mode: Rfc64CatalogRolloutModeV1,
   killSwitch: boolean,
   contextGraphId: string,
   ownerAddress: string,
-): Record<string, unknown> {
-  const policy = Object.freeze({
-    networkId: RFC64_GATE1_DEPLOYMENT.networkId,
+  completeSwmProvider: string | undefined,
+): Rfc64PublicCatalogActivationInputV1 {
+  assertContextGraphIdV1(contextGraphId, 'rollout contextGraphId');
+  assertCanonicalEvmAddress(ownerAddress, 'rollout owner address');
+  const policy = buildOpenOwnerContextGraphPolicyV1({
+    networkId: GATE1_DEPLOYMENT.networkId,
     contextGraphId,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
-    era: '0',
-    version: '0',
-    previousPolicyDigest: null,
-    accessPolicy: 0,
-    publishPolicy: 1,
-    publishAuthority: null,
-    publishAuthorityAccountId: '0',
-    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
-    administrativeDelegationDigest: null,
-    source: Object.freeze({
-      kind: 'owner-signed-unregistered',
-      ownerAddress,
-      ownerAuthorityEra: '0',
-    }),
-    effectiveAt: '0',
-    issuedAt: '0',
+    ownerAddress,
   });
-  const policyEnvelope = Object.freeze({
-    issuer: ownerAddress,
-    objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-    payload: policy,
-    signatureEvidence: Object.freeze({ kind: 'none' }),
-    signatureSuite: 'eip191-personal-sign-digest-v1',
-  });
-  return Object.freeze({
-    deploymentProfile: RFC64_GATE1_DEPLOYMENT,
-    bootstrap: Object.freeze({
-      acceptedPublicPolicies: Object.freeze([Object.freeze({
+  const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
+  assertUnsignedContextGraphPolicyEnvelopeV1(policyEnvelope);
+  const activation = {
+    deploymentProfile: GATE1_DEPLOYMENT,
+    bootstrap: {
+      acceptedPublicPolicies: [{
         policyEnvelope,
-        targets: Object.freeze([]),
-      })]),
-    }),
-    rollout: Object.freeze({
+        targets: [],
+        ...(completeSwmProvider === undefined
+          ? {}
+          : { completeSwmProviders: [completeSwmProvider] }),
+      }],
+    },
+    rollout: {
       killSwitch,
-      contextGraphModes: Object.freeze({ [contextGraphId]: mode }),
-    }),
-  });
+      contextGraphModes: { [contextGraphId]: mode },
+    },
+  } satisfies Rfc64PublicCatalogActivationInputV1;
+  return Object.freeze(activation);
+}
+
+const VM_CHAIN_READ_KEYS = Object.freeze([
+  'accessPolicy',
+  'active',
+  'author',
+  'count',
+  'kaAt',
+  'latestRoot',
+  'nameHashResolution',
+  'publisher',
+  'rootCount',
+  'storageAddress',
+] as const);
+type VmChainReadKey = typeof VM_CHAIN_READ_KEYS[number];
+type VmChainReadCounts = Record<VmChainReadKey, number>;
+
+/** Deterministic chain-owned VM inventory used by every receiver restart. */
+class Gate1VmChainAdapter extends MockChainAdapter {
+  readonly #readCounts: VmChainReadCounts = Object.fromEntries(
+    VM_CHAIN_READ_KEYS.map((key) => [key, 0]),
+  ) as VmChainReadCounts;
+
+  private constructor() {
+    super(GATE1_NETWORK_ID, GATE1_AUTHOR_ADDRESS);
+  }
+
+  static async create(contextGraphId: string): Promise<Gate1VmChainAdapter> {
+    const chain = new Gate1VmChainAdapter();
+    const registered = await chain.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+    });
+    chain.__registerKC({
+      kaId: BigInt(GATE1_KA_ID),
+      contextGraphId: registered.contextGraphId,
+      merkleRootHex: GATE1_ASSERTION_ROOT,
+      chunks: [],
+      merkleLeafCount: 2,
+      byteSize: BigInt(Buffer.byteLength(GATE1_PROJECTION_NQUADS)),
+      publisherAddress: GATE1_AUTHOR_ADDRESS,
+    });
+    return chain;
+  }
+
+  snapshotReadCounts(): Readonly<VmChainReadCounts> {
+    return Object.freeze({ ...this.#readCounts });
+  }
+
+  override async resolveContextGraphIdByNameHash(nameHash: string): Promise<bigint | null> {
+    this.#readCounts.nameHashResolution += 1;
+    return super.resolveContextGraphIdByNameHash(nameHash);
+  }
+
+  override async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
+    this.#readCounts.count += 1;
+    return super.getContextGraphKCCount(contextGraphId);
+  }
+
+  override async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
+    this.#readCounts.kaAt += 1;
+    return super.getContextGraphKCAt(contextGraphId, index);
+  }
+
+  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    this.#readCounts.storageAddress += 1;
+    return GATE1_AUTHOR_ADDRESS;
+  }
+
+  override async getLatestMerkleRoot(kaId: bigint): Promise<Uint8Array> {
+    this.#readCounts.latestRoot += 1;
+    return super.getLatestMerkleRoot(kaId);
+  }
+
+  override async getMerkleRootCount(kaId: bigint): Promise<bigint> {
+    this.#readCounts.rootCount += 1;
+    return super.getMerkleRootCount(kaId);
+  }
+
+  override async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
+    this.#readCounts.publisher += 1;
+    return super.getLatestMerkleRootPublisher(kaId);
+  }
+
+  override async getLatestMerkleRootAuthor(kaId: bigint): Promise<string> {
+    this.#readCounts.author += 1;
+    return super.getLatestMerkleRootAuthor(kaId);
+  }
+
+  override async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
+    this.#readCounts.active += 1;
+    return super.isContextGraphActiveOnChain(contextGraphId);
+  }
+
+  override async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
+    this.#readCounts.accessPolicy += 1;
+    return super.getContextGraphAccessPolicy(contextGraphId);
+  }
+}
+
+function subtractCounts(
+  current: Readonly<VmChainReadCounts>,
+  previous: Readonly<VmChainReadCounts>,
+): Readonly<VmChainReadCounts> {
+  return Object.freeze(Object.fromEntries(VM_CHAIN_READ_KEYS.map((key) => (
+    [key, current[key] - previous[key]]
+  ))) as VmChainReadCounts);
 }
 
 function compareQuad(left: Quad, right: Quad): number {

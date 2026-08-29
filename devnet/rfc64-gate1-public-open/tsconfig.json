@@ -12,6 +12,7 @@
     "agent-child.test.ts",
     "agent-child.ts",
     "adapter-process.ts",
+    "fixture.ts",
     "model.test.ts",
     "model.ts",
     "product-capabilities.test.ts",

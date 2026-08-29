@@ -7,35 +7,26 @@ import { after, test } from 'node:test';
 
 import {
   MemoryLayer,
-  assertCanonicalGraphScopedAuthorSealV1,
-  buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
-  type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
-import { ethers } from 'ethers';
 
 import { ChildProcessRegistry } from '../rfc64-persistence-lifecycle/process-lifecycle.js';
 import { Gate1AgentChild, type Gate1AgentEvent } from './agent-child.js';
+import {
+  GATE1_AUTHOR_ADDRESS as AUTHOR_ADDRESS,
+  GATE1_AUTHOR_PRIVATE_KEY as AUTHOR_PRIVATE_KEY,
+  GATE1_DEPLOYMENT as DEPLOYMENT,
+  GATE1_NETWORK_ID as NETWORK_ID,
+  GATE1_PROJECTION_NQUADS as PROJECTION_NQUADS,
+  GATE1_ROLE_MASTER_KEYS as ROLE_KEYS,
+  createGate1AuthorSealV1 as authorSeal,
+} from './fixture.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
-const NETWORK_ID = 'otp:20430';
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/rollout-transition';
-const AUTHOR_PRIVATE_KEY = `0x${'64'.repeat(32)}`;
-const AUTHOR_WALLET = new ethers.Wallet(AUTHOR_PRIVATE_KEY);
-const AUTHOR_ADDRESS = AUTHOR_WALLET.address.toLowerCase();
-const DEPLOYMENT = Object.freeze({
-  networkId: NETWORK_ID,
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
-});
-const PROJECTION_NQUADS =
-  '<https://example.org/alice> <https://schema.org/age> '
-    + '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
-    + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
-const ROLE_KEYS = Object.freeze({ author: '1a'.repeat(32), receiver: '2b'.repeat(32) });
 const children = new ChildProcessRegistry(20_000);
 const temporaryRoots: string[] = [];
 
@@ -106,67 +97,133 @@ test('certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     bucketCount: '1',
   } as never);
   const kaUal = string(successor.kaUal, 'successor KA UAL');
+  const assetScope = createGraphKnowledgeAssetScope(kaUal, '1');
   const swmGraph = knowledgeAssetLayerGraphUri(
     CONTEXT_GRAPH_ID,
     MemoryLayer.SharedWorkingMemory,
-    createGraphKnowledgeAssetScope(kaUal, '1'),
+    assetScope,
+  );
+  const vmGraph = knowledgeAssetLayerGraphUri(
+    CONTEXT_GRAPH_ID,
+    MemoryLayer.VerifiableMemory,
+    assetScope,
   );
 
-  const shadow = await startReceiver('shadow', false, receiverDataDir, author, authorReady);
-  assert.deepEqual(await rolloutStatus(shadow.child, 'shadow'), expectedStatus({
+  const shadow = await startReceiver(
+    'shadow',
+    false,
+    receiverDataDir,
+    author,
+    authorReady,
+    false,
+  );
+  assert.deepEqual(await rolloutStatus(
+    shadow.child,
+    authorReady.peerId as string,
+    'shadow',
+  ), expectedStatus({
     service: true,
     legacy: true,
-    manualTargets: 0,
+    manualTargets: 1,
     bootstrap: true,
   }));
+  const seededVmSource = output(await shadow.child.request(
+    'seedVmSourceSwm',
+    'shadow-seed-vm-source',
+    'operation-completed',
+    { contextGraphId: CONTEXT_GRAPH_ID },
+  ));
+  assert.equal(seededVmSource.tripleCount, 2);
+  const shadowVm = await reconcileVm(shadow.child, 'shadow');
+  assertVmChainRead(shadowVm, 'shadow');
+  assertVmReconciled(shadowVm, 'shadow');
+  assertSemanticExact(await semanticGraph(shadow.child, vmGraph, 'shadow-vm'), vmGraph);
+  await connectBothWays(author, shadow.child, authorReady, shadow.ready, 'shadow-connect');
   await announceAndDrain(author, shadow.child, announcement, shadow.ready, 'shadow');
   assert.equal(await stagedHead(shadow.child, headDigest, signatureVariantDigest, 'shadow'), headDigest);
   assert.equal(await appliedHead(shadow.child, catalogScopeDigest, 'shadow'), null);
-  assert.equal((await semanticGraph(shadow.child, swmGraph, 'shadow')).activatedQuadCount, 0);
+  assertSemanticExact(await semanticGraph(shadow.child, swmGraph, 'shadow'), swmGraph);
   await shadow.child.stop('stop-shadow');
 
   const catalog = await startReceiver('catalog', false, receiverDataDir, author, authorReady);
-  assert.deepEqual(await rolloutStatus(catalog.child, 'catalog'), expectedStatus({
+  assert.deepEqual(await rolloutStatus(
+    catalog.child,
+    authorReady.peerId as string,
+    'catalog',
+  ), expectedStatus({
     service: true,
     legacy: false,
     manualTargets: 0,
     bootstrap: true,
   }));
   await announceAndDrain(author, catalog.child, announcement, catalog.ready, 'catalog');
+  assertSemanticExact(
+    await semanticGraph(catalog.child, vmGraph, 'catalog-vm-before'),
+    vmGraph,
+  );
+  const catalogVm = await reconcileVm(catalog.child, 'catalog');
+  assertVmChainRead(catalogVm, 'catalog');
+  const catalogVmGraph = await semanticGraph(catalog.child, vmGraph, 'catalog-vm');
+  assertVmReconciled(catalogVm, 'catalog');
+  assertSemanticExact(catalogVmGraph, vmGraph);
   assertAppliedExact(await appliedHead(catalog.child, catalogScopeDigest, 'catalog'), headDigest);
   assertSemanticExact(await semanticGraph(catalog.child, swmGraph, 'catalog'), swmGraph);
   await catalog.child.stop('stop-catalog');
 
   const killed = await startReceiver('catalog', true, receiverDataDir, author, authorReady, false);
-  assert.deepEqual(await rolloutStatus(killed.child, 'killed'), expectedStatus({
+  assert.deepEqual(await rolloutStatus(
+    killed.child,
+    authorReady.peerId as string,
+    'killed',
+  ), expectedStatus({
     service: false,
     legacy: false,
     manualTargets: 0,
     bootstrap: false,
   }));
+  const killedVm = await reconcileVm(killed.child, 'killed');
+  assertVmChainRead(killedVm, 'killed');
+  assertVmReconciled(killedVm, 'killed');
+  assertSemanticExact(await semanticGraph(killed.child, vmGraph, 'killed-vm'), vmGraph);
   assertAppliedExact(await appliedHead(killed.child, catalogScopeDigest, 'killed'), headDigest);
   assertSemanticExact(await semanticGraph(killed.child, swmGraph, 'killed'), swmGraph);
   await killed.child.stop('stop-killed');
 
   const reenabled = await startReceiver('catalog', false, receiverDataDir, author, authorReady);
-  assert.deepEqual(await rolloutStatus(reenabled.child, 'reenabled'), expectedStatus({
+  assert.deepEqual(await rolloutStatus(
+    reenabled.child,
+    authorReady.peerId as string,
+    'reenabled',
+  ), expectedStatus({
     service: true,
     legacy: false,
     manualTargets: 0,
     bootstrap: true,
   }));
   await announceAndDrain(author, reenabled.child, announcement, reenabled.ready, 'reenabled');
+  const reenabledVm = await reconcileVm(reenabled.child, 'reenabled');
+  assertVmChainRead(reenabledVm, 'reenabled');
+  assertVmReconciled(reenabledVm, 'reenabled');
+  assertSemanticExact(await semanticGraph(reenabled.child, vmGraph, 'reenabled-vm'), vmGraph);
   assertAppliedExact(await appliedHead(reenabled.child, catalogScopeDigest, 'reenabled'), headDigest);
   assertSemanticExact(await semanticGraph(reenabled.child, swmGraph, 'reenabled'), swmGraph);
   await reenabled.child.stop('stop-reenabled');
 
   const legacy = await startReceiver('legacy', false, receiverDataDir, author, authorReady, false);
-  assert.deepEqual(await rolloutStatus(legacy.child, 'legacy'), expectedStatus({
+  assert.deepEqual(await rolloutStatus(
+    legacy.child,
+    authorReady.peerId as string,
+    'legacy',
+  ), expectedStatus({
     service: false,
     legacy: true,
-    manualTargets: 0,
-    bootstrap: false,
+    manualTargets: 1,
+    bootstrap: true,
   }));
+  const legacyVm = await reconcileVm(legacy.child, 'legacy');
+  assertVmChainRead(legacyVm, 'legacy');
+  assertVmReconciled(legacyVm, 'legacy');
+  assertSemanticExact(await semanticGraph(legacy.child, vmGraph, 'legacy-vm'), vmGraph);
   assertAppliedExact(await appliedHead(legacy.child, catalogScopeDigest, 'legacy'), headDigest);
   assertSemanticExact(await semanticGraph(legacy.child, swmGraph, 'legacy'), swmGraph);
   await legacy.child.stop('stop-legacy');
@@ -181,7 +238,13 @@ async function startReceiver(
   authorReady: Gate1AgentEvent,
   connect = true,
 ): Promise<Readonly<{ child: Gate1AgentChild; ready: Gate1AgentEvent }>> {
-  const child = spawnAgent('receiver', dataDir, mode, killSwitch);
+  const child = spawnAgent(
+    'receiver',
+    dataDir,
+    mode,
+    killSwitch,
+    authorReady.peerId as string,
+  );
   const ready = await child.waitFor('ready');
   assertReady(ready, mode, killSwitch);
   if (mode !== 'legacy' && !killSwitch) {
@@ -236,6 +299,7 @@ function spawnAgent(
   dataDir: string,
   mode: RolloutMode | null = null,
   killSwitch = false,
+  completeSwmProvider?: string,
 ): Gate1AgentChild {
   return new Gate1AgentChild({
     eventTimeoutMs: 60_000,
@@ -255,6 +319,10 @@ function spawnAgent(
           DKG_RFC64_ROLLOUT_KILL_SWITCH: killSwitch ? 'true' : 'false',
           DKG_RFC64_ROLLOUT_CONTEXT_GRAPH_ID: CONTEXT_GRAPH_ID,
           DKG_RFC64_ROLLOUT_OWNER_ADDRESS: AUTHOR_ADDRESS,
+          ...(completeSwmProvider === undefined
+            ? {}
+            : { DKG_RFC64_ROLLOUT_COMPLETE_SWM_PROVIDER: completeSwmProvider }),
+          DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS: '600000',
         }),
       },
     },
@@ -270,10 +338,45 @@ async function acceptPolicy(child: Gate1AgentChild, requestId: string): Promise<
   assert.match(string(accepted.policyDigest, 'policy digest'), /^0x[0-9a-f]{64}$/u);
 }
 
-async function rolloutStatus(child: Gate1AgentChild, label: string): Promise<unknown> {
+async function rolloutStatus(
+  child: Gate1AgentChild,
+  completeProviderPeerId: string,
+  label: string,
+): Promise<unknown> {
   return output(await child.request('rolloutStatus', `${label}-status`, 'operation-completed', {
     contextGraphId: CONTEXT_GRAPH_ID,
+    completeProviderPeerId,
   }));
+}
+
+async function reconcileVm(
+  child: Gate1AgentChild,
+  label: string,
+): Promise<Record<string, unknown>> {
+  return output(await child.request('vmReconcile', `${label}-vm-reconcile`, 'operation-completed', {
+    contextGraphId: CONTEXT_GRAPH_ID,
+  }));
+}
+
+function assertVmChainRead(value: Record<string, unknown>, label: string): void {
+  const reads = record(value.chainReadDelta, `${label} VM chain-read delta`);
+  assert.equal(Number(reads.nameHashResolution) >= 2, true);
+  assert.equal(Number(reads.count) >= 1, true);
+  const result = record(value.result, `${label} VM reconcile result`);
+  assert.equal(result.contextGraphId, CONTEXT_GRAPH_ID);
+  assert.equal(result.source, 'manual');
+}
+
+function assertVmReconciled(value: Record<string, unknown>, label: string): void {
+  const result = record(value.result, `${label} VM reconcile result`);
+  assert.equal(
+    result.status,
+    'current',
+    `${label} VM reconcile evidence: ${JSON.stringify(value)}`,
+  );
+  assert.equal(result.headOrdinal, 1);
+  assert.equal(result.watermarkAfter, 1);
+  assert.equal(result.unresolvedOrdinals, 0);
 }
 
 function expectedStatus(input: Readonly<{
@@ -354,45 +457,6 @@ function assertReady(
   assert.equal(event.rolloutKillSwitch, killSwitch);
   assert.equal(typeof event.peerId, 'string');
   assert.equal(typeof event.multiaddr, 'string');
-}
-
-async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
-  const kaNumber = 7n;
-  const kaId = ((BigInt(AUTHOR_ADDRESS) << 96n) | kaNumber).toString();
-  const typedData = buildAuthorAttestationTypedData({
-    chainId: BigInt(DEPLOYMENT.assertedAtChainId),
-    kav10Address: DEPLOYMENT.assertedAtKav10Address as never,
-    merkleRoot: ethers.getBytes(
-      '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
-    ),
-    authorAddress: AUTHOR_ADDRESS as never,
-    reservedKaId: BigInt(kaId),
-  });
-  const signature = ethers.Signature.from(await AUTHOR_WALLET.signTypedData(
-    typedData.domain,
-    typedData.types,
-    typedData.message,
-  ));
-  const seal = {
-    assertionMerkleRoot:
-      '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
-    authorAddress: AUTHOR_ADDRESS,
-    authorAttestationR: signature.r,
-    authorAttestationVS: signature.yParityAndS,
-    authorSchemeVersion: '1',
-    assertedAtChainId: DEPLOYMENT.assertedAtChainId,
-    assertedAtKav10Address: DEPLOYMENT.assertedAtKav10Address,
-    reservedKaId: kaId,
-    assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
-    contentScopeVersion: '2',
-    kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR_ADDRESS}/${kaNumber}`,
-    assertionVersion: '1',
-    publicTripleCount: '2',
-    privateTripleCount: '0',
-    privateMerkleRoot: null,
-  } as unknown as CanonicalGraphScopedAuthorSealV1;
-  assertCanonicalGraphScopedAuthorSealV1(seal);
-  return seal;
 }
 
 function stagedHeadRef(value: Record<string, unknown>): Record<string, unknown> {
