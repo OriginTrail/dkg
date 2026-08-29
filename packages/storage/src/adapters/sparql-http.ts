@@ -219,7 +219,12 @@ export interface SparqlHttpStoreOptions {
    * index/revalidation owner.
    */
   managedByDkg?: boolean;
-  /** Runtime-only marker for a daemon-supervised Oxigraph endpoint. */
+  /**
+   * Runtime-only marker issued by the daemon supervisor for the Oxigraph
+   * process it launched. This is deliberately independent of
+   * `managedByDkg`, which only describes namespace/cache ownership and may be
+   * present in persisted operator configuration.
+   */
   managedOxigraph?: boolean;
   /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
   onClientTimeout?: (operation: string) => void;
@@ -284,7 +289,7 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
-    this.managedOxigraph = options.managedOxigraph === true || this.managedByDkg;
+    this.managedOxigraph = options.managedOxigraph === true;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
     this.consistencyProfile = this.managedOxigraph

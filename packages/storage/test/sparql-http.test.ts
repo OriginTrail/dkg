@@ -612,6 +612,7 @@ describe('SparqlHttpStore (test server)', () => {
       const managed = new SparqlHttpStore({
         queryEndpoint: 'http://managed-oxigraph.test/query',
         managedByDkg: true,
+        managedOxigraph: true,
         onClientTimeout,
       });
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
@@ -664,6 +665,7 @@ describe('SparqlHttpStore (test server)', () => {
       const managed = new SparqlHttpStore({
         queryEndpoint: 'http://managed-oxigraph.test/query',
         managedByDkg: true,
+        managedOxigraph: true,
       });
       await expect(
         managed.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
@@ -689,6 +691,7 @@ describe('SparqlHttpStore (test server)', () => {
       const managed = new SparqlHttpStore({
         queryEndpoint: 'http://managed-oxigraph.test/query',
         managedByDkg: true,
+        managedOxigraph: true,
       });
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
         code: 'STORE_OPERATION_TIMEOUT',
@@ -1217,6 +1220,7 @@ describe('SparqlHttpStore (test server)', () => {
       queryEndpoint: queryUrl,
       updateEndpoint: updateUrl,
       managedByDkg: true,
+      managedOxigraph: true,
     });
     await expect(tryReplaceGraphAtomically(managedStore, 'http://ex.org/g1', replacement))
       .resolves.toBe(true);
@@ -1271,6 +1275,7 @@ describe('SparqlHttpStore (test server)', () => {
       queryEndpoint: queryUrl,
       updateEndpoint: updateUrl,
       managedByDkg: true,
+      managedOxigraph: true,
     });
     await expect(tryReplaceSubjectAtomically(managedStore, 'http://ex.org/g1', 'http://ex.org/job', replacement))
       .resolves.toBe(true);

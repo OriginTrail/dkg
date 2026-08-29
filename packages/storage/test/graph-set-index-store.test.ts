@@ -1388,7 +1388,12 @@ describe('GraphSetIndexStore', () => {
     const endpoint = `http://127.0.0.1:${port}/sparql`;
     const store = await createTripleStore({
       backend: 'sparql-http',
-      options: { queryEndpoint: endpoint, updateEndpoint: endpoint, managedByDkg: true },
+      options: {
+        queryEndpoint: endpoint,
+        updateEndpoint: endpoint,
+        managedByDkg: true,
+        managedOxigraph: true,
+      },
     });
     try {
       const graph = 'did:dkg:context-graph:managed-atomic';

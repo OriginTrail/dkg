@@ -548,16 +548,13 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   ) {
     return config.options;
   }
-  // `managedByDkg` has two independent meanings in SparqlHttpStore: it owns
-  // the adapter-local graph-list cache and it identifies the transactional
-  // daemon-managed Oxigraph endpoint. The outer GraphSetIndexStore replaces
-  // only the cache, so preserve the managed-Oxigraph identity when clearing
-  // the cache-ownership flag. SparqlHttpStore derives the strongest consistency
-  // profile from that identity in one place.
+  // The outer GraphSetIndexStore replaces the adapter-local graph-list cache,
+  // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
+  // process carries the separate runtime-only `managedOxigraph` capability;
+  // never derive that consistency proof from persisted namespace ownership.
   return {
     ...config.options,
     managedByDkg: false,
-    managedOxigraph: true,
   };
 }
 

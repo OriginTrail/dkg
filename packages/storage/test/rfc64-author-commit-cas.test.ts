@@ -1,148 +1,44 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
-  BlazegraphStore,
-  ChangelogStore,
-  EXTERNAL_LITERAL_REF_DATATYPE,
-  GraphSetIndexStore,
   OxigraphStore,
   RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
-  SharedMemoryLiteralBlobStore,
   SparqlHttpStore,
-  UnsupportedTripleStoreCapabilityError,
   buildRfc64AuthorCommitCasUpdateV1,
-  createTripleStore,
   executeRfc64AuthorCommitCasV1,
   mapRfc64AuthorCommitCasV1,
   normalizeRfc64AuthorCommitCasV1,
-  tryRfc64AuthorCommitCasV1,
-  type Quad,
-  type QueryOptions,
   type Rfc64AuthorCommitCasInputV1,
-  type TripleStore,
 } from '../src/index.js';
-
-const PROJECTION_GRAPH = 'did:dkg:context-graph:rfc64/_shared_memory';
-const SEAL_GRAPH = 'urn:test:rfc64:seals';
-const HEAD_GRAPH = 'urn:test:rfc64:heads';
-const STATE_GRAPH = 'urn:test:rfc64:state';
-const OTHER_GRAPH = 'urn:test:rfc64:unrelated';
-const AUTHOR = 'urn:test:rfc64:author:alice';
-const SEAL = 'urn:test:rfc64:seal:alice';
-const KA_STATE = 'urn:test:rfc64:ka-state';
-const MUTATION = 'urn:test:rfc64:mutation:subgraph';
-const CG_MUTATION = 'urn:test:rfc64:mutation:context-graph';
-const APPLIED_SET = 'urn:test:rfc64:applied-set';
-const INVALIDATED_SEAL = 'urn:test:rfc64:seal:stale';
-const P_VALUE = 'urn:test:rfc64:value';
-const P_HEAD = 'urn:test:rfc64:current-head';
-const P_GENERATION = 'urn:test:rfc64:generation';
-const P_APPLIED = 'urn:test:rfc64:applied';
-const OLD_HEAD = 'urn:test:rfc64:catalog:old';
-const NEW_HEAD = 'urn:test:rfc64:catalog:new';
-
-function quad(subject: string, predicate: string, object: string, graph: string): Quad {
-  return { subject, predicate, object, graph };
-}
-
-function authorCommitInput(
-  overrides: Partial<Rfc64AuthorCommitCasInputV1> = {},
-): Rfc64AuthorCommitCasInputV1 {
-  return {
-    sharedProjectionGraph: PROJECTION_GRAPH,
-    sharedProjectionQuads: [
-      quad('urn:test:rfc64:new:1', P_VALUE, '"new-1"', PROJECTION_GRAPH),
-      quad('urn:test:rfc64:new:2', P_VALUE, '"new-2"', PROJECTION_GRAPH),
-    ],
-    authorSealGraph: SEAL_GRAPH,
-    authorSealSubject: SEAL,
-    authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', SEAL_GRAPH)],
-    currentHeadGraph: HEAD_GRAPH,
-    currentHeadSubject: AUTHOR,
-    currentHeadPredicate: P_HEAD,
-    expectedCurrentHeadObject: OLD_HEAD,
-    nextCurrentHeadObject: NEW_HEAD,
-    kaStateDigest: {
-      graphUri: STATE_GRAPH,
-      subject: KA_STATE,
-      predicate: P_VALUE,
-      expectedObject: OLD_HEAD,
-      quads: [quad(KA_STATE, P_VALUE, NEW_HEAD, STATE_GRAPH)],
-    },
-    subgraphMutationGeneration: {
-      graphUri: STATE_GRAPH,
-      subject: MUTATION,
-      predicate: P_GENERATION,
-      expectedObject: '"1"',
-      quads: [quad(MUTATION, P_GENERATION, '"2"', STATE_GRAPH)],
-    },
-    contextGraphMutationGeneration: {
-      graphUri: STATE_GRAPH,
-      subject: CG_MUTATION,
-      predicate: P_GENERATION,
-      expectedObject: '"10"',
-      quads: [quad(CG_MUTATION, P_GENERATION, '"11"', STATE_GRAPH)],
-    },
-    appliedSet: {
-      graphUri: STATE_GRAPH,
-      subject: APPLIED_SET,
-      predicate: P_APPLIED,
-      expectedObject: OLD_HEAD,
-      quads: [quad(APPLIED_SET, P_APPLIED, NEW_HEAD, STATE_GRAPH)],
-    },
-    sealInvalidations: [],
-    ...overrides,
-  };
-}
-
-async function seedOldState(store: TripleStore): Promise<void> {
-  await store.insert([
-    quad('urn:test:rfc64:old', P_VALUE, '"old"', PROJECTION_GRAPH),
-    quad(SEAL, P_VALUE, '"old-seal"', SEAL_GRAPH),
-    quad(AUTHOR, P_HEAD, OLD_HEAD, HEAD_GRAPH),
-    quad(KA_STATE, P_VALUE, OLD_HEAD, STATE_GRAPH),
-    quad(MUTATION, P_GENERATION, '"1"', STATE_GRAPH),
-    quad(CG_MUTATION, P_GENERATION, '"10"', STATE_GRAPH),
-    quad(APPLIED_SET, P_APPLIED, OLD_HEAD, STATE_GRAPH),
-    quad('urn:test:rfc64:keep', P_VALUE, '"keep"', OTHER_GRAPH),
-  ]);
-}
-
-async function objectFor(
-  store: TripleStore,
-  graph: string,
-  subject: string,
-  predicate: string,
-): Promise<string | undefined> {
-  const result = await store.query(
-    `SELECT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
-  );
-  if (result.type !== 'bindings') throw new Error('expected bindings result');
-  return result.bindings[0]?.o;
-}
-
-function overrideStore(base: TripleStore, overrides: Partial<TripleStore>): TripleStore {
-  return new Proxy(base, {
-    get(target, prop) {
-      if (prop in overrides) return (overrides as Record<string | symbol, unknown>)[prop];
-      const value = Reflect.get(target, prop, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }) as TripleStore;
-}
+import {
+  APPLIED_SET,
+  AUTHOR,
+  CG_MUTATION,
+  HEAD_GRAPH,
+  INVALIDATED_SEAL,
+  KA_STATE,
+  MUTATION,
+  NEW_HEAD,
+  OLD_HEAD,
+  OTHER_GRAPH,
+  PROJECTION_GRAPH,
+  P_APPLIED,
+  P_GENERATION,
+  P_HEAD,
+  P_VALUE,
+  SEAL,
+  SEAL_GRAPH,
+  STATE_GRAPH,
+  authorCommitInput,
+  objectFor,
+  quad,
+  seedOldState,
+} from './rfc64-author-commit-cas-harness.js';
 
 describe('RFC-64 certified author commit CAS v1', () => {
-  const tempDirs: string[] = [];
-
-  afterEach(async () => {
+  afterEach(() => {
     vi.restoreAllMocks();
-    await Promise.all(
-      tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
-    );
   });
 
   describe('receipt executor failure contract', () => {
@@ -221,7 +117,9 @@ describe('RFC-64 certified author commit CAS v1', () => {
     ]);
     expect(await objectFor(store, SEAL_GRAPH, SEAL, P_VALUE)).toBe('"new-seal"');
     expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
+    expect(await objectFor(store, STATE_GRAPH, KA_STATE, P_VALUE)).toBe(NEW_HEAD);
     expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBe('"2"');
+    expect(await objectFor(store, STATE_GRAPH, CG_MUTATION, P_GENERATION)).toBe('"11"');
     expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(NEW_HEAD);
     expect(await store.countQuads(OTHER_GRAPH)).toBe(1);
     expect((await store.listGraphs()).some(
@@ -241,15 +139,19 @@ describe('RFC-64 certified author commit CAS v1', () => {
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
     const quadRoles: string[] = [];
     const objectRoles: string[] = [];
+    let mappedQuadIndex = 0;
 
     const mapped = await mapRfc64AuthorCommitCasV1(manifest, {
       mapQuad: async (value, context) => {
         quadRoles.push(`${context.role}:${context.roleIndex}`);
-        return value;
+        return {
+          ...value,
+          object: `"mapped:${context.role}:${context.roleIndex}:${mappedQuadIndex++}"`,
+        };
       },
       mapObject: async (value, context) => {
         objectRoles.push(`${context.role}:${context.kind}`);
-        return value;
+        return value === null ? null : `<urn:test:mapped:${context.role}:${context.kind}>`;
       },
     });
 
@@ -271,7 +173,27 @@ describe('RFC-64 certified author commit CAS v1', () => {
       'appliedSet:expected',
       'currentHead:next',
     ]);
-    expect(mapped).toEqual(input);
+    expect(mapped.sharedProjectionQuads.map(({ object }) => object)).toEqual([
+      '"mapped:sharedProjection:0:0"',
+      '"mapped:sharedProjection:0:1"',
+    ]);
+    expect(mapped.authorSealQuads[0]?.object).toBe('"mapped:authorSeal:0:2"');
+    expect(mapped.kaStateDigest.quads[0]?.object).toBe('"mapped:kaStateDigest:0:3"');
+    expect(mapped.subgraphMutationGeneration.quads[0]?.object)
+      .toBe('"mapped:subgraphMutationGeneration:0:4"');
+    expect(mapped.contextGraphMutationGeneration.quads[0]?.object)
+      .toBe('"mapped:contextGraphMutationGeneration:0:5"');
+    expect(mapped.appliedSet.quads[0]?.object).toBe('"mapped:appliedSet:0:6"');
+    expect(mapped.sealInvalidations[0]?.quads[0]?.object)
+      .toBe('"mapped:sealInvalidation:0:7"');
+    expect(mapped.expectedCurrentHeadObject).toBe('<urn:test:mapped:currentHead:expected>');
+    expect(mapped.kaStateDigest.expectedObject).toBe('<urn:test:mapped:kaStateDigest:expected>');
+    expect(mapped.subgraphMutationGeneration.expectedObject)
+      .toBe('<urn:test:mapped:subgraphMutationGeneration:expected>');
+    expect(mapped.contextGraphMutationGeneration.expectedObject)
+      .toBe('<urn:test:mapped:contextGraphMutationGeneration:expected>');
+    expect(mapped.appliedSet.expectedObject).toBe('<urn:test:mapped:appliedSet:expected>');
+    expect(mapped.nextCurrentHeadObject).toBe('<urn:test:mapped:currentHead:next>');
     expect(manifest.semanticQuads).toHaveLength(9);
     expect(manifest.touchedGraphs).toEqual([
       PROJECTION_GRAPH,
@@ -543,402 +465,6 @@ describe('RFC-64 certified author commit CAS v1', () => {
     await expect(store.rfc64AuthorCommitCasV1(authorCommitInput())).resolves.toBe('conflict');
     expect(store.getWriteGen(affectedPrefix)).toBe(affectedAfterCommit);
     expect(store.getWriteGen(unrelatedPrefix)).toBe(unrelatedBefore);
-  });
-
-  it('preserves the capability through literal, graph-index, and changelog decorators', async () => {
-    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-author-commit-blobs-'));
-    tempDirs.push(blobDir);
-    const raw = new OxigraphStore();
-    const blobs = new SharedMemoryLiteralBlobStore(raw, { blobDir, thresholdBytes: 20 });
-    const indexed = new GraphSetIndexStore(blobs, { revalidateMs: 60_000 });
-    const records: Array<{ graph: string; op: string }> = [];
-    const store = new ChangelogStore(indexed, {
-      onAppend: ({ graph, op }) => records.push({ graph, op }),
-    });
-    await seedOldState(store);
-    records.length = 0;
-    const largeLiteral = `"${'large-public-swm-value'.repeat(10)}"`;
-
-    await expect(tryRfc64AuthorCommitCasV1(store, authorCommitInput({
-      sharedProjectionQuads: [
-        quad('urn:test:rfc64:new:large', P_VALUE, largeLiteral, PROJECTION_GRAPH),
-      ],
-    }))).resolves.toBe('committed');
-
-    expect(await objectFor(store, PROJECTION_GRAPH, 'urn:test:rfc64:new:large', P_VALUE)).toBe(
-      largeLiteral,
-    );
-    const rawObject = await objectFor(
-      raw,
-      PROJECTION_GRAPH,
-      'urn:test:rfc64:new:large',
-      P_VALUE,
-    );
-    expect(rawObject).toMatch(
-      new RegExp(`^"sha256:[0-9a-f]{64}"\\^\\^<${EXTERNAL_LITERAL_REF_DATATYPE}>$`),
-    );
-    expect(records).toEqual([
-      { graph: PROJECTION_GRAPH, op: 'upsert' },
-      { graph: SEAL_GRAPH, op: 'upsert' },
-      { graph: HEAD_GRAPH, op: 'upsert' },
-      { graph: STATE_GRAPH, op: 'upsert' },
-    ]);
-    expect(await store.listGraphs()).toEqual(expect.arrayContaining([
-      PROJECTION_GRAPH,
-      SEAL_GRAPH,
-      HEAD_GRAPH,
-      STATE_GRAPH,
-    ]));
-
-    records.length = 0;
-    await expect(tryRfc64AuthorCommitCasV1(store, authorCommitInput())).resolves.toBe('conflict');
-    expect(records).toEqual([]);
-  });
-
-  it('translates oversized scalar guards and next values through the blob representation', async () => {
-    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-scalar-blobs-'));
-    tempDirs.push(blobDir);
-    const raw = new OxigraphStore();
-    const store = new SharedMemoryLiteralBlobStore(raw, { blobDir, thresholdBytes: 20 });
-    await seedOldState(store);
-    const scalarGraph = 'did:dkg:context-graph:rfc64/control/_shared_memory';
-    const oldValue = `"${'old-guard-value'.repeat(10)}"`;
-    const nextValue = `"${'next-guard-value'.repeat(10)}"`;
-    await store.insert([quad(KA_STATE, P_VALUE, oldValue, scalarGraph)]);
-    const input = authorCommitInput({
-      kaStateDigest: {
-        graphUri: scalarGraph,
-        subject: KA_STATE,
-        predicate: P_VALUE,
-        expectedObject: oldValue,
-        quads: [quad(KA_STATE, P_VALUE, nextValue, scalarGraph)],
-      },
-      currentHeadGraph: scalarGraph,
-      currentHeadSubject: AUTHOR,
-      currentHeadPredicate: P_HEAD,
-      expectedCurrentHeadObject: null,
-      nextCurrentHeadObject: nextValue,
-    });
-    await expect(store.rfc64AuthorCommitCasV1(input)).resolves.toBe('committed');
-    expect(await objectFor(store, scalarGraph, KA_STATE, P_VALUE)).toBe(nextValue);
-    expect(await objectFor(store, scalarGraph, AUTHOR, P_HEAD)).toBe(nextValue);
-  });
-
-  it('retains newly-created literal blobs after a clean conflict for reference-aware GC', async () => {
-    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-conflict-blobs-'));
-    tempDirs.push(blobDir);
-    const base = new OxigraphStore();
-    const inner = overrideStore(base, {
-      rfc64AuthorCommitCasV1: async () => 'conflict',
-    });
-    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 20 });
-    const largeLiteral = `"${'conflicting-value'.repeat(20)}"`;
-
-    await expect(store.rfc64AuthorCommitCasV1(authorCommitInput({
-      sharedProjectionQuads: [
-        quad('urn:test:rfc64:conflict', P_VALUE, largeLiteral, PROJECTION_GRAPH),
-      ],
-    }))).resolves.toBe('conflict');
-    expect(await readdir(blobDir)).toHaveLength(1);
-  });
-
-  it('preserves pre-existing and concurrently committed shared blob hashes', async () => {
-    const preexistingDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-shared-blob-'));
-    tempDirs.push(preexistingDir);
-    const largeLiteral = `"${'shared-value'.repeat(30)}"`;
-    const preexistingInner = overrideStore(new OxigraphStore(), {
-      rfc64AuthorCommitCasV1: async () => 'conflict',
-    });
-    const preexisting = new SharedMemoryLiteralBlobStore(
-      preexistingInner,
-      { blobDir: preexistingDir, thresholdBytes: 20 },
-    );
-    await preexisting.insert([
-      quad('urn:test:rfc64:existing', P_VALUE, largeLiteral, PROJECTION_GRAPH),
-    ]);
-    const existingFiles = await readdir(preexistingDir);
-    await expect(preexisting.rfc64AuthorCommitCasV1(authorCommitInput({
-      sharedProjectionQuads: [
-        quad('urn:test:rfc64:conflict', P_VALUE, largeLiteral, PROJECTION_GRAPH),
-      ],
-    }))).resolves.toBe('conflict');
-    expect(await readdir(preexistingDir)).toEqual(existingFiles);
-
-    const concurrentDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-concurrent-blob-'));
-    tempDirs.push(concurrentDir);
-    let entered = 0;
-    let releaseBoth!: () => void;
-    const bothEntered = new Promise<void>((resolve) => { releaseBoth = resolve; });
-    const concurrentInner = overrideStore(new OxigraphStore(), {
-      rfc64AuthorCommitCasV1: async () => {
-        const writer = entered++;
-        if (entered === 2) releaseBoth();
-        await bothEntered;
-        return writer === 0 ? 'committed' : 'conflict';
-      },
-    });
-    const concurrent = new SharedMemoryLiteralBlobStore(
-      concurrentInner,
-      { blobDir: concurrentDir, thresholdBytes: 20 },
-    );
-    const manifest = authorCommitInput({
-      sharedProjectionQuads: [
-        quad('urn:test:rfc64:concurrent', P_VALUE, largeLiteral, PROJECTION_GRAPH),
-      ],
-    });
-    await expect(Promise.all([
-      concurrent.rfc64AuthorCommitCasV1(manifest),
-      concurrent.rfc64AuthorCommitCasV1(manifest),
-    ])).resolves.toEqual(['committed', 'conflict']);
-    expect(await readdir(concurrentDir)).toHaveLength(1);
-  });
-
-  it('flags changelog reconciliation after an indeterminate post-commit failure', async () => {
-    const base = new OxigraphStore();
-    await seedOldState(base);
-    const inner = overrideStore(base, {
-      rfc64AuthorCommitCasV1: async (
-        input: Rfc64AuthorCommitCasInputV1,
-        options?: QueryOptions,
-      ) => {
-        await base.rfc64AuthorCommitCasV1!(input, options);
-        throw new Error('response lost after commit');
-      },
-    });
-    const store = new ChangelogStore(inner);
-
-    await expect(store.rfc64AuthorCommitCasV1(authorCommitInput())).rejects.toThrow(
-      'response lost after commit',
-    );
-    expect(store.needsReconcile).toBe(true);
-    expect(await objectFor(base, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
-  });
-
-  it('rebuilds a warm graph index after an indeterminate RFC-64 commit response', async () => {
-    const base = new OxigraphStore();
-    await seedOldState(base);
-    const committedGraph = 'urn:test:rfc64:new-seal-graph';
-    const committedInput = authorCommitInput({
-      authorSealGraph: committedGraph,
-      authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', committedGraph)],
-    });
-    let scans = 0;
-    const inner = overrideStore(base, {
-      listGraphs: async (options?: QueryOptions) => {
-        scans += 1;
-        return base.listGraphs(options);
-      },
-      rfc64AuthorCommitCasV1: async (input, options) => {
-        await base.rfc64AuthorCommitCasV1!(input, options);
-        throw new Error('RFC-64 response lost after commit');
-      },
-    });
-    const store = new GraphSetIndexStore(inner, { revalidateMs: 60_000 });
-    expect(await store.listGraphs()).not.toContain(committedGraph);
-    expect(scans).toBe(1);
-
-    await expect(store.rfc64AuthorCommitCasV1(committedInput))
-      .rejects.toThrow('RFC-64 response lost after commit');
-    expect(await store.listGraphs()).toEqual(expect.arrayContaining([
-      PROJECTION_GRAPH,
-      committedGraph,
-      HEAD_GRAPH,
-      STATE_GRAPH,
-    ]));
-    expect(scans).toBe(2);
-  });
-
-  it('maintains added and emptied graphs in a warm index without a full rescan', async () => {
-    const base = new OxigraphStore();
-    await seedOldState(base);
-    const addedGraph = 'urn:test:rfc64:added-seal-graph';
-    const emptiedGraph = 'urn:test:rfc64:emptied-seal-graph';
-    await base.insert([
-      quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', emptiedGraph),
-    ]);
-    let scans = 0;
-    const inner = overrideStore(base, {
-      listGraphs: async (options?: QueryOptions) => {
-        scans += 1;
-        return base.listGraphs(options);
-      },
-    });
-    const store = new GraphSetIndexStore(inner, { revalidateMs: 60_000 });
-    expect(await store.listGraphs()).toEqual(expect.arrayContaining([emptiedGraph]));
-    expect(await store.listGraphs()).not.toContain(addedGraph);
-    expect(scans).toBe(1);
-
-    await expect(store.rfc64AuthorCommitCasV1(authorCommitInput({
-      authorSealGraph: addedGraph,
-      authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', addedGraph)],
-      sealInvalidations: [{
-        graphUri: emptiedGraph,
-        subject: INVALIDATED_SEAL,
-        quads: [],
-      }],
-    }))).resolves.toBe('committed');
-
-    const graphs = await store.listGraphs();
-    expect(graphs).toContain(addedGraph);
-    expect(graphs).not.toContain(emptiedGraph);
-    expect(scans).toBe(1);
-  });
-
-  it('keeps a warm graph index on RFC-64 conflict and proven not-started refusal', async () => {
-    for (const outcome of ['conflict', 'not-started'] as const) {
-      const base = new OxigraphStore();
-      await base.insert([quad('urn:test:rfc64:warm', P_VALUE, '"warm"', OTHER_GRAPH)]);
-      let scans = 0;
-      const inner = overrideStore(base, {
-        listGraphs: async (options?: QueryOptions) => {
-          scans += 1;
-          return base.listGraphs(options);
-        },
-        rfc64AuthorCommitCasV1: async () => {
-          if (outcome === 'not-started') {
-            throw new UnsupportedTripleStoreCapabilityError(
-              'rfc64AuthorCommitCasV1',
-              'refusing-test-store',
-            );
-          }
-          return 'conflict';
-        },
-      });
-      const store = new GraphSetIndexStore(inner, { revalidateMs: 60_000 });
-      expect(await store.listGraphs()).toEqual([OTHER_GRAPH]);
-      expect(scans).toBe(1);
-
-      if (outcome === 'conflict') {
-        await expect(store.rfc64AuthorCommitCasV1(authorCommitInput()))
-          .resolves.toBe('conflict');
-      } else {
-        await expect(store.rfc64AuthorCommitCasV1(authorCommitInput()))
-          .rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
-      }
-      expect(await store.listGraphs()).toEqual([OTHER_GRAPH]);
-      expect(scans).toBe(1);
-    }
-  });
-
-  it('fails closed on unsupported and non-transactional endpoints before any request', async () => {
-    const base = new OxigraphStore();
-    const unsupported = overrideStore(base, { rfc64AuthorCommitCasV1: undefined });
-    await expect(tryRfc64AuthorCommitCasV1(unsupported, authorCommitInput())).resolves.toBeNull();
-
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    const remote = new SparqlHttpStore({ queryEndpoint: 'http://unsupported.invalid/sparql' });
-    await expect(tryRfc64AuthorCommitCasV1(remote, authorCommitInput())).resolves.toBeNull();
-    const transactionalButReplicaUnsafe = new SparqlHttpStore({
-      queryEndpoint: 'http://unsupported.invalid/query-replica',
-      updateEndpoint: 'http://unsupported.invalid/update-primary',
-      consistencyProfile: 'atomic-update',
-    });
-    await expect(tryRfc64AuthorCommitCasV1(
-      transactionalButReplicaUnsafe,
-      authorCommitInput(),
-    )).resolves.toBeNull();
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it('preserves receipt certification through the managed factory decorator stack', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
-      const body = String(init?.body ?? '');
-      if (body.includes('ASK')) {
-        return new Response(JSON.stringify({ boolean: true }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/sparql-results+json' },
-        });
-      }
-      return new Response(null, { status: 200 });
-    });
-    const store = await createTripleStore({
-      backend: 'sparql-http',
-      options: {
-        queryEndpoint: 'http://managed-rfc64.test/query',
-        updateEndpoint: 'http://managed-rfc64.test/update',
-        managedByDkg: true,
-      },
-    });
-    try {
-      await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput()))
-        .resolves.toBe('committed');
-    } finally {
-      await store.close();
-    }
-  });
-
-  it.each([
-    ['Blazegraph', () => new BlazegraphStore('http://rfc64.test/sparql') as TripleStore],
-    ['transactional SPARQL HTTP', () => new SparqlHttpStore({
-      queryEndpoint: 'http://rfc64.test/query',
-      updateEndpoint: 'http://rfc64.test/update',
-      consistencyProfile: 'atomic-readback',
-    }) as TripleStore],
-  ])('uses the certified update and receipt protocol on %s', async (_name, createStore) => {
-    const requests: Array<{ url: string; body: string }> = [];
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-      const body = String(init?.body ?? '');
-      requests.push({ url: String(input), body });
-      if (body.includes('ASK')) {
-        return new Response(JSON.stringify({ boolean: true }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/sparql-results+json' },
-        });
-      }
-      return new Response(null, { status: 200 });
-    });
-    const store = createStore();
-
-    await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput())).resolves.toBe('committed');
-
-    expect(requests).toHaveLength(3);
-    expect(requests[0]!.body).toContain('urn:dkg:sync:authorCommitApplied');
-    expect(requests[0]!.body).toContain(`GRAPH <${PROJECTION_GRAPH}>`);
-    expect(requests[0]!.body).toContain(`GRAPH <${HEAD_GRAPH}>`);
-    expect(requests[1]!.body).toContain('ASK');
-    expect(requests[2]!.body).toContain('DROP SILENT GRAPH');
-  });
-
-  it.each([
-    ['Blazegraph', () => new BlazegraphStore('http://rfc64-abort.test/sparql') as TripleStore],
-    ['transactional SPARQL HTTP', () => new SparqlHttpStore({
-      queryEndpoint: 'http://rfc64-abort.test/query',
-      updateEndpoint: 'http://rfc64-abort.test/update',
-      consistencyProfile: 'atomic-readback',
-    }) as TripleStore],
-  ])('detaches %s receipt cleanup from caller cancellation after dispatch', async (
-    _name,
-    createStore,
-  ) => {
-    const requests: Array<{ body: string; signal: AbortSignal | null }> = [];
-    let receiptStarted!: () => void;
-    const receiptDispatched = new Promise<void>((resolve) => { receiptStarted = resolve; });
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
-      const body = String(init?.body ?? '');
-      const signal = init?.signal ?? null;
-      requests.push({ body, signal });
-      if (!body.includes('ASK')) return new Response(null, { status: 200 });
-      receiptStarted();
-      return new Promise<Response>((_resolve, reject) => {
-        const abort = () => reject(signal?.reason ?? new Error('receipt aborted'));
-        if (signal?.aborted) abort();
-        else signal?.addEventListener('abort', abort, { once: true });
-      });
-    });
-    const store = createStore();
-    const controller = new AbortController();
-    const commit = store.rfc64AuthorCommitCasV1!(authorCommitInput(), {
-      signal: controller.signal,
-    });
-    await receiptDispatched;
-    controller.abort(new Error('caller cancelled after CAS dispatch'));
-
-    await expect(commit).rejects.toThrow('caller cancelled after CAS dispatch');
-    expect(requests).toHaveLength(3);
-    expect(requests[0]!.body).toContain('urn:dkg:sync:authorCommitApplied');
-    expect(requests[1]!.body).toContain('ASK');
-    expect(requests[2]!.body).toContain('DROP SILENT GRAPH');
-    expect(requests[2]!.signal?.aborted).toBe(false);
   });
 
   it('rejects ambiguous or unbounded fixed-manifest inputs before building an update', () => {
