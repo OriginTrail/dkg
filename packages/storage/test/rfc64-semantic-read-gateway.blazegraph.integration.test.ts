@@ -62,8 +62,7 @@ const SEAL = Object.freeze({
   privateMerkleRoot: null,
   privateTripleCount: '0',
   publicTripleCount: '1',
-  reservedKaId:
-    '23158417847463239084714197001737581570653996933112267175388663934063917137927',
+  reservedKaId: ((BigInt(AUTHOR) << 96n) | 7n).toString(),
 }) as CanonicalGraphScopedAuthorSealV1;
 
 const CASES: readonly {

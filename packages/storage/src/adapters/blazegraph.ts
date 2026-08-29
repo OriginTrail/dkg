@@ -23,6 +23,7 @@ import {
   assertQuadLiteralsMutf8Safe,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SharedProjectionStreamOperationV1,
 } from '@origintrail-official/dkg-core';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
@@ -50,6 +51,11 @@ import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import type { StoreOperation, StoreOperationOutcome } from '../store-operation-outcome.js';
+import type {
+  Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  Rfc64SharedProjectionStreamCapabilityV1,
+} from '../rfc64-shared-projection-stream-capability.js';
+import { spoolRfc64SharedProjectionHttpResponseV1 } from '../rfc64-shared-projection-http-spool.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -228,11 +234,55 @@ function createStoreOperationDeadline(
 export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
+  readonly rfc64SharedProjectionStreamV1:
+    Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1'] = (
+      operation,
+      options,
+    ) => this.openRfc64SharedProjectionV1(operation, options);
+
   rfc64ExactBindingsReadV1(
     operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
     return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
+  }
+
+  private openRfc64SharedProjectionV1(
+    operation: Rfc64SharedProjectionStreamOperationV1,
+    options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  ): Promise<AsyncIterable<DKGQuad>> {
+    return this.runStoreWork(
+      'construct',
+      {
+        priority: 'background',
+        signal: options.signal,
+        source: 'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1',
+      },
+      async (deadline) => {
+        const response = await this.postReadQuery(
+          operation.sparql,
+          'text/x-nquads, application/n-quads',
+          deadline,
+          {
+            maxResponseBytes: Math.min(options.byteCeiling, 64 * 1024),
+            priority: 'background',
+            signal: deadline.signal,
+            source: 'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1',
+          },
+          'construct',
+        );
+        if (response.body === null) {
+          throw new Error('Blazegraph RFC-64 shared projection has no readable response body');
+        }
+        return deadline.waitFor(spoolRfc64SharedProjectionHttpResponseV1({
+          body: response.body,
+          operation,
+          byteCeiling: options.byteCeiling,
+          signal: deadline.signal,
+          consumptionSignal: options.signal,
+        }));
+      },
+    );
   }
 
   private readonly url: string;
