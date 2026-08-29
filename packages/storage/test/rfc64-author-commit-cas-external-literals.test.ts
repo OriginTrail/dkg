@@ -1,8 +1,10 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  EXTERNAL_LITERAL_REF_DATATYPE,
   OxigraphStore,
   SharedMemoryLiteralBlobStore,
 } from '../src/index.js';
@@ -55,6 +57,12 @@ describe('RFC-64 author commit external literal mapping', () => {
     await expect(store.rfc64AuthorCommitCasV1(input)).resolves.toBe('committed');
     expect(await objectFor(store, scalarGraph, KA_STATE, P_VALUE)).toBe(nextValue);
     expect(await objectFor(store, scalarGraph, AUTHOR, P_HEAD)).toBe(nextValue);
+
+    const nextHash = createHash('sha256').update(nextValue, 'utf8').digest('hex');
+    const nextRef = `"sha256:${nextHash}"^^<${EXTERNAL_LITERAL_REF_DATATYPE}>`;
+    expect(await objectFor(raw, scalarGraph, KA_STATE, P_VALUE)).toBe(nextRef);
+    expect(await objectFor(raw, scalarGraph, AUTHOR, P_HEAD)).toBe(nextRef);
+    await expect(readFile(join(blobDir, nextHash), 'utf8')).resolves.toBe(nextValue);
   });
 
   it('retains newly-created literal blobs after a clean conflict for reference-aware GC', async () => {
