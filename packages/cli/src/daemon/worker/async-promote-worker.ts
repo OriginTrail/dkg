@@ -226,6 +226,16 @@ function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
 }
 
 /**
+ * Queue bookkeeping has its own retry domain. Only typed storage failures
+ * whose write definitely did not start are replayable; an indeterminate
+ * mutation remains fail-closed even if its diagnostic text contains generic
+ * words such as "timeout" or "recovering".
+ */
+function isRetryableQueueBookkeepingError(error: unknown): boolean {
+  return isStoreOperationTimeoutError(error) && error.outcome === 'not_started';
+}
+
+/**
  * Emit privacy-bounded evidence before queue.fail() makes a terminal row
  * externally clearable. Diagnostics are best-effort and can never change the
  * promote state transition, even when the injected logger fails synchronously
@@ -433,7 +443,7 @@ export async function runPromoteJob(
         return await write();
       } catch (err: unknown) {
         failures += 1;
-        const retryable = classifyPromoteError(err).retryable;
+        const retryable = isRetryableQueueBookkeepingError(err);
         if (err instanceof PromoteJobLeaseError || !retryable || now() >= deadlineAt) throw err;
         if (failures === 1) {
           bestEffortLog(
@@ -586,9 +596,17 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   const concurrency = Math.max(1, config.workerConcurrency ?? 4);
   const pollIntervalMs = Math.max(10, config.pollIntervalMs ?? 100);
   const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 60_000;
-  if (heartbeatIntervalMs > 0 && heartbeatIntervalMs >= DEFAULT_PROMOTE_LEASE_MS) {
+  const effectiveLeaseMs = config.agent.promoteQueue.effectiveLeaseMs
+    ?? DEFAULT_PROMOTE_LEASE_MS;
+  if (heartbeatIntervalMs > 0 && heartbeatIntervalMs >= effectiveLeaseMs) {
     throw new Error(
-      `promoteQueue.heartbeatIntervalMs must be shorter than the queue lease (${DEFAULT_PROMOTE_LEASE_MS}ms)`,
+      `promoteQueue.heartbeatIntervalMs must be shorter than the queue lease (${effectiveLeaseMs}ms)`,
+    );
+  }
+  const bookkeepingRetryBudgetMs = config.bookkeepingRetryBudgetMs ?? 10 * 60 * 1000;
+  if (bookkeepingRetryBudgetMs >= effectiveLeaseMs) {
+    throw new Error(
+      `promoteQueue.bookkeepingRetryBudgetMs must be shorter than the queue lease (${effectiveLeaseMs}ms)`,
     );
   }
   const shutdownTimeoutMs = config.shutdownTimeoutMs ?? 30_000;
@@ -653,7 +671,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           now,
           heartbeatIntervalMs,
           bookkeepingRetryIntervalMs: config.bookkeepingRetryIntervalMs,
-          bookkeepingRetryBudgetMs: config.bookkeepingRetryBudgetMs,
+          bookkeepingRetryBudgetMs,
           sleep: config.sleep,
           log,
           emitMemoryGraphChanged: config.emitMemoryGraphChanged,

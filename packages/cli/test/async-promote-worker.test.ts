@@ -45,6 +45,16 @@ function deferred<T = void>(): {
   return { promise, resolve, reject };
 }
 
+function retryableBookkeepingFailure(): StoreOperationTimeoutError {
+  return new StoreOperationTimeoutError({
+    backend: 'managed-oxigraph',
+    operation: 'replaceSubject',
+    storeOperation: 'replaceSubject',
+    outcome: 'not_started',
+    message: 'Managed Oxigraph is recovering; write was not started',
+  });
+}
+
 const PROMOTE_FAILURE_LOG_PREFIX = '[async-promote-worker] ';
 
 function promoteFailureDiagnostics(logs: readonly string[]): Record<string, unknown>[] {
@@ -328,7 +338,7 @@ describe('runPromoteJob', () => {
     recoveringQueue.fail = async (jobId, claimToken, error) => {
       failCalls += 1;
       if (failCalls <= 2) {
-        throw new Error('Managed Oxigraph is recovering; query was not started');
+        throw retryableBookkeepingFailure();
       }
       return fail(jobId, claimToken, error);
     };
@@ -374,7 +384,7 @@ describe('runPromoteJob', () => {
       if (step === 'swmInserted') {
         swmMarkerCalls += 1;
         if (swmMarkerCalls === 1) {
-          throw new Error('Managed Oxigraph is recovering; query was not started');
+          throw retryableBookkeepingFailure();
         }
       }
       return recordCommitMarker(jobId, claimToken, step);
@@ -382,7 +392,7 @@ describe('runPromoteJob', () => {
     recoveringQueue.succeed = async (jobId, claimToken, result) => {
       succeedCalls += 1;
       if (succeedCalls === 1) {
-        throw new Error('Store scheduler queue wait timeout');
+        throw retryableBookkeepingFailure();
       }
       return succeed(jobId, claimToken, result);
     };
@@ -428,14 +438,14 @@ describe('runPromoteJob', () => {
       if (step === 'swmInserted') {
         swmMarkerCalls += 1;
         if (swmMarkerCalls <= 2) {
-          throw new Error('Managed Oxigraph is recovering; query was not started');
+          throw retryableBookkeepingFailure();
         }
       }
       return recordCommitMarker(jobId, claimToken, step);
     };
     recoveringQueue.succeed = async () => {
       succeedCalls += 1;
-      throw new Error('Store scheduler queue wait timeout');
+      throw retryableBookkeepingFailure();
     };
 
     const result = await runPromoteJob({
@@ -479,7 +489,7 @@ describe('runPromoteJob', () => {
     recoveringQueue.recordCommitMarker = async (jobId, claimToken, step) => {
       if (step === 'swmInserted') {
         swmMarkerCalls += 1;
-        throw new Error('Managed Oxigraph is recovering; query was not started');
+        throw retryableBookkeepingFailure();
       }
       return recordCommitMarker(jobId, claimToken, step);
     };
@@ -1183,6 +1193,7 @@ describe('createPromoteWorkerSupervisor', () => {
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
       heartbeatIntervalMs: 0,
+      bookkeepingRetryBudgetMs: 500,
       log: (m) => logs.push(m),
       workerIdPrefix: 'test',
     });
@@ -1191,6 +1202,25 @@ describe('createPromoteWorkerSupervisor', () => {
     expect((await recoverableQueue.getStats()).running).toBe(0);
     expect(logs.some((m) => m.includes('abandoned=1'))).toBe(true);
     await sup.stop();
+  });
+
+  it('validates worker timing against the queue effective lease', () => {
+    const shortLeaseQueue = new TripleStoreAsyncPromoteQueue(store, { leaseMs: 1_000 });
+    const agent = {
+      promoteQueue: shortLeaseQueue,
+      assertion: { promote: async () => ({ promotedCount: 1 }) },
+    } as any;
+
+    expect(() => createPromoteWorkerSupervisor({
+      agent,
+      heartbeatIntervalMs: 1_000,
+      bookkeepingRetryBudgetMs: 500,
+    })).toThrow(/heartbeatIntervalMs.*1000ms/);
+    expect(() => createPromoteWorkerSupervisor({
+      agent,
+      heartbeatIntervalMs: 0,
+      bookkeepingRetryBudgetMs: 1_000,
+    })).toThrow(/bookkeepingRetryBudgetMs.*1000ms/);
   });
 
   it('refuses to start polling when recoverOnStartup() fails', async () => {
