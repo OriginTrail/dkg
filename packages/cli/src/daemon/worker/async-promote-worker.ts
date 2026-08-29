@@ -300,6 +300,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     message.includes('timed out') ||
     message.includes('managed oxigraph is recovering') ||
     message.includes('managed oxigraph recovery interrupted query') ||
+    message.includes('managed oxigraph recovery interrupted listgraphs') ||
     message.includes('store scheduler queue wait timeout')
   ) {
     return { classification: 'transient', retryable: true };

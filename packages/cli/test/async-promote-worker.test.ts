@@ -130,6 +130,7 @@ describe('classifyPromoteError', () => {
     for (const message of [
       'STORE_OPERATION_TIMEOUT Managed Oxigraph is recovering; query was not started',
       'Managed Oxigraph recovery interrupted query execution',
+      'Managed Oxigraph recovery interrupted listGraphs; outcome is indeterminate',
       'Store scheduler queue wait timeout',
     ]) {
       expect(classifyPromoteError(new Error(message))).toEqual({
