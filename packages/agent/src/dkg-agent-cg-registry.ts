@@ -986,7 +986,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     } catch {
       // SPARQL DELETE WHERE may not be supported — delete quads manually
       const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
-      await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
+      await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: subGraphUri });
     }
 
     const dataUri = gm.subGraphUri(contextGraphId, subGraphName);
@@ -1185,7 +1185,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   ): Promise<void> {
     const quads = buildTrustLevelQuads(subjects, level, graph) as Quad[];
     for (const quad of quads) {
-      await this.store.deleteByPattern({
+      await this.deleteStoreByPatternWithoutCount({
         graph: quad.graph,
         subject: quad.subject,
         predicate: TRUST_LEVEL_PREDICATE,

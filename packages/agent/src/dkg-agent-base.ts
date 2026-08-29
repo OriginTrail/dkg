@@ -118,7 +118,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -481,6 +481,13 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
+        () => markProjectionDirty?.(),
+      );
+    },
+    deleteByPatternWithoutCount(pattern, options) {
+      return invalidateAfterMutation(
+        () => deleteByPatternWithoutCount(innerStore, pattern, options),
+        () => true,
         () => markProjectionDirty?.(),
       );
     },
@@ -1765,6 +1772,14 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
+  }
+
+  /** Use the backend's one-round-trip delete path when no exact count is consumed. */
+  protected deleteStoreByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    return deleteByPatternWithoutCount(this.store, pattern, options);
   }
 
   /**

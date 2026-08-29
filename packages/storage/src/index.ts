@@ -16,6 +16,7 @@ export {
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  deleteByPatternWithoutCount,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
   tryReplaceGraphAtomically,

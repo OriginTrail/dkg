@@ -1212,7 +1212,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       if (!updatedAtomically) {
         // Compatibility fallback for custom stores without SPARQL UPDATE.
         // Restore the prior row best-effort if the replacement insert fails.
-        await this.store.deleteByPattern({ graph: REQUESTER_JOIN_STATE_GRAPH, subject });
+        await this.deleteStoreByPatternWithoutCount({ graph: REQUESTER_JOIN_STATE_GRAPH, subject });
         try {
           await this.store.insert(quads);
         } catch (error) {
@@ -1258,7 +1258,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
     const cache = this.requesterJoinStateCache();
     try {
-      await this.store.deleteByPattern({
+      await this.deleteStoreByPatternWithoutCount({
         graph: REQUESTER_JOIN_STATE_GRAPH,
         subject: requesterJoinStateSubject(contextGraphId, agentAddress),
       });
@@ -1676,7 +1676,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       }
     }
 
-    await this.store.deleteByPattern({ graph: cgMetaGraph, subject: requestUri });
+    await this.deleteStoreByPatternWithoutCount({ graph: cgMetaGraph, subject: requestUri });
 
     // Escape every user-controllable literal. `contextGraphId`, `delegation.scope`,
     // and `agentName` flow from joiner input and can contain `"` or `\`, which
@@ -2294,12 +2294,12 @@ export class JoinRequestMethods extends DKGAgentBase {
       // Compatibility fallback for custom stores without SPARQL UPDATE.
       // The curator remains authoritative if a crash lands between these two
       // mutations, and an approval can be redelivered to repair local state.
-      await this.store.deleteByPattern({
+      await this.deleteStoreByPatternWithoutCount({
         graph: cgMetaGraph,
         subject: requestUri,
         predicate: requestStatus,
       });
-      await this.store.deleteByPattern({
+      await this.deleteStoreByPatternWithoutCount({
         graph: cgMetaGraph,
         subject: requestUri,
         predicate: decisionTimestamp,

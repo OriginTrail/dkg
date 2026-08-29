@@ -107,7 +107,10 @@
  */
 import { assertSafeIri, sparqlString } from '@origintrail-official/dkg-core';
 import type { QueryOptions, Quad, TripleStore } from './triple-store.js';
-import { tryReplaceSubjectAtomically } from './triple-store.js';
+import {
+  deleteByPatternWithoutCount,
+  tryReplaceSubjectAtomically,
+} from './triple-store.js';
 
 export const SWM_MATERIALIZATION_WITNESS_GRAPH = 'urn:dkg:local:swm-materialization-witness';
 
@@ -214,15 +217,21 @@ export async function invalidateSwmMaterializationWitness(
   // regardless of how rich its store handle is. The private recovery lane holds
   // a `SwmRecoveryStore`, which is not a full `TripleStore` — requiring one here
   // would have made that site uncallable and quietly left it out of the set.
-  store: { deleteByPattern(pattern: { graph: string; subject: string }, options?: QueryOptions): Promise<unknown> },
+  store: {
+    deleteByPattern(
+      pattern: { graph: string; subject: string },
+      options?: QueryOptions,
+    ): Promise<unknown>;
+    deleteByPatternWithoutCount?(
+      pattern: { graph: string; subject: string },
+      options?: QueryOptions,
+    ): Promise<void>;
+  },
   assertionGraph: string,
   options: QueryOptions = {},
 ): Promise<void> {
-  await store.deleteByPattern(
-    {
-      graph: SWM_MATERIALIZATION_WITNESS_GRAPH,
-      subject: swmMaterializationWitnessSubject(assertionGraph),
-    },
-    options,
-  );
+  await deleteByPatternWithoutCount(store, {
+    graph: SWM_MATERIALIZATION_WITNESS_GRAPH,
+    subject: swmMaterializationWitnessSubject(assertionGraph),
+  }, options);
 }

@@ -571,6 +571,28 @@ describe('ChangelogStore — delete-path op attribution & reconcile', () => {
     expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual(['upsert', 'upsert', 'drop']);
     expect(log.needsReconcile).toBe(false); // graph-hinted path is fully attributed
   });
+
+  it('no-count deleteByPattern emits a conservative marker and preserves drop attribution', async () => {
+    await log.insert([q('http://ex.org/a', G1), q('http://ex.org/b', G1)]);
+
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/a', graph: G1 });
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/b', graph: G1 });
+
+    expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual([
+      'upsert',
+      'upsert',
+      'drop',
+    ]);
+    expect(log.needsReconcile).toBe(false);
+  });
+
+  it('no-count graph-less delete flags reconcile without requiring a count', async () => {
+    await log.insert([q('http://ex.org/s1', G1)]);
+
+    await log.deleteByPatternWithoutCount({ predicate: 'http://ex.org/p' });
+
+    expect(log.needsReconcile).toBe(true);
+  });
 });
 
 describe('ChangelogStore — reserved-graph hiding (prefix) & post-mutation failure', () => {

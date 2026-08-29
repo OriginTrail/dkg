@@ -9,7 +9,7 @@ import {
 } from './chain-proof-retry-schedule.js';
 import { ReconciliationSnapshotCoordinator } from './reconciliation-snapshot-coordinator.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
@@ -3090,8 +3090,8 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async deleteJob(jobId: string): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(jobId), graph: this.graphUri });
-    await this.store.deleteByPattern({ subject: requestSubject(jobId), graph: this.graphUri });
+    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri });
+    await deleteByPatternWithoutCount(this.store, { subject: requestSubject(jobId), graph: this.graphUri });
   }
 
   // Scheduling-only — the claim attempt re-checks every guard — and it must never throw into

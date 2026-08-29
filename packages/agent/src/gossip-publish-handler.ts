@@ -11,6 +11,7 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
+  deleteByPatternWithoutCount,
   GraphManager,
   tryReplaceGraphAtomically,
   type TripleStore,
@@ -653,7 +654,7 @@ export class GossipPublishHandler {
                 { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
               );
             }
-            await this.store.deleteByPattern({
+            await deleteByPatternWithoutCount(this.store, {
               graph: metaGraph,
               subject: graphPublish.scope.ual,
             });

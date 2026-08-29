@@ -567,6 +567,26 @@ export class SparqlHttpStore implements TripleStore {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern.countBefore',
     });
+    await this.applyDeleteByPattern(pattern, options);
+    const after = await this.countQuads(graphUri, {
+      ...options,
+      source: options?.source ?? 'sparql-http.deleteByPattern.countAfter',
+    });
+    return Math.max(0, before - after);
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<DKGQuad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    await this.applyDeleteByPattern(pattern, options);
+  }
+
+  private async applyDeleteByPattern(
+    pattern: Partial<DKGQuad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    const graphUri = pattern.graph;
     const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
     const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
     const o = pattern.object ? formatTerm(pattern.object) : '?o';
@@ -590,11 +610,6 @@ export class SparqlHttpStore implements TripleStore {
       },
       operation: 'deleteByPattern',
     });
-    const after = await this.countQuads(graphUri, {
-      ...options,
-      source: options?.source ?? 'sparql-http.deleteByPattern.countAfter',
-    });
-    return Math.max(0, before - after);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {

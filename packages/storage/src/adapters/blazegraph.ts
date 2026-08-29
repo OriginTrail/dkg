@@ -316,6 +316,25 @@ export class BlazegraphStore implements TripleStore {
       ...options,
       source: options?.source ?? 'blazegraph.deleteByPattern.countBefore',
     });
+    await this.applyDeleteByPattern(pattern, options);
+    const after = await this.countQuads(pattern.graph, {
+      ...options,
+      source: options?.source ?? 'blazegraph.deleteByPattern.countAfter',
+    });
+    return Math.max(0, before - after);
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<DKGQuad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    await this.applyDeleteByPattern(pattern, options);
+  }
+
+  private async applyDeleteByPattern(
+    pattern: Partial<DKGQuad>,
+    options?: QueryOptions,
+  ): Promise<void> {
     const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
     const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
     const o = pattern.object ? formatTerm(pattern.object) : '?o';
@@ -335,11 +354,6 @@ export class BlazegraphStore implements TripleStore {
         'deleteByPattern',
       );
     }
-    const after = await this.countQuads(pattern.graph, {
-      ...options,
-      source: options?.source ?? 'blazegraph.deleteByPattern.countAfter',
-    });
-    return Math.max(0, before - after);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {

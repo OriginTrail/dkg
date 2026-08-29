@@ -17,6 +17,7 @@ let server: Server;
 let queryUrl: string;
 let updateUrl: string;
 const insertedQuads: string[] = [];
+let countQuadsHits = 0;
 /** How many times the server received a listGraphs enumeration query (old `SELECT DISTINCT ?g` scan or the new index-read `GRAPH ?g {} FILTER EXISTS`). */
 let listGraphsHits = 0;
 /** The most recent listGraphs enumeration query the server received — asserted on to guard the query SHAPE (index-read, not the O(#quads) scan; dkg #1597). */
@@ -73,6 +74,7 @@ function startTestServer(): Promise<void> {
             return;
           }
           if (decoded.includes('COUNT(*)')) {
+            countQuadsHits++;
             res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
             res.end(JSON.stringify({
               head: { vars: ['c'] },
@@ -1554,6 +1556,20 @@ describe('SparqlHttpStore (test server)', () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });
     expect(insertedQuads.some(q => q.includes('DELETE'))).toBe(true);
+  });
+
+  it('deleteByPatternWithoutCount sends one UPDATE and skips both COUNT queries', async () => {
+    insertedQuads.length = 0;
+    const countHitsBefore = countQuadsHits;
+
+    await store.deleteByPatternWithoutCount({
+      subject: 'http://ex.org/s',
+      graph: 'http://ex.org/g',
+    });
+
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('DELETE');
+    expect(countQuadsHits).toBe(countHitsBefore);
   });
 
   it('deleteBySubjectPrefix sends DELETE with FILTER STRSTARTS', async () => {

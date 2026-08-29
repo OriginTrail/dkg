@@ -1806,7 +1806,7 @@ export class DKGAgent extends DKGAgentBase {
         // Keep this durable write before in-memory catalogue mutation: cursor
         // pages are acked after this function returns, and an in-memory onChainId
         // alone must not make a retry skip the RDF binding.
-        await this.store.deleteByPattern({
+        await this.deleteStoreByPatternWithoutCount({
           graph: ontoGraph,
           subject: cgUri,
           predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
