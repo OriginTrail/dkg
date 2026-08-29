@@ -26,7 +26,7 @@ function scripted(reads: Array<() => Promise<string>>, leaseMs = 50): Scripted {
       events.push(`scope${scopeCounter}`);
       return scopeCounter;
     },
-    leaseMs: () => leaseMs,
+    leaseMs,
   });
   return { events, coordinator };
 }
@@ -58,6 +58,23 @@ describe('ReconciliationSnapshotCoordinator', () => {
     release('a');
     await first;
     await second;
+    expect(events).toEqual(['scope1', 'read1:enter', 'read1:exit', 'scope2', 'read2:enter', 'read2:exit']);
+  });
+
+  it("settlement releases the successor IMMEDIATELY — the lease is a bound, not the successor's schedule", async () => {
+    // PR #2381 r1 (🟡 3884946389) — the single release gate resolves from the owner's finally,
+    // not only from the lease timer. The lease here is far beyond the test timeout, so a
+    // regression that leaves release() to the timer alone hangs this row instead of passing
+    // slowly.
+    let release!: (value: string) => void;
+    const gated = new Promise<string>((resolve) => { release = resolve; });
+    const { events, coordinator } = scripted([() => gated, immediate('b')], 300_000);
+    const first = coordinator.acquire();
+    const second = coordinator.acquire();
+    await Promise.resolve();
+    release('a');
+    await first;
+    await second; // must complete with NO lease elapsing at all
     expect(events).toEqual(['scope1', 'read1:enter', 'read1:exit', 'scope2', 'read2:enter', 'read2:exit']);
   });
 

@@ -475,17 +475,15 @@ export class TripleStoreAsyncLiftPublisher
   });
 
   /**
-   * Owns the whole snapshot-acquisition ordering protocol (FIFO tail, owner lease,
+   * Owns the whole snapshot-acquisition ordering protocol (FIFO release gates, owner lease,
    * scope-before-read) — see reconciliation-snapshot-coordinator.ts for the model. The
-   * publisher only wires its collaborators and calls `acquire()`.
+   * publisher only wires its collaborators and calls `acquire()`; constructed in the
+   * constructor body so the resolved lease value is passed directly.
    */
-  private readonly reconciliationSnapshotCoordinator = new ReconciliationSnapshotCoordinator({
-    readInventory: () => this.list(),
-    beginScope: () => this.chainProofRetrySchedule.beginPass(this.now()),
-    leaseMs: () => this.reconciliationAcquisitionLeaseMs,
-  });
-
-  private readonly reconciliationAcquisitionLeaseMs: number;
+  private readonly reconciliationSnapshotCoordinator: ReconciliationSnapshotCoordinator<
+    LiftJob[],
+    ChainProofSchedulePass
+  >;
   /**
    * r26 (🔴 3821028709) — jobs whose MUTATING recovery repair is currently running. A deadline
    * may stop the dispatcher waiting, but it must never let a second pass enter the same repair
@@ -621,7 +619,11 @@ export class TripleStoreAsyncLiftPublisher
     this.chainProofCapableForWallet = config.chainProofCapableForWallet;
     this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
     this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
-    this.reconciliationAcquisitionLeaseMs = config.reconciliationAcquisitionLeaseMs ?? 30_000;
+    this.reconciliationSnapshotCoordinator = new ReconciliationSnapshotCoordinator({
+      readInventory: () => this.list(),
+      beginScope: () => this.chainProofRetrySchedule.beginPass(this.now()),
+      leaseMs: config.reconciliationAcquisitionLeaseMs ?? 30_000,
+    });
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.detachReceiptReconciliation = config.detachReceiptReconciliation ?? false;
     this.publishExecutor = config.publishExecutor;
