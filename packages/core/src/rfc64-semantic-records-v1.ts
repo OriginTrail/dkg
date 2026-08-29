@@ -366,7 +366,9 @@ export function projectRfc64SemanticRecordStoreRowsV1(
 ): readonly Rfc64SemanticStoreRowV1[] {
   const record = snapshotRfc64SemanticRecordV1(input);
   const definition = definitionFor(record.recordType);
-  const address = definition.deriveAddress(record.value as never);
+  const address = deriveRfc64SemanticRecordAddressFromCoordinateV1(
+    coordinateFromRecord(record),
+  );
   const value = record.value as unknown as Record<string, unknown>;
   return Object.freeze(definition.fields.map((field) => Object.freeze({
     subjectIri: address.subject,
@@ -386,7 +388,7 @@ export function decodeRfc64SemanticRecordStoreRowsV1(
 ): DecodedRfc64SemanticRecordV1 {
   const coordinate = snapshotRfc64SemanticRecordCoordinateV1(expectedCoordinate);
   const definition = definitionFor(coordinate.recordType);
-  const address = definition.deriveAddress(coordinate as never);
+  const address = deriveRfc64SemanticRecordAddressFromCoordinateV1(coordinate);
   const fields = definition.fields;
   const typedRows = snapshotSemanticRows(rows, fields.length);
   const allowed = new Map<string, UntypedFieldSpecV1>(
@@ -556,11 +558,18 @@ function snapshotClosed(
 }
 
 /** Resolve the one canonical graph and subject for a validated semantic coordinate. */
+export function deriveRfc64SemanticRecordAddressFromCoordinateV1(
+  coordinate: Rfc64SemanticRecordCoordinateV1,
+): Rfc64SemanticAddressV1 {
+  return definitionFor(coordinate.recordType).deriveAddress(coordinate as never);
+}
+
+/** Validate untrusted input once, then delegate to the typed address primitive. */
 export function deriveRfc64SemanticRecordAddressV1(
   input: unknown,
 ): Rfc64SemanticAddressV1 {
   const coordinate = snapshotRfc64SemanticRecordCoordinateV1(input);
-  return definitionFor(coordinate.recordType).deriveAddress(coordinate as never);
+  return deriveRfc64SemanticRecordAddressFromCoordinateV1(coordinate);
 }
 
 function coordinateFromRecord(record: Rfc64SemanticRecordV1): Rfc64SemanticRecordCoordinateV1 {

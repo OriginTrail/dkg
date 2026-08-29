@@ -1,5 +1,5 @@
 import {
-  deriveRfc64SemanticRecordAddressV1,
+  deriveRfc64SemanticRecordAddressFromCoordinateV1,
   MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
   RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1,
   snapshotRfc64SemanticRecordCoordinateV1,
@@ -17,17 +17,22 @@ export const RFC64_SEMANTIC_READ_BACKENDS_V1 = Object.freeze([
 export type Rfc64SemanticReadBackendV1 =
   (typeof RFC64_SEMANTIC_READ_BACKENDS_V1)[number];
 
-export const RFC64_SEMANTIC_READ_QUERY_IDS_V1 = Object.freeze([
-  'SYNC_HEAD_REF_GET_V1',
-  'SYNC_MUTATION_GUARD_GET_V1',
-  'SYNC_RECONCILE_TARGET_GET_V1',
-  'SYNC_APPLIED_SEAL_GET_V1',
-  'SYNC_APPLIED_SET_GET_V1',
-  'SYNC_APPLIED_CG_SEAL_GET_V1',
-] as const);
+export const RFC64_SEMANTIC_READ_QUERY_ID_BY_RECORD_TYPE_V1 = Object.freeze({
+  CurrentAuthorCatalogRefV1: 'SYNC_HEAD_REF_GET_V1',
+  SubgraphMutationGuardV1: 'SYNC_MUTATION_GUARD_GET_V1',
+  ContextGraphMutationGuardV1: 'SYNC_MUTATION_GUARD_GET_V1',
+  SubgraphReconcileTargetGuardV1: 'SYNC_RECONCILE_TARGET_GET_V1',
+  AppliedSubgraphSealV1: 'SYNC_APPLIED_SEAL_GET_V1',
+  AppliedSubgraphSetRefV1: 'SYNC_APPLIED_SET_GET_V1',
+  AppliedContextGraphSealV1: 'SYNC_APPLIED_CG_SEAL_GET_V1',
+} as const satisfies Record<Rfc64SemanticRecordTypeV1, string>);
 
 export type Rfc64SemanticReadQueryIdV1 =
-  (typeof RFC64_SEMANTIC_READ_QUERY_IDS_V1)[number];
+  (typeof RFC64_SEMANTIC_READ_QUERY_ID_BY_RECORD_TYPE_V1)[Rfc64SemanticRecordTypeV1];
+
+export const RFC64_SEMANTIC_READ_QUERY_IDS_V1 = Object.freeze([
+  ...new Set(Object.values(RFC64_SEMANTIC_READ_QUERY_ID_BY_RECORD_TYPE_V1)),
+] as Rfc64SemanticReadQueryIdV1[]);
 
 export const RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1 =
   'rfc64-semantic-control-v1' as const;
@@ -82,7 +87,7 @@ export function compileRfc64SemanticReadOperationV1(
   const request = snapshotInput(input);
   const coordinate = snapshotRfc64SemanticRecordCoordinateV1(request.coordinate);
   const queryId = queryIdForRecordType(coordinate.recordType);
-  const address = deriveRfc64SemanticRecordAddressV1(coordinate);
+  const address = deriveRfc64SemanticRecordAddressFromCoordinateV1(coordinate);
   const expectedRowCount = RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1[coordinate.recordType];
   const rowCeiling = expectedRowCount + 1;
   return Object.freeze({
@@ -131,21 +136,7 @@ function snapshotInput(input: unknown): {
 function queryIdForRecordType(
   recordType: Rfc64SemanticRecordTypeV1,
 ): Rfc64SemanticReadQueryIdV1 {
-  switch (recordType) {
-    case 'CurrentAuthorCatalogRefV1':
-      return 'SYNC_HEAD_REF_GET_V1';
-    case 'SubgraphMutationGuardV1':
-    case 'ContextGraphMutationGuardV1':
-      return 'SYNC_MUTATION_GUARD_GET_V1';
-    case 'SubgraphReconcileTargetGuardV1':
-      return 'SYNC_RECONCILE_TARGET_GET_V1';
-    case 'AppliedSubgraphSealV1':
-      return 'SYNC_APPLIED_SEAL_GET_V1';
-    case 'AppliedSubgraphSetRefV1':
-      return 'SYNC_APPLIED_SET_GET_V1';
-    case 'AppliedContextGraphSealV1':
-      return 'SYNC_APPLIED_CG_SEAL_GET_V1';
-  }
+  return RFC64_SEMANTIC_READ_QUERY_ID_BY_RECORD_TYPE_V1[recordType];
 }
 
 function renderExactSubjectRead(
