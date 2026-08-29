@@ -251,7 +251,6 @@ function runGraphScopedDurableSync(options: {
 describe('durable graph-scoped KA materialization', () => {
   it('rejects an RFC-64 control graph before graph-scoped materialization', async () => {
     const controlGraph = `did:dkg:context-graph:${contextGraphId}/_sync/applied/test`;
-    const controlData = { ...dataQuad(2), graph: controlGraph };
     const controlMeta = metadata(2).map((quad) => (
       quad.predicate === `${DKG}assertionGraph`
         ? { ...quad, object: controlGraph }
@@ -265,13 +264,13 @@ describe('durable graph-scoped KA materialization', () => {
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({ phase }) => (
-        phase === 'data' ? page(phase, [controlData]) : page(phase, controlMeta)
+        phase === 'data' ? page(phase, []) : page(phase, controlMeta)
       ),
       processDurableBatchInWorker: async () => ({
-        verifiedData: [controlData],
+        verifiedData: [],
         verifiedMeta: controlMeta,
         verifiedGraphScopedDataGraphs: [controlGraph],
-        totalFetchedDataQuads: 1,
+        totalFetchedDataQuads: 0,
         totalFetchedMetaQuads: controlMeta.length,
         rejectedKcs: 0,
         emptyResponses: 0,
