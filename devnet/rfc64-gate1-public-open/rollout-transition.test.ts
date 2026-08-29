@@ -41,13 +41,14 @@ import {
   parseRolloutStoreBackend,
   type RolloutStoreFixture,
 } from './rollout-store-fixture.js';
+import { ROLLOUT_STORE_BACKEND_ENV } from './rollout-store-config.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/rollout-transition';
 const children = new ChildProcessRegistry(20_000);
 const temporaryRoots: string[] = [];
-const STORE_BACKEND = parseRolloutStoreBackend(process.env.DKG_RFC64_GATE1_STORE_BACKEND);
+const STORE_BACKEND = parseRolloutStoreBackend(process.env[ROLLOUT_STORE_BACKEND_ENV]);
 let storeFixture: RolloutStoreFixture | undefined;
 
 after(async () => {
@@ -99,13 +100,19 @@ test('routes every registered rollout command through its own output decoder', (
 test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy authority on ${STORE_BACKEND}`, {
   timeout: 180_000,
 }, async (context) => {
-  storeFixture = await createRolloutStoreFixture({
-    backendInput: process.env.DKG_RFC64_GATE1_STORE_BACKEND,
-    blazegraphTestUrl: process.env.BLAZEGRAPH_TEST_URL,
-    signal: context.signal,
-  });
   const authorDataDir = await makeTemp('author');
   const receiverDataDir = await makeTemp('receiver');
+  const inactiveDataDir = await makeTemp('inactive-chain');
+  const legacyDataDir = await makeTemp('legacy-fresh');
+  storeFixture = await createRolloutStoreFixture({
+    backendInput: process.env[ROLLOUT_STORE_BACKEND_ENV],
+    blazegraphTestUrl: process.env.BLAZEGRAPH_TEST_URL,
+    signal: context.signal,
+    storeDataDirs: {
+      author: [authorDataDir],
+      receiver: [receiverDataDir, inactiveDataDir, legacyDataDir],
+    },
+  });
   const author = spawnAgent('author', authorDataDir, 'catalog');
   const authorReady = await author.waitFor('ready');
   assertReady(authorReady, 'catalog', false);
@@ -196,7 +203,12 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assert.equal(await stagedHead(shadow.child, headDigest, signatureVariantDigest, 'shadow'), headDigest);
   assert.equal(await appliedHead(shadow.child, catalogScopeDigest, 'shadow'), null);
   assertSemanticExact(await semanticGraph(shadow.child, swmGraph, 'shadow'), swmGraph);
-  await requireStoreFixture().assertGraphExact('receiver', swmGraph, PROJECTION_QUADS);
+  await requireStoreFixture().assertGraphExact(
+    'receiver',
+    receiverDataDir,
+    swmGraph,
+    PROJECTION_QUADS,
+  );
   await shadow.child.stop('stop-shadow');
 
   const catalog = await startReceiver('catalog', false, receiverDataDir, author, authorReady);
@@ -222,7 +234,12 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertSemanticExact(catalogVmGraph, vmGraph);
   assertAppliedExact(await appliedHead(catalog.child, catalogScopeDigest, 'catalog'), headDigest);
   assertSemanticExact(await semanticGraph(catalog.child, swmGraph, 'catalog'), swmGraph);
-  await requireStoreFixture().assertGraphExact('receiver', swmGraph, PROJECTION_QUADS);
+  await requireStoreFixture().assertGraphExact(
+    'receiver',
+    receiverDataDir,
+    swmGraph,
+    PROJECTION_QUADS,
+  );
   await catalog.child.stop('stop-catalog');
 
   const killed = await startReceiver('catalog', true, receiverDataDir, author, authorReady, false);
@@ -310,7 +327,6 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   );
   await transitionedLegacy.child.stop('stop-transitioned-legacy');
 
-  const inactiveDataDir = await makeTemp('inactive-chain');
   const inactive = await startReceiver(
     'shadow',
     false,
@@ -330,7 +346,6 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assert.equal((await semanticGraph(inactive.child, vmGraph, 'inactive-vm')).activatedQuadCount, 0);
   await inactive.child.stop('stop-inactive');
 
-  const legacyDataDir = await makeTemp('legacy-fresh');
   const legacy = await startReceiver('legacy', false, legacyDataDir, author, authorReady, false);
   assert.deepEqual(await rolloutStatus(
     legacy.child,

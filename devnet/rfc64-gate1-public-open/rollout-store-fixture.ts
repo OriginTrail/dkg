@@ -1,10 +1,23 @@
 import { access, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
-import { quadsToNQuads, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  createTripleStore,
+  quadsToNQuads,
+  readExactGraphPaged,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 
-export type RolloutStoreBackend = 'oxigraph' | 'blazegraph';
+import {
+  parseRolloutStoreBackend,
+  ROLLOUT_BLAZEGRAPH_URL_ENV,
+  ROLLOUT_STORE_BACKEND_ENV,
+  type RolloutStoreBackend,
+} from './rollout-store-config.js';
+
+export { parseRolloutStoreBackend, type RolloutStoreBackend } from './rollout-store-config.js';
 export type RolloutStoreRole = 'author' | 'receiver';
 
 export interface RolloutStoreFixture {
@@ -12,6 +25,7 @@ export interface RolloutStoreFixture {
   envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>>;
   assertGraphExact(
     role: RolloutStoreRole,
+    dataDir: string,
     graphUri: string,
     expectedQuads: readonly Quad[],
   ): Promise<void>;
@@ -24,6 +38,7 @@ export interface RolloutStoreFixtureOptions {
   readonly fetchImpl?: typeof fetch;
   readonly requestTimeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly storeDataDirs?: Readonly<Record<RolloutStoreRole, readonly string[]>>;
 }
 
 interface BlazegraphRuntimeContract {
@@ -31,6 +46,10 @@ interface BlazegraphRuntimeContract {
 }
 
 const DEFAULT_MANAGEMENT_TIMEOUT_MS = 30_000;
+const DEFAULT_STORE_DATA_DIRS = Object.freeze({
+  author: Object.freeze(['author']),
+  receiver: Object.freeze(['receiver']),
+});
 const require = createRequire(import.meta.url);
 const { renderBlazegraphNamespaceXml } = require(
   '../../packages/cli/blazegraph-image-metadata.cjs',
@@ -50,6 +69,7 @@ export async function createRolloutStoreFixture(
     fetchImpl: options.fetchImpl ?? fetch,
     requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_MANAGEMENT_TIMEOUT_MS,
     signal: options.signal,
+    storeDataDirs: normalizeStoreDataDirs(options.storeDataDirs),
   });
 }
 
@@ -70,28 +90,19 @@ export async function cleanupRolloutStoreFixture(
   }
 }
 
-export function parseRolloutStoreBackend(input: string | undefined): RolloutStoreBackend {
-  if (input === undefined || input === '' || input === 'oxigraph') return 'oxigraph';
-  if (input === 'blazegraph') return input;
-  throw new Error('DKG_RFC64_GATE1_STORE_BACKEND must be oxigraph or blazegraph');
-}
-
 class OxigraphRolloutStoreFixture implements RolloutStoreFixture {
   readonly backend = 'oxigraph' as const;
-  private readonly dataDirs = new Map<RolloutStoreRole, string>();
 
-  envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>> {
-    this.dataDirs.set(role, dataDir);
-    return Object.freeze({ DKG_RFC64_GATE1_STORE_BACKEND: this.backend });
+  envForRole(_role: RolloutStoreRole, _dataDir: string): Readonly<Record<string, string>> {
+    return Object.freeze({ [ROLLOUT_STORE_BACKEND_ENV]: this.backend });
   }
 
   async assertGraphExact(
     role: RolloutStoreRole,
+    dataDir: string,
     graphUri: string,
     expectedQuads: readonly Quad[],
   ): Promise<void> {
-    const dataDir = this.dataDirs.get(role);
-    if (dataDir === undefined) throw new Error(`Oxigraph ${role} data directory is not registered`);
     const persisted = await readFile(join(dataDir, 'store.nq'), 'utf8');
     const graphTerm = `<${assertSafeIri(graphUri, 'graph URI')}>`;
     const actualLines = persisted.split('\n')
@@ -114,14 +125,12 @@ class OxigraphRolloutStoreFixture implements RolloutStoreFixture {
 
 class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
   readonly backend = 'blazegraph' as const;
-  private readonly dataDirs = new Map<RolloutStoreRole, string>();
 
   private constructor(
-    private readonly endpoints: Readonly<Record<RolloutStoreRole, string>>,
+    private readonly endpointByStore: ReadonlyMap<string, string>,
     private readonly namespaceUrls: readonly string[],
     private readonly fetchImpl: typeof fetch,
     private readonly requestTimeoutMs: number,
-    private readonly operationSignal?: AbortSignal,
   ) {}
 
   static async create(input: Readonly<{
@@ -129,85 +138,101 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
     fetchImpl: typeof fetch;
     requestTimeoutMs: number;
     signal?: AbortSignal;
+    storeDataDirs: Readonly<Record<RolloutStoreRole, readonly string[]>>;
   }>): Promise<BlazegraphRolloutStoreFixture> {
     const namespaceApiUrl = blazegraphNamespaceApiUrl(input.configuredUrl);
     const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const names = Object.freeze({
-      author: `rfc64-rollout-${nonce}-author`,
-      receiver: `rfc64-rollout-${nonce}-receiver`,
-    });
-    const createdNamespaceUrls: string[] = [];
+    const attemptedNamespaceUrls: string[] = [];
+    const endpointByStore = new Map<string, string>();
     try {
       for (const role of ['author', 'receiver'] as const) {
-        await createBlazegraphNamespace({
-          namespaceApiUrl,
-          namespace: names[role],
-          fetchImpl: input.fetchImpl,
-          requestTimeoutMs: input.requestTimeoutMs,
-          signal: input.signal,
-        });
-        createdNamespaceUrls.push(
-          `${namespaceApiUrl}/${encodeURIComponent(names[role])}`,
-        );
+        for (const [index, dataDir] of input.storeDataDirs[role].entries()) {
+          const namespace = `rfc64-rollout-${nonce}-${role}-${index}`;
+          const namespaceUrl = `${namespaceApiUrl}/${encodeURIComponent(namespace)}`;
+          // A rejected POST is indeterminate: Blazegraph may have committed the
+          // namespace before its response was lost. Register before issuing it.
+          attemptedNamespaceUrls.push(namespaceUrl);
+          endpointByStore.set(roleDataDirKey(role, dataDir), `${namespaceUrl}/sparql`);
+          await createBlazegraphNamespace({
+            namespaceApiUrl,
+            namespace,
+            fetchImpl: input.fetchImpl,
+            requestTimeoutMs: input.requestTimeoutMs,
+            signal: input.signal,
+          });
+        }
       }
     } catch (error) {
-      await cleanupBlazegraphNamespaces(
-        createdNamespaceUrls,
-        input.fetchImpl,
-        input.requestTimeoutMs,
-      ).catch(() => undefined);
+      try {
+        await cleanupBlazegraphNamespaces(
+          attemptedNamespaceUrls,
+          input.fetchImpl,
+          input.requestTimeoutMs,
+          3,
+        );
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Blazegraph namespace setup failed and cleanup could not be proven',
+        );
+      }
       throw error;
     }
     return new BlazegraphRolloutStoreFixture(
-      Object.freeze({
-        author: `${createdNamespaceUrls[0]}/sparql`,
-        receiver: `${createdNamespaceUrls[1]}/sparql`,
-      }),
-      Object.freeze(createdNamespaceUrls),
+      endpointByStore,
+      Object.freeze(attemptedNamespaceUrls),
       input.fetchImpl,
       input.requestTimeoutMs,
-      input.signal,
     );
   }
 
   envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>> {
-    this.dataDirs.set(role, dataDir);
+    const endpoint = this.endpointByStore.get(roleDataDirKey(role, dataDir));
+    if (endpoint === undefined) {
+      throw new Error(`Blazegraph rollout fixture has no registered ${role} store for ${dataDir}`);
+    }
     return Object.freeze({
-      DKG_RFC64_GATE1_STORE_BACKEND: this.backend,
-      DKG_RFC64_GATE1_BLAZEGRAPH_URL: this.endpoints[role],
+      [ROLLOUT_STORE_BACKEND_ENV]: this.backend,
+      [ROLLOUT_BLAZEGRAPH_URL_ENV]: endpoint,
     });
   }
 
   async assertGraphExact(
     role: RolloutStoreRole,
+    dataDir: string,
     graphUri: string,
     expectedQuads: readonly Quad[],
   ): Promise<void> {
-    const dataDir = this.dataDirs.get(role);
-    if (dataDir === undefined) throw new Error(`Blazegraph ${role} data directory is not registered`);
     await assertPathMissing(
       join(dataDir, 'store.nq'),
       `Blazegraph ${role} unexpectedly created an Oxigraph fallback store`,
     );
-    const endpoint = this.endpoints[role];
-    const graph = sparqlIri(graphUri, 'graph URI');
-    const count = await this.queryJson(endpoint,
-      `SELECT (COUNT(*) AS ?count) WHERE { GRAPH ${graph} { ?s ?p ?o } }`);
-    const countValue = readSparqlCount(count);
-    if (countValue !== expectedQuads.length) {
-      throw new Error(
-        `Blazegraph ${role} graph ${graphUri} has ${countValue} quads, expected ${expectedQuads.length}`,
-      );
+    const endpoint = this.endpointByStore.get(roleDataDirKey(role, dataDir));
+    if (endpoint === undefined) {
+      throw new Error(`Blazegraph ${role} endpoint is not registered`);
     }
-    for (const quad of expectedQuads) {
-      const ask = await this.queryJson(
-        endpoint,
-        `ASK WHERE { GRAPH ${graph} { ${sparqlIri(quad.subject, 'subject')} `
-          + `${sparqlIri(quad.predicate, 'predicate')} ${sparqlObject(quad.object)} } }`,
-      );
-      if (ask.boolean !== true) {
-        throw new Error(`Blazegraph ${role} graph ${graphUri} lacks an expected projection quad`);
+    const observer = await createTripleStore({
+      backend: 'blazegraph',
+      options: { url: endpoint, timeout: this.requestTimeoutMs },
+    });
+    try {
+      const actual = await readExactGraphPaged(observer, graphUri, {
+        expectedQuadCount: expectedQuads.length,
+        maxQuadCount: expectedQuads.length,
+        outputGraph: graphUri,
+      });
+      const actualLines = quadsToNQuads(actual).split('\n').filter(Boolean).sort();
+      const expectedLines = quadsToNQuads(expectedQuads.map((quad) => ({
+        ...quad,
+        graph: assertSafeIri(graphUri, 'graph URI'),
+      }))).split('\n').filter(Boolean).sort();
+      if (JSON.stringify(actualLines) !== JSON.stringify(expectedLines)) {
+        throw new Error(
+          `Blazegraph ${role} graph ${graphUri} differs from the exact persisted projection`,
+        );
       }
+    } finally {
+      await observer.close();
     }
   }
 
@@ -218,21 +243,31 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       this.requestTimeoutMs,
     );
   }
+}
 
-  private async queryJson(endpoint: string, query: string): Promise<Record<string, unknown>> {
-    const response = await boundedFetch(this.fetchImpl, endpoint, {
-      method: 'POST',
-      headers: {
-        accept: 'application/sparql-results+json',
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ query }),
-    }, this.requestTimeoutMs, this.operationSignal);
-    if (!response.ok) {
-      throw new Error(`Blazegraph direct observation failed: HTTP ${response.status}`);
+function normalizeStoreDataDirs(
+  input: Readonly<Record<RolloutStoreRole, readonly string[]>> | undefined,
+): Readonly<Record<RolloutStoreRole, readonly string[]>> {
+  const normalized = {
+    author: [...(input?.author ?? DEFAULT_STORE_DATA_DIRS.author)],
+    receiver: [...(input?.receiver ?? DEFAULT_STORE_DATA_DIRS.receiver)],
+  };
+  for (const [role, dataDirs] of Object.entries(normalized)) {
+    if (dataDirs.length < 1 || new Set(dataDirs).size !== dataDirs.length) {
+      throw new Error(`Blazegraph rollout ${role} data directories must be non-empty and unique`);
     }
-    return await response.json() as Record<string, unknown>;
+    if (dataDirs.some((dataDir) => dataDir.length === 0)) {
+      throw new Error(`Blazegraph rollout ${role} data directory must be non-empty`);
+    }
   }
+  return Object.freeze({
+    author: Object.freeze(normalized.author),
+    receiver: Object.freeze(normalized.receiver),
+  });
+}
+
+function roleDataDirKey(role: RolloutStoreRole, dataDir: string): string {
+  return `${role}\u0000${dataDir}`;
 }
 
 function blazegraphNamespaceApiUrl(configuredUrl: string): string {
@@ -272,20 +307,36 @@ async function cleanupBlazegraphNamespaces(
   namespaceUrls: readonly string[],
   fetchImpl: typeof fetch,
   requestTimeoutMs: number,
+  reconcileAttempts = 1,
 ): Promise<void> {
   const failures: string[] = [];
+  const attempts = Math.max(1, Math.min(reconcileAttempts, requestTimeoutMs));
+  const retryDelayMs = attempts === 1
+    ? 0
+    : Math.max(1, Math.min(100, Math.floor(requestTimeoutMs / (attempts * 4))));
+  const perAttemptTimeoutMs = Math.max(
+    1,
+    Math.floor((requestTimeoutMs - retryDelayMs * (attempts - 1)) / attempts),
+  );
   for (const url of namespaceUrls) {
-    try {
-      const response = await boundedFetch(
-        fetchImpl,
-        url,
-        { method: 'DELETE' },
-        requestTimeoutMs,
-      );
-      if (!response.ok && response.status !== 404) failures.push(`${url}: HTTP ${response.status}`);
-    } catch (error) {
-      failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
+    let failure: string | null = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const response = await boundedFetch(
+          fetchImpl,
+          url,
+          { method: 'DELETE' },
+          perAttemptTimeoutMs,
+        );
+        failure = !response.ok && response.status !== 404
+          ? `${url}: HTTP ${response.status}`
+          : null;
+      } catch (error) {
+        failure = `${url}: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      if (attempt + 1 < attempts) await delay(retryDelayMs);
     }
+    if (failure !== null) failures.push(failure);
   }
   if (failures.length > 0) {
     throw new Error(`could not clean isolated Blazegraph namespaces: ${failures.join('; ')}`);
@@ -309,45 +360,12 @@ async function boundedFetch(
   return fetchImpl(input, { ...init, signal });
 }
 
-function readSparqlCount(value: Record<string, unknown>): number {
-  const results = plainRecord(value.results, 'SPARQL results');
-  const bindings = results.bindings;
-  if (!Array.isArray(bindings) || bindings.length !== 1) {
-    throw new Error('SPARQL count response must contain exactly one binding');
-  }
-  const row = plainRecord(bindings[0], 'SPARQL count row');
-  const count = plainRecord(row.count, 'SPARQL count binding');
-  if (typeof count.value !== 'string' || !/^\d+$/u.test(count.value)) {
-    throw new Error('SPARQL count binding must be a non-negative integer');
-  }
-  return Number(count.value);
-}
-
-function plainRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} is missing`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function sparqlIri(value: string, label: string): string {
-  return `<${assertSafeIri(value, label)}>`;
-}
-
 function assertSafeIri(value: string, label: string): string {
   const hasControlOrSpace = [...value].some((character) => character.codePointAt(0)! <= 0x20);
   if (hasControlOrSpace || /[<>"{}|\\^`]/u.test(value)) {
     throw new Error(`${label} cannot be represented safely in the fixture SPARQL query`);
   }
   return value;
-}
-
-function sparqlObject(value: string): string {
-  if (value.startsWith('"')) {
-    if (/[\r\n]/u.test(value)) throw new Error('literal object cannot contain a raw line break');
-    return value;
-  }
-  return sparqlIri(value, 'object');
 }
 
 async function assertPathMissing(path: string, message: string): Promise<void> {
