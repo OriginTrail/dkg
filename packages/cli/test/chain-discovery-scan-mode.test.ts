@@ -448,6 +448,49 @@ describe('chainDiscoveryScanOptions', () => {
 
 // The policy is two pure functions over a discriminated state; pin the
 // transition table directly, not only through tick sequences.
+  // A rejection VALUE is arbitrary: `Object.create(null)` has no toString
+  // and a poisoned toString throws during formatting. The lifecycle hands
+  // this runner to a timer with no rejection handler, so a throw escaping
+  // here is an unhandled rejection — potentially fatal to the daemon.
+  it('rejection values that cannot be formatted neither crash the runner nor lose the retry', async () => {
+    for (const poison of [
+      Object.create(null),
+      { toString() { throw new Error('bad coercion'); } },
+    ]) {
+      const agent = {
+        hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+        discoverContextGraphsFromChain: vi
+          .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+          .mockRejectedValueOnce(poison)
+          .mockResolvedValueOnce(0),
+      };
+      const log = vi.fn();
+      const runner = createChainDiscoveryScanRunner({ agent, log });
+
+      await expect(runner()).resolves.toBeUndefined();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('Chain scan run 0 (seedFull) failed'));
+      await runner();
+      expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
+        mode: 'seedFull',
+        throwOnChainScanFailure: true,
+      });
+    }
+  });
+
+  it('a probe rejecting with an unformattable value still resolves and logs the skip', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi
+        .fn<() => Promise<boolean>>()
+        .mockRejectedValueOnce(Object.create(null)),
+      discoverContextGraphsFromChain: vi.fn(async () => 0),
+    };
+    const log = vi.fn();
+    const runner = createChainDiscoveryScanRunner({ agent, log });
+    await expect(runner()).resolves.toBeUndefined();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('watermark probe failed'));
+    expect(agent.discoverContextGraphsFromChain).not.toHaveBeenCalled();
+  });
+
 describe('scan scheduler transitions (GH#2323)', () => {
   const seedFull = { mode: 'seedFull', throwOnChainScanFailure: true } as const;
   const incremental = { mode: 'incremental', pageBudget: 30 } as const;

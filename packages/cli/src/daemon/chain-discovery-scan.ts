@@ -244,8 +244,22 @@ export function commitScanOutcome(
   };
 }
 
-const describeError = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
+/**
+ * TOTAL error description: chain discovery is non-critical and the lifecycle
+ * hands the runner straight to a timer with no rejection handler, so a
+ * throw ANYWHERE in reporting escapes as an unhandled rejection and can take
+ * the daemon down. A rejection value is arbitrary — `Object.create(null)`
+ * has no toString, and a poisoned `toString`/`message` getter throws — so
+ * both the property access and the coercion sit inside the catch.
+ */
+const describeError = (error: unknown): string => {
+  try {
+    if (error instanceof Error && typeof error.message === 'string') return error.message;
+    return String(error);
+  } catch {
+    return 'unknown error (rejection value could not be formatted)';
+  }
+};
 
 /**
  * The I/O shell (GH#2323): single-flight guard, the watermark probe with its
@@ -336,8 +350,15 @@ export function createChainDiscoveryScanRunner(input: {
       }
       const committed = commitScanOutcome(plan, outcome);
       state = committed.state; // committed before ANY logging
-      const line = reportLine(committed.report);
-      if (line !== undefined) safeLog(line);
+      try {
+        // describeError is total, but reporting stays inside its own no-throw
+        // boundary anyway — nothing after the state commit may reject the
+        // runner the timer never observes.
+        const line = reportLine(committed.report);
+        if (line !== undefined) safeLog(line);
+      } catch {
+        /* reporting must never affect scheduling or the timer */
+      }
     } finally {
       inFlight = false;
     }
