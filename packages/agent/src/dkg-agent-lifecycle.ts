@@ -9,6 +9,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isLegacySyncGraphAdmittedV1 } from './sync/legacy-sync-graph-admission.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -20,7 +21,7 @@ import {
   ENTITY_PRED_ALT, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY,
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
-  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -6596,14 +6597,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let insertedMetaTriples = 0;
     const accumulator = createDurableSyncAccumulator();
     const acceptUnverified = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId);
-    const cgDataUri = contextGraphDataUri(contextGraphId);
-    // In-scope iff the graph is this CG's own public data plane. Rejects the reserved
-    // changelog graph, any other CG, and the private/SWM planes (deferred to legacy).
-    const isForeignGraph = (graph: string): boolean => {
-      const inCg = graph === cgDataUri || graph.startsWith(`${cgDataUri}/`);
-      if (!inCg) return true;
-      return graph.includes('/_private') || graph.includes('/_shared_memory');
-    };
+    // One policy shared with the responder and durable requester: this lane
+    // admits only public payload plus top-level durable meta, never RFC-64
+    // control records, WM/SWM, private data, or another context graph.
+    const isForeignGraph = (graph: string): boolean =>
+      !isLegacySyncGraphAdmittedV1(graph, contextGraphId, 'changelog');
     const worker = this.getOrCreateSyncVerifyWorker();
 
     const outcome = await runChangelogSync({
