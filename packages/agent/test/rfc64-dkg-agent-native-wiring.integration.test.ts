@@ -508,6 +508,70 @@ function privateCatalogRoster(
 }
 
 ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
+  it('enforces legacy, shadow, catalog, and kill-switch authority at startup', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const activation = (
+      mode: 'legacy' | 'shadow' | 'catalog',
+      killSwitch = false,
+    ): Rfc64PublicCatalogActivationInputV1 => ({
+      deploymentProfile: NATIVE_DEPLOYMENT,
+      rollout: {
+        killSwitch,
+        contextGraphModes: { [CONTEXT_GRAPH_ID]: mode },
+      },
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [],
+        }],
+        retryIntervalMs: 1_000,
+      },
+    });
+
+    const legacy = await startNativeAgentWithOptions({
+      name: 'rollout-legacy',
+      activation: activation('legacy'),
+    });
+    expect(legacy.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
+    expect(legacy.rfc64PublicCatalogStatsV1()).toBeNull();
+    expect(legacy.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();
+
+    const shadow = await startNativeAgentWithOptions({
+      name: 'rollout-shadow',
+      activation: activation('shadow'),
+    });
+    expect(shadow.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
+    expect(shadow.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+    expect(shadow.readRfc64PublicCatalogBootstrapStatusV1()).not.toBeNull();
+
+    const catalog = await startNativeAgentWithOptions({
+      name: 'rollout-catalog',
+      activation: activation('catalog'),
+    });
+    expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    await expect(catalog.planSharedMemorySyncContextGraphs(
+      undefined,
+      [CONTEXT_GRAPH_ID],
+      createOperationContext('sync'),
+    )).resolves.toMatchObject({ targets: [] });
+    expect(catalog.isRfc64SelectedVmReconcileContextGraph(CONTEXT_GRAPH_ID)).toBe(true);
+    expect(catalog.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+    expect(catalog.readRfc64PublicCatalogBootstrapStatusV1()).not.toBeNull();
+
+    const stopped = await startNativeAgentWithOptions({
+      name: 'rollout-kill-switch',
+      activation: activation('catalog', true),
+    });
+    expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect(stopped.isRfc64SelectedVmReconcileContextGraph(CONTEXT_GRAPH_ID)).toBe(true);
+    expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
+    expect(stopped.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();
+  }, 30_000);
+
   it('preserves the EVM default chain identity for a no-admin chain config', async () => {
     const operational = ethers.Wallet.createRandom();
     const agent = await DKGAgent.create({

@@ -36,6 +36,10 @@ import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-p
 import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
 import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from './rfc64/public-catalog-successor-producer-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
+import {
+  rfc64CatalogKillSwitchActiveV1,
+  rfc64CatalogRolloutModeForContextGraphV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
 
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -83,6 +87,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1> {
+    this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
       throw new Error('RFC-64 confirmed public asset upsert requires the root catalog lane');
     }
@@ -144,6 +149,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
   ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
+    this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
       throw new Error('RFC-64 exact-set reconciliation requires the root catalog lane');
     }
@@ -227,6 +233,22 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         targetAssetCount: targetAssets.length,
       });
     });
+  }
+
+  private assertRfc64CatalogAuthoringModeV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): void {
+    const rollout = this.config.rfc64CatalogRollout;
+    if (rfc64CatalogKillSwitchActiveV1(rollout)) {
+      throw new Error('RFC-64 catalog authoring is disabled by the Track-2 kill switch');
+    }
+    if (
+      rollout.selectedContextGraphs.includes(contextGraphId)
+      && rfc64CatalogRolloutModeForContextGraphV1(rollout, contextGraphId) === 'legacy'
+    ) {
+      throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
+    }
   }
 
   private async readRfc64CatalogMutationStateV1(

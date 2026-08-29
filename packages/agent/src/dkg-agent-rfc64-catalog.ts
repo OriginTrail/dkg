@@ -102,6 +102,10 @@ import {
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
+import {
+  rfc64CatalogKillSwitchActiveV1,
+  rfc64CatalogRolloutModeForContextGraphV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -287,6 +291,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
+    if (rfc64CatalogKillSwitchActiveV1(this.config.rfc64CatalogRollout)) {
+      this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
+      return;
+    }
+    const selectedContextGraphs = this.config.rfc64CatalogRollout.selectedContextGraphs;
+    if (
+      selectedContextGraphs.length > 0
+      && selectedContextGraphs.every((contextGraphId) => (
+        rfc64CatalogRolloutModeForContextGraphV1(
+          this.config.rfc64CatalogRollout,
+          contextGraphId,
+        ) === 'legacy'
+      ))
+    ) {
+      this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
+      return;
+    }
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return;
     const verifyIssuerSignature = verifyControlEnvelopeIssuerSignatureV1;
@@ -296,6 +317,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
+      resolveContextGraphMode: (contextGraphId) =>
+        rfc64CatalogRolloutModeForContextGraphV1(
+          this.config.rfc64CatalogRollout,
+          contextGraphId,
+        ),
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(

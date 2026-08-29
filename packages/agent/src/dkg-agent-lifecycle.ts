@@ -673,6 +673,8 @@ import {
   type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
+import { rfc64LegacySyncAuthorityActiveForContextGraphV1 } from
+  './rfc64/public-catalog-activation-config-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -695,7 +697,10 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
     selectedRecoveryContextGraphIds: [...new Set([
       ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
         config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
-      ),
+      ).filter((contextGraphId) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
+        config.rfc64CatalogRollout,
+        contextGraphId,
+      )),
       ...edgeSelectedContextGraphIds,
     ])],
   });
@@ -4840,9 +4845,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
     const prioritySharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
-    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+    const acceptedPolicies = (this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?? [];
+      ?? []).filter(({ policyEnvelope }) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
+        this.config.rfc64CatalogRollout,
+        policyEnvelope.payload.contextGraphId,
+      ));
     // Private RFC-64 selections stay out of `syncContextGraphs`: that list is
     // also the automatic durable/VM scope, and private VM recovery belongs to
     // catalog activation. They still need an explicit SWM-only planning scope
@@ -4851,7 +4859,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(this.config.syncContextGraphs ?? []),
       ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      ),
+      ).filter((contextGraphId) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
+        this.config.rfc64CatalogRollout,
+        contextGraphId,
+      )),
     ])];
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
@@ -5154,6 +5165,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
+      if (!rfc64LegacySyncAuthorityActiveForContextGraphV1(
+        this.config.rfc64CatalogRollout,
+        contextGraphId,
+      )) {
+        this.log.debug(
+          ctx,
+          `Skipping legacy SWM planning for catalog-authoritative CG "${contextGraphId.slice(0, 28)}"`,
+        );
+        continue;
+      }
       const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
         contextGraphId,
       );
@@ -5735,6 +5756,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return createIncompleteDurableSyncResult();
     }
+    const requestedContextGraphCount = contextGraphIds.length;
+    contextGraphIds = contextGraphIds.filter((contextGraphId) => (
+      rfc64LegacySyncAuthorityActiveForContextGraphV1(
+        this.config.rfc64CatalogRollout,
+        contextGraphId,
+      )
+    ));
+    if (contextGraphIds.length !== requestedContextGraphCount) {
+      this.log.debug(
+        ctx,
+        `Skipped ${requestedContextGraphCount - contextGraphIds.length} catalog-authoritative CG(s) from legacy durable sync`,
+      );
+    }
+    if (contextGraphIds.length === 0) return createIncompleteDurableSyncResult();
     // OT-RFC-59 — peel off the public CGs this peer serves via the O(delta) changelog
     // lane; the rest fall through to the legacy full-scan lane below. STRICTLY ADDITIVE:
     // gated on this node's `store.changelog` flag, and ANY failure returns every CG to

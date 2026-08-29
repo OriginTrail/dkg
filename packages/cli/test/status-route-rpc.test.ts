@@ -285,6 +285,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     expect(response.status).toBe(200);
     expect(response.body.rfc64Catalog.privateRecovery).toEqual([{
       contextGraphId: privateContextGraph,
+      mode: 'catalog',
       accessPolicy: 1,
       publishPolicy: 1,
       vmRequired: true,
@@ -309,6 +310,13 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       scope: { contextGraphId: publicContextGraph },
       providers: [publicProvider],
       providerPeerId: publicProvider,
+    });
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      contextGraphModes: {
+        [publicContextGraph]: 'catalog',
+        [privateContextGraph]: 'catalog',
+      },
     });
     expect(JSON.stringify(response.body)).toContain(publicProvider);
     expect(JSON.stringify(response.body)).not.toContain(privateProvider);
@@ -657,6 +665,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64PublicCatalog).toEqual({
       enabled: false,
       selectedContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
       autoPublishEnabled: false,
       completeSwmProviders: [],
       service: null,
@@ -710,6 +719,10 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64PublicCatalog).toEqual({
       enabled: true,
       selectedContextGraphs: ['selected-public-cg'],
+      rollout: {
+        killSwitch: false,
+        contextGraphModes: { 'selected-public-cg': 'catalog' },
+      },
       autoPublishEnabled: true,
       completeSwmProviders: [{
         contextGraphId: 'selected-public-cg',

@@ -97,6 +97,7 @@ import type {
 import type {
   Rfc64PublicCatalogIssuerAuthorizationV1,
 } from './public-catalog-successor-producer-v1.js';
+import type { Rfc64CatalogRolloutModeV1 } from './public-catalog-activation-config-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   Rfc64PublicCatalogTransportV1,
@@ -141,6 +142,10 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
+  /** Immutable per-CG D17/D18 authority snapshot for this service lifetime. */
+  readonly resolveContextGraphMode?: (
+    contextGraphId: ContextGraphIdV1,
+  ) => Rfc64CatalogRolloutModeV1;
 }
 
 export type Rfc64PublicCatalogHeadFetchClientV1 = Pick<
@@ -295,6 +300,9 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #transportTimeoutMs: number;
   readonly #readNativeResourceStats: () =>
     Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
+  readonly #resolveContextGraphMode: (
+    contextGraphId: ContextGraphIdV1,
+  ) => Rfc64CatalogRolloutModeV1;
   #started = false;
   #closed = false;
 
@@ -305,10 +313,15 @@ export class Rfc64PublicCatalogServiceV1 {
       options.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
     this.#transportTimeoutMs = options.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
     this.#readNativeResourceStats = options.native?.readResourceStats ?? (() => null);
+    this.#resolveContextGraphMode = options.resolveContextGraphMode ?? (() => 'catalog');
 
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
-      authorizeCatalogOperation: this.#policies.authorize,
+      authorizeCatalogOperation: async (input) => (
+        this.#resolveContextGraphMode(input.contextGraphId) === 'legacy'
+          ? null
+          : this.#policies.authorize(input)
+      ),
       verifyIssuerSignature: this.#verifyIssuerSignature,
       // Non-blocking: schedule() enqueues synchronously so the transport's ACK
       // path (which awaits this callback) is never stalled on a fetch.
@@ -334,15 +347,20 @@ export class Rfc64PublicCatalogServiceV1 {
         readCatalogObjectByDigest: options.native.readCatalogObjectByDigest,
         readKaBundleByDigest: options.native.readKaBundleByDigest,
         resolveScopedReadCapability: options.native.resolveScopedReadCapability,
-        authorizeCatalogOperation: this.#policies.authorize,
+        authorizeCatalogOperation: async (input) => (
+          this.#resolveContextGraphMode(input.contextGraphId) === 'legacy'
+            ? null
+            : this.#policies.authorize(input)
+        ),
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
-    const reconciler = options.native === undefined
-      ? {
-        isHeadApplied: async () => false,
-        reconcileHead: (remotePeerId, announcement, signal) =>
-          this.#stageHeadOnly(remotePeerId, announcement, signal, options.onHeadStaged),
-      } satisfies Rfc64PublicCatalogReceiverReconcilerV1
+    const stagingReconciler = {
+      isHeadApplied: async () => false,
+      reconcileHead: (remotePeerId, announcement, signal) =>
+        this.#stageHeadOnly(remotePeerId, announcement, signal, options.onHeadStaged),
+    } satisfies Rfc64PublicCatalogReceiverReconcilerV1;
+    const nativeReconciler = options.native === undefined
+      ? undefined
       : options.native.createReconciler(Object.freeze({
         // Pass explicit capability objects rather than the owned transport
         // instances. The reconciler may fetch, but cannot start/stop protocols
@@ -361,6 +379,24 @@ export class Rfc64PublicCatalogServiceV1 {
         verifyIssuerSignature: this.#verifyIssuerSignature,
         transportTimeoutMs: this.#transportTimeoutMs,
       }));
+    const reconciler: Rfc64PublicCatalogReceiverReconcilerV1 = nativeReconciler === undefined
+      ? stagingReconciler
+      : {
+        isHeadApplied: (announcement) => (
+          this.#resolveContextGraphMode(announcement.contextGraphId) === 'catalog'
+            ? nativeReconciler.isHeadApplied(announcement)
+            : Promise.resolve(false)
+        ),
+        reconcileHead: (remotePeerId, announcement, signal) => {
+          const mode = this.#resolveContextGraphMode(announcement.contextGraphId);
+          if (mode === 'legacy') {
+            throw new Error('RFC-64 catalog reconciliation is disabled for legacy-mode CG');
+          }
+          return mode === 'shadow'
+            ? stagingReconciler.reconcileHead(remotePeerId, announcement, signal)
+            : nativeReconciler.reconcileHead(remotePeerId, announcement, signal);
+        },
+      };
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
   }
 
@@ -501,6 +537,9 @@ export class Rfc64PublicCatalogServiceV1 {
   ): Promise<PublishAuthorCatalogGenesisResultV1> {
     this.#requireStarted();
     const scope = snapshotCatalogScope(input.scope);
+    if (this.#resolveContextGraphMode(scope.contextGraphId) === 'legacy') {
+      throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
+    }
     const signer = Object.freeze({
       issuer: input.signer.issuer,
       signDigest: input.signer.signDigest,
@@ -692,7 +731,9 @@ export class Rfc64PublicCatalogServiceV1 {
       announcement: discovered.announcement,
       remotePeerId,
     }]);
-    if (!isRfc64PublicCatalogReceiverSuccessCompletionV1(completion)) {
+    const shadowStaged = completion.outcome === 'staged-only'
+      && this.#resolveContextGraphMode(discovered.announcement.contextGraphId) === 'shadow';
+    if (!isRfc64PublicCatalogReceiverSuccessCompletionV1(completion) && !shadowStaged) {
       throw new Rfc64CatalogReconciliationTerminalErrorV1(completion);
     }
     return discovered;
@@ -769,7 +810,11 @@ export class Rfc64PublicCatalogServiceV1 {
       announcement: discovered.announcement,
     })));
     const providerPeerIds = Object.freeze(selected.map(({ remotePeerId }) => remotePeerId));
-    if (!isRfc64PublicCatalogReceiverSuccessCompletionV1(completion)) {
+    const shadowStaged = completion.outcome === 'staged-only'
+      && this.#resolveContextGraphMode(
+        selected[0]!.discovered.announcement.contextGraphId,
+      ) === 'shadow';
+    if (!isRfc64PublicCatalogReceiverSuccessCompletionV1(completion) && !shadowStaged) {
       throw new Rfc64CatalogReconciliationTerminalErrorV1(completion);
     }
     if (
@@ -836,6 +881,9 @@ export class Rfc64PublicCatalogServiceV1 {
   #assertAcceptedCatalogAnnouncement(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    if (this.#resolveContextGraphMode(announcement.contextGraphId) === 'legacy') {
+      throw new Error('RFC-64 catalog reconciliation is disabled for legacy-mode CG');
+    }
     const held = this.#policies.lookup(announcement.networkId, announcement.contextGraphId);
     if (
       held === null
@@ -857,6 +905,7 @@ export class Rfc64PublicCatalogServiceV1 {
   async #authorizeCurrentHeadDiscovery(
     input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
   ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
+    if (this.#resolveContextGraphMode(input.contextGraphId) === 'legacy') return null;
     let trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
     try {
       trustedCatalogScope = this.#resolveTrustedCurrentHeadScope(input);

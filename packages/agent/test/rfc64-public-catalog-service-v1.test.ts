@@ -303,6 +303,24 @@ function countEvent(router: RecordingRouter, event: string): number {
 }
 
 describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
+  it('keeps legacy-mode CG authoring out of the catalog authority', async () => {
+    const router = new RecordingRouter();
+    const store = controlObjects();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: store,
+      accessPolicyAuthority: accessPolicyAuthority(),
+      resolveContextGraphMode: () => 'legacy',
+    });
+    service.start();
+
+    await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service)))
+      .rejects.toThrow(/authoring is disabled for legacy-mode CG/u);
+    expect(store.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(router.events.some((event) => event.startsWith('send:'))).toBe(false);
+    await service.close();
+  });
+
   it('preserves direct open-only construction and rejects private snapshots', async () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: new RecordingRouter().asProtocolRouter(),
@@ -1508,15 +1526,21 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
-  it('keeps diagnostic staging-only mode explicitly non-applied across replays', async () => {
+  it('keeps shadow mode explicitly staged-only even when native activation is available', async () => {
     const router = new RecordingRouter();
     const store = controlObjects();
     const onHeadStaged = vi.fn();
+    const reconcileHead = vi.fn(async () => 'applied' as const);
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: store,
       accessPolicyAuthority: accessPolicyAuthority(),
       onHeadStaged,
+      resolveContextGraphMode: () => 'shadow',
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead,
+      })),
     });
     const policy = acceptPolicy(service);
     const produced = await produceEmptyAuthorCatalogGenesisV1({
@@ -1570,6 +1594,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
 
     expect(store.stageVerifiedObjects).toHaveBeenCalledTimes(2);
     expect(onHeadStaged).toHaveBeenCalledTimes(2);
+    expect(reconcileHead).not.toHaveBeenCalled();
     expect(service.stats().receiver).toMatchObject({
       stagedOnly: 2,
       applied: 0,
