@@ -93,7 +93,7 @@ describe('RFC-64 shared-projection stream manifest v1', () => {
     });
 
     const graph =
-      `did:dkg:context-graph:a/b/_shared_memory/${AUTHOR}/7`;
+      `did:dkg:context-graph:v1/root/a%2Fb/_shared_memory/${AUTHOR}/7`;
     expect(operation).toMatchObject({
       queryId: 'SYNC_KA_SHARED_PROJECTION_STREAM_V1',
       graphIri: graph,
@@ -125,9 +125,42 @@ describe('RFC-64 shared-projection stream manifest v1', () => {
       sealBinding,
     });
     expect(operation.graphIri).toBe(
-      `did:dkg:context-graph:a/b/curated/_shared_memory/${AUTHOR}/7`,
+      `did:dkg:context-graph:v1/subgraph/a%2Fb/curated/_shared_memory/${AUTHOR}/7`,
     );
     expect(operation.sparql).not.toMatch(/OFFSET|ORDER BY|VALUES|GRAPH \?g/);
+  });
+
+  it('cannot alias a named lane with a slash-containing root context graph', () => {
+    const namedScope = validScope({
+      ...SCOPE,
+      contextGraphId: 'a/b',
+      subGraphName: 'curated',
+    });
+    const rootScope = validScope({
+      ...SCOPE,
+      contextGraphId: 'a/b/curated',
+      subGraphName: null,
+    });
+    const named = compileRfc64SharedProjectionStreamOperationV1({
+      sealBinding: verifyCatalogSealBindingV1(
+        namedScope,
+        ROW,
+        canonicalizeCanonicalGraphScopedAuthorSealBytesV1(SEAL),
+        PROFILE,
+      ),
+    });
+    const root = compileRfc64SharedProjectionStreamOperationV1({
+      sealBinding: verifyCatalogSealBindingV1(
+        rootScope,
+        ROW,
+        canonicalizeCanonicalGraphScopedAuthorSealBytesV1(SEAL),
+        PROFILE,
+      ),
+    });
+
+    expect(named.graphIri).not.toBe(root.graphIri);
+    expect(named.graphIri).toContain(':v1/subgraph/');
+    expect(root.graphIri).toContain(':v1/root/');
   });
 
   it('does not expose a raw scope/row rebinding surface beside the verified proof', () => {

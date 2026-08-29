@@ -9,7 +9,7 @@ import {
   type Rfc64SharedProjectionStreamTemplateInputV1,
 } from '@origintrail-official/dkg-core';
 
-import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
+import { openLazyAbortableStream } from './abortable-stream-work-lifecycle.js';
 import {
   isRfc64SharedProjectionStreamCapabilityV1,
   type Rfc64SharedProjectionStreamCapabilityV1,
@@ -110,55 +110,29 @@ export class SyncSharedProjectionStoreV1 {
     callerSignal: AbortSignal | undefined,
     deadlineAt: number,
   ): AsyncGenerator<Uint8Array, void, undefined> {
-    const remainingMs = deadlineAt - performance.now();
-    if (remainingMs <= 0) {
-      throw new DOMException(
-        'RFC-64 shared-projection stream deadline exceeded',
-        'TimeoutError',
-      );
-    }
-    const deadlineSignal = AbortSignal.timeout(Math.max(1, Math.ceil(remainingMs)));
-    const signalScope = composeAbortSignals(callerSignal, deadlineSignal);
-    try {
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
-      let source: AsyncIterable<Quad>;
-      try {
-        const pendingSource = this.capability.rfc64SharedProjectionStreamV1(operation, {
-          byteCeiling: effectiveByteCeiling,
-          signal: signalScope.signal,
-        });
-        source = await raceAgainstAbort(pendingSource, signalScope.signal, async (lateSource) => {
-          if (isAsyncIterable(lateSource)) await closeAsyncIterable(lateSource);
-        });
-      } catch (cause) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
-        throw cause;
-      }
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
-      if (!isAsyncIterable(source)) {
+    const source = openLazyAbortableStream<Quad>({
+      deadlineAt,
+      signal: callerSignal,
+      timeoutMessage: 'RFC-64 shared-projection stream deadline exceeded',
+      open: (signal) => this.capability.rfc64SharedProjectionStreamV1(operation, {
+        byteCeiling: effectiveByteCeiling,
+        signal,
+      }),
+      invalidSource: () => {
         fail(
           'rfc64-shared-projection-stream-result',
           'adapter did not return an async iterable projection stream',
         );
-      }
-      try {
-        yield* this.validateStream(
-          source,
-          operation.graphIri,
-          operation.commitmentSubject,
-          operation.publicTripleCount,
-          operation.projectionDigest,
-          effectiveByteCeiling,
-          signalScope.signal,
-          deadlineAt,
-        );
-      } catch (cause) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
-        throw cause;
-      }
-    } finally {
-      signalScope.dispose();
-    }
+      },
+    });
+    yield* this.validateStream(
+      source,
+      operation.graphIri,
+      operation.commitmentSubject,
+      operation.publicTripleCount,
+      operation.projectionDigest,
+      effectiveByteCeiling,
+    );
   }
 
   private async *validateStream(
@@ -168,8 +142,6 @@ export class SyncSharedProjectionStoreV1 {
     expectedTripleCount: Rfc64SharedProjectionStreamOperationV1['publicTripleCount'],
     expectedDigest: Digest32V1,
     byteCeiling: number,
-    signal: AbortSignal | undefined,
-    deadlineAt: number,
   ): AsyncGenerator<Uint8Array, void, undefined> {
     const verifier = createCgSharedProjectionStreamVerifierV1({
       commitmentSubject,
@@ -177,42 +149,29 @@ export class SyncSharedProjectionStoreV1 {
       expectedProjectionDigest: expectedDigest,
       byteCeiling,
     });
-    const iterator = source[Symbol.asyncIterator]();
-    let complete = false;
-    try {
-      while (true) {
-        assertBeforeDeadline(signal, deadlineAt);
-        const next = await raceAgainstAbort(Promise.resolve(iterator.next()), signal);
-        if (next.done) {
-          complete = true;
-          break;
-        }
-        const quad = snapshotQuad(next.value);
-        if (quad.graph !== graphIri) {
-          fail(
-            'rfc64-shared-projection-stream-result',
-            'adapter returned a quad outside the authenticated projection graph',
-          );
-        }
-        let line: Uint8Array;
-        try {
-          line = verifier.push(quad);
-        } catch (cause) {
-          fail(
-            'rfc64-shared-projection-stream-result',
-            projectionFailureMessage(cause),
-            cause,
-          );
-        }
-        yield line;
-        assertBeforeDeadline(signal, deadlineAt);
+    for await (const value of source) {
+      const quad = snapshotQuad(value);
+      if (quad.graph !== '' && quad.graph !== graphIri) {
+        fail(
+          'rfc64-shared-projection-stream-result',
+          'adapter returned a quad outside the authenticated projection graph',
+        );
       }
-    } finally {
-      if (!complete) {
-        await raceAgainstAbort(Promise.resolve(iterator.return?.()), signal).catch(() => undefined);
+      const normalized = quad.graph === graphIri
+        ? quad
+        : Object.freeze({ ...quad, graph: graphIri });
+      let line: Uint8Array;
+      try {
+        line = verifier.push(normalized);
+      } catch (cause) {
+        fail(
+          'rfc64-shared-projection-stream-result',
+          projectionFailureMessage(cause),
+          cause,
+        );
       }
+      yield line;
     }
-    assertBeforeDeadline(signal, deadlineAt);
     try {
       verifier.finalize();
     } catch (cause) {
@@ -223,46 +182,6 @@ export class SyncSharedProjectionStoreV1 {
       );
     }
   }
-}
-
-async function raceAgainstAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-  onLateResult?: (value: T) => void | Promise<void>,
-): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) {
-    void work.then(onLateResult).catch(() => undefined);
-    signal.throwIfAborted();
-  }
-  return new Promise<T>((resolve, reject) => {
-    let aborted = false;
-    const onAbort = () => {
-      aborted = true;
-      reject(signal.reason);
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (!aborted && signal.aborted) onAbort();
-    work.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        if (aborted) {
-          void Promise.resolve(onLateResult?.(value)).catch(() => undefined);
-        } else {
-          resolve(value);
-        }
-      },
-      (cause) => {
-        signal.removeEventListener('abort', onAbort);
-        if (!aborted) reject(cause);
-      },
-    );
-  });
-}
-
-async function closeAsyncIterable(source: AsyncIterable<unknown>): Promise<void> {
-  const iterator = source[Symbol.asyncIterator]();
-  await iterator.return?.();
 }
 
 function snapshotOptions(input: unknown): Rfc64SharedProjectionStreamOptionsV1 {
@@ -349,12 +268,6 @@ function snapshotQuad(input: unknown): Readonly<Quad> {
   });
 }
 
-function isAsyncIterable(value: unknown): value is AsyncIterable<Quad> {
-  return value !== null
-    && (typeof value === 'object' || typeof value === 'function')
-    && typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function';
-}
-
 function hasOwnKey(input: unknown, key: string): boolean {
   return input !== null
     && typeof input === 'object'
@@ -384,13 +297,6 @@ function projectionFailureMessage(cause: unknown): string {
     }
   }
   return 'adapter returned an invalid canonical projection triple';
-}
-
-function assertBeforeDeadline(signal: AbortSignal | undefined, deadlineAt: number): void {
-  signal?.throwIfAborted();
-  if (performance.now() >= deadlineAt) {
-    throw new DOMException('RFC-64 shared-projection stream deadline exceeded', 'TimeoutError');
-  }
 }
 
 function fail(

@@ -59,6 +59,15 @@ describe('core cg-shared-v1 incremental verifier', () => {
     expect(() => verifier.finalize()).not.toThrow();
   });
 
+  it('returns caller-owned chunks that cannot mutate retained ordering state', () => {
+    const verifier = createVerifier();
+    const first = verifier.push(TRIPLES[0]);
+    first.fill(0x7f);
+
+    expect(() => verifier.push(TRIPLES[1])).not.toThrow();
+    expect(() => verifier.finalize()).not.toThrow();
+  });
+
   it('uses the same typed projection errors for ordered-stream failures', () => {
     const verifier = createVerifier();
     verifier.push(TRIPLES[1]);

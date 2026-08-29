@@ -6,9 +6,9 @@ import {
   CG_SHARED_PRIVATE_COMMITMENT_SUFFIX_V1,
 } from './cg-shared-projection.js';
 import {
-  contextGraphLayerUri,
-} from './constants.js';
-import { MemoryLayer } from './memory-model.js';
+  buildCatalogAssertionScopeV1,
+  type CatalogLaneV1,
+} from './author-catalog-codec.js';
 import {
   assertCanonicalDeterministicUalV1,
 } from './ka-content-scope.js';
@@ -62,6 +62,28 @@ export class Rfc64SharedProjectionStreamManifestErrorV1 extends Error {
   }
 }
 
+/**
+ * Prefix-free physical graph for one RFC-64 shared projection.
+ *
+ * The legacy `{contextGraphId}[/{subGraphName}]` path is not injective when a
+ * context-graph ID itself contains `/`. Reuse the catalog-v1 root/subgraph
+ * discriminator and escaped context component so two authenticated lanes can
+ * never resolve to the same graph.
+ */
+export function deriveRfc64SharedProjectionGraphIriV1(
+  lane: CatalogLaneV1,
+  kaUal: unknown,
+): string {
+  let ual: ReturnType<typeof assertCanonicalDeterministicUalV1>;
+  try {
+    ual = assertCanonicalDeterministicUalV1(kaUal);
+  } catch (cause) {
+    fail('shared-projection graph requires a canonical deterministic KA UAL', cause);
+  }
+  return `did:dkg:context-graph:${buildCatalogAssertionScopeV1(lane)}`
+    + `/_shared_memory/${ual.agentAddress}/${ual.kaNumber}`;
+}
+
 /** Compile the sole exact-graph RFC-64 shared-projection stream. */
 export function compileRfc64SharedProjectionStreamOperationV1(
   input: unknown,
@@ -99,13 +121,7 @@ export function compileRfc64SharedProjectionStreamOperationV1(
     fail('signed transfer byte ceiling is outside the protocol hard cap');
   }
 
-  const graphIri = contextGraphLayerUri(
-    catalogScope.contextGraphId,
-    MemoryLayer.SharedWorkingMemory,
-    ual.agentAddress,
-    ual.kaNumber,
-    catalogScope.subGraphName ?? undefined,
-  );
+  const graphIri = deriveRfc64SharedProjectionGraphIriV1(catalogScope, ual.ual);
   const commitmentSubject =
     `${ual.ual}${CG_SHARED_PRIVATE_COMMITMENT_SUFFIX_V1}`;
 

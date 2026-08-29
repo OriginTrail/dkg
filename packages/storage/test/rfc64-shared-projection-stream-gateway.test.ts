@@ -29,7 +29,7 @@ const AUTHOR = '0x3333333333333333333333333333333333333333';
 const KAV10 = '0x4444444444444444444444444444444444444444';
 const KA_ID =
   '23158417847463239084714197001737581570653996933112267175388663934063917137927';
-const GRAPH = `did:dkg:context-graph:a/b/_shared_memory/${AUTHOR}/7`;
+const GRAPH = `did:dkg:context-graph:v1/root/a%2Fb/_shared_memory/${AUTHOR}/7`;
 const QUADS: readonly Quad[] = Object.freeze([
   Object.freeze({ subject: 'urn:a', predicate: 'urn:p', object: '"alpha"', graph: GRAPH }),
   Object.freeze({ subject: 'urn:b', predicate: 'urn:p', object: '"beta"', graph: GRAPH }),
@@ -124,6 +124,19 @@ describe('SyncSharedProjectionStoreV1', () => {
       resultKind: 'quad-stream',
     });
     expect(capturedByteCeiling).toBe(2048);
+  });
+
+  it('centrally normalizes graphless CONSTRUCT output and preserves exact-graph output', async () => {
+    const graphless = QUADS.map((quad) => ({ ...quad, graph: '' }));
+    for (const quads of [graphless, QUADS]) {
+      const result = await new SyncSharedProjectionStoreV1(
+        fakeStore(async () => streamQuads(quads)),
+      ).open(REQUEST, {
+        operatorByteCeiling: 4096,
+        timeoutMs: 1000,
+      });
+      expect(await collect(result.bytes)).toEqual(PROJECTION_BYTES);
+    }
   });
 
   it('discovers the callable capability through a documented decorator', async () => {
@@ -253,7 +266,7 @@ describe('SyncSharedProjectionStoreV1', () => {
     }));
     const result = await gateway.open(REQUEST, {
       operatorByteCeiling: 4096,
-      timeoutMs: 10,
+      timeoutMs: 100,
     });
     await expect(collect(result.bytes)).rejects.toMatchObject({ name: 'TimeoutError' });
     expect(observedSignal?.aborted).toBe(true);
@@ -269,6 +282,34 @@ describe('SyncSharedProjectionStoreV1', () => {
     });
 
     await expect(collect(result.bytes)).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('closes an adapter stream that arrives after its acquisition deadline', async () => {
+    const pending = Promise.withResolvers<AsyncIterable<Quad>>();
+    let closed = false;
+    const lateSource: AsyncIterable<Quad> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            return { done: true, value: undefined };
+          },
+          async return() {
+            closed = true;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(() => pending.promise),
+    ).open(REQUEST, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 5,
+    });
+
+    await expect(collect(result.bytes)).rejects.toMatchObject({ name: 'TimeoutError' });
+    pending.resolve(lateSource);
+    await vi.waitFor(() => expect(closed).toBe(true));
   });
 
   it('enforces the deadline on a non-cooperative iterator read and closes it', async () => {

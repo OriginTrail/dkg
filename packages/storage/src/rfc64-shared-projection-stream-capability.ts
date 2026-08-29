@@ -14,11 +14,10 @@ export interface Rfc64SharedProjectionStreamCapabilityOptionsV1 {
  * Callable adapter contract for one exact, non-materialized KA projection.
  *
  * SPARQL CONSTRUCT normally returns graphless triples even when its WHERE
- * clause reads one named graph. A certified adapter MUST accept only graphless
- * output or output already tagged with `operation.graphIri`, reject every
- * other named graph, and attach the internally derived `operation.graphIri`
- * before yielding. The gateway therefore never trusts a response-supplied
- * graph identity and can still enforce the exact authenticated graph contract.
+ * clause reads one named graph. Capabilities may therefore yield graphless
+ * quads or quads tagged with `operation.graphIri`. The public gateway owns the
+ * one canonical normalization rule: it attaches the authenticated graph to
+ * graphless results and rejects every foreign named graph.
  */
 export interface Rfc64SharedProjectionStreamCapabilityV1 {
   rfc64SharedProjectionStreamV1(
