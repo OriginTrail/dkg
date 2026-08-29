@@ -233,7 +233,9 @@ describe('selected snapshot walk continuation', () => {
 });
 
 describe('sync requester progress accounting', () => {
-  it('rejects RFC-64 control graphs returned by a legacy durable responder before insert', async () => {
+  it.each(['data', 'meta'] as const)(
+    'rejects RFC-64 control graphs returned in verified %s before insert',
+    async (verifiedPhase) => {
     const contextGraphId = 'rfc64-control-boundary';
     const controlQuad = {
       ...quad('urn:dkg:sync:applied-cg:test'),
@@ -252,8 +254,10 @@ describe('sync requester progress accounting', () => {
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
         emptyResponses: 0,
-        verifiedData: [controlQuad],
-        totalFetchedDataQuads: 1,
+        verifiedData: verifiedPhase === 'data' ? [controlQuad] : [],
+        verifiedMeta: verifiedPhase === 'meta' ? [controlQuad] : [],
+        totalFetchedDataQuads: verifiedPhase === 'data' ? 1 : 0,
+        totalFetchedMetaQuads: verifiedPhase === 'meta' ? 1 : 0,
       }),
       storeInsert,
       deleteCheckpoint: () => {},
@@ -266,7 +270,8 @@ describe('sync requester progress accounting', () => {
     expect(storeInsert.calls).toHaveLength(0);
     expect(summary.insertedTriples).toBe(0);
     expect(summary.failedPhases).toBe(1);
-  });
+    },
+  );
 
   it('does not count a denied durable graph but counts the subsequent clean-empty graph', async () => {
     const deniedCgs: string[] = [];

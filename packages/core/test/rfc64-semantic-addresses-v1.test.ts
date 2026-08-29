@@ -20,6 +20,29 @@ const AUTHOR = '0x89abcdef0123456789abcdef0123456789abcdef' as EvmAddressV1;
 const SUBGRAPH = 'research' as SubGraphNameV1;
 
 describe('RFC-64 semantic addresses v1', () => {
+  it.each(['networkId', 'contextGraphId', 'subGraphName', 'authorAddress'] as const)(
+    'rejects accessor-backed %s before semantic address derivation',
+    (key) => {
+      const scope: Record<string, unknown> = {
+        networkId: NETWORK,
+        contextGraphId: CONTEXT_GRAPH,
+        subGraphName: SUBGRAPH,
+        authorAddress: AUTHOR,
+      };
+      let reads = 0;
+      Object.defineProperty(scope, key, {
+        enumerable: true,
+        get() {
+          reads += 1;
+          return 'changed value';
+        },
+      });
+      expect(() => deriveRfc64CurrentAuthorCatalogRefAddressV1(
+        scope as never,
+      )).toThrow(/enumerable data property/u);
+      expect(reads).toBe(0);
+    },
+  );
   it('freezes collision-safe root and named subgraph key vectors', () => {
     expect(computeRfc64SubGraphKeyV1(null)).toBe(
       '0x746bfff91a7c229a180489f0149b250944da97e5038b125af5df5a74916518e4',

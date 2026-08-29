@@ -2,7 +2,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 
 import { canonicalizeJson, type CanonicalJsonValue } from './canonical-json.js';
-import { iriComponentV1 } from './canonical-iri-component-v1.js';
+import { encodeCanonicalIriComponentV1 } from './canonical-iri-component-v1.js';
 import { contextGraphDataUri } from './constants.js';
 import {
   assertAuthorLaneContextGraphIdV1,
@@ -115,22 +115,20 @@ export function computeRfc64SubGraphKeyV1(
 export function deriveRfc64CurrentAuthorCatalogRefAddressV1(
   scope: Rfc64AuthorSemanticScopeV1,
 ): Rfc64CurrentAuthorCatalogRefAddressV1 {
-  assertSemanticScope(scope);
-  if (scope.subGraphName !== null) assertAuthorLaneSubGraphNameV1(scope.subGraphName);
-  assertCanonicalEvmAddress(scope.authorAddress, 'authorAddress');
-  const base = semanticGraphBase(scope.contextGraphId);
-  const subGraphKey = computeRfc64SubGraphKeyV1(scope.subGraphName);
+  const snapshot = snapshotAuthorSemanticScope(scope);
+  const base = semanticGraphBase(snapshot.contextGraphId);
+  const subGraphKey = computeRfc64SubGraphKeyV1(snapshot.subGraphName);
   return Object.freeze({
     subGraphKey,
     graphUri: (
-      `${base}/catalog/${subGraphKey}/${scope.authorAddress}/current`
+      `${base}/catalog/${subGraphKey}/${snapshot.authorAddress}/current`
     ) as Rfc64SyncGraphIriV1,
     subject: semanticSubject(
       'catalog',
-      scope.networkId,
-      scope.contextGraphId,
+      snapshot.networkId,
+      snapshot.contextGraphId,
       subGraphKey,
-      scope.authorAddress,
+      snapshot.authorAddress,
     ),
   });
 }
@@ -139,28 +137,27 @@ export function deriveRfc64CurrentAuthorCatalogRefAddressV1(
 export function deriveRfc64SubgraphSemanticAddressesV1(
   scope: Rfc64SubgraphSemanticScopeV1,
 ): Rfc64SubgraphSemanticAddressesV1 {
-  assertSemanticScope(scope);
-  if (scope.subGraphName !== null) assertAuthorLaneSubGraphNameV1(scope.subGraphName);
-  const subGraphKey = computeRfc64SubGraphKeyV1(scope.subGraphName);
-  const base = semanticGraphBase(scope.contextGraphId);
+  const snapshot = snapshotSubgraphSemanticScope(scope);
+  const subGraphKey = computeRfc64SubGraphKeyV1(snapshot.subGraphName);
+  const base = semanticGraphBase(snapshot.contextGraphId);
   return Object.freeze({
     subGraphKey,
     appliedSeal: semanticAddress(
       base,
       'applied',
-      scope,
+      snapshot,
       subGraphKey,
     ),
     mutationGuard: semanticAddress(
       base,
       'mutation',
-      scope,
+      snapshot,
       subGraphKey,
     ),
     reconcileTarget: semanticAddress(
       base,
       'reconcile-target',
-      scope,
+      snapshot,
       subGraphKey,
     ),
   });
@@ -170,21 +167,50 @@ export function deriveRfc64SubgraphSemanticAddressesV1(
 export function deriveRfc64ContextGraphSemanticAddressesV1(
   scope: Rfc64SemanticScopeV1,
 ): Rfc64ContextGraphSemanticAddressesV1 {
-  assertSemanticScope(scope);
-  const base = semanticGraphBase(scope.contextGraphId);
+  const snapshot = snapshotSemanticScope(scope);
+  const base = semanticGraphBase(snapshot.contextGraphId);
   return Object.freeze({
-    mutationGuard: semanticAddress(base, 'mutation-cg', scope),
-    appliedSetRef: semanticAddress(base, 'applied-set', scope),
-    appliedSeal: semanticAddress(base, 'applied-cg', scope),
+    mutationGuard: semanticAddress(base, 'mutation-cg', snapshot),
+    appliedSetRef: semanticAddress(base, 'applied-set', snapshot),
+    appliedSeal: semanticAddress(base, 'applied-cg', snapshot),
   });
 }
 
-function assertSemanticScope(scope: Rfc64SemanticScopeV1): void {
+function snapshotSemanticScope(scope: Rfc64SemanticScopeV1): Readonly<Rfc64SemanticScopeV1> {
   if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) {
     throw new Error('RFC-64 semantic scope must be an object');
   }
-  assertNetworkIdV1(scope.networkId);
-  assertAuthorLaneContextGraphIdV1(scope.contextGraphId);
+  const networkId = ownDataProperty(scope, 'networkId');
+  const contextGraphId = ownDataProperty(scope, 'contextGraphId');
+  assertNetworkIdV1(networkId);
+  assertAuthorLaneContextGraphIdV1(contextGraphId);
+  return Object.freeze({ networkId, contextGraphId });
+}
+
+function snapshotSubgraphSemanticScope(
+  scope: Rfc64SubgraphSemanticScopeV1,
+): Readonly<Rfc64SubgraphSemanticScopeV1> {
+  const base = snapshotSemanticScope(scope);
+  const subGraphName = ownDataProperty(scope, 'subGraphName');
+  if (subGraphName !== null) assertAuthorLaneSubGraphNameV1(subGraphName);
+  return Object.freeze({ ...base, subGraphName });
+}
+
+function snapshotAuthorSemanticScope(
+  scope: Rfc64AuthorSemanticScopeV1,
+): Readonly<Rfc64AuthorSemanticScopeV1> {
+  const base = snapshotSubgraphSemanticScope(scope);
+  const authorAddress = ownDataProperty(scope, 'authorAddress');
+  assertCanonicalEvmAddress(authorAddress, 'authorAddress');
+  return Object.freeze({ ...base, authorAddress });
+}
+
+function ownDataProperty<T extends object, K extends keyof T>(value: T, key: K): T[K] {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+    throw new Error(`RFC-64 semantic scope ${String(key)} must be an enumerable data property`);
+  }
+  return descriptor.value as T[K];
 }
 
 function semanticGraphBase(contextGraphId: ContextGraphIdV1): string {
@@ -212,8 +238,8 @@ function semanticSubject(
 ): Rfc64SyncSubjectIriV1 {
   const components = [
     role,
-    iriComponentV1(networkId),
-    iriComponentV1(contextGraphId),
+    encodeCanonicalIriComponentV1(networkId),
+    encodeCanonicalIriComponentV1(contextGraphId),
   ];
   components.push(...suffixes);
   return `urn:dkg:sync:${components.join(':')}` as Rfc64SyncSubjectIriV1;

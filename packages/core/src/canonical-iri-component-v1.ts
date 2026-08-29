@@ -1,15 +1,12 @@
 const UTF8 = new TextEncoder();
 
 /**
- * Percent-encode one already-canonical NFC UTF-8 identifier component.
- *
- * The caller supplies the protocol-specific byte ceiling. The encoder is kept
- * neutral so catalog, semantic-address, and later RFC-64 record codecs cannot
- * acquire a dependency on one another merely to share an IRI primitive.
+ * Percent-encode one identifier component that its owning protocol has already
+ * validated and normalized. Validation and error classification deliberately
+ * remain at those protocol boundaries.
  */
-export function iriComponentV1(value: string, maxBytes = 256): string {
-  const identifier = assertNfcUtf8Identifier(value, 'IRI component', maxBytes);
-  const bytes = UTF8.encode(identifier);
+export function encodeCanonicalIriComponentV1(value: string): string {
+  const bytes = UTF8.encode(value);
   let encoded = '';
   for (const byte of bytes) {
     if (isUnescapedIriComponentByte(byte)) {
@@ -19,42 +16,6 @@ export function iriComponentV1(value: string, maxBytes = 256): string {
     }
   }
   return encoded;
-}
-
-function assertNfcUtf8Identifier(
-  value: unknown,
-  label: string,
-  maxBytes: number,
-): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`${label} must be a non-empty string`);
-  }
-  if (value.length > maxBytes) {
-    throw new Error(`${label} exceeds ${maxBytes} UTF-8 bytes`);
-  }
-  assertWellFormedUnicode(value, label);
-  if (value.normalize('NFC') !== value) {
-    throw new Error(`${label} must already be NFC-normalized`);
-  }
-  if (UTF8.encode(value).byteLength > maxBytes) {
-    throw new Error(`${label} exceeds ${maxBytes} UTF-8 bytes`);
-  }
-  return value;
-}
-
-function assertWellFormedUnicode(value: string, label: string): void {
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index);
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) {
-        throw new Error(`${label} contains an unpaired UTF-16 surrogate`);
-      }
-      index += 1;
-    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
-      throw new Error(`${label} contains an unpaired UTF-16 surrogate`);
-    }
-  }
 }
 
 function isUnescapedIriComponentByte(byte: number): boolean {

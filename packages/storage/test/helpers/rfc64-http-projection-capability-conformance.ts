@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { StorePriorityScheduler } from '../../src/store-priority-scheduler.js';
 import type { TripleStore } from '../../src/triple-store.js';
+import type {
+  Rfc64SharedProjectionStreamCapabilityV1,
+} from '../../src/rfc64-shared-projection-stream-capability.js';
 import { createRfc64SharedProjectionTestFixture } from './rfc64-shared-projection-fixture.js';
 
 const FIXTURE = createRfc64SharedProjectionTestFixture();
@@ -13,7 +16,7 @@ export interface Rfc64HttpProjectionCapabilityConformanceOptions {
   readonly createStore: (
     scheduler: StorePriorityScheduler,
     timeoutMs: number,
-  ) => TripleStore;
+  ) => TripleStore & Rfc64SharedProjectionStreamCapabilityV1;
 }
 
 /** Shared HTTP capability contract; vendor suites retain only vendor-specific assertions. */
@@ -29,7 +32,7 @@ export function runRfc64HttpProjectionCapabilityConformance(
       })) as typeof fetch;
       const store = options.createStore(scheduler, 1_000);
 
-      const source = await store.rfc64SharedProjectionStreamV1!(FIXTURE.operation, {
+      const source = await store.rfc64SharedProjectionStreamV1(FIXTURE.operation, {
         byteCeiling: 4096,
       });
 
@@ -50,7 +53,7 @@ export function runRfc64HttpProjectionCapabilityConformance(
         `<urn:a> <urn:p> "alpha" <${FIXTURE.graph}> .\n`,
         { status: 200 },
       )) as typeof fetch;
-      const exact = await store.rfc64SharedProjectionStreamV1!(
+      const exact = await store.rfc64SharedProjectionStreamV1(
         oneTripleOperation(),
         { byteCeiling: 4096 },
       );
@@ -60,7 +63,7 @@ export function runRfc64HttpProjectionCapabilityConformance(
         '<urn:a> <urn:p> "alpha" <urn:foreign> .\n',
         { status: 200 },
       )) as typeof fetch;
-      await expect(store.rfc64SharedProjectionStreamV1!(
+      await expect(store.rfc64SharedProjectionStreamV1(
         oneTripleOperation(),
         { byteCeiling: 4096 },
       )).rejects.toThrow('escaped the exact authenticated graph');
@@ -85,7 +88,7 @@ export function runRfc64HttpProjectionCapabilityConformance(
       const store = options.createStore(scheduler, 30_000);
       const abort = new AbortController();
 
-      const pending = store.rfc64SharedProjectionStreamV1!(FIXTURE.operation, {
+      const pending = store.rfc64SharedProjectionStreamV1(FIXTURE.operation, {
         byteCeiling: 4096,
         signal: abort.signal,
       });
@@ -105,7 +108,7 @@ export function runRfc64HttpProjectionCapabilityConformance(
       })) as typeof fetch;
       const store = options.createStore(scheduler, 1_000);
       const abort = new AbortController();
-      const source = await store.rfc64SharedProjectionStreamV1!(FIXTURE.operation, {
+      const source = await store.rfc64SharedProjectionStreamV1(FIXTURE.operation, {
         byteCeiling: 4096,
         signal: abort.signal,
       });
