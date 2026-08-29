@@ -26,7 +26,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-export const SCHEMA_VERSION = 34;
+export const SCHEMA_VERSION = 35;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -247,11 +247,6 @@ export class DashboardDB {
     this._memoTtlMs = resolveCacheTtlMs(opts.cacheTtlMs);
     const dbPath = join(opts.dataDir, 'node-ui.db');
     this.db = new Database(dbPath);
-    this.routineLogRetention = new RoutineLogRetention(
-      this.db,
-      routineLogRowCap,
-      logVolumePruneBatchRows,
-    );
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     // Cap the persisted WAL file. A PASSIVE autocheckpoint resets WAL
@@ -264,6 +259,11 @@ export class DashboardDB {
     // autocheckpoint while bounding the worst case.
     this.db.pragma('journal_size_limit = 67108864');
     this.migrate();
+    this.routineLogRetention = new RoutineLogRetention(
+      this.db,
+      routineLogRowCap,
+      logVolumePruneBatchRows,
+    );
     this.loadRetentionSetting();
     this.prune();
   }
@@ -341,6 +341,98 @@ export class DashboardDB {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
       }
     };
+    const ensureRoutineLogRetentionState = () => {
+      const logsTable = this.db.prepare(`
+        SELECT 1 AS found FROM sqlite_master
+        WHERE type = 'table' AND name = 'logs'
+      `).get() as { found: number } | undefined;
+      if (!logsTable) return;
+
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS routine_log_retention_state (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+          routine_rows INTEGER NOT NULL CHECK (routine_rows >= 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_logs_routine_id
+          ON logs(id)
+          WHERE level NOT IN ('warn', 'error');
+      `);
+
+      const requiredTriggers = [
+        'track_routine_log_insert',
+        'track_routine_log_delete',
+        'track_routine_log_level_update',
+      ];
+      const triggerRows = this.db.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name IN (
+            'track_routine_log_insert',
+            'track_routine_log_delete',
+            'track_routine_log_level_update'
+          )
+      `).all() as Array<{ name: string }>;
+      const state = this.db.prepare(`
+        SELECT routine_rows
+        FROM routine_log_retention_state
+        WHERE singleton = 1
+      `).get() as { routine_rows: number } | undefined;
+      if (state && requiredTriggers.every((name) => triggerRows.some((row) => row.name === name))) {
+        return;
+      }
+
+      // This one-time/recovery scan is protected by an IMMEDIATE transaction.
+      // The partial index makes it covering, and every later overflow check is
+      // an O(1) singleton lookup rather than OFFSET-walking one million rows.
+      this.db.transaction(() => {
+        this.db.exec(`
+          DROP TRIGGER IF EXISTS track_routine_log_insert;
+          DROP TRIGGER IF EXISTS track_routine_log_delete;
+          DROP TRIGGER IF EXISTS track_routine_log_level_update;
+        `);
+        const count = this.db.prepare(`
+          SELECT COUNT(*) AS routine_rows
+          FROM logs
+          WHERE level NOT IN ('warn', 'error')
+        `).get() as { routine_rows: number };
+        this.db.prepare(`
+          INSERT INTO routine_log_retention_state (singleton, routine_rows)
+          VALUES (1, @routineRows)
+          ON CONFLICT(singleton) DO UPDATE SET routine_rows = excluded.routine_rows
+        `).run({ routineRows: count.routine_rows });
+        this.db.exec(`
+          CREATE TRIGGER track_routine_log_insert
+          AFTER INSERT ON logs
+          WHEN NEW.level NOT IN ('warn', 'error')
+          BEGIN
+            UPDATE routine_log_retention_state
+            SET routine_rows = routine_rows + 1
+            WHERE singleton = 1;
+          END;
+
+          CREATE TRIGGER track_routine_log_delete
+          AFTER DELETE ON logs
+          WHEN OLD.level NOT IN ('warn', 'error')
+          BEGIN
+            UPDATE routine_log_retention_state
+            SET routine_rows = MAX(0, routine_rows - 1)
+            WHERE singleton = 1;
+          END;
+
+          CREATE TRIGGER track_routine_log_level_update
+          AFTER UPDATE OF level ON logs
+          WHEN (OLD.level IN ('warn', 'error')) <> (NEW.level IN ('warn', 'error'))
+          BEGIN
+            UPDATE routine_log_retention_state
+            SET routine_rows = routine_rows + CASE
+              WHEN NEW.level NOT IN ('warn', 'error') THEN 1
+              ELSE -1
+            END
+            WHERE singleton = 1;
+          END;
+        `);
+      }).immediate();
+    };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
@@ -348,6 +440,7 @@ export class DashboardDB {
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
+      ensureRoutineLogRetentionState();
       return;
     }
 
@@ -1276,6 +1369,9 @@ export class DashboardDB {
          WHERE key LIKE '%|durable|data%'
            AND key NOT LIKE '%|durable|data|checkpoint:v2%'
       `).run();
+    }
+    if (version < 35) {
+      ensureRoutineLogRetentionState();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
@@ -3348,6 +3444,7 @@ export class DashboardDB {
 
   close(): void {
     if (!this.db.open) return;
+    this.routineLogRetention.close();
     this.db.close();
   }
 }

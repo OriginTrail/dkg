@@ -8,6 +8,27 @@ import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphRegistrySca
 let db: DashboardDB;
 let dir: string;
 
+function routineLogCount(database: DashboardDB): number {
+  const row = database.db.prepare(`
+    SELECT routine_rows
+    FROM routine_log_retention_state
+    WHERE singleton = 1
+  `).get() as { routine_rows: number };
+  return row.routine_rows;
+}
+
+async function waitForRoutineLogCountAtMost(
+  database: DashboardDB,
+  maximum: number,
+  attempts = 2_000,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (routineLogCount(database) <= maximum) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  expect(routineLogCount(database)).toBeLessThanOrEqual(maximum);
+}
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'dkg-db-test-'));
   db = new DashboardDB({ dataDir: dir });
@@ -370,6 +391,86 @@ describe('DashboardDB — retention', () => {
     db2.close();
   });
 
+  it('tracks direct inserts, deletes, and level changes transactionally', () => {
+    const insert = db.db.prepare(
+      `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'compatibility', ?)`,
+    );
+    const routine = insert.run(Date.now(), 'info', 'routine').lastInsertRowid;
+    const warning = insert.run(Date.now(), 'warn', 'warning').lastInsertRowid;
+    insert.run(Date.now(), 'error', 'error');
+    expect(routineLogCount(db)).toBe(1);
+
+    db.db.prepare(`UPDATE logs SET level = 'debug' WHERE id = ?`).run(warning);
+    expect(routineLogCount(db)).toBe(2);
+
+    db.db.prepare(`UPDATE logs SET level = 'error' WHERE id = ?`).run(routine);
+    expect(routineLogCount(db)).toBe(1);
+
+    db.db.prepare(`DELETE FROM logs WHERE id = ?`).run(warning);
+    expect(routineLogCount(db)).toBe(0);
+  });
+
+  it('repairs missing current-version retention triggers by recounting once', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`DROP TRIGGER track_routine_log_insert;`);
+    raw.prepare(
+      `INSERT INTO logs (ts, level, module, message) VALUES (?, 'info', 'compatibility', 'untracked')`,
+    ).run(Date.now());
+    expect((raw.prepare(`
+      SELECT routine_rows FROM routine_log_retention_state WHERE singleton = 1
+    `).get() as { routine_rows: number }).routine_rows).toBe(0);
+    raw.pragma(`user_version = ${SCHEMA_VERSION}`);
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir, retentionDays: 365 });
+    expect(routineLogCount(db)).toBe(1);
+    db.db.prepare(
+      `INSERT INTO logs (ts, level, module, message) VALUES (?, 'debug', 'compatibility', 'tracked')`,
+    ).run(Date.now());
+    expect(routineLogCount(db)).toBe(2);
+  });
+
+  it('initializes exact retention state when upgrading a V34 database', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TRIGGER track_routine_log_insert;
+      DROP TRIGGER track_routine_log_delete;
+      DROP TRIGGER track_routine_log_level_update;
+      DROP INDEX idx_logs_routine_id;
+      DROP TABLE routine_log_retention_state;
+    `);
+    const insert = raw.prepare(
+      `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'v34', ?)`,
+    );
+    insert.run(Date.now(), 'info', 'routine-a');
+    insert.run(Date.now(), 'debug', 'routine-b');
+    insert.run(Date.now(), 'warn', 'warning');
+    raw.pragma('user_version = 34');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir, retentionDays: 365 });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(routineLogCount(db)).toBe(2);
+  });
+
+  it('uses the routine-only id index for bounded oldest-row deletion', () => {
+    const plan = db.db.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id
+      FROM logs
+      WHERE level NOT IN ('warn', 'error')
+      ORDER BY id ASC
+      LIMIT 25000
+    `).all() as Array<{ detail: string }>;
+    expect(plan.some((row) => row.detail.includes('idx_logs_routine_id'))).toBe(true);
+  });
+
   it('caps routine logs incrementally while preserving warning and error history', () => {
     const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-volume-'));
     const volumeDb = new DashboardDB({
@@ -438,7 +539,7 @@ describe('DashboardDB — retention', () => {
     }
   });
 
-  it('bounds routine compatibility writes through the published row cap', () => {
+  it('bounds routine compatibility writes through deferred maintenance', async () => {
     const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-compat-cap-'));
     const volumeDb = new DashboardDB({
       dataDir: volumeDir,
@@ -469,6 +570,7 @@ describe('DashboardDB — retention', () => {
         module: 'compatibility',
         message: 'keep-warning',
       });
+      await waitForRoutineLogCountAtMost(volumeDb, 2);
 
       const rows = volumeDb.db.prepare(
         `SELECT level, message FROM logs ORDER BY id ASC`,
@@ -484,7 +586,7 @@ describe('DashboardDB — retention', () => {
     }
   });
 
-  it('keeps pace when the compatibility cleanup batch is smaller than the old guard cadence', () => {
+  it('keeps pace when the deferred cleanup batch is smaller than the old guard cadence', async () => {
     const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-small-compat-batch-'));
     const volumeDb = new DashboardDB({
       dataDir: volumeDir,
@@ -516,6 +618,7 @@ describe('DashboardDB — retention', () => {
         module: 'legacy-caller',
         message: 'keep-warning',
       });
+      await waitForRoutineLogCountAtMost(volumeDb, 100);
 
       const counts = volumeDb.db.prepare(`
         SELECT
@@ -530,7 +633,7 @@ describe('DashboardDB — retention', () => {
     }
   });
 
-  it('reports a committed insert as successful when inline retention fails', () => {
+  it('reports a committed insert as successful when deferred retention fails', async () => {
     const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-retention-failure-'));
     const volumeDb = new DashboardDB({
       dataDir: volumeDir,
@@ -558,6 +661,8 @@ describe('DashboardDB — retention', () => {
       ).all()).toEqual([
         { level: 'info', message: 'committed-before-maintenance' },
       ]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(routineLogCount(volumeDb)).toBe(1);
 
       volumeDb.db.exec('DROP TRIGGER fail_inline_log_retention');
       expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 1, status: 'more' });

@@ -6,26 +6,55 @@ export interface RoutineLogPruneBatch {
   filledBatch: boolean;
 }
 
+interface RoutineLogCountRow {
+  routine_rows: number;
+}
+
 /**
- * Owns the complete count-based retention policy for routine log rows.
- * Warning/error classification, guard cadence, overflow selection, and the
- * bounded deletion statement live together so compatibility writes and the
- * background pruner cannot drift onto different retention rules.
+ * Owns count-based retention for routine log rows.
+ *
+ * Schema triggers maintain an exact, crash-safe row count for every writer,
+ * including compatibility callers that write through `DashboardDB.db`. The
+ * hot path performs only O(1) counter accounting and schedules maintenance;
+ * bounded deletion runs after the insert returns and the independent daemon
+ * pruner remains its retry/backlog owner.
  */
 export class RoutineLogRetention {
   private writesSinceGuard = 0;
+  private scheduledMaintenance: ReturnType<typeof setImmediate> | null = null;
+  private readonly readRoutineCount: Database.Statement;
+  private readonly deleteOldestRoutineRows: Database.Statement;
+  private readonly runPruneTransaction: () => RoutineLogPruneBatch;
 
   constructor(
-    private readonly db: Pick<Database.Database, 'prepare'>,
+    db: Pick<Database.Database, 'prepare' | 'transaction'>,
     private readonly rowCap: number,
     private readonly batchRows: number,
-  ) {}
+  ) {
+    this.readRoutineCount = db.prepare(`
+      SELECT routine_rows
+      FROM routine_log_retention_state
+      WHERE singleton = 1
+    `);
+    this.deleteOldestRoutineRows = db.prepare(`
+      DELETE FROM logs
+      WHERE id IN (
+        SELECT id
+        FROM logs
+        WHERE level NOT IN ('warn', 'error')
+        ORDER BY id ASC
+        LIMIT @deleteRows
+      )
+    `);
+    const pruneTransaction = db.transaction(() => this.pruneWithinTransaction());
+    this.runPruneTransaction = () => pruneTransaction.immediate();
+  }
 
   noteCommittedInsert(level: string): void {
     if (!this.isRoutineLevel(level)) return;
     this.writesSinceGuard += 1;
-    // Each guard removes at most one configured batch, so its cadence must
-    // never admit more routine rows than that batch can remove.
+    // Each scheduled run removes at most one configured batch, so its cadence
+    // must never admit more routine rows than that batch can remove.
     const guardInterval = Math.min(
       1_000,
       Math.max(1, this.rowCap),
@@ -33,52 +62,58 @@ export class RoutineLogRetention {
     );
     if (this.writesSinceGuard < guardInterval) return;
     this.writesSinceGuard = 0;
-    try {
-      this.pruneOverflowBatch();
-    } catch {
-      // The INSERT has already committed. Inline retention is therefore
-      // best-effort: surfacing this maintenance failure would falsely report
-      // the durable write as failed and invite duplicate retries. The
-      // independent volume pruner will retry the same bounded cleanup later.
-    }
+    this.scheduleMaintenance();
   }
 
   hasOverflow(): boolean {
-    return this.overflowCutoff() !== null;
+    return this.routineRowCount() > this.rowCap;
   }
 
   pruneOverflowBatch(): RoutineLogPruneBatch {
-    const cutoff = this.overflowCutoff();
-    if (cutoff === null) {
+    return this.runPruneTransaction();
+  }
+
+  close(): void {
+    if (this.scheduledMaintenance) clearImmediate(this.scheduledMaintenance);
+    this.scheduledMaintenance = null;
+  }
+
+  private scheduleMaintenance(): void {
+    if (this.scheduledMaintenance) return;
+    this.scheduledMaintenance = setImmediate(() => {
+      this.scheduledMaintenance = null;
+      try {
+        const result = this.pruneOverflowBatch();
+        if (result.filledBatch) this.scheduleMaintenance();
+      } catch {
+        // The INSERT committed before maintenance was scheduled. A retention
+        // failure must not falsely report that durable write as failed; the
+        // independent daemon pruner or a later guard will retry the backlog.
+      }
+    });
+    this.scheduledMaintenance.unref?.();
+  }
+
+  private routineRowCount(): number {
+    const row = this.readRoutineCount.get() as RoutineLogCountRow | undefined;
+    if (!row) {
+      throw new Error('Routine-log retention state is missing');
+    }
+    return row.routine_rows;
+  }
+
+  private pruneWithinTransaction(): RoutineLogPruneBatch {
+    const overflow = Math.max(0, this.routineRowCount() - this.rowCap);
+    if (overflow === 0) {
       return { deleted: 0, hadOverflow: false, filledBatch: false };
     }
-    const deleted = this.db.prepare(`
-      DELETE FROM logs
-      WHERE id IN (
-        SELECT id
-        FROM logs
-        WHERE id <= @cutoff
-          AND level NOT IN ('warn', 'error')
-        ORDER BY id ASC
-        LIMIT @batchRows
-      )
-    `).run({ cutoff, batchRows: this.batchRows }).changes;
+    const deleteRows = Math.min(overflow, this.batchRows);
+    const deleted = this.deleteOldestRoutineRows.run({ deleteRows }).changes;
     return {
       deleted,
       hadOverflow: true,
       filledBatch: deleted === this.batchRows,
     };
-  }
-
-  private overflowCutoff(): number | null {
-    const row = this.db.prepare(`
-      SELECT id
-      FROM logs
-      WHERE level NOT IN ('warn', 'error')
-      ORDER BY id DESC
-      LIMIT 1 OFFSET ?
-    `).get(this.rowCap) as { id: number } | undefined;
-    return row?.id ?? null;
   }
 
   private isRoutineLevel(level: string): boolean {
