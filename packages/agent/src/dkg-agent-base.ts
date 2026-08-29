@@ -1584,6 +1584,13 @@ export class DKGAgentBase {
    */
   protected readonly catchupOnConnectAt = new Map<string, number>();
   /**
+   * Per-peer admission timestamp for exact RFC-64 recovery plans. Kept
+   * separate from ordinary connection catch-up so one post-catalog upgrade
+   * can bypass an ordinary owner's cooldown without letting every periodic
+   * catalog pass bypass the same cooldown.
+   */
+  protected readonly rfc64ExactCatchupOnConnectAt = new Map<string, number>();
+  /**
    * One owner per peer with explicit pending lanes. Exact RFC-64 work is
    * always drained before ordinary work that has not started yet; an upgrade
    * arriving during either lane remains on the same job and is consumed by

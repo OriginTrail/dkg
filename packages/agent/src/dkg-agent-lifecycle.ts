@@ -4512,6 +4512,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.knownCorePeerIdsV2.delete(remotePeer);
     this.skippedNoSyncPeers.delete(remotePeer);
     this.catchupOnConnectAt.delete(remotePeer);
+    this.rfc64ExactCatchupOnConnectAt.delete(remotePeer);
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
@@ -4644,6 +4645,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
+    const exactRecoveryPlan = options.rfc64RecoveryPlan;
+    const lastExactQueued = this.rfc64ExactCatchupOnConnectAt.get(remotePeer) ?? 0;
+    if (
+      exactRecoveryPlan !== undefined
+      && lastExactQueued > disconnectBoundary
+      && now - lastExactQueued < CATCHUP_ON_CONNECT_COOLDOWN_MS
+    ) {
+      return false;
+    }
     const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
     if (
       !selectedSwmRetryRequired &&
@@ -4656,13 +4666,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const scheduler = this.getSyncOnConnectPeerScheduler();
     if (scheduler.has(remotePeer)) {
-      if (options.rfc64RecoveryPlan !== undefined) {
-        return scheduler.enqueueSelected(
+      if (exactRecoveryPlan !== undefined) {
+        const enqueued = scheduler.enqueueSelected(
           remotePeer,
           handleSyncError,
           delayMs,
-          options.rfc64RecoveryPlan,
+          exactRecoveryPlan,
         );
+        if (enqueued) this.rfc64ExactCatchupOnConnectAt.set(remotePeer, now);
+        return enqueued;
       }
       return selectedSwmRetryRequired
         ? false
@@ -4671,9 +4683,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const lastQueued = this.catchupOnConnectAt.get(remotePeer) ?? 0;
     if (lastQueued > disconnectBoundary && now - lastQueued < CATCHUP_ON_CONNECT_COOLDOWN_MS) {
-      // An exact post-catalog recovery may arrive just after the earlier
-      // generic timer completed. Do not lose it to the generic queue cooldown.
-      if (options.rfc64RecoveryPlan === undefined) return false;
+      // One exact post-catalog recovery may arrive just after an ordinary
+      // timer completed. Its dedicated timestamp above permits that upgrade
+      // once while keeping subsequent periodic exact plans bounded.
+      if (exactRecoveryPlan === undefined) return false;
     }
 
     const backoff = this.syncReconcilerBackoff.get(remotePeer);
@@ -4682,12 +4695,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     this.catchupOnConnectAt.set(remotePeer, now);
+    if (exactRecoveryPlan !== undefined) {
+      this.rfc64ExactCatchupOnConnectAt.set(remotePeer, now);
+    }
     return selectedSwmRetryRequired
       ? scheduler.enqueueSelected(
         remotePeer,
         handleSyncError,
         delayMs,
-        options.rfc64RecoveryPlan,
+        exactRecoveryPlan,
       )
       : scheduler.enqueueOrdinary(remotePeer, handleSyncError, delayMs);
   }
@@ -5454,6 +5470,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const [peerId, ts] of this.catchupOnConnectAt) {
       if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
         this.catchupOnConnectAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.rfc64ExactCatchupOnConnectAt) {
+      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
+        this.rfc64ExactCatchupOnConnectAt.delete(peerId);
       }
     }
     for (const [peerId, ts] of this.lastSyncDisconnectedAt) {

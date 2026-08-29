@@ -287,6 +287,7 @@ describe('runPromoteJob', () => {
     // partial-promote bucket on next daemon boot.
     const job = await enqueueAndClaim();
     const failingQueue: AsyncPromoteQueue = {
+      effectiveLeaseMs: 15 * 60 * 1000,
       ...queue,
       recordCommitMarker: async (jobId, claimToken, step) => {
         if (step === 'swmInserted') {

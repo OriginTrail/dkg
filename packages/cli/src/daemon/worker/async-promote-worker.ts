@@ -589,15 +589,12 @@ interface WorkerSlot {
   tickInFlight: Promise<boolean> | null;
 }
 
-const DEFAULT_PROMOTE_LEASE_MS = 15 * 60 * 1000;
-
 export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): PromoteWorkerSupervisor {
   const concurrency = Math.max(1, config.workerConcurrency ?? 4);
   const supportsWorkWake = typeof config.agent.promoteQueue.workScheduling?.attachScheduler === 'function';
   const pollIntervalMs = Math.max(10, config.pollIntervalMs ?? (supportsWorkWake ? 1_000 : 100));
   const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 60_000;
-  const effectiveLeaseMs = config.agent.promoteQueue.effectiveLeaseMs
-    ?? DEFAULT_PROMOTE_LEASE_MS;
+  const effectiveLeaseMs = config.agent.promoteQueue.effectiveLeaseMs;
   if (heartbeatIntervalMs > 0 && heartbeatIntervalMs >= effectiveLeaseMs) {
     throw new Error(
       `promoteQueue.heartbeatIntervalMs must be shorter than the queue lease (${effectiveLeaseMs}ms)`,
