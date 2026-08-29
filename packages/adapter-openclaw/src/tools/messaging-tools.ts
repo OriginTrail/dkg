@@ -9,17 +9,6 @@ import type { OpenClawTool } from '../types.js';
 import { FIND_AGENTS_TOOL_SCHEMA_PROPERTIES } from '../agent-list.js';
 import type { DkgToolHost } from './tool-host.js';
 
-/** The boundary's schema descriptor, shaped for the OpenClawTool parameter type. */
-function findAgentsSchemaProperties(): Record<string, { type: string; description?: string; enum?: string[]; minimum?: number }> {
-  const properties: Record<string, { type: string; description?: string; enum?: string[]; minimum?: number }> = {};
-  for (const [key, spec] of Object.entries(FIND_AGENTS_TOOL_SCHEMA_PROPERTIES)) {
-    properties[key] = { type: spec.type, description: spec.description };
-    if ('enum' in spec && spec.enum) properties[key].enum = [...spec.enum];
-    if ('minimum' in spec && spec.minimum !== undefined) properties[key].minimum = spec.minimum;
-  }
-  return properties;
-}
-
 export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
   return [
     {
@@ -30,9 +19,10 @@ export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
         'their last-seen `connectionStatus` even when no peers are currently reachable.',
       parameters: {
         type: 'object',
-        // Derived from the agent-list boundary, so the advertised vocabulary
-        // and the serializer's exhaustive mapping cannot drift apart.
-        properties: findAgentsSchemaProperties(),
+        // THE boundary's canonical declaration, assigned directly — the
+        // advertised vocabulary and the serializer mapping are derived from
+        // this same object, so they cannot drift apart.
+        properties: FIND_AGENTS_TOOL_SCHEMA_PROPERTIES,
         required: [],
       },
       execute: async (_toolCallId, args) => ctx.handleFindAgents(args),

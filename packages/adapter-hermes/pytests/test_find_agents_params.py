@@ -10,6 +10,7 @@ filter.
 from __future__ import annotations
 
 import json
+import urllib.parse
 
 import pytest
 
@@ -46,6 +47,13 @@ def test_schema_advertises_the_310_filters(plugin_module):
     assert props["cursor"]["type"] == "string"
 
 
+def _entries(path: str) -> dict:
+    # Exact entries — substring checks are spoofable by a prefixed key, and
+    # the wire parameter NAMES are the load-bearing contract.
+    query = path.split("?", 1)[1] if "?" in path else ""
+    return dict(urllib.parse.parse_qsl(query, keep_blank_values=True))
+
+
 def test_handler_maps_snake_case_args_to_daemon_params(provider):
     out = provider._handle_find_agents({
         "framework": "hermes-agent",
@@ -56,26 +64,25 @@ def test_handler_maps_snake_case_args_to_daemon_params(provider):
     })
     assert json.loads(out) == {"agents": []}
     assert len(provider._client.gets) == 1
-    path = provider._client.gets[0]
-    assert path.startswith("/api/agents?")
-    assert "framework=hermes-agent" in path
-    assert "connectionStatus=connected" in path  # camelCase on the wire
-    assert "local=true" in path
-    assert "limit=5" in path
-    assert "cursor=djE6YWJj" in path
+    assert _entries(provider._client.gets[0]) == {
+        "framework": "hermes-agent",
+        "connectionStatus": "connected",  # camelCase on the wire
+        "local": "true",
+        "limit": "5",
+        "cursor": "djE6YWJj",
+    }
 
 
 def test_handler_urlencodes_values(provider):
-    # The old handler string-joined k=v pairs raw; a framework value with a
-    # space or '&' would have produced a malformed query.
+    # A framework value with a space or '&' must round-trip intact — parse
+    # the query rather than matching the encoded bytes.
     provider._handle_find_agents({"framework": "hermes agent&co"})
-    path = provider._client.gets[0]
-    assert "framework=hermes+agent%26co" in path
+    assert _entries(provider._client.gets[0]) == {"framework": "hermes agent&co"}
 
 
 def test_local_false_is_sent_not_dropped(provider):
     provider._handle_find_agents({"local": False})
-    assert "local=false" in provider._client.gets[0]
+    assert _entries(provider._client.gets[0]) == {"local": "false"}
 
 
 def test_malformed_values_are_forwarded_not_coerced(provider):
@@ -83,10 +90,11 @@ def test_malformed_values_are_forwarded_not_coerced(provider):
     # limit dropped) would silently change the query instead of surfacing
     # the daemon's 400.
     provider._handle_find_agents({"local": "ture", "limit": 0, "connection_status": "onnected"})
-    path = provider._client.gets[0]
-    assert "local=ture" in path
-    assert "limit=0" in path
-    assert "connectionStatus=onnected" in path
+    assert _entries(provider._client.gets[0]) == {
+        "local": "ture",
+        "limit": "0",
+        "connectionStatus": "onnected",
+    }
 
 
 def test_no_args_keeps_the_bare_path(provider):
@@ -98,6 +106,4 @@ def test_misspelled_key_and_empty_cursor_reach_the_daemon(provider):
     # A dropped 'limt' silently returns the full registry; a dropped empty
     # cursor silently serves page one. Both must surface the daemon's 400.
     provider._handle_find_agents({"limt": 5, "cursor": ""})
-    path = provider._client.gets[0]
-    assert "limt=5" in path
-    assert "cursor=" in path
+    assert _entries(provider._client.gets[0]) == {"limt": "5", "cursor": ""}

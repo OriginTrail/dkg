@@ -42,37 +42,12 @@ const OPTION_WIRE_KEYS = {
   cursor: 'cursor',
 } as const satisfies Record<CanonicalOption, string>;
 
-/** The advertised dkg_find_agents argument names — THE tool vocabulary. */
-export const FIND_AGENTS_TOOL_ARG_KEYS = [
-  'framework',
-  'skill_type',
-  'connection_status',
-  'local',
-  'limit',
-  'cursor',
-] as const;
-export type FindAgentsToolArg = (typeof FIND_AGENTS_TOOL_ARG_KEYS)[number];
-
 /**
- * dkg_find_agents tool arg -> canonical option. EXHAUSTIVE over the tool
- * vocabulary (`Record<FindAgentsToolArg, …>`), and values are OPTION KEYS,
- * so the wire spelling is always looked up through {@link OPTION_WIRE_KEYS}
- * — the compiler ties the schema vocabulary, this map, and the wire map
- * together: an advertised argument without a mapping does not compile.
- */
-export const RAW_ARG_TO_OPTION = {
-  framework: 'framework',
-  skill_type: 'skillType',
-  connection_status: 'connectionStatus',
-  local: 'local',
-  limit: 'limit',
-  cursor: 'cursor',
-} as const satisfies Record<FindAgentsToolArg, CanonicalOption>;
-
-/**
- * The dkg_find_agents JSON-schema properties, defined AT the boundary so the
- * advertised contract and the serializer cannot drift — messaging-tools
- * builds the tool schema from this object. Exhaustive over the vocabulary.
+ * The dkg_find_agents JSON-schema properties — THE canonical declaration of
+ * the tool vocabulary. messaging-tools assigns this object into the tool
+ * definition directly, and the argument type plus the serializer mapping are
+ * DERIVED from it, so adding an argument is one edit here plus its mapping —
+ * which the compiler then demands.
  */
 export const FIND_AGENTS_TOOL_SCHEMA_PROPERTIES = {
   framework: { type: 'string', description: 'Filter by framework (e.g. "OpenClaw", "ElizaOS").' },
@@ -95,7 +70,25 @@ export const FIND_AGENTS_TOOL_SCHEMA_PROPERTIES = {
     type: 'string',
     description: 'Opaque cursor from a previous response; repeat the same filters.',
   },
-} as const satisfies Record<FindAgentsToolArg, { type: string; description: string; enum?: readonly string[]; minimum?: number }>;
+} as const;
+
+/** Derived, not maintained: the schema object's keys ARE the vocabulary. */
+export type FindAgentsToolArg = keyof typeof FIND_AGENTS_TOOL_SCHEMA_PROPERTIES;
+
+/**
+ * dkg_find_agents tool arg -> canonical option. EXHAUSTIVE over the derived
+ * vocabulary, and values are OPTION KEYS, so the wire spelling is always
+ * looked up through {@link OPTION_WIRE_KEYS} — an argument advertised in the
+ * schema without a mapping here does not compile.
+ */
+export const RAW_ARG_TO_OPTION = {
+  framework: 'framework',
+  skill_type: 'skillType',
+  connection_status: 'connectionStatus',
+  local: 'local',
+  limit: 'limit',
+  cursor: 'cursor',
+} as const satisfies Record<FindAgentsToolArg, CanonicalOption>;
 
 /** Serialize strict SDK options. `undefined` means "omit". */
 export function serializeAgentListOptions(options: AgentListOptions): string {
@@ -121,9 +114,6 @@ export function serializeAgentListOptions(options: AgentListOptions): string {
   return params.toString();
 }
 
-const isKnownToolArg = (key: string): key is FindAgentsToolArg =>
-  (FIND_AGENTS_TOOL_ARG_KEYS as readonly string[]).includes(key);
-
 /**
  * Serialize UNVALIDATED tool arguments — EVERY supplied argument reaches the
  * daemon. Known names are translated to their wire spelling; unknown names
@@ -138,7 +128,9 @@ export function serializeRawAgentListArgs(args: Record<string, unknown>): string
   const params = new URLSearchParams();
   for (const [rawKey, value] of Object.entries(args)) {
     if (value === undefined || value === null) continue;
-    const wireKey = isKnownToolArg(rawKey) ? OPTION_WIRE_KEYS[RAW_ARG_TO_OPTION[rawKey]] : rawKey;
+    const wireKey = Object.hasOwn(RAW_ARG_TO_OPTION, rawKey)
+      ? OPTION_WIRE_KEYS[RAW_ARG_TO_OPTION[rawKey as FindAgentsToolArg]]
+      : rawKey;
     params.set(wireKey, String(value));
   }
   return params.toString();

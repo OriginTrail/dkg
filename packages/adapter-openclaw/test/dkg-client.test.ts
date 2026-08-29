@@ -662,6 +662,14 @@ describe('DkgDaemonClient', () => {
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
+/**
+   * Exact query-entry map — substring assertions are spoofable (a URL holding
+   * `badconnectionStatus=connected` CONTAINS `connectionStatus=connected`),
+   * and the wire parameter NAMES are the load-bearing contract here.
+   */
+  const queryEntries = (url: string): Record<string, string> =>
+    Object.fromEntries(new URLSearchParams(url.split('?')[1] ?? ''));
+
   it('getAgents should GET /api/agents', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ agents: [{ name: 'agent-1', peerId: '12D3...' }] }), { status: 200 }),
@@ -678,9 +686,10 @@ describe('DkgDaemonClient', () => {
     );
 
     await client.getAgents({ framework: 'OpenClaw', skillType: 'ImageAnalysis' });
-    const url = fetchCalls[0][0] as string;
-    expect(url).toContain('framework=OpenClaw');
-    expect(url).toContain('skill_type=ImageAnalysis');
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+    });
   });
 
   it('getAgents passes the GH#310 connection/local/pagination filters', async () => {
@@ -694,12 +703,13 @@ describe('DkgDaemonClient', () => {
       limit: 10,
       cursor: 'cur-1',
     });
-    const url = fetchCalls[0][0] as string;
-    // Adapter args are snake_case; the daemon parameter is camelCase.
-    expect(url).toContain('connectionStatus=connected');
-    expect(url).toContain('local=true');
-    expect(url).toContain('limit=10');
-    expect(url).toContain('cursor=cur-1');
+    // Exact entries: the camelCase/snake_case parameter NAMES are the contract.
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      connectionStatus: 'connected',
+      local: 'true',
+      limit: '10',
+      cursor: 'cur-1',
+    });
     expect(result.nextCursor).toBe('n1');
   });
 
@@ -717,20 +727,22 @@ describe('DkgDaemonClient', () => {
       limit: '10junk',
       local: 'ture',
     })).rejects.toThrow(/responded 400.*positive integer/);
-    const url = fetchCalls[0][0] as string;
-    // The pre-existing filters go through the SAME boundary as the new ones.
-    expect(url).toContain('framework=OpenClaw');
-    expect(url).toContain('skill_type=ImageAnalysis');
-    expect(url).toContain('connectionStatus=onnected');
-    expect(url).toContain('limit=10junk');
-    expect(url).toContain('local=ture');
+    // The pre-existing filters go through the SAME boundary as the new ones;
+    // exact entries so a prefixed or renamed key cannot sneak past.
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+      connectionStatus: 'onnected',
+      limit: '10junk',
+      local: 'ture',
+    });
   });
 
   it('legacy skill_type callers keep working, and a conflicting pair is loud', async () => {
     fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
     // Pre-GH#310 spelling, unchanged behavior on the wire.
     await client.getAgents({ skill_type: 'ImageAnalysis' });
-    expect(fetchCalls[0][0] as string).toContain('skill_type=ImageAnalysis');
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({ skill_type: 'ImageAnalysis' });
     // Both spellings with different values cannot silently pick one.
     await expect(client.getAgents({ skillType: 'A', skill_type: 'B' }))
       .rejects.toThrow(/Conflicting skill filters/);
@@ -745,9 +757,10 @@ describe('DkgDaemonClient', () => {
     // dropped empty cursor would silently serve page one.
     await expect(client.getAgentsUnvalidated({ limt: 5, cursor: '' }))
       .rejects.toThrow(/responded 400/);
-    const url = fetchCalls[0][0] as string;
-    expect(url).toContain('limt=5');
-    expect(url).toContain('cursor=');
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      limt: '5',
+      cursor: '',
+    });
   });
 
   it('typed and tool-originated requests share one wire mapping', async () => {

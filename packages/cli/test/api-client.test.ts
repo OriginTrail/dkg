@@ -359,14 +359,19 @@ describe('ApiClient', () => {
         limit: 5,
         cursor: 'c123',
       });
-      const url = calls[0].url;
-      expect(url).toContain('framework=eliza');
-      // The route's parameter is snake_case skill_type; the option is camelCase.
-      expect(url).toContain('skill_type=ImageAnalysis');
-      expect(url).toContain('connectionStatus=connected');
-      expect(url).toContain('local=true');
-      expect(url).toContain('limit=5');
-      expect(url).toContain('cursor=c123');
+      // Exact query entries — substring checks are spoofable by a prefixed
+      // key, and the parameter NAMES are the contract (the daemon 400s on
+      // unknown names). The route's parameter is snake_case skill_type; the
+      // option is camelCase.
+      const entries = Object.fromEntries(new URLSearchParams(calls[0].url.split('?')[1] ?? ''));
+      expect(entries).toEqual({
+        framework: 'eliza',
+        skill_type: 'ImageAnalysis',
+        connectionStatus: 'connected',
+        local: 'true',
+        limit: '5',
+        cursor: 'c123',
+      });
       expect(result.nextCursor).toBe('next-1');
     });
 
@@ -376,7 +381,8 @@ describe('ApiClient', () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
       globalThis.fetch = fetch;
       await client.agents({ local: false });
-      expect(calls[0].url).toContain('local=false');
+      expect(Object.fromEntries(new URLSearchParams(calls[0].url.split('?')[1] ?? '')))
+        .toEqual({ local: 'false' });
     });
 
     it('skills() calls /api/skills', async () => {

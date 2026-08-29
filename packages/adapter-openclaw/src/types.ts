@@ -85,7 +85,7 @@ export interface JSONSchemaObject {
    */
   properties: Record<
     string,
-    { type: string | string[]; description?: string; items?: any; enum?: string[]; minimum?: number }
+    { type: string | string[]; description?: string; items?: any; enum?: readonly string[]; minimum?: number }
   >;
   required?: string[];
 }

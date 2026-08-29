@@ -5,6 +5,14 @@ import { makeConfig } from './harness.js';
 // GH#310 follow-up — the daemon 400s on unknown parameter NAMES, so this
 // client's option→query-param mapping is a hard contract: a wrong name is a
 // hard failure, a dropped one silently widens the query.
+/**
+ * Exact query-entry map — substring assertions are spoofable (a URL holding
+ * `badconnectionStatus=connected` CONTAINS `connectionStatus=connected`),
+ * and the wire parameter NAMES are the load-bearing contract here.
+ */
+const queryEntries = (url: string): Record<string, string> =>
+  Object.fromEntries(new URLSearchParams(url.split('?')[1] ?? ''));
+
 describe('DkgClient agents-list serialization', () => {
   const makeClient = (body: unknown = { agents: [] }) => {
     const urls: string[] = [];
@@ -53,29 +61,33 @@ describe('DkgClient agents-list serialization', () => {
   it('listAgents() maps every non-truncating filter to the daemon parameter names', async () => {
     const { client, urls } = makeClient();
     await client.listAgents({ framework: 'eliza', connectionStatus: 'connected', local: false });
-    const url = urls[0]!;
-    expect(url).toContain('framework=eliza');
-    expect(url).toContain('connectionStatus=connected');
-    // false must be SENT — dropping it flips "everyone else's agents" into
-    // "everyone's agents".
-    expect(url).toContain('local=false');
+    // Exact entries — and local=false must be SENT: dropping it flips
+    // "everyone else's agents" into "everyone's agents".
+    expect(queryEntries(urls[0]!)).toEqual({
+      framework: 'eliza',
+      connectionStatus: 'connected',
+      local: 'false',
+    });
   });
 
   it('listAgentsPage() carries limit/cursor out and nextCursor back, and the cursor continues', async () => {
     const { client, urls } = makeClient({ agents: [fullRow()], nextCursor: 'n1' });
     const page = await client.listAgentsPage({ connectionStatus: 'self', skillType: 'ImageAnalysis', limit: 5, cursor: 'c0' });
-    expect(urls[0]).toContain('connectionStatus=self');
-    // The camelCase option maps to the daemon's snake_case parameter.
-    expect(urls[0]).toContain('skill_type=ImageAnalysis');
-    expect(urls[0]).toContain('limit=5');
-    expect(urls[0]).toContain('cursor=c0');
+    // Exact entries: the camelCase option maps to the daemon's snake_case
+    // parameter, and the NAMES are the load-bearing part.
+    expect(queryEntries(urls[0]!)).toEqual({
+      connectionStatus: 'self',
+      skill_type: 'ImageAnalysis',
+      limit: '5',
+      cursor: 'c0',
+    });
     // Rows are typed: known fields need no cast.
     expect(page.agents[0]!.peerId).toBe('p1');
     expect(page.nextCursor).toBe('n1');
 
     // The returned cursor is directly usable for the next call.
     await client.listAgentsPage({ connectionStatus: 'self', skillType: 'ImageAnalysis', limit: 5, cursor: page.nextCursor });
-    expect(urls[1]).toContain('cursor=n1');
+    expect(queryEntries(urls[1]!).cursor).toBe('n1');
   });
 
   it('listAgentsPage() omits nextCursor on a final page', async () => {
