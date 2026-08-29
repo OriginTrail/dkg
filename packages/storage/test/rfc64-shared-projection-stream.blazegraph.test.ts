@@ -6,12 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
-import type { Quad } from '../src/triple-store.js';
 
 const ORIGINAL_FETCH = globalThis.fetch;
 const GRAPH = 'did:dkg:context-graph:v1/root/a%2Fb/_shared_memory/0x3333333333333333333333333333333333333333/7';
 const LINE_A = '<urn:a> <urn:p> "alpha" .\n';
 const LINE_Z = '<urn:z> <urn:p> "zeta" .\n';
+const PROJECTION_BYTES = new TextEncoder().encode(LINE_A + LINE_Z);
 const OPERATION = operation();
 
 afterEach(() => {
@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 describe('Blazegraph RFC-64 shared-projection stream', () => {
-  it('executes only the frozen query under background admission and normalizes graphless output', async () => {
+  it('executes only the frozen query under background admission and emits canonical bytes', async () => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
     const schedule = vi.spyOn(scheduler, 'run');
     let request: RequestInit | undefined;
@@ -37,10 +37,7 @@ describe('Blazegraph RFC-64 shared-projection stream', () => {
       byteCeiling: 4096,
     });
 
-    expect(await collect(source)).toEqual([
-      quad('urn:a', '"alpha"'),
-      quad('urn:z', '"zeta"'),
-    ]);
+    expect(await collect(source)).toEqual(PROJECTION_BYTES);
     expect(request?.body).toBe(OPERATION.sparql);
     expect(request?.headers).toMatchObject({
       Accept: 'text/x-nquads, application/n-quads',
@@ -66,7 +63,7 @@ describe('Blazegraph RFC-64 shared-projection stream', () => {
       operation({ publicTripleCount: '1' }),
       { byteCeiling: 4096 },
     );
-    expect(await collect(exact)).toEqual([quad('urn:a', '"alpha"')]);
+    expect(await collect(exact)).toEqual(new TextEncoder().encode(LINE_A));
 
     globalThis.fetch = (async () => new Response(
       '<urn:a> <urn:p> "alpha" <urn:foreign> .\n',
@@ -166,12 +163,18 @@ function byteStream(chunks: readonly string[]): ReadableStream<Uint8Array> {
   });
 }
 
-function quad(subject: string, object: string): Quad {
-  return Object.freeze({ subject, predicate: 'urn:p', object, graph: GRAPH });
-}
-
-async function collect(source: AsyncIterable<Quad>): Promise<Quad[]> {
-  const quads: Quad[] = [];
-  for await (const value of source) quads.push(value);
-  return quads;
+async function collect(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for await (const value of source) {
+    chunks.push(value);
+    length += value.byteLength;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }

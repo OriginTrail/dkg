@@ -250,7 +250,7 @@ export class BlazegraphStore implements TripleStore {
   private openRfc64SharedProjectionV1(
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
-  ): Promise<AsyncIterable<DKGQuad>> {
+  ): ReturnType<Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1']> {
     return this.runStoreWork(
       'construct',
       {
