@@ -96,54 +96,55 @@ describe('chainDiscoveryScanOptions', () => {
   // `discoverContextGraphsFromChain` must be swallowed and must clear the
   // `inFlight` guard via the `finally`, or the first transient RPC failure
   // would permanently disable every later scheduled scan.
-  it('swallows a rejected scan and still runs the next scheduled invocation', async () => {
+  // GH#2323 — these three tests DELIBERATELY flip the behaviour their
+  // predecessors pinned. The old runner consumed the run slot before any
+  // await (`const run = runs++`), so a rejected run-0 `seedFull` silently
+  // downgraded the startup recovery to `incremental` until run 48 — roughly
+  // 24h at the 30-minute cadence. The slot is now committed only when the
+  // scan resolves: a rejected scan retries the SAME run next tick.
+  it('retries a rejected startup-recovery seedFull on the next tick instead of degrading to incremental', async () => {
     const agent = {
       hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
       discoverContextGraphsFromChain: vi
         .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
         .mockRejectedValueOnce(new Error('chain RPC unavailable'))
-        .mockResolvedValueOnce(3),
+        .mockResolvedValueOnce(3)
+        .mockResolvedValueOnce(0),
     };
     const log = vi.fn();
     const runner = createChainDiscoveryScanRunner({ agent, log });
 
+    // Tick 1: run-0 seedFull rejects. Not silent any more — the operator can
+    // see the recovery scan failed and that it will be retried.
     await expect(runner()).resolves.toBeUndefined();
-    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
-    expect(log).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Chain scan run 0 (seedFull) failed'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('chain RPC unavailable'));
 
+    // Tick 2: the SAME run retries — still seedFull, the missed history walk
+    // actually happens. Tick 3: only now does the counter advance.
+    await runner();
     await runner();
 
-    expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
-    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
-    expect(log).toHaveBeenCalledWith('Chain scan: discovered 3 new context graph(s)');
-
-    // Pin WHICH scan each call was, not just that two happened — asserting
-    // counts alone passes identically whether the retry recovers the missed
-    // work or silently degrades (PR #2132 review).
-    //
-    // `const run = runs++` sits at lifecycle.ts:740, BEFORE either await, so a
-    // rejection still consumes the run slot. Call 1 is run 0 with the
-    // watermark seeded => the `seedFull` startup-recovery scan. Call 2 is
-    // run 1, and 1 % CHAIN_FULL_SCAN_EVERY (48) !== 0, so it is `incremental`:
-    // the failed full-history scan is NOT re-attempted. The next `seedFull` is
-    // run 48, roughly 24h out at the 30-minute cadence.
-    //
-    // This documents current behaviour rather than endorsing it — whether the
-    // consumed run slot is a defect or intended backoff is tracked separately.
     expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(1, {
       mode: 'seedFull',
       throwOnChainScanFailure: true,
     });
     expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
+      mode: 'seedFull',
+      throwOnChainScanFailure: true,
+    });
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(3, {
       mode: 'incremental',
       pageBudget: 30,
     });
+    expect(log).toHaveBeenCalledWith('Chain scan: discovered 3 new context graph(s)');
   });
 
   // A rejection from the watermark probe happens before
   // `discoverContextGraphsFromChain` is reached, so it takes a different path
-  // out of the `try` — it must clear `inFlight` just the same.
-  it('swallows a rejected watermark probe and still runs the next scheduled invocation', async () => {
+  // out of the `try` — it must clear `inFlight` just the same, and (GH#2323)
+  // it must not consume the slot either.
+  it('a rejected watermark probe does not consume run 0 — the next tick still issues the startup seedFull', async () => {
     const agent = {
       hasContextGraphRegistryScanWatermark: vi
         .fn<() => Promise<boolean>>()
@@ -154,22 +155,46 @@ describe('chainDiscoveryScanOptions', () => {
           async () => 0,
         ),
     };
-    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+    const log = vi.fn();
+    const runner = createChainDiscoveryScanRunner({ agent, log });
 
     await expect(runner()).resolves.toBeUndefined();
     expect(agent.discoverContextGraphsFromChain).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('watermark probe failed'));
 
     await runner();
 
     expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
 
-    // The probe rejection also consumed run 0, so the one scan that does reach
-    // the agent is run 1 => `incremental`, not the `seedFull` a fresh startup
-    // would have issued. Same run-slot accounting as the test above.
+    // Run 0 survived the probe failure, so the scan that reaches the agent is
+    // the seedFull startup recovery a fresh boot owes — not incremental.
     expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(1, {
-      mode: 'incremental',
-      pageBudget: 30,
+      mode: 'seedFull',
+      throwOnChainScanFailure: true,
     });
+  });
+
+  it('a failed periodic full resync retries in one tick, not one day', async () => {
+    // fullScanEvery=2 reaches the periodic seedFull quickly: run 0 seedFull,
+    // run 1 incremental, run 2 seedFull (2 % 2 === 0).
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockResolvedValueOnce(0)
+        .mockResolvedValueOnce(0)
+        .mockRejectedValueOnce(new Error('rpc flake'))
+        .mockResolvedValueOnce(0),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn(), fullScanEvery: 2 });
+
+    await runner(); // run 0 seedFull, ok
+    await runner(); // run 1 incremental, ok
+    await runner(); // run 2 seedFull, REJECTED — slot must survive
+    await runner(); // run 2 again, seedFull, ok
+
+    const modes = agent.discoverContextGraphsFromChain.mock.calls.map((c) => c[0]!.mode);
+    expect(modes).toEqual(['seedFull', 'incremental', 'seedFull', 'seedFull']);
   });
 });
