@@ -193,6 +193,11 @@ export interface SparqlHttpRecoveryState {
   generation: number;
 }
 
+export type SparqlHttpConsistencyProfile =
+  | 'best-effort'
+  | 'atomic-update'
+  | 'atomic-readback';
+
 export interface SparqlHttpStoreOptions {
   /** SPARQL query endpoint URL (required). */
   queryEndpoint: string;
@@ -221,20 +226,13 @@ export interface SparqlHttpStoreOptions {
   /** Runtime-only managed-server state used to classify restart collateral. */
   getRecoveryState?: () => SparqlHttpRecoveryState;
   /**
-   * Declare that the endpoint executes a whole multi-operation SPARQL Update
-   * request as one transaction (SPARQL 1.1 only RECOMMENDS this). Required for
-   * `replaceGraph`: without it the staged DROP/INSERT/MOVE could be applied
-   * partially, violating the old-graph-or-new-graph contract, so the
-   * capability fails closed. Daemon-owned endpoints (`managedByDkg`) are
-   * oxigraph-server, which is known transactional, and imply this flag.
+   * Certified endpoint guarantees. `atomic-update` means a whole
+   * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
+   * that a query issued after a completed update observes that update, as
+   * required by receipt-bearing CAS. Daemon-owned Oxigraph endpoints imply
+   * `atomic-readback`; all other endpoints default to `best-effort`.
    */
-  atomicUpdates?: boolean;
-  /**
-   * Declare that a query issued after a completed update observes that update.
-   * Required only by receipt-bearing CAS capabilities; transactionality alone
-   * does not prevent a query endpoint backed by a lagging replica.
-   */
-  readAfterWriteConsistency?: boolean;
+  consistencyProfile?: SparqlHttpConsistencyProfile;
   /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
   slowQueryThresholdMs?: number;
   /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
@@ -261,8 +259,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly managedOxigraph: boolean;
   private readonly onClientTimeout?: (operation: string) => void;
   private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
-  private readonly atomicUpdates: boolean;
-  private readonly readAfterWriteConsistency: boolean;
+  private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
 
   private readonly now: () => number;
@@ -290,9 +287,9 @@ export class SparqlHttpStore implements TripleStore {
     this.managedOxigraph = options.managedOxigraph === true || this.managedByDkg;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
-    this.atomicUpdates = options.atomicUpdates === true || this.managedOxigraph;
-    this.readAfterWriteConsistency = options.readAfterWriteConsistency === true
-      || this.managedOxigraph;
+    this.consistencyProfile = this.managedOxigraph
+      ? 'atomic-readback'
+      : normalizeConsistencyProfile(options.consistencyProfile);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -659,7 +656,7 @@ export class SparqlHttpStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (!this.atomicUpdates) {
+    if (!this.supportsConsistency('atomic-update')) {
       // A generic SPARQL endpoint may apply the staged DROP/INSERT/MOVE
       // operations non-transactionally, which can strand the target graph in a
       // partial state — the one outcome replaceGraph must never produce. Fail
@@ -694,7 +691,7 @@ export class SparqlHttpStore implements TripleStore {
     metadataQuads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (!this.atomicUpdates) {
+    if (!this.supportsConsistency('atomic-update')) {
       throw new UnsupportedTripleStoreCapabilityError(
         'replaceGraphAndSubject',
         'SparqlHttpStore',
@@ -730,7 +727,7 @@ export class SparqlHttpStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (!this.atomicUpdates) {
+    if (!this.supportsConsistency('atomic-update')) {
       // A generic endpoint may apply DELETE WHERE; INSERT DATA as separate
       // operations, re-exposing the transient-empty subject. Fail closed before
       // any request so callers take their non-atomic delete-then-insert fallback.
@@ -753,7 +750,7 @@ export class SparqlHttpStore implements TripleStore {
     input: Rfc64AuthorCommitCasInputV1,
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
-    if (!this.atomicUpdates || !this.readAfterWriteConsistency) {
+    if (!this.supportsConsistency('atomic-readback')) {
       throw new UnsupportedTripleStoreCapabilityError(
         'rfc64AuthorCommitCasV1',
         'SparqlHttpStore',
@@ -794,6 +791,13 @@ export class SparqlHttpStore implements TripleStore {
    * timeout classification, and optional staging cleanup as one operation.
    * There is no callback a caller can omit while still sending an update.
    */
+  private supportsConsistency(
+    required: Exclude<SparqlHttpConsistencyProfile, 'best-effort'>,
+  ): boolean {
+    return this.consistencyProfile === 'atomic-readback'
+      || this.consistencyProfile === required;
+  }
+
   private async runRemoteGraphMutation(opts: {
     scope: GraphWriteScope;
     update: string;
@@ -1137,6 +1141,16 @@ export class SparqlHttpStore implements TripleStore {
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }
+}
+
+function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {
+  if (value === undefined) return 'best-effort';
+  if (value === 'best-effort' || value === 'atomic-update' || value === 'atomic-readback') {
+    return value;
+  }
+  throw new Error(
+    'sparql-http consistencyProfile must be best-effort, atomic-update, or atomic-readback',
+  );
 }
 
 function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {

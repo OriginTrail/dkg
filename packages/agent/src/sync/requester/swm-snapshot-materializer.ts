@@ -270,13 +270,13 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   //
   // There is deliberately NO capability probe here. An earlier revision tested
   // `typeof deps.store.replaceSubject !== 'function'`, on the theory that
-  // `sparql-http` with `atomicUpdates:false` could never hold a witness and
+  // best-effort `sparql-http` could never hold a witness and
   // would otherwise pay the ASK forever. BOTH halves were false:
   //
   //   - every adapter and all three decorators DEFINE `replaceSubject` and
   //     throw `UnsupportedTripleStoreCapabilityError` INSIDE it, so the typeof
   //     is always "function" — the probe could never fire;
-  //   - that config gates `replaceGraph` on the same `atomicUpdates` flag, so
+  //   - that profile also gates `replaceGraph`, so
   //     no writer can populate a SWM assertion graph at all. The graph stays
   //     empty, the count gate returns first, and the ASK is never reached.
   //     There was no cost to avoid.

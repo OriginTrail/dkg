@@ -1,17 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { ContentAddressedBlobLeaseManager } from '../src/content-addressed-blob-lease-manager.js';
 
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => { resolve = done; });
-  return { promise, resolve };
-}
-
 describe('ContentAddressedBlobLeaseManager', () => {
   it('creates once for concurrent users and preserves a committed blob', async () => {
     const blobs = new Map<string, string>();
     let creates = 0;
-    let removes = 0;
     const manager = new ContentAddressedBlobLeaseManager({
       createOrVerify: async (hash, value) => {
         const existing = blobs.get(hash);
@@ -23,10 +16,6 @@ describe('ContentAddressedBlobLeaseManager', () => {
         blobs.set(hash, value);
         return true;
       },
-      remove: async (hash) => {
-        removes += 1;
-        blobs.delete(hash);
-      },
     });
     const first = manager.createScope();
     const second = manager.createScope();
@@ -35,15 +24,14 @@ describe('ContentAddressedBlobLeaseManager', () => {
       manager.acquire('same', 'value', first),
       manager.acquire('same', 'value', second),
     ]);
-    await manager.release(first, false);
-    await manager.release(second, true);
+    await manager.release(first);
+    await manager.release(second);
 
     expect(creates).toBe(1);
-    expect(removes).toBe(0);
     expect(blobs.get('same')).toBe('value');
   });
 
-  it('reclaims a blob created only for a losing writer', async () => {
+  it('retains a blob created by a losing writer for reference-aware garbage collection', async () => {
     const blobs = new Map<string, string>();
     const manager = new ContentAddressedBlobLeaseManager({
       createOrVerify: async (hash, value) => {
@@ -51,47 +39,35 @@ describe('ContentAddressedBlobLeaseManager', () => {
         blobs.set(hash, value);
         return created;
       },
-      remove: async (hash) => { blobs.delete(hash); },
     });
     const scope = manager.createScope();
 
     await manager.acquire('loser', 'value', scope);
-    await manager.release(scope, false);
+    await manager.release(scope);
 
-    expect(blobs.has('loser')).toBe(false);
+    expect(blobs.get('loser')).toBe('value');
   });
 
-  it('serializes a new writer behind losing-writer cleanup and recreates the blob', async () => {
+  it('does not let one manager delete a hash preserved by another manager', async () => {
     const blobs = new Map<string, string>();
-    const removalStarted = deferred();
-    const allowRemoval = deferred();
-    let creates = 0;
-    const manager = new ContentAddressedBlobLeaseManager({
+    const options = {
       createOrVerify: async (hash, value) => {
         const created = !blobs.has(hash);
-        if (created) creates += 1;
         blobs.set(hash, value);
         return created;
       },
-      remove: async (hash) => {
-        removalStarted.resolve();
-        await allowRemoval.promise;
-        blobs.delete(hash);
-      },
-    });
-    const losing = manager.createScope();
-    await manager.acquire('race', 'value', losing);
-    const losingRelease = manager.release(losing, false);
-    await removalStarted.promise;
+    };
+    const losingManager = new ContentAddressedBlobLeaseManager(options);
+    const winningManager = new ContentAddressedBlobLeaseManager(options);
+    const losing = losingManager.createScope();
+    const winning = winningManager.createScope();
 
-    const winner = manager.createScope();
-    const winningAcquire = manager.acquire('race', 'value', winner);
-    allowRemoval.resolve();
-    await Promise.all([losingRelease, winningAcquire]);
-    await manager.release(winner, true);
+    await losingManager.acquire('shared', 'value', losing);
+    await winningManager.acquire('shared', 'value', winning);
+    await winningManager.release(winning);
+    await losingManager.release(losing);
 
-    expect(creates).toBe(2);
-    expect(blobs.get('race')).toBe('value');
+    expect(blobs.get('shared')).toBe('value');
   });
 
   it('rejects double release and cross-manager scope use without corrupting leases', async () => {
@@ -102,7 +78,6 @@ describe('ContentAddressedBlobLeaseManager', () => {
         blobs.set(hash, value);
         return created;
       },
-      remove: async (hash: string) => { blobs.delete(hash); },
     };
     const owner = new ContentAddressedBlobLeaseManager(options);
     const stranger = new ContentAddressedBlobLeaseManager(options);
@@ -111,8 +86,8 @@ describe('ContentAddressedBlobLeaseManager', () => {
 
     await expect(stranger.acquire('owned', 'value', scope))
       .rejects.toThrow(/different manager/);
-    await owner.release(scope, true);
-    await expect(owner.release(scope, false)).rejects.toThrow(/already been released/);
+    await owner.release(scope);
+    await expect(owner.release(scope)).rejects.toThrow(/already been released/);
     await expect(owner.acquire('owned', 'value', scope)).rejects.toThrow(/already been released/);
     expect(blobs.get('owned')).toBe('value');
   });

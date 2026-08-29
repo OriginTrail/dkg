@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   ConstructResult,
@@ -18,7 +18,6 @@ import type {
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
 import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
-import { isStoreOperationNotStarted, type StoreOperation } from './store-operation-outcome.js';
 import {
   ContentAddressedBlobLeaseManager,
   type ContentAddressedBlobLeaseScope,
@@ -70,13 +69,12 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.thresholdBytes = options.thresholdBytes;
     this.blobLeases = new ContentAddressedBlobLeaseManager({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
-      remove: (hash) => this.removeBlobFile(hash),
     });
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return this.inner.insert(quads, options);
-    return this.withExternalizedQuads(quads, 'insert', (externalized) =>
+    return this.withExternalizedQuads(quads, (externalized) =>
       this.inner.insert(externalized, options));
   }
 
@@ -109,7 +107,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    await this.withExternalizedQuads(quads, 'replaceGraph', (externalized) =>
+    await this.withExternalizedQuads(quads, (externalized) =>
       this.inner.replaceGraph!(graphUri, externalized, options));
   }
 
@@ -129,7 +127,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     await this.withExternalizedQuads(
       [...graphQuads, ...metadataQuads],
-      'replaceGraphAndSubject',
       (externalized) => this.inner.replaceGraphAndSubject!(
         graphUri,
         externalized.slice(0, graphQuads.length),
@@ -156,7 +153,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     // Externalize oversized literals before the replace, exactly like insert() /
     // replaceGraph() — so a large job payload is stored as a blob ref rather than
     // inline, keeping the atomic path byte-consistent with the fallback.
-    await this.withExternalizedQuads(quads, 'replaceSubject', (externalized) =>
+    await this.withExternalizedQuads(quads, (externalized) =>
       this.inner.replaceSubject!(graphUri, subject, externalized, options));
   }
 
@@ -173,7 +170,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     // Normalize first so an incomplete closed manifest cannot create blobs.
     normalizeRfc64AuthorCommitCasV1(input);
     return this.withBlobLeaseScope(
-      'rfc64AuthorCommitCasV1',
       async (scope) => {
         const externalizeTransition = async (
           transition: Rfc64AuthorCommitCasInputV1['kaStateDigest'],
@@ -230,7 +226,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
           sealInvalidations,
         }, options);
       },
-      (result) => result === 'committed',
     );
   }
 
@@ -301,10 +296,9 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
 
   private async withExternalizedQuads<T>(
     quads: readonly Quad[],
-    operation: StoreOperation,
     work: (externalized: Quad[]) => Promise<T>,
   ): Promise<T> {
-    return this.withBlobLeaseScope(operation, async (scope) => {
+    return this.withBlobLeaseScope(async (scope) => {
       const externalized = await Promise.all(
         quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
       );
@@ -313,21 +307,13 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   private async withBlobLeaseScope<T>(
-    operation: StoreOperation,
     work: (scope: ContentAddressedBlobLeaseScope) => Promise<T>,
-    shouldPreserve: (result: T) => boolean = () => true,
   ): Promise<T> {
     const scope = this.blobLeases.createScope();
-    let preserve = false;
     try {
-      const result = await work(scope);
-      preserve = shouldPreserve(result);
-      return result;
-    } catch (error) {
-      preserve = !isStoreOperationNotStarted(error, operation);
-      throw error;
+      return await work(scope);
     } finally {
-      await this.blobLeases.release(scope, preserve);
+      await this.blobLeases.release(scope);
     }
   }
 
@@ -441,11 +427,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       return externalLiteralRefTerm(sha256Term(term));
     });
     return rewritten === sparql ? undefined : rewritten;
-  }
-
-  /** Test seam for deterministic create/delete race coverage. */
-  protected async removeBlobFile(hash: string): Promise<void> {
-    await rm(this.blobPath(hash), { force: true });
   }
 
   private async writeBlobFile(hash: string, term: string): Promise<boolean> {

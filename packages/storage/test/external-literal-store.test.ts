@@ -244,7 +244,7 @@ describe('SharedMemoryLiteralBlobStore', () => {
     expect(result.type === 'bindings' ? result.bindings : []).toEqual([{ o: largeLiteral }]);
   });
 
-  it('removes an atomic replacement blob after a proven pre-dispatch refusal', async () => {
+  it('retains an atomic replacement blob after pre-dispatch refusal for reference-aware GC', async () => {
     const blobDir = await tempBlobDir();
     const base = new OxigraphStore();
     const inner = overrideStore(base, {
@@ -258,47 +258,48 @@ describe('SharedMemoryLiteralBlobStore', () => {
     await expect(store.replaceGraph(SWM_GRAPH, [
       quad('http://ex.org/refused-replacement', largeLiteral, SWM_GRAPH),
     ])).rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
-    expect(await readdir(blobDir)).toEqual([]);
+    expect(await readdir(blobDir)).toHaveLength(1);
   });
 
-  it('serializes cleanup with a new writer for the same content hash', async () => {
+  it('preserves a blob committed by another store instance sharing the directory', async () => {
     const blobDir = await tempBlobDir();
-    let removalStartedResolve!: () => void;
-    let allowRemovalResolve!: () => void;
-    const removalStarted = new Promise<void>((resolve) => { removalStartedResolve = resolve; });
-    const allowRemoval = new Promise<void>((resolve) => { allowRemovalResolve = resolve; });
-    class PausingBlobStore extends SharedMemoryLiteralBlobStore {
-      protected override async removeBlobFile(hash: string): Promise<void> {
-        removalStartedResolve();
-        await allowRemoval;
-        await super.removeBlobFile(hash);
-      }
-    }
-
-    const base = new OxigraphStore();
-    let attempt = 0;
-    const inner = overrideStore(base, {
+    let losingEnteredResolve!: () => void;
+    let releaseLosingResolve!: () => void;
+    const losingEntered = new Promise<void>((resolve) => { losingEnteredResolve = resolve; });
+    const releaseLosing = new Promise<void>((resolve) => { releaseLosingResolve = resolve; });
+    const losingInner = overrideStore(new OxigraphStore(), {
+      rfc64AuthorCommitCasV1: async () => {
+        losingEnteredResolve();
+        await releaseLosing;
+        return 'conflict';
+      },
+    });
+    const committedBase = new OxigraphStore();
+    const committedInner = overrideStore(committedBase, {
       rfc64AuthorCommitCasV1: async (input) => {
-        attempt += 1;
-        if (attempt === 1) return 'conflict';
-        await base.insert([...input.sharedProjectionQuads]);
+        await committedBase.insert([...input.sharedProjectionQuads]);
         return 'committed';
       },
     });
-    const store = new PausingBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const losingStore = new SharedMemoryLiteralBlobStore(
+      losingInner,
+      { blobDir, thresholdBytes: 20 },
+    );
+    const committedStore = new SharedMemoryLiteralBlobStore(
+      committedInner,
+      { blobDir, thresholdBytes: 20 },
+    );
     const largeLiteral = `"${'cleanup-race'.repeat(30)}"`;
     const subject = 'http://ex.org/cleanup-race';
     const input = rfc64Input(subject, largeLiteral);
 
-    const losingWriter = store.rfc64AuthorCommitCasV1(input);
-    await removalStarted;
-    const winningWriter = store.rfc64AuthorCommitCasV1(input);
-    allowRemovalResolve();
-
-    await expect(Promise.all([losingWriter, winningWriter]))
-      .resolves.toEqual(['conflict', 'committed']);
+    const losingWriter = losingStore.rfc64AuthorCommitCasV1(input);
+    await losingEntered;
+    await expect(committedStore.rfc64AuthorCommitCasV1(input)).resolves.toBe('committed');
+    releaseLosingResolve();
+    await expect(losingWriter).resolves.toBe('conflict');
     expect(await readFile(blobPath(blobDir, sha256Term(largeLiteral)), 'utf8')).toBe(largeLiteral);
-    const result = await store.query(
+    const result = await committedStore.query(
       `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
     );
     expect(result.type === 'bindings' ? result.bindings : []).toEqual([{ o: largeLiteral }]);

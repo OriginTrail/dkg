@@ -149,7 +149,7 @@ describe('ChangelogStore — pre-execution atomic replace rejection', () => {
       create: (scheduler: StorePriorityScheduler): TripleStore => new SparqlHttpStore({
         queryEndpoint: 'http://sparql.test/query',
         updateEndpoint: 'http://sparql.test/update',
-        atomicUpdates: true,
+        consistencyProfile: 'atomic-update',
         scheduler,
         timeout: 1_000,
       }),

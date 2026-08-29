@@ -16,6 +16,7 @@ import {
   UnsupportedTripleStoreCapabilityError,
   buildRfc64AuthorCommitCasUpdateV1,
   createTripleStore,
+  executeRfc64AuthorCommitCasV1,
   tryRfc64AuthorCommitCasV1,
   type Quad,
   type QueryOptions,
@@ -142,6 +143,67 @@ describe('RFC-64 certified author commit CAS v1', () => {
     );
   });
 
+  describe('receipt executor failure contract', () => {
+    it('preserves an update failure when best-effort cleanup also fails', async () => {
+      const updateError = new Error('update response lost');
+      const cleanup = vi.fn().mockRejectedValue(new Error('cleanup failed'));
+      const readReceipt = vi.fn();
+      const onCommitted = vi.fn();
+
+      const error = await executeRfc64AuthorCommitCasV1({
+        executeUpdate: () => { throw updateError; },
+        readReceipt,
+        cleanup,
+        onCommitted,
+      }).catch((reason: unknown) => reason);
+
+      expect(error).toBe(updateError);
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(readReceipt).not.toHaveBeenCalled();
+      expect(onCommitted).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['receipt rejection', () => { throw new Error('receipt transport failed'); }],
+      ['malformed receipt', () => ({ type: 'bindings', bindings: [] })],
+    ])('preserves an indeterminate %s and still attempts cleanup', async (_name, read) => {
+      const cleanup = vi.fn().mockRejectedValue(new Error('cleanup failed'));
+      const onCommitted = vi.fn();
+
+      const error = await executeRfc64AuthorCommitCasV1({
+        executeUpdate: vi.fn(),
+        readReceipt: read,
+        cleanup,
+        onCommitted,
+      }).catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/receipt (transport failed|query returned)/);
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(onCommitted).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [false, 'conflict', 0],
+      [true, 'committed', 1],
+    ] as const)(
+      'keeps the %s receipt outcome when cleanup fails',
+      async (receipt, expected, committedCalls) => {
+        const cleanup = vi.fn().mockRejectedValue(new Error('cleanup failed'));
+        const onCommitted = vi.fn();
+
+        await expect(executeRfc64AuthorCommitCasV1({
+          executeUpdate: vi.fn(),
+          readReceipt: () => receipt,
+          cleanup,
+          onCommitted,
+        })).resolves.toBe(expected);
+        expect(cleanup).toHaveBeenCalledOnce();
+        expect(onCommitted).toHaveBeenCalledTimes(committedCalls);
+      },
+    );
+  });
+
   it('commits the projection, seal, head, and bounded state old-or-new together', async () => {
     const store = new OxigraphStore();
     await seedOldState(store);
@@ -212,8 +274,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
     const store = new SparqlHttpStore({
       queryEndpoint: 'http://oversized-head.test/query',
       updateEndpoint: 'http://oversized-head.test/update',
-      atomicUpdates: true,
-      readAfterWriteConsistency: true,
+      consistencyProfile: 'atomic-readback',
     });
 
     await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput({
@@ -410,8 +471,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
     const store = new SparqlHttpStore({
       queryEndpoint: 'http://write-gen.test/query',
       updateEndpoint: 'http://write-gen.test/update',
-      atomicUpdates: true,
-      readAfterWriteConsistency: true,
+      consistencyProfile: 'atomic-readback',
     });
     const affectedPrefix = 'did:dkg:context-graph:rfc64/';
     const unrelatedPrefix = 'did:dkg:context-graph:unrelated/';
@@ -508,7 +568,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(await objectFor(store, scalarGraph, AUTHOR, P_HEAD)).toBe(nextValue);
   });
 
-  it('removes newly-created literal blobs after a proven clean conflict', async () => {
+  it('retains newly-created literal blobs after a clean conflict for reference-aware GC', async () => {
     const blobDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-conflict-blobs-'));
     tempDirs.push(blobDir);
     const base = new OxigraphStore();
@@ -523,7 +583,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
         quad('urn:test:rfc64:conflict', P_VALUE, largeLiteral, PROJECTION_GRAPH),
       ],
     }))).resolves.toBe('conflict');
-    expect(await readdir(blobDir)).toEqual([]);
+    expect(await readdir(blobDir)).toHaveLength(1);
   });
 
   it('preserves pre-existing and concurrently committed shared blob hashes', async () => {
@@ -679,7 +739,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
     const transactionalButReplicaUnsafe = new SparqlHttpStore({
       queryEndpoint: 'http://unsupported.invalid/query-replica',
       updateEndpoint: 'http://unsupported.invalid/update-primary',
-      atomicUpdates: true,
+      consistencyProfile: 'atomic-update',
     });
     await expect(tryRfc64AuthorCommitCasV1(
       transactionalButReplicaUnsafe,
@@ -720,8 +780,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
     ['transactional SPARQL HTTP', () => new SparqlHttpStore({
       queryEndpoint: 'http://rfc64.test/query',
       updateEndpoint: 'http://rfc64.test/update',
-      atomicUpdates: true,
-      readAfterWriteConsistency: true,
+      consistencyProfile: 'atomic-readback',
     }) as TripleStore],
   ])('uses the certified update and receipt protocol on %s', async (_name, createStore) => {
     const requests: Array<{ url: string; body: string }> = [];

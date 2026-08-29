@@ -1,9 +1,7 @@
 interface ContentAddressedBlobLease {
   readonly hash: string;
   users: number;
-  preserve: boolean;
-  created: boolean;
-  /** Serialized create/remove lifecycle for this content hash. */
+  /** Serialized create/verify lifecycle for this content hash. */
   ready: Promise<void>;
 }
 
@@ -20,15 +18,16 @@ interface ContentAddressedBlobLeaseScopeState {
 }
 
 export interface ContentAddressedBlobLeaseManagerOptions {
-  /** Create or verify the blob, returning true only when this call created it. */
+  /** Create or verify the immutable blob. */
   readonly createOrVerify: (hash: string, value: string) => Promise<boolean>;
-  readonly remove: (hash: string) => Promise<void>;
 }
 
 /**
- * Coordinates content-addressed blob creation and cleanup across concurrent
- * store mutations. A scope represents one mutation attempt; releasing it with
- * `preserve=false` reclaims only blobs created by losing/not-started attempts.
+ * Coordinates content-addressed blob creation across concurrent store
+ * mutations. A scope represents one mutation attempt. Release deliberately
+ * does not remove blobs from the shared content-addressed namespace: another
+ * store instance or process may already have committed the same hash. Orphan
+ * reclamation therefore belongs to future reference-aware garbage collection.
  */
 export class ContentAddressedBlobLeaseManager {
   private readonly active = new Map<string, ContentAddressedBlobLease>();
@@ -62,8 +61,6 @@ export class ContentAddressedBlobLeaseManager {
       lease = {
         hash,
         users: 0,
-        preserve: false,
-        created: false,
         ready: Promise.resolve(),
       };
       this.active.set(hash, lease);
@@ -72,44 +69,32 @@ export class ContentAddressedBlobLeaseManager {
     scopeState.leases.set(hash, lease);
 
     const state = lease;
-    // Chain creation behind pending cleanup. A writer arriving while a losing
-    // writer removes this hash waits for removal, then recreates/verifies it
-    // before its store mutation can commit.
+    // Serialize local create/verify calls. Cross-process safety comes from the
+    // content-addressed file's exclusive create and immutable verification.
     const ready = state.ready.then(async () => {
-      const created = await this.options.createOrVerify(hash, value);
-      state.created ||= created;
+      await this.options.createOrVerify(hash, value);
     });
     state.ready = ready;
     await ready;
   }
 
-  async release(scope: ContentAddressedBlobLeaseScope, preserve: boolean): Promise<void> {
+  async release(scope: ContentAddressedBlobLeaseScope): Promise<void> {
     const scopeState = this.requireOpenScope(scope);
-    // Close ownership before awaiting cleanup so concurrent/double releases
-    // cannot decrement the same leases twice.
+    // Close ownership before awaiting outstanding verification so concurrent /
+    // double releases cannot decrement the same leases twice.
     scopeState.released = true;
-    const cleanup: Promise<void>[] = [];
+    const settled: Promise<void>[] = [];
     for (const state of scopeState.leases.values()) {
-      state.preserve ||= preserve;
       state.users -= 1;
-      if (state.users !== 0) continue;
-
-      const lifecycle = state.ready.then(async () => {
-        // A new acquisition may have joined while cleanup was queued.
-        if (state.users !== 0 || !state.created || state.preserve) return;
-        await this.options.remove(state.hash);
-        state.created = false;
-      });
-      state.ready = lifecycle;
-      cleanup.push(lifecycle.finally(() => {
-        // Keep coordination installed through deletion so a concurrent acquire
-        // either prevents removal or chains recreation after it.
-        if (state.users === 0 && this.active.get(state.hash) === state) {
-          this.active.delete(state.hash);
-        }
-      }));
+      if (state.users === 0) {
+        settled.push(state.ready.finally(() => {
+          if (state.users === 0 && this.active.get(state.hash) === state) {
+            this.active.delete(state.hash);
+          }
+        }));
+      }
     }
-    await Promise.all(cleanup);
+    await Promise.all(settled);
   }
 
   private requireOpenScope(

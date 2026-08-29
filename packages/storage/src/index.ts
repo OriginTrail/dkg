@@ -156,6 +156,7 @@ export {
 export {
   SparqlHttpStore,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
+  type SparqlHttpConsistencyProfile,
   type SparqlHttpStoreOptions,
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,
