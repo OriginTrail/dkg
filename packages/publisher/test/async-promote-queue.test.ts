@@ -664,8 +664,32 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(sources).toEqual([
       'publisher.asyncPromote.recoverExpired',
       'publisher.asyncPromote.claimNext.candidates',
-      'publisher.asyncPromote.claimNext.running',
     ]);
+  });
+
+  it('signals in-process workers only after enqueue and recovery commit', async () => {
+    const queue = createQueue();
+    const notifications: string[] = [];
+    const unsubscribe = queue.subscribeWorkAvailable?.(() => notifications.push('wake'));
+
+    const jobId = await queue.enqueue(makeRequest());
+    expect(notifications).toEqual(['wake']);
+
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: 'fatal',
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+    });
+    expect(notifications).toEqual(['wake']);
+
+    await queue.recover(jobId);
+    expect(notifications).toEqual(['wake', 'wake']);
+
+    unsubscribe?.();
+    await queue.enqueue(makeRequest({ assertionName: 'after-unsubscribe' }));
+    expect(notifications).toEqual(['wake', 'wake']);
   });
 
   it('13. claimNext() does NOT pick a second job for the same (cgId, subGraphName, assertionName) while one is running', async () => {

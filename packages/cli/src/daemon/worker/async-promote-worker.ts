@@ -3,17 +3,17 @@
  *
  * PR #3 of the async-promote-queue series. PR #1 shipped the queue
  * library; PR #2 exposed it to the agent + HTTP routes. This module
- * drains the queue: N worker loops, each polling `claimNext` on a
- * short interval, calling `agent.assertion.promote(...)` on the
- * claimed job, then recording success or classified failure back into
- * the queue.
+ * drains the queue: an in-process queue signal wakes N worker slots,
+ * with periodic polling retained for durable cross-process writes and
+ * retry deadlines. A claimed slot calls `agent.assertion.promote(...)`,
+ * then records success or classified failure back into the queue.
  *
  * Open questions from the plan §10 are resolved here:
  *
- * 1. **Worker model**: in-process `setInterval(claimNext, pollIntervalMs)`
- *    × `workerConcurrency` instances. AsyncLift's on-demand
- *    `processNext` model is rejected because the promote queue has no
- *    external trigger — the daemon owns its own clock.
+ * 1. **Worker model**: in-process enqueue/recover signals wake all available
+ *    slots immediately. One periodic poll remains as a durable fallback for
+ *    cross-process writes and retry eligibility — the daemon still owns the
+ *    recovery clock.
  *
  * 2. **Backoff curve**: defined in `async-promote-queue-utils.ts`,
  *    inherited by the queue itself; the worker just calls `fail()` with
@@ -71,7 +71,7 @@ export interface PromoteWorkerConfig {
   agent: DKGAgent;
   /** Number of concurrent worker loops (default 4 — RFC §4.5). */
   workerConcurrency?: number;
-  /** Polling interval for claimNext (default 100ms). */
+  /** Durable fallback poll interval (default 1s with queue wake support, otherwise 100ms). */
   pollIntervalMs?: number;
   /**
    * Heartbeat interval. Must be SHORTER than the queue's `leaseMs`
@@ -577,14 +577,14 @@ interface WorkerSlot {
   workerId: string;
   inFlight: Promise<void> | null;
   tickInFlight: Promise<boolean> | null;
-  timer: ReturnType<typeof setInterval> | null;
 }
 
 const DEFAULT_PROMOTE_LEASE_MS = 15 * 60 * 1000;
 
 export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): PromoteWorkerSupervisor {
   const concurrency = Math.max(1, config.workerConcurrency ?? 4);
-  const pollIntervalMs = Math.max(10, config.pollIntervalMs ?? 100);
+  const supportsWorkWake = typeof config.agent.promoteQueue.subscribeWorkAvailable === 'function';
+  const pollIntervalMs = Math.max(10, config.pollIntervalMs ?? (supportsWorkWake ? 1_000 : 100));
   const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 60_000;
   if (heartbeatIntervalMs > 0 && heartbeatIntervalMs >= DEFAULT_PROMOTE_LEASE_MS) {
     throw new Error(
@@ -600,10 +600,13 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     workerId: `${workerIdPrefix}-slot-${i}`,
     inFlight: null,
     tickInFlight: null,
-    timer: null,
   }));
   let shuttingDown = false;
   let started = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let unsubscribeWorkAvailable: (() => void) | null = null;
+  let wakeRequested = false;
+  let wakeLoop: Promise<void> | null = null;
   let counters: PromoteWorkerCounters = freshCounters();
 
   function freshCounters(): PromoteWorkerCounters {
@@ -701,6 +704,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         }
       } finally {
         slot.inFlight = null;
+        requestWake();
       }
     })();
     slot.inFlight = run;
@@ -720,11 +724,36 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
 
   async function tickAllOnce(): Promise<number> {
     let picked = 0;
-    for (const slot of slots) {
+    const availableSlots = slots.filter((slot) => slot.inFlight === null);
+    for (const slot of availableSlots) {
       const claimed = await scheduleTick(slot);
-      if (claimed) picked += 1;
+      if (!claimed) break;
+      picked += 1;
     }
     return picked;
+  }
+
+  function requestWake(): void {
+    if (!started || shuttingDown) return;
+    wakeRequested = true;
+    if (wakeLoop) return;
+    const run = (async () => {
+      do {
+        wakeRequested = false;
+        await tickAllOnce();
+      } while (wakeRequested && !shuttingDown);
+    })()
+      .catch((err: unknown) => {
+        bestEffortLog(
+          log,
+          `Promote worker wake failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      })
+      .finally(() => {
+        if (wakeLoop === run) wakeLoop = null;
+        if (wakeRequested && !shuttingDown) requestWake();
+      });
+    wakeLoop = run;
   }
 
   function activeShutdownSlotCount(): number {
@@ -765,22 +794,20 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         started = false;
         return;
       }
-      for (const slot of slots) {
-        slot.timer = setInterval(() => {
-          if (shuttingDown) return;
-          void scheduleTick(slot);
-        }, pollIntervalMs);
-        if (slot.timer.unref) slot.timer.unref();
+      if (supportsWorkWake) {
+        unsubscribeWorkAvailable = config.agent.promoteQueue.subscribeWorkAvailable!(requestWake);
       }
+      pollTimer = setInterval(requestWake, pollIntervalMs);
+      if (pollTimer.unref) pollTimer.unref();
     },
     async stop() {
       if (!started) return;
       shuttingDown = true;
-      for (const slot of slots) {
-        if (slot.timer) {
-          clearInterval(slot.timer);
-          slot.timer = null;
-        }
+      unsubscribeWorkAvailable?.();
+      unsubscribeWorkAvailable = null;
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
       }
       const activeAtStop = activeShutdownSlotCount();
       if (activeAtStop === 0) {

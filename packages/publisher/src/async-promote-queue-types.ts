@@ -219,6 +219,12 @@ export interface AsyncPromoteQueue {
   pause(): Promise<void>;
   resume(): Promise<void>;
   getStats(): Promise<PromoteStats>;
+  /**
+   * Optional in-process wake signal for queue workers. Durable queue state
+   * remains authoritative; supervisors must retain periodic polling for
+   * cross-process writes and retry deadlines.
+   */
+  subscribeWorkAvailable?(listener: () => void): () => void;
 }
 
 /**

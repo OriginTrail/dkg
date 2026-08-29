@@ -1016,6 +1016,56 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.stop();
   });
 
+  it('wakes immediately on enqueue while retaining a slow durable fallback poll', async () => {
+    const promoted = deferred();
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async () => {
+        promoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+
+    await queue.enqueue(makeRequest('signalled'));
+    await Promise.race([
+      promoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('enqueue wake timed out')), 500)),
+    ]);
+    await sup.stop();
+
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('stops probing remaining idle slots after the first empty claim', async () => {
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async (workerId: string) => {
+      claimCalls += 1;
+      return queue.claimNext(workerId);
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+    expect(await sup.tickOnce()).toBe(0);
+    await sup.stop();
+
+    expect(claimCalls).toBe(1);
+  });
+
   it('rejects a heartbeat interval that is not shorter than the queue lease', () => {
     expect(() =>
       createPromoteWorkerSupervisor({
