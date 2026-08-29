@@ -8,9 +8,11 @@ import {
 import type { LiftJob } from '../src/lift-job.js';
 import {
   CONTROL_LIFECYCLE_KEY,
+  CONTROL_PAYLOAD,
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
   knowledgeAssetVmPublishLifecycleKey,
+  literal,
   serializeJob,
 } from '../src/async-lift-control-plane.js';
 import {
@@ -185,6 +187,65 @@ describe('#1828 async lift intent lookup', () => {
     expect(indexed).toBeGreaterThanOrEqual(0);
   });
 
+  it('isolates corrupt inventory rows but fails closed for the requested lifecycle', async () => {
+    const publisher = createPublisher();
+    const corruptPayload = async (jobId: string): Promise<void> => {
+      const job = await publisher.getStatus(jobId);
+      if (!job || job.status !== 'accepted') throw new Error('expected accepted job');
+      const corrupt = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+        entry.predicate === CONTROL_PAYLOAD
+          ? { ...entry, object: literal('{not-json') }
+          : entry,
+      );
+      await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await store.insert(corrupt);
+    };
+
+    const unrelatedId = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'unrelated-corrupt' }),
+    );
+    await corruptPayload(unrelatedId);
+
+    const requestedId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    expect(typeof requestedId).toBe('string');
+    await expect(publisher.ensureVmPublishIntentIndex()).resolves.toBeGreaterThanOrEqual(0);
+    await expect(publisher.recover()).resolves.toBeGreaterThanOrEqual(0);
+
+    await corruptPayload(requestedId);
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest()),
+    ).rejects.toThrow('Malformed persisted LiftJob payload');
+  });
+
+  it('rejects a valid payload indexed under a different lifecycle without admitting a duplicate', async () => {
+    const publisher = createPublisher();
+    const originalRequest = kaVmPublishRequest({ name: 'indexed-original' });
+    const requested = kaVmPublishRequest({ name: 'indexed-target' });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(originalRequest);
+    const job = await publisher.getStatus(jobId);
+    if (!job) throw new Error('seed job missing');
+
+    const wrongIndex = knowledgeAssetVmPublishLifecycleKey(requested);
+    const mismatched = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_LIFECYCLE_KEY
+        ? { ...entry, object: literal(wrongIndex) }
+        : entry,
+    );
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(mismatched);
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(requested),
+    ).rejects.toThrow(/lifecycle index does not match/);
+    expect((await publisher.list()).map(({ jobId: id }) => id)).toEqual([jobId]);
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      request: {
+        knowledgeAssetVmPublish: { name: 'indexed-original' },
+      },
+    });
+  });
+
   // #1828 review (otReviewAgent): writeJob deletes the job subject BEFORE serializing
   // the replacement, so if the key guard threw inside serializeJob a legacy
   // delimiter-bearing job would be ERASED on its next transition (data loss). The
@@ -303,7 +364,11 @@ describe('#1828 async lift intent lookup', () => {
         failure: { ...failureBase, retryable },
         retries: { retryCount, maxRetries: 10 },
       } as unknown as LiftJob;
-      await store.insert(serializeJob(failed, DEFAULT_CONTROL_GRAPH_URI));
+      await store.insert(serializeJob(
+        failed,
+        DEFAULT_CONTROL_GRAPH_URI,
+        { payloadSchema: 'legacy-v0' },
+      ));
     };
 
     await insertFailed(true, 0);

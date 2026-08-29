@@ -16,6 +16,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  toAgentDid,
 } from '@origintrail-official/dkg-core';
 import type { AssertionState } from '@origintrail-official/dkg-core';
 import {
@@ -1041,16 +1042,7 @@ export function isZeroEthAddress(address: string): boolean {
 }
 
 export function agentDid(address: string): string {
-  // GH #748 Codex round 3: canonicalise EVM-address DID subjects to lowercase
-  // so the same wallet doesn't split into multiple RDF subjects when callers
-  // pass checksummed vs lowercased forms (e.g. `ethers.getAddress(...)` in
-  // workspace-handler returns checksummed, while config files often carry
-  // lowercase). Mirrors `canonicalAgentDidSubject` in
-  // `packages/agent/src/profile.ts:20` — the canonical writer for agent
-  // registry records, which has lowercased EVM subjects since A-12. Non-EVM
-  // shapes (peer IDs, names) pass through unchanged.
-  const subject = /^0x[0-9a-fA-F]{40}$/.test(address) ? address.toLowerCase() : address;
-  return `did:dkg:agent:${subject}`;
+  return toAgentDid(address);
 }
 
 // RFC ka-metadata-trim Phase 3 (P3.4): `generateShareTransitionMetadata`

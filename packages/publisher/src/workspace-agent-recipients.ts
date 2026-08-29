@@ -10,6 +10,8 @@ import {
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
   decodeWorkspaceEncryptionKey,
+  AGENT_DID_PREFIX,
+  toAgentDid,
   workspaceAgentEncryptionKeyId,
   tryCanonicalPeerIdString,
   type WorkspaceRecipientEncryptionKey,
@@ -330,8 +332,9 @@ export async function resolveWorkspaceAgentRecipientKeys(
   agentAddress: string,
 ): Promise<WorkspaceAgentRecipient[]> {
   const checksum = ethers.getAddress(agentAddress);
-  const agentUri = `did:dkg:agent:${checksum}`;
-  const lowerAgentUri = `did:dkg:agent:${checksum.toLowerCase()}`;
+  // Read the historical checksum-cased subject alongside the canonical shared-core form.
+  const agentUri = `${AGENT_DID_PREFIX}${checksum}`;
+  const lowerAgentUri = toAgentDid(checksum);
   const agentUriValues = agentUri === lowerAgentUri ? `<${agentUri}>` : `<${agentUri}> <${lowerAgentUri}>`;
   const result = await store.query(
     `SELECT ?key ?algorithm ?proof ?peerId WHERE {
