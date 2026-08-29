@@ -17,7 +17,10 @@ import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
-import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
+import {
+  mapRfc64AuthorCommitCasV1,
+  normalizeRfc64AuthorCommitCasV1,
+} from './rfc64-author-commit-cas.js';
 import {
   ContentAddressedBlobLeaseManager,
   type ContentAddressedBlobLeaseScope,
@@ -168,63 +171,18 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       );
     }
     // Normalize first so an incomplete closed manifest cannot create blobs.
-    normalizeRfc64AuthorCommitCasV1(input);
+    // The manifest is also the sole source for decorator traversal: adding a
+    // semantic role to the protocol plan cannot silently bypass blob mapping.
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
     return this.withBlobLeaseScope(
       async (scope) => {
-        const externalizeTransition = async (
-          transition: Rfc64AuthorCommitCasInputV1['kaStateDigest'],
-        ) => ({
-          ...transition,
-          expectedObject: await this.translateGuardObject(
-            transition.graphUri,
-            transition.expectedObject,
-          ),
-          quads: await Promise.all(
-            transition.quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
-          ),
+        const mappedInput = await mapRfc64AuthorCommitCasV1(manifest, {
+          mapQuad: (quad) => this.externalizeInsertQuad(quad, scope),
+          mapObject: (object, context) => context.kind === 'expected'
+            ? this.translateGuardObject(context.graphUri, object)
+            : this.externalizeScalarObject(context.graphUri, object!, scope),
         });
-        const [
-          sharedProjectionQuads,
-          authorSealQuads,
-          kaStateDigest,
-          subgraphMutationGeneration,
-          contextGraphMutationGeneration,
-          appliedSet,
-          sealInvalidations,
-          expectedCurrentHeadObject,
-          nextCurrentHeadObject,
-        ] = await Promise.all([
-          Promise.all(
-            input.sharedProjectionQuads.map((quad) => this.externalizeInsertQuad(quad, scope)),
-          ),
-          Promise.all(
-            input.authorSealQuads.map((quad) => this.externalizeInsertQuad(quad, scope)),
-          ),
-          externalizeTransition(input.kaStateDigest),
-          externalizeTransition(input.subgraphMutationGeneration),
-          externalizeTransition(input.contextGraphMutationGeneration),
-          externalizeTransition(input.appliedSet),
-          Promise.all(input.sealInvalidations.map(async (replacement) => ({
-            ...replacement,
-            quads: await Promise.all(
-              replacement.quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
-            ),
-          }))),
-          this.translateGuardObject(input.currentHeadGraph, input.expectedCurrentHeadObject),
-          this.externalizeScalarObject(input.currentHeadGraph, input.nextCurrentHeadObject, scope),
-        ]);
-        return this.inner.rfc64AuthorCommitCasV1!({
-          ...input,
-          sharedProjectionQuads,
-          authorSealQuads,
-          expectedCurrentHeadObject,
-          nextCurrentHeadObject,
-          kaStateDigest,
-          subgraphMutationGeneration,
-          contextGraphMutationGeneration,
-          appliedSet,
-          sealInvalidations,
-        }, options);
+        return this.inner.rfc64AuthorCommitCasV1!(mappedInput, options);
       },
     );
   }

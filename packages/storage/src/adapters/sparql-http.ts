@@ -757,6 +757,7 @@ export class SparqlHttpStore implements TripleStore {
       );
     }
     const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    const { signal: _callerSignal, ...cleanupOptions } = options ?? {};
     assertQuadLiteralsMutf8Safe(plan.semanticQuads, {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.rfc64AuthorCommitCasV1',
@@ -776,7 +777,7 @@ export class SparqlHttpStore implements TripleStore {
       }),
       cleanup: () => this.postCleanupUpdate(
         plan.cleanup,
-        { ...options, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' },
+        { ...cleanupOptions, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' },
         'rfc64AuthorCommitCasV1',
       ),
       onCommitted: () => {

@@ -17,6 +17,8 @@ import {
   buildRfc64AuthorCommitCasUpdateV1,
   createTripleStore,
   executeRfc64AuthorCommitCasV1,
+  mapRfc64AuthorCommitCasV1,
+  normalizeRfc64AuthorCommitCasV1,
   tryRfc64AuthorCommitCasV1,
   type Quad,
   type QueryOptions,
@@ -225,6 +227,60 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect((await store.listGraphs()).some(
       (graph) => graph.startsWith(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX),
     )).toBe(false);
+  });
+
+  it('maps every closed-manifest role through the canonical async plan', async () => {
+    const invalidationGraph = 'urn:test:rfc64:invalidations';
+    const input = authorCommitInput({
+      sealInvalidations: [{
+        graphUri: invalidationGraph,
+        subject: INVALIDATED_SEAL,
+        quads: [quad(INVALIDATED_SEAL, P_VALUE, '"invalidated"', invalidationGraph)],
+      }],
+    });
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    const quadRoles: string[] = [];
+    const objectRoles: string[] = [];
+
+    const mapped = await mapRfc64AuthorCommitCasV1(manifest, {
+      mapQuad: async (value, context) => {
+        quadRoles.push(`${context.role}:${context.roleIndex}`);
+        return value;
+      },
+      mapObject: async (value, context) => {
+        objectRoles.push(`${context.role}:${context.kind}`);
+        return value;
+      },
+    });
+
+    expect(quadRoles).toEqual([
+      'sharedProjection:0',
+      'sharedProjection:0',
+      'authorSeal:0',
+      'kaStateDigest:0',
+      'subgraphMutationGeneration:0',
+      'contextGraphMutationGeneration:0',
+      'appliedSet:0',
+      'sealInvalidation:0',
+    ]);
+    expect(objectRoles).toEqual([
+      'currentHead:expected',
+      'kaStateDigest:expected',
+      'subgraphMutationGeneration:expected',
+      'contextGraphMutationGeneration:expected',
+      'appliedSet:expected',
+      'currentHead:next',
+    ]);
+    expect(mapped).toEqual(input);
+    expect(manifest.semanticQuads).toHaveLength(9);
+    expect(manifest.touchedGraphs).toEqual([
+      PROJECTION_GRAPH,
+      SEAL_GRAPH,
+      HEAD_GRAPH,
+      STATE_GRAPH,
+      invalidationGraph,
+    ]);
+    expect(manifest.referencedGraphs).toEqual(manifest.touchedGraphs);
   });
 
   it('returns a clean conflict and changes no semantic target when any guard is stale', async () => {
@@ -692,6 +748,42 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(scans).toBe(2);
   });
 
+  it('maintains added and emptied graphs in a warm index without a full rescan', async () => {
+    const base = new OxigraphStore();
+    await seedOldState(base);
+    const addedGraph = 'urn:test:rfc64:added-seal-graph';
+    const emptiedGraph = 'urn:test:rfc64:emptied-seal-graph';
+    await base.insert([
+      quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', emptiedGraph),
+    ]);
+    let scans = 0;
+    const inner = overrideStore(base, {
+      listGraphs: async (options?: QueryOptions) => {
+        scans += 1;
+        return base.listGraphs(options);
+      },
+    });
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 60_000 });
+    expect(await store.listGraphs()).toEqual(expect.arrayContaining([emptiedGraph]));
+    expect(await store.listGraphs()).not.toContain(addedGraph);
+    expect(scans).toBe(1);
+
+    await expect(store.rfc64AuthorCommitCasV1(authorCommitInput({
+      authorSealGraph: addedGraph,
+      authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', addedGraph)],
+      sealInvalidations: [{
+        graphUri: emptiedGraph,
+        subject: INVALIDATED_SEAL,
+        quads: [],
+      }],
+    }))).resolves.toBe('committed');
+
+    const graphs = await store.listGraphs();
+    expect(graphs).toContain(addedGraph);
+    expect(graphs).not.toContain(emptiedGraph);
+    expect(scans).toBe(1);
+  });
+
   it('keeps a warm graph index on RFC-64 conflict and proven not-started refusal', async () => {
     for (const outcome of ['conflict', 'not-started'] as const) {
       const base = new OxigraphStore();
@@ -805,6 +897,48 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(requests[0]!.body).toContain(`GRAPH <${HEAD_GRAPH}>`);
     expect(requests[1]!.body).toContain('ASK');
     expect(requests[2]!.body).toContain('DROP SILENT GRAPH');
+  });
+
+  it.each([
+    ['Blazegraph', () => new BlazegraphStore('http://rfc64-abort.test/sparql') as TripleStore],
+    ['transactional SPARQL HTTP', () => new SparqlHttpStore({
+      queryEndpoint: 'http://rfc64-abort.test/query',
+      updateEndpoint: 'http://rfc64-abort.test/update',
+      consistencyProfile: 'atomic-readback',
+    }) as TripleStore],
+  ])('detaches %s receipt cleanup from caller cancellation after dispatch', async (
+    _name,
+    createStore,
+  ) => {
+    const requests: Array<{ body: string; signal: AbortSignal | null }> = [];
+    let receiptStarted!: () => void;
+    const receiptDispatched = new Promise<void>((resolve) => { receiptStarted = resolve; });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = String(init?.body ?? '');
+      const signal = init?.signal ?? null;
+      requests.push({ body, signal });
+      if (!body.includes('ASK')) return new Response(null, { status: 200 });
+      receiptStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        const abort = () => reject(signal?.reason ?? new Error('receipt aborted'));
+        if (signal?.aborted) abort();
+        else signal?.addEventListener('abort', abort, { once: true });
+      });
+    });
+    const store = createStore();
+    const controller = new AbortController();
+    const commit = store.rfc64AuthorCommitCasV1!(authorCommitInput(), {
+      signal: controller.signal,
+    });
+    await receiptDispatched;
+    controller.abort(new Error('caller cancelled after CAS dispatch'));
+
+    await expect(commit).rejects.toThrow('caller cancelled after CAS dispatch');
+    expect(requests).toHaveLength(3);
+    expect(requests[0]!.body).toContain('urn:dkg:sync:authorCommitApplied');
+    expect(requests[1]!.body).toContain('ASK');
+    expect(requests[2]!.body).toContain('DROP SILENT GRAPH');
+    expect(requests[2]!.signal?.aborted).toBe(false);
   });
 
   it('rejects ambiguous or unbounded fixed-manifest inputs before building an update', () => {

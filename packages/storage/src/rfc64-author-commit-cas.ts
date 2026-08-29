@@ -83,6 +83,64 @@ export interface Rfc64AuthorCommitCasExecutionV1 {
   readonly onCommitted?: () => void | Promise<void>;
 }
 
+export type Rfc64AuthorCommitSemanticRoleV1 =
+  | 'sharedProjection'
+  | 'authorSeal'
+  | 'currentHead'
+  | 'kaStateDigest'
+  | 'subgraphMutationGeneration'
+  | 'contextGraphMutationGeneration'
+  | 'appliedSet'
+  | 'sealInvalidation';
+
+export interface Rfc64AuthorCommitGraphReplacementPlanV1 {
+  readonly role: 'sharedProjection';
+  readonly graphUri: string;
+  readonly quads: readonly Quad[];
+}
+
+export interface Rfc64AuthorCommitSubjectReplacementPlanV1 {
+  readonly role: Exclude<
+    Rfc64AuthorCommitSemanticRoleV1,
+    'sharedProjection' | 'currentHead'
+  >;
+  /** Stable input order for the bounded, repeated seal-invalidation role. */
+  readonly roleIndex: number;
+  readonly graphUri: string;
+  readonly subject: string;
+  readonly quads: readonly Quad[];
+}
+
+export interface Rfc64AuthorCommitGuardPlanV1 extends Rfc64AuthorCommitValueGuardV1 {
+  readonly role: Exclude<Rfc64AuthorCommitSemanticRoleV1, 'sharedProjection' | 'authorSeal' | 'sealInvalidation'>;
+}
+
+export interface Rfc64AuthorCommitCurrentHeadPlanV1
+  extends Rfc64AuthorCommitGuardPlanV1 {
+  readonly role: 'currentHead';
+  readonly nextObject: string;
+}
+
+export interface Rfc64AuthorCommitCasMapperV1 {
+  mapQuad(
+    quad: Quad,
+    context: Readonly<{
+      role: Rfc64AuthorCommitSemanticRoleV1;
+      roleIndex: number;
+      graphUri: string;
+      subject: string | null;
+    }>,
+  ): Quad | Promise<Quad>;
+  mapObject(
+    object: string | null,
+    context: Readonly<{
+      role: Rfc64AuthorCommitGuardPlanV1['role'];
+      graphUri: string;
+      kind: 'expected' | 'next';
+    }>,
+  ): string | null | Promise<string | null>;
+}
+
 /**
  * Execute the receipt-bearing RFC-64 CAS protocol identically on every backend.
  *
@@ -135,9 +193,10 @@ async function bestEffortRfc64Cleanup(cleanup: () => void | Promise<void>): Prom
 
 /** Canonical validated metadata consumed by every adapter and decorator. */
 export interface NormalizedRfc64AuthorCommitCasV1 {
-  readonly input: Rfc64AuthorCommitCasInputV1;
-  readonly stateGuards: readonly Rfc64AuthorCommitValueGuardV1[];
-  readonly stateReplacements: readonly Rfc64AuthorCommitSubjectReplacementV1[];
+  readonly graphReplacements: readonly Rfc64AuthorCommitGraphReplacementPlanV1[];
+  readonly subjectReplacements: readonly Rfc64AuthorCommitSubjectReplacementPlanV1[];
+  readonly guards: readonly Rfc64AuthorCommitGuardPlanV1[];
+  readonly currentHead: Rfc64AuthorCommitCurrentHeadPlanV1;
   readonly semanticQuads: readonly Quad[];
   readonly touchedGraphs: readonly string[];
   readonly referencedGraphs: readonly string[];
@@ -160,50 +219,180 @@ export function normalizeRfc64AuthorCommitCasV1(
   if (!Array.isArray(input.sealInvalidations)) {
     throw new Error('RFC-64 author commit requires bounded seal invalidations');
   }
-  const stateGuards = Object.freeze(roles.map(([, transition]) => ({
+  const stateGuards = Object.freeze(roles.map(([role, transition]) => ({
+    role,
     graphUri: transition.graphUri,
     subject: transition.subject,
     predicate: transition.predicate,
     expectedObject: transition.expectedObject,
   })));
   const stateReplacements = Object.freeze([
-    ...roles.map(([, transition]) => ({
+    ...roles.map(([role, transition]) => ({
+      role,
+      roleIndex: 0,
       graphUri: transition.graphUri,
       subject: transition.subject,
       quads: transition.quads,
     })),
-    ...input.sealInvalidations,
+    ...input.sealInvalidations.map((replacement, roleIndex) => ({
+      role: 'sealInvalidation' as const,
+      roleIndex,
+      ...replacement,
+    })),
   ]);
   validateInput(input, stateGuards, stateReplacements);
+  const graphReplacements = Object.freeze([Object.freeze({
+    role: 'sharedProjection' as const,
+    graphUri: input.sharedProjectionGraph,
+    quads: input.sharedProjectionQuads,
+  })]);
+  const authorSealReplacement = Object.freeze({
+    role: 'authorSeal' as const,
+    roleIndex: 0,
+    graphUri: input.authorSealGraph,
+    subject: input.authorSealSubject,
+    quads: input.authorSealQuads,
+  });
+  const subjectReplacements = Object.freeze([
+    authorSealReplacement,
+    ...stateReplacements,
+  ]);
+  const currentHead = Object.freeze({
+    role: 'currentHead' as const,
+    graphUri: input.currentHeadGraph,
+    subject: input.currentHeadSubject,
+    predicate: input.currentHeadPredicate,
+    expectedObject: input.expectedCurrentHeadObject,
+    nextObject: input.nextCurrentHeadObject,
+  });
+  const guards = Object.freeze([currentHead, ...stateGuards]);
   const touchedGraphs = Object.freeze([...new Set([
-    input.sharedProjectionGraph,
-    input.authorSealGraph,
-    input.currentHeadGraph,
-    ...stateReplacements.map(({ graphUri }) => graphUri),
+    ...graphReplacements.map(({ graphUri }) => graphUri),
+    ...subjectReplacements
+      .filter(({ role }) => role === 'authorSeal')
+      .map(({ graphUri }) => graphUri),
+    currentHead.graphUri,
+    ...subjectReplacements
+      .filter(({ role }) => role !== 'authorSeal')
+      .map(({ graphUri }) => graphUri),
   ])]);
   const referencedGraphs = Object.freeze([...new Set([
     ...touchedGraphs,
-    ...stateGuards.map(({ graphUri }) => graphUri),
+    ...guards.map(({ graphUri }) => graphUri),
   ])]);
   const semanticQuads = Object.freeze([
-    ...input.sharedProjectionQuads,
-    ...input.authorSealQuads,
-    ...stateReplacements.flatMap(({ quads }) => quads),
+    ...graphReplacements.flatMap(({ quads }) => quads),
+    ...subjectReplacements.flatMap(({ quads }) => quads),
     {
-      graph: input.currentHeadGraph,
-      subject: input.currentHeadSubject,
-      predicate: input.currentHeadPredicate,
-      object: input.nextCurrentHeadObject,
+      graph: currentHead.graphUri,
+      subject: currentHead.subject,
+      predicate: currentHead.predicate,
+      object: currentHead.nextObject,
     },
   ]);
   return Object.freeze({
-    input,
-    stateGuards,
-    stateReplacements,
+    graphReplacements,
+    subjectReplacements,
+    guards,
+    currentHead,
     semanticQuads,
     touchedGraphs,
     referencedGraphs,
   });
+}
+
+/**
+ * Map every quad and scalar in the closed manifest through one canonical plan.
+ * Decorators use this instead of reconstructing RFC-64 roles field-by-field.
+ */
+export async function mapRfc64AuthorCommitCasV1(
+  manifest: NormalizedRfc64AuthorCommitCasV1,
+  mapper: Rfc64AuthorCommitCasMapperV1,
+): Promise<Rfc64AuthorCommitCasInputV1> {
+  const graphReplacements = await Promise.all(manifest.graphReplacements.map(async (replacement) => ({
+    ...replacement,
+    quads: await Promise.all(replacement.quads.map((quad) => mapper.mapQuad(quad, {
+      role: replacement.role,
+      roleIndex: 0,
+      graphUri: replacement.graphUri,
+      subject: null,
+    }))),
+  })));
+  const subjectReplacements = await Promise.all(manifest.subjectReplacements.map(async (replacement) => ({
+    ...replacement,
+    quads: await Promise.all(replacement.quads.map((quad) => mapper.mapQuad(quad, {
+      role: replacement.role,
+      roleIndex: replacement.roleIndex,
+      graphUri: replacement.graphUri,
+      subject: replacement.subject,
+    }))),
+  })));
+  const guards = await Promise.all(manifest.guards.map(async (guard) => ({
+    ...guard,
+    expectedObject: await mapper.mapObject(guard.expectedObject, {
+      role: guard.role,
+      graphUri: guard.graphUri,
+      kind: 'expected',
+    }),
+  })));
+  const nextCurrentHeadObject = await mapper.mapObject(manifest.currentHead.nextObject, {
+    role: 'currentHead',
+    graphUri: manifest.currentHead.graphUri,
+    kind: 'next',
+  });
+  if (nextCurrentHeadObject === null) {
+    throw new Error('RFC-64 author commit mapper removed the next current head');
+  }
+
+  const graphReplacement = requireMappedRole(graphReplacements, 'sharedProjection');
+  const authorSeal = requireMappedRole(subjectReplacements, 'authorSeal');
+  const currentHead = requireMappedRole(guards, 'currentHead');
+  const transition = (
+    role: Exclude<Rfc64AuthorCommitGuardPlanV1['role'], 'currentHead'>,
+  ): Rfc64AuthorCommitStateTransitionV1 => {
+    const guard = requireMappedRole(guards, role);
+    const replacement = requireMappedRole(subjectReplacements, role);
+    return Object.freeze({
+      graphUri: replacement.graphUri,
+      subject: replacement.subject,
+      predicate: guard.predicate,
+      expectedObject: guard.expectedObject,
+      quads: replacement.quads,
+    });
+  };
+  const sealInvalidations = subjectReplacements
+    .filter((replacement) => replacement.role === 'sealInvalidation')
+    .sort((left, right) => left.roleIndex - right.roleIndex)
+    .map(({ graphUri, subject, quads }) => Object.freeze({ graphUri, subject, quads }));
+
+  return Object.freeze({
+    sharedProjectionGraph: graphReplacement.graphUri,
+    sharedProjectionQuads: graphReplacement.quads,
+    authorSealGraph: authorSeal.graphUri,
+    authorSealSubject: authorSeal.subject,
+    authorSealQuads: authorSeal.quads,
+    currentHeadGraph: currentHead.graphUri,
+    currentHeadSubject: currentHead.subject,
+    currentHeadPredicate: currentHead.predicate,
+    expectedCurrentHeadObject: currentHead.expectedObject,
+    nextCurrentHeadObject,
+    kaStateDigest: transition('kaStateDigest'),
+    subgraphMutationGeneration: transition('subgraphMutationGeneration'),
+    contextGraphMutationGeneration: transition('contextGraphMutationGeneration'),
+    appliedSet: transition('appliedSet'),
+    sealInvalidations,
+  });
+}
+
+function requireMappedRole<T extends Readonly<{ role: Rfc64AuthorCommitSemanticRoleV1 }>>(
+  values: readonly T[],
+  role: T['role'],
+): T {
+  const matches = values.filter((value) => value.role === role);
+  if (matches.length !== 1) {
+    throw new Error(`RFC-64 author commit plan requires exactly one ${role} role`);
+  }
+  return matches[0]!;
 }
 
 /** Build the one certified transactional update for the closed manifest. */
@@ -211,14 +400,16 @@ export function buildRfc64AuthorCommitCasUpdateV1(
   input: Rfc64AuthorCommitCasInputV1,
 ): Rfc64AuthorCommitCasUpdateV1 {
   const manifest = normalizeRfc64AuthorCommitCasV1(input);
-  const sharedProjectionGraph = assertSafeIri(input.sharedProjectionGraph);
-  const currentHeadGraph = assertSafeIri(input.currentHeadGraph);
+  const projection = manifest.graphReplacements[0]!;
+  const currentHead = manifest.currentHead;
+  const sharedProjectionGraph = assertSafeIri(projection.graphUri);
+  const currentHeadGraph = assertSafeIri(currentHead.graphUri);
   const currentHeadSubject = assertNonBlankNodeIri(
-    input.currentHeadSubject,
+    currentHead.subject,
     'RFC-64 author current-head subject',
   );
-  const currentHeadPredicate = assertSafeIri(unwrapIri(input.currentHeadPredicate));
-  const nextCurrentHeadObject = formatControlObject(input.nextCurrentHeadObject, 'next current head');
+  const currentHeadPredicate = assertSafeIri(unwrapIri(currentHead.predicate));
+  const nextCurrentHeadObject = formatControlObject(currentHead.nextObject, 'next current head');
   const receiptId = randomUUID();
   const receiptGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}rfc64-author-commit:${receiptId}`;
   const receiptSubject = `${receiptGraph}:receipt`;
@@ -226,14 +417,7 @@ export function buildRfc64AuthorCommitCasUpdateV1(
   const receiptObject = '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>';
   const receiptPattern =
     `GRAPH <${receiptGraph}> { <${receiptSubject}> <${receiptPredicate}> ${receiptObject} . }`;
-  const replacements: Rfc64AuthorCommitSubjectReplacementV1[] = [
-    {
-      graphUri: input.authorSealGraph,
-      subject: input.authorSealSubject,
-      quads: input.authorSealQuads,
-    },
-    ...manifest.stateReplacements,
-  ];
+  const replacements = manifest.subjectReplacements;
   const staged: Array<Readonly<{
     targetGraph: string;
     targetSubject: string | null;
@@ -243,7 +427,7 @@ export function buildRfc64AuthorCommitCasUpdateV1(
     targetGraph: sharedProjectionGraph,
     targetSubject: null,
     stagingGraph: `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`,
-    quads: input.sharedProjectionQuads,
+    quads: projection.quads,
   }];
   for (const replacement of replacements) {
     if (replacement.quads.length === 0) continue;
@@ -261,15 +445,7 @@ export function buildRfc64AuthorCommitCasUpdateV1(
   const cleanup = internalGraphs.map((graph) => `DROP SILENT GRAPH <${graph}>`).join(';\n');
   const stagePayload = `INSERT DATA {\n${staged.map(({ stagingGraph, quads }) =>
     formatGraphBlock(stagingGraph, quads)).join('\n')}\n};\n`;
-  const guards = [
-    formatGuard({
-      graphUri: input.currentHeadGraph,
-      subject: input.currentHeadSubject,
-      predicate: input.currentHeadPredicate,
-      expectedObject: input.expectedCurrentHeadObject,
-    }, 0),
-    ...manifest.stateGuards.map((guard, index) => formatGuard(guard, index + 1)),
-  ];
+  const guards = manifest.guards.map((guard, index) => formatGuard(guard, index));
   const receiptInsert =
     `INSERT { ${receiptPattern} }\n` +
     `WHERE {\n${guards.map((guard) => `  ${guard}`).join('\n')}\n};\n`;

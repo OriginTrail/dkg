@@ -471,6 +471,7 @@ export class BlazegraphStore implements TripleStore {
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
     const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    const { signal: _callerSignal, ...cleanupOptions } = options ?? {};
     assertQuadLiteralsMutf8Safe(plan.semanticQuads, {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.rfc64AuthorCommitCasV1',
@@ -487,7 +488,7 @@ export class BlazegraphStore implements TripleStore {
       }),
       cleanup: () => this.sparqlUpdate(
         plan.cleanup,
-        { ...options, source: 'blazegraph.rfc64AuthorCommitCasV1.cleanup' },
+        { ...cleanupOptions, source: 'blazegraph.rfc64AuthorCommitCasV1.cleanup' },
         'rfc64AuthorCommitCasV1',
       ),
     });
