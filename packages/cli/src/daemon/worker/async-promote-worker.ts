@@ -74,7 +74,7 @@ export interface PromoteWorkerConfig {
   pollIntervalMs?: number;
   /**
    * Heartbeat interval. Must be SHORTER than the queue's `leaseMs`
-   * (default 5min); default 60s = 5× safety margin.
+   * (default 15min); default 60s = 15× safety margin.
    */
   heartbeatIntervalMs?: number;
   /**
@@ -88,6 +88,12 @@ export interface PromoteWorkerConfig {
   now?: () => number;
   /** Defaults to `console.warn`. The daemon passes its own logger. */
   log?: PromoteWorkerLogger;
+  /** Retry interval for queue-only outcome bookkeeping (default 5s). */
+  bookkeepingRetryIntervalMs?: number;
+  /** Maximum queue-only bookkeeping recovery window (default 10min). */
+  bookkeepingRetryBudgetMs?: number;
+  /** Deterministic sleep hook for tests. */
+  sleep?: (ms: number) => Promise<void>;
   /** Defaults to a no-op. The daemon passes its `memoryGraphChanged` emitter. */
   emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   /**
@@ -291,7 +297,10 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     message.includes('socket hang up') ||
     message.includes('network') ||
     message.includes('timeout') ||
-    message.includes('timed out')
+    message.includes('timed out') ||
+    message.includes('managed oxigraph is recovering') ||
+    message.includes('managed oxigraph recovery interrupted query') ||
+    message.includes('store scheduler queue wait timeout')
   ) {
     return { classification: 'transient', retryable: true };
   }
@@ -322,6 +331,9 @@ export async function runPromoteJob(
     ) => Promise<{ promotedCount: number }>;
     now: () => number;
     heartbeatIntervalMs: number;
+    bookkeepingRetryIntervalMs?: number;
+    bookkeepingRetryBudgetMs?: number;
+    sleep?: (ms: number) => Promise<void>;
     log: PromoteWorkerLogger;
     emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   },
@@ -333,7 +345,18 @@ export async function runPromoteJob(
     | 'partial_promote_ambiguity';
   error?: ClassifiedPromoteError;
 }> {
-  const { job, queue, runPromote, now, heartbeatIntervalMs, log, emitMemoryGraphChanged } = args;
+  const {
+    job,
+    queue,
+    runPromote,
+    now,
+    heartbeatIntervalMs,
+    bookkeepingRetryIntervalMs = 5_000,
+    bookkeepingRetryBudgetMs = 10 * 60 * 1000,
+    sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    log,
+    emitMemoryGraphChanged,
+  } = args;
   if (!job.lease) {
     throw new Error(`runPromoteJob requires a job with an active lease (jobId=${job.jobId})`);
   }
@@ -356,6 +379,27 @@ export async function runPromoteJob(
       });
     }, heartbeatIntervalMs);
     if (heartbeatTimer.unref) heartbeatTimer.unref();
+  }
+
+  async function persistWithRecovery<T>(label: string, write: () => Promise<T>): Promise<T> {
+    const deadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
+    let failures = 0;
+    for (;;) {
+      try {
+        return await write();
+      } catch (err: unknown) {
+        failures += 1;
+        const retryable = classifyPromoteError(err).retryable;
+        if (err instanceof PromoteJobLeaseError || !retryable || now() >= deadlineAt) throw err;
+        if (failures === 1) {
+          bestEffortLog(
+            log,
+            `Queue bookkeeping recovery started for ${job.jobId} (${label}) after a transient error`,
+          );
+        }
+        await sleep(Math.max(0, bookkeepingRetryIntervalMs));
+      }
+    }
   }
 
   try {
@@ -386,7 +430,7 @@ export async function runPromoteJob(
         recordedAt: now(),
       };
       try {
-        await queue.fail(job.jobId, claimToken, attemptError);
+        await persistWithRecovery('record failure', () => queue.fail(job.jobId, claimToken, attemptError));
       } catch (failErr: unknown) {
         if (failErr instanceof PromoteJobLeaseError) {
           bestEffortLog(log, `Lease lost while recording failure for ${job.jobId}: ${message}`);
@@ -406,10 +450,11 @@ export async function runPromoteJob(
     // gate the queue actually consumes.
     //
     // Codex (#665#discussion_r3302646439): `assertion.promote()` has
-    // ALREADY mutated SWM / gossiped data at this point. If either of
-    // the next two writes throws (store hiccup, lost lease, transient
-    // FS error, …), we MUST NOT let the outer worker catch park this
-    // job as a normal `failed` row — that would expose it to
+    // ALREADY mutated SWM / gossiped data at this point. Retry only the
+    // queue bookkeeping when a recognized transient store/network error
+    // interrupts either of the next two writes. We MUST NOT rerun the
+    // promote itself or let the outer worker park this as a normal
+    // `failed` row — that would expose it to
     // `/promote-async/{jobId}/recover`, which blindly re-queues
     // `failed` jobs. Re-running an already-completed promote risks
     // duplicate WM/SWM writes and re-gossip. Instead, return the
@@ -419,11 +464,15 @@ export async function runPromoteJob(
     // it into the "abandoned partial promote" bucket (promoteStarted
     // = true, swmInserted = false → operator action required).
     try {
-      await queue.recordCommitMarker(job.jobId, claimToken, 'swmInserted');
-      await queue.succeed(job.jobId, claimToken, {
-        promotedCount: result.promotedCount,
-        succeededAt: now(),
-      });
+      await persistWithRecovery('record swmInserted', () =>
+        queue.recordCommitMarker(job.jobId, claimToken, 'swmInserted'),
+      );
+      await persistWithRecovery('record success', () =>
+        queue.succeed(job.jobId, claimToken, {
+          promotedCount: result.promotedCount,
+          succeededAt: now(),
+        }),
+      );
     } catch (bookkeepingErr: unknown) {
       const message =
         bookkeepingErr instanceof Error
@@ -480,7 +529,7 @@ interface WorkerSlot {
   timer: ReturnType<typeof setInterval> | null;
 }
 
-const DEFAULT_PROMOTE_LEASE_MS = 5 * 60 * 1000;
+const DEFAULT_PROMOTE_LEASE_MS = 15 * 60 * 1000;
 
 export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): PromoteWorkerSupervisor {
   const concurrency = Math.max(1, config.workerConcurrency ?? 4);
@@ -552,6 +601,9 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           },
           now,
           heartbeatIntervalMs,
+          bookkeepingRetryIntervalMs: config.bookkeepingRetryIntervalMs,
+          bookkeepingRetryBudgetMs: config.bookkeepingRetryBudgetMs,
+          sleep: config.sleep,
           log,
           emitMemoryGraphChanged: config.emitMemoryGraphChanged,
         });

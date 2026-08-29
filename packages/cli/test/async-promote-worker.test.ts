@@ -126,6 +126,19 @@ describe('classifyPromoteError', () => {
     });
   });
 
+  it('classifies managed-store recovery errors as transient', () => {
+    for (const message of [
+      'STORE_OPERATION_TIMEOUT Managed Oxigraph is recovering; query was not started',
+      'Managed Oxigraph recovery interrupted query execution',
+      'Store scheduler queue wait timeout',
+    ]) {
+      expect(classifyPromoteError(new Error(message))).toEqual({
+        classification: 'transient',
+        retryable: true,
+      });
+    }
+  });
+
   it('classifies unknown errors as fatal (non-retryable)', () => {
     expect(classifyPromoteError(new Error('assertion not found: foo'))).toEqual({
       classification: 'fatal',
@@ -211,8 +224,8 @@ describe('runPromoteJob', () => {
   it('Codex #665 — post-promote bookkeeping failure returns partial_promote_ambiguity and leaves job running', async () => {
     // Codex (#665#discussion_r3302646439): if `assertion.promote()` has
     // already returned successfully and the next `recordCommitMarker
-    // ('swmInserted')` or `queue.succeed()` write fails (store hiccup,
-    // lost lease, transient FS error, …), the previous behavior let the
+    // ('swmInserted')` or `queue.succeed()` write fails permanently (or
+    // loses its lease), the previous behavior let the
     // outer worker catch park the job as `failed` with retryable=false.
     // Re-running through `/promote-async/{jobId}/recover` would then
     // promote already-promoted data — duplicate WM/SWM writes + re-gossip.
@@ -226,7 +239,7 @@ describe('runPromoteJob', () => {
       ...queue,
       recordCommitMarker: async (jobId, claimToken, step) => {
         if (step === 'swmInserted') {
-          throw new Error('simulated store hiccup');
+          throw new Error('simulated non-retryable bookkeeping failure');
         }
         return queue.recordCommitMarker(jobId, claimToken, step);
       },
@@ -257,12 +270,109 @@ describe('runPromoteJob', () => {
     // The loud log line operators need to see.
     expect(logs.some((l) => l.includes('PARTIAL-PROMOTE-AMBIGUITY'))).toBe(true);
 
-    now += 6 * 60 * 1000;
+    now += 16 * 60 * 1000;
     await queue.claimNext('worker-after-lease-expiry');
     const reconciled = await queue.getStatus(job.jobId);
     expect(reconciled?.state).toBe('failed');
     expect(reconciled?.reason).toContain('partial promote ambiguity');
     await expect(queue.recover(job.jobId)).rejects.toThrow(/Cannot recover job job-1: partial promote ambiguity/);
+  });
+
+  it('retries transient queue.fail bookkeeping without rerunning promote', async () => {
+    const job = await enqueueAndClaim();
+    const recoveringQueue = Object.create(queue) as AsyncPromoteQueue;
+    const fail = queue.fail.bind(queue);
+    let failCalls = 0;
+    let promoteCalls = 0;
+    recoveringQueue.fail = async (jobId, claimToken, error) => {
+      failCalls += 1;
+      if (failCalls <= 2) {
+        throw new Error('Managed Oxigraph is recovering; query was not started');
+      }
+      return fail(jobId, claimToken, error);
+    };
+
+    const result = await runPromoteJob({
+      job,
+      queue: recoveringQueue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        promoteCalls += 1;
+        await markPromoteStarted();
+        throw new Error('Managed Oxigraph is recovering; query was not started');
+      },
+      now: () => now,
+      heartbeatIntervalMs: 0,
+      bookkeepingRetryIntervalMs: 5_000,
+      bookkeepingRetryBudgetMs: 20_000,
+      sleep: async (ms) => {
+        now += ms;
+      },
+      log: (message) => logs.push(message),
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'failed_retrying',
+      error: { classification: 'transient', retryable: true },
+    });
+    expect(promoteCalls).toBe(1);
+    expect(failCalls).toBe(3);
+    expect((await queue.getStatus(job.jobId))?.state).toBe('failed_retrying');
+    expect(logs.some((line) => line.includes('Queue bookkeeping recovery started'))).toBe(true);
+  });
+
+  it('retries transient post-promote bookkeeping without rerunning a successful promote', async () => {
+    const job = await enqueueAndClaim();
+    const recoveringQueue = Object.create(queue) as AsyncPromoteQueue;
+    const recordCommitMarker = queue.recordCommitMarker.bind(queue);
+    const succeed = queue.succeed.bind(queue);
+    let swmMarkerCalls = 0;
+    let succeedCalls = 0;
+    let promoteCalls = 0;
+    recoveringQueue.recordCommitMarker = async (jobId, claimToken, step) => {
+      if (step === 'swmInserted') {
+        swmMarkerCalls += 1;
+        if (swmMarkerCalls === 1) {
+          throw new Error('Managed Oxigraph is recovering; query was not started');
+        }
+      }
+      return recordCommitMarker(jobId, claimToken, step);
+    };
+    recoveringQueue.succeed = async (jobId, claimToken, result) => {
+      succeedCalls += 1;
+      if (succeedCalls === 1) {
+        throw new Error('Store scheduler queue wait timeout');
+      }
+      return succeed(jobId, claimToken, result);
+    };
+
+    const result = await runPromoteJob({
+      job,
+      queue: recoveringQueue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        promoteCalls += 1;
+        await markPromoteStarted();
+        return { promotedCount: 99 };
+      },
+      now: () => now,
+      heartbeatIntervalMs: 0,
+      bookkeepingRetryIntervalMs: 5_000,
+      bookkeepingRetryBudgetMs: 20_000,
+      sleep: async (ms) => {
+        now += ms;
+      },
+      log: (message) => logs.push(message),
+    });
+
+    expect(result.outcome).toBe('succeeded');
+    expect(promoteCalls).toBe(1);
+    expect(swmMarkerCalls).toBe(2);
+    expect(succeedCalls).toBe(2);
+    const final = await queue.getStatus(job.jobId);
+    expect(final?.state).toBe('succeeded');
+    expect(final?.commitMarker?.swmInserted).toBe(true);
+    expect(final?.result?.promotedCount).toBe(99);
   });
 
   it('emits memoryGraphChanged on successful promote with >0 triples', async () => {
@@ -768,7 +878,7 @@ describe('createPromoteWorkerSupervisor', () => {
     expect(() =>
       createPromoteWorkerSupervisor({
         agent: makeAgentStub(async () => ({ promotedCount: 0 })),
-        heartbeatIntervalMs: 5 * 60 * 1000,
+        heartbeatIntervalMs: 15 * 60 * 1000,
         log: () => {},
       }),
     ).toThrow(/heartbeatIntervalMs.*shorter than the queue lease/);

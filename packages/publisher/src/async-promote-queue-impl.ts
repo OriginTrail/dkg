@@ -83,7 +83,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    */
   private static readonly mutationQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_MAX_RETRIES = 5;
-  private static readonly DEFAULT_LEASE_MS = 5 * 60 * 1000;
+  // A managed-store recovery can legitimately reject every heartbeat and
+  // bookkeeping write for several minutes. Keep the lease longer than the
+  // worker's bounded bookkeeping-retry window so an in-process worker is not
+  // misclassified as a crashed partial promote while it is still trying to
+  // persist the outcome.
+  private static readonly DEFAULT_LEASE_MS = 15 * 60 * 1000;
 
   private readonly graphUri: string;
   private readonly maxRetries: number;

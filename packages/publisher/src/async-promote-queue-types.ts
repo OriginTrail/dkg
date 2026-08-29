@@ -238,7 +238,7 @@ export interface AsyncPromoteQueueConfig {
   graphUri?: string;
   /** Defaults to 5 — promote retries are cheap. RFC §4.2. */
   maxRetries?: number;
-  /** Defaults to 5 minutes — matches `AsyncLiftPublisher.lockLeaseMs`. */
+  /** Defaults to 15 minutes — longer than bounded managed-store recovery. */
   leaseMs?: number;
   /** Defaults to `Date.now()`. Tests inject deterministic time. */
   now?: () => number;
