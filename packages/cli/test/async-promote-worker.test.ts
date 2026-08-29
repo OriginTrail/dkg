@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
@@ -53,6 +54,15 @@ function retryableBookkeepingFailure(): StoreOperationTimeoutError {
     outcome: 'not_started',
     message: 'Managed Oxigraph is recovering; write was not started',
   });
+}
+
+function retryableSchedulerBusyFailure(): StoreSchedulerBusyError {
+  return new StoreSchedulerBusyError(
+    'queue_wait_timeout',
+    'normal',
+    'publisher.asyncPromote.write',
+    { storeOperation: 'replaceSubject' },
+  );
 }
 
 const PROMOTE_FAILURE_LOG_PREFIX = '[async-promote-worker] ';
@@ -139,7 +149,7 @@ describe('classifyPromoteError', () => {
     });
   });
 
-  it('classifies managed-store recovery errors as transient', () => {
+  it('requires typed outcomes for managed-store and scheduler failures', () => {
     for (const message of [
       'STORE_OPERATION_TIMEOUT Managed Oxigraph is recovering; query was not started',
       'Managed Oxigraph recovery interrupted query execution',
@@ -148,10 +158,14 @@ describe('classifyPromoteError', () => {
       'Store scheduler queue wait timeout',
     ]) {
       expect(classifyPromoteError(new Error(message))).toEqual({
-        classification: 'transient',
-        retryable: true,
+        classification: 'fatal',
+        retryable: false,
       });
     }
+    expect(classifyPromoteError(retryableSchedulerBusyFailure())).toEqual({
+      classification: 'transient',
+      retryable: true,
+    });
   });
 
   it('retries typed indeterminate reads and atomic graph replacement but fails closed for other writes', () => {
@@ -339,7 +353,7 @@ describe('runPromoteJob', () => {
     recoveringQueue.fail = async (jobId, claimToken, error) => {
       failCalls += 1;
       if (failCalls <= 2) {
-        throw retryableBookkeepingFailure();
+        throw retryableSchedulerBusyFailure();
       }
       return fail(jobId, claimToken, error);
     };
@@ -351,7 +365,7 @@ describe('runPromoteJob', () => {
       runPromote: async (_request, markPromoteStarted) => {
         promoteCalls += 1;
         await markPromoteStarted();
-        throw new Error('Managed Oxigraph is recovering; query was not started');
+        throw retryableBookkeepingFailure();
       },
       now: () => now,
       heartbeatIntervalMs: 0,

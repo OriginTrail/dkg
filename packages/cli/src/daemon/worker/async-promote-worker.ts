@@ -35,7 +35,10 @@
  */
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { isStoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import {
+  isStoreOperationTimeoutError,
+  StoreSchedulerBusyError,
+} from '@origintrail-official/dkg-storage';
 import {
   PromoteJobLeaseError,
   type AsyncPromoteQueue,
@@ -160,8 +163,6 @@ const SAFE_INDETERMINATE_STORE_OPERATIONS = new Set([
   // destructive writes such as insert/delete remain fail-closed below.
   'replaceGraph',
 ]);
-const MANAGED_OXIGRAPH_INTERRUPTED_READ =
-  /managed oxigraph recovery interrupted (?:query|construct|hasgraph|listgraphs|listgraphsbyprefix|countquads)\b/;
 const PROMOTE_DIAGNOSTIC_STAGES = new Set([
   'ensureSubGraphRegistered',
   'assertGraphScopedLifecycleWritable',
@@ -232,7 +233,8 @@ function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
  * words such as "timeout" or "recovering".
  */
 function isRetryableQueueBookkeepingError(error: unknown): boolean {
-  return isStoreOperationTimeoutError(error) && error.outcome === 'not_started';
+  return error instanceof StoreSchedulerBusyError
+    || (isStoreOperationTimeoutError(error) && error.outcome === 'not_started');
 }
 
 /**
@@ -338,6 +340,25 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     return { classification: 'fatal', retryable: false };
   }
 
+  // Scheduler overload is a typed pre-dispatch rejection: the store closure
+  // never started, so both promotion execution and fenced queue bookkeeping
+  // may retry it without relying on the diagnostic wording.
+  if (err instanceof StoreSchedulerBusyError) {
+    return { classification: 'transient', retryable: true };
+  }
+
+  // Store failures without the canonical typed outcome are not safe to infer
+  // from prose. Keep them out of the generic network-timeout fallback even
+  // when a legacy message happens to contain words such as "timeout".
+  if (
+    code === 'store_operation_timeout'
+    || code === 'store_scheduler_busy'
+    || message.includes('managed oxigraph')
+    || message.includes('store scheduler')
+  ) {
+    return { classification: 'fatal', retryable: false };
+  }
+
   // 3. Transient network / IO — the rc.10 importer hit "fetch failed"
   //    multiple times under sustained load. Worker should retry.
   if (
@@ -348,10 +369,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     message.includes('socket hang up') ||
     message.includes('network') ||
     message.includes('timeout') ||
-    message.includes('timed out') ||
-    message.includes('managed oxigraph is recovering') ||
-    MANAGED_OXIGRAPH_INTERRUPTED_READ.test(message) ||
-    message.includes('store scheduler queue wait timeout')
+    message.includes('timed out')
   ) {
     return { classification: 'transient', retryable: true };
   }
