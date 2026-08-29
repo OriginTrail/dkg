@@ -42,6 +42,7 @@ import type { RequestContext } from './context.js';
 
 import {
   AGENT_CONNECTION_STATUSES,
+  AGENT_LIST_WIRE_KEYS,
   AGENT_LIST_WIRE_KEY_VALUES,
   type AgentConnectionStatus,
   type AgentListFilters,
@@ -92,12 +93,12 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
   const filters: AgentsListFilters = {};
 
   // Empty values retain the pre-GH#310 behavior: they mean "no filter".
-  const framework = searchParams.get('framework');
+  const framework = searchParams.get(AGENT_LIST_WIRE_KEYS.framework);
   if (framework) filters.framework = framework;
-  const skillType = searchParams.get('skill_type');
+  const skillType = searchParams.get(AGENT_LIST_WIRE_KEYS.skillType);
   if (skillType) filters.skillType = skillType;
 
-  const status = searchParams.get('connectionStatus');
+  const status = searchParams.get(AGENT_LIST_WIRE_KEYS.connectionStatus);
   if (status !== null) {
     if (!(AGENT_CONNECTION_STATUSES as readonly string[]).includes(status)) {
       return {
@@ -108,7 +109,7 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
     filters.connectionStatus = status as AgentConnectionStatus;
   }
 
-  const local = searchParams.get('local');
+  const local = searchParams.get(AGENT_LIST_WIRE_KEYS.local);
   if (local !== null) {
     if (local !== 'true' && local !== 'false') {
       return { ok: false, error: '"local" must be "true" or "false"' };
@@ -116,7 +117,7 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
     filters.local = local === 'true';
   }
 
-  const rawLimit = searchParams.get('limit');
+  const rawLimit = searchParams.get(AGENT_LIST_WIRE_KEYS.limit);
   let limit: number | undefined;
   if (rawLimit !== null) {
     // Digits only — Number() would also admit '+5', '1e2' and '0x10', all
@@ -130,7 +131,7 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
   const query: AgentsListQuery = { ...filters };
   if (limit !== undefined) query.limit = limit;
 
-  const cursor = searchParams.get('cursor');
+  const cursor = searchParams.get(AGENT_LIST_WIRE_KEYS.cursor);
   if (cursor !== null) {
     const decodedCursor = decodeCursor(cursor);
     if (decodedCursor === undefined) {

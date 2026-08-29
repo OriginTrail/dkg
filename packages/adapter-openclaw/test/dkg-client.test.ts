@@ -736,6 +736,20 @@ describe('DkgDaemonClient', () => {
       .rejects.toThrow(/Conflicting skill filters/);
   });
 
+  it('a misspelled key and an empty cursor REACH the daemon instead of widening the query', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ error: 'Unknown query parameter "limt"' }), { status: 400 }),
+    );
+    // The whole point of the unvalidated path: nothing supplied may vanish.
+    // A dropped `limt` would silently return the full ~150 KB registry; a
+    // dropped empty cursor would silently serve page one.
+    await expect(client.getAgentsUnvalidated({ limt: 5, cursor: '' }))
+      .rejects.toThrow(/responded 400/);
+    const url = fetchCalls[0][0] as string;
+    expect(url).toContain('limt=5');
+    expect(url).toContain('cursor=');
+  });
+
   it('typed and tool-originated requests share one wire mapping', async () => {
     fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
     fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));

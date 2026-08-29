@@ -3,6 +3,7 @@ import {
   paginateAgentRows,
   parseAgentsListQuery,
 } from '../src/daemon/routes/agents-list.js';
+import { serializeAgentListOptions } from '../src/agents-list-wire.js';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import {
@@ -631,5 +632,36 @@ describe('GET /api/agents (GH#310)', () => {
     const { status, body } = await getAgents(fakeAgent(), '?local=ture');
     expect(status).toBe(400);
     expect(body.error).toContain('"local"');
+  });
+});
+
+// GH#310 round 5 — the serializer and the parser BOTH derive their spellings
+// from AGENT_LIST_WIRE_KEYS. This drives one value through both directions
+// per option, so a wire spelling changed on either side cannot
+// compile-and-drift on the other.
+describe('wire contract round-trip (GH#310)', () => {
+  const roundTrip = (qs: string) => {
+    const parsed = parseAgentsListQuery(new URLSearchParams(qs));
+    if (!parsed.ok) throw new Error(parsed.error);
+    return parsed.query;
+  };
+
+  it('every serialized option parses back to the same filter', () => {
+    expect(roundTrip(serializeAgentListOptions({ framework: 'eliza' })).framework).toBe('eliza');
+    expect(roundTrip(serializeAgentListOptions({ skillType: 'ImageAnalysis' })).skillType).toBe('ImageAnalysis');
+    expect(roundTrip(serializeAgentListOptions({ connectionStatus: 'connected' })).connectionStatus).toBe('connected');
+    expect(roundTrip(serializeAgentListOptions({ local: false })).local).toBe(false);
+    expect(roundTrip(serializeAgentListOptions({ limit: 7 })).limit).toBe(7);
+  });
+
+  it('an issued cursor survives the serializer too', () => {
+    const rows = [
+      { agentUri: 'did:dkg:agent/1', name: 'alpha', peerId: 'peer-1' },
+      { agentUri: 'did:dkg:agent/2', name: 'beta', peerId: 'peer-2' },
+    ];
+    const page = paginateAgentRows(rows, { limit: 1 });
+    const continued = roundTrip(serializeAgentListOptions({ limit: 1, cursor: page.nextCursor! }));
+    expect(continued.cursor).toBeDefined();
+    expect(paginateAgentRows(rows, continued).rows).toHaveLength(1);
   });
 });

@@ -1674,30 +1674,37 @@ class DKGMemoryProvider(MemoryProvider):
             return json.dumps({**result, "contextGraphs": filtered, "count": len(filtered), "scope": scope})
         return json.dumps({"contextGraphs": filtered, "count": len(filtered), "scope": scope})
 
+    _FIND_AGENTS_ARG_TO_WIRE = {
+        "framework": "framework",
+        "skill_type": "skill_type",
+        "connection_status": "connectionStatus",
+        "local": "local",
+        "limit": "limit",
+        "cursor": "cursor",
+    }
+
     def _handle_find_agents(self, args: Dict[str, Any]) -> str:
         if self._offline:
             return tool_error("DKG daemon is offline. Cannot discover agents.")
-        params = {}
-        if args.get("framework"):
-            params["framework"] = args["framework"]
-        if args.get("skill_type"):
-            params["skill_type"] = args["skill_type"]
-        # GH#310 daemon filters — forwarded verbatim; the daemon validates and
-        # 400s on bad values, which beats silently returning the full registry.
-        if args.get("connection_status"):
-            params["connectionStatus"] = args["connection_status"]
-        if args.get("local") is not None:
-            # Booleans map to the daemon's lowercase literals; any other value
-            # is forwarded VERBATIM so the daemon's 400 surfaces instead of a
-            # typo being silently folded to false.
-            local = args["local"]
-            params["local"] = (
-                "true" if local is True else "false" if local is False else str(local)
-            )
-        if args.get("limit") is not None:
-            params["limit"] = str(args["limit"])
-        if args.get("cursor"):
-            params["cursor"] = args["cursor"]
+        # EVERY supplied argument reaches the daemon — the single validator.
+        # Known names translate to their wire spelling; unknown names are
+        # forwarded AS-IS so a misspelled key surfaces the daemon's
+        # unknown-parameter 400 instead of silently widening the query.
+        # Supplied values are forwarded verbatim, empty strings included
+        # (an empty cursor must produce the daemon's 400, not page one).
+        # Only None means "absent" — the JSON-Schema omit-or-null convention.
+        params = []
+        for key, value in args.items():
+            if value is None:
+                continue
+            wire = self._FIND_AGENTS_ARG_TO_WIRE.get(key, key)
+            if value is True:
+                text = "true"
+            elif value is False:
+                text = "false"
+            else:
+                text = str(value)
+            params.append((wire, text))
         qs = urllib.parse.urlencode(params)
         path = f"/api/agents?{qs}" if qs else "/api/agents"
         return json.dumps(self._client._get(path))

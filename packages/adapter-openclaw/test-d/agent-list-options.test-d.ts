@@ -1,5 +1,9 @@
 import { expectTypeOf, test } from 'vitest';
-import type { AgentListOptions } from '../src/agent-list.js';
+import type { AgentListOptions, FindAgentsToolArg } from '../src/agent-list.js';
+import type {
+  FIND_AGENTS_TOOL_SCHEMA_PROPERTIES,
+  RAW_ARG_TO_OPTION,
+} from '../src/agent-list.js';
 import type { DkgDaemonClient } from '../src/dkg-client.js';
 
 declare const client: DkgDaemonClient;
@@ -21,4 +25,11 @@ test('strict getAgents rejects raw model values at compile time', () => {
   void client.getAgents({ skill_type: 'ImageAnalysis' });
   expectTypeOf<AgentListOptions['limit']>().toEqualTypeOf<number | undefined>();
   expectTypeOf<AgentListOptions['local']>().toEqualTypeOf<boolean | undefined>();
+});
+
+test('the raw map and the advertised schema are exhaustive over the tool vocabulary', () => {
+  // An argument added to the vocabulary without a mapping (or without a
+  // schema property) must fail compilation, not silently drop at runtime.
+  expectTypeOf<keyof typeof RAW_ARG_TO_OPTION>().toEqualTypeOf<FindAgentsToolArg>();
+  expectTypeOf<keyof typeof FIND_AGENTS_TOOL_SCHEMA_PROPERTIES>().toEqualTypeOf<FindAgentsToolArg>();
 });

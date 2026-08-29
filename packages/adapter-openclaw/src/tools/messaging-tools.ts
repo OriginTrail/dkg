@@ -6,7 +6,19 @@
  * `handle*` methods (see {@link DkgToolHost}). No behavior change.
  */
 import type { OpenClawTool } from '../types.js';
+import { FIND_AGENTS_TOOL_SCHEMA_PROPERTIES } from '../agent-list.js';
 import type { DkgToolHost } from './tool-host.js';
+
+/** The boundary's schema descriptor, shaped for the OpenClawTool parameter type. */
+function findAgentsSchemaProperties(): Record<string, { type: string; description?: string; enum?: string[]; minimum?: number }> {
+  const properties: Record<string, { type: string; description?: string; enum?: string[]; minimum?: number }> = {};
+  for (const [key, spec] of Object.entries(FIND_AGENTS_TOOL_SCHEMA_PROPERTIES)) {
+    properties[key] = { type: spec.type, description: spec.description };
+    if ('enum' in spec && spec.enum) properties[key].enum = [...spec.enum];
+    if ('minimum' in spec && spec.minimum !== undefined) properties[key].minimum = spec.minimum;
+  }
+  return properties;
+}
 
 export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
   return [
@@ -18,21 +30,9 @@ export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
         'their last-seen `connectionStatus` even when no peers are currently reachable.',
       parameters: {
         type: 'object',
-        properties: {
-          framework: { type: 'string', description: 'Filter by framework (e.g. "OpenClaw", "ElizaOS").' },
-          skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis").' },
-          connection_status: {
-            type: 'string',
-            enum: ['self', 'connected', 'disconnected'],
-            description: 'Only agents in this live connection state.',
-          },
-          local: {
-            type: 'boolean',
-            description: "Only this node's own agents — the cheap way to learn your own agent address.",
-          },
-          limit: { type: 'integer', minimum: 1, description: 'Page size; the response carries nextCursor while rows remain.' },
-          cursor: { type: 'string', description: 'Opaque cursor from a previous response; repeat the same filters.' },
-        },
+        // Derived from the agent-list boundary, so the advertised vocabulary
+        // and the serializer's exhaustive mapping cannot drift apart.
+        properties: findAgentsSchemaProperties(),
         required: [],
       },
       execute: async (_toolCallId, args) => ctx.handleFindAgents(args),

@@ -92,3 +92,12 @@ def test_malformed_values_are_forwarded_not_coerced(provider):
 def test_no_args_keeps_the_bare_path(provider):
     provider._handle_find_agents({})
     assert provider._client.gets[0] == "/api/agents"
+
+
+def test_misspelled_key_and_empty_cursor_reach_the_daemon(provider):
+    # A dropped 'limt' silently returns the full registry; a dropped empty
+    # cursor silently serves page one. Both must surface the daemon's 400.
+    provider._handle_find_agents({"limt": 5, "cursor": ""})
+    path = provider._client.gets[0]
+    assert "limt=5" in path
+    assert "cursor=" in path

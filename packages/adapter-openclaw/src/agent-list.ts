@@ -42,19 +42,60 @@ const OPTION_WIRE_KEYS = {
   cursor: 'cursor',
 } as const satisfies Record<CanonicalOption, string>;
 
+/** The advertised dkg_find_agents argument names — THE tool vocabulary. */
+export const FIND_AGENTS_TOOL_ARG_KEYS = [
+  'framework',
+  'skill_type',
+  'connection_status',
+  'local',
+  'limit',
+  'cursor',
+] as const;
+export type FindAgentsToolArg = (typeof FIND_AGENTS_TOOL_ARG_KEYS)[number];
+
 /**
- * dkg_find_agents tool arg -> canonical option. Values are OPTION KEYS, so
- * the wire spelling below is always looked up through {@link OPTION_WIRE_KEYS}
- * — the compiler ties the two maps together.
+ * dkg_find_agents tool arg -> canonical option. EXHAUSTIVE over the tool
+ * vocabulary (`Record<FindAgentsToolArg, …>`), and values are OPTION KEYS,
+ * so the wire spelling is always looked up through {@link OPTION_WIRE_KEYS}
+ * — the compiler ties the schema vocabulary, this map, and the wire map
+ * together: an advertised argument without a mapping does not compile.
  */
-const RAW_ARG_TO_OPTION = {
+export const RAW_ARG_TO_OPTION = {
   framework: 'framework',
   skill_type: 'skillType',
   connection_status: 'connectionStatus',
   local: 'local',
   limit: 'limit',
   cursor: 'cursor',
-} as const satisfies Record<string, CanonicalOption>;
+} as const satisfies Record<FindAgentsToolArg, CanonicalOption>;
+
+/**
+ * The dkg_find_agents JSON-schema properties, defined AT the boundary so the
+ * advertised contract and the serializer cannot drift — messaging-tools
+ * builds the tool schema from this object. Exhaustive over the vocabulary.
+ */
+export const FIND_AGENTS_TOOL_SCHEMA_PROPERTIES = {
+  framework: { type: 'string', description: 'Filter by framework (e.g. "OpenClaw", "ElizaOS").' },
+  skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis").' },
+  connection_status: {
+    type: 'string',
+    enum: ['self', 'connected', 'disconnected'],
+    description: 'Only agents in this live connection state.',
+  },
+  local: {
+    type: 'boolean',
+    description: "Only this node's own agents — the cheap way to learn your own agent address.",
+  },
+  limit: {
+    type: 'integer',
+    minimum: 1,
+    description: 'Page size; the response carries nextCursor while rows remain.',
+  },
+  cursor: {
+    type: 'string',
+    description: 'Opaque cursor from a previous response; repeat the same filters.',
+  },
+} as const satisfies Record<FindAgentsToolArg, { type: string; description: string; enum?: readonly string[]; minimum?: number }>;
 
 /** Serialize strict SDK options. `undefined` means "omit". */
 export function serializeAgentListOptions(options: AgentListOptions): string {
@@ -80,18 +121,25 @@ export function serializeAgentListOptions(options: AgentListOptions): string {
   return params.toString();
 }
 
+const isKnownToolArg = (key: string): key is FindAgentsToolArg =>
+  (FIND_AGENTS_TOOL_ARG_KEYS as readonly string[]).includes(key);
+
 /**
- * Serialize UNVALIDATED tool arguments verbatim. Only known arg names are
- * read (the daemon rejects unknown parameter names anyway); values pass
- * through `String()` untouched so the daemon's 400 is the caller's signal.
+ * Serialize UNVALIDATED tool arguments — EVERY supplied argument reaches the
+ * daemon. Known names are translated to their wire spelling; unknown names
+ * are forwarded AS-IS so a misspelled key surfaces the daemon's
+ * unknown-parameter 400 instead of silently widening the query (`limt: 5`
+ * must not become the full ~150 KB registry). Supplied values are forwarded
+ * verbatim, empty strings included (`cursor: ""` must produce the daemon's
+ * invalid-cursor 400, not the first page). Only `undefined` and `null` mean
+ * "absent" — the JSON-Schema omit-or-null convention.
  */
 export function serializeRawAgentListArgs(args: Record<string, unknown>): string {
   const params = new URLSearchParams();
-  for (const rawKey of Object.keys(RAW_ARG_TO_OPTION) as Array<keyof typeof RAW_ARG_TO_OPTION>) {
-    const value = args[rawKey];
-    if (value !== undefined && value !== null && value !== '') {
-      params.set(OPTION_WIRE_KEYS[RAW_ARG_TO_OPTION[rawKey]], String(value));
-    }
+  for (const [rawKey, value] of Object.entries(args)) {
+    if (value === undefined || value === null) continue;
+    const wireKey = isKnownToolArg(rawKey) ? OPTION_WIRE_KEYS[RAW_ARG_TO_OPTION[rawKey]] : rawKey;
+    params.set(wireKey, String(value));
   }
   return params.toString();
 }
