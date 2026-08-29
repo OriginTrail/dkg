@@ -168,6 +168,14 @@ import {
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
+// The scan policy lived here until GH#2323; the implementation moved to its
+// own module, but the public import path stays valid for existing consumers.
+export {
+  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  CHAIN_FULL_SCAN_EVERY,
+  chainDiscoveryScanOptions,
+  createChainDiscoveryScanRunner,
+} from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {

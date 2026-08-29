@@ -11,6 +11,23 @@
 export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
 export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
 
+/**
+ * How many consecutive ticks a failed scan is retried AS-IS before the runner
+ * releases its slot and lets the normal cadence proceed. Bounded because an
+ * unbounded pin trades one liveness bug for another: a deterministically
+ * failing historical page would otherwise block incremental discovery of new
+ * blocks forever.
+ */
+export const MAX_CONSECUTIVE_SAME_SCAN_RETRIES = 3;
+
+/**
+ * While a full resync is overdue (a `seedFull` exhausted its retries), a
+ * fresh attempt is injected every this-many ticks (~2h at the 30-minute
+ * cadence). Incremental scans run on the ticks in between, so recent blocks
+ * keep being discovered while the historical re-walk stays scheduled.
+ */
+export const OVERDUE_FULL_RESYNC_RETRY_EVERY = 4;
+
 export function chainDiscoveryScanOptions(input: {
   watermarkSeeded: boolean;
   run?: number;
@@ -48,12 +65,41 @@ export function chainDiscoveryScanOptions(input: {
     : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
 }
 
+type ScanOptions = ReturnType<typeof chainDiscoveryScanOptions>;
+
+/**
+ * The scan runner (GH#2323). Its scheduling invariants, each pinned by a
+ * test:
+ *
+ * SLOT ON RESOLVE. The run counter advances only when a scan settles the
+ * slot — success, or a failure that exhausted its retries. `runs++` before
+ * the awaits meant a rejected run-0 `seedFull` burned its slot and silently
+ * downgraded the startup recovery to `incremental` until run 48 (~24h).
+ *
+ * SAME SCAN, NOT SAME NUMBER. A failed attempt is retried with its CAPTURED
+ * options. The mode derives from the run number AND the mutable watermark,
+ * and a partially-successful scan moves the watermark — recomputed, a fresh
+ * node's failed `seedFromCursor` would become an unbounded `seedFull` from
+ * block zero instead of resuming its cursor.
+ *
+ * BOUNDED PIN. The same failed scan is retried at most
+ * MAX_CONSECUTIVE_SAME_SCAN_RETRIES ticks in a row, then its slot is
+ * released so the normal cadence (usually `incremental`) resumes — a
+ * deterministic failure must not starve discovery of new blocks forever.
+ *
+ * OVERDUE RESYNC. A released `seedFull` is not forgotten: while overdue, a
+ * fresh attempt is injected every OVERDUE_FULL_RESYNC_RETRY_EVERY ticks in
+ * place of an incremental scan, until one succeeds.
+ *
+ * ATOMIC COMMITS. All scheduling state is committed before anything is
+ * logged, and the watermark probe has its own error boundary — a throwing
+ * log line must neither corrupt the state machine nor be misclassified as a
+ * probe failure.
+ */
 export function createChainDiscoveryScanRunner(input: {
   agent: {
     hasContextGraphRegistryScanWatermark(): Promise<boolean>;
-    discoverContextGraphsFromChain(
-      options: ReturnType<typeof chainDiscoveryScanOptions>,
-    ): Promise<number>;
+    discoverContextGraphsFromChain(options: ScanOptions): Promise<number>;
   };
   log: (msg: string) => void;
   pageBudget?: number;
@@ -61,58 +107,111 @@ export function createChainDiscoveryScanRunner(input: {
 }): () => Promise<void> {
   let runs = 0;
   let inFlight = false;
-  // GH#2323 — a failed attempt is retried as the SAME SCAN, not merely the
-  // same run number. The mode is derived from the run number AND the mutable
-  // watermark, and a partially-successful scan moves the watermark: a fresh
-  // node's run-0 `seedFromCursor` that seeds blocks 0..1999 and then fails
-  // would, recomputed, become a `seedFull` (run 0 + now-seeded watermark) —
-  // discarding cursor resumption and the page budget for an unbounded
-  // re-walk from block zero. Retrying the CAPTURED options instead resumes
-  // `seedFromCursor` from the saved cursor, which is what "retry" means.
-  let retryOptions: ReturnType<typeof chainDiscoveryScanOptions> | undefined;
+  let retryOptions: ScanOptions | undefined;
+  let consecutiveRetries = 0;
+  let fullResyncOverdue = false;
+  let ticksSinceOverdueAttempt = 0;
+
+  const safeLog = (msg: string): void => {
+    try {
+      input.log(msg);
+    } catch {
+      /* a broken log sink must not affect scan scheduling */
+    }
+  };
+
   return async () => {
     if (inFlight) return;
     inFlight = true;
-    // GH#2323 — peek at the slot, commit it only after the scan RESOLVES.
-    // `runs++` before the awaits meant a rejected scan still consumed its
-    // slot, and the run number is what selects the mode: a run-0 `seedFull`
-    // startup-recovery scan that failed on a transient RPC error left runs
-    // 1..47 issuing `incremental` scans, so the history it existed to
-    // re-walk stayed unwalked until run 48 — roughly 24 hours at the
-    // 30-minute cadence — with nothing in the log. A rejected scan now
-    // retries the SAME run next tick: a failed full scan re-runs in 30
-    // minutes, not a day.
-    const run = runs;
     try {
-      const options = retryOptions ?? chainDiscoveryScanOptions({
-        run,
-        watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
-        pageBudget: input.pageBudget,
-        fullScanEvery: input.fullScanEvery,
-      });
-      try {
-        const found = await input.agent.discoverContextGraphsFromChain(options);
-        retryOptions = undefined;
-        runs = run + 1;
-        if (found > 0) {
-          input.log(`Chain scan: discovered ${found} new context graph(s)`);
+      const run = runs;
+
+      // ── Select the scan ────────────────────────────────────────────────
+      let options: ScanOptions;
+      if (retryOptions !== undefined) {
+        options = retryOptions;
+      } else {
+        let watermarkSeeded: boolean;
+        try {
+          watermarkSeeded = await input.agent.hasContextGraphRegistryScanWatermark();
+        } catch (err) {
+          // Probe failure: no options exist to pin, and the slot survives —
+          // scoped to the probe call so nothing else can be misclassified.
+          safeLog(
+            `Chain scan run ${run} skipped (watermark probe failed; retrying next tick): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+          return;
         }
+        options = chainDiscoveryScanOptions({
+          run,
+          watermarkSeeded,
+          pageBudget: input.pageBudget,
+          fullScanEvery: input.fullScanEvery,
+        });
+        if (fullResyncOverdue && options.mode === 'incremental') {
+          ticksSinceOverdueAttempt += 1;
+          if (ticksSinceOverdueAttempt >= OVERDUE_FULL_RESYNC_RETRY_EVERY) {
+            ticksSinceOverdueAttempt = 0;
+            options = { mode: 'seedFull', throwOnChainScanFailure: true };
+          }
+        }
+      }
+
+      // ── Run it ─────────────────────────────────────────────────────────
+      let found: number | undefined;
+      let failure: unknown;
+      try {
+        found = await input.agent.discoverContextGraphsFromChain(options);
       } catch (err) {
-        // Still non-critical — the daemon keeps running — but no longer
-        // silent, and the slot survives for the retry.
+        failure = err;
+      }
+
+      // ── Commit ALL state atomically, before any logging ────────────────
+      let released = false;
+      if (failure === undefined) {
+        retryOptions = undefined;
+        consecutiveRetries = 0;
+        runs = run + 1;
+        if (options.mode === 'seedFull') {
+          fullResyncOverdue = false;
+          ticksSinceOverdueAttempt = 0;
+        }
+      } else if (consecutiveRetries < MAX_CONSECUTIVE_SAME_SCAN_RETRIES) {
         retryOptions = options;
-        input.log(
-          `Chain scan run ${run} (${options.mode}) failed; ` +
-            `the same scan retries next tick: ${err instanceof Error ? err.message : String(err)}`,
+        consecutiveRetries += 1;
+      } else {
+        // Retries exhausted: release the slot so the cadence proceeds, and
+        // keep a failed full resync scheduled instead of forgetting it.
+        released = true;
+        retryOptions = undefined;
+        consecutiveRetries = 0;
+        runs = run + 1;
+        if (options.mode === 'seedFull') {
+          fullResyncOverdue = true;
+          ticksSinceOverdueAttempt = 0;
+        }
+      }
+
+      // ── Report ─────────────────────────────────────────────────────────
+      if (failure === undefined) {
+        if (found !== undefined && found > 0) {
+          safeLog(`Chain scan: discovered ${found} new context graph(s)`);
+        }
+      } else {
+        const reason = failure instanceof Error ? failure.message : String(failure);
+        safeLog(
+          released
+            ? `Chain scan run ${run} (${options.mode}) failed ${MAX_CONSECUTIVE_SAME_SCAN_RETRIES + 1}x; ` +
+              `releasing the slot so discovery continues` +
+              (options.mode === 'seedFull'
+                ? ` — the full resync stays scheduled and retries every ${OVERDUE_FULL_RESYNC_RETRY_EVERY} tick(s)`
+                : '') +
+              `: ${reason}`
+            : `Chain scan run ${run} (${options.mode}) failed; ` +
+              `the same scan retries next tick: ${reason}`,
         );
       }
-    } catch (err) {
-      // Watermark probe failed before any options existed — nothing to pin;
-      // the next tick recomputes from scratch.
-      input.log(
-        `Chain scan run ${run} skipped (watermark probe failed; retrying next tick): ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-      );
     } finally {
       inFlight = false;
     }

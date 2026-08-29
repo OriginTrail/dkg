@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { chainDiscoveryScanOptions, createChainDiscoveryScanRunner } from '../src/daemon/chain-discovery-scan.js';
+import {
+  MAX_CONSECUTIVE_SAME_SCAN_RETRIES,
+  OVERDUE_FULL_RESYNC_RETRY_EVERY,
+  chainDiscoveryScanOptions,
+  createChainDiscoveryScanRunner,
+} from '../src/daemon/chain-discovery-scan.js';
+import {
+  chainDiscoveryScanOptions as reExportedOptions,
+  createChainDiscoveryScanRunner as reExportedRunner,
+} from '../src/daemon/lifecycle.js';
 
 describe('chainDiscoveryScanOptions', () => {
   it('uses bounded cursor-resumable watermark seeding before a seed exists', () => {
@@ -232,5 +241,104 @@ describe('chainDiscoveryScanOptions', () => {
 
     const modes = agent.discoverContextGraphsFromChain.mock.calls.map((c) => c[0]!.mode);
     expect(modes).toEqual(['seedFull', 'incremental', 'seedFull', 'seedFull']);
+  });
+
+  // Review round 2 RED — the pin must be BOUNDED. Unbounded same-scan retry
+  // trades one liveness bug for another: a deterministically failing
+  // historical page would block incremental discovery of new blocks forever.
+  it('a permanently failing seedFull releases its slot and incremental discovery continues', async () => {
+    const modes: string[] = [];
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi.fn(
+        async (options: ReturnType<typeof chainDiscoveryScanOptions>) => {
+          modes.push(options.mode);
+          if (options.mode === 'seedFull') throw new Error('historical page 404s deterministically');
+          return 0;
+        },
+      ),
+    };
+    const log = vi.fn();
+    const runner = createChainDiscoveryScanRunner({ agent, log });
+
+    // Initial attempt + MAX consecutive retries, all seedFull, all failing.
+    for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner();
+    expect(modes).toEqual(Array(MAX_CONSECUTIVE_SAME_SCAN_RETRIES + 1).fill('seedFull'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('releasing the slot so discovery continues'));
+
+    // Liveness: the very next tick is a normal incremental scan.
+    await runner();
+    expect(modes.at(-1)).toBe('incremental');
+
+    // The resync is scheduled, not forgotten: after
+    // OVERDUE_FULL_RESYNC_RETRY_EVERY incremental-cadence ticks, a fresh
+    // seedFull attempt is injected in place of one of them.
+    for (let i = 1; i < OVERDUE_FULL_RESYNC_RETRY_EVERY; i++) await runner();
+    expect(modes.at(-1)).toBe('seedFull');
+    expect(modes.filter((m) => m === 'incremental').length).toBe(OVERDUE_FULL_RESYNC_RETRY_EVERY - 1);
+  });
+
+  it('an overdue full resync clears once an injected attempt succeeds', async () => {
+    let seedFullFails = true;
+    const modes: string[] = [];
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi.fn(
+        async (options: ReturnType<typeof chainDiscoveryScanOptions>) => {
+          modes.push(options.mode);
+          if (options.mode === 'seedFull' && seedFullFails) throw new Error('flaky RPC');
+          return 0;
+        },
+      ),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner(); // exhaust
+    seedFullFails = false;
+    for (let i = 0; i < OVERDUE_FULL_RESYNC_RETRY_EVERY; i++) await runner();    // ...injected attempt succeeds
+    expect(modes.at(-1)).toBe('seedFull');
+    const afterRecovery = modes.length;
+
+    // Overdue cleared: a long quiet stretch stays purely incremental.
+    for (let i = 0; i < 2 * OVERDUE_FULL_RESYNC_RETRY_EVERY; i++) await runner();
+    expect(modes.slice(afterRecovery).every((m) => m === 'incremental')).toBe(true);
+  });
+
+  // Review round 2 — state commits must be atomic with respect to logging: a
+  // throwing success-log used to advance `runs` AND re-pin the completed
+  // scan's options, so the next tick executed a stale scan under a new run
+  // number, and a throwing failure-log was misclassified as a probe failure.
+  it('a throwing log sink cannot corrupt the scheduling state', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockResolvedValueOnce(1)   // run 0 seedFull SUCCEEDS, but the log throws
+        .mockResolvedValueOnce(0),
+    };
+    const log = vi.fn(() => { throw new Error('log sink broken'); });
+    const runner = createChainDiscoveryScanRunner({ agent, log });
+
+    await expect(runner()).resolves.toBeUndefined();
+    await runner();
+
+    // Run 0 completed and committed; run 1 must be a FRESH incremental scan,
+    // not the pinned replay of the already-successful seedFull.
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(1, {
+      mode: 'seedFull',
+      throwOnChainScanFailure: true,
+    });
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
+      mode: 'incremental',
+      pageBudget: 30,
+    });
+  });
+
+  // Review round 2 RED — the extraction must not break the pre-existing
+  // import path: daemon/index.ts re-exports lifecycle wholesale, and this
+  // test file itself imported from lifecycle.js before the move.
+  it('the relocated scan APIs remain importable from lifecycle.js', () => {
+    expect(reExportedOptions).toBe(chainDiscoveryScanOptions);
+    expect(reExportedRunner).toBe(createChainDiscoveryScanRunner);
   });
 });
