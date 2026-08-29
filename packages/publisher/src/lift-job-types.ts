@@ -722,11 +722,17 @@ export interface LiftJobPersistedFinalizedCompatibility extends LiftJobBase {
   readonly failure?: undefined;
 }
 
-/** Persisted compatibility records are readable, but are never accepted by the write boundary. */
-export type LiftJobCompatibility =
+/**
+ * Unversioned durable-schema-v0 records accepted only by the named migration boundary. Current
+ * schema-v1 writers can never produce these shapes.
+ */
+export type LiftJobLegacyV0Compatibility =
   | LiftJobLegacyEvidenceFreeBroadcast
   | LiftJobPersistedFinalizedCompatibility
   | LiftJobPersistedFailure;
+
+/** Persisted compatibility records are readable, but are never accepted by the write boundary. */
+export type LiftJobCompatibility = LiftJobLegacyV0Compatibility;
 
 /** Honest durable read model: canonical current rows plus explicitly read-only compatibility rows. */
 export type PersistedLiftJob = LiftJob | LiftJobCompatibility;

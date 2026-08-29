@@ -10,6 +10,7 @@ import {
 } from '../src/lift-job.js';
 import { literal } from '../src/async-lift-control-plane.js';
 import { decodeLiftJobPayload } from '../src/lift-job-payload-codec.js';
+import { encodeCurrentLiftJobPayload } from '../src/lift-job-payload-version.js';
 import {
   buildCanonicalLiftJobTransition,
   buildCanonicalRevertedLiftJobFailure,
@@ -35,7 +36,7 @@ const accepted: LiftJobAccepted = {
 };
 
 function expectCanonicalRoundTrip(job: LiftJob): void {
-  expect(decodeLiftJobPayload(literal(JSON.stringify(job)))).toEqual({
+  expect(decodeLiftJobPayload(literal(encodeCurrentLiftJobPayload(job)))).toEqual({
     kind: 'canonical',
     job,
   });

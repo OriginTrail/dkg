@@ -102,7 +102,11 @@ describe('#1837 lift publisher clearTerminalJob', () => {
       finalization: { mode: 'local' },
     } as const;
     await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
-    await store.insert(serializeJob(legacyFinalized as never, DEFAULT_CONTROL_GRAPH_URI));
+    await store.insert(serializeJob(
+      legacyFinalized as never,
+      DEFAULT_CONTROL_GRAPH_URI,
+      { payloadSchema: 'legacy-v0' },
+    ));
 
     await expect(p.getStatus(jobId)).resolves.toMatchObject({
       status: 'finalized',
@@ -546,6 +550,20 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const jobId = await driveToFinalized(p);
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'already_absent' });
+  });
+
+  it('performs exactly one payload read inside a targeted clear transaction', async () => {
+    const p = createPublisher();
+    const jobId = await driveToFinalized(p, { name: 'single-clear-read' });
+    const originalQuery = store.query.bind(store);
+    let payloadReads = 0;
+    store.query = async (...args) => {
+      if (args[1]?.source === 'publisher.asyncLift.getStatus') payloadReads += 1;
+      return await originalQuery(...args);
+    };
+
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
+    expect(payloadReads).toBe(1);
   });
 
   it('rejects a readable future state as unknown without deleting it', async () => {

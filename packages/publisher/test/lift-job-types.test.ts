@@ -31,8 +31,15 @@ import {
   createKnowledgeAssetVmPublishSnapshotRequest,
   normalizePersistedLiftJobRequest,
 } from '../src/async-lift-publisher-utils.js';
-import { literal } from '../src/async-lift-control-plane.js';
+import {
+  CONTROL_PAYLOAD,
+  DEFAULT_CONTROL_GRAPH_URI,
+  literal,
+  parseLiteral,
+  serializeJob,
+} from '../src/async-lift-control-plane.js';
 import { decodeLiftJobPayload } from '../src/lift-job-payload-codec.js';
+import { LIFT_JOB_PAYLOAD_SCHEMA_VERSION } from '../src/lift-job-payload-version.js';
 
 const ROOTLESS_UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
 
@@ -285,6 +292,19 @@ describe('LiftJob request and record types', () => {
       });
     }
 
+    const currentPayloadQuad = serializeJob(accepted, DEFAULT_CONTROL_GRAPH_URI)
+      .find(({ predicate }) => predicate === CONTROL_PAYLOAD);
+    if (!currentPayloadQuad) throw new Error('current payload quad missing');
+    const currentPayload = JSON.parse(String(parseLiteral(currentPayloadQuad.object))) as Record<string, unknown>;
+    expect(currentPayload['schemaVersion']).toBe(LIFT_JOB_PAYLOAD_SCHEMA_VERSION);
+    expect(decodeLiftJobPayload(currentPayloadQuad.object)).toEqual({
+      kind: 'canonical',
+      job: {
+        ...accepted,
+        request: normalizePersistedLiftJobRequest(accepted.request),
+      },
+    });
+
     const legacyBroadcast = {
       ...accepted,
       status: 'broadcast',
@@ -296,6 +316,19 @@ describe('LiftJob request and record types', () => {
       expect(compatibility.job.status).toBe('broadcast');
       expect(compatibility.job.broadcast).toBeUndefined();
     }
+
+    expect(decodeLiftJobPayload(encode({
+      ...legacyBroadcast,
+      schemaVersion: LIFT_JOB_PAYLOAD_SCHEMA_VERSION,
+    }))).toMatchObject({
+      kind: 'malformed',
+      reason: expect.stringContaining('validation is required'),
+    });
+
+    expect(decodeLiftJobPayload(encode({ ...accepted, schemaVersion: 99 }))).toEqual({
+      kind: 'malformed',
+      reason: 'payload.schemaVersion 99 is unsupported',
+    });
 
     const unknown = decodeLiftJobPayload(encode({ ...accepted, status: 'future-state' }));
     expect(unknown.kind).toBe('unknown');
@@ -373,6 +406,65 @@ describe('LiftJob request and record types', () => {
       expect(progressClearedRetry.job).not.toHaveProperty('claim');
       expect(progressClearedRetry.job).not.toHaveProperty('validation');
       expect(progressClearedRetry.job).not.toHaveProperty('broadcast');
+    }
+
+    const legacyFailureFixtures = [
+      {
+        name: 'recovery-only unattributed transaction evidence',
+        payload: {
+          ...accepted,
+          status: 'failed',
+          validation,
+          failure: { ...failure, failedFromState: 'validated' },
+          recovery: {
+            action: 'reset_to_accepted',
+            recoveredFromStatus: 'validated',
+            txHashChecked: broadcast.txHash,
+          },
+        },
+      },
+      {
+        name: 'claimed failure with retained validation',
+        payload: {
+          ...accepted,
+          status: 'failed',
+          claim: { walletId: 'wallet-codec' },
+          validation,
+          failure: { ...failure, failedFromState: 'claimed' },
+        },
+      },
+      {
+        name: 'validated failure without retained claim',
+        payload: {
+          ...accepted,
+          status: 'failed',
+          validation,
+          failure: { ...failure, failedFromState: 'validated' },
+        },
+      },
+      {
+        name: 'included failure finalized from chain',
+        payload: {
+          ...accepted,
+          status: 'failed',
+          claim: { walletId: 'wallet-codec' },
+          validation,
+          broadcast,
+          inclusion: { txHash: broadcast.txHash, blockNumber: 9 },
+          failure: { ...failure, failedFromState: 'included' },
+          recovery: {
+            action: 'finalized_from_chain',
+            recoveredFromStatus: 'included',
+            txHashChecked: broadcast.txHash,
+          },
+        },
+      },
+    ] as const;
+    for (const fixture of legacyFailureFixtures) {
+      expect(decodeLiftJobPayload(encode(fixture.payload)), fixture.name).toMatchObject({
+        kind: 'compatibility',
+        job: { status: 'failed' },
+      });
     }
 
     const unrelated = decodeLiftJobPayload(encode({

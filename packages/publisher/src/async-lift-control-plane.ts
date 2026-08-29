@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { AdmissionJournalEntry, LiftJob, LiftJobHex, LiftJobRequest, PersistedJournalKind, PersistedLiftJob } from './lift-job.js';
+import {
+  encodeCurrentLiftJobPayload,
+  encodeLegacyV0LiftJobPayload,
+} from './lift-job-payload-version.js';
 
 export const DEFAULT_CONTROL_GRAPH_URI = 'urn:dkg:publisher:control-plane';
 export const DEFAULT_WALLET_LOCK_GRAPH_URI = 'urn:dkg:publisher:wallet-locks';
@@ -153,15 +157,22 @@ export function serializeWalletLock(lock: WalletLockRecord, graphUri: string): Q
   ];
 }
 
-export function serializeJob(job: LiftJob, graphUri: string): Quad[] {
+export function serializeJob(
+  job: LiftJob,
+  graphUri: string,
+  options: SerializeJobOptions = {},
+): Quad[] {
   const jobRef = jobSubject(job.jobId);
   const requestRef = requestSubject(job.jobId);
+  const encodedPayload = options.payloadSchema === 'legacy-v0'
+    ? encodeLegacyV0LiftJobPayload(job)
+    : encodeCurrentLiftJobPayload(job);
   const quads: Quad[] = [
     quad(jobRef, RDF_TYPE_PREDICATE, iri(CONTROL_JOB_TYPE), graphUri),
     quad(jobRef, CONTROL_HAS_REQUEST, iri(requestRef), graphUri),
     quad(jobRef, CONTROL_STATUS, literal(job.status), graphUri),
     quad(jobRef, CONTROL_JOB_SLUG, literal(job.jobSlug), graphUri),
-    quad(jobRef, CONTROL_PAYLOAD, literal(JSON.stringify(job)), graphUri),
+    quad(jobRef, CONTROL_PAYLOAD, literal(encodedPayload), graphUri),
     quad(jobRef, CONTROL_ACCEPTED_AT, integer(job.timestamps.acceptedAt), graphUri),
     quad(jobRef, CONTROL_UPDATED_AT, integer(job.timestamps.updatedAt), graphUri),
     quad(jobRef, CONTROL_RETRY_COUNT, integer(job.retries.retryCount), graphUri),
@@ -252,6 +263,10 @@ export interface SerializedJobRecord {
   readonly requestQuads: Quad[];
 }
 
+export interface SerializeJobOptions {
+  readonly payloadSchema?: 'current-v1' | 'legacy-v0';
+}
+
 /**
  * #1863 — the grouping the atomic write path needs, owned by the serializer
  * rather than re-derived at the write site with ad-hoc subject filters.
@@ -260,10 +275,14 @@ export interface SerializedJobRecord {
  * at the serialization boundary: if a future field ever emits a third subject,
  * this throws here (fail-loud) instead of the write path silently dropping it.
  */
-export function serializeJobRecord(job: LiftJob, graphUri: string): SerializedJobRecord {
+export function serializeJobRecord(
+  job: LiftJob,
+  graphUri: string,
+  options: SerializeJobOptions = {},
+): SerializedJobRecord {
   const jobRef = jobSubject(job.jobId);
   const requestRef = requestSubject(job.jobId);
-  const all = serializeJob(job, graphUri);
+  const all = serializeJob(job, graphUri, options);
   const jobQuads = all.filter((quad) => quad.subject === jobRef);
   const requestQuads = all.filter((quad) => quad.subject === requestRef);
   if (jobQuads.length + requestQuads.length !== all.length) {

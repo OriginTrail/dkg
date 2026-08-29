@@ -32,7 +32,7 @@ import {
   DEFAULT_CONTROL_GRAPH_URI,
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   jobSubject,
-  serializeJob,
+  serializeJob as serializeLiftJob,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import {
@@ -51,6 +51,11 @@ import {
 
 const AUTHOR = '0x1111111111111111111111111111111111111111' as LiftJobHex;
 const MERKLE_ROOT = `0x${'12'.repeat(32)}` as LiftJobHex;
+
+/** Every direct row in this file models an already-persisted, unversioned recovery fixture. */
+function serializeJob(job: LiftJob, graphUri: string) {
+  return serializeLiftJob(job, graphUri, { payloadSchema: 'legacy-v0' });
+}
 
 /** The canonical evidence the named lane needs: the generic recovery result has no publishProof. */
 function kaVmRecoveryEvidence(): AsyncKnowledgeAssetVmPublishRecoveryEvidence {

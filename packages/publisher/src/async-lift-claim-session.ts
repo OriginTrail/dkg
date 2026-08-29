@@ -85,6 +85,27 @@ export type ClassifiedLiftJobClearTransaction =
   };
 
 /**
+ * The one decoded read-under-lock representation. Public transaction APIs adapt this primitive
+ * into either fail-closed lifecycle authority or the targeted clear operation's diagnostic view.
+ */
+type DecodedLiftJobTransaction =
+  | { readonly kind: 'missing' }
+  | { readonly kind: 'malformed'; readonly reason: string }
+  | { readonly kind: 'unknown'; readonly current: StructurallyValidLiftJobPayload }
+  | {
+    readonly kind: 'canonical';
+    readonly current: LiftJob;
+    readonly scope: LiftJobTransitionScope;
+  }
+  | {
+    readonly kind: 'compatibility';
+    readonly current: LiftJobCompatibility;
+    readonly scope: LiftJobRecoveryTransitionScope;
+  };
+
+type LiftJobTransactionLockMode = 'job' | 'claim-job';
+
+/**
  * A worker checkpoint may observe proof advancing its exact claim before the callback runs.
  * Advanced records are deliberately read-only: only a still-owned record receives commit scope.
  */
@@ -540,33 +561,7 @@ export class AsyncLiftClaimCoordinator {
     jobId: string,
     operation: (transaction: LiftJobTransaction) => Promise<T>,
   ): Promise<T> {
-    await this.dependencies.ensureGraph();
-    return await this.withJobTransitionLock(
-      jobId,
-      async () => {
-        const decoded = await this.dependencies.readStatus(jobId);
-        switch (decoded.kind) {
-          case 'absent':
-            return await operation({ kind: 'missing' });
-          case 'canonical':
-            return await operation({
-              kind: 'present',
-              current: decoded.job,
-              scope: this.createTransitionScope(decoded.job),
-            });
-          case 'compatibility':
-            return await operation({
-              kind: 'compatibility',
-              current: decoded.job,
-              scope: this.createRecoveryTransitionScope(decoded.job),
-            });
-          case 'malformed':
-          case 'unknown':
-            decodedLiftJobOrThrow(decoded);
-            throw new Error('unreachable persisted LiftJob decode result');
-        }
-      },
-    );
+    return await this.runLifecycleJobTransaction(jobId, 'job', operation);
   }
 
   /** Canonical global-claim -> per-job transaction, with the same bound re-read. */
@@ -574,7 +569,7 @@ export class AsyncLiftClaimCoordinator {
     jobId: string,
     operation: (transaction: LiftJobTransaction) => Promise<T>,
   ): Promise<T> {
-    return await this.withClaimLock(() => this.runJobTransaction(jobId, operation));
+    return await this.runLifecycleJobTransaction(jobId, 'claim-job', operation);
   }
 
   /**
@@ -586,23 +581,21 @@ export class AsyncLiftClaimCoordinator {
     jobId: string,
     operation: (transaction: ClassifiedLiftJobClearTransaction) => Promise<T>,
   ): Promise<T> {
-    await this.dependencies.ensureGraph();
-    return await this.withClaimLock(() => this.withJobTransitionLock(jobId, async () => {
-      const decoded = await this.dependencies.readStatus(jobId);
-      if (decoded.kind === 'absent' || decoded.kind === 'malformed') {
-        return await operation(decoded.kind === 'absent'
-          ? { kind: 'missing' }
-          : decoded);
+    return await this.runDecodedJobTransaction(jobId, 'claim-job', async (transaction) => {
+      switch (transaction.kind) {
+        case 'missing':
+        case 'malformed':
+        case 'unknown':
+          return await operation(transaction);
+        case 'canonical':
+        case 'compatibility':
+          return await operation({
+            kind: 'present',
+            current: transaction.current,
+            scope: transaction.scope,
+          });
       }
-      if (decoded.kind === 'unknown') {
-        return await operation({ kind: 'unknown', current: decoded.job });
-      }
-      return await operation({
-        kind: 'present',
-        current: decoded.job,
-        scope: this.createRecoveryTransitionScope(decoded.job),
-      });
-    }));
+    });
   }
 
   /** Canonical administrative transition boundary: lock, re-read, and validate live ownership. */
@@ -778,6 +771,72 @@ export class AsyncLiftClaimCoordinator {
       );
     }
     this.dependencies.assertJobMatchesStatus(next);
+  }
+
+  /** Thin fail-closed adapter over the one decoded transaction primitive. */
+  private async runLifecycleJobTransaction<T>(
+    jobId: string,
+    lockMode: LiftJobTransactionLockMode,
+    operation: (transaction: LiftJobTransaction) => Promise<T>,
+  ): Promise<T> {
+    return await this.runDecodedJobTransaction(jobId, lockMode, async (transaction) => {
+      switch (transaction.kind) {
+        case 'missing':
+          return await operation(transaction);
+        case 'canonical':
+          return await operation({
+            kind: 'present',
+            current: transaction.current,
+            scope: transaction.scope,
+          });
+        case 'compatibility':
+          return await operation(transaction);
+        case 'malformed':
+          decodedLiftJobOrThrow(transaction);
+          throw new Error('unreachable persisted LiftJob decode result');
+        case 'unknown':
+          decodedLiftJobOrThrow({ kind: 'unknown', job: transaction.current });
+          throw new Error('unreachable persisted LiftJob decode result');
+      }
+    });
+  }
+
+  /**
+   * The sole job payload transaction: acquire locks in the selected canonical order, read once,
+   * decode once, and construct state-appropriate capabilities once while still under the lock.
+   */
+  private async runDecodedJobTransaction<T>(
+    jobId: string,
+    lockMode: LiftJobTransactionLockMode,
+    operation: (transaction: DecodedLiftJobTransaction) => Promise<T>,
+  ): Promise<T> {
+    await this.dependencies.ensureGraph();
+    const underJobLock = async (): Promise<T> => await this.withJobTransitionLock(jobId, async () => {
+      const decoded = await this.dependencies.readStatus(jobId);
+      switch (decoded.kind) {
+        case 'absent':
+          return await operation({ kind: 'missing' });
+        case 'malformed':
+          return await operation(decoded);
+        case 'unknown':
+          return await operation({ kind: 'unknown', current: decoded.job });
+        case 'canonical':
+          return await operation({
+            kind: 'canonical',
+            current: decoded.job,
+            scope: this.createTransitionScope(decoded.job),
+          });
+        case 'compatibility':
+          return await operation({
+            kind: 'compatibility',
+            current: decoded.job,
+            scope: this.createRecoveryTransitionScope(decoded.job),
+          });
+      }
+    });
+    return lockMode === 'claim-job'
+      ? await this.withClaimLock(underJobLock)
+      : await underJobLock();
   }
 
   private async withClaimLock<T>(fn: () => Promise<T>): Promise<T> {

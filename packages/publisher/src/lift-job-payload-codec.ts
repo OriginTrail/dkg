@@ -28,6 +28,7 @@ import {
 } from './lift-job.js';
 import { parseLiteral } from './async-lift-control-plane.js';
 import { normalizePersistedLiftJobRequest } from './async-lift-publisher-utils.js';
+import { LIFT_JOB_PAYLOAD_SCHEMA_VERSION } from './lift-job-payload-version.js';
 import {
   canonicalLiftJobBase,
   canonicalLiftJobBaseWithoutRecovery,
@@ -57,6 +58,10 @@ type KnownLiftJobPayload = Extract<
   { readonly kind: 'canonical' | 'compatibility' }
 >;
 
+type StructurallyValidCurrentLiftJobPayload = StructurallyValidLiftJobPayload & {
+  readonly schemaVersion: typeof LIFT_JOB_PAYLOAD_SCHEMA_VERSION;
+};
+
 /** Classify one persisted job payload without hiding malformed state behind null or an exception. */
 export function decodeLiftJobPayload(binding?: string): LiftJobPayloadDecodeResult {
   if (binding === undefined) return { kind: 'absent' };
@@ -64,39 +69,67 @@ export function decodeLiftJobPayload(binding?: string): LiftJobPayloadDecodeResu
     const payload = parseLiteral(binding);
     if (typeof payload !== 'string') return malformed('payload is not an RDF literal');
     const parsed = JSON.parse(payload) as unknown;
-    const job = parseStructuralPayload(parsed);
-    // Unknown states deliberately stop at the structural representation so targeted clear can
-    // distinguish them from corruption. Every recognized payload leaves this boundary already
-    // classified and fully typed; consumers never reinterpret the structural bag.
-    if (!(LIFT_JOB_STATES as readonly string[]).includes(job.status)) {
-      return { kind: 'unknown', job };
+    const record = expectRecord(parsed, 'payload');
+    const schemaVersion = record['schemaVersion'];
+    if (schemaVersion === undefined) return decodeLegacyV0Payload(record);
+    if (schemaVersion === LIFT_JOB_PAYLOAD_SCHEMA_VERSION) {
+      return decodeCurrentV1Payload(record);
     }
-    return classifyKnownLiftJobPayload(job);
+    throw new Error(`payload.schemaVersion ${JSON.stringify(schemaVersion)} is unsupported`);
   } catch (error) {
     return malformed(error instanceof Error ? error.message : String(error));
   }
 }
 
-/** Build and classify one recognized persisted union member from the already-parsed structure. */
-function classifyKnownLiftJobPayload(job: StructurallyValidLiftJobPayload): KnownLiftJobPayload {
+/** Current writes have one schema and never receive historical reinterpretation authority. */
+function decodeCurrentV1Payload(value: unknown): LiftJobPayloadDecodeResult {
+  const { schemaVersion: _schemaVersion, ...job } = currentV1PayloadParser(value, 'payload');
+  return classifyCurrentV1Payload(job);
+}
+
+/** Unversioned rows are the explicit v0 input to named compatibility migrations. */
+function decodeLegacyV0Payload(value: unknown): LiftJobPayloadDecodeResult {
+  return classifyLegacyV0Payload(legacyV0PayloadParser(value, 'payload'));
+}
+
+function classifyCurrentV1Payload(
+  job: StructurallyValidLiftJobPayload,
+): LiftJobPayloadDecodeResult {
+  if (!isRecognizedLiftJobState(job.status)) return { kind: 'unknown', job };
+  return canonicalPayload(requiredCanonicalProjection(job));
+}
+
+/**
+ * V0 dispatch is based on explicit historical shape predicates. It never treats a thrown current
+ * invariant as permission to reinterpret the same row through a more permissive representation.
+ */
+function classifyLegacyV0Payload(job: StructurallyValidLiftJobPayload): LiftJobPayloadDecodeResult {
+  if (!isRecognizedLiftJobState(job.status)) return { kind: 'unknown', job };
   switch (job.status) {
     case 'broadcast':
-      return parsePersistedBroadcast(job);
+      return isLegacyV0EvidenceFreeBroadcast(job)
+        ? compatibilityPayload(migrateLegacyV0EvidenceFreeBroadcast(job))
+        : canonicalPayload(requiredCanonicalProjection(job));
     case 'finalized':
-      return parsePersistedFinalized(job);
+      return isLegacyV0LocalFinalizationWithChainEvidence(job)
+        ? compatibilityPayload(migrateLegacyV0LocalFinalizationWithChainEvidence(job))
+        : canonicalPayload(requiredCanonicalProjection(job));
     case 'failed':
-      return parsePersistedFailed(job);
-    default: {
-      const canonical = projectCanonicalLiftJob(job);
-      if (canonical === null) throw new Error(`Unsupported LiftJob status: ${job.status}`);
-      return canonicalPayload(canonical);
-    }
+      return requiresLegacyV0FailureMigration(job)
+        ? compatibilityPayload(migrateLegacyV0Failure(job))
+        : canonicalPayload(requiredCanonicalProjection(job));
+    default:
+      return canonicalPayload(requiredCanonicalProjection(job));
   }
+}
+
+function isRecognizedLiftJobState(status: string): boolean {
+  return (LIFT_JOB_STATES as readonly string[]).includes(status);
 }
 
 /** Validate an in-memory write candidate with the same structural and state schemas as restart. */
 export function assertCanonicalLiftJobPayload(value: unknown): LiftJob {
-  const job = parseStructuralPayload(value);
+  const job = legacyV0PayloadParser(value, 'payload');
   const canonical = projectCanonicalLiftJob(job);
   if (canonical === null) throw new Error(`Unsupported LiftJob status: ${job.status}`);
   return canonical;
@@ -131,62 +164,100 @@ function requiredCanonicalProjection(job: StructurallyValidLiftJobPayload): Lift
   return canonical;
 }
 
-function parseStructuralPayload(value: unknown): StructurallyValidLiftJobPayload {
-  return structuralPayloadParser(value, 'payload');
+function isLegacyV0EvidenceFreeBroadcast(job: StructurallyValidLiftJobPayload): boolean {
+  return job.request.jobType === 'lift'
+    && job.validation === undefined
+    && job.broadcast === undefined
+    && job.inclusion === undefined
+    && job.finalization === undefined
+    && job.failure === undefined;
 }
 
-function parsePersistedBroadcast(job: StructurallyValidLiftJobPayload): KnownLiftJobPayload {
-  try {
-    return canonicalPayload(requiredCanonicalProjection(job));
-  } catch (canonicalError) {
-    rejectDefinedLiftJobFields(job, ['validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
-    if (job.request.jobType !== 'lift') throw canonicalError;
-    return compatibilityPayload({
-      ...canonicalLiftJobBase(job),
-      status: 'broadcast',
-      request: job.request,
-      claim: requiredLiftJobField(job.claim, 'claim'),
-    });
+function migrateLegacyV0EvidenceFreeBroadcast(
+  job: StructurallyValidLiftJobPayload,
+): LiftJobCompatibility {
+  rejectDefinedLiftJobFields(job, ['validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
+  if (job.request.jobType !== 'lift') throw new Error('legacy broadcast request must be raw lift');
+  return {
+    ...canonicalLiftJobBase(job),
+    status: 'broadcast',
+    request: job.request,
+    claim: requiredLiftJobField(job.claim, 'claim'),
+  };
+}
+
+function isLegacyV0LocalFinalizationWithChainEvidence(
+  job: StructurallyValidLiftJobPayload,
+): boolean {
+  const mode = job.finalization?.mode;
+  return (mode === 'noop' || mode === 'local')
+    && (job.broadcast !== undefined || job.inclusion !== undefined);
+}
+
+function migrateLegacyV0LocalFinalizationWithChainEvidence(
+  job: StructurallyValidLiftJobPayload,
+): LiftJobCompatibility {
+  rejectDefinedLiftJobFields(job, ['failure']);
+  const finalization = requiredLiftJobField(job.finalization, 'finalization');
+  if (finalization.mode !== 'noop' && finalization.mode !== 'local') {
+    throw new Error('legacy local finalization mode is required');
   }
+  const broadcast = requiredLiftJobField(job.broadcast, 'broadcast');
+  return {
+    ...canonicalLiftJobBase(job),
+    status: 'finalized',
+    claim: requiredLiftJobField(job.claim, 'claim'),
+    validation: requiredLiftJobField(job.validation, 'validation'),
+    broadcast,
+    ...(job.inclusion
+      ? { inclusion: canonicalLiftJobInclusion(job.inclusion, broadcast) }
+      : {}),
+    finalization: { ...finalization, mode: finalization.mode },
+  };
 }
 
-function parsePersistedFinalized(job: StructurallyValidLiftJobPayload): KnownLiftJobPayload {
-  try {
-    return canonicalPayload(requiredCanonicalProjection(job));
-  } catch (canonicalError) {
-    rejectDefinedLiftJobFields(job, ['failure']);
-    const finalization = requiredLiftJobField(job.finalization, 'finalization');
-    if (finalization.mode !== 'noop' && finalization.mode !== 'local') throw canonicalError;
-    const broadcast = job.broadcast;
-    return compatibilityPayload({
-      ...canonicalLiftJobBase(job),
-      status: 'finalized',
-      claim: requiredLiftJobField(job.claim, 'claim'),
-      validation: requiredLiftJobField(job.validation, 'validation'),
-      ...(broadcast ? { broadcast } : {}),
-      ...(job.inclusion && broadcast
-        ? { inclusion: canonicalLiftJobInclusion(job.inclusion, broadcast) }
-        : {}),
-      finalization: { ...finalization, mode: finalization.mode },
-    });
-  }
-}
+/**
+ * Select only the documented v0 failure layouts. This is deliberately a positive legacy-format
+ * predicate rather than the complement of current validation: a new V1 invariant can therefore
+ * never make a row acquire migration authority.
+ */
+function requiresLegacyV0FailureMigration(job: StructurallyValidLiftJobPayload): boolean {
+  const failure = job.failure;
+  if (failure === undefined || failure.failedFromState === 'accepted') return false;
+  if (job.recovery?.action === 'finalized_from_chain') return true;
 
-function parsePersistedFailed(job: StructurallyValidLiftJobPayload): KnownLiftJobPayload {
-  try {
-    return canonicalPayload(requiredCanonicalProjection(job));
-  } catch (canonicalError) {
-    try {
-      return compatibilityPayload(parsePersistedFailureCompatibility(job));
-    } catch {
-      // Preserve the canonical invariant error. Compatibility is an explicit version predicate,
-      // not a more permissive parser whose failure can obscure the violated current-state rule.
-      throw canonicalError;
+  if (job.broadcast !== undefined) {
+    if (failure.failedFromState === 'claimed' || failure.failedFromState === 'validated') {
+      return true;
     }
+    if (failure.failedFromState === 'broadcast') {
+      return job.claim === undefined
+        || job.validation === undefined
+        || job.inclusion !== undefined;
+    }
+    return job.claim === undefined
+      || job.validation === undefined
+      || job.inclusion === undefined;
   }
+
+  // An inclusion without its broadcast is neither a v0 layout nor a V1 layout; current
+  // validation owns the malformed result rather than attempting a migration.
+  if (job.inclusion !== undefined) return false;
+  if (job.claim === undefined && job.validation === undefined) return true;
+  if (
+    job.claim === undefined
+    && job.recovery?.txHashChecked !== undefined
+    && job.recovery.walletIdChecked === undefined
+  ) {
+    return true;
+  }
+  if (failure.failedFromState === 'claimed' && job.validation !== undefined) return true;
+  return failure.failedFromState === 'validated'
+    && job.claim === undefined
+    && job.validation !== undefined;
 }
 
-function parsePersistedFailureCompatibility(
+function migrateLegacyV0Failure(
   job: StructurallyValidLiftJobPayload,
 ): LiftJobPersistedFailure {
   rejectDefinedLiftJobFields(job, ['finalization']);
@@ -524,7 +595,8 @@ const failureParser = objectParser<LiftJobFailureMetadata>({
   timeout: optional(timeoutParser),
 });
 
-const structuralPayloadParser = objectParser<StructurallyValidLiftJobPayload>({
+/** One exhaustive field schema shared by the explicit v0 and v1 durable envelopes. */
+const liftJobPayloadFieldSchema = {
   jobId: nonEmptyStringParser,
   jobSlug: nonEmptyStringParser,
   request: (value) => normalizePersistedLiftJobRequest(value),
@@ -540,6 +612,23 @@ const structuralPayloadParser = objectParser<StructurallyValidLiftJobPayload>({
   inclusion: optional((value) => parseInclusion(value)),
   finalization: optional((value) => parseFinalization(value)),
   failure: optional((value) => parseFailure(value)),
+} satisfies ObjectRuntimeSchema<StructurallyValidLiftJobPayload>;
+
+const legacyV0PayloadParser = objectParser<StructurallyValidLiftJobPayload>(
+  liftJobPayloadFieldSchema,
+);
+
+const currentSchemaVersionParser: RuntimeParser<typeof LIFT_JOB_PAYLOAD_SCHEMA_VERSION> =
+  (value, path) => {
+    if (value !== LIFT_JOB_PAYLOAD_SCHEMA_VERSION) {
+      throw new Error(`${path} must be ${LIFT_JOB_PAYLOAD_SCHEMA_VERSION}`);
+    }
+    return LIFT_JOB_PAYLOAD_SCHEMA_VERSION;
+  };
+
+const currentV1PayloadParser = objectParser<StructurallyValidCurrentLiftJobPayload>({
+  ...liftJobPayloadFieldSchema,
+  schemaVersion: currentSchemaVersionParser,
 });
 
 function parseFinalization(value: unknown): LiftJobFinalizationMetadata {

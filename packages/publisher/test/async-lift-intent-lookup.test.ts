@@ -364,7 +364,11 @@ describe('#1828 async lift intent lookup', () => {
         failure: { ...failureBase, retryable },
         retries: { retryCount, maxRetries: 10 },
       } as unknown as LiftJob;
-      await store.insert(serializeJob(failed, DEFAULT_CONTROL_GRAPH_URI));
+      await store.insert(serializeJob(
+        failed,
+        DEFAULT_CONTROL_GRAPH_URI,
+        { payloadSchema: 'legacy-v0' },
+      ));
     };
 
     await insertFailed(true, 0);

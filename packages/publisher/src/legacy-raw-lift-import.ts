@@ -34,5 +34,5 @@ export async function restorePersistedLegacyRawLiftJob(params: {
   await params.store.createGraph(graphUri);
   await params.store.deleteByPattern({ subject: expectedJobRef, graph: graphUri });
   await params.store.deleteByPattern({ subject: requestSubject(jobId), graph: graphUri });
-  await params.store.insert(serializeJob(params.job, graphUri));
+  await params.store.insert(serializeJob(params.job, graphUri, { payloadSchema: 'legacy-v0' }));
 }
