@@ -185,6 +185,8 @@ describe('GH#2270 failed-job retry disposition', () => {
       action: 'reset_to_accepted',
       recoveredFromStatus: 'included',
       txHashChecked: TX_HASH,
+      // The included carrier retains the same pre-send branch marker as broadcast recovery.
+      operationKind: 'create',
       // r23 — the signer travels from this origin too; an 'included' failure has broadcast
       // metadata, so there is an authoritative wallet to preserve.
       walletIdChecked: includedFailure.broadcast?.walletId,
