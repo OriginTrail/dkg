@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './agent-identity.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
 export * from './context-graph-join-policy.js';
