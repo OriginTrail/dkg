@@ -27,6 +27,7 @@ import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
+import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
 import type {
   Rfc64AuthorizedSwmRecoveryPlanV1,
   Rfc64SwmRecoveryCoordinatorV1,
@@ -584,28 +585,6 @@ export function createListContextGraphsCacheInvalidatingStore(
   };
   return wrapper;
 }
-
-type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
-
-type PendingOrdinarySyncOnConnectLane = {
-  handleSyncError: SyncOnConnectErrorHandler;
-  omitSelectedSwm: boolean;
-  ignoreBackoff: boolean;
-};
-
-type PendingSelectedSyncOnConnectLane = {
-  handleSyncError: SyncOnConnectErrorHandler;
-  recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
-};
-
-type SyncOnConnectPeerJob = {
-  phase: 'scheduled' | 'ordinary' | 'selected';
-  ordinary: PendingOrdinarySyncOnConnectLane | null;
-  selected: PendingSelectedSyncOnConnectLane | null;
-  ordinaryClaimed: boolean;
-  selectedClaimed: boolean;
-  handleUnexpectedError: SyncOnConnectErrorHandler;
-};
 
 export class DKGAgentBase {
   readonly wallet: AgentWallet;
@@ -1610,7 +1589,9 @@ export class DKGAgentBase {
    * arriving during either lane remains on the same job and is consumed by
    * the next drain iteration.
    */
-  protected readonly syncOnConnectPeerJobs = new Map<string, SyncOnConnectPeerJob>();
+  protected syncOnConnectPeerScheduler:
+    | SyncOnConnectPeerScheduler<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>
+    | null = null;
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
   /**

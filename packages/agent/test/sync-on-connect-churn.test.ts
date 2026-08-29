@@ -275,11 +275,12 @@ describe('sync-on-connect churn gates', () => {
       0,
     )).toBe(true);
     expect((agent as any).catchupOnConnectAt.size).toBe(1);
-    expect((agent as any).syncOnConnectPeerJobs.size).toBe(1);
-    expect((agent as any).syncOnConnectPeerJobs.get(PEER_A).selected.recoveryPlan)
-      .toBe(authorized);
-    expect((agent as any).syncOnConnectPeerJobs.get(PEER_A).ordinary)
-      .toEqual(expect.objectContaining({ omitSelectedSwm: true, ignoreBackoff: true }));
+    expect((agent as any).syncOnConnectPeerScheduler.size).toBe(1);
+    expect((agent as any).syncOnConnectPeerScheduler.snapshot(PEER_A)).toEqual({
+      state: 'scheduled',
+      hasPendingSelected: true,
+      pendingOrdinaryMode: 'ordinary-after-selected',
+    });
 
     await vi.waitFor(() => expect(genericRun).toHaveBeenCalledOnce());
 
@@ -287,7 +288,7 @@ describe('sync-on-connect churn gates', () => {
     expect(genericRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
-      { omitSelectedSwm: true, ignoreBackoff: true },
+      'ordinary-after-selected',
     );
     expect(ordering).toEqual(['exact', 'ordinary']);
     expect(selectedSync).toHaveBeenCalledWith(
@@ -302,7 +303,7 @@ describe('sync-on-connect churn gates', () => {
       }),
     );
     expect(selectedSync.mock.calls[0]![2].requestedScope.plan).toBe(authorized);
-    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerJobs.size).toBe(0));
+    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
     expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
     expect(errors).toEqual([]);
 
@@ -328,7 +329,7 @@ describe('sync-on-connect churn gates', () => {
     releaseOrdinary();
     await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledTimes(2));
     expect(genericRun).toHaveBeenCalledTimes(2);
-    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerJobs.size).toBe(0));
+    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
 
     // The exact post-catalog plan is also allowed through when the generic
     // timer has already completed but its short queue cooldown is still live.
@@ -411,12 +412,12 @@ describe('sync-on-connect churn gates', () => {
       0,
     )).toBe(true);
 
-    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerJobs.size).toBe(0));
+    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
     expect(ordering).toEqual(['exact', 'ordinary']);
     expect(ordinaryRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
-      { omitSelectedSwm: true, ignoreBackoff: true },
+      'ordinary-after-selected',
     );
     expect(ordinarySharedSync).toHaveBeenCalledOnce();
     expect(ordinarySharedSync).toHaveBeenCalledWith(
@@ -461,11 +462,11 @@ describe('sync-on-connect churn gates', () => {
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     releaseExact();
 
-    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerJobs.size).toBe(0));
+    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
     expect(ordinaryRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
-      { omitSelectedSwm: true, ignoreBackoff: true },
+      'ordinary-after-selected',
     );
     expect(ordering).toEqual(['exact-in-flight', 'ordinary']);
   });
@@ -764,6 +765,7 @@ describe('sync-on-connect churn gates', () => {
       PEER_A,
       expect.any(Function),
       'reconcile',
+      'ordinary',
     ]]);
   });
 

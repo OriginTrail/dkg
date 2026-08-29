@@ -9,6 +9,7 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MEMBER_ROSTER_OBJECT_TYPE_V1,
   MemoryLayer,
+  PROTOCOL_SYNC,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
@@ -119,6 +120,23 @@ const PROJECTION = new TextEncoder().encode(
   '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
 );
+
+function emptySyncResult(overrides: Record<string, number | boolean> = {}) {
+  return {
+    insertedTriples: 0,
+    insertedDataTriples: 0,
+    insertedMetaTriples: 0,
+    metaOnlyResponses: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
+    timedOutPhases: 0,
+    failedPeers: 0,
+    failedPhases: 0,
+    deniedPhases: 0,
+    backoffWorthyFailures: 0,
+    ...overrides,
+  };
+}
 const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
   Object.freeze({
     subject: 'https://example.org/alice',
@@ -1381,6 +1399,195 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
     expect(ordering).toEqual(['connect', 'catalog-start', 'catalog-complete', 'swm']);
     await receiver.stop();
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
+  });
+
+  it('uses the real coordinator to gate selected SWM while ordinary sync remains live', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-real-coordinator-gate-'));
+    tempDirs.push(dataDir);
+    const providerPeerId = '12D3KooWRealCoordinatorProvider';
+    const receiver = await DKGAgent.create({
+      name: 'real-coordinator-gate-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store: new OxigraphStore(),
+      syncOnConnectEnabled: true,
+      syncSharedMemoryOnConnect: true,
+      syncReconcilerEnabled: false,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
+      agentProfileHeartbeatMs: 0,
+      rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
+      rfc64PublicCatalogBootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          completeSwmProviders: [providerPeerId],
+        }],
+      },
+    });
+    agents.push(receiver);
+    const realCoordinator = (receiver as any).rfc64SwmRecoveryCoordinatorV1;
+    const admission = (receiver as any).networkAdmissionCoordinator;
+    admission.isAcceptedPeer = () => true;
+    admission.isRejectedPeer = () => false;
+    admission.ensureAdmitted = async () => true;
+    vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    let markCatalogStarted!: () => void;
+    let releaseCatalog!: () => void;
+    const catalogStarted = new Promise<void>((resolve) => { markCatalogStarted = resolve; });
+    const catalogRelease = new Promise<void>((resolve) => { releaseCatalog = resolve; });
+    vi.spyOn(receiver, 'synchronizeRfc64CatalogFromProvidersV1')
+      .mockImplementation(async ({ signal }) => {
+        markCatalogStarted();
+        await Promise.race([
+          catalogRelease,
+          new Promise<void>((resolve) => {
+            if (signal?.aborted) resolve();
+            else signal?.addEventListener('abort', () => resolve(), { once: true });
+          }),
+        ]);
+        return null;
+      });
+    vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(true);
+    (receiver as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (receiver as any).planSharedMemorySyncContextGraphs = async () => ({
+      targets: [
+        { contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' },
+        { contextGraphId: 'ordinary-private-cg', lane: 'ordinary-private' },
+      ],
+    });
+    (receiver as any).refreshMetaSyncedFlags = async () => undefined;
+    (receiver as any).discoverContextGraphsFromStore = async () => 0;
+    const ordinarySync = vi.fn(async () => emptySyncResult({ completedPhases: 1 }));
+    const selectedSync = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: unknown },
+    ) => ({
+      kind: 'selected-shared-memory' as const,
+      requestedScope: options.requestedScope,
+      shared: emptySyncResult({ completedPhases: 1 }),
+      scopeComplete: true,
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
+    }));
+    (receiver as any).syncSharedMemoryFromPeerDetailed = ordinarySync;
+    (receiver as any).syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
+
+    await receiver.start();
+    await catalogStarted;
+    const liveAdmission = (receiver as any).networkAdmissionCoordinator;
+    liveAdmission.isAcceptedPeer = () => true;
+    liveAdmission.isRejectedPeer = () => false;
+    liveAdmission.ensureAdmitted = async () => true;
+    expect((receiver as any).rfc64SwmRecoveryCoordinatorV1).toBe(realCoordinator);
+    expect(await (receiver as any).trySyncFromPeer(
+      providerPeerId,
+      undefined,
+      'reconcile',
+    )).toBe('synced');
+    expect(selectedSync).not.toHaveBeenCalled();
+    expect(ordinarySync).toHaveBeenCalledWith(
+      providerPeerId,
+      ['ordinary-private-cg'],
+      expect.any(Object),
+    );
+
+    releaseCatalog();
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
+    expect(await (receiver as any).trySyncFromPeer(
+      providerPeerId,
+      undefined,
+      'reconcile',
+    )).toBe('synced');
+    expect(selectedSync).toHaveBeenCalledWith(
+      providerPeerId,
+      [CONTEXT_GRAPH_ID],
+      expect.any(Object),
+    );
+    expect(ordinarySync).toHaveBeenCalledTimes(2);
+  });
+
+  it('replaces retained closed bootstrap state on same-object restart', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-bootstrap-restart-'));
+    tempDirs.push(dataDir);
+    const providerPeerId = '12D3KooWBootstrapRestartProvider';
+    const receiver = await DKGAgent.create({
+      name: 'bootstrap-restart-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store: new OxigraphStore(),
+      syncOnConnectEnabled: true,
+      syncReconcilerEnabled: false,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
+      agentProfileHeartbeatMs: 0,
+      rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
+      rfc64PublicCatalogBootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          completeSwmProviders: [providerPeerId],
+        }],
+      },
+    });
+    agents.push(receiver);
+    vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    let pass = 0;
+    let markSecondPassStarted!: () => void;
+    let releaseSecondPass!: () => void;
+    const secondPassStarted = new Promise<void>((resolve) => {
+      markSecondPassStarted = resolve;
+    });
+    const secondPassRelease = new Promise<void>((resolve) => {
+      releaseSecondPass = resolve;
+    });
+    vi.spyOn(receiver, 'synchronizeRfc64CatalogFromProvidersV1')
+      .mockImplementation(async () => {
+        pass += 1;
+        if (pass === 2) {
+          markSecondPassStarted();
+          await secondPassRelease;
+        }
+        return null;
+      });
+    const queue = vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(true);
+    const ctx = createOperationContext('sync');
+
+    await receiver.start();
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
+    expect(queue).toHaveBeenCalledTimes(1);
+    await receiver.closeRfc64PublicCatalogBootstrapV1();
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
+
+    receiver.startRfc64PublicCatalogBootstrapV1(ctx);
+    await secondPassStarted;
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
+    expect(queue).toHaveBeenCalledTimes(1);
+    releaseSecondPass();
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
+    expect(queue).toHaveBeenCalledTimes(2);
+    await receiver.closeRfc64PublicCatalogBootstrapV1();
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
   });
 
