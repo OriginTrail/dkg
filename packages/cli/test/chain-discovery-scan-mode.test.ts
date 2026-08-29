@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { chainDiscoveryScanOptions, createChainDiscoveryScanRunner } from '../src/daemon/lifecycle.js';
+import { chainDiscoveryScanOptions, createChainDiscoveryScanRunner } from '../src/daemon/chain-discovery-scan.js';
 
 describe('chainDiscoveryScanOptions', () => {
   it('uses bounded cursor-resumable watermark seeding before a seed exists', () => {
@@ -173,6 +173,42 @@ describe('chainDiscoveryScanOptions', () => {
       mode: 'seedFull',
       throwOnChainScanFailure: true,
     });
+  });
+
+  // Review RED on the first version of this fix: "same run" is not "same
+  // scan". The mode derives from the run number AND the mutable watermark,
+  // and a partially-successful scan MOVES the watermark — so recomputing the
+  // options on retry can silently change what retries. The failed attempt's
+  // options are captured and reused instead.
+  it('a partially seeded seedFromCursor retries as seedFromCursor, not an unbounded seedFull', async () => {
+    const agent = {
+      // Fresh node: no watermark on the first probe. The scan then seeds
+      // blocks 0..1999, SAVES the watermark, and fails on 2000..3999 —
+      // so every later probe reports seeded.
+      hasContextGraphRegistryScanWatermark: vi
+        .fn<() => Promise<boolean>>()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValue(true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockRejectedValueOnce(new Error('rpc failed mid-seed'))
+        .mockResolvedValueOnce(2)
+        .mockResolvedValueOnce(0),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    await runner(); // run 0: seedFromCursor, partial progress, REJECTED
+    await runner(); // run 0 retried — MUST resume the cursor scan, not restart history
+    await runner(); // run 1: watermark seeded => incremental
+
+    const calls = agent.discoverContextGraphsFromChain.mock.calls.map((c) => c[0]!);
+    expect(calls[0]).toEqual({ mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget: 30 });
+    // Recomputed from the moved watermark this would be seedFull (run 0 +
+    // seeded = startup recovery): unbounded, from block zero, no page budget.
+    expect(calls[1]).toEqual({ mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget: 30 });
+    expect(calls[2]).toEqual({ mode: 'incremental', pageBudget: 30 });
+    // The successful retry released the pin: nothing later reuses stale options.
+    expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
   });
 
   it('a failed periodic full resync retries in one tick, not one day', async () => {

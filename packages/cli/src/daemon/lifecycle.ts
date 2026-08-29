@@ -164,6 +164,10 @@ import {
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
+import {
+  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  createChainDiscoveryScanRunner,
+} from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
@@ -691,104 +695,6 @@ export function orderACKCandidatePeerIds(input: {
     verifiedSameNetworkPeerIds: input.verifiedSameNetworkPeerIds,
     requiredACKs: Number.MAX_SAFE_INTEGER,
   });
-}
-
-export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
-export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
-
-export function chainDiscoveryScanOptions(input: {
-  watermarkSeeded: boolean;
-  run?: number;
-  fullScanEvery?: number;
-  pageBudget?: number;
-}):
-  | { mode: 'incremental'; pageBudget: number }
-  | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
-  | { mode: 'seedFull'; throwOnChainScanFailure: true } {
-  const configuredFullScanEvery = input.fullScanEvery;
-  let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
-  if (
-    typeof configuredFullScanEvery === 'number' &&
-    Number.isFinite(configuredFullScanEvery) &&
-    configuredFullScanEvery >= 1
-  ) {
-    fullScanEvery = Math.floor(configuredFullScanEvery);
-  }
-  const configuredPageBudget = input.pageBudget;
-  const pageBudget = (
-    typeof configuredPageBudget === 'number' &&
-    Number.isFinite(configuredPageBudget) &&
-    configuredPageBudget >= 1
-  )
-    ? Math.floor(configuredPageBudget)
-    : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
-  const run = input.run ?? 0;
-  const startupRecoveryScan = input.watermarkSeeded && run === 0;
-  const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
-  if (startupRecoveryScan || periodicFullResync) {
-    return { mode: 'seedFull', throwOnChainScanFailure: true };
-  }
-  return input.watermarkSeeded && !periodicFullResync
-    ? { mode: 'incremental', pageBudget }
-    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
-}
-
-export function createChainDiscoveryScanRunner(input: {
-  agent: {
-    hasContextGraphRegistryScanWatermark(): Promise<boolean>;
-    discoverContextGraphsFromChain(
-      options: ReturnType<typeof chainDiscoveryScanOptions>,
-    ): Promise<number>;
-  };
-  log: (msg: string) => void;
-  pageBudget?: number;
-  fullScanEvery?: number;
-}): () => Promise<void> {
-  let runs = 0;
-  let inFlight = false;
-  return async () => {
-    if (inFlight) return;
-    inFlight = true;
-    // GH#2323 — peek at the slot, commit it only after the scan RESOLVES.
-    // `runs++` before the awaits meant a rejected scan still consumed its
-    // slot, and the run number is what selects the mode: a run-0 `seedFull`
-    // startup-recovery scan that failed on a transient RPC error left runs
-    // 1..47 issuing `incremental` scans, so the history it existed to
-    // re-walk stayed unwalked until run 48 — roughly 24 hours at the
-    // 30-minute cadence — with nothing in the log. A rejected scan now
-    // retries the SAME run next tick: a failed full scan re-runs in 30
-    // minutes, not a day.
-    const run = runs;
-    try {
-      const options = chainDiscoveryScanOptions({
-        run,
-        watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
-        pageBudget: input.pageBudget,
-        fullScanEvery: input.fullScanEvery,
-      });
-      try {
-        const found = await input.agent.discoverContextGraphsFromChain(options);
-        runs = run + 1;
-        if (found > 0) {
-          input.log(`Chain scan: discovered ${found} new context graph(s)`);
-        }
-      } catch (err) {
-        // Still non-critical — the daemon keeps running — but no longer
-        // silent, and the slot survives for the retry.
-        input.log(
-          `Chain scan run ${run} (${options.mode}) failed; ` +
-            `the same scan retries next tick: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    } catch (err) {
-      input.log(
-        `Chain scan run ${run} skipped (watermark probe failed; retrying next tick): ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-      );
-    } finally {
-      inFlight = false;
-    }
-  };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
