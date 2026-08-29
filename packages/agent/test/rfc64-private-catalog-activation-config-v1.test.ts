@@ -18,6 +18,7 @@ import {
 import {
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
+  rfc64CatalogTrack2ModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationsV1,
@@ -297,6 +298,17 @@ describe('RFC-64 private catalog activation', () => {
       chainIdentity,
     );
     expect(rfc64CatalogRolloutModeForContextGraphV1(omitted, PRIVATE_CG)).toBe('catalog');
+  });
+
+  it('preserves pre-activation Track-2 authoring while keeping ordinary sync legacy', () => {
+    const disabled = Object.freeze({
+      enabled: false,
+      selectedContextGraphs: Object.freeze([]),
+      rollout: undefined,
+    });
+    expect(rfc64CatalogRolloutModeForContextGraphV1(disabled, PUBLIC_CG)).toBe('legacy');
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(disabled, PUBLIC_CG)).toBe(true);
+    expect(rfc64CatalogTrack2ModeForContextGraphV1(disabled, PUBLIC_CG)).toBe('catalog');
   });
 
   it('projects one legacy sync authority and never uses the kill switch as fallback', () => {

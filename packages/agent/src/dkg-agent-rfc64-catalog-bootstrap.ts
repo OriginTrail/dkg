@@ -27,6 +27,7 @@ import { resolveRfc64PeerSwmRecoveryPlanV1 } from
 import {
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
+  rfc64CatalogTrack2ModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -199,7 +200,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       completeSwmProviders = [],
     }) => (
       policyTargets.map((target) => ({
-        mode: rfc64CatalogRolloutModeForContextGraphV1(
+        mode: rfc64CatalogTrack2ModeForContextGraphV1(
           this.config.rfc64CatalogRollout,
           policyEnvelope.payload.contextGraphId,
         ) as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
@@ -507,10 +508,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
 
 function filterTrack2PoliciesV1(
   config: BootstrapStateV1['config'],
-  rollout: Parameters<typeof rfc64CatalogRolloutModeForContextGraphV1>[0],
+  rollout: Parameters<typeof rfc64CatalogTrack2ModeForContextGraphV1>[0],
 ): BootstrapStateV1['config'] | undefined {
   const acceptedPolicies = config.acceptedPolicies.filter(({ policyEnvelope }) => (
-    rfc64CatalogRolloutModeForContextGraphV1(
+    rfc64CatalogTrack2ModeForContextGraphV1(
       rollout,
       policyEnvelope.payload.contextGraphId,
     ) !== 'legacy'

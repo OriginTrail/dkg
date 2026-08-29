@@ -1900,7 +1900,7 @@ export type ResolvedDKGAgentConfig =
     /** Immutable restart-stable D17/D18 authority selection for this boot. */
     rfc64CatalogRollout: Pick<
       ResolvedRfc64CatalogActivationConfigV1,
-      'selectedContextGraphs' | 'rollout'
+      'enabled' | 'selectedContextGraphs' | 'rollout'
     >;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;

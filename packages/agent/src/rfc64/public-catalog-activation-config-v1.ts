@@ -350,6 +350,23 @@ export function rfc64CatalogRolloutModeForContextGraphV1(
   return activation.rollout?.contextGraphModes[contextGraphId] ?? 'catalog';
 }
 
+/**
+ * Resolve the Track-2 service mode without breaking the pre-activation public
+ * catalog API. A disabled activation means the legacy deployment/bootstrap
+ * controls still own their historical catalog behavior; once activation is
+ * enabled, only its explicit selected-CG allowlist may enter Track 2.
+ */
+export function rfc64CatalogTrack2ModeForContextGraphV1(
+  activation: Pick<
+    ResolvedRfc64CatalogActivationConfigV1,
+    'enabled' | 'selectedContextGraphs' | 'rollout'
+  > | undefined,
+  contextGraphId: string,
+): Rfc64CatalogRolloutModeV1 {
+  if (activation?.enabled === false) return 'catalog';
+  return rfc64CatalogRolloutModeForContextGraphV1(activation, contextGraphId);
+}
+
 /** Dedicated Track-2 emergency stop; it never changes a CG's persisted mode. */
 export function rfc64CatalogKillSwitchActiveV1(
   activation: Pick<ResolvedRfc64CatalogActivationConfigV1, 'rollout'> | undefined,

@@ -1092,6 +1092,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogDeploymentProfile,
       rfc64CatalogBootstrap,
       rfc64CatalogRollout: Object.freeze({
+        enabled: catalogActivation.enabled,
         selectedContextGraphs: catalogActivation.selectedContextGraphs,
         rollout: catalogActivation.rollout,
       }),

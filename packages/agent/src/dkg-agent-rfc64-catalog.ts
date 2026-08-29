@@ -105,6 +105,7 @@ import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-na
 import {
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
+  rfc64CatalogTrack2ModeForContextGraphV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -318,7 +319,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
       resolveContextGraphMode: (contextGraphId) =>
-        rfc64CatalogRolloutModeForContextGraphV1(
+        rfc64CatalogTrack2ModeForContextGraphV1(
           this.config.rfc64CatalogRollout,
           contextGraphId,
         ),
