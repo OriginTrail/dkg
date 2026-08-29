@@ -672,6 +672,9 @@ jobs:
           node ../../scripts/ci/run-vitest-junit.mjs \
             --lane agent --shard ${{ matrix.shard }} \
             -- "${SHARD_FILES[@]}"
+      - name: RFC-64 rollout transition certificate
+        if: matrix.shard == 10
+        run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-transition.test.ts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit

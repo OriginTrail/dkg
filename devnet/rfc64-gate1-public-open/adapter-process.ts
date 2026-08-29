@@ -7,42 +7,24 @@ import { multiaddr } from '@multiformats/multiaddr';
 import {
   DKGAgent,
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
-  buildOpenOwnerContextGraphPolicyV1,
   produceDirectAuthorCatalogIssuerDelegationV1,
   produceEmptyAuthorCatalogGenesisV1,
-  unsignedOpenContextGraphPolicyEnvelopeV1,
-  type Rfc64CatalogRolloutModeV1,
-  type Rfc64PublicCatalogActivationInputV1,
 } from '@origintrail-official/dkg-agent';
+import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import {
-  MockChainAdapter,
-  verifyControlEnvelopeIssuerSignatureV1,
-} from '@origintrail-official/dkg-chain';
-import {
-  assertCanonicalEvmAddress,
-  assertContextGraphIdV1,
-  assertUnsignedContextGraphPolicyEnvelopeV1,
   computeNetworkId,
   computeControlSignatureVariantDigestHex,
   createOperationContext,
-  createGraphKnowledgeAssetScope,
-  knowledgeAssetLayerGraphUri,
-  MemoryLayer,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
   type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
-  GraphManager,
   OxigraphStore,
   quadsToNQuads,
   type Quad,
 } from '@origintrail-official/dkg-storage';
-import {
-  storeKnowledgeAssetOperationPublicQuads,
-  storeKnowledgeAssetWorkspaceHead,
-} from '../../packages/publisher/src/index.js';
 import { ethers } from 'ethers';
 
 import {
@@ -56,63 +38,30 @@ import {
   requireGate1ProductMethod,
 } from './product-capabilities.js';
 import {
-  GATE1_ASSERTION_ROOT,
-  GATE1_AUTHOR_ADDRESS,
   GATE1_DEPLOYMENT,
-  GATE1_KA_ID,
-  GATE1_KA_UAL,
-  GATE1_NETWORK_ID,
-  GATE1_PROJECTION_NQUADS,
-  GATE1_PROJECTION_QUADS,
 } from './fixture.js';
+import {
+  Gate1RolloutAdapterFixture,
+  parseGate1RolloutAdapterConfig,
+} from './rollout-adapter-fixture.js';
 
-const role = process.argv[2];
+const roleInput = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
 const masterKeyHex = process.env.DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX;
-const rolloutModeInput = process.env.DKG_RFC64_ROLLOUT_MODE;
-const rolloutContextGraphId = process.env.DKG_RFC64_ROLLOUT_CONTEXT_GRAPH_ID;
-const rolloutOwnerAddressInput = process.env.DKG_RFC64_ROLLOUT_OWNER_ADDRESS;
-const rolloutKillSwitchInput = process.env.DKG_RFC64_ROLLOUT_KILL_SWITCH;
-const rolloutCompleteSwmProvider = process.env.DKG_RFC64_ROLLOUT_COMPLETE_SWM_PROVIDER;
-if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
+if (roleInput !== 'author' && roleInput !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE1_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
   throw new Error('DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX must be 32 lowercase hex bytes');
 }
 
 const dataDir = resolve(dataDirInput);
+const role: 'author' | 'receiver' = roleInput;
 const pinnedMasterKeyHex = masterKeyHex;
-const rolloutMode = parseRolloutMode(rolloutModeInput);
-const rolloutKillSwitch = parseBooleanEnvironment(
-  rolloutKillSwitchInput,
-  'DKG_RFC64_ROLLOUT_KILL_SWITCH',
-);
-const rolloutOwnerAddress = rolloutOwnerAddressInput?.toLowerCase();
-if (
-  rolloutMode !== null
-  && (
-    rolloutContextGraphId === undefined
-    || rolloutOwnerAddress === undefined
-    || !/^0x[0-9a-f]{40}$/u.test(rolloutOwnerAddress)
-  )
-) {
-  throw new Error(
-    'rollout mode requires DKG_RFC64_ROLLOUT_CONTEXT_GRAPH_ID and a lowercase EVM owner',
-  );
-}
-if (rolloutContextGraphId !== undefined) {
-  assertContextGraphIdV1(rolloutContextGraphId, 'rollout contextGraphId');
-}
-if (rolloutOwnerAddress !== undefined) {
-  assertCanonicalEvmAddress(rolloutOwnerAddress, 'rollout owner address');
-}
-if (rolloutMode === null && rolloutKillSwitch) {
-  throw new Error('rollout kill switch requires DKG_RFC64_ROLLOUT_MODE');
-}
+const rolloutConfig = parseGate1RolloutAdapterConfig(process.env);
+const rolloutMode = rolloutConfig?.mode ?? null;
+const rolloutKillSwitch = rolloutConfig?.killSwitch ?? false;
 let agent: DKGAgent | undefined;
-let vmChain: Gate1VmChainAdapter | undefined;
-let agentStore: OxigraphStore | undefined;
-const vmReplicationEvents: unknown[] = [];
+let rolloutFixture: Gate1RolloutAdapterFixture | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
 
@@ -166,19 +115,13 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
-  const rolloutActivation = rolloutMode === null
-    ? null
-    : buildRolloutActivation(
-      rolloutMode,
-      rolloutKillSwitch,
-      rolloutContextGraphId!,
-      rolloutOwnerAddress!,
-      rolloutCompleteSwmProvider,
-    );
-  vmChain = rolloutActivation !== null && role === 'receiver'
-    ? await Gate1VmChainAdapter.create(rolloutContextGraphId!)
-    : undefined;
+  rolloutFixture = rolloutConfig === null
+    ? undefined
+    : await Gate1RolloutAdapterFixture.create(rolloutConfig, role);
+  const rolloutActivation = rolloutFixture?.activation ?? null;
+  const vmChain = rolloutFixture?.vmChain;
   const store = new OxigraphStore(join(dataDir, 'store.nq'));
+  rolloutFixture?.attachStore(store);
   const created = await DKGAgent.create({
     name: `RFC64Gate1${role}`,
     dataDir,
@@ -192,7 +135,7 @@ async function boot(): Promise<void> {
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    onReplicationEvent: (event) => { vmReplicationEvents.push(event); },
+    onReplicationEvent: rolloutFixture?.onReplicationEvent,
     ...(vmChain === undefined ? {} : { chainAdapter: vmChain }),
     ...(rolloutActivation === null ? {
       rfc64CatalogDeploymentProfile: GATE1_DEPLOYMENT,
@@ -205,7 +148,6 @@ async function boot(): Promise<void> {
     }),
   });
   agent = created;
-  agentStore = store;
   await created.start();
   const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
   if (tcp === undefined) throw new Error('real DKGAgent exposed no TCP multiaddr');
@@ -363,16 +305,10 @@ async function handle(command: Command): Promise<void> {
         input.contextGraphId,
         'vmReconcile.contextGraphId',
       );
-      const chain = vmChain;
-      if (chain === undefined) throw new Error('rollout VM chain fixture is unavailable');
-      const readsBefore = chain.snapshotReadCounts();
-      const eventCursor = vmReplicationEvents.length;
-      const result = await currentAgent.runVmReconcileForCg(contextGraphId, 'manual');
-      emitOperationResult(command, {
-        chainReadDelta: subtractCounts(chain.snapshotReadCounts(), readsBefore),
-        replicationEvents: vmReplicationEvents.slice(eventCursor),
-        result,
-      });
+      if (rolloutFixture === undefined) {
+        throw new Error('rollout adapter fixture is unavailable');
+      }
+      emitOperationResult(command, await rolloutFixture.reconcileVm(currentAgent, contextGraphId));
       return;
     }
     case 'seedVmSourceSwm': {
@@ -382,44 +318,13 @@ async function handle(command: Command): Promise<void> {
         input.contextGraphId,
         'seedVmSourceSwm.contextGraphId',
       );
-      const store = agentStore;
-      if (store === undefined) throw new Error('rollout store fixture is unavailable');
-      const scope = createGraphKnowledgeAssetScope(GATE1_KA_UAL, '1');
-      const graphManager = new GraphManager(store);
-      const publicQuads = GATE1_PROJECTION_QUADS;
-      const swmGraph = knowledgeAssetLayerGraphUri(
+      if (rolloutFixture === undefined) {
+        throw new Error('rollout adapter fixture is unavailable');
+      }
+      emitOperationResult(command, await rolloutFixture.seedVmSourceSwm(
+        currentAgent,
         contextGraphId,
-        MemoryLayer.SharedWorkingMemory,
-        scope,
-      );
-      await store.replaceGraph(
-        swmGraph,
-        publicQuads.map((quad) => ({ ...quad, graph: swmGraph })),
-      );
-      const shareOperationId = 'rfc64-rollout-vm-source-v1';
-      await storeKnowledgeAssetOperationPublicQuads({
-        store,
-        graphManager,
-        contextGraphId,
-        shareOperationId,
-        kaUal: GATE1_KA_UAL,
-        assertionVersion: '1',
-        quads: publicQuads,
-        privateTripleCount: 0,
-        publisherPeerId: currentAgent.peerId,
-        accessPolicy: 'public',
-        agentAddress: GATE1_AUTHOR_ADDRESS,
-        timestamp: new Date('2026-07-19T12:34:56.789Z'),
-      });
-      await storeKnowledgeAssetWorkspaceHead({
-        store,
-        graphManager,
-        contextGraphId,
-        kaUal: GATE1_KA_UAL,
-        assertionVersion: '1',
-        shareOperationId,
-      });
-      emitOperationResult(command, { swmGraph, tripleCount: publicQuads.length });
+      ));
       return;
     }
     case 'stagedHeadReadback': {
@@ -503,161 +408,6 @@ async function handle(command: Command): Promise<void> {
     default:
       throw new Error(`unknown adapter command: ${command.command}`);
   }
-}
-
-function parseRolloutMode(input: string | undefined): 'legacy' | 'shadow' | 'catalog' | null {
-  if (input === undefined || input === '') return null;
-  if (input === 'legacy' || input === 'shadow' || input === 'catalog') return input;
-  throw new Error('DKG_RFC64_ROLLOUT_MODE must be legacy, shadow, or catalog');
-}
-
-function parseBooleanEnvironment(input: string | undefined, label: string): boolean {
-  if (input === undefined || input === '' || input === '0' || input === 'false') return false;
-  if (input === '1' || input === 'true') return true;
-  throw new Error(`${label} must be true, false, 1, or 0`);
-}
-
-function buildRolloutActivation(
-  mode: Rfc64CatalogRolloutModeV1,
-  killSwitch: boolean,
-  contextGraphId: string,
-  ownerAddress: string,
-  completeSwmProvider: string | undefined,
-): Rfc64PublicCatalogActivationInputV1 {
-  assertContextGraphIdV1(contextGraphId, 'rollout contextGraphId');
-  assertCanonicalEvmAddress(ownerAddress, 'rollout owner address');
-  const policy = buildOpenOwnerContextGraphPolicyV1({
-    networkId: GATE1_DEPLOYMENT.networkId,
-    contextGraphId,
-    ownerAddress,
-  });
-  const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
-  assertUnsignedContextGraphPolicyEnvelopeV1(policyEnvelope);
-  const activation = {
-    deploymentProfile: GATE1_DEPLOYMENT,
-    bootstrap: {
-      acceptedPublicPolicies: [{
-        policyEnvelope,
-        targets: [],
-        ...(completeSwmProvider === undefined
-          ? {}
-          : { completeSwmProviders: [completeSwmProvider] }),
-      }],
-    },
-    rollout: {
-      killSwitch,
-      contextGraphModes: { [contextGraphId]: mode },
-    },
-  } satisfies Rfc64PublicCatalogActivationInputV1;
-  return Object.freeze(activation);
-}
-
-const VM_CHAIN_READ_KEYS = Object.freeze([
-  'accessPolicy',
-  'active',
-  'author',
-  'count',
-  'kaAt',
-  'latestRoot',
-  'nameHashResolution',
-  'publisher',
-  'rootCount',
-  'storageAddress',
-] as const);
-type VmChainReadKey = typeof VM_CHAIN_READ_KEYS[number];
-type VmChainReadCounts = Record<VmChainReadKey, number>;
-
-/** Deterministic chain-owned VM inventory used by every receiver restart. */
-class Gate1VmChainAdapter extends MockChainAdapter {
-  readonly #readCounts: VmChainReadCounts = Object.fromEntries(
-    VM_CHAIN_READ_KEYS.map((key) => [key, 0]),
-  ) as VmChainReadCounts;
-
-  private constructor() {
-    super(GATE1_NETWORK_ID, GATE1_AUTHOR_ADDRESS);
-  }
-
-  static async create(contextGraphId: string): Promise<Gate1VmChainAdapter> {
-    const chain = new Gate1VmChainAdapter();
-    const registered = await chain.createOnChainContextGraph({
-      accessPolicy: 0,
-      publishPolicy: 1,
-      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
-    });
-    chain.__registerKC({
-      kaId: BigInt(GATE1_KA_ID),
-      contextGraphId: registered.contextGraphId,
-      merkleRootHex: GATE1_ASSERTION_ROOT,
-      chunks: [],
-      merkleLeafCount: 2,
-      byteSize: BigInt(Buffer.byteLength(GATE1_PROJECTION_NQUADS)),
-      publisherAddress: GATE1_AUTHOR_ADDRESS,
-    });
-    return chain;
-  }
-
-  snapshotReadCounts(): Readonly<VmChainReadCounts> {
-    return Object.freeze({ ...this.#readCounts });
-  }
-
-  override async resolveContextGraphIdByNameHash(nameHash: string): Promise<bigint | null> {
-    this.#readCounts.nameHashResolution += 1;
-    return super.resolveContextGraphIdByNameHash(nameHash);
-  }
-
-  override async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
-    this.#readCounts.count += 1;
-    return super.getContextGraphKCCount(contextGraphId);
-  }
-
-  override async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
-    this.#readCounts.kaAt += 1;
-    return super.getContextGraphKCAt(contextGraphId, index);
-  }
-
-  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
-    this.#readCounts.storageAddress += 1;
-    return GATE1_AUTHOR_ADDRESS;
-  }
-
-  override async getLatestMerkleRoot(kaId: bigint): Promise<Uint8Array> {
-    this.#readCounts.latestRoot += 1;
-    return super.getLatestMerkleRoot(kaId);
-  }
-
-  override async getMerkleRootCount(kaId: bigint): Promise<bigint> {
-    this.#readCounts.rootCount += 1;
-    return super.getMerkleRootCount(kaId);
-  }
-
-  override async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
-    this.#readCounts.publisher += 1;
-    return super.getLatestMerkleRootPublisher(kaId);
-  }
-
-  override async getLatestMerkleRootAuthor(kaId: bigint): Promise<string> {
-    this.#readCounts.author += 1;
-    return super.getLatestMerkleRootAuthor(kaId);
-  }
-
-  override async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
-    this.#readCounts.active += 1;
-    return super.isContextGraphActiveOnChain(contextGraphId);
-  }
-
-  override async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
-    this.#readCounts.accessPolicy += 1;
-    return super.getContextGraphAccessPolicy(contextGraphId);
-  }
-}
-
-function subtractCounts(
-  current: Readonly<VmChainReadCounts>,
-  previous: Readonly<VmChainReadCounts>,
-): Readonly<VmChainReadCounts> {
-  return Object.freeze(Object.fromEntries(VM_CHAIN_READ_KEYS.map((key) => (
-    [key, current[key] - previous[key]]
-  ))) as VmChainReadCounts);
 }
 
 function compareQuad(left: Quad, right: Quad): number {
