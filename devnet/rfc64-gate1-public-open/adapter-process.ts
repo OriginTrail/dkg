@@ -24,7 +24,6 @@ import {
   createTripleStore,
   quadsToNQuads,
   type Quad,
-  type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
@@ -45,6 +44,11 @@ import {
   Gate1RolloutAdapterFixture,
   parseGate1RolloutAdapterConfig,
 } from './rollout-adapter-fixture.js';
+import {
+  buildGate1RolloutStoreConfig,
+  ROLLOUT_BLAZEGRAPH_URL_ENV,
+  ROLLOUT_STORE_BACKEND_ENV,
+} from './rollout-store-config.js';
 
 const roleInput = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
@@ -57,11 +61,11 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 
 const dataDir = resolve(dataDirInput);
 const role: 'author' | 'receiver' = roleInput;
-const storeConfig = parseStoreConfig(
-  process.env.DKG_RFC64_GATE1_STORE_BACKEND,
-  process.env.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+const storeConfig = buildGate1RolloutStoreConfig({
+  backendInput: process.env[ROLLOUT_STORE_BACKEND_ENV],
+  blazegraphUrl: process.env[ROLLOUT_BLAZEGRAPH_URL_ENV],
   dataDir,
-);
+});
 const storeBackend = storeConfig.backend;
 const pinnedMasterKeyHex = masterKeyHex;
 const rolloutConfig = parseGate1RolloutAdapterConfig(process.env);
@@ -416,40 +420,6 @@ async function handle(command: Command): Promise<void> {
     default:
       throw new Error(`unknown adapter command: ${command.command}`);
   }
-}
-
-type Gate1StoreConfig = Readonly<
-  | { backend: 'oxigraph'; tripleStore: TripleStoreConfig }
-  | { backend: 'blazegraph'; tripleStore: TripleStoreConfig }
->;
-
-function parseStoreConfig(
-  backendInput: string | undefined,
-  blazegraphUrl: string | undefined,
-  dataDir: string,
-): Gate1StoreConfig {
-  if (backendInput === undefined || backendInput === '' || backendInput === 'oxigraph') {
-    return Object.freeze({
-      backend: 'oxigraph',
-      tripleStore: {
-        backend: 'oxigraph-persistent',
-        options: { path: join(dataDir, 'store.nq') },
-      },
-    });
-  }
-  if (backendInput === 'blazegraph') {
-    if (blazegraphUrl === undefined || blazegraphUrl.length === 0) {
-      throw new Error('Blazegraph rollout certification requires DKG_RFC64_GATE1_BLAZEGRAPH_URL');
-    }
-    return Object.freeze({
-      backend: 'blazegraph',
-      tripleStore: {
-        backend: 'blazegraph',
-        options: { url: blazegraphUrl, timeout: 30_000 },
-      },
-    });
-  }
-  throw new Error('DKG_RFC64_GATE1_STORE_BACKEND must be oxigraph or blazegraph');
 }
 
 function compareQuad(left: Quad, right: Quad): number {

@@ -21,9 +21,36 @@ test('bounds a Blazegraph namespace request that never returns', async () => {
       fetchImpl: hangingFetch,
       requestTimeoutMs: 20,
     }),
-    (error: unknown) => error instanceof Error && error.name === 'TimeoutError',
+    (error: unknown) => error instanceof AggregateError
+      && error.errors.some((entry) => entry instanceof Error && entry.name === 'TimeoutError'),
   );
   assert(Date.now() - startedAt < 500, 'namespace setup did not settle within its deadline');
+});
+
+test('cleans an attempted namespace when creation commits but its response is lost', async () => {
+  const deleted: string[] = [];
+  const fetchImpl = (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    if (init?.method === 'POST') throw new Error('namespace committed but response was lost');
+    if (init?.method === 'DELETE') {
+      deleted.push(String(input));
+      return new Response('', { status: 200 });
+    }
+    throw new Error(`unexpected fixture request ${String(init?.method)}`);
+  }) as typeof fetch;
+  await assert.rejects(
+    createRolloutStoreFixture({
+      backendInput: 'blazegraph',
+      blazegraphTestUrl: BLAZEGRAPH_URL,
+      fetchImpl,
+      requestTimeoutMs: 60,
+    }),
+    /namespace committed but response was lost/u,
+  );
+  assert.equal(deleted.length, 3, 'indeterminate creation must receive reconciliation deletes');
+  assert.ok(deleted.every((url) => /\/namespace\/rfc64-rollout-.*-author-0$/u.test(url)));
 });
 
 test('bounds cleanup when Blazegraph accepts namespaces but never deletes them', async () => {
@@ -41,7 +68,7 @@ test('bounds cleanup when Blazegraph accepts namespaces but never deletes them',
     blazegraphTestUrl: BLAZEGRAPH_URL,
     fetchImpl,
     requestTimeoutMs: 20,
-    storesPerRole: { author: 1, receiver: 1 },
+    storeDataDirs: { author: ['/tmp/author'], receiver: ['/tmp/receiver'] },
   });
   const startedAt = Date.now();
   await assert.rejects(
@@ -57,7 +84,10 @@ test('isolates fresh Blazegraph data directories and reuses restart endpoints', 
     backendInput: 'blazegraph',
     blazegraphTestUrl: BLAZEGRAPH_URL,
     fetchImpl,
-    storesPerRole: { author: 1, receiver: 2 },
+    storeDataDirs: {
+      author: ['/tmp/author'],
+      receiver: ['/tmp/receiver-a', '/tmp/receiver-b'],
+    },
   });
   const first = fixture.envForRole('receiver', '/tmp/receiver-a');
   const restarted = fixture.envForRole('receiver', '/tmp/receiver-a');
@@ -72,7 +102,7 @@ test('isolates fresh Blazegraph data directories and reuses restart endpoints', 
   );
   assert.throws(
     () => fixture.envForRole('receiver', '/tmp/receiver-c'),
-    /exhausted its receiver store pool/u,
+    /no registered receiver store/u,
   );
   await fixture.dispose();
 });
