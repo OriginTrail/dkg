@@ -66,6 +66,7 @@ import {
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SharedProjectionStreamOperationV1,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -77,7 +78,13 @@ import {
 } from '../store-operation-timeout.js';
 import { readSparqlResponseText } from './sparql-response-policy.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
-
+import type {
+  Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  Rfc64SharedProjectionStreamCapabilityV1,
+} from '../rfc64-shared-projection-stream-capability.js';
+import {
+  spoolRfc64SharedProjectionHttpResponseV1,
+} from '../rfc64-shared-projection-http-spool.js';
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
@@ -255,6 +262,12 @@ export interface SparqlHttpStoreOptions {
 
 export class SparqlHttpStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  /**
+   * Runtime-issued RFC-64 capability. It is installed per instance only for
+   * the daemon-supervised Oxigraph process, never for an arbitrary SPARQL URL.
+   */
+  readonly rfc64SharedProjectionStreamV1?:
+    Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1'];
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
@@ -313,6 +326,67 @@ export class SparqlHttpStore implements TripleStore {
     if (options.auth) {
       this.headers['Authorization'] = options.auth;
     }
+    if (this.managedOxigraph) {
+      this.rfc64SharedProjectionStreamV1 = (operation, capabilityOptions) =>
+        this.openManagedOxigraphSharedProjectionV1(operation, capabilityOptions);
+    }
+  }
+
+  private openManagedOxigraphSharedProjectionV1(
+    operation: Rfc64SharedProjectionStreamOperationV1,
+    options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  ): Promise<AsyncIterable<DKGQuad>> {
+    return this.runStoreWork(
+      'construct',
+      {
+        priority: 'background',
+        signal: options.signal,
+        source: 'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1',
+      },
+      async (lifecycleSignal) => {
+        const effectiveOptions: SparqlHttpQueryOptions = {
+          priority: 'background',
+          signal: lifecycleSignal,
+          source: 'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1',
+        };
+        return this.postQuery(
+          operation.sparql,
+          'application/n-quads, text/n-quads',
+          'construct',
+          'construct',
+          effectiveOptions,
+          async (response) => {
+            if (!response.ok) {
+              const text = await readSparqlResponseText(response, {
+                maxResponseBytes: Math.min(options.byteCeiling, 64 * 1024),
+                managedOxigraph: true,
+                operation: 'construct',
+                tolerateReadFailure: true,
+              });
+              throw new SparqlHttpResponseError(
+                'rfc64-shared-projection',
+                response.status,
+                text.slice(0, 300),
+              );
+            }
+            if (response.body === null) {
+              throw new SparqlHttpResponseError(
+                'rfc64-shared-projection',
+                response.status,
+                'response has no readable body',
+              );
+            }
+            return spoolRfc64SharedProjectionHttpResponseV1({
+              body: response.body,
+              operation,
+              byteCeiling: options.byteCeiling,
+              signal: lifecycleSignal,
+              consumptionSignal: options.signal,
+            });
+          },
+        );
+      },
+    );
   }
 
   private runStoreWork<T>(
