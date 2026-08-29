@@ -585,6 +585,28 @@ export function createListContextGraphsCacheInvalidatingStore(
   return wrapper;
 }
 
+type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
+
+type PendingOrdinarySyncOnConnectLane = {
+  handleSyncError: SyncOnConnectErrorHandler;
+  omitSelectedSwm: boolean;
+  ignoreBackoff: boolean;
+};
+
+type PendingSelectedSyncOnConnectLane = {
+  handleSyncError: SyncOnConnectErrorHandler;
+  recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
+};
+
+type SyncOnConnectPeerJob = {
+  phase: 'scheduled' | 'ordinary' | 'selected';
+  ordinary: PendingOrdinarySyncOnConnectLane | null;
+  selected: PendingSelectedSyncOnConnectLane | null;
+  ordinaryClaimed: boolean;
+  selectedClaimed: boolean;
+  handleUnexpectedError: SyncOnConnectErrorHandler;
+};
+
 export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
@@ -1583,22 +1605,12 @@ export class DKGAgentBase {
    */
   protected readonly catchupOnConnectAt = new Map<string, number>();
   /**
-   * The canonical on-connect scheduler's pending state. A generic connection
-   * event can be upgraded in place when RFC-64 bootstrap supplies an exact
-   * mixed plan before its timer fires; no second queue or cooldown ledger is
-   * involved.
+   * One owner per peer with explicit pending lanes. Exact RFC-64 work is
+   * always drained before ordinary work that has not started yet; an upgrade
+   * arriving during either lane remains on the same job and is consumed by
+   * the next drain iteration.
    */
-  protected readonly queuedSyncOnConnectPeers = new Set<string>();
-  /** Generic owners whose delayed run must survive an RFC-64 exact-plan upgrade. */
-  protected readonly queuedOrdinarySyncOnConnectPeers = new Set<string>();
-  protected readonly pendingRfc64SwmRecoveries = new Map<
-    string,
-    Readonly<{
-      plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
-      handleSyncError: (remotePeer: string, error: unknown) => void;
-      replayOrdinarySync: boolean;
-    }>
-  >();
+  protected readonly syncOnConnectPeerJobs = new Map<string, SyncOnConnectPeerJob>();
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
   /**

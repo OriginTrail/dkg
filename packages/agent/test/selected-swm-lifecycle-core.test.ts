@@ -357,6 +357,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           agent.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds)
         ),
       },
+      selectedSwmBootstrapContextGraphIdsForPeer:
+        LifecycleSyncMethods.prototype.selectedSwmBootstrapContextGraphIdsForPeer,
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async (_peerId, contextGraphIds = []) => {
         plannedScopes.push([...contextGraphIds]);
@@ -452,6 +454,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           agent.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds)
         ),
       },
+      selectedSwmBootstrapContextGraphIdsForPeer:
+        LifecycleSyncMethods.prototype.selectedSwmBootstrapContextGraphIdsForPeer,
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async () => ({
         targets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
@@ -741,9 +745,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.lastSuccessfulSyncAt = new Map([[PEER, Date.now()]]);
       queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
       queueAgent.catchupOnConnectAt = new Map<string, number>();
-      queueAgent.queuedSyncOnConnectPeers = new Set<string>();
-      queueAgent.queuedOrdinarySyncOnConnectPeers = new Set<string>();
-      queueAgent.pendingRfc64SwmRecoveries = new Map();
+      queueAgent.syncOnConnectPeerJobs = new Map();
       queueAgent.syncReconcilerBackoff = new Map<string, unknown>();
       queueAgent.syncOnConnectDisconnectBoundary =
         LifecycleSyncMethods.prototype.syncOnConnectDisconnectBoundary;

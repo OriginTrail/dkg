@@ -289,6 +289,7 @@ export interface SelectedProviderSelectionAgent {
   rfc64SwmRecoveryCoordinatorV1: {
     admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;
   };
+  selectedSwmBootstrapContextGraphIdsForPeer: (peerId: string) => readonly string[];
   getPeerProtocols: () => Promise<string[]>;
   planSharedMemorySyncContextGraphs: (
     peerId?: string,

@@ -4512,9 +4512,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
-    this.queuedSyncOnConnectPeers.delete(remotePeer);
-    this.queuedOrdinarySyncOnConnectPeers.delete(remotePeer);
-    this.pendingRfc64SwmRecoveries.delete(remotePeer);
+    this.syncOnConnectPeerJobs.delete(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
@@ -4636,21 +4634,44 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return false;
     }
 
-    const lastQueued = this.catchupOnConnectAt.get(remotePeer) ?? 0;
-    if (lastQueued > disconnectBoundary && now - lastQueued < CATCHUP_ON_CONNECT_COOLDOWN_MS) {
-      if (
-        options.rfc64RecoveryPlan !== undefined
-        && this.queuedSyncOnConnectPeers.has(remotePeer)
-      ) {
-        // Upgrade the scheduled owner in place. If it was an ordinary
-        // connection run, preserve that work behind the exact RFC-64 lane.
-        this.pendingRfc64SwmRecoveries.set(remotePeer, Object.freeze({
-          plan: options.rfc64RecoveryPlan,
+    const existingJob = this.syncOnConnectPeerJobs.get(remotePeer);
+    if (existingJob !== undefined) {
+      existingJob.handleUnexpectedError = handleSyncError;
+      if (options.rfc64RecoveryPlan !== undefined) {
+        existingJob.selected = {
           handleSyncError,
-          replayOrdinarySync: this.queuedOrdinarySyncOnConnectPeers.has(remotePeer),
-        }));
+          recoveryPlan: options.rfc64RecoveryPlan,
+        };
+        // When exact recovery claims selected SWM before an ordinary lane has
+        // started, the owed ordinary work must neither repeat that lane nor
+        // inherit backoff created by the exact attempt.
+        if (existingJob.ordinary !== null) {
+          existingJob.ordinary.omitSelectedSwm = true;
+          existingJob.ordinary.ignoreBackoff = true;
+        }
         return true;
       }
+      if (
+        !selectedSwmRetryRequired
+        && !existingJob.ordinaryClaimed
+        && existingJob.ordinary === null
+      ) {
+        existingJob.ordinary = {
+          handleSyncError,
+          omitSelectedSwm: existingJob.selected !== null
+            || existingJob.phase === 'selected'
+            || existingJob.selectedClaimed,
+          ignoreBackoff: existingJob.selected !== null
+            || existingJob.phase === 'selected'
+            || existingJob.selectedClaimed,
+        };
+        return true;
+      }
+      return false;
+    }
+
+    const lastQueued = this.catchupOnConnectAt.get(remotePeer) ?? 0;
+    if (lastQueued > disconnectBoundary && now - lastQueued < CATCHUP_ON_CONNECT_COOLDOWN_MS) {
       // An exact post-catalog recovery may arrive just after the earlier
       // generic timer completed. Do not lose it to the generic queue cooldown.
       if (options.rfc64RecoveryPlan === undefined) return false;
@@ -4661,59 +4682,64 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return false;
     }
 
-    if (options.rfc64RecoveryPlan !== undefined) {
-      this.pendingRfc64SwmRecoveries.set(remotePeer, Object.freeze({
-        plan: options.rfc64RecoveryPlan,
-        handleSyncError,
-        replayOrdinarySync: false,
-      }));
-    }
     this.catchupOnConnectAt.set(remotePeer, now);
-    this.queuedSyncOnConnectPeers.add(remotePeer);
-    if (!selectedSwmRetryRequired) {
-      this.queuedOrdinarySyncOnConnectPeers.add(remotePeer);
-    }
+    const job: NonNullable<ReturnType<typeof this.syncOnConnectPeerJobs.get>> = {
+      phase: 'scheduled',
+      ordinary: selectedSwmRetryRequired
+        ? null
+        : {
+          handleSyncError,
+          omitSelectedSwm: false,
+          ignoreBackoff: false,
+        },
+      selected: selectedSwmRetryRequired
+        ? {
+          handleSyncError,
+          ...(options.rfc64RecoveryPlan === undefined
+            ? {}
+            : { recoveryPlan: options.rfc64RecoveryPlan }),
+        }
+        : null,
+      ordinaryClaimed: false,
+      selectedClaimed: false,
+      handleUnexpectedError: handleSyncError,
+    };
+    this.syncOnConnectPeerJobs.set(remotePeer, job);
     setTimeout(() => {
-      const run = async (): Promise<void> => {
-        const pendingRecovery = this.pendingRfc64SwmRecoveries.get(remotePeer);
-        this.pendingRfc64SwmRecoveries.delete(remotePeer);
-        const effectiveErrorHandler = pendingRecovery?.handleSyncError ?? handleSyncError;
-        if (pendingRecovery !== undefined || selectedSwmRetryRequired) {
-          await this.runSelectedSwmRetryFromPeerOnConnect(
-            remotePeer,
-            effectiveErrorHandler,
-            pendingRecovery?.plan,
-          );
-          if (pendingRecovery?.replayOrdinarySync === true) {
-            await this.runSyncFromPeerOnConnect(remotePeer, effectiveErrorHandler, {
-              omitSelectedSwm: true,
-              ignoreBackoff: true,
+      const drain = async (): Promise<void> => {
+        while (this.syncOnConnectPeerJobs.get(remotePeer) === job) {
+          const selected = job.selected;
+          if (selected !== null) {
+            job.selected = null;
+            job.phase = 'selected';
+            job.selectedClaimed = true;
+            await this.runSelectedSwmRetryFromPeerOnConnect(
+              remotePeer,
+              selected.handleSyncError,
+              selected.recoveryPlan,
+            );
+            continue;
+          }
+          const ordinary = job.ordinary;
+          if (ordinary !== null) {
+            job.ordinary = null;
+            job.phase = 'ordinary';
+            job.ordinaryClaimed = true;
+            await this.runSyncFromPeerOnConnect(remotePeer, ordinary.handleSyncError, {
+              omitSelectedSwm: ordinary.omitSelectedSwm,
+              ignoreBackoff: ordinary.ignoreBackoff,
             });
+            continue;
           }
           return;
         }
-        await this.runSyncFromPeerOnConnect(remotePeer, effectiveErrorHandler);
-
-        // Catalog bootstrap can finish while the generic sync is already in
-        // flight. The queue owner remains visible until that run settles, so
-        // consume its late exact-plan upgrade instead of racing syncingPeers
-        // and losing the recovery request.
-        const lateRecovery = this.pendingRfc64SwmRecoveries.get(remotePeer);
-        this.pendingRfc64SwmRecoveries.delete(remotePeer);
-        if (lateRecovery !== undefined) {
-          await this.runSelectedSwmRetryFromPeerOnConnect(
-            remotePeer,
-            lateRecovery.handleSyncError,
-            lateRecovery.plan,
-          );
-        }
       };
-      run().catch((err: unknown) => {
-        handleSyncError(remotePeer, err);
+      drain().catch((err: unknown) => {
+        job.handleUnexpectedError(remotePeer, err);
       }).finally(() => {
-        this.queuedSyncOnConnectPeers.delete(remotePeer);
-        this.queuedOrdinarySyncOnConnectPeers.delete(remotePeer);
-        this.pendingRfc64SwmRecoveries.delete(remotePeer);
+        if (this.syncOnConnectPeerJobs.get(remotePeer) === job) {
+          this.syncOnConnectPeerJobs.delete(remotePeer);
+        }
       });
     }, delayMs);
     return true;
@@ -4902,12 +4928,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
       );
-    const locallySelectedContextGraphIds = new Set(this.config.syncContextGraphs ?? []);
     const selectedPublicContextGraphIds = new Set(
-      resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
-        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-        remotePeer,
-      ).filter((contextGraphId) => locallySelectedContextGraphIds.has(contextGraphId)),
+      this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer),
     );
     const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
       let plan = sharedMemorySyncPlans.get(peerId);
