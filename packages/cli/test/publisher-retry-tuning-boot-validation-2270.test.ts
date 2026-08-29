@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   loadNetworkConfig: vi.fn(),
   startPublisherRuntimeWithOutcome: vi.fn(),
   daemonLogShutdown: vi.fn(),
+  daemonLogPush: vi.fn(),
 }));
 
 vi.mock('node:http', () => ({ createServer: mocks.createServer }));
@@ -56,6 +57,10 @@ vi.mock('../src/daemon/daemon-log-file-writer.js', async importOriginal => {
       const writer = actual.startDaemonLogFileWriter(...args);
       return {
         ...writer,
+        push: (data: string) => {
+          mocks.daemonLogPush(data);
+          return writer.push(data);
+        },
         shutdown: () => mocks.daemonLogShutdown(writer.shutdown),
       };
     },
@@ -113,6 +118,7 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
       async (shutdown: () => Promise<void>) => await shutdown(),
     );
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
       throw new Error(`process.exit:${code}`);
     }) as never);
@@ -154,6 +160,13 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
         chainId: 'evm:100',
       },
     } as any, Date.now());
+  }
+
+  function closeAgentCreateDb(): void {
+    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
+    const db = createArg?.chainEventCursorStore?.cursors?.db
+      ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
+    db?.close?.();
   }
 
   it('fails the boot on an out-of-range retryJitterRatio before wipe or agent create', async () => {
@@ -201,27 +214,27 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     await expect(bootWith({ retryJitterRatio: '0.2' as never }, { enabled: false }))
       .rejects.toThrow('after-agent-create');
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
-    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
-    const db = createArg?.chainEventCursorStore?.cursors?.db
-      ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
-    db?.close?.();
+    closeAgentCreateDb();
   });
 
   // End-to-end teardown-determinism proof against the REAL writer: the
-  // ordering test above pins that the rejection settles after shutdown() was
+  // controlled ordering test pins that the rejection settles after shutdown() was
   // CALLED, but a mock-level assertion cannot catch a shutdown() that
   // resolves without actually draining, or a tee left installed. Nothing may
   // land in DKG_HOME once the boot has rejected — that is the property the
-  // plain-rm() afterEach depends on (#2270's ENOTEMPTY race).
+  // plain-rm() afterEach depends on (#2270's ENOTEMPTY race). The explicit
+  // push-boundary assertion keeps this proof free of another timing budget.
   it('a failed boot writes nothing more into DKG_HOME after it rejects (#2270)', async () => {
     await expect(bootWith({ maxAttempts: 3 })).rejects.toThrow('after-agent-create');
     const logFile = join(tempHome!, 'daemon.log');
     const sizeAtRejection = (await stat(logFile)).size;
     expect(sizeAtRejection).toBeGreaterThan(0);
-    process.stdout.write('post-rejection straggler probe\n');
-    process.stderr.write('post-rejection straggler probe\n');
-    await new Promise((r) => setTimeout(r, 50));
+    const probe = 'post-rejection straggler probe\n';
+    process.stdout.write(probe);
+    process.stderr.write(probe);
+    expect(mocks.daemonLogPush).not.toHaveBeenCalledWith(probe);
     expect((await stat(logFile)).size).toBe(sizeAtRejection);
+    closeAgentCreateDb();
   });
 
   it('boots past the boundary with a fully valid retry-knob block', async () => {
@@ -250,9 +263,6 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     await expect(boot).rejects.toThrow('after-agent-create');
 
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
-    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
-    const db = createArg?.chainEventCursorStore?.cursors?.db
-      ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
-    db?.close?.();
+    closeAgentCreateDb();
   });
 });
