@@ -9,17 +9,24 @@ import {
   OxigraphStore,
   SharedMemoryLiteralBlobStore,
   UnsupportedTripleStoreCapabilityError,
+  createTripleStore,
   tryRfc64AuthorCommitCasV1,
   type QueryOptions,
   type Rfc64AuthorCommitCasInputV1,
 } from '../src/index.js';
 import {
+  APPLIED_SET,
   AUTHOR,
+  CG_MUTATION,
   HEAD_GRAPH,
   INVALIDATED_SEAL,
+  KA_STATE,
+  MUTATION,
   NEW_HEAD,
   OTHER_GRAPH,
   PROJECTION_GRAPH,
+  P_APPLIED,
+  P_GENERATION,
   P_HEAD,
   P_VALUE,
   SEAL,
@@ -90,6 +97,87 @@ describe('RFC-64 author commit decorator integration', () => {
     await expect(tryRfc64AuthorCommitCasV1(store, authorCommitInput())).resolves.toBe('conflict');
     expect(records).toEqual([]);
   });
+
+  it('commits one consistent winner and persists it through the factory worker stack', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-author-commit-worker-'));
+    tempDirs.push(dataDir);
+    const path = join(dataDir, 'store.nq');
+    const first = authorCommitInput();
+    const competingHead = 'urn:test:rfc64:catalog:competing';
+    const competingProjection = 'urn:test:rfc64:new:competing';
+    const second = authorCommitInput({
+      sharedProjectionQuads: [quad(competingProjection, P_VALUE, '"competing"', PROJECTION_GRAPH)],
+      authorSealQuads: [quad(SEAL, P_VALUE, '"competing-seal"', SEAL_GRAPH)],
+      nextCurrentHeadObject: competingHead,
+      kaStateDigest: {
+        ...first.kaStateDigest,
+        quads: [quad(KA_STATE, P_VALUE, competingHead, STATE_GRAPH)],
+      },
+      subgraphMutationGeneration: {
+        ...first.subgraphMutationGeneration,
+        quads: [quad(MUTATION, P_GENERATION, '"3"', STATE_GRAPH)],
+      },
+      contextGraphMutationGeneration: {
+        ...first.contextGraphMutationGeneration,
+        quads: [quad(CG_MUTATION, P_GENERATION, '"12"', STATE_GRAPH)],
+      },
+      appliedSet: {
+        ...first.appliedSet,
+        quads: [quad(APPLIED_SET, P_APPLIED, competingHead, STATE_GRAPH)],
+      },
+    });
+
+    let store = await createTripleStore({ backend: 'oxigraph-worker', options: { path } });
+    await seedOldState(store);
+    const results = await Promise.all([
+      tryRfc64AuthorCommitCasV1(store, first),
+      tryRfc64AuthorCommitCasV1(store, second),
+    ]);
+    expect(results.slice().sort()).toEqual(['committed', 'conflict']);
+    const winner = results[0] === 'committed'
+      ? {
+          head: NEW_HEAD,
+          projectionSubject: 'urn:test:rfc64:new:1',
+          projectionValue: '"new-1"',
+          losingProjectionSubject: competingProjection,
+          seal: '"new-seal"',
+          mutation: '"2"',
+          contextMutation: '"11"',
+        }
+      : {
+          head: competingHead,
+          projectionSubject: competingProjection,
+          projectionValue: '"competing"',
+          losingProjectionSubject: 'urn:test:rfc64:new:1',
+          seal: '"competing-seal"',
+          mutation: '"3"',
+          contextMutation: '"12"',
+        };
+
+    const assertWinner = async () => {
+      expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(winner.head);
+      expect(await objectFor(store, PROJECTION_GRAPH, winner.projectionSubject, P_VALUE))
+        .toBe(winner.projectionValue);
+      expect(await objectFor(store, PROJECTION_GRAPH, winner.losingProjectionSubject, P_VALUE))
+        .toBeUndefined();
+      expect(await objectFor(store, SEAL_GRAPH, SEAL, P_VALUE)).toBe(winner.seal);
+      expect(await objectFor(store, STATE_GRAPH, KA_STATE, P_VALUE)).toBe(winner.head);
+      expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBe(winner.mutation);
+      expect(await objectFor(store, STATE_GRAPH, CG_MUTATION, P_GENERATION))
+        .toBe(winner.contextMutation);
+      expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(winner.head);
+    };
+    await assertWinner();
+    await store.flush();
+    await store.close();
+
+    store = await createTripleStore({ backend: 'oxigraph-worker', options: { path } });
+    try {
+      await assertWinner();
+    } finally {
+      await store.close();
+    }
+  }, 15_000);
 
   it('flags changelog reconciliation after an indeterminate post-commit failure', async () => {
     const base = new OxigraphStore();
