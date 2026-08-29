@@ -26,6 +26,7 @@
 
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import { ASSERTION_ACTIVITY_TYPE, PCA_COST_COVERED_TYPE, type AssertionActivityKind } from '@origintrail-official/dkg-node-ui';
+import { isEvmAgentDidSubject, toAgentDid } from '@origintrail-official/dkg-core';
 
 /**
  * Cheap local membership gate for the cross-node (gossip) activity emitter
@@ -52,9 +53,6 @@ export function localNodeInvolvedInContextGraph(
   return members.some((m) => m.status === 'active');
 }
 
-const AGENT_DID_PREFIX = 'did:dkg:agent:';
-const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
-
 /**
  * Coerce an actor identity (an EVM address, a bare `did:dkg:agent:…` DID, or
  * a peer-id-based DID) into the canonical `did:dkg:agent:<id>` form the rest
@@ -65,13 +63,7 @@ export function toActorAgentDid(actor: string | null | undefined): string | unde
   if (actor == null) return undefined;
   const trimmed = actor.trim();
   if (!trimmed) return undefined;
-  if (trimmed.startsWith(AGENT_DID_PREFIX)) {
-    const rest = trimmed.slice(AGENT_DID_PREFIX.length);
-    return EVM_ADDRESS_RE.test(rest) ? `${AGENT_DID_PREFIX}${rest.toLowerCase()}` : trimmed;
-  }
-  if (EVM_ADDRESS_RE.test(trimmed)) return `${AGENT_DID_PREFIX}${trimmed.toLowerCase()}`;
-  // Peer-id-based or other identifier — wrap so it's still an agent DID.
-  return `${AGENT_DID_PREFIX}${trimmed}`;
+  return toAgentDid(trimmed);
 }
 
 export interface AssertionActivityInput {
@@ -154,7 +146,7 @@ export function recordConvictionCostCovered(
   const contextGraphId = input.contextGraphId?.trim();
   if (!contextGraphId) return null;
   const publisher = input.publisherAddress?.trim();
-  if (!publisher || !EVM_ADDRESS_RE.test(publisher)) return null;
+  if (!publisher || !isEvmAgentDidSubject(publisher)) return null;
   const accountId = String(input.accountId);
   const meta = {
     publisherAddress: publisher.toLowerCase(),
