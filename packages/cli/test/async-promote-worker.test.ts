@@ -13,7 +13,7 @@
  * controlled per-test (resolve / throw with specific message).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
@@ -963,7 +963,7 @@ describe('createPromoteWorkerSupervisor', () => {
   });
 
   afterEach(async () => {
-    // best-effort cleanup
+    vi.useRealTimers();
   });
 
   it('start() then tickOnce() picks up queued jobs and runs them to succeeded', async () => {
@@ -1066,7 +1066,8 @@ describe('createPromoteWorkerSupervisor', () => {
     expect((await queue.getStats()).succeeded).toBe(1);
   });
 
-  it('retains the 100ms fallback for durable work written through another queue instance', async () => {
+  it('retains the exact 100ms fallback for durable work written through another queue instance', async () => {
+    vi.useFakeTimers();
     const externalQueue = new TripleStoreAsyncPromoteQueue(store, {
       now: () => Date.now(),
       backoff: () => 50,
@@ -1088,10 +1089,10 @@ describe('createPromoteWorkerSupervisor', () => {
     // This queue instance has no scheduler attached, so the supervisor can
     // observe the durable write only through its public 100ms fallback poll.
     await externalQueue.enqueue(makeRequest('external-write'));
-    await Promise.race([
-      promoted.promise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('durable fallback timed out')), 900)),
-    ]);
+    await vi.advanceTimersByTimeAsync(99);
+    expect((await queue.getStats()).running).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await promoted.promise;
     await sup.stop();
 
     expect((await queue.getStats()).succeeded).toBe(1);
@@ -1381,6 +1382,64 @@ describe('createPromoteWorkerSupervisor', () => {
     // wait on it forever.
     releaseSlow!();
     await slowPromote;
+  });
+
+  it('shutdown timeout stops bookkeeping retries and heartbeats before returning', async () => {
+    await queue.enqueue(makeRequest('bookkeeping-recovery'));
+    const retrySleepStarted = deferred();
+    const retrySleep = deferred();
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    const recordCommitMarker = queue.recordCommitMarker.bind(queue);
+    const heartbeat = queue.heartbeat.bind(queue);
+    let swmMarkerWrites = 0;
+    let heartbeatWrites = 0;
+    wrappedQueue.recordCommitMarker = async (jobId, claimToken, step) => {
+      if (step === 'swmInserted') {
+        swmMarkerWrites += 1;
+        throw retryableBookkeepingFailure();
+      }
+      return recordCommitMarker(jobId, claimToken, step);
+    };
+    wrappedQueue.heartbeat = async (jobId, claimToken) => {
+      heartbeatWrites += 1;
+      return heartbeat(jobId, claimToken);
+    };
+
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 1 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 1_000_000,
+      heartbeatIntervalMs: 5,
+      bookkeepingRetryIntervalMs: 60_000,
+      shutdownTimeoutMs: 25,
+      sleep: async () => {
+        retrySleepStarted.resolve();
+        await retrySleep.promise;
+      },
+      log: (m) => logs.push(m),
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+    await sup.tickOnce();
+    await retrySleepStarted.promise;
+
+    await sup.stop();
+    const writesAtStop = swmMarkerWrites;
+    const heartbeatsAtStop = heartbeatWrites;
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+    expect(writesAtStop).toBe(1);
+    expect(swmMarkerWrites).toBe(writesAtStop);
+    expect(heartbeatWrites).toBe(heartbeatsAtStop);
+    expect(sup.getCounters().interruptedAtShutdown).toBe(1);
+    expect((await queue.getStats()).running).toBe(1);
+    expect((await queue.getStats()).succeeded).toBe(0);
+    expect((await queue.getStats()).failed).toBe(0);
+
+    retrySleep.resolve();
   });
 
   it('stop() waits for a poll callback that has claimed work but not published inFlight yet', async () => {

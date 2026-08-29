@@ -734,6 +734,31 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(notifications).toEqual([]);
   });
 
+  it('keeps committed enqueue and recovery successful when the scheduler throws', async () => {
+    const queue = createQueue();
+    let notifications = 0;
+    queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => {
+        notifications += 1;
+        throw new Error('scheduler crashed');
+      },
+    });
+
+    const jobId = await queue.enqueue(makeRequest());
+    expect((await queue.getStatus(jobId))?.state).toBe('queued');
+
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: 'fatal',
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+    });
+    await expect(queue.recover(jobId)).resolves.toBeUndefined();
+    expect((await queue.getStatus(jobId))?.state).toBe('queued');
+    expect(notifications).toBe(2);
+  });
+
   it('hands scheduler ownership over atomically and ignores stale detach', async () => {
     const queue = createQueue();
     const notifications: string[] = [];
