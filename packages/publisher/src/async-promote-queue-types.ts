@@ -225,6 +225,16 @@ export interface AsyncPromoteQueue {
   pause(): Promise<void>;
   resume(): Promise<void>;
   getStats(): Promise<PromoteStats>;
+  /**
+   * Optional in-process scheduling capability. This is exclusive ownership,
+   * not pub/sub: attaching a new scheduler atomically supersedes the old one,
+   * and a stale detach cannot remove the current owner. Durable queue state
+   * remains authoritative; the owner must retain periodic polling for
+   * cross-process writes and retry deadlines.
+   */
+  readonly workScheduling?: {
+    attachScheduler(scheduler: { onWorkAvailable(): void }): () => void;
+  };
 }
 
 /**

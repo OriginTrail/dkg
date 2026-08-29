@@ -13,7 +13,7 @@
  * controlled per-test (resolve / throw with specific message).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
@@ -963,7 +963,7 @@ describe('createPromoteWorkerSupervisor', () => {
   });
 
   afterEach(async () => {
-    // best-effort cleanup
+    vi.useRealTimers();
   });
 
   it('start() then tickOnce() picks up queued jobs and runs them to succeeded', async () => {
@@ -1039,6 +1039,251 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.start();
     expect(await sup.tickOnce()).toBe(0);
     await sup.stop();
+  });
+
+  it('wakes immediately on enqueue while retaining a slow durable fallback poll', async () => {
+    const promoted = deferred();
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async () => {
+        promoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+
+    await queue.enqueue(makeRequest('signalled'));
+    await Promise.race([
+      promoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('enqueue wake timed out')), 500)),
+    ]);
+    await sup.stop();
+
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('retains the exact 100ms fallback for durable work written through another queue instance', async () => {
+    vi.useFakeTimers();
+    const externalQueue = new TripleStoreAsyncPromoteQueue(store, {
+      now: () => Date.now(),
+      backoff: () => 50,
+      maxRetries: 2,
+    });
+    const promoted = deferred();
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async () => {
+        promoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'durable-fallback',
+    });
+    await sup.start();
+
+    // This queue instance has no scheduler attached, so the supervisor can
+    // observe the durable write only through its public 100ms fallback poll.
+    await externalQueue.enqueue(makeRequest('external-write'));
+    await vi.advanceTimersByTimeAsync(99);
+    expect((await queue.getStats()).running).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await promoted.promise;
+    await sup.stop();
+
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('wakes only the latest supervisor after scheduler handoff and stale stop', async () => {
+    const firstOwnerCalls: string[] = [];
+    const currentOwnerCalls: string[] = [];
+    const firstCurrentRun = deferred();
+    const secondCurrentRun = deferred();
+    const firstSupervisor = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        firstOwnerCalls.push(request.assertionName);
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'superseded',
+    });
+    const currentSupervisor = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        currentOwnerCalls.push(request.assertionName);
+        if (currentOwnerCalls.length === 1) firstCurrentRun.resolve();
+        if (currentOwnerCalls.length === 2) secondCurrentRun.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'current',
+    });
+
+    await firstSupervisor.start();
+    await currentSupervisor.start();
+    await queue.enqueue(makeRequest('after-handoff'));
+    await Promise.race([
+      firstCurrentRun.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('handoff wake timed out')), 500)),
+    ]);
+    expect(firstOwnerCalls).toEqual([]);
+
+    // This detach belongs to the superseded attachment and must not remove
+    // the current supervisor's scheduler ownership.
+    await firstSupervisor.stop();
+    await queue.enqueue(makeRequest('after-stale-stop'));
+    await Promise.race([
+      secondCurrentRun.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('post-stop wake timed out')), 500)),
+    ]);
+    await currentSupervisor.stop();
+
+    expect(firstOwnerCalls).toEqual([]);
+    expect(currentOwnerCalls).toEqual(['after-handoff', 'after-stale-stop']);
+  });
+
+  it('rolls startup back when scheduler attachment throws and can retry cleanly', async () => {
+    let attachAttempts = 0;
+    const wrappedQueue = new Proxy(queue, {
+      get(target, prop, receiver) {
+        if (prop === 'workScheduling') {
+          return {
+            attachScheduler(scheduler: { onWorkAvailable: () => void }) {
+              attachAttempts += 1;
+              if (attachAttempts === 1) throw new Error('scheduler attachment failed');
+              return target.workScheduling.attachScheduler(scheduler);
+            },
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as AsyncPromoteQueue;
+    const promoted = deferred();
+    const agent = makeAgentStub(async () => {
+      promoted.resolve();
+      return { promotedCount: 1 };
+    });
+    agent.promoteQueue = wrappedQueue;
+    const sup = createPromoteWorkerSupervisor({
+      agent,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'startup-rollback',
+    });
+
+    await expect(sup.start()).rejects.toThrow('scheduler attachment failed');
+    await expect(sup.start()).resolves.toBeUndefined();
+    await queue.enqueue(makeRequest('after-startup-retry'));
+    await Promise.race([
+      promoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('startup retry wake timed out')), 500)),
+    ]);
+    await sup.stop();
+
+    expect(attachAttempts).toBe(2);
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('wakes immediately on resume when queued work was observed while paused', async () => {
+    const promoted = deferred();
+    let promoteCalls = 0;
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async () => {
+        promoteCalls += 1;
+        promoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'resume',
+    });
+    await sup.start();
+    await queue.pause();
+    await queue.enqueue(makeRequest('paused'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(promoteCalls).toBe(0);
+
+    await queue.resume();
+    await Promise.race([
+      promoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('resume wake timed out')), 500)),
+    ]);
+    await sup.stop();
+
+    expect(promoteCalls).toBe(1);
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('drains a backlog larger than worker concurrency from a single resume wake', async () => {
+    await queue.pause();
+    await queue.enqueue(makeRequest('backlog-a'));
+    await queue.enqueue(makeRequest('backlog-b'));
+    await queue.enqueue(makeRequest('backlog-c'));
+
+    const allPromoted = deferred();
+    const promoted: string[] = [];
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        promoted.push(request.assertionName);
+        if (promoted.length === 3) allPromoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'backlog',
+    });
+    await sup.start();
+
+    await queue.resume();
+    await Promise.race([
+      allPromoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('backlog drain timed out')), 2_000)),
+    ]);
+    await sup.stop();
+
+    expect([...promoted].sort()).toEqual(['backlog-a', 'backlog-b', 'backlog-c']);
+    expect((await queue.getStats()).succeeded).toBe(3);
+  });
+
+  it('stops probing remaining idle slots after the first empty claim', async () => {
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async (workerId: string) => {
+      claimCalls += 1;
+      return queue.claimNext(workerId);
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+    expect(await sup.tickOnce()).toBe(0);
+    await sup.stop();
+
+    expect(claimCalls).toBe(1);
   });
 
   it('rejects a heartbeat interval that is not shorter than the queue lease', () => {
