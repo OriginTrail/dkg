@@ -115,6 +115,31 @@ export type ScanReport =
   | { kind: 'slotReleased'; run: number; mode: ScanOptions['mode']; attempts: number; resyncStaysScheduled: boolean; error: unknown };
 
 /**
+ * An executable plan: the scan to run plus everything commit needs, carried
+ * AS ONE UNIT. The retry history travels inside the plan, so structurally
+ * copying the scan options cannot reset it, and commit needs no reference
+ * identity with the scheduler's pin.
+ */
+export interface ScanPlan {
+  readonly scan: ScanOptions;
+  /** Failures already recorded against THIS scan before this attempt. */
+  readonly priorFailures: number;
+  /** Scheduler state as of planning, tick accounting applied. */
+  readonly state: ScanSchedulerState;
+}
+
+/**
+ * Planning names its own prerequisite instead of making the caller predict
+ * it: a pinned retry and a DUE overdue resync are executable immediately —
+ * in particular, an overdue `seedFull` must not be skippable by a failing,
+ * irrelevant watermark probe — while only the canonical cadence selection
+ * needs the probe, via `complete`.
+ */
+export type ScanPlanStep =
+  | { readonly kind: 'ready'; readonly plan: ScanPlan }
+  | { readonly kind: 'needsWatermark'; readonly complete: (watermarkSeeded: boolean) => ScanPlan };
+
+/**
  * Pure: choose this tick's scan and account for overdue-cadence time.
  *
  * Overdue ticks count on EVERY planned tick, and when the cadence comes due
@@ -125,45 +150,56 @@ export type ScanReport =
  */
 export function planScan(
   state: ScanSchedulerState,
-  watermarkSeeded: boolean,
   config: ScanSchedulerConfig = {},
-): { scan: ScanOptions; state: ScanSchedulerState } {
+): ScanPlanStep {
   if (state.overdueResync) {
     const ticks = state.overdueResync.ticksSinceAttempt + 1;
     const preemptable = state.pinned === undefined || state.pinned.options.mode === 'incremental';
     if (ticks >= OVERDUE_FULL_RESYNC_RETRY_EVERY && preemptable) {
       return {
-        scan: { mode: 'seedFull', throwOnChainScanFailure: true },
-        state: { run: state.run, overdueResync: { ticksSinceAttempt: 0 } },
+        kind: 'ready',
+        plan: {
+          scan: { mode: 'seedFull', throwOnChainScanFailure: true },
+          priorFailures: 0,
+          state: { run: state.run, overdueResync: { ticksSinceAttempt: 0 } },
+        },
       };
     }
     state = { ...state, overdueResync: { ticksSinceAttempt: ticks } };
   }
   if (state.pinned) {
-    return { scan: state.pinned.options, state };
+    return {
+      kind: 'ready',
+      plan: { scan: state.pinned.options, priorFailures: state.pinned.failures, state },
+    };
   }
+  const planned = state;
   return {
-    scan: chainDiscoveryScanOptions({
-      run: state.run,
-      watermarkSeeded,
-      pageBudget: config.pageBudget,
-      fullScanEvery: config.fullScanEvery,
+    kind: 'needsWatermark',
+    complete: (watermarkSeeded: boolean): ScanPlan => ({
+      scan: chainDiscoveryScanOptions({
+        run: planned.run,
+        watermarkSeeded,
+        pageBudget: config.pageBudget,
+        fullScanEvery: config.fullScanEvery,
+      }),
+      priorFailures: 0,
+      state: planned,
     }),
-    state,
   };
 }
 
 /**
- * Pure: fold a scan's outcome into the next state, and say what to report.
+ * Pure: fold a plan's outcome into the next state, and say what to report.
  * The outcome is discriminated — `Promise.reject(undefined)` is a FAILURE
  * carrying `undefined`, not a success (a sentinel comparison would commit it
  * as one, consuming the slot and clearing an overdue resync no scan earned).
  */
 export function commitScanOutcome(
-  state: ScanSchedulerState,
-  scan: ScanOptions,
+  plan: ScanPlan,
   outcome: ScanOutcome,
 ): { state: ScanSchedulerState; report: ScanReport } {
+  const { scan, state } = plan;
   if (outcome.ok) {
     return {
       state: {
@@ -177,7 +213,9 @@ export function commitScanOutcome(
       report: outcome.found > 0 ? { kind: 'discovered', found: outcome.found } : { kind: 'quiet' },
     };
   }
-  const failures = (state.pinned?.options === scan ? state.pinned.failures : 0) + 1;
+  // Retry history comes from the plan itself — never from comparing object
+  // identities, which a structural copy would silently defeat.
+  const failures = plan.priorFailures + 1;
   if (failures <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES) {
     return {
       state: { ...state, pinned: { options: scan, failures } },
@@ -262,33 +300,41 @@ export function createChainDiscoveryScanRunner(input: {
     if (inFlight) return;
     inFlight = true;
     try {
-      // The probe result only matters when nothing is pinned; a pinned scan
-      // replays its captured options regardless.
-      let watermarkSeeded = false;
-      if (state.pinned === undefined) {
+      // Planning names its own prerequisite: only the canonical cadence
+      // selection needs the watermark probe. A pinned retry or a DUE overdue
+      // resync executes without it — so an irrelevant probe failure cannot
+      // skip either.
+      const step = planScan(state, {
+        pageBudget: input.pageBudget,
+        fullScanEvery: input.fullScanEvery,
+      });
+      let plan: ScanPlan;
+      if (step.kind === 'ready') {
+        plan = step.plan;
+      } else {
+        let watermarkSeeded: boolean;
         try {
           watermarkSeeded = await input.agent.hasContextGraphRegistryScanWatermark();
         } catch (err) {
           // Scoped to the probe call alone, so nothing else — least of all a
-          // throwing log line — can be misclassified as a probe failure.
+          // throwing log line — can be misclassified as a probe failure. The
+          // tick planned nothing, so state (overdue aging included) is
+          // untouched: the debt ages only on ticks that actually plan.
           safeLog(
             `Chain scan run ${state.run} skipped (watermark probe failed; retrying next tick): ` +
               `${describeError(err)}`,
           );
           return;
         }
+        plan = step.complete(watermarkSeeded);
       }
-      const planned = planScan(state, watermarkSeeded, {
-        pageBudget: input.pageBudget,
-        fullScanEvery: input.fullScanEvery,
-      });
       let outcome: ScanOutcome;
       try {
-        outcome = { ok: true, found: await input.agent.discoverContextGraphsFromChain(planned.scan) };
+        outcome = { ok: true, found: await input.agent.discoverContextGraphsFromChain(plan.scan) };
       } catch (error) {
         outcome = { ok: false, error };
       }
-      const committed = commitScanOutcome(planned.state, planned.scan, outcome);
+      const committed = commitScanOutcome(plan, outcome);
       state = committed.state; // committed before ANY logging
       const line = reportLine(committed.report);
       if (line !== undefined) safeLog(line);

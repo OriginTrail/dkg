@@ -397,6 +397,35 @@ describe('chainDiscoveryScanOptions', () => {
   // Review round 3 — the overdue cadence is a TICK contract, and it must
   // hold even while incremental scans are themselves failing and retrying:
   // a failing incremental's retry cycle cannot postpone the owed resync.
+  it('a DUE overdue resync fires even when the watermark probe is failing', async () => {
+    // Review round 4 — the probe is irrelevant to a due resync, so a probe
+    // outage must not be able to skip it.
+    const modes: string[] = [];
+    let probeHealthy = true;
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => {
+        if (!probeHealthy) throw new Error('registry store unavailable');
+        return true;
+      }),
+      discoverContextGraphsFromChain: vi.fn(
+        async (options: ReturnType<typeof chainDiscoveryScanOptions>) => {
+          modes.push(options.mode);
+          if (options.mode === 'seedFull') throw new Error('flaky RPC');
+          return 0;
+        },
+      ),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner(); // exhaust seedFull
+    // Age the debt to one tick short of due with healthy probes, then break
+    // the probe for the due tick.
+    for (let i = 1; i < OVERDUE_FULL_RESYNC_RETRY_EVERY; i++) await runner();
+    probeHealthy = false;
+    await runner();
+    expect(modes.at(-1)).toBe('seedFull');
+  });
+
   it('an overdue resync fires on schedule even while incremental scans fail', async () => {
     const modes: string[] = [];
     const agent = {
@@ -431,38 +460,71 @@ describe('scan scheduler transitions (GH#2323)', () => {
   const seedFull = { mode: 'seedFull', throwOnChainScanFailure: true } as const;
   const incremental = { mode: 'incremental', pageBudget: 30 } as const;
 
-  it('failure pins the executed scan; success releases the pin and advances the run', () => {
-    const planned = planScan(INITIAL_SCAN_SCHEDULER_STATE, true);
-    expect(planned.scan).toEqual(seedFull);
+  /** Resolve a plan, providing the watermark only when planning asks. */
+  const plan = (state: Parameters<typeof planScan>[0], watermarkSeeded = true) => {
+    const step = planScan(state);
+    return step.kind === 'ready' ? step.plan : step.complete(watermarkSeeded);
+  };
 
-    const failed = commitScanOutcome(planned.state, planned.scan, { ok: false, error: new Error('x') });
+  it('failure pins the executed scan; success releases the pin and advances the run', () => {
+    const first = plan(INITIAL_SCAN_SCHEDULER_STATE);
+    expect(first.scan).toEqual(seedFull);
+
+    const failed = commitScanOutcome(first, { ok: false, error: new Error('x') });
     expect(failed.state).toEqual({ run: 0, pinned: { options: seedFull, failures: 1 } });
     expect(failed.report.kind).toBe('retryScheduled');
 
-    const replanned = planScan(failed.state, /* probe irrelevant when pinned */ false);
-    expect(replanned.scan).toBe(failed.state.pinned!.options);
+    // A pinned retry is executable WITHOUT the watermark probe.
+    const step = planScan(failed.state);
+    expect(step.kind).toBe('ready');
+    if (step.kind !== 'ready') return;
+    expect(step.plan.scan).toBe(failed.state.pinned!.options);
+    expect(step.plan.priorFailures).toBe(1);
 
-    const succeeded = commitScanOutcome(replanned.state, replanned.scan, { ok: true, found: 0 });
+    const succeeded = commitScanOutcome(step.plan, { ok: true, found: 0 });
     expect(succeeded.state).toEqual({ run: 1 });
     expect(succeeded.report.kind).toBe('quiet');
+  });
+
+  it('structurally copying a plan cannot reset its retry history', () => {
+    // Review round 4: commit must not depend on object identity with the
+    // scheduler's pin — the history travels IN the plan.
+    const failed = commitScanOutcome(plan(INITIAL_SCAN_SCHEDULER_STATE), { ok: false, error: 'e' });
+    const step = planScan(failed.state);
+    if (step.kind !== 'ready') throw new Error('pinned retry must be ready');
+    const copied = { ...step.plan, scan: { ...step.plan.scan } };
+    const refailed = commitScanOutcome(copied, { ok: false, error: 'e' });
+    expect(refailed.state.pinned!.failures).toBe(2);
+  });
+
+  it('a DUE overdue resync plans ready — no watermark prerequisite', () => {
+    const step = planScan({
+      run: 5,
+      overdueResync: { ticksSinceAttempt: OVERDUE_FULL_RESYNC_RETRY_EVERY - 1 },
+    });
+    expect(step.kind).toBe('ready');
+    if (step.kind !== 'ready') return;
+    expect(step.plan.scan).toEqual(seedFull);
+    expect(step.plan.state.overdueResync).toEqual({ ticksSinceAttempt: 0 });
   });
 
   it('exhaustion of a seedFull releases the slot AND records the overdue resync', () => {
     let state = INITIAL_SCAN_SCHEDULER_STATE;
     for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) {
-      const planned = planScan(state, true);
-      state = commitScanOutcome(planned.state, planned.scan, { ok: false, error: 'e' }).state;
+      state = commitScanOutcome(plan(state), { ok: false, error: 'e' }).state;
     }
     expect(state).toEqual({ run: 1, overdueResync: { ticksSinceAttempt: 0 } });
   });
 
   it('a non-seedFull success and a non-seedFull release both PRESERVE the overdue debt', () => {
     const owing = { run: 3, overdueResync: { ticksSinceAttempt: 1 } };
-    const success = commitScanOutcome(owing, incremental, { ok: true, found: 0 });
+    const success = commitScanOutcome(
+      { scan: incremental, priorFailures: 0, state: owing },
+      { ok: true, found: 0 },
+    );
     expect(success.state.overdueResync).toEqual({ ticksSinceAttempt: 1 });
     const exhausted = commitScanOutcome(
-      { ...owing, pinned: { options: incremental, failures: MAX_CONSECUTIVE_SAME_SCAN_RETRIES } },
-      incremental,
+      { scan: incremental, priorFailures: MAX_CONSECUTIVE_SAME_SCAN_RETRIES, state: owing },
       { ok: false, error: 'e' },
     );
     expect(exhausted.report.kind).toBe('slotReleased');
@@ -471,7 +533,10 @@ describe('scan scheduler transitions (GH#2323)', () => {
 
   it('only a completed seedFull settles the overdue debt', () => {
     const owing = { run: 3, overdueResync: { ticksSinceAttempt: 2 } };
-    const settled = commitScanOutcome(owing, seedFull, { ok: true, found: 0 });
+    const settled = commitScanOutcome(
+      { scan: seedFull, priorFailures: 0, state: owing },
+      { ok: true, found: 0 },
+    );
     expect(settled.state.overdueResync).toBeUndefined();
   });
 
@@ -482,10 +547,12 @@ describe('scan scheduler transitions (GH#2323)', () => {
       pinned: { options: seeding, failures: 1 },
       overdueResync: { ticksSinceAttempt: OVERDUE_FULL_RESYNC_RETRY_EVERY },
     };
-    const planned = planScan(state, true);
+    const step = planScan(state);
+    expect(step.kind).toBe('ready');
+    if (step.kind !== 'ready') return;
     // The bootstrap retry is the more specific recovery already in progress.
-    expect(planned.scan).toBe(state.pinned.options);
+    expect(step.plan.scan).toBe(state.pinned.options);
     // The debt keeps aging rather than resetting from an attempt that never ran.
-    expect(planned.state.overdueResync!.ticksSinceAttempt).toBeGreaterThan(OVERDUE_FULL_RESYNC_RETRY_EVERY);
+    expect(step.plan.state.overdueResync!.ticksSinceAttempt).toBeGreaterThan(OVERDUE_FULL_RESYNC_RETRY_EVERY);
   });
 });
