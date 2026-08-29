@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  ORDINARY_SYNC_ON_CONNECT_POLICY,
+  type OrdinarySyncOnConnectPolicy,
+} from './sync-on-connect.js';
+
 export type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
 
 interface OrdinaryLane {
   readonly kind: 'ordinary';
   readonly handleSyncError: SyncOnConnectErrorHandler;
-  readonly afterSelected: boolean;
+  readonly policy: OrdinarySyncOnConnectPolicy;
 }
 
 interface SelectedLane<SelectedPlan> {
@@ -28,10 +33,7 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
   readonly runOrdinary: (
     remotePeer: string,
     handleSyncError: SyncOnConnectErrorHandler,
-  ) => Promise<void>;
-  readonly runOrdinaryAfterSelected: (
-    remotePeer: string,
-    handleSyncError: SyncOnConnectErrorHandler,
+    policy: OrdinarySyncOnConnectPolicy,
   ) => Promise<void>;
   readonly runSelected: (
     remotePeer: string,
@@ -75,7 +77,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       this.schedule(remotePeer, {
         kind: 'ordinary',
         handleSyncError,
-        afterSelected: false,
+        policy: ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
       }, delayMs);
       return true;
     }
@@ -83,7 +85,9 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     existing.pendingOrdinary = {
       kind: 'ordinary',
       handleSyncError,
-      afterSelected: existing.currentLane === 'selected' || existing.pendingSelected !== null,
+      policy: existing.currentLane === 'selected' || existing.pendingSelected !== null
+        ? ORDINARY_SYNC_ON_CONNECT_POLICY.afterSelected
+        : ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
     };
     return true;
   }
@@ -108,7 +112,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     if (existing.pendingOrdinary !== null) {
       existing.pendingOrdinary = {
         ...existing.pendingOrdinary,
-        afterSelected: true,
+        policy: ORDINARY_SYNC_ON_CONNECT_POLICY.afterSelected,
       };
     }
     return true;
@@ -147,10 +151,11 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
             lane.recoveryPlan,
           );
         } else {
-          const runOrdinary = lane.afterSelected
-            ? this.callbacks.runOrdinaryAfterSelected
-            : this.callbacks.runOrdinary;
-          await runOrdinary(remotePeer, lane.handleSyncError);
+          await this.callbacks.runOrdinary(
+            remotePeer,
+            lane.handleSyncError,
+            lane.policy,
+          );
         }
       } catch (error: unknown) {
         // Error ownership belongs to the lane that actually failed. A later

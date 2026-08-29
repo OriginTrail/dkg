@@ -358,9 +358,11 @@ import {
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
 import {
+  ORDINARY_SYNC_ON_CONNECT_POLICY,
   runSelectedSharedMemoryRetry,
   runSyncOnConnect,
   SyncOnConnectPostSyncError,
+  type OrdinarySyncOnConnectPolicy,
   type SyncOnConnectOutcome,
   type SyncOnConnectPeerOutcome,
 } from './sync/on-connect/sync-on-connect.js';
@@ -674,7 +676,6 @@ import {
   resolveRfc64SelectedRecoveryContextGraphIdsV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
-  type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 
@@ -4550,26 +4551,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   /** Production trigger shared with the RFC-64 bootstrap mixin. */
   queueRfc64SwmRecoveryPlanFromPeerOnConnect(
     this: DKGAgent,
-    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
+    recoveryPlan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
-    options: { catalogPassMinimumTerminalAgeMs?: number } = {},
   ): boolean {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(recoveryPlan.providerPeerId)) {
       return false;
     }
-    const authorized = options.catalogPassMinimumTerminalAgeMs === undefined
-      ? this.rfc64SwmRecoveryCoordinatorV1.authorize(recoveryPlan)
-      : this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
-        recoveryPlan,
-        options.catalogPassMinimumTerminalAgeMs,
-      );
-    if (authorized === null) return false;
     return this.queueSyncFromPeerOnConnect(
       recoveryPlan.providerPeerId,
       handleSyncError,
       delayMs,
-      { selectedSwmRetry: true, rfc64RecoveryPlan: authorized },
+      { selectedSwmRetry: true, rfc64RecoveryPlan: recoveryPlan },
     );
   }
 
@@ -4617,10 +4610,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
   ): SyncOnConnectPeerScheduler<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
     this.syncOnConnectPeerScheduler ??= new SyncOnConnectPeerScheduler({
-      runOrdinary: (remotePeer, handleSyncError) =>
-        this.runSyncFromPeerOnConnect(remotePeer, handleSyncError),
-      runOrdinaryAfterSelected: (remotePeer, handleSyncError) =>
-        this.runOrdinaryOnlySyncFromPeerOnConnect(remotePeer, handleSyncError),
+      runOrdinary: (remotePeer, handleSyncError, policy) =>
+        this.runSyncFromPeerOnConnect(remotePeer, handleSyncError, policy),
       runSelected: (remotePeer, handleSyncError, recoveryPlan) =>
         this.runSelectedSwmRetryFromPeerOnConnect(
           remotePeer,
@@ -4720,11 +4711,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
+    policy: OrdinarySyncOnConnectPolicy = ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
   ): Promise<void> {
     if (!syncOnConnectEnabled(this.config)) return;
     const now = Date.now();
     const backoff = this.syncReconcilerBackoff.get(remotePeer);
-    if (backoff && now < backoff.nextRetryAt) return;
+    if (!policy.bypassPeerBackoff && backoff && now < backoff.nextRetryAt) return;
 
     const probe = await this.getSyncReconcilerProbe(remotePeer);
     try {
@@ -4732,24 +4724,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         probe,
         'on-connect',
-      );
-    } catch (err: unknown) {
-      handleSyncError(remotePeer, err);
-    }
-  }
-
-  async runOrdinaryOnlySyncFromPeerOnConnect(
-    this: DKGAgent,
-    remotePeer: string,
-    handleSyncError: (remotePeer: string, err: unknown) => void,
-  ): Promise<void> {
-    if (!syncOnConnectEnabled(this.config)) return;
-    const probe = await this.getSyncReconcilerProbe(remotePeer);
-    try {
-      await this.attemptOrdinaryOnlySyncFromPeerWithReconcilerAccounting(
-        remotePeer,
-        probe,
-        'on-connect',
+        policy,
       );
     } catch (err: unknown) {
       handleSyncError(remotePeer, err);
@@ -4788,6 +4763,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
+    policy: OrdinarySyncOnConnectPolicy = ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
   ): Promise<SyncReconcilerAttemptOutcome> {
     if (!syncOnConnectEnabled(this.config)) return 'not-started';
     return this.accountSyncAttemptWithReconciler(
@@ -4797,24 +4773,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         onSyncAccounting,
         source,
-      ),
-    );
-  }
-
-  async attemptOrdinaryOnlySyncFromPeerWithReconcilerAccounting(
-    this: DKGAgent,
-    remotePeer: string,
-    probe: SyncReconcilerProbe,
-    source: SyncAdmissionSource = 'on-connect',
-  ): Promise<SyncReconcilerAttemptOutcome> {
-    if (!syncOnConnectEnabled(this.config)) return 'not-started';
-    return this.accountSyncAttemptWithReconciler(
-      remotePeer,
-      probe,
-      (onSyncAccounting) => this.tryOrdinaryOnlySyncFromPeer(
-        remotePeer,
-        onSyncAccounting,
-        source,
+        policy,
       ),
     );
   }
@@ -4909,46 +4868,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
-  ): Promise<SyncOnConnectOutcome | 'not-started'> {
-    return LifecycleSyncMethods.prototype.trySyncFromPeerWithLanePolicy.call(
-      this,
-      remotePeer,
-      onSyncAccounting,
-      source,
-      {
-        includeSelectedPublicLane: true,
-        preserveSelectedRetryOwnership: false,
-      },
-    );
-  }
-
-  async tryOrdinaryOnlySyncFromPeer(
-    this: DKGAgent,
-    remotePeer: string,
-    onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
-    source: SyncAdmissionSource = 'on-connect',
-  ): Promise<SyncOnConnectOutcome | 'not-started'> {
-    return LifecycleSyncMethods.prototype.trySyncFromPeerWithLanePolicy.call(
-      this,
-      remotePeer,
-      onSyncAccounting,
-      source,
-      {
-        includeSelectedPublicLane: false,
-        preserveSelectedRetryOwnership: true,
-      },
-    );
-  }
-
-  private async trySyncFromPeerWithLanePolicy(
-    this: DKGAgent,
-    remotePeer: string,
-    onSyncAccounting: ((outcome: SyncOnConnectPeerOutcome) => void) | undefined,
-    source: SyncAdmissionSource,
-    lanePolicy: Readonly<{
-      includeSelectedPublicLane: boolean;
-      preserveSelectedRetryOwnership: boolean;
-    }>,
+    policy: OrdinarySyncOnConnectPolicy = ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
@@ -4976,18 +4896,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const selectedPublicContextGraphIds = new Set(
       this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer),
     );
-    const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
-      let plan = sharedMemorySyncPlans.get(peerId);
-      if (!plan) {
-        plan = this.planSharedMemorySyncContextGraphs(
-          peerId,
-          sharedMemoryRecoveryContextGraphIds,
-          createOperationContext('sync'),
-        );
-        sharedMemorySyncPlans.set(peerId, plan);
-      }
-      return plan;
-    };
     const getPrioritySharedMemorySyncPlan = (
       peerId: string,
     ): Promise<SharedMemorySyncContextGraphPlan> => {
@@ -5000,6 +4908,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           { requireCompleteProviderMatch: true },
         );
         prioritySharedMemorySyncPlans.set(peerId, plan);
+      }
+      return plan;
+    };
+    const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
+      // One automatic complete-provider run owns one immutable planning
+      // snapshot. The selected lane admits that exact snapshot first; the
+      // later ordinary-lane projection must not consult a changed catalog and
+      // accidentally transfer a different scope in the same run.
+      if (automaticPeerSweep && remotePeerIsCompleteSwmProvider) {
+        return getPrioritySharedMemorySyncPlan(peerId);
+      }
+      let plan = sharedMemorySyncPlans.get(peerId);
+      if (!plan) {
+        plan = this.planSharedMemorySyncContextGraphs(
+          peerId,
+          sharedMemoryRecoveryContextGraphIds,
+          createOperationContext('sync'),
+        );
+        sharedMemorySyncPlans.set(peerId, plan);
       }
       return plan;
     };
@@ -5042,7 +4969,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       ...(automaticPeerSweep
         && remotePeerIsCompleteSwmProvider
-        && lanePolicy.includeSelectedPublicLane
+        && policy.includeSelectedPublicLane
         ? {
           selectedSharedMemoryLane: {
             admitPlan: async (peerId: string) => {
@@ -5142,7 +5069,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.skippedNoSyncPeers.add(peerId);
       },
       onSyncAccounting: (peerId, outcome) => {
-        const selectedRetryStillRequired = lanePolicy.preserveSelectedRetryOwnership
+        const selectedRetryStillRequired = policy.preserveSelectedRetryOwnership
           && this.selectedSwmBootstrapAdmission.isRetryRequired(peerId);
         const effectiveOutcome: SyncOnConnectPeerOutcome =
           selectedRetryStillRequired && outcome.reconcilerDisposition === 'clear'

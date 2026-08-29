@@ -377,11 +377,16 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           state.config,
           providerPeerId,
         );
+        const authorizedPlan = this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
+          recoveryPlan,
+          this.config.syncReconcilerTiming.stalenessThresholdMs,
+        );
+        if (authorizedPlan === null) continue;
         // A pre-existing connection has no new connection:open event. One
         // immutable provider plan owns admission for every selected graph,
         // including mixed public/private providers.
         this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-          recoveryPlan,
+          authorizedPlan,
           (_peerId, error) => {
             this.log.warn(
               state.ctx,
@@ -389,10 +394,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             );
           },
           0,
-          {
-            catalogPassMinimumTerminalAgeMs:
-              this.config.syncReconcilerTiming.stalenessThresholdMs,
-          },
         );
       }
     } finally {

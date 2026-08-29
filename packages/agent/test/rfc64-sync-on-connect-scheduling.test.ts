@@ -104,9 +104,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       };
     });
     (agent as any).syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
-    const genericRun = vi.spyOn(agent as any, 'runSyncFromPeerOnConnect')
-      .mockImplementation(async () => { ordering.push('ordinary'); });
-    const ordinaryOnlyRun = vi.spyOn(agent as any, 'runOrdinaryOnlySyncFromPeerOnConnect')
+    const ordinaryRun = vi.spyOn(agent as any, 'runSyncFromPeerOnConnect')
       .mockImplementation(async () => { ordering.push('ordinary'); });
     const selectedRun = vi.spyOn(agent as any, 'runSelectedSwmRetryFromPeerOnConnect');
     const errors: unknown[] = [];
@@ -116,24 +114,21 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     // upgrades that pending run instead of creating a second timer/ledger.
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-      {
-        providerPeerId: PEER_A,
-        targets: authorized.targets,
-      },
+      authorized,
       handleSyncError,
       0,
     )).toBe(true);
     expect((agent as any).catchupOnConnectAt.size).toBe(1);
     expect((agent as any).syncOnConnectPeerScheduler.size).toBe(1);
 
-    await vi.waitFor(() => expect(ordinaryOnlyRun).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledOnce());
 
     expect(selectedRun).toHaveBeenCalledOnce();
-    expect(ordinaryOnlyRun).toHaveBeenCalledWith(
+    expect(ordinaryRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
+      expect.objectContaining({ kind: 'after-selected' }),
     );
-    expect(genericRun).not.toHaveBeenCalled();
     expect(ordering).toEqual(['exact', 'ordinary']);
     expect(selectedSync).toHaveBeenCalledWith(
       PEER_A,
@@ -150,12 +145,13 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
     expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
     expect(errors).toEqual([]);
+    ordinaryRun.mockClear();
 
     // If catalog bootstrap finishes while the generic owner is already
     // running, the same owner drains the late exact plan after ordinary sync.
     let releaseOrdinary!: () => void;
     const ordinaryBlocked = new Promise<void>((resolve) => { releaseOrdinary = resolve; });
-    genericRun.mockImplementationOnce(async () => {
+    ordinaryRun.mockImplementationOnce(async () => {
       ordering.push('ordinary-in-flight');
       await ordinaryBlocked;
     });
@@ -168,30 +164,27 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
-    await vi.waitFor(() => expect(genericRun).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledOnce());
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-      { providerPeerId: PEER_A, targets: authorized.targets },
+      authorized,
       handleSyncError,
       0,
     )).toBe(true);
     releaseOrdinary();
     await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledTimes(2));
-    expect(genericRun).toHaveBeenCalledOnce();
+    expect(ordinaryRun).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
 
     // A periodic exact plan inside its own cooldown must not use the ordinary
     // owner's one-time post-catalog bypass again.
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-      {
-        providerPeerId: PEER_A,
-        targets: authorized.targets,
-      },
+      authorized,
       handleSyncError,
       0,
     )).toBe(false);
     await flushTimers();
     expect(selectedSync).toHaveBeenCalledTimes(2);
-    expect(genericRun).toHaveBeenCalledOnce();
+    expect(ordinaryRun).toHaveBeenCalledOnce();
 
     // After the real cooldown expires, a generic owner may finish before the
     // catalog plan arrives. That first exact plan still gets one bypass; the
@@ -205,17 +198,17 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
-    await vi.waitFor(() => expect(genericRun).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-      { providerPeerId: PEER_A, targets: authorized.targets },
+      authorized,
       handleSyncError,
       0,
     )).toBe(true);
     await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledTimes(3));
     await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-      { providerPeerId: PEER_A, targets: authorized.targets },
+      authorized,
       handleSyncError,
       0,
     )).toBe(false);
@@ -273,7 +266,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
           nextRetryAt: Date.now() + 60_000,
         });
       });
-    const ordinaryRun = vi.spyOn(agent as any, 'runOrdinaryOnlySyncFromPeerOnConnect');
+    const ordinaryRun = vi.spyOn(agent as any, 'runSyncFromPeerOnConnect');
     ordinarySharedSync.mockImplementation(async () => {
       ordering.push('ordinary');
       return emptyDetailedSync({ completedPhases: 1 });
@@ -283,7 +276,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
 
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-      { providerPeerId: PEER_A, targets: authorized.targets },
+      authorized,
       handleSyncError,
       0,
     )).toBe(true);
@@ -293,6 +286,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(ordinaryRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
+      expect.objectContaining({ kind: 'after-selected' }),
     );
     expect(ordinarySharedSync).toHaveBeenCalledOnce();
     expect(ordinarySharedSync).toHaveBeenCalledWith(
@@ -356,7 +350,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       0,
     )).toBe(true);
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-      { providerPeerId: PEER_A, targets: authorized.targets },
+      authorized,
       handleSyncError,
       0,
     )).toBe(true);
@@ -408,12 +402,12 @@ describe('RFC-64 sync-on-connect scheduling', () => {
         ordering.push('exact-in-flight');
         await exactBlocked;
       });
-    const ordinaryRun = vi.spyOn(agent as any, 'runOrdinaryOnlySyncFromPeerOnConnect')
+    const ordinaryRun = vi.spyOn(agent as any, 'runSyncFromPeerOnConnect')
       .mockImplementation(async () => { ordering.push('ordinary'); });
     const handleSyncError = () => undefined;
 
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-      { providerPeerId: PEER_A, targets: authorized.targets },
+      authorized,
       handleSyncError,
       0,
     )).toBe(true);
@@ -425,6 +419,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(ordinaryRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
+      expect.objectContaining({ kind: 'after-selected' }),
     );
     expect(ordering).toEqual(['exact-in-flight', 'ordinary']);
   });
@@ -481,6 +476,76 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       PEER_A,
       ['ordinary-cg'],
       expect.any(Object),
+    );
+  });
+
+  it('freezes one selected SWM plan across admission and transfer', async () => {
+    const agent = await createUnstartedAgent('Rfc64FrozenSelectedSwmPlan');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).config.nodeRole = 'edge';
+    (agent as any).config.syncContextGraphs = ['selected-a', 'selected-b'];
+    (agent as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: {
+          payload: { contextGraphId: 'selected-a', accessPolicy: 0 },
+        },
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => [
+      'selected-a',
+      'selected-b',
+    ];
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    const planner = vi.fn()
+      .mockResolvedValueOnce({
+        targets: [{ contextGraphId: 'selected-a', lane: 'selected-public' }],
+      })
+      .mockResolvedValue({
+        targets: [{ contextGraphId: 'selected-b', lane: 'selected-public' }],
+      });
+    (agent as any).planSharedMemorySyncContextGraphs = planner;
+    (agent as any).rfc64SwmRecoveryCoordinatorV1 = {
+      admitSelectedPublic: vi.fn(() => true),
+    };
+    const selectedSync = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: any },
+    ) => ({
+      kind: 'selected-shared-memory' as const,
+      requestedScope: options.requestedScope,
+      shared: emptyDetailedSync({ completedPhases: 1 }),
+      scopeComplete: true,
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
+    }));
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
+    (agent as any).syncSharedMemoryFromPeerDetailed = vi.fn(
+      async () => emptyDetailedSync({ completedPhases: 1 }),
+    );
+    (agent as any).syncFromPeerDetailed = vi.fn(
+      async () => emptyDetailedSync({ completedPhases: 1 }),
+    );
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+
+    expect(await (agent as any).trySyncFromPeer(PEER_A, undefined, 'reconcile'))
+      .toBe('synced');
+
+    expect(planner).toHaveBeenCalledOnce();
+    expect(selectedSync).toHaveBeenCalledWith(
+      PEER_A,
+      ['selected-a'],
+      expect.objectContaining({
+        requestedScope: {
+          kind: 'selected-public',
+          targets: [{ contextGraphId: 'selected-a', lane: 'selected-public' }],
+        },
+      }),
     );
   });
 

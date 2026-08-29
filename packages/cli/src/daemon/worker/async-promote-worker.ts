@@ -42,7 +42,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   PromoteJobLeaseError,
-  PromoteReplaySafeError,
+  isPromoteReplaySafeError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteFailureClassification,
@@ -316,7 +316,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // The promotion producer owns workflow-level replay safety. A typed
   // disposition means it proved that retrying the complete attempt converges;
   // the worker never infers that from a low-level storage operation name.
-  if (err instanceof PromoteReplaySafeError) {
+  if (isPromoteReplaySafeError(err)) {
     return { classification: 'transient', retryable: true };
   }
 

@@ -1,5 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  GraphManager,
+  OxigraphStore,
+  StoreOperationTimeoutError,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   DKG_GOSSIP_MAX_MESSAGE_BYTES,
   TypedEventBus,
@@ -19,6 +24,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
+  PromoteReplaySafeError,
   assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
@@ -27,6 +33,7 @@ import {
 } from '../src/index.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { classifyPromoteError } from '../../cli/src/daemon/worker/async-promote-worker.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
 const CG_ID = 'test-assertion-cg';
@@ -503,6 +510,50 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
       expect(swmResult.bindings.length).toBe(3);
+    }
+  });
+
+  it('marks an indeterminate exact SWM replacement as replay-safe through assertionPromote', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      storeOperation: 'replaceGraph',
+      outcome: 'indeterminate',
+    });
+    const replaceGraph = store.replaceGraph.bind(store);
+    let injected = false;
+    const replaceGraphSpy = vi.spyOn(store, 'replaceGraph').mockImplementation(
+      async (graphUri, quads) => {
+        if (!injected && graphUri === finalized.sharedGraphUri) {
+          injected = true;
+          throw failure;
+        }
+        return replaceGraph(graphUri, quads);
+      },
+    );
+
+    try {
+      let rejection: unknown;
+      try {
+        await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBeInstanceOf(PromoteReplaySafeError);
+      expect(rejection).toMatchObject({
+        stage: 'atomic-exact-swm-graph-replacement',
+        cause: failure,
+      });
+      expect(classifyPromoteError(rejection)).toEqual({
+        classification: 'transient',
+        retryable: true,
+      });
+      expect(injected).toBe(true);
+    } finally {
+      replaceGraphSpy.mockRestore();
     }
   });
 

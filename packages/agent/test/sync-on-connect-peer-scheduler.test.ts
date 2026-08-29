@@ -16,8 +16,9 @@ describe('sync-on-connect per-peer scheduler', () => {
     const ordering: string[] = [];
     const scheduler = new SyncOnConnectPeerScheduler<string>({
       runSelected: async (_peer, _onError, plan) => { ordering.push(`selected:${plan}`); },
-      runOrdinary: async () => { ordering.push('ordinary'); },
-      runOrdinaryAfterSelected: async () => { ordering.push('ordinary-only'); },
+      runOrdinary: async (_peer, _onError, policy) => {
+        ordering.push(policy.kind === 'after-selected' ? 'ordinary-only' : 'ordinary');
+      },
     });
     const onError = () => undefined;
 
@@ -40,12 +41,8 @@ describe('sync-on-connect per-peer scheduler', () => {
         ordering.push('selected');
         await selected.promise;
       },
-      runOrdinary: async () => {
-        ordering.push('ordinary');
-        await ordinary.promise;
-      },
-      runOrdinaryAfterSelected: async () => {
-        ordering.push('ordinary-only');
+      runOrdinary: async (_peer, _onError, policy) => {
+        ordering.push(policy.kind === 'after-selected' ? 'ordinary-only' : 'ordinary');
         await ordinary.promise;
       },
     });
@@ -70,8 +67,9 @@ describe('sync-on-connect per-peer scheduler', () => {
         ordering.push('selected');
         await selected.promise;
       },
-      runOrdinary: async () => { ordering.push('ordinary'); },
-      runOrdinaryAfterSelected: async () => { ordering.push('ordinary-only'); },
+      runOrdinary: async (_peer, _onError, policy) => {
+        ordering.push(policy.kind === 'after-selected' ? 'ordinary-only' : 'ordinary');
+      },
     });
     const onError = () => undefined;
 
@@ -92,8 +90,9 @@ describe('sync-on-connect per-peer scheduler', () => {
         ordering.push(`selected:${plan}`);
         if (plan === 'plan-a') await firstSelected.promise;
       },
-      runOrdinary: async () => { ordering.push('ordinary'); },
-      runOrdinaryAfterSelected: async () => { ordering.push('ordinary-only'); },
+      runOrdinary: async (_peer, _onError, policy) => {
+        ordering.push(policy.kind === 'after-selected' ? 'ordinary-only' : 'ordinary');
+      },
     });
     const onError = () => undefined;
 
@@ -123,11 +122,6 @@ describe('sync-on-connect per-peer scheduler', () => {
         if (plan !== undefined) selectedPlans.push(plan);
       },
       runOrdinary: async () => {
-        ordinaryStarted.resolve();
-        await ordinary.promise;
-        throw ordinaryFailure;
-      },
-      runOrdinaryAfterSelected: async () => {
         ordinaryStarted.resolve();
         await ordinary.promise;
         throw ordinaryFailure;

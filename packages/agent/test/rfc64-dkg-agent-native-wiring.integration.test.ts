@@ -1373,12 +1373,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     expect(queue).toHaveBeenCalledWith(
       expect.objectContaining({
+        kind: 'rfc64-authorized-swm-recovery-v1',
         providerPeerId,
         targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
       }),
       expect.any(Function),
       0,
-      { catalogPassMinimumTerminalAgeMs: 600_000 },
     );
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
     expect(ordering).toEqual(['connect', 'catalog-start', 'catalog-complete', 'swm']);
@@ -1577,12 +1577,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
     expect(queue).toHaveBeenCalledWith(
       expect.objectContaining({
+        kind: 'rfc64-authorized-swm-recovery-v1',
         providerPeerId,
         targets: [{ contextGraphId: policy.contextGraphId, lane: 'ordinary-private' }],
       }),
       expect.any(Function),
       0,
-      { catalogPassMinimumTerminalAgeMs: 600_000 },
     );
     await expect(receiver.planSharedMemorySyncContextGraphs(
       providerPeerId,
@@ -1627,24 +1627,28 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    const coordinator = (receiver as any).rfc64SwmRecoveryCoordinatorV1;
+    const authorizeForCatalogPass = vi.spyOn(coordinator, 'authorizeForCatalogPass');
+    const authorize = vi.spyOn(coordinator, 'authorize');
     const authorizedPlans: unknown[] = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
-      .mockImplementation((plan, _handleSyncError, _delayMs, options) => {
-        const coordinator = (receiver as any).rfc64SwmRecoveryCoordinatorV1;
-        const authorized = options.catalogPassMinimumTerminalAgeMs === undefined
-          ? coordinator.authorize(plan)
-          : coordinator.authorizeForCatalogPass(
-            plan,
-            options.catalogPassMinimumTerminalAgeMs,
-          );
-        if (authorized === null) return false;
-        authorizedPlans.push(authorized);
+      .mockImplementation((authorizedPlan) => {
+        authorizedPlans.push(authorizedPlan);
         return true;
       });
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(authorizedPlans).toHaveLength(1);
+    expect(authorizeForCatalogPass).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerPeerId,
+        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+      }),
+      60_000,
+    );
+    expect(authorizedPlans[0]).toBe(authorizeForCatalogPass.mock.results[0]?.value);
+    expect(authorize).not.toHaveBeenCalled();
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(true);
 
@@ -1699,24 +1703,28 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    const coordinator = (receiver as any).rfc64SwmRecoveryCoordinatorV1;
+    const authorizeForCatalogPass = vi.spyOn(coordinator, 'authorizeForCatalogPass');
+    const authorize = vi.spyOn(coordinator, 'authorize');
     const authorizedPlans: unknown[] = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
-      .mockImplementation((plan, _handleSyncError, _delayMs, options) => {
-        const coordinator = (receiver as any).rfc64SwmRecoveryCoordinatorV1;
-        const authorized = options.catalogPassMinimumTerminalAgeMs === undefined
-          ? coordinator.authorize(plan)
-          : coordinator.authorizeForCatalogPass(
-            plan,
-            options.catalogPassMinimumTerminalAgeMs,
-          );
-        if (authorized === null) return false;
-        authorizedPlans.push(authorized);
+      .mockImplementation((authorizedPlan) => {
+        authorizedPlans.push(authorizedPlan);
         return true;
       });
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(authorizedPlans).toHaveLength(1);
+    expect(authorizeForCatalogPass).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerPeerId,
+        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+      }),
+      60_000,
+    );
+    expect(authorizedPlans[0]).toBe(authorizeForCatalogPass.mock.results[0]?.value);
+    expect(authorize).not.toHaveBeenCalled();
     const completeOwner = (receiver as any).selectedSwmBootstrapAdmission.beginTransfer(
       providerPeerId,
       [CONTEXT_GRAPH_ID],
@@ -1767,10 +1775,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
     const authorizedPlans: unknown[] = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
-      .mockImplementation((plan) => {
-        const authorized = (receiver as any).rfc64SwmRecoveryCoordinatorV1.authorize(plan);
-        if (authorized === null) return false;
-        authorizedPlans.push(authorized);
+      .mockImplementation((authorizedPlan) => {
+        authorizedPlans.push(authorizedPlan);
         return true;
       });
 
@@ -1834,10 +1840,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       targets: readonly Readonly<{ contextGraphId: string }>[];
     }> = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
-      .mockImplementation((plan) => {
-        const authorized = (receiver as any).rfc64SwmRecoveryCoordinatorV1.authorize(plan);
-        if (authorized === null) return false;
-        authorizedPlans.push(authorized);
+      .mockImplementation((authorizedPlan) => {
+        authorizedPlans.push(authorizedPlan);
         return true;
       });
 

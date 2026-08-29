@@ -373,6 +373,8 @@ export {
 export {
   PROMOTE_REPLAY_SAFE_ERROR_CODE,
   PromoteReplaySafeError,
+  isPromoteReplaySafeError,
+  type PromoteReplaySafeErrorLike,
 } from './promote-replay-safety.js';
 export {
   AsyncLiftRunner,
