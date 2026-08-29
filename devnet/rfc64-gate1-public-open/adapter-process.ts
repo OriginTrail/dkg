@@ -35,9 +35,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
-  OxigraphStore,
+  createTripleStore,
   quadsToNQuads,
   type Quad,
+  type TripleStore,
+  type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
 import {
   storeKnowledgeAssetOperationPublicQuads,
@@ -81,6 +83,12 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 }
 
 const dataDir = resolve(dataDirInput);
+const storeConfig = parseStoreConfig(
+  process.env.DKG_RFC64_GATE1_STORE_BACKEND,
+  process.env.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+  dataDir,
+);
+const storeBackend = storeConfig.backend;
 const pinnedMasterKeyHex = masterKeyHex;
 const rolloutMode = parseRolloutMode(rolloutModeInput);
 const rolloutKillSwitch = parseBooleanEnvironment(
@@ -111,7 +119,7 @@ if (rolloutMode === null && rolloutKillSwitch) {
 }
 let agent: DKGAgent | undefined;
 let vmChain: Gate1VmChainAdapter | undefined;
-let agentStore: OxigraphStore | undefined;
+let agentStore: GraphReplaceStore | undefined;
 const vmReplicationEvents: unknown[] = [];
 let stopping = false;
 let commandTail = Promise.resolve();
@@ -178,7 +186,10 @@ async function boot(): Promise<void> {
   vmChain = rolloutActivation !== null && role === 'receiver'
     ? await Gate1VmChainAdapter.create(rolloutContextGraphId!)
     : undefined;
-  const store = new OxigraphStore(join(dataDir, 'store.nq'));
+  const store = requireGraphReplaceStore(
+    await createTripleStore(storeConfig.tripleStore),
+    storeBackend,
+  );
   const created = await DKGAgent.create({
     name: `RFC64Gate1${role}`,
     dataDir,
@@ -220,6 +231,7 @@ async function boot(): Promise<void> {
     protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
     rolloutKillSwitch,
     rolloutMode,
+    storeBackend,
     startupRepair: null,
   });
 }
@@ -509,6 +521,51 @@ function parseRolloutMode(input: string | undefined): 'legacy' | 'shadow' | 'cat
   if (input === undefined || input === '') return null;
   if (input === 'legacy' || input === 'shadow' || input === 'catalog') return input;
   throw new Error('DKG_RFC64_ROLLOUT_MODE must be legacy, shadow, or catalog');
+}
+
+type GraphReplaceStore = TripleStore & {
+  replaceGraph: NonNullable<TripleStore['replaceGraph']>;
+};
+
+type Gate1StoreConfig = Readonly<
+  | { backend: 'oxigraph'; tripleStore: TripleStoreConfig }
+  | { backend: 'blazegraph'; tripleStore: TripleStoreConfig }
+>;
+
+function parseStoreConfig(
+  backendInput: string | undefined,
+  blazegraphUrl: string | undefined,
+  dataDir: string,
+): Gate1StoreConfig {
+  if (backendInput === undefined || backendInput === '' || backendInput === 'oxigraph') {
+    return Object.freeze({
+      backend: 'oxigraph',
+      tripleStore: {
+        backend: 'oxigraph-persistent',
+        options: { path: join(dataDir, 'store.nq') },
+      },
+    });
+  }
+  if (backendInput === 'blazegraph') {
+    if (blazegraphUrl === undefined || blazegraphUrl.length === 0) {
+      throw new Error('Blazegraph rollout certification requires DKG_RFC64_GATE1_BLAZEGRAPH_URL');
+    }
+    return Object.freeze({
+      backend: 'blazegraph',
+      tripleStore: {
+        backend: 'blazegraph',
+        options: { url: blazegraphUrl, timeout: 30_000 },
+      },
+    });
+  }
+  throw new Error('DKG_RFC64_GATE1_STORE_BACKEND must be oxigraph or blazegraph');
+}
+
+function requireGraphReplaceStore(store: TripleStore, backend: string): GraphReplaceStore {
+  if (typeof store.replaceGraph !== 'function') {
+    throw new Error(`${backend} rollout store lacks atomic graph replacement`);
+  }
+  return store as GraphReplaceStore;
 }
 
 function parseBooleanEnvironment(input: string | undefined, label: string): boolean {

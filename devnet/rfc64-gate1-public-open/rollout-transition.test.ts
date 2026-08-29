@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
@@ -20,29 +20,41 @@ import {
   GATE1_DEPLOYMENT as DEPLOYMENT,
   GATE1_NETWORK_ID as NETWORK_ID,
   GATE1_PROJECTION_NQUADS as PROJECTION_NQUADS,
+  GATE1_PROJECTION_QUADS as PROJECTION_QUADS,
   GATE1_ROLE_MASTER_KEYS as ROLE_KEYS,
   createGate1AuthorSealV1 as authorSeal,
 } from './fixture.js';
+import {
+  cleanupRolloutStoreFixture,
+  createRolloutStoreFixture,
+  parseRolloutStoreBackend,
+  type RolloutStoreFixture,
+} from './rollout-store-fixture.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/rollout-transition';
 const children = new ChildProcessRegistry(20_000);
 const temporaryRoots: string[] = [];
+const STORE_BACKEND = parseRolloutStoreBackend(process.env.DKG_RFC64_GATE1_STORE_BACKEND);
+let storeFixture: RolloutStoreFixture | undefined;
 
 type RolloutMode = 'legacy' | 'shadow' | 'catalog';
 
 after(async () => {
   await children.terminateAllThenCleanup(async () => {
-    await Promise.all(temporaryRoots.splice(0).map((path) => (
-      rm(path, { force: true, recursive: true })
-    )));
+    await cleanupRolloutStoreFixture(storeFixture, temporaryRoots);
   });
 });
 
-test('certifies restart-stable shadow, catalog, kill, re-enable, and legacy authority', {
+test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy authority on ${STORE_BACKEND}`, {
   timeout: 180_000,
-}, async () => {
+}, async (context) => {
+  storeFixture = await createRolloutStoreFixture({
+    backendInput: process.env.DKG_RFC64_GATE1_STORE_BACKEND,
+    blazegraphTestUrl: process.env.BLAZEGRAPH_TEST_URL,
+    signal: context.signal,
+  });
   const authorDataDir = await makeTemp('author');
   const receiverDataDir = await makeTemp('receiver');
   const author = spawnAgent('author', authorDataDir, 'catalog');
@@ -143,6 +155,7 @@ test('certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assert.equal(await stagedHead(shadow.child, headDigest, signatureVariantDigest, 'shadow'), headDigest);
   assert.equal(await appliedHead(shadow.child, catalogScopeDigest, 'shadow'), null);
   assertSemanticExact(await semanticGraph(shadow.child, swmGraph, 'shadow'), swmGraph);
+  await requireStoreFixture().assertGraphExact('receiver', swmGraph, PROJECTION_QUADS);
   await shadow.child.stop('stop-shadow');
 
   const catalog = await startReceiver('catalog', false, receiverDataDir, author, authorReady);
@@ -168,6 +181,7 @@ test('certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertSemanticExact(catalogVmGraph, vmGraph);
   assertAppliedExact(await appliedHead(catalog.child, catalogScopeDigest, 'catalog'), headDigest);
   assertSemanticExact(await semanticGraph(catalog.child, swmGraph, 'catalog'), swmGraph);
+  await requireStoreFixture().assertGraphExact('receiver', swmGraph, PROJECTION_QUADS);
   await catalog.child.stop('stop-catalog');
 
   const killed = await startReceiver('catalog', true, receiverDataDir, author, authorReady, false);
@@ -313,6 +327,7 @@ function spawnAgent(
         ...process.env,
         DKG_RFC64_GATE1_ADAPTER_DATA_DIR: dataDir,
         DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX: ROLE_KEYS[role],
+        ...requireStoreFixture().envForRole(role, dataDir),
         NODE_ENV: 'production',
         ...(mode === null ? {} : {
           DKG_RFC64_ROLLOUT_MODE: mode,
@@ -455,6 +470,7 @@ function assertReady(
   assert.equal(event.agentClass, 'DKGAgent');
   assert.equal(event.rolloutMode, mode);
   assert.equal(event.rolloutKillSwitch, killSwitch);
+  assert.equal(event.storeBackend, STORE_BACKEND);
   assert.equal(typeof event.peerId, 'string');
   assert.equal(typeof event.multiaddr, 'string');
 }
@@ -487,4 +503,9 @@ async function makeTemp(role: string): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), `dkg-rfc64-rollout-${role}-`));
   temporaryRoots.push(path);
   return path;
+}
+
+function requireStoreFixture(): RolloutStoreFixture {
+  if (storeFixture === undefined) throw new Error('rollout store fixture is not prepared');
+  return storeFixture;
 }
