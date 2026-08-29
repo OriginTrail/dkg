@@ -136,9 +136,13 @@ export class AuthorCatalogCodecError extends Error {
 }
 
 /** Catalog-compatible public wrapper around the neutral percent encoder. */
-export function iriComponentV1(value: string, maxBytes = 256): string {
+export function iriComponentV1(value: string): string {
   return encodeCanonicalIriComponentV1(
-    assertNfcUtf8Identifier(value, 'IRI component', maxBytes),
+    assertNfcUtf8Identifier(
+      value,
+      'IRI component',
+      MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1,
+    ),
   );
 }
 
