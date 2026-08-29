@@ -67,6 +67,7 @@ export {
   STORE_OPERATION_OUTCOME_TAG,
   STORE_OPERATIONS,
   hasStoreOperationOutcome,
+  isReadOnlyStoreOperation,
   isStoreOperation,
   type StoreOperation,
   type StoreOperationOutcome,
