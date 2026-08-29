@@ -58,6 +58,7 @@ describe('graph membership snapshot', () => {
   it('matches reordered graph listings and rejects membership changes', () => {
     const snapshot = createGraphMembershipSnapshot(['urn:graph:a', 'urn:graph:b']);
     expect(snapshot.matches(['urn:graph:b', 'urn:graph:a'])).toBe(true);
+    expect(snapshot.matches(['urn:graph:a', 'urn:graph:a'])).toBe(false);
     expect(snapshot.matches(['urn:graph:a', 'urn:graph:c'])).toBe(false);
     expect(snapshot.matches(['urn:graph:a'])).toBe(false);
   });

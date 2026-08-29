@@ -32,21 +32,40 @@ export function createGraphMembershipSnapshot(
   sourceGraphs: readonly string[],
 ): GraphMembershipSnapshot {
   const graphs = Object.freeze([...new Set(sourceGraphs)].sort(compareCodePoint));
-  const membership = new Set(graphs);
+  const membershipIndex = new Map<string, number>();
+  for (let index = 0; index < graphs.length; index += 1) {
+    membershipIndex.set(graphs[index]!, index);
+  }
+  // Reuse one mark table for allocation-free membership equality checks. JS is
+  // single-threaded between these synchronous operations, so one monotonically
+  // stamped table also detects duplicate entries in a fresh graph listing.
+  const matchMarks = new Uint32Array(graphs.length);
+  let matchEpoch = 0;
+  const matches = (candidates: readonly string[]): boolean => {
+    if (candidates.length !== graphs.length) return false;
+    matchEpoch = (matchEpoch + 1) >>> 0;
+    if (matchEpoch === 0) {
+      matchMarks.fill(0);
+      matchEpoch = 1;
+    }
+    for (const graph of candidates) {
+      const index = membershipIndex.get(graph);
+      if (index === undefined || matchMarks[index] === matchEpoch) return false;
+      matchMarks[index] = matchEpoch;
+    }
+    return true;
+  };
   const snapshot: GraphMembershipSnapshot = Object.freeze({
     graphs,
     size: graphs.length,
-    has: (graph: string) => membership.has(graph),
-    matches: (candidates: readonly string[]) => (
-      candidates.length === graphs.length
-      && candidates.every((graph) => membership.has(graph))
-    ),
+    has: (graph: string) => membershipIndex.has(graph),
+    matches,
     equalOrUnder: (
       graph: string,
       accept: (candidate: string) => boolean = acceptEveryGraph,
     ): string[] => {
       const selected: string[] = [];
-      if (membership.has(graph) && accept(graph)) selected.push(graph);
+      if (membershipIndex.has(graph) && accept(graph)) selected.push(graph);
 
       const prefix = `${graph}/`;
       for (let index = lowerBound(graphs, prefix); index < graphs.length; index += 1) {
