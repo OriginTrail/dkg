@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
   startPublisherRuntimeWithOutcome: vi.fn(),
+  daemonLogShutdown: vi.fn(),
 }));
 
 vi.mock('node:http', () => ({ createServer: mocks.createServer }));
@@ -43,6 +44,22 @@ vi.mock('../src/daemon/chain-reset-wipe.js', async importOriginal => {
 vi.mock('../src/publisher-runner.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/publisher-runner.js')>();
   return { ...actual, startPublisherRuntimeWithOutcome: mocks.startPublisherRuntimeWithOutcome };
+});
+
+vi.mock('../src/daemon/daemon-log-file-writer.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/daemon-log-file-writer.js')>();
+  return {
+    ...actual,
+    startDaemonLogFileWriter: (
+      ...args: Parameters<typeof actual.startDaemonLogFileWriter>
+    ) => {
+      const writer = actual.startDaemonLogFileWriter(...args);
+      return {
+        ...writer,
+        shutdown: () => mocks.daemonLogShutdown(writer.shutdown),
+      };
+    },
+  };
 });
 
 const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
@@ -92,6 +109,9 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
       wiped: false, skipped: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [],
     });
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
+    mocks.daemonLogShutdown.mockImplementation(
+      async (shutdown: () => Promise<void>) => await shutdown(),
+    );
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
       throw new Error(`process.exit:${code}`);
@@ -111,12 +131,9 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     for (const l of sigtermListeners) process.on('SIGTERM', l);
     if (originalDkgHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = originalDkgHome;
-    // The aborted boot (agentCreate rejects mid-runDaemonInner) can leave a
-    // straggler async task still writing into DKG_HOME while rm() walks it —
-    // a file that lands after its directory was scanned fails the rmdir with
-    // ENOTEMPTY and reddens the whole file. rm()'s built-in retry exists for
-    // exactly this class of race (it retries ENOTEMPTY/EBUSY/EPERM).
-    if (tempHome) await rm(tempHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    // A failed boot owns and drains its daemon-log writer before rejecting, so
+    // teardown never needs timing-dependent filesystem retries.
+    if (tempHome) await rm(tempHome, { recursive: true, force: true });
     tempHome = undefined;
   });
 
@@ -191,12 +208,29 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
   });
 
   it('boots past the boundary with a fully valid retry-knob block', async () => {
-    await expect(bootWith({
+    let releaseShutdown!: () => void;
+    const shutdownGate = new Promise<void>((resolve) => { releaseShutdown = resolve; });
+    mocks.daemonLogShutdown.mockImplementationOnce(async (shutdown: () => Promise<void>) => {
+      await shutdown();
+      await shutdownGate;
+    });
+
+    const boot = bootWith({
       autoRetryEnabled: false,
       retryJitterRatio: 0.35,
       retryBackoffBaseMs: 2_000,
       retryBackoffMaxMs: 90_000,
-    })).rejects.toThrow('after-agent-create');
+    });
+    let bootSettled = false;
+    void boot.then(
+      () => { bootSettled = true; },
+      () => { bootSettled = true; },
+    );
+    await vi.waitFor(() => expect(mocks.daemonLogShutdown).toHaveBeenCalledTimes(1));
+    expect(bootSettled).toBe(false);
+
+    releaseShutdown();
+    await expect(boot).rejects.toThrow('after-agent-create');
 
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
