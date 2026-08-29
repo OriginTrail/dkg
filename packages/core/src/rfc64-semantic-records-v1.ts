@@ -331,6 +331,17 @@ const RECORD_FIELDS = Object.freeze({
   ],
 } as const satisfies Record<Rfc64SemanticRecordTypeV1, readonly FieldSpec[]>);
 
+export const RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1 = Object.freeze({
+  CurrentAuthorCatalogRefV1: RECORD_FIELDS.CurrentAuthorCatalogRefV1.length,
+  AppliedSubgraphSealV1: RECORD_FIELDS.AppliedSubgraphSealV1.length,
+  SubgraphMutationGuardV1: RECORD_FIELDS.SubgraphMutationGuardV1.length,
+  ContextGraphMutationGuardV1: RECORD_FIELDS.ContextGraphMutationGuardV1.length,
+  SubgraphReconcileTargetGuardV1:
+    RECORD_FIELDS.SubgraphReconcileTargetGuardV1.length,
+  AppliedSubgraphSetRefV1: RECORD_FIELDS.AppliedSubgraphSetRefV1.length,
+  AppliedContextGraphSealV1: RECORD_FIELDS.AppliedContextGraphSealV1.length,
+} as const satisfies Record<Rfc64SemanticRecordTypeV1, number>);
+
 const RECORD_TYPES = new Set<Rfc64SemanticRecordTypeV1>(
   Object.keys(RECORD_FIELDS) as Rfc64SemanticRecordTypeV1[],
 );

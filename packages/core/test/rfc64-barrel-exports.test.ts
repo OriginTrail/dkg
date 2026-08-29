@@ -6,10 +6,12 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_KA_TRANSFER_BYTES_V1,
   MAX_RFC64_PENDING_TARGET_DIGESTS_V1,
+  RFC64_SEMANTIC_READ_QUERY_IDS_V1,
   RFC64_DIGEST_LIST_DATATYPE_IRI_V1,
   RFC64_SEMANTIC_NULL_IRI_V1,
   RFC64_SUBGRAPH_KEY_DOMAIN_V1,
   assertCanonicalChainId,
+  assertRfc64SemanticReadOperationV1,
   assertCanonicalDecimalU64,
   assertCanonicalDecimalU256,
   assertCanonicalDigest,
@@ -19,6 +21,7 @@ import {
   assertKaTransferDescriptorV1,
   canonicalizeKaTransferDescriptorV1,
   computeRfc64SubGraphKeyV1,
+  compileRfc64SemanticReadOperationV1,
   decodeRfc64SemanticRecordStoreRowsV1,
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
@@ -81,7 +84,10 @@ describe('RFC-64 transfer descriptor + wire scalars public package barrel', () =
       'http://dkg.io/ontology/digestListV1',
     );
     expect(MAX_RFC64_PENDING_TARGET_DIGESTS_V1).toBe(64);
+    expect(RFC64_SEMANTIC_READ_QUERY_IDS_V1).toHaveLength(6);
     for (const [name, fn] of [
+      ['assertRfc64SemanticReadOperationV1', assertRfc64SemanticReadOperationV1],
+      ['compileRfc64SemanticReadOperationV1', compileRfc64SemanticReadOperationV1],
       ['decodeRfc64SemanticRecordStoreRowsV1', decodeRfc64SemanticRecordStoreRowsV1],
       ['projectRfc64SemanticRecordStoreRowsV1', projectRfc64SemanticRecordStoreRowsV1],
       ['renderRfc64SemanticStoreRowV1', renderRfc64SemanticStoreRowV1],
