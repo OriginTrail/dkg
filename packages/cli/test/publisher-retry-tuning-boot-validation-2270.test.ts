@@ -111,7 +111,12 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     for (const l of sigtermListeners) process.on('SIGTERM', l);
     if (originalDkgHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = originalDkgHome;
-    if (tempHome) await rm(tempHome, { recursive: true, force: true });
+    // The aborted boot (agentCreate rejects mid-runDaemonInner) can leave a
+    // straggler async task still writing into DKG_HOME while rm() walks it —
+    // a file that lands after its directory was scanned fails the rmdir with
+    // ENOTEMPTY and reddens the whole file. rm()'s built-in retry exists for
+    // exactly this class of race (it retries ENOTEMPTY/EBUSY/EPERM).
+    if (tempHome) await rm(tempHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     tempHome = undefined;
   });
 
