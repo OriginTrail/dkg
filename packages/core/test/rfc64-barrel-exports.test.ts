@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 // module-level behavior tests stay green.
 import {
   MAX_KA_TRANSFER_BYTES_V1,
+  RFC64_SUBGRAPH_KEY_DOMAIN_V1,
   assertCanonicalChainId,
   assertCanonicalDecimalU64,
   assertCanonicalDecimalU256,
@@ -14,6 +15,10 @@ import {
   assertCanonicalTimestampMs,
   assertKaTransferDescriptorV1,
   canonicalizeKaTransferDescriptorV1,
+  computeRfc64SubGraphKeyV1,
+  deriveRfc64ContextGraphSemanticAddressesV1,
+  deriveRfc64CurrentAuthorCatalogRefAddressV1,
+  deriveRfc64SubgraphSemanticAddressesV1,
   parseCanonicalDecimalU64,
   parseCanonicalDecimalU256,
   parseCanonicalKaTransferDescriptorV1,
@@ -39,6 +44,27 @@ describe('RFC-64 transfer descriptor + wire scalars public package barrel', () =
     expect(() => assertKaTransferDescriptorV1(VALID_MIN)).not.toThrow();
     expect(canonicalizeKaTransferDescriptorV1(VALID_MIN)).toBe(VALID_MIN_CANONICAL);
     expect(parseCanonicalKaTransferDescriptorV1(VALID_MIN_CANONICAL)).toEqual(VALID_MIN);
+  });
+
+  it('re-exports the dormant RFC-64 semantic-address API', () => {
+    expect(RFC64_SUBGRAPH_KEY_DOMAIN_V1).toBe('dkg-subgraph-key-v1\n');
+    for (const [name, fn] of [
+      ['computeRfc64SubGraphKeyV1', computeRfc64SubGraphKeyV1],
+      [
+        'deriveRfc64CurrentAuthorCatalogRefAddressV1',
+        deriveRfc64CurrentAuthorCatalogRefAddressV1,
+      ],
+      ['deriveRfc64SubgraphSemanticAddressesV1', deriveRfc64SubgraphSemanticAddressesV1],
+      [
+        'deriveRfc64ContextGraphSemanticAddressesV1',
+        deriveRfc64ContextGraphSemanticAddressesV1,
+      ],
+    ] as const) {
+      expect(typeof fn, name).toBe('function');
+    }
+    expect(computeRfc64SubGraphKeyV1(null)).toBe(
+      '0x746bfff91a7c229a180489f0149b250944da97e5038b125af5df5a74916518e4',
+    );
   });
 
   it('re-exports the full canonical wire scalar API from ../src/index.js', () => {
