@@ -1,6 +1,6 @@
 import type {
   Quad,
-  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasSemanticInputV1,
   TripleStore,
 } from '../src/index.js';
 
@@ -27,8 +27,8 @@ export function quad(subject: string, predicate: string, object: string, graph: 
 }
 
 export function authorCommitInput(
-  overrides: Partial<Rfc64AuthorCommitCasInputV1> = {},
-): Rfc64AuthorCommitCasInputV1 {
+  overrides: Partial<Rfc64AuthorCommitCasSemanticInputV1> = {},
+): Rfc64AuthorCommitCasSemanticInputV1 {
   return {
     sharedProjectionGraph: PROJECTION_GRAPH,
     sharedProjectionQuads: [

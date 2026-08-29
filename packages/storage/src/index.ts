@@ -45,6 +45,8 @@ export {
   RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1,
   RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
   type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasLegacyInputV1,
+  type Rfc64AuthorCommitCasSemanticInputV1,
   type Rfc64AuthorCommitCasResultV1,
   type Rfc64AuthorCommitStateTransitionV1,
   type Rfc64AuthorCommitSubjectReplacementV1,

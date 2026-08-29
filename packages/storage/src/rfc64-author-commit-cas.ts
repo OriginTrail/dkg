@@ -12,8 +12,9 @@ import {
 } from './atomic-graph-replace.js';
 
 export const RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1 = 4;
-export const RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1 = 4;
+export const RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1 = 6;
 export const RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1 = 1024;
+const RFC64_AUTHOR_COMMIT_SEMANTIC_STATE_REPLACEMENTS_V1 = 4;
 
 export interface Rfc64AuthorCommitValueGuardV1 {
   readonly graphUri: string;
@@ -38,8 +39,27 @@ export interface Rfc64AuthorCommitStateTransitionV1 {
   readonly quads: readonly Quad[];
 }
 
-/** Closed `SYNC_AUTHOR_COMMIT_CAS_V1` manifest for one author publication. */
-export interface Rfc64AuthorCommitCasInputV1 {
+/** Original exported V1 storage contract retained for existing callers. */
+export interface Rfc64AuthorCommitCasLegacyInputV1 {
+  readonly sharedProjectionGraph: string;
+  readonly sharedProjectionQuads: readonly Quad[];
+  readonly authorSealGraph: string;
+  readonly authorSealSubject: string;
+  readonly authorSealQuads: readonly Quad[];
+  readonly currentHeadGraph: string;
+  readonly currentHeadSubject: string;
+  readonly currentHeadPredicate: string;
+  readonly expectedCurrentHeadObject: string | null;
+  readonly nextCurrentHeadObject: string;
+  readonly kaStateDigest: Rfc64AuthorCommitStateTransitionV1;
+  readonly subgraphMutationGeneration: Rfc64AuthorCommitStateTransitionV1;
+  readonly contextGraphMutationGeneration: Rfc64AuthorCommitStateTransitionV1;
+  readonly appliedSet: Rfc64AuthorCommitStateTransitionV1;
+  readonly sealInvalidations: readonly Rfc64AuthorCommitSubjectReplacementV1[];
+}
+
+/** Full-record semantic input compiled only by the typed RFC-64 boundary. */
+export interface Rfc64AuthorCommitCasSemanticInputV1 {
   readonly sharedProjectionGraph: string;
   readonly sharedProjectionQuads: readonly Quad[];
   readonly authorSealGraph: string;
@@ -54,6 +74,11 @@ export interface Rfc64AuthorCommitCasInputV1 {
   /** Exact applied-set fence and next applied-set subject. */
   readonly appliedSet: Rfc64AuthorCommitStateTransitionV1;
 }
+
+/** Backward-compatible V1 capability: legacy callers and the typed semantic compiler. */
+export type Rfc64AuthorCommitCasInputV1 =
+  | Rfc64AuthorCommitCasLegacyInputV1
+  | Rfc64AuthorCommitCasSemanticInputV1;
 
 export type Rfc64AuthorCommitCasResultV1 = 'committed' | 'conflict';
 
@@ -81,9 +106,11 @@ export type Rfc64AuthorCommitSemanticRoleV1 =
   | 'sharedProjection'
   | 'authorSeal'
   | 'currentHead'
+  | 'kaStateDigest'
   | 'subgraphMutationGeneration'
   | 'contextGraphMutationGeneration'
-  | 'appliedSet';
+  | 'appliedSet'
+  | 'sealInvalidation';
 
 export interface Rfc64AuthorCommitGraphReplacementPlanV1 {
   readonly role: 'sharedProjection';
@@ -100,7 +127,16 @@ export interface Rfc64AuthorCommitSubjectReplacementPlanV1 {
 }
 
 export interface Rfc64AuthorCommitGuardPlanV1 extends Rfc64AuthorCommitValueGuardV1 {
-  readonly role: Exclude<Rfc64AuthorCommitSemanticRoleV1, 'sharedProjection' | 'authorSeal'>;
+  readonly role: Exclude<
+    Rfc64AuthorCommitSemanticRoleV1,
+    'sharedProjection' | 'authorSeal' | 'sealInvalidation'
+  >;
+}
+
+export interface Rfc64AuthorCommitCurrentHeadPlanV1
+  extends Rfc64AuthorCommitGuardPlanV1 {
+  readonly role: 'currentHead';
+  readonly nextObject: string;
 }
 
 export interface Rfc64AuthorCommitCasMapperV1 {
@@ -118,7 +154,7 @@ export interface Rfc64AuthorCommitCasMapperV1 {
     context: Readonly<{
       role: Rfc64AuthorCommitGuardPlanV1['role'];
       graphUri: string;
-      kind: 'expected';
+      kind: 'expected' | 'next';
     }>,
   ): string | null | Promise<string | null>;
 }
@@ -175,9 +211,11 @@ async function bestEffortRfc64Cleanup(cleanup: () => void | Promise<void>): Prom
 
 /** Canonical validated metadata consumed by every adapter and decorator. */
 export interface NormalizedRfc64AuthorCommitCasV1 {
+  readonly mode: 'legacy-v1' | 'semantic-v1';
   readonly graphReplacements: readonly Rfc64AuthorCommitGraphReplacementPlanV1[];
   readonly subjectReplacements: readonly Rfc64AuthorCommitSubjectReplacementPlanV1[];
   readonly guards: readonly Rfc64AuthorCommitGuardPlanV1[];
+  readonly currentHead: Rfc64AuthorCommitCurrentHeadPlanV1 | null;
   readonly semanticQuads: readonly Quad[];
   readonly touchedGraphs: readonly string[];
   readonly referencedGraphs: readonly string[];
@@ -185,6 +223,14 @@ export interface NormalizedRfc64AuthorCommitCasV1 {
 
 export function normalizeRfc64AuthorCommitCasV1(
   input: Rfc64AuthorCommitCasInputV1,
+): NormalizedRfc64AuthorCommitCasV1 {
+  return 'currentHead' in input
+    ? normalizeSemanticRfc64AuthorCommitCasV1(input)
+    : normalizeLegacyRfc64AuthorCommitCasV1(input);
+}
+
+function normalizeSemanticRfc64AuthorCommitCasV1(
+  input: Rfc64AuthorCommitCasSemanticInputV1,
 ): NormalizedRfc64AuthorCommitCasV1 {
   const roles = [
     ['currentHead', input.currentHead],
@@ -211,7 +257,7 @@ export function normalizeRfc64AuthorCommitCasV1(
     subject: transition.subject,
     quads: transition.quads,
   })));
-  validateInput(input, stateGuards, stateReplacements);
+  validateSemanticInput(input, stateGuards, stateReplacements);
   const graphReplacements = Object.freeze([Object.freeze({
     role: 'sharedProjection' as const,
     graphUri: input.sharedProjectionGraph,
@@ -247,9 +293,103 @@ export function normalizeRfc64AuthorCommitCasV1(
     ...subjectReplacements.flatMap(({ quads }) => quads),
   ]);
   return Object.freeze({
+    mode: 'semantic-v1',
     graphReplacements,
     subjectReplacements,
     guards,
+    currentHead: null,
+    semanticQuads,
+    touchedGraphs,
+    referencedGraphs,
+  });
+}
+
+function normalizeLegacyRfc64AuthorCommitCasV1(
+  input: Rfc64AuthorCommitCasLegacyInputV1,
+): NormalizedRfc64AuthorCommitCasV1 {
+  const roles = [
+    ['kaStateDigest', input.kaStateDigest],
+    ['subgraphMutationGeneration', input.subgraphMutationGeneration],
+    ['contextGraphMutationGeneration', input.contextGraphMutationGeneration],
+    ['appliedSet', input.appliedSet],
+  ] as const;
+  for (const [role, transition] of roles) {
+    if (!transition || typeof transition !== 'object') {
+      throw new Error(`RFC-64 author commit requires the exact ${role} semantic transition`);
+    }
+  }
+  if (!Array.isArray(input.sealInvalidations)) {
+    throw new Error('RFC-64 author commit requires bounded seal invalidations');
+  }
+  const stateGuards = Object.freeze(roles.map(([role, transition]) => ({
+    role,
+    graphUri: transition.graphUri,
+    subject: transition.subject,
+    predicate: transition.predicate,
+    expectedObject: transition.expectedObject,
+  })));
+  const stateReplacements = Object.freeze([
+    ...roles.map(([role, transition]) => ({
+      role,
+      roleIndex: 0,
+      graphUri: transition.graphUri,
+      subject: transition.subject,
+      quads: transition.quads,
+    })),
+    ...input.sealInvalidations.map((replacement, roleIndex) => ({
+      role: 'sealInvalidation' as const,
+      roleIndex,
+      ...replacement,
+    })),
+  ]);
+  const currentHead = Object.freeze({
+    role: 'currentHead' as const,
+    graphUri: input.currentHeadGraph,
+    subject: input.currentHeadSubject,
+    predicate: input.currentHeadPredicate,
+    expectedObject: input.expectedCurrentHeadObject,
+    nextObject: input.nextCurrentHeadObject,
+  });
+  validateLegacyInput(input, currentHead, stateGuards, stateReplacements);
+  const graphReplacements = Object.freeze([Object.freeze({
+    role: 'sharedProjection' as const,
+    graphUri: input.sharedProjectionGraph,
+    quads: input.sharedProjectionQuads,
+  })]);
+  const subjectReplacements = Object.freeze([Object.freeze({
+    role: 'authorSeal' as const,
+    roleIndex: 0,
+    graphUri: input.authorSealGraph,
+    subject: input.authorSealSubject,
+    quads: input.authorSealQuads,
+  }), ...stateReplacements]);
+  const guards = Object.freeze([currentHead, ...stateGuards]);
+  const touchedGraphs = Object.freeze([...new Set([
+    input.sharedProjectionGraph,
+    input.authorSealGraph,
+    input.currentHeadGraph,
+    ...stateReplacements.map(({ graphUri }) => graphUri),
+  ])]);
+  const referencedGraphs = Object.freeze([...new Set([
+    ...touchedGraphs,
+    ...guards.map(({ graphUri }) => graphUri),
+  ])]);
+  const semanticQuads = Object.freeze([
+    ...input.sharedProjectionQuads,
+    ...subjectReplacements.flatMap(({ quads }) => quads),
+    Object.freeze({
+      graph: input.currentHeadGraph,
+      subject: input.currentHeadSubject,
+      predicate: input.currentHeadPredicate,
+      object: input.nextCurrentHeadObject,
+    }),
+  ]);
+  return Object.freeze({
+    mode: 'legacy-v1',
+    graphReplacements,
+    subjectReplacements,
+    guards,
+    currentHead,
     semanticQuads,
     touchedGraphs,
     referencedGraphs,
@@ -306,6 +446,39 @@ export async function mapRfc64AuthorCommitCasV1(
       quads: replacement.quads,
     });
   };
+  if (manifest.mode === 'legacy-v1') {
+    const currentHead = manifest.currentHead!;
+    const mappedCurrentHead = requireMappedRole(guards, 'currentHead');
+    const nextCurrentHeadObject = await mapper.mapObject(currentHead.nextObject, {
+      role: 'currentHead',
+      graphUri: currentHead.graphUri,
+      kind: 'next',
+    });
+    if (nextCurrentHeadObject === null) {
+      throw new Error('RFC-64 author commit mapper removed the next current head');
+    }
+    const sealInvalidations = subjectReplacements
+      .filter(({ role }) => role === 'sealInvalidation')
+      .sort((left, right) => left.roleIndex - right.roleIndex)
+      .map(({ graphUri, subject, quads }) => Object.freeze({ graphUri, subject, quads }));
+    return Object.freeze({
+      sharedProjectionGraph: graphReplacement.graphUri,
+      sharedProjectionQuads: graphReplacement.quads,
+      authorSealGraph: authorSeal.graphUri,
+      authorSealSubject: authorSeal.subject,
+      authorSealQuads: authorSeal.quads,
+      currentHeadGraph: mappedCurrentHead.graphUri,
+      currentHeadSubject: mappedCurrentHead.subject,
+      currentHeadPredicate: mappedCurrentHead.predicate,
+      expectedCurrentHeadObject: mappedCurrentHead.expectedObject,
+      nextCurrentHeadObject,
+      kaStateDigest: transition('kaStateDigest'),
+      subgraphMutationGeneration: transition('subgraphMutationGeneration'),
+      contextGraphMutationGeneration: transition('contextGraphMutationGeneration'),
+      appliedSet: transition('appliedSet'),
+      sealInvalidations,
+    });
+  }
   return Object.freeze({
     sharedProjectionGraph: graphReplacement.graphUri,
     sharedProjectionQuads: graphReplacement.quads,
@@ -337,6 +510,7 @@ export function buildRfc64AuthorCommitCasUpdateV1(
   const manifest = normalizeRfc64AuthorCommitCasV1(input);
   const projection = manifest.graphReplacements[0]!;
   const sharedProjectionGraph = assertSafeIri(projection.graphUri);
+  const legacyCurrentHead = manifest.currentHead;
   const receiptId = randomUUID();
   const receiptGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}rfc64-author-commit:${receiptId}`;
   const receiptSubject = `${receiptGraph}:receipt`;
@@ -397,6 +571,24 @@ export function buildRfc64AuthorCommitCasUpdateV1(
       receiptPattern,
     ));
   }
+  if (legacyCurrentHead !== null) {
+    const currentHeadGraph = assertSafeIri(legacyCurrentHead.graphUri);
+    const currentHeadSubject = assertNonBlankNodeIri(
+      legacyCurrentHead.subject,
+      'RFC-64 author current-head subject',
+    );
+    const currentHeadPredicate = assertSafeIri(unwrapIri(legacyCurrentHead.predicate));
+    const nextCurrentHeadObject = formatControlObject(
+      legacyCurrentHead.nextObject,
+      'next current head',
+    );
+    mutations.push(
+      `DELETE { GRAPH <${currentHeadGraph}> { <${currentHeadSubject}> <${currentHeadPredicate}> ?oldHead . } }\n` +
+      `WHERE { ${receiptPattern} OPTIONAL { GRAPH <${currentHeadGraph}> { <${currentHeadSubject}> <${currentHeadPredicate}> ?oldHead . } } };\n` +
+      `INSERT { GRAPH <${currentHeadGraph}> { <${currentHeadSubject}> <${currentHeadPredicate}> ${nextCurrentHeadObject} . } }\n` +
+      `WHERE { ${receiptPattern} }`,
+    );
+  }
   return Object.freeze({
     update:
       `${cleanup};\n` +
@@ -412,10 +604,10 @@ export function buildRfc64AuthorCommitCasUpdateV1(
   });
 }
 
-function validateInput(
-  input: Rfc64AuthorCommitCasInputV1,
-  stateGuards: readonly Rfc64AuthorCommitValueGuardV1[],
-  stateReplacements: readonly Rfc64AuthorCommitSubjectReplacementV1[],
+function validateSemanticInput(
+  input: Rfc64AuthorCommitCasSemanticInputV1,
+  stateGuards: readonly Rfc64AuthorCommitGuardPlanV1[],
+  stateReplacements: readonly Rfc64AuthorCommitSubjectReplacementPlanV1[],
 ): void {
   const sharedProjectionGraph = assertNonInternalGraph(input.sharedProjectionGraph, 'shared projection graph');
   if (input.sharedProjectionQuads.length === 0) {
@@ -438,10 +630,36 @@ function validateInput(
       `RFC-64 author commit requires exactly ${RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1} state guards`,
     );
   }
-  if (stateReplacements.length !== RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1) {
+  if (stateReplacements.length !== RFC64_AUTHOR_COMMIT_SEMANTIC_STATE_REPLACEMENTS_V1) {
     throw new Error(
-      `RFC-64 author commit requires exactly ${RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1} state replacements`,
+      `RFC-64 semantic author commit requires exactly ${RFC64_AUTHOR_COMMIT_SEMANTIC_STATE_REPLACEMENTS_V1} state replacements`,
     );
+  }
+  const currentHeadGuard = stateGuards.find(({ role }) => role === 'currentHead');
+  const currentHeadReplacement = stateReplacements.find(({ role }) => role === 'currentHead');
+  if (!currentHeadGuard || !currentHeadReplacement) {
+    throw new Error('RFC-64 author commit requires one guarded current-head replacement');
+  }
+  if (currentHeadReplacement.quads.length === 0) {
+    throw new Error('RFC-64 author commit requires a non-empty current-head replacement');
+  }
+  const nextHeadValues = currentHeadReplacement.quads.filter(({ predicate }) =>
+    unwrapIri(predicate) === unwrapIri(currentHeadGuard.predicate));
+  if (nextHeadValues.length !== 1) {
+    throw new Error(
+      'RFC-64 author commit current-head replacement requires exactly one guarded predicate',
+    );
+  }
+  const nextHeadObject = formatControlObject(
+    nextHeadValues[0]!.object,
+    'next current-head value',
+  );
+  if (
+    currentHeadGuard.expectedObject !== null
+    && formatControlObject(currentHeadGuard.expectedObject, 'expected current-head value')
+      === nextHeadObject
+  ) {
+    throw new Error('RFC-64 author commit next current head must advance the guarded value');
   }
   const guardKeys = new Set<string>();
   for (const guard of stateGuards) {
@@ -460,6 +678,109 @@ function validateInput(
     const subject = assertNonBlankNodeIri(replacement.subject, 'RFC-64 author commit replacement subject');
     if (graphUri === sharedProjectionGraph) {
       throw new Error('RFC-64 author commit cannot replace a subject inside its complete projection graph');
+    }
+    const key = JSON.stringify([graphUri, subject]);
+    if (replacementKeys.has(key)) {
+      throw new Error('RFC-64 author commit contains a duplicate subject replacement');
+    }
+    replacementKeys.add(key);
+    assertSubjectReplacementPayload(graphUri, subject, replacement.quads);
+    controlQuadCount += replacement.quads.length;
+  }
+  if (controlQuadCount > RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1) {
+    throw new Error(
+      `RFC-64 author commit control payload exceeds ${RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1} quads`,
+    );
+  }
+}
+
+function validateLegacyInput(
+  input: Rfc64AuthorCommitCasLegacyInputV1,
+  currentHead: Rfc64AuthorCommitCurrentHeadPlanV1,
+  stateGuards: readonly Rfc64AuthorCommitGuardPlanV1[],
+  stateReplacements: readonly Rfc64AuthorCommitSubjectReplacementPlanV1[],
+): void {
+  const sharedProjectionGraph = assertNonInternalGraph(
+    input.sharedProjectionGraph,
+    'shared projection graph',
+  );
+  if (input.sharedProjectionQuads.length === 0) {
+    throw new Error(
+      'RFC-64 author commit requires a non-empty shared projection; retraction uses its own certified capability',
+    );
+  }
+  assertReplacementPayload(sharedProjectionGraph, input.sharedProjectionQuads);
+  const authorSealGraph = assertNonInternalGraph(input.authorSealGraph, 'author seal graph');
+  const authorSealSubject = assertNonBlankNodeIri(
+    input.authorSealSubject,
+    'RFC-64 author seal subject',
+  );
+  if (authorSealGraph === sharedProjectionGraph) {
+    throw new Error('RFC-64 author seal cannot share the complete projection graph');
+  }
+  if (input.authorSealQuads.length === 0) {
+    throw new Error('RFC-64 author commit requires a non-empty author seal');
+  }
+  assertSubjectReplacementPayload(authorSealGraph, authorSealSubject, input.authorSealQuads);
+  const currentHeadGraph = assertNonInternalGraph(currentHead.graphUri, 'current-head graph');
+  const currentHeadSubject = assertNonBlankNodeIri(
+    currentHead.subject,
+    'RFC-64 author current-head subject',
+  );
+  const currentHeadPredicate = assertSafeIri(unwrapIri(currentHead.predicate));
+  if (currentHeadGraph === sharedProjectionGraph) {
+    throw new Error('RFC-64 current head cannot live inside the complete projection graph');
+  }
+  if (currentHeadGraph === authorSealGraph && currentHeadSubject === authorSealSubject) {
+    throw new Error('RFC-64 current-head subject cannot also be the author-seal subject');
+  }
+  const nextCurrentHeadObject = formatControlObject(currentHead.nextObject, 'next current head');
+  if (
+    currentHead.expectedObject !== null
+    && formatControlObject(currentHead.expectedObject, 'expected current head')
+      === nextCurrentHeadObject
+  ) {
+    throw new Error('RFC-64 author commit next current head must advance the guarded value');
+  }
+  if (stateGuards.length !== RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1) {
+    throw new Error(
+      `RFC-64 author commit requires exactly ${RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1} state guards`,
+    );
+  }
+  if (stateReplacements.length > RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1) {
+    throw new Error(
+      `RFC-64 author commit accepts at most ${RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1} state replacements`,
+    );
+  }
+  const guardKeys = new Set([
+    JSON.stringify([currentHeadGraph, currentHeadSubject, currentHeadPredicate]),
+  ]);
+  for (const guard of stateGuards) {
+    const graphUri = assertNonInternalGraph(guard.graphUri, 'state guard graph');
+    const subject = assertNonBlankNodeIri(guard.subject, 'RFC-64 author commit guard subject');
+    const predicate = assertSafeIri(unwrapIri(guard.predicate));
+    if (guard.expectedObject !== null) {
+      formatControlObject(guard.expectedObject, 'expected guard value');
+    }
+    const key = JSON.stringify([graphUri, subject, predicate]);
+    if (guardKeys.has(key)) throw new Error('RFC-64 author commit contains a duplicate guard');
+    guardKeys.add(key);
+  }
+  const replacementKeys = new Set([JSON.stringify([authorSealGraph, authorSealSubject])]);
+  let controlQuadCount = 1 + input.authorSealQuads.length;
+  for (const replacement of stateReplacements) {
+    const graphUri = assertNonInternalGraph(replacement.graphUri, 'state replacement graph');
+    const subject = assertNonBlankNodeIri(
+      replacement.subject,
+      'RFC-64 author commit replacement subject',
+    );
+    if (graphUri === sharedProjectionGraph) {
+      throw new Error(
+        'RFC-64 author commit cannot replace a subject inside its complete projection graph',
+      );
+    }
+    if (graphUri === currentHeadGraph && subject === currentHeadSubject) {
+      throw new Error('RFC-64 current-head subject is owned by the guarded head transition');
     }
     const key = JSON.stringify([graphUri, subject]);
     if (replacementKeys.has(key)) {

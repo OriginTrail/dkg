@@ -1,6 +1,7 @@
 import {
   compileRfc64SemanticReadOperationV1,
   decodeRfc64SemanticRecordStoreRowsV1,
+  snapshotExactDataRecord,
   type DecodedRfc64SemanticRecordV1,
   type Rfc64SemanticRecordCoordinateV1,
   type Rfc64SemanticStoreRowV1,
@@ -171,30 +172,11 @@ function snapshotExactRecord(
   label: string,
   code: Rfc64SemanticReadGatewayErrorCodeV1,
 ): Readonly<Record<string, unknown>> {
-  if (
-    input === null
-    || typeof input !== 'object'
-    || Object.getPrototypeOf(input) !== Object.prototype
-  ) {
-    fail(code, `${label} must be a plain object`);
+  try {
+    return snapshotExactDataRecord(input, expectedKeys, label);
+  } catch (cause) {
+    fail(code, `${label} has an invalid field set`, cause);
   }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== expectedKeys.length
-    || expectedKeys.some((key) => !keys.includes(key))
-  ) {
-    fail(code, `${label} has an invalid field set`);
-  }
-  const result: Record<string, unknown> = {};
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail(code, `${label} must use enumerable data properties`);
-    }
-    result[key] = descriptor.value;
-  }
-  return Object.freeze(result);
 }
 
 function isRecordWithOwnKey(input: unknown, key: string): boolean {

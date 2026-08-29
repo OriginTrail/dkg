@@ -28,6 +28,7 @@ import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import { StoreOperationTimeoutError } from '../src/store-operation-timeout.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasSemanticInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from '../src/rfc64-author-commit-cas.js';
 
@@ -39,7 +40,7 @@ function q(subject: string, graph: string, object = '"x"'): Quad {
   return { subject, predicate: 'http://ex.org/p', object, graph };
 }
 
-function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasInputV1 {
+function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasSemanticInputV1 {
   const stateGraph = 'urn:test:changelog:rfc64:state';
   const transition = (role: string) => ({
     graphUri: stateGraph,
@@ -600,7 +601,9 @@ describe('ChangelogStore — reserved-graph write protection', () => {
         [role]: {
           ...baseInput[role],
           graphUri: CHANGELOG_GRAPH,
-          quads: [reservedQuad(baseInput[role].subject, `"${role}"`)],
+          quads: role === 'currentHead'
+            ? [{ ...baseInput.currentHead.quads[0]!, graph: CHANGELOG_GRAPH }]
+            : [reservedQuad(baseInput[role].subject, `"${role}"`)],
         },
       }] as const),
     ];

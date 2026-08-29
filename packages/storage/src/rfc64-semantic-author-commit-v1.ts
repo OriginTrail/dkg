@@ -1,8 +1,19 @@
 import {
+  MemoryLayer,
   RFC64_SEMANTIC_PREDICATES_V1,
+  assertCanonicalDeterministicUalV1,
+  buildCatalogAssertionScopeV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  contextGraphLayerUri,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  parseAssertionSealQuads,
+  parseContextGraphAssertionUri,
   projectRfc64SemanticRecordStoreRowsV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
   renderRfc64SemanticStoreRowV1,
+  snapshotExactDataRecord,
   snapshotRfc64SemanticRecordV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
   type Rfc64SemanticRecordTypeV1,
   type Rfc64SemanticRecordV1,
 } from '@origintrail-official/dkg-core';
@@ -12,7 +23,7 @@ import {
 } from './triple-store.js';
 import {
   normalizeRfc64AuthorCommitCasV1,
-  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasSemanticInputV1,
   type Rfc64AuthorCommitStateTransitionV1,
 } from './rfc64-author-commit-cas.js';
 
@@ -69,7 +80,7 @@ export class Rfc64SemanticAuthorCommitErrorV1 extends Error {
  */
 export function compileRfc64SemanticAuthorCommitV1(
   input: unknown,
-): Rfc64AuthorCommitCasInputV1 {
+): Rfc64AuthorCommitCasSemanticInputV1 {
   const candidate = snapshotExactRecord(input, [
     'authorSealGraph',
     'authorSealQuads',
@@ -159,18 +170,32 @@ export function compileRfc64SemanticAuthorCommitV1(
     );
   }
 
+  const sharedProjectionGraph = requiredString(
+    candidate.sharedProjectionGraph,
+    'sharedProjectionGraph',
+  );
+  const sharedProjectionQuads = snapshotQuads(
+    candidate.sharedProjectionQuads,
+    'sharedProjectionQuads',
+  );
+  const authorSealGraph = requiredString(candidate.authorSealGraph, 'authorSealGraph');
+  const authorSealSubject = requiredString(candidate.authorSealSubject, 'authorSealSubject');
+  const authorSealQuads = snapshotQuads(candidate.authorSealQuads, 'authorSealQuads');
+  assertPayloadTargets(
+    nextCurrentHead,
+    sharedProjectionGraph,
+    sharedProjectionQuads,
+    authorSealGraph,
+    authorSealSubject,
+    authorSealQuads,
+  );
+
   const compiled = Object.freeze({
-    sharedProjectionGraph: requiredString(
-      candidate.sharedProjectionGraph,
-      'sharedProjectionGraph',
-    ),
-    sharedProjectionQuads: snapshotQuads(
-      candidate.sharedProjectionQuads,
-      'sharedProjectionQuads',
-    ),
-    authorSealGraph: requiredString(candidate.authorSealGraph, 'authorSealGraph'),
-    authorSealSubject: requiredString(candidate.authorSealSubject, 'authorSealSubject'),
-    authorSealQuads: snapshotQuads(candidate.authorSealQuads, 'authorSealQuads'),
+    sharedProjectionGraph,
+    sharedProjectionQuads,
+    authorSealGraph,
+    authorSealSubject,
+    authorSealQuads,
     currentHead: transition(
       expectedCurrentHead,
       nextCurrentHead,
@@ -194,6 +219,138 @@ export function compileRfc64SemanticAuthorCommitV1(
   });
   normalizeRfc64AuthorCommitCasV1(compiled);
   return compiled;
+}
+
+function assertPayloadTargets(
+  nextCurrentHead: CurrentHeadRecordV1,
+  sharedProjectionGraph: string,
+  sharedProjectionQuads: readonly Quad[],
+  authorSealGraph: string,
+  authorSealSubject: string,
+  authorSealQuads: readonly Quad[],
+): void {
+  const scope = nextCurrentHead.value;
+  const parsedCoordinate = parseContextGraphAssertionUri(authorSealSubject);
+  const expectedScope = buildCatalogAssertionScopeV1({
+    contextGraphId: scope.contextGraphId,
+    subGraphName: scope.subGraphName,
+  });
+  if (
+    !parsedCoordinate
+    || parsedCoordinate.scope !== expectedScope
+    || parsedCoordinate.agentAddress.toLowerCase() !== scope.authorAddress
+  ) {
+    fail(
+      'rfc64-semantic-author-commit-scope',
+      'author seal does not belong to the semantic commit author lane',
+    );
+  }
+  const coordinate = Object.freeze({
+    contextGraphId: scope.contextGraphId,
+    subGraphName: scope.subGraphName,
+    authorAddress: scope.authorAddress,
+    assertionCoordinate: parsedCoordinate.name,
+  }) as CanonicalGraphScopedAuthorSealCoordinateV1;
+  let placement;
+  try {
+    placement = deriveCanonicalGraphScopedAuthorSealPlacementV1(coordinate);
+  } catch (cause) {
+    fail(
+      'rfc64-semantic-author-commit-schema',
+      'author seal coordinate is not canonical',
+      cause,
+    );
+  }
+  if (authorSealGraph !== placement.metaGraph || authorSealSubject !== placement.subject) {
+    fail(
+      'rfc64-semantic-author-commit-scope',
+      'author seal graph and subject must use the canonical lane placement',
+    );
+  }
+  let parsedSeal;
+  try {
+    parsedSeal = parseAssertionSealQuads(authorSealQuads, authorSealSubject);
+  } catch (cause) {
+    fail(
+      'rfc64-semantic-author-commit-schema',
+      'author seal quads are not a complete graph-scoped seal',
+      cause,
+    );
+  }
+  if (!parsedSeal) {
+    fail(
+      'rfc64-semantic-author-commit-schema',
+      'author seal quads are not a complete graph-scoped seal',
+    );
+  }
+  let payload;
+  let canonicalSealRows;
+  try {
+    payload = canonicalGraphScopedAuthorSealFromAssertionSealV1(parsedSeal);
+    canonicalSealRows = projectCanonicalGraphScopedAuthorSealRowsV1(payload, coordinate);
+  } catch (cause) {
+    fail(
+      'rfc64-semantic-author-commit-schema',
+      'author seal quads are not one canonical graph-scoped seal',
+      cause,
+    );
+  }
+  if (!sameQuadSet(authorSealQuads, canonicalSealRows)) {
+    fail(
+      'rfc64-semantic-author-commit-schema',
+      'author seal quads must be one exact canonical graph-scoped seal',
+    );
+  }
+  let ual;
+  try {
+    ual = assertCanonicalDeterministicUalV1(payload.kaUal);
+  } catch (cause) {
+    fail(
+      'rfc64-semantic-author-commit-schema',
+      'author seal has no canonical KA identity',
+      cause,
+    );
+  }
+  if (ual.chainId !== scope.networkId || ual.agentAddress !== scope.authorAddress) {
+    fail(
+      'rfc64-semantic-author-commit-scope',
+      'sealed KA identity does not belong to the semantic commit network and author',
+    );
+  }
+  const expectedProjectionGraph = contextGraphLayerUri(
+    scope.contextGraphId,
+    MemoryLayer.SharedWorkingMemory,
+    scope.authorAddress,
+    ual.kaNumber,
+    scope.subGraphName ?? undefined,
+  );
+  if (sharedProjectionGraph !== expectedProjectionGraph) {
+    fail(
+      'rfc64-semantic-author-commit-scope',
+      'shared projection graph does not belong to the sealed KA author lane',
+    );
+  }
+  if (sharedProjectionQuads.some(({ graph }) => graph !== expectedProjectionGraph)) {
+    fail(
+      'rfc64-semantic-author-commit-scope',
+      'shared projection quads target a graph outside the sealed KA author lane',
+    );
+  }
+}
+
+function sameQuadSet(
+  left: readonly Quad[],
+  right: readonly Quad[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const key = ({ graph, object, predicate, subject }: Quad): string =>
+    JSON.stringify([graph, subject, predicate, object]);
+  const expected = new Set(right.map(key));
+  const actual = new Set(left.map(key));
+  return expected.size === right.length
+    && actual.size === left.length
+    && actual.size === expected.size
+    && [...actual].every((quad) => expected.has(quad));
 }
 
 function transition<Type extends Rfc64SemanticRecordTypeV1>(
@@ -383,19 +540,28 @@ function snapshotQuads(input: unknown, label: string): readonly Quad[] {
   ) {
     fail('rfc64-semantic-author-commit-schema', `${label} must be dense and unadorned`);
   }
-  return Object.freeze(input.map((quad, index) => {
+  const result: Quad[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
+    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      fail(
+        'rfc64-semantic-author-commit-schema',
+        `${label} must use enumerable data properties`,
+      );
+    }
     const value = snapshotExactRecord(
-      quad,
+      descriptor.value,
       ['graph', 'object', 'predicate', 'subject'],
       `${label}[${index}]`,
     );
-    return Object.freeze({
+    result.push(Object.freeze({
       graph: requiredString(value.graph, `${label}[${index}].graph`),
       object: requiredString(value.object, `${label}[${index}].object`),
       predicate: requiredString(value.predicate, `${label}[${index}].predicate`),
       subject: requiredString(value.subject, `${label}[${index}].subject`),
-    });
-  }));
+    }));
+  }
+  return Object.freeze(result);
 }
 
 function requiredString(input: unknown, label: string): string {
@@ -410,33 +576,11 @@ function snapshotExactRecord(
   expectedKeys: readonly string[],
   label: string,
 ): Readonly<Record<string, unknown>> {
-  if (
-    input === null
-    || typeof input !== 'object'
-    || Object.getPrototypeOf(input) !== Object.prototype
-  ) {
-    fail('rfc64-semantic-author-commit-schema', `${label} must be a plain object`);
+  try {
+    return snapshotExactDataRecord(input, expectedKeys, label);
+  } catch (cause) {
+    fail('rfc64-semantic-author-commit-schema', `${label} has an invalid field set`, cause);
   }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== expectedKeys.length
-    || expectedKeys.some((key) => !keys.includes(key))
-  ) {
-    fail('rfc64-semantic-author-commit-schema', `${label} has an invalid field set`);
-  }
-  const result: Record<string, unknown> = {};
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail(
-        'rfc64-semantic-author-commit-schema',
-        `${label} must use enumerable data properties`,
-      );
-    }
-    result[key] = descriptor.value;
-  }
-  return Object.freeze(result);
 }
 
 function fail(

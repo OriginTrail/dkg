@@ -5,6 +5,7 @@ import {
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   SparqlHttpStore,
   type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasLegacyInputV1,
 } from '../src/index.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
@@ -124,6 +125,24 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect((await store.listGraphs()).some(
       (graph) => graph.startsWith(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX),
     )).toBe(false);
+  });
+
+  it('preserves the exported legacy V1 input and seal-invalidation behavior', async () => {
+    const store = new OxigraphStore();
+    await seedOldState(store);
+    const kaStateSubject = 'urn:test:rfc64:ka-state';
+    await store.insert([
+      quad(kaStateSubject, P_VALUE, '"old-ka-state"', STATE_GRAPH),
+      quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', SEAL_GRAPH),
+    ]);
+
+    await expect(store.rfc64AuthorCommitCasV1!(legacyAuthorCommitInput()))
+      .resolves.toBe('committed');
+
+    expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
+    expect(await objectFor(store, STATE_GRAPH, kaStateSubject, P_VALUE))
+      .toBe('"new-ka-state"');
+    expect(await objectFor(store, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBeUndefined();
   });
 
   it('maps every closed-manifest role through the canonical async plan', async () => {
@@ -340,12 +359,11 @@ describe('RFC-64 certified author commit CAS v1', () => {
     }
   });
 
-  it('can atomically clear the four bounded control subjects without retracting the asset', async () => {
+  it('can clear nullable bounded controls but always installs an advanced current head', async () => {
     const store = new OxigraphStore();
     await seedOldState(store);
     const base = authorCommitInput();
     const input = authorCommitInput({
-      currentHead: { ...base.currentHead, quads: [] },
       subgraphMutationGeneration: {
         ...base.subgraphMutationGeneration,
         quads: [],
@@ -363,7 +381,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
     await expect(store.rfc64AuthorCommitCasV1!(input)).resolves.toBe('committed');
     expect(await store.countQuads(PROJECTION_GRAPH)).toBe(2);
     expect(await objectFor(store, SEAL_GRAPH, SEAL, P_VALUE)).toBe('"new-seal"');
-    expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBeUndefined();
+    expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
     expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBeUndefined();
     expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBeUndefined();
     expect(await store.countQuads(OTHER_GRAPH)).toBe(1);
@@ -456,6 +474,18 @@ describe('RFC-64 certified author commit CAS v1', () => {
       authorSealQuads: [],
     }))).toThrow(/non-empty author seal/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
+      currentHead: {
+        ...authorCommitInput().currentHead,
+        quads: [],
+      },
+    }))).toThrow(/non-empty current-head replacement/i);
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
+      currentHead: {
+        ...authorCommitInput().currentHead,
+        quads: [quad(AUTHOR, P_VALUE, '"not-a-head"', HEAD_GRAPH)],
+      },
+    }))).toThrow(/exactly one guarded predicate/i);
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
       authorSealSubject: '_:seal',
     }))).toThrow(/canonical IRI/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
@@ -513,3 +543,35 @@ describe('RFC-64 certified author commit CAS v1', () => {
     }))).toThrow(/control payload exceeds/i);
   });
 });
+
+function legacyAuthorCommitInput(): Rfc64AuthorCommitCasLegacyInputV1 {
+  const current = authorCommitInput();
+  const kaStateSubject = 'urn:test:rfc64:ka-state';
+  return {
+    sharedProjectionGraph: current.sharedProjectionGraph,
+    sharedProjectionQuads: current.sharedProjectionQuads,
+    authorSealGraph: current.authorSealGraph,
+    authorSealSubject: current.authorSealSubject,
+    authorSealQuads: current.authorSealQuads,
+    currentHeadGraph: current.currentHead.graphUri,
+    currentHeadSubject: current.currentHead.subject,
+    currentHeadPredicate: current.currentHead.predicate,
+    expectedCurrentHeadObject: current.currentHead.expectedObject,
+    nextCurrentHeadObject: current.currentHead.quads[0]!.object,
+    kaStateDigest: {
+      graphUri: STATE_GRAPH,
+      subject: kaStateSubject,
+      predicate: P_VALUE,
+      expectedObject: '"old-ka-state"',
+      quads: [quad(kaStateSubject, P_VALUE, '"new-ka-state"', STATE_GRAPH)],
+    },
+    subgraphMutationGeneration: current.subgraphMutationGeneration,
+    contextGraphMutationGeneration: current.contextGraphMutationGeneration,
+    appliedSet: current.appliedSet,
+    sealInvalidations: [{
+      graphUri: SEAL_GRAPH,
+      subject: INVALIDATED_SEAL,
+      quads: [],
+    }],
+  };
+}

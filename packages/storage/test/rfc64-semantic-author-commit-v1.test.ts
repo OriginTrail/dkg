@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  MemoryLayer,
+  contextGraphLayerUri,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
+  type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -14,6 +20,7 @@ import {
 
 import {
   OxigraphStore,
+  Rfc64SemanticAuthorCommitErrorV1,
   SyncSemanticStoreV1,
   compileRfc64SemanticAuthorCommitV1,
   type Quad,
@@ -30,9 +37,40 @@ const DIGEST_A = `0x${'a'.repeat(64)}` as Digest32V1;
 const DIGEST_B = `0x${'b'.repeat(64)}` as Digest32V1;
 const DIGEST_C = `0x${'c'.repeat(64)}` as Digest32V1;
 const DIGEST_D = `0x${'d'.repeat(64)}` as Digest32V1;
-const PROJECTION_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory/1`;
-const SEAL_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
-const SEAL_SUBJECT = 'urn:test:rfc64:seal';
+const KA_NUMBER = '7';
+const PROJECTION_GRAPH = contextGraphLayerUri(
+  CONTEXT_GRAPH,
+  MemoryLayer.SharedWorkingMemory,
+  AUTHOR,
+  KA_NUMBER,
+  SUBGRAPH,
+);
+const SEAL_COORDINATE = Object.freeze({
+  contextGraphId: CONTEXT_GRAPH,
+  subGraphName: SUBGRAPH,
+  authorAddress: AUTHOR,
+  assertionCoordinate: 'research-note',
+}) as CanonicalGraphScopedAuthorSealCoordinateV1;
+const SEAL_PLACEMENT = deriveCanonicalGraphScopedAuthorSealPlacementV1(SEAL_COORDINATE);
+const SEAL_GRAPH = SEAL_PLACEMENT.metaGraph;
+const SEAL_SUBJECT = SEAL_PLACEMENT.subject;
+const AUTHOR_SEAL = Object.freeze({
+  assertedAtChainId: '20430',
+  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
+  assertionFinalizedAt: '2026-08-29T10:00:00.123Z',
+  assertionMerkleRoot: `0x${'e'.repeat(64)}`,
+  assertionVersion: '1',
+  authorAddress: AUTHOR,
+  authorAttestationR: `0x${'1'.repeat(64)}`,
+  authorAttestationVS: `0x${'2'.repeat(64)}`,
+  authorSchemeVersion: '1',
+  contentScopeVersion: '2',
+  kaUal: `did:dkg:${NETWORK}/${AUTHOR}/${KA_NUMBER}`,
+  privateMerkleRoot: null,
+  privateTripleCount: '0',
+  publicTripleCount: '1',
+  reservedKaId: ((BigInt(AUTHOR) << 96n) | BigInt(KA_NUMBER)).toString(),
+}) as CanonicalGraphScopedAuthorSealV1;
 
 const EXPECTED_HEAD = record('CurrentAuthorCatalogRefV1', {
   networkId: NETWORK,
@@ -131,28 +169,7 @@ describe('RFC-64 typed semantic author commit v1', () => {
   });
 
   it('initializes the first content-bearing semantic commit at version and generation one', () => {
-    const first = commitInput({
-      expectedCurrentHead: null,
-      nextCurrentHead: record('CurrentAuthorCatalogRefV1', {
-        ...NEXT_HEAD.value,
-        catalogVersion: '1',
-      }),
-      expectedSubgraphMutation: null,
-      nextSubgraphMutation: record('SubgraphMutationGuardV1', {
-        ...NEXT_SUBGRAPH_MUTATION.value,
-        generation: '1',
-      }),
-      expectedContextGraphMutation: null,
-      nextContextGraphMutation: record('ContextGraphMutationGuardV1', {
-        ...NEXT_CG_MUTATION.value,
-        generation: '1',
-      }),
-      expectedAppliedSet: null,
-      nextAppliedSet: record('AppliedSubgraphSetRefV1', {
-        ...NEXT_APPLIED_SET.value,
-        generation: '1',
-      }),
-    });
+    const first = firstCommitInput();
     expect(() => compileRfc64SemanticAuthorCommitV1(first)).not.toThrow();
     expect(() => compileRfc64SemanticAuthorCommitV1({
       ...first,
@@ -168,6 +185,33 @@ describe('RFC-64 typed semantic author commit v1', () => {
         generation: '0',
       }),
     })).toThrow(/generation must be one/u);
+  });
+
+  it('atomically installs a valid first publication and conflicts on replay', async () => {
+    const store = new OxigraphStore();
+    try {
+      const first = firstCommitInput();
+      const compiled = compileRfc64SemanticAuthorCommitV1(first);
+      await expect(store.rfc64AuthorCommitCasV1!(compiled)).resolves.toBe('committed');
+      const gateway = new SyncSemanticStoreV1(store);
+      for (const expected of [
+        first.nextCurrentHead,
+        first.nextSubgraphMutation,
+        first.nextContextGraphMutation,
+        first.nextAppliedSet,
+      ]) {
+        const result = await gateway.read({ coordinate: coordinateOf(expected) }, {
+          timeoutMs: 1_000,
+        });
+        expect(result.kind, expected.recordType).toBe('record');
+        if (result.kind === 'record') expect(result.decoded.record).toEqual(expected);
+      }
+      expect(await store.countQuads(PROJECTION_GRAPH)).toBe(1);
+      expect(await store.countQuads(SEAL_GRAPH)).toBe(14);
+      await expect(store.rfc64AuthorCommitCasV1!(compiled)).resolves.toBe('conflict');
+    } finally {
+      await store.close();
+    }
   });
 
   it('atomically installs full typed records and retains now-stale applied seals', async () => {
@@ -249,6 +293,16 @@ describe('RFC-64 typed semantic author commit v1', () => {
       ...commitInput(),
       rawSparql: 'DROP ALL',
     })).toThrow(/invalid field set/u);
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1({
+      ...commitInput(),
+      rawSparql: 'DROP ALL',
+    }), 'rfc64-semantic-author-commit-schema');
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      nextCurrentHead: record('CurrentAuthorCatalogRefV1', {
+        ...NEXT_HEAD.value,
+        catalogVersion: '6',
+      }),
+    })), 'rfc64-semantic-author-commit-generation');
 
     let invoked = false;
     const adorned = { ...commitInput() } as Record<string, unknown>;
@@ -260,9 +314,56 @@ describe('RFC-64 typed semantic author commit v1', () => {
       },
     });
     expect(() => compileRfc64SemanticAuthorCommitV1(adorned)).toThrow(
-      /enumerable data properties/u,
+      /invalid field set/u,
     );
     expect(invoked).toBe(false);
+
+    let quadInvoked = false;
+    const quads = [...commitInput().sharedProjectionQuads];
+    Object.defineProperty(quads, '0', {
+      enumerable: true,
+      get() {
+        quadInvoked = true;
+        return commitInput().sharedProjectionQuads[0];
+      },
+    });
+    expect(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      sharedProjectionQuads: quads,
+    }))).toThrow(/enumerable data properties/u);
+    expect(quadInvoked).toBe(false);
+
+    const otherCg = '0x1111111111111111111111111111111111111111/2' as ContextGraphIdV1;
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      nextAppliedSet: record('AppliedSubgraphSetRefV1', {
+        ...NEXT_APPLIED_SET.value,
+        contextGraphId: otherCg,
+      }),
+    })), 'rfc64-semantic-author-commit-scope');
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      nextAppliedSet: record('AppliedSubgraphSetRefV1', {
+        ...NEXT_APPLIED_SET.value,
+        networkId: 'otp:99999' as NetworkIdV1,
+      }),
+    })), 'rfc64-semantic-author-commit-scope');
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      sharedProjectionGraph: `${PROJECTION_GRAPH}-other`,
+      sharedProjectionQuads: [quad(
+        'urn:test:new',
+        'urn:test:value',
+        '"new"',
+        `${PROJECTION_GRAPH}-other`,
+      )],
+    })), 'rfc64-semantic-author-commit-scope');
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      expectedAppliedSet: record('AppliedSubgraphSetRefV1', {
+        ...EXPECTED_APPLIED_SET.value,
+        generation: '9',
+      }),
+      nextAppliedSet: record('AppliedSubgraphSetRefV1', {
+        ...NEXT_APPLIED_SET.value,
+        generation: '10',
+      }),
+    })), 'rfc64-semantic-author-commit-generation');
   });
 });
 
@@ -276,9 +377,10 @@ function commitInput(
     ],
     authorSealGraph: SEAL_GRAPH,
     authorSealSubject: SEAL_SUBJECT,
-    authorSealQuads: [
-      quad(SEAL_SUBJECT, 'urn:test:value', '"new-seal"', SEAL_GRAPH),
-    ],
+    authorSealQuads: [...projectCanonicalGraphScopedAuthorSealRowsV1(
+      AUTHOR_SEAL,
+      SEAL_COORDINATE,
+    )],
     expectedCurrentHead: EXPECTED_HEAD,
     nextCurrentHead: NEXT_HEAD,
     expectedSubgraphMutation: EXPECTED_SUBGRAPH_MUTATION,
@@ -289,6 +391,31 @@ function commitInput(
     nextAppliedSet: NEXT_APPLIED_SET,
     ...overrides,
   };
+}
+
+function firstCommitInput(): Rfc64SemanticAuthorCommitInputV1 {
+  return commitInput({
+    expectedCurrentHead: null,
+    nextCurrentHead: record('CurrentAuthorCatalogRefV1', {
+      ...NEXT_HEAD.value,
+      catalogVersion: '1',
+    }),
+    expectedSubgraphMutation: null,
+    nextSubgraphMutation: record('SubgraphMutationGuardV1', {
+      ...NEXT_SUBGRAPH_MUTATION.value,
+      generation: '1',
+    }),
+    expectedContextGraphMutation: null,
+    nextContextGraphMutation: record('ContextGraphMutationGuardV1', {
+      ...NEXT_CG_MUTATION.value,
+      generation: '1',
+    }),
+    expectedAppliedSet: null,
+    nextAppliedSet: record('AppliedSubgraphSetRefV1', {
+      ...NEXT_APPLIED_SET.value,
+      generation: '1',
+    }),
+  });
 }
 
 function semanticQuads(recordValue: Rfc64SemanticRecordV1): Quad[] {
@@ -336,4 +463,18 @@ function record<Type extends Rfc64SemanticRecordV1['recordType']>(
 
 function quad(subject: string, predicate: string, object: string, graph: string): Quad {
   return Object.freeze({ subject, predicate, object, graph });
+}
+
+function expectErrorCode(
+  action: () => unknown,
+  code: Rfc64SemanticAuthorCommitErrorV1['code'],
+): void {
+  let thrown: unknown;
+  try {
+    action();
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeInstanceOf(Rfc64SemanticAuthorCommitErrorV1);
+  expect((thrown as Rfc64SemanticAuthorCommitErrorV1).code).toBe(code);
 }
