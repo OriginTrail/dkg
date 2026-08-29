@@ -7,9 +7,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
+  projectCanonicalGraphScopedAuthorSealRowsV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
   type ChainIdV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
+  type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphIdV1,
   type DecimalU64V1,
   type Digest32V1,
@@ -21,7 +24,11 @@ import {
   type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 
-import { BlazegraphStore, SyncSemanticStoreV1 } from '../src/index.js';
+import {
+  BlazegraphStore,
+  SyncAuthorSealStoreV1,
+  SyncSemanticStoreV1,
+} from '../src/index.js';
 
 const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_TEST_URL;
 const NETWORK = 'otp:20430' as NetworkIdV1;
@@ -34,6 +41,30 @@ const GOVERNANCE = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const CHAIN = '20430' as ChainIdV1;
 const D = (byte: string): Digest32V1 => `0x${byte.repeat(64)}` as Digest32V1;
 const U = (value: string): DecimalU64V1 => value as DecimalU64V1;
+const SEAL_COORDINATE = Object.freeze({
+  contextGraphId: CONTEXT_GRAPH,
+  subGraphName: SUBGRAPH,
+  authorAddress: AUTHOR,
+  assertionCoordinate: 'seal-live',
+}) as CanonicalGraphScopedAuthorSealCoordinateV1;
+const SEAL = Object.freeze({
+  assertedAtChainId: '20430',
+  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
+  assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
+  assertionMerkleRoot: D('a'),
+  assertionVersion: '2',
+  authorAddress: AUTHOR,
+  authorAttestationR: D('1'),
+  authorAttestationVS: D('2'),
+  authorSchemeVersion: '1',
+  contentScopeVersion: '2',
+  kaUal: `did:dkg:otp:20430/${AUTHOR}/7`,
+  privateMerkleRoot: null,
+  privateTripleCount: '0',
+  publicTripleCount: '1',
+  reservedKaId:
+    '23158417847463239084714197001737581570653996933112267175388663934063917137927',
+}) as CanonicalGraphScopedAuthorSealV1;
 
 const CASES: readonly {
   readonly queryId: Rfc64SemanticReadQueryIdV1;
@@ -122,6 +153,9 @@ describe.skipIf(!BLAZEGRAPH_URL)('RFC-64 semantic read gateway (live Blazegraph)
       for (const quad of quads) graphs.add(quad.graph);
       await store.insert(quads);
     }
+    const sealQuads = [...projectCanonicalGraphScopedAuthorSealRowsV1(SEAL, SEAL_COORDINATE)];
+    for (const quad of sealQuads) graphs.add(quad.graph);
+    await store.insert(sealQuads);
   }, 30_000);
 
   afterAll(async () => {
@@ -139,5 +173,14 @@ describe.skipIf(!BLAZEGRAPH_URL)('RFC-64 semantic read gateway (live Blazegraph)
       expect(result.kind, current.record.recordType).toBe('record');
       if (result.kind === 'record') expect(result.decoded.record).toEqual(current.record);
     }
+  }, 30_000);
+
+  it('round-trips the exact 14-row author seal through the certified capability', async () => {
+    const result = await new SyncAuthorSealStoreV1(store).read(
+      { coordinate: SEAL_COORDINATE },
+      { timeoutMs: 5_000 },
+    );
+    expect(result.kind).toBe('seal');
+    if (result.kind === 'seal') expect(result.decoded.payload).toEqual(SEAL);
   }, 30_000);
 });

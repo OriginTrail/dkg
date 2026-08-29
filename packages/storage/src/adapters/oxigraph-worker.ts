@@ -6,10 +6,13 @@ import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOpt
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
 import type {
+  CanonicalAuthorSealStoreRowV1,
+  Rfc64AuthorSealReadOperationV1,
   Rfc64SemanticReadOperationV1,
   Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
 import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
+import { executeRfc64AuthorSealReadCapabilityV1 } from '../rfc64-author-seal-read-capability.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -157,6 +160,13 @@ export class OxigraphWorkerStore implements TripleStore {
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
     return executeRfc64SemanticReadCapabilityV1(this, operation, options);
+  }
+
+  rfc64AuthorSealReadV1(
+    operation: Rfc64AuthorSealReadOperationV1,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]> {
+    return executeRfc64AuthorSealReadCapabilityV1(this, operation, options);
   }
 
   // Assigned by spawnWorker(), which the constructor always calls — hence the

@@ -23,6 +23,8 @@ import type {
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
 import type {
+  CanonicalAuthorSealStoreRowV1,
+  Rfc64AuthorSealReadOperationV1,
   Rfc64SemanticReadOperationV1,
   Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
@@ -138,6 +140,11 @@ export interface TripleStore {
     operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly Rfc64SemanticStoreRowV1[]>;
+  /** Execute the sole certified fixed-subject RFC-64 author-seal read. */
+  rfc64AuthorSealReadV1?(
+    operation: Rfc64AuthorSealReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;

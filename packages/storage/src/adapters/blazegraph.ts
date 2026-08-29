@@ -23,10 +23,13 @@ import {
   assertQuadLiteralsMutf8Safe,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type CanonicalAuthorSealStoreRowV1,
+  type Rfc64AuthorSealReadOperationV1,
   type Rfc64SemanticReadOperationV1,
   type Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
 import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
+import { executeRfc64AuthorSealReadCapabilityV1 } from '../rfc64-author-seal-read-capability.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -231,6 +234,13 @@ export class BlazegraphStore implements TripleStore {
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
     return executeRfc64SemanticReadCapabilityV1(this, operation, options);
+  }
+
+  rfc64AuthorSealReadV1(
+    operation: Rfc64AuthorSealReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]> {
+    return executeRfc64AuthorSealReadCapabilityV1(this, operation, options);
   }
 
   private readonly url: string;

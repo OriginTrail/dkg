@@ -18,6 +18,15 @@ export interface Rfc64SemanticReadCapabilityV1 {
   ): Promise<readonly Rfc64SemanticStoreRowV1[]>;
 }
 
+export interface Rfc64ExactBindingsReadOperationV1 {
+  readonly queryId: string;
+  readonly subjectIri: string;
+  readonly graphIri: string;
+  readonly rowCeiling: number;
+  readonly responseByteCeiling: number;
+  readonly sparql: string;
+}
+
 export class Rfc64SemanticReadCapabilityResultErrorV1 extends Error {
   constructor(message: string) {
     super(message);
@@ -33,6 +42,15 @@ export class Rfc64SemanticReadCapabilityResultErrorV1 extends Error {
 export async function executeRfc64SemanticReadCapabilityV1(
   store: Pick<TripleStore, 'query'>,
   operation: Rfc64SemanticReadOperationV1,
+  options: Pick<QueryOptions, 'signal'> = {},
+): Promise<readonly Rfc64SemanticStoreRowV1[]> {
+  return executeRfc64ExactBindingsReadCapabilityV1(store, operation, options);
+}
+
+/** Shared exact-bindings adapter normalization for closed RFC-64 read manifests. */
+export async function executeRfc64ExactBindingsReadCapabilityV1(
+  store: Pick<TripleStore, 'query'>,
+  operation: Rfc64ExactBindingsReadOperationV1,
   options: Pick<QueryOptions, 'signal'> = {},
 ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
   const result = await store.query(operation.sparql, {
@@ -55,7 +73,7 @@ export function isRfc64SemanticReadCapabilityV1(
 
 function normalizeRfc64SemanticReadResultV1(
   result: QueryResult,
-  operation: Rfc64SemanticReadOperationV1,
+  operation: Rfc64ExactBindingsReadOperationV1,
 ): readonly Rfc64SemanticStoreRowV1[] {
   if (ownDataValue(result, 'type') !== 'bindings') {
     invalid('semantic read did not return bindings');
