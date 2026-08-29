@@ -1144,6 +1144,26 @@ export async function runDaemonInner(
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
 ): Promise<void> {
+  let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
+  try {
+    await runDaemonInnerWithStartupOwnership(
+      foreground,
+      config,
+      startedAt,
+      (cleanup) => { cleanupOwnedStartupResources = cleanup; },
+    );
+  } catch (error) {
+    await cleanupOwnedStartupResources?.();
+    throw error;
+  }
+}
+
+async function runDaemonInnerWithStartupOwnership(
+  foreground: boolean,
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  startedAt: number,
+  registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
+): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -1196,6 +1216,22 @@ export async function runDaemonInner(
     process.stderr.write = origStderrWrite as typeof process.stderr.write;
   };
 
+  let startupUncaughtExceptionHandler: NodeJS.UncaughtExceptionListener | undefined;
+  let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
+  registerStartupFailureCleanup(async () => {
+    // The graceful shutdown handlers are registered only after startup succeeds. A rejection
+    // before that boundary must still retire the writer it started; otherwise queued appends can
+    // outlive the failed boot and race the next startup (or test teardown) through DKG_HOME.
+    if (startupUncaughtExceptionHandler) {
+      process.removeListener("uncaughtException", startupUncaughtExceptionHandler);
+    }
+    if (startupUnhandledRejectionHandler) {
+      process.removeListener("unhandledRejection", startupUnhandledRejectionHandler);
+    }
+    detachDaemonLogTee();
+    await daemonLogFileWriter.shutdown();
+  });
+
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
@@ -1217,7 +1253,7 @@ export async function runDaemonInner(
     );
   }
 
-  process.on("uncaughtException", (err) => {
+  startupUncaughtExceptionHandler = (err) => {
     const msg = err?.message ?? String(err);
     if (
       msg.includes("Cannot write to a stream that is") ||
@@ -1239,9 +1275,10 @@ export async function runDaemonInner(
           },
         });
       });
-  });
+  };
+  process.on("uncaughtException", startupUncaughtExceptionHandler);
 
-  process.on("unhandledRejection", (reason) => {
+  startupUnhandledRejectionHandler = (reason) => {
     const msg = reason instanceof Error ? reason.message : String(reason);
     if (
       msg.includes("Cannot write to a stream that is") ||
@@ -1253,7 +1290,8 @@ export async function runDaemonInner(
     log(
       `[warn] Unhandled rejection: ${reason instanceof Error ? reason.stack : msg}`,
     );
-  });
+  };
+  process.on("unhandledRejection", startupUnhandledRejectionHandler);
 
   const role = config.nodeRole ?? "edge";
 
