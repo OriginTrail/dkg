@@ -38,6 +38,7 @@ import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
+import { compareCodePoint } from '../code-point-order.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -45,6 +46,7 @@ export {
   type SyncRow,
   type SyncRowListMemo,
 } from './snapshot-cache.js';
+export { compareCodePoint } from '../code-point-order.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const DKG_SUB_GRAPH = `${DKG}SubGraph`;
@@ -561,17 +563,6 @@ function createSubGraphNameMemo(
       return [...names];
     },
   };
-}
-
-export function compareCodePoint(a: string, b: string): number {
-  const left = Array.from(a);
-  const right = Array.from(b);
-  const len = Math.min(left.length, right.length);
-  for (let i = 0; i < len; i++) {
-    const delta = left[i].codePointAt(0)! - right[i].codePointAt(0)!;
-    if (delta !== 0) return delta;
-  }
-  return left.length - right.length;
 }
 
 export function compareRows(a: SyncRow, b: SyncRow): number {
