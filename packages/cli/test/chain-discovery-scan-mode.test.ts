@@ -108,12 +108,9 @@ describe('chainDiscoveryScanOptions', () => {
   // `discoverContextGraphsFromChain` must be swallowed and must clear the
   // `inFlight` guard via the `finally`, or the first transient RPC failure
   // would permanently disable every later scheduled scan.
-  // GH#2323 — these three tests DELIBERATELY flip the behaviour their
-  // predecessors pinned. The old runner consumed the run slot before any
-  // await (`const run = runs++`), so a rejected run-0 `seedFull` silently
-  // downgraded the startup recovery to `incremental` until run 48 — roughly
-  // 24h at the 30-minute cadence. The slot is now committed only when the
-  // scan resolves: a rejected scan retries the SAME run next tick.
+  // GH#2323 — the slot is committed only when a scan settles it: a rejected
+  // scan retries the SAME run next tick instead of silently downgrading the
+  // startup recovery to `incremental` until run 48 (~24h at the cadence).
   it('retries a rejected startup-recovery seedFull on the next tick instead of degrading to incremental', async () => {
     const agent = {
       hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
@@ -187,8 +184,7 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  // Review RED on the first version of this fix: "same run" is not "same
-  // scan". The mode derives from the run number AND the mutable watermark,
+  // "Same run" is not "same scan". The mode derives from the run number AND the mutable watermark,
   // and a partially-successful scan MOVES the watermark — so recomputing the
   // options on retry can silently change what retries. The failed attempt's
   // options are captured and reused instead.
@@ -246,8 +242,7 @@ describe('chainDiscoveryScanOptions', () => {
     expect(modes).toEqual(['seedFull', 'incremental', 'seedFull', 'seedFull']);
   });
 
-  // Review round 2 RED — the pin must be BOUNDED. Unbounded same-scan retry
-  // trades one liveness bug for another: a deterministically failing
+  // The pin must be BOUNDED. Unbounded same-scan retry trades one liveness bug for another: a deterministically failing
   // historical page would block incremental discovery of new blocks forever.
   it('a permanently failing seedFull releases its slot and incremental discovery continues', async () => {
     const modes: string[] = [];
@@ -307,10 +302,9 @@ describe('chainDiscoveryScanOptions', () => {
     expect(modes.slice(afterRecovery).every((m) => m === 'incremental')).toBe(true);
   });
 
-  // Review round 2 — state commits must be atomic with respect to logging: a
-  // throwing success-log used to advance `runs` AND re-pin the completed
-  // scan's options, so the next tick executed a stale scan under a new run
-  // number, and a throwing failure-log was misclassified as a probe failure.
+  // State commits are atomic with respect to logging: a throwing success-log
+  // must not advance `runs` while re-pinning a completed scan, and a throwing
+  // failure-log must not be misclassified as a probe failure.
   it('a throwing log sink cannot corrupt the scheduling state', async () => {
     const agent = {
       hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
@@ -337,16 +331,15 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  // Review round 2 RED — the extraction must not break the pre-existing
-  // import path: daemon/index.ts re-exports lifecycle wholesale, and this
+  // The extraction must not break the pre-existing import path: daemon/index.ts re-exports lifecycle wholesale, and this
   // test file itself imported from lifecycle.js before the move.
   it('the relocated scan APIs remain importable from lifecycle.js', () => {
     expect(reExportedOptions).toBe(chainDiscoveryScanOptions);
     expect(reExportedRunner).toBe(createChainDiscoveryScanRunner);
   });
 
-  // Review round 3 RED — a promise may legally reject with `undefined`; a
-  // sentinel comparison committed that as SUCCESS, consuming the slot (and
+  // A promise may legally reject with `undefined`; a sentinel comparison
+  // would commit that as SUCCESS, consuming the slot (and
   // able to clear an overdue resync no scan earned).
   it('a rejection carrying undefined is a failure, not a success', async () => {
     const agent = {
@@ -370,8 +363,7 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  // Review round 3 RED — the throwing-log-sink guarantee must hold on the
-  // FAILURE branch too: a failed scan whose failure line throws must neither
+  // The throwing-log-sink guarantee must hold on the FAILURE branch too: a failed scan whose failure line throws must neither
   // reject the timer callback nor lose its captured retry.
   it('a throwing log sink on the failure branch keeps the retry pinned and the runner resolved', async () => {
     const agent = {
@@ -394,12 +386,12 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  // Review round 3 — the overdue cadence is a TICK contract, and it must
+  // The overdue cadence is a TICK contract, and it must
   // hold even while incremental scans are themselves failing and retrying:
   // a failing incremental's retry cycle cannot postpone the owed resync.
   it('a DUE overdue resync fires even when the watermark probe is failing', async () => {
-    // Review round 4 — the probe is irrelevant to a due resync, so a probe
-    // outage must not be able to skip it.
+    // The probe is irrelevant to a due resync, so a probe outage must not
+    // be able to skip it.
     const modes: string[] = [];
     let probeHealthy = true;
     const agent = {
@@ -454,8 +446,8 @@ describe('chainDiscoveryScanOptions', () => {
   });
 });
 
-// Review round 3 — the policy is now two pure functions over a discriminated
-// state; pin the transition table directly, not only through tick sequences.
+// The policy is two pure functions over a discriminated state; pin the
+// transition table directly, not only through tick sequences.
 describe('scan scheduler transitions (GH#2323)', () => {
   const seedFull = { mode: 'seedFull', throwOnChainScanFailure: true } as const;
   const incremental = { mode: 'incremental', pageBudget: 30 } as const;
@@ -487,8 +479,8 @@ describe('scan scheduler transitions (GH#2323)', () => {
   });
 
   it('structurally copying a plan cannot reset its retry history', () => {
-    // Review round 4: commit must not depend on object identity with the
-    // scheduler's pin — the history travels IN the plan.
+    // Commit must not depend on object identity with the scheduler's pin —
+    // the history travels IN the plan.
     const failed = commitScanOutcome(plan(INITIAL_SCAN_SCHEDULER_STATE), { ok: false, error: 'e' });
     const step = planScan(failed.state);
     if (step.kind !== 'ready') throw new Error('pinned retry must be ready');
