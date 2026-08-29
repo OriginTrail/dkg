@@ -2,21 +2,14 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import readline from 'node:readline/promises';
-import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import {
-  StdioClientTransport,
-  getDefaultEnvironment,
-} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {
   DkgLocalLlmRuntime,
-  TextInteractionTrace,
   parseDomainProfile,
-  type McpClientLike,
   type ToolProfile,
 } from '@origintrail-official/dkg-local-llm';
 import { resolveDkgConfigHome } from '@origintrail-official/dkg-core';
+import { createDkgLocalLlmRuntimeSession } from '../local-llm-runtime-factory.js';
 
 export interface LlmCommandOptions {
   interactive?: boolean;
@@ -195,70 +188,40 @@ export async function handleLlmInteractiveCommand(
   return { handled: true, output: `Unknown command '${input}'. Use /help.` };
 }
 
-function currentCliPath(): string {
-  return fileURLToPath(new URL('../cli.js', import.meta.url));
-}
-
 export async function runLlmCommand(options: ResolvedLlmCommandOptions): Promise<void> {
-  const trace = await TextInteractionTrace.create({
+  const systemContextAddendum = options.systemContextFile
+    ? await readFile(options.systemContextFile, 'utf8')
+    : undefined;
+  const domainProfile = options.domainProfileFile
+    ? parseDomainProfile(JSON.parse(await readFile(options.domainProfileFile, 'utf8')))
+    : undefined;
+  const session = await createDkgLocalLlmRuntimeSession({
+    dkgHome: options.dkgHome,
+    llamaUrl: options.llamaUrl,
+    model: options.model,
+    projectId: options.projectId,
+    profile: options.profile,
+    allowWrite: options.allowWrite,
+    adapterPaths: options.adapterPaths,
+    additionalToolNames: options.additionalToolNames,
+    domainProfile,
+    systemContextAddendum,
     logDir: options.logDir,
     logFile: options.logFile,
+    maxToolCalls: options.maxToolCalls,
+    maxToolsPerTurn: options.maxToolsPerTurn,
+    maxToolJsonBytes: options.maxToolJsonBytes,
+    maxEvidenceChars: options.maxEvidenceChars,
+    maxSessionTurns: options.maxSessionTurns,
+    maxSessionChars: options.maxSessionChars,
+    requestTimeoutMs: options.requestTimeoutMs,
+    temperature: options.temperature,
+    topP: options.topP,
+    maxTokens: options.maxTokens,
+    stderr: (line) => process.stderr.write(`[dkg-mcp] ${line}\n`),
   });
-  const environment: Record<string, string> = {
-    ...getDefaultEnvironment(),
-  };
-  environment.DKG_HOME = options.dkgHome;
-  // The runtime materializes every accepted projectId before invoking a
-  // scoped MCP tool. Do not let an inherited shell value become a silent
-  // fallback inside the child MCP server.
-  delete environment.DKG_PROJECT;
-  if (options.adapterPaths.length) environment.DKG_ADAPTERS = options.adapterPaths.join(',');
-
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [currentCliPath(), 'mcp', 'serve'],
-    cwd: process.cwd(),
-    stderr: 'pipe',
-    env: environment,
-  });
-  transport.stderr?.on('data', (chunk) => {
-    const line = String(chunk).trimEnd();
-    if (!line) return;
-    process.stderr.write(`[dkg-mcp] ${line}\n`);
-    void trace.write('DKG MCP STDERR', line);
-  });
-
-  const mcp = new Client({ name: 'dkg-local-llm', version: '10.0.14' });
   try {
-    await mcp.connect(transport);
-    const systemContextAddendum = options.systemContextFile
-      ? await readFile(options.systemContextFile, 'utf8')
-      : undefined;
-    const domainProfile = options.domainProfileFile
-      ? parseDomainProfile(JSON.parse(await readFile(options.domainProfileFile, 'utf8')))
-      : undefined;
-    const runtime = await DkgLocalLlmRuntime.create({
-      mcp: mcp as unknown as McpClientLike,
-      llamaUrl: options.llamaUrl,
-      model: options.model,
-      projectId: options.projectId,
-      profile: options.profile,
-      allowWrite: options.allowWrite,
-      additionalToolNames: options.additionalToolNames,
-      domainProfile,
-      systemContextAddendum,
-      temperature: options.temperature,
-      topP: options.topP,
-      maxTokens: options.maxTokens,
-      maxToolCalls: options.maxToolCalls,
-      maxToolsPerTurn: options.maxToolsPerTurn,
-      maxToolJsonBytes: options.maxToolJsonBytes,
-      maxEvidenceChars: options.maxEvidenceChars,
-      maxSessionTurns: options.maxSessionTurns,
-      maxSessionChars: options.maxSessionChars,
-      requestTimeoutMs: options.requestTimeoutMs,
-      trace,
-    });
+    const { runtime, trace } = session;
 
     process.stderr.write(`Interaction log: ${trace.filePath}\n`);
     if (options.prompt) {
@@ -295,7 +258,7 @@ export async function runLlmCommand(options: ResolvedLlmCommandOptions): Promise
       }
     }
   } finally {
-    await mcp.close().catch(() => undefined);
+    await session.close();
   }
 }
 

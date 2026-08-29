@@ -24,6 +24,7 @@ const persistLocalAgentChatFailureMock = vi.fn();
 const streamLocalAgentChatMock = vi.fn();
 const connectLocalAgentIntegrationMock = vi.fn();
 const disconnectLocalAgentIntegrationMock = vi.fn();
+const clearLocalLlmSessionMock = vi.fn();
 const apiFetchMemorySessionsMock = vi.fn();
 
 vi.mock('../src/ui/api.js', async () => {
@@ -40,6 +41,7 @@ vi.mock('../src/ui/api.js', async () => {
     streamLocalAgentChat: streamLocalAgentChatMock,
     connectLocalAgentIntegration: connectLocalAgentIntegrationMock,
     disconnectLocalAgentIntegration: disconnectLocalAgentIntegrationMock,
+    clearLocalLlmSession: clearLocalLlmSessionMock,
   };
 });
 
@@ -121,6 +123,11 @@ describe('PanelRight component', () => {
       nodeIdentityId: 'node-self',
     });
     streamLocalAgentChatMock.mockResolvedValue({ text: 'Roger that', correlationId: 'corr-1' });
+    clearLocalLlmSessionMock.mockResolvedValue({
+      ok: true,
+      sessionId: 'local-llm:dkg-ui',
+      readOnly: true,
+    });
     persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-1' });
     importFileMock.mockResolvedValue({
       assertionUri: 'urn:dkg:assertion:completed',
@@ -129,6 +136,95 @@ describe('PanelRight component', () => {
       extraction: { status: 'completed', tripleCount: 4, pipelineUsed: 'markdown' },
     });
     apiFetchMemorySessionsMock.mockResolvedValue({ sessions: [] });
+  });
+
+  it('renders local-LLM final tool metadata and clears the daemon-owned session', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'local-llm',
+      name: 'DKG Local LLM',
+      description: 'Daemon-owned local model',
+      defaultSessionId: 'local-llm:dkg-ui',
+      connectSupported: false,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'chat_ready',
+      statusLabel: 'Chat ready',
+      detail: 'ready',
+      source: 'live',
+    }] });
+    streamLocalAgentChatMock.mockResolvedValue({
+      text: 'Catalog evidence',
+      correlationId: 'local-correlation',
+      turnId: 'local-correlation',
+      sessionId: 'local-llm:dkg-ui',
+      contextGraphId: 'testing',
+      profile: 'catalog',
+      toolCalls: [{ name: 'dkg_query_catalog_list', arguments: {} }],
+      traceFile: '/tmp/local-llm.log',
+      readOnly: true,
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(React.createElement(PanelRight)));
+    await waitForAssertion(() => expect(container.textContent).toContain('DKG Local LLM'));
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(
+        textarea,
+        'List saved queries',
+      );
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain('Catalog evidence');
+      expect(container.textContent).toContain('Tools: dkg_query_catalog_list');
+      expect(container.textContent).toContain('Trace: /tmp/local-llm.log');
+    });
+    expect(streamLocalAgentChatMock).toHaveBeenCalledWith(
+      'local-llm',
+      'List saved queries',
+      expect.objectContaining({ contextGraphId: 'testing' }),
+    );
+
+    await act(async () => {
+      container.querySelector('.v10-agent-tab-menu-trigger')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const clearItem = Array.from(container.querySelectorAll<HTMLButtonElement>(
+      '.v10-agent-tab-menu-item',
+    )).find((item) => /clear session/i.test(item.textContent ?? ''));
+    expect(clearItem).toBeTruthy();
+    expect(container.textContent).not.toContain('Disconnect');
+    await act(async () => {
+      clearItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForAssertion(() => expect(clearLocalLlmSessionMock).toHaveBeenCalledOnce());
+    await waitForAssertion(() => expect(container.textContent).not.toContain('Catalog evidence'));
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   it('always injects target context graph name alongside id and URI', async () => {

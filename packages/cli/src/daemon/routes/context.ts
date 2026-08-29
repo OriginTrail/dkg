@@ -29,6 +29,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
+import type { DaemonLocalLlmService } from '../local-llm-service.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -100,6 +101,8 @@ export interface RequestContext {
   // shedding load. Deliberately the read-only `AdmissionStatsView`, not the
   // concrete limiter — plugin-facing routes must not reach tryAcquire()/release().
   admission: AdmissionStatsView;
+  /** Daemon-owned, read-only local LLM session used by the Node UI. */
+  localLlm?: DaemonLocalLlmService;
   // Derived per-request (from req.url + headers + token). Routes read
   // `path`, `url`, `requestAgentAddress` extensively; pre-computing
   // here keeps every group on the same fast path.

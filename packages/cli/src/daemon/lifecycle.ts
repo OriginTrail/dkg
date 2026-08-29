@@ -164,6 +164,7 @@ import {
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
+import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
   createTelemetrySettings,
@@ -3404,6 +3405,11 @@ export async function runDaemonInner(
   // (version counters or ETag-like compare-and-swap) to close the race
   // across processes — out of scope for Round 6.
   const assertionImportLocks = new Map<string, Promise<void>>();
+  const localLlm = createDaemonLocalLlmService({
+    dkgHome: dkgDir(),
+    cwd: process.cwd(),
+    stderr: (line) => log(`[dkg-mcp] ${line}`),
+  });
 
   // --- HTTP API ---
 
@@ -3661,6 +3667,7 @@ export async function runDaemonInner(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
+        localLlm,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3785,6 +3792,7 @@ export async function runDaemonInner(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             server,
+            closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,
             stopPublisherRuntime: async () => {
