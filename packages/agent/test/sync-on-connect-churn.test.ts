@@ -314,6 +314,10 @@ describe('sync-on-connect churn gates', () => {
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
+    (agent as any).rfc64ExactCatchupOnConnectAt.set(
+      PEER_A,
+      Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
+    );
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     await vi.waitFor(() => expect(genericRun).toHaveBeenCalledTimes(2));
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
@@ -326,8 +330,8 @@ describe('sync-on-connect churn gates', () => {
     expect(genericRun).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
 
-    // The exact post-catalog plan is also allowed through when the generic
-    // timer has already completed but its short queue cooldown is still live.
+    // A periodic exact plan inside its own cooldown must not use the ordinary
+    // owner's one-time post-catalog bypass again.
     expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
       {
         providerPeerId: PEER_A,
@@ -335,9 +339,37 @@ describe('sync-on-connect churn gates', () => {
       },
       handleSyncError,
       0,
+    )).toBe(false);
+    await flushTimers();
+    expect(selectedSync).toHaveBeenCalledTimes(2);
+    expect(genericRun).toHaveBeenCalledTimes(2);
+
+    // After the real cooldown expires, a generic owner may finish before the
+    // catalog plan arrives. That first exact plan still gets one bypass; the
+    // next periodic plan in the same window does not.
+    (agent as any).catchupOnConnectAt.set(
+      PEER_A,
+      Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
+    );
+    (agent as any).rfc64ExactCatchupOnConnectAt.set(
+      PEER_A,
+      Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
+    );
+    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
+    await vi.waitFor(() => expect(genericRun).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
+    expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      { providerPeerId: PEER_A, targets: authorized.targets },
+      handleSyncError,
+      0,
     )).toBe(true);
     await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledTimes(3));
-    expect(genericRun).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
+    expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      { providerPeerId: PEER_A, targets: authorized.targets },
+      handleSyncError,
+      0,
+    )).toBe(false);
   });
 
   it('replays the real ordinary lane past backoff without duplicating selected SWM', async () => {

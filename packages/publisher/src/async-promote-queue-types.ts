@@ -198,12 +198,11 @@ export type PromoteStats = Record<PromoteJobState, number>;
 
 export interface AsyncPromoteQueue {
   /**
-   * Effective claim lease used by this queue. Optional for compatibility with
-   * older/custom queue implementations; native queues always expose it so the
-   * worker can validate heartbeat and bookkeeping timing against the same
-   * policy that grants claims.
+   * Effective claim lease used by this queue. Worker timing invariants depend
+   * on this value, so every implementation must expose the same policy that
+   * grants its claims; consumers must never guess a fallback duration.
    */
-  readonly effectiveLeaseMs?: number;
+  readonly effectiveLeaseMs: number;
   // RFC §3.1
   enqueue(request: PromoteRequest): Promise<string>;
   // RFC §3.2
