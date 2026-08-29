@@ -19,9 +19,11 @@ import {
   type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
-  OxigraphStore,
+  createTripleStore,
   quadsToNQuads,
   type Quad,
+  type TripleStore,
+  type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
@@ -54,6 +56,12 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 
 const dataDir = resolve(dataDirInput);
 const role: 'author' | 'receiver' = roleInput;
+const storeConfig = parseStoreConfig(
+  process.env.DKG_RFC64_GATE1_STORE_BACKEND,
+  process.env.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+  dataDir,
+);
+const storeBackend = storeConfig.backend;
 const pinnedMasterKeyHex = masterKeyHex;
 const rolloutConfig = parseGate1RolloutAdapterConfig(process.env);
 const rolloutMode = rolloutConfig?.mode ?? null;
@@ -113,7 +121,10 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
-  const store = new OxigraphStore(join(dataDir, 'store.nq'));
+  const store = requireGraphReplaceStore(
+    await createTripleStore(storeConfig.tripleStore),
+    storeBackend,
+  );
   rolloutFixture = rolloutConfig === null
     ? undefined
     : await Gate1RolloutAdapterFixture.create(rolloutConfig, role, store);
@@ -149,6 +160,7 @@ async function boot(): Promise<void> {
     protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
     rolloutKillSwitch,
     rolloutMode,
+    storeBackend,
     startupRepair: null,
   });
 }
@@ -337,6 +349,50 @@ async function handle(command: Command): Promise<void> {
   }
 }
 
+type GraphReplaceStore = TripleStore & {
+  replaceGraph: NonNullable<TripleStore['replaceGraph']>;
+};
+
+type Gate1StoreConfig = Readonly<
+  | { backend: 'oxigraph'; tripleStore: TripleStoreConfig }
+  | { backend: 'blazegraph'; tripleStore: TripleStoreConfig }
+>;
+
+function parseStoreConfig(
+  backendInput: string | undefined,
+  blazegraphUrl: string | undefined,
+  dataDir: string,
+): Gate1StoreConfig {
+  if (backendInput === undefined || backendInput === '' || backendInput === 'oxigraph') {
+    return Object.freeze({
+      backend: 'oxigraph',
+      tripleStore: {
+        backend: 'oxigraph-persistent',
+        options: { path: join(dataDir, 'store.nq') },
+      },
+    });
+  }
+  if (backendInput === 'blazegraph') {
+    if (blazegraphUrl === undefined || blazegraphUrl.length === 0) {
+      throw new Error('Blazegraph rollout certification requires DKG_RFC64_GATE1_BLAZEGRAPH_URL');
+    }
+    return Object.freeze({
+      backend: 'blazegraph',
+      tripleStore: {
+        backend: 'blazegraph',
+        options: { url: blazegraphUrl, timeout: 30_000 },
+      },
+    });
+  }
+  throw new Error('DKG_RFC64_GATE1_STORE_BACKEND must be oxigraph or blazegraph');
+}
+
+function requireGraphReplaceStore(store: TripleStore, backend: string): GraphReplaceStore {
+  if (typeof store.replaceGraph !== 'function') {
+    throw new Error(`${backend} rollout store lacks atomic graph replacement`);
+  }
+  return store as GraphReplaceStore;
+}
 function compareQuad(left: Quad, right: Quad): number {
   const leftKey = `${left.subject}\n${left.predicate}\n${left.object}\n${left.graph}`;
   const rightKey = `${right.subject}\n${right.predicate}\n${right.object}\n${right.graph}`;
