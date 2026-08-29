@@ -1139,6 +1139,64 @@ describe('createPromoteWorkerSupervisor', () => {
     await slowPromote;
   });
 
+  it('shutdown timeout stops bookkeeping retries and heartbeats before returning', async () => {
+    await queue.enqueue(makeRequest('bookkeeping-recovery'));
+    const retrySleepStarted = deferred();
+    const retrySleep = deferred();
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    const recordCommitMarker = queue.recordCommitMarker.bind(queue);
+    const heartbeat = queue.heartbeat.bind(queue);
+    let swmMarkerWrites = 0;
+    let heartbeatWrites = 0;
+    wrappedQueue.recordCommitMarker = async (jobId, claimToken, step) => {
+      if (step === 'swmInserted') {
+        swmMarkerWrites += 1;
+        throw retryableBookkeepingFailure();
+      }
+      return recordCommitMarker(jobId, claimToken, step);
+    };
+    wrappedQueue.heartbeat = async (jobId, claimToken) => {
+      heartbeatWrites += 1;
+      return heartbeat(jobId, claimToken);
+    };
+
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 1 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 1_000_000,
+      heartbeatIntervalMs: 5,
+      bookkeepingRetryIntervalMs: 60_000,
+      shutdownTimeoutMs: 25,
+      sleep: async () => {
+        retrySleepStarted.resolve();
+        await retrySleep.promise;
+      },
+      log: (m) => logs.push(m),
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+    await sup.tickOnce();
+    await retrySleepStarted.promise;
+
+    await sup.stop();
+    const writesAtStop = swmMarkerWrites;
+    const heartbeatsAtStop = heartbeatWrites;
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+    expect(writesAtStop).toBe(1);
+    expect(swmMarkerWrites).toBe(writesAtStop);
+    expect(heartbeatWrites).toBe(heartbeatsAtStop);
+    expect(sup.getCounters().interruptedAtShutdown).toBe(1);
+    expect((await queue.getStats()).running).toBe(1);
+    expect((await queue.getStats()).succeeded).toBe(0);
+    expect((await queue.getStats()).failed).toBe(0);
+
+    retrySleep.resolve();
+  });
+
   it('stop() waits for a poll callback that has claimed work but not published inFlight yet', async () => {
     await queue.enqueue(makeRequest('interval-claim-race'));
     const claimStarted = deferred();

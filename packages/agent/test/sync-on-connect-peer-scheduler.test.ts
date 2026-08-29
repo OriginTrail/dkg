@@ -110,12 +110,17 @@ describe('sync-on-connect per-peer scheduler', () => {
 
   it('routes a late rejection to the handler owned by the failing lane', async () => {
     const ordinary = deferred();
+    const ordinaryStarted = deferred();
     const ordinaryFailure = new Error('ordinary lane failed');
     const firstErrors: unknown[] = [];
     const lateErrors: unknown[] = [];
+    const selectedPlans: string[] = [];
     const scheduler = new SyncOnConnectPeerScheduler<string>({
-      runSelected: async () => undefined,
+      runSelected: async (_peer, _onError, plan) => {
+        if (plan !== undefined) selectedPlans.push(plan);
+      },
       runOrdinary: async () => {
+        ordinaryStarted.resolve();
         await ordinary.promise;
         throw ordinaryFailure;
       },
@@ -126,7 +131,7 @@ describe('sync-on-connect per-peer scheduler', () => {
       (_peer, error) => firstErrors.push(error),
       0,
     )).toBe(true);
-    await vi.waitFor(() => expect(scheduler.has(PEER)).toBe(true));
+    await ordinaryStarted.promise;
     expect(scheduler.enqueueSelected(
       PEER,
       (_peer, error) => lateErrors.push(error),
@@ -138,5 +143,6 @@ describe('sync-on-connect per-peer scheduler', () => {
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
     expect(firstErrors).toEqual([ordinaryFailure]);
     expect(lateErrors).toEqual([]);
+    expect(selectedPlans).toEqual(['late-plan']);
   });
 });

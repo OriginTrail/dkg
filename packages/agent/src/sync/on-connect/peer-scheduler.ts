@@ -159,7 +159,6 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
         // enqueue may replace a pending selected lane, but it must never
         // redirect an already-running lane's rejection to the newer caller.
         lane.handleSyncError(remotePeer, error);
-        return;
       } finally {
         if (this.jobs.get(remotePeer) === job) job.currentLane = null;
       }
