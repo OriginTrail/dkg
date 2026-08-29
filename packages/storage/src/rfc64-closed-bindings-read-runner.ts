@@ -1,8 +1,9 @@
-import { snapshotExactDataRecord } from '@origintrail-official/dkg-core';
+import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
-import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
-import { Rfc64ExactBindingsReadResultErrorV1 } from
-  './rfc64-exact-bindings-read-capability.js';
+import {
+  composeAbortSignals,
+  raceStoreWorkAgainstAbort,
+} from './abortable-store-work-lifecycle.js';
 
 export interface Rfc64ClosedBindingsReadOptionsV1 {
   readonly timeoutMs: number;
@@ -42,49 +43,31 @@ export function snapshotRfc64ClosedBindingsReadOptionsV1(
   }) as Rfc64ClosedBindingsReadOptionsV1;
 }
 
-interface Rfc64ClosedBindingsReadRunV1<TRow, TDecoded, TResult> {
+interface Rfc64ClosedBindingsReadRunV1<TRow, TDecoded> {
   readonly options: Rfc64ClosedBindingsReadOptionsV1;
   readonly deadlineLabel: string;
   readonly dispatch: (signal: AbortSignal | undefined) => Promise<readonly TRow[]>;
   readonly decode: (rows: readonly TRow[]) => TDecoded;
-  readonly absent: () => TResult;
-  readonly present: (decoded: TDecoded) => TResult;
-  readonly invalidResult: (message: string, cause: unknown) => never;
 }
 
 /** One shared cancellation/deadline lifecycle for all closed bindings reads. */
-export async function runRfc64ClosedBindingsReadV1<TRow, TDecoded, TResult>(
-  run: Rfc64ClosedBindingsReadRunV1<TRow, TDecoded, TResult>,
-): Promise<TResult> {
+export async function runRfc64ClosedBindingsReadV1<TRow, TDecoded>(
+  run: Rfc64ClosedBindingsReadRunV1<TRow, TDecoded>,
+): Promise<TDecoded | undefined> {
   const deadlineAt = performance.now() + run.options.timeoutMs;
   const deadlineSignal = AbortSignal.timeout(run.options.timeoutMs);
   const signalScope = composeAbortSignals(run.options.signal, deadlineSignal);
   try {
     assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
-    let rows: readonly TRow[];
-    try {
-      rows = await run.dispatch(signalScope.signal);
-    } catch (cause) {
-      assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
-      if (cause instanceof Rfc64ExactBindingsReadResultErrorV1) {
-        run.invalidResult(cause.message, cause);
-      }
-      throw cause;
-    }
+    const rows = await raceStoreWorkAgainstAbort(
+      run.dispatch(signalScope.signal),
+      signalScope.signal,
+    );
     assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
-    if (rows.length === 0) {
-      assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
-      return run.absent();
-    }
-    let decoded: TDecoded;
-    try {
-      decoded = run.decode(rows);
-    } catch (cause) {
-      assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
-      throw cause;
-    }
+    if (rows.length === 0) return undefined;
+    const decoded = run.decode(rows);
     assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
-    return run.present(decoded);
+    return decoded;
   } finally {
     signalScope.dispose();
   }

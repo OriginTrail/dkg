@@ -1,7 +1,3 @@
-import {
-  RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
-  type Rfc64SharedProjectionStreamOperationV1,
-} from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
@@ -10,11 +6,11 @@ import { runRfc64HttpProjectionCapabilityConformance } from './helpers/rfc64-htt
 import { createRfc64SharedProjectionTestFixture } from './helpers/rfc64-shared-projection-fixture.js';
 
 const ORIGINAL_FETCH = globalThis.fetch;
-const GRAPH = 'did:dkg:context-graph:v1/root/a%2Fb/_shared_memory/0x3333333333333333333333333333333333333333/7';
 const LINE_A = '<urn:a> <urn:p> "alpha" .\n';
 const LINE_Z = '<urn:z> <urn:p> "zeta" .\n';
-const PROJECTION_BYTES = new TextEncoder().encode(LINE_A + LINE_Z);
-const OPERATION = operation();
+const FIXTURE = createRfc64SharedProjectionTestFixture();
+const PROJECTION_BYTES = FIXTURE.projectionBytes;
+const OPERATION = FIXTURE.operation;
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
@@ -65,6 +61,29 @@ describe('Blazegraph RFC-64 shared-projection stream', () => {
     expect(await collect(result.bytes)).toEqual(fixture.projectionBytes);
   });
 
+  it('bounds and cancels an oversized non-2xx response body', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(1024).fill(0x78));
+        if (pulls >= 12) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    globalThis.fetch = (async () => new Response(body, { status: 503 })) as typeof fetch;
+    const store = new BlazegraphStore('http://blazegraph.invalid/sparql');
+
+    await expect(store.rfc64SharedProjectionStreamV1(OPERATION, {
+      byteCeiling: 4096,
+    })).rejects.toThrow('Blazegraph construct failed (503)');
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(12);
+  });
+
 });
 
 runRfc64HttpProjectionCapabilityConformance({
@@ -74,25 +93,6 @@ runRfc64HttpProjectionCapabilityConformance({
     { scheduler, timeout },
   ),
 });
-
-function operation(
-  overrides: Partial<Rfc64SharedProjectionStreamOperationV1> = {},
-): Rfc64SharedProjectionStreamOperationV1 {
-  return Object.freeze({
-    queryId: 'SYNC_KA_SHARED_PROJECTION_STREAM_V1',
-    graphIri: GRAPH,
-    commitmentSubject:
-      'did:dkg:otp:20430/0x3333333333333333333333333333333333333333/7/_cg-shared-v1',
-    projectionDigest: `0x${'11'.repeat(32)}`,
-    publicTripleCount: '2',
-    signedByteCeiling: 4096,
-    protocolByteCeiling: RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
-    resultKind: 'quad-stream',
-    concurrencyClass: 'rfc64-shared-projection-v1',
-    sparql: `CONSTRUCT { ?s ?p ?o }\nWHERE {\n  GRAPH <${GRAPH}> {\n    ?s ?p ?o .\n  }\n}`,
-    ...overrides,
-  }) as Rfc64SharedProjectionStreamOperationV1;
-}
 
 function byteStream(chunks: readonly string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();

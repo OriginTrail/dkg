@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   escapeRdfLiteral,
   decodeRdfLiteralBody,
+  decodeNTriplesUcharEscapes,
   formatCanonicalRdfLiteralTerm,
   isRdfTerm,
   normalizeRdfObject,
@@ -24,6 +25,32 @@ describe('escapeRdfLiteral', () => {
     expect(normalizeRdfObject('urn:test:entity')).toBe('urn:test:entity');
     expect(normalizeRdfObject('a "quote"\u0000')).toBe('"a \\"quote\\"\\u0000"');
     expect(normalizeRdfObject(null)).toBe('""');
+  });
+});
+
+describe('N-Triples UCHAR decoding', () => {
+  it('decodes BMP, scalar, and paired UTF-16 escape forms', () => {
+    expect(decodeNTriplesUcharEscapes(String.raw`caf\u00E9/\U0001F600/\uD83D\uDE00`, {
+      surrogatePolicy: 'combine',
+    })).toBe('café/😀/😀');
+  });
+
+  it('rejects malformed, unpaired, and out-of-range escapes by default', () => {
+    expect(decodeNTriplesUcharEscapes(String.raw`\q`)).toBeNull();
+    expect(decodeNTriplesUcharEscapes(String.raw`\uD800`, {
+      surrogatePolicy: 'combine',
+    })).toBeNull();
+    expect(decodeNTriplesUcharEscapes(String.raw`\uDC00`, {
+      surrogatePolicy: 'combine',
+    })).toBeNull();
+    expect(decodeNTriplesUcharEscapes(String.raw`\U00110000`)).toBeNull();
+  });
+
+  it('supports the consensus compatibility policy explicitly', () => {
+    expect(decodeNTriplesUcharEscapes(String.raw`\q/\uD800`, {
+      invalidEscape: 'preserve',
+      surrogatePolicy: 'allow',
+    })).toBe(`\\q/\uD800`);
   });
 });
 

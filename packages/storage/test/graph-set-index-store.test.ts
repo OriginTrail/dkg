@@ -12,6 +12,7 @@ import {
   StoreSchedulerBusyError,
   StorePriorityScheduler,
   createTripleStore,
+  issueManagedOxigraphRuntimeCapabilityV1,
   registerTripleStoreAdapter,
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
@@ -20,6 +21,9 @@ import {
   type StoreWorkPriority,
   type TripleStore,
 } from '../src/index.js';
+
+const managedOxigraphRuntimeCapability = () =>
+  issueManagedOxigraphRuntimeCapabilityV1();
 import {
   ControlledProbeStore,
   CountingStore,
@@ -1392,7 +1396,7 @@ describe('GraphSetIndexStore', () => {
         queryEndpoint: endpoint,
         updateEndpoint: endpoint,
         managedByDkg: true,
-        managedOxigraph: true,
+        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
       },
     });
     try {

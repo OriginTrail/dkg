@@ -23,7 +23,10 @@
  * matching the Blazegraph-Docker provisioner's contract.
  */
 import { join } from 'node:path';
-import { DEFAULT_SPARQL_HTTP_TIMEOUT_MS } from '@origintrail-official/dkg-storage';
+import {
+  DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
+  issueManagedOxigraphRuntimeCapabilityV1,
+} from '@origintrail-official/dkg-storage';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
   startOxigraphServer,
@@ -256,7 +259,6 @@ export function planManagedOxigraph(
     // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
     options: {
       managedByDkg: true,
-      managedOxigraph: true,
       timeout: clientTimeoutMs,
     },
   };
@@ -340,6 +342,7 @@ export async function startManagedOxigraph(
     backend: 'sparql-http',
     options: {
       ...plan.storeConfigTemplate.options,
+      managedOxigraphRuntimeCapability: issueManagedOxigraphRuntimeCapabilityV1(),
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
       getRecoveryState: () => handle.getRecoveryState(),

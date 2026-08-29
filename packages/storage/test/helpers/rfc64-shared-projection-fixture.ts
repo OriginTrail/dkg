@@ -33,6 +33,9 @@ export interface Rfc64SharedProjectionTestFixtureOptions {
   readonly triples?: readonly Rfc64ProjectionTestTriple[];
   readonly projectionBytes?: Uint8Array;
   readonly publicTripleCount?: string;
+  readonly contextGraphId?: string;
+  readonly assertionCoordinate?: string;
+  readonly kaNumber?: string;
 }
 
 /** One shared seal-bound fixture for gateway and certified-adapter suites. */
@@ -46,9 +49,11 @@ export function createRfc64SharedProjectionTestFixture(
   const projectionBytes = options.projectionBytes?.slice()
     ?? encodeCanonicalCgSharedPublicRootProjectionV1(triples);
   const publicTripleCount = options.publicTripleCount ?? String(triples.length);
+  const contextGraphId = options.contextGraphId ?? 'a/b';
+  const kaNumber = options.kaNumber ?? '7';
   const scope = validScope({
     networkId: 'otp:20430',
-    contextGraphId: 'a/b',
+    contextGraphId,
     governanceChainId: '20430',
     governanceContractAddress: '0x5555555555555555555555555555555555555555',
     ownershipTransitionDigest: null,
@@ -73,7 +78,7 @@ export function createRfc64SharedProjectionTestFixture(
     reservedKaId: RFC64_PROJECTION_TEST_KA_ID,
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
-    kaUal: `did:dkg:otp:20430/${RFC64_PROJECTION_TEST_AUTHOR}/7`,
+    kaUal: `did:dkg:otp:20430/${RFC64_PROJECTION_TEST_AUTHOR}/${kaNumber}`,
     assertionVersion: '2',
     publicTripleCount,
     privateTripleCount: '0',
@@ -82,7 +87,7 @@ export function createRfc64SharedProjectionTestFixture(
   const projectionDigest = computeKaProjectionDigestV1(projectionBytes);
   const row = validRow({
     kaId: RFC64_PROJECTION_TEST_KA_ID,
-    assertionCoordinate: 'name λ',
+    assertionCoordinate: options.assertionCoordinate ?? 'name λ',
     assertionVersion: '2',
     projectionId: 'cg-shared-v1',
     projectionDigest,
@@ -106,9 +111,10 @@ export function createRfc64SharedProjectionTestFixture(
       profile,
     ),
   });
+  const operation = compileRfc64SharedProjectionStreamOperationV1(request);
   return Object.freeze({
-    graph: RFC64_PROJECTION_TEST_GRAPH,
-    operation: compileRfc64SharedProjectionStreamOperationV1(request),
+    graph: operation.graphIri,
+    operation,
     profile,
     projectionBytes,
     projectionDigest,
