@@ -4803,12 +4803,6 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    if (!liveSwmBare) {
-      throw stale(
-        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
-          `SWM pointer is none, queued seal is ${queuedSealBare}.`,
-      );
-    }
     if (!liveWmBare) {
       throw stale(
         `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
@@ -4856,6 +4850,14 @@ export class PublishMethods extends DKGAgentBase {
           'the immutable SWM access envelope no longer matches the queued request.',
       );
     }
+
+    // `_stampSwmPointer` is explicitly a best-effort post-commit projection.
+    // A managed-store restart can therefore leave this optional lifecycle row
+    // absent even though the complete-share marker and immutable graph-scoped
+    // head both committed. Absence alone is not proof that the queued content
+    // changed: the exact operation id, assertion version, access envelope and
+    // queued WM root above are the durable authority. A present-but-different
+    // SWM pointer remains terminally stale via the comparison above.
 
     if (history.kaNumber && request.kaNumber && history.kaNumber !== request.kaNumber) {
       throw stale(
