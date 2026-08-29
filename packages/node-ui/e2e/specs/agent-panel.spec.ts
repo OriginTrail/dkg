@@ -1,3 +1,4 @@
+import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/base.js';
 import { sel } from '../helpers/selectors.js';
 
@@ -19,17 +20,23 @@ test.describe('Right Panel (Agent Panel)', () => {
   });
 
   test.describe('Agents Mode', () => {
+    const openAddAgentFlow = async (page: Page) => {
+      await page.locator(sel.rightPanel.addBtn).click();
+    };
+
     test('"+" add agent subtab is visible', async ({ page }) => {
       const addTab = page.locator(sel.rightPanel.addBtn);
       await expect(addTab).toBeVisible();
     });
 
     test('shows CONNECT ANOTHER AGENT heading', async ({ page }) => {
+      await openAddAgentFlow(page);
       const heading = page.getByText('CONNECT ANOTHER AGENT');
       await expect(heading).toBeVisible();
     });
 
     test('lists at least one connectable agent integration (OpenClaw / Hermes)', async ({ page }) => {
+      await openAddAgentFlow(page);
       // Two default integrations (OpenClaw + Hermes) ship out of the
       // box now, so the original empty-state copy is unreachable until
       // both are connected. Assert the *positive* invariant — the

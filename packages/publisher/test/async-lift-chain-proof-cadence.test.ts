@@ -7,7 +7,7 @@
  * prove the WIRING: phase-driven ceilings, shared attempt accounting, jitter bounds, and the
  * stale-successor no-op, each observed via which passes actually re-ask the resolver.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
   serializeJobRecord,
@@ -241,6 +241,13 @@ describe('GH#2270 chain-proof cadence', () => {
         delete timestamps.failedAt;
         return { ...t, timestamps };
       }],
+      // r8 (3882533673) — the fourth component: TRANSACTION EVIDENCE. Only the broadcast hash
+      // changes; failure state, code, and timestamps stay identical, so this case is red iff
+      // `chainProofLookupFingerprint(lookup)` participates in the incarnation key.
+      ['transaction evidence', (t: Record<string, unknown>) => ({
+        ...t,
+        broadcast: { ...(t.broadcast as object), txHash: `0x${'77'.repeat(32)}` },
+      })],
     ] as const)(
       'every incarnation-key component discriminates: a mid-flight %s change makes the verdict stale',
       async (_component, mutate) => {
@@ -431,6 +438,364 @@ describe('GH#2270 chain-proof cadence', () => {
       await publisher.recover();
       expect(asks).toBe(2);
       expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    });
+  });
+
+  describe('pass ordering and residue through the real reconciliation path (r6)', () => {
+    it("a pass stalled BEFORE dispatch cannot outrank a later pass's newer snapshot", async () => {
+      // r6 (🔴 3883453447 follow-up) — the publisher-level inversion regression: pass A
+      // snapshots the predecessor incarnation, stalls in an earlier reconciliation lane, the
+      // record is re-failed, pass B snapshots and defers the successor for its 30s base — and
+      // only THEN pass A reaches the dispatcher. Its token was issued at its SNAPSHOT, so its
+      // observation is refused: no resolver call, and the successor's backoff runs in full. A
+      // regression that issues the token at the dispatcher hands stale A the newer token,
+      // erases B's deferral, and re-asks before 30s — both assertions below go red.
+      let releaseStalled!: () => void;
+      const stalled = new Promise<void>((resolve) => { releaseStalled = resolve; });
+      let signalStalled!: () => void;
+      const stalledEntered = new Promise<void>((resolve) => { signalStalled = resolve; });
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      // Stall pass A between its snapshot and its chain-proof dispatch — the window the
+      // ordering claim is about — by parking the first recovery-lane call on its way through.
+      const impl = publisher as unknown as {
+        recoverInterruptedPreBroadcastJobs(inventory: unknown): Promise<number>;
+      };
+      const originalLane = impl.recoverInterruptedPreBroadcastJobs.bind(publisher);
+      let firstLaneCall = true;
+      impl.recoverInterruptedPreBroadcastJobs = async (inventory: unknown) => {
+        if (firstLaneCall) {
+          firstLaneCall = false;
+          signalStalled();
+          await stalled;
+        }
+        return originalLane(inventory);
+      };
+
+      const passA = publisher.recover();
+      // r8 (🔴 3883812279) — an explicit handshake, not a sleep: the patched lane runs strictly
+      // AFTER acquisition, so this await proves pass A holds its predecessor snapshot (and its
+      // token) before the record is replaced below.
+      await stalledEntered;
+
+      const current = await publisher.getStatus(jobId);
+      const successor = {
+        ...current!,
+        timestamps: { ...current!.timestamps, failedAt: (current!.timestamps as { failedAt: number }).failedAt + 1 },
+      };
+      const { jobRef, jobQuads } = serializeJobRecord(successor as never, DEFAULT_CONTROL_GRAPH_URI);
+      await (h.store as unknown as {
+        replaceSubject(graph: string, subject: string, quads: unknown): Promise<void>;
+      }).replaceSubject(DEFAULT_CONTROL_GRAPH_URI, jobRef, jobQuads);
+
+      await publisher.recover(); // pass B: newer snapshot, successor asked and deferred 30s
+      expect(asks).toBe(1);
+
+      releaseStalled();
+      await passA; // stale A reaches the dispatcher LAST — refused by its older token
+      expect(asks).toBe(1);
+
+      h.advance(29_000);
+      await publisher.recover();
+      expect(asks).toBe(1); // the successor's earned backoff ran in full
+      h.advance(2_000);
+      await publisher.recover();
+      expect(asks).toBe(2);
+    });
+
+    it('inventory acquisition is a linearization boundary — concurrent passes cannot interleave it', async () => {
+      // r6 (🔴 3883453447) — overlapping list() reads may RESOLVE out of store-side capture
+      // order, so the seam serializes acquisitions: the second pass's read must not start
+      // until the first pass's snapshot (and its token) is complete, even when the first
+      // read is slow. Interleaved enters here mean tokens can order by completion again.
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => ({ status: 'pending-mempool' }),
+      });
+      const events: string[] = [];
+      const originalList = publisher.list.bind(publisher);
+      let firstListCall = true;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        events.push('enter');
+        if (firstListCall) {
+          firstListCall = false;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        const result = await originalList(filter);
+        events.push('exit');
+        return result;
+      };
+      await Promise.all([publisher.recover(), publisher.recover()]);
+      expect(events).toEqual(['enter', 'exit', 'enter', 'exit']);
+    });
+
+    it("a hung owner promotes ONE head at a time — the lease clock runs from the owner's START, not the waiter's entry", async () => {
+      // r12 (🔴 3884393225) — the cap is a lease on the OWNER's execution, not a per-waiter
+      // entry timer: with entry-relative timers, B and C queued during A's hang both bypass at
+      // ~the same instant and their reads overlap, re-opening the capture-order inversion
+      // (a higher-token stale capture can replace a newly deferred entry). B's read is held
+      // open here so the two clocks are distinguishable: C must still be fenced at t=99 (its
+      // entry-relative timer would long have fired) and is promoted only at t=100, when B —
+      // promoted at t=50 — has held the seam for its own full 50ms lease.
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        reconciliationAcquisitionLeaseMs: 50,
+        chainProofResolver: async () => ({ status: 'pending-mempool' }),
+      });
+      await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const events: string[] = [];
+      let releaseB!: () => void;
+      const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+      const originalList = publisher.list.bind(publisher);
+      let listCalls = 0;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        listCalls += 1;
+        const call = listCalls;
+        if (call === 1) {
+          return new Promise(() => undefined); // A: hangs forever
+        }
+        events.push(`enter${call}`);
+        if (call === 2) await gateB; // B: held open across C's would-be bypass window
+        const result = await originalList(filter);
+        events.push(`exit${call}`);
+        return result;
+      };
+
+      vi.useFakeTimers();
+      try {
+        const passA = publisher.recover(); // owner: hangs in list()
+        void passA;
+        const passB = publisher.recover(); // head waiter
+        const passC = publisher.recover(); // queued behind B, NOT behind A
+        await vi.advanceTimersByTimeAsync(49);
+        expect(events).toEqual([]); // both fenced behind A's live lease
+        await vi.advanceTimersByTimeAsync(1); // t=50: A's lease expires — B ALONE is promoted
+        expect(events).toEqual(['enter2']);
+        await vi.advanceTimersByTimeAsync(49); // t=99: C's entry-relative clock is long past 50…
+        expect(events).toEqual(['enter2']); // …but C is fenced until B's OWN lease runs out
+        await vi.advanceTimersByTimeAsync(1); // t=100: B held the seam 50ms — C is promoted
+        await passC;
+        expect(events).toEqual(['enter2', 'enter3', 'exit3']);
+        releaseB();
+        await passB; // the bypassed-but-healthy B still completes, fenced older
+        expect(events).toEqual(['enter2', 'enter3', 'exit3', 'exit2']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a read bypassed at the cap completes late RANKED OLD — its sweep spares the successor', async () => {
+      // r11 (🔴 3884193885) — the ordering token is drawn BEFORE the read, so a hung
+      // acquisition that a successor bypassed keeps its old rank when it finally completes.
+      // Issued after the read, the late pass would carry the NEWEST token with the OLDEST
+      // inventory, and its sweep — which acts on absence, where no identity guard applies —
+      // would delete the successor's earned backoff for a job the old snapshot never saw.
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        reconciliationAcquisitionLeaseMs: 50,
+        chainProofResolver: async () => {
+          asks += 1;
+          return { status: 'pending-mempool' };
+        },
+      });
+
+      let releaseCapture!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseCapture = resolve; });
+      let signalCaptured!: () => void;
+      const captured = new Promise<void>((resolve) => { signalCaptured = resolve; });
+      const originalList = publisher.list.bind(publisher);
+      let firstListCall = true;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        if (firstListCall) {
+          firstListCall = false;
+          const result = await originalList(filter); // captures the PRE-held state...
+          signalCaptured();
+          await gate; // ...but resolves only when released, far past the cap
+          return result;
+        }
+        return originalList(filter);
+      };
+
+      const passA = publisher.recover(); // old snapshot drawn; response stalled
+      await captured; // the capture provably predates the job below
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+      void jobId;
+
+      await publisher.recover(); // pass B: bypasses at the 50ms cap, sees the job, defers 30s
+      expect(asks).toBe(1);
+
+      releaseCapture();
+      await passA; // the late pass runs with an inventory that omits the held job
+      const schedule = (publisher as unknown as {
+        chainProofRetrySchedule: { retainedEntryCount(): number };
+      }).chainProofRetrySchedule;
+      expect(schedule.retainedEntryCount()).toBe(1); // the successor's entry SURVIVED the sweep
+
+      h.advance(29_000);
+      await publisher.recover();
+      expect(asks).toBe(1); // earned backoff honored — no immediate re-poll
+      h.advance(2_000);
+      await publisher.recover();
+      expect(asks).toBe(2);
+    });
+
+    it("recover() itself sweeps residue a truncated pass left behind", async () => {
+      // r8 (🟡 3883812096) — the dispatcher's prune CALL is the wiring under test (the sweep
+      // semantics are the schedule's own rows): batch size 0 lets a pass observe the held job
+      // (installing its entry) without ever dispatching the turn, and the job is then cleared,
+      // so no dispatch can ever release the slot. The next recover()'s sweep must collect it.
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 0,
+        rand: () => 0,
+        chainProofResolver: async () => ({ status: 'pending-mempool' }),
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+      const schedule = (publisher as unknown as {
+        chainProofRetrySchedule: { retainedEntryCount(): number };
+      }).chainProofRetrySchedule;
+
+      await publisher.recover(); // observed + installed, batch 0: never dispatched
+      expect(schedule.retainedEntryCount()).toBe(1);
+
+      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { requestedBy: 'operator' } });
+      await publisher.recover(); // empty held population: the sweep collects the residue
+      expect(schedule.retainedEntryCount()).toBe(0);
+    });
+
+    it('a failed inventory acquisition does not poison the chain — the next pass reads fresh', async () => {
+      // r7 (🟡 3883690945) — the rejection handler on the acquisition chain is load-bearing:
+      // the chain must carry only settlement, never the failure. A one-shot list() failure
+      // rejects its own pass; the NEXT pass performs a fresh read (not the memoized rejection)
+      // and real dispatch work proceeds.
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const originalList = publisher.list.bind(publisher);
+      let listCalls = 0;
+      let failNext = true;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        listCalls += 1;
+        if (failNext) {
+          failNext = false;
+          throw new Error('transient store read failure');
+        }
+        return originalList(filter);
+      };
+
+      await expect(publisher.recover()).rejects.toThrow('transient store read failure');
+      const callsAfterFailure = listCalls;
+      await publisher.recover();
+      expect(listCalls).toBe(callsAfterFailure + 1); // a fresh read, not a replayed rejection
+      expect(asks).toBe(1); // the held job was actually dispatched
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    });
+
+    it('a HUNG inventory read cannot block later passes — released at EXACTLY the configured cap', async () => {
+      // r10 (🔴 3883959795) — one non-settling store read must degrade ordering, not
+      // availability: with an unbounded chain, every later recover() queues behind the hung
+      // read forever. r11 (🔴 3883812279-follow / 3884193991) — the CAP VALUE is the pin, not
+      // mere finiteness: fake timers prove the successor is still fenced at 49ms and released
+      // at exactly the configured 50ms, so a hard-coded cap cannot hide behind the test
+      // timeout.
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        reconciliationAcquisitionLeaseMs: 50,
+        chainProofResolver: async () => {
+          asks += 1;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const originalList = publisher.list.bind(publisher);
+      let firstListCall = true;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        if (firstListCall) {
+          firstListCall = false;
+          return new Promise(() => undefined); // a store read that never settles
+        }
+        return originalList(filter);
+      };
+
+      vi.useFakeTimers();
+      try {
+        const hung = publisher.recover(); // acquisition 1: wedged inside list() forever
+        void hung;
+        let secondSettled = false;
+        const second = publisher.recover().then((n) => {
+          secondSettled = true;
+          return n;
+        });
+        await vi.advanceTimersByTimeAsync(49);
+        expect(secondSettled).toBe(false); // still fenced behind the hung read at 49ms
+        await vi.advanceTimersByTimeAsync(1); // the cap fires at exactly 50ms
+        await second; // fresh acquisition + real work
+        expect(asks).toBe(1); // the held job was dispatched
+      } finally {
+        vi.useRealTimers();
+      }
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+      h.advance(31_000);
+      await publisher.recover(); // the chain is owned by settled acquisitions again
+      expect(asks).toBe(2); // past the 30s deferral: the lane keeps running after the hung head
+    });
+
+    it('a held job cleared while its verdict is in flight releases its schedule slot', async () => {
+      // r6 (🔴 3883453613) — the record is DELETED (operator clear) while the resolver is in
+      // flight; the locked re-read finds nothing. The turn must release its slot: without the
+      // stale-branch settlement the ready() entry survives a job no pass will ever observe
+      // again, and `retainedEntryCount` counts it forever.
+      let release!: () => void;
+      const parked = new Promise<void>((resolve) => { release = resolve; });
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          await parked;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const firstPass = publisher.recover();
+      while (asks === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // The real operator exit, serialized on the same claim lock the disposition uses.
+      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { requestedBy: 'operator' } });
+
+      release();
+      await firstPass;
+      const schedule = (publisher as unknown as {
+        chainProofRetrySchedule: { retainedEntryCount(): number };
+      }).chainProofRetrySchedule;
+      expect(schedule.retainedEntryCount()).toBe(0);
+      expect(await publisher.getStatus(jobId)).toBeNull();
     });
   });
 });
