@@ -2,29 +2,37 @@
  * Chain-discovery scan scheduling: which scan mode each run issues, and the
  * runner the daemon's 30-minute timer drives (GH#2323).
  *
- * Extracted from lifecycle.ts — the runner is a self-contained state machine
- * with a narrow dependency surface (two agent methods and a log sink), and
- * retry/cadence policy changes should not require editing the module that
- * also owns boot, servers, workers and shutdown.
+ * Extracted from lifecycle.ts — the scheduler is a self-contained state
+ * machine with a narrow dependency surface (two agent methods and a log
+ * sink), and retry/cadence policy changes should not require editing the
+ * module that also owns boot, servers, workers and shutdown.
+ *
+ * The policy lives in two PURE functions over a discriminated state —
+ * `planScan` (what this tick runs) and `commitScanOutcome` (how the result
+ * moves the state) — so invalid combinations (a retry count without a pinned
+ * scan, overdue ticks without an overdue resync) are unrepresentable, and
+ * the runner itself does nothing but single-flight orchestration and I/O.
  */
 
 export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
 export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
 
 /**
- * How many consecutive ticks a failed scan is retried AS-IS before the runner
- * releases its slot and lets the normal cadence proceed. Bounded because an
- * unbounded pin trades one liveness bug for another: a deterministically
- * failing historical page would otherwise block incremental discovery of new
- * blocks forever.
+ * How many consecutive ticks a failed scan is retried AS-IS before the
+ * scheduler releases its slot and lets the normal cadence proceed. Bounded
+ * because an unbounded pin trades one liveness bug for another: a
+ * deterministically failing historical page would otherwise block
+ * incremental discovery of new blocks forever.
  */
 export const MAX_CONSECUTIVE_SAME_SCAN_RETRIES = 3;
 
 /**
  * While a full resync is overdue (a `seedFull` exhausted its retries), a
- * fresh attempt is injected every this-many ticks (~2h at the 30-minute
- * cadence). Incremental scans run on the ticks in between, so recent blocks
- * keep being discovered while the historical re-walk stays scheduled.
+ * fresh attempt fires every this-many RUNNER TICKS (~2h at the 30-minute
+ * cadence) — ticks, not completed slots, so a failing incremental's retry
+ * cycle cannot postpone the owed resync. Incremental scans run on the ticks
+ * in between, keeping recent-block discovery live while the historical
+ * re-walk stays scheduled.
  */
 export const OVERDUE_FULL_RESYNC_RETRY_EVERY = 4;
 
@@ -65,36 +73,147 @@ export function chainDiscoveryScanOptions(input: {
     : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
 }
 
-type ScanOptions = ReturnType<typeof chainDiscoveryScanOptions>;
+export type ScanOptions = ReturnType<typeof chainDiscoveryScanOptions>;
+
+export interface ScanSchedulerConfig {
+  pageBudget?: number;
+  fullScanEvery?: number;
+}
 
 /**
- * The scan runner (GH#2323). Its scheduling invariants, each pinned by a
- * test:
+ * The scheduler state. Invalid combinations are unrepresentable by
+ * construction: a retry count exists only inside `pinned`, overdue ticks
+ * only inside `overdueResync`.
  *
- * SLOT ON RESOLVE. The run counter advances only when a scan settles the
- * slot — success, or a failure that exhausted its retries. `runs++` before
- * the awaits meant a rejected run-0 `seedFull` burned its slot and silently
- * downgraded the startup recovery to `incremental` until run 48 (~24h).
+ * `pinned` — a failed scan retried AS-IS. Captured options, not a
+ * recomputed mode: the mode derives from the run number AND the mutable
+ * watermark, and a partially-successful scan moves the watermark, so a
+ * fresh node's failed `seedFromCursor` recomputed would become an unbounded
+ * `seedFull` from block zero instead of resuming its cursor.
  *
- * SAME SCAN, NOT SAME NUMBER. A failed attempt is retried with its CAPTURED
- * options. The mode derives from the run number AND the mutable watermark,
- * and a partially-successful scan moves the watermark — recomputed, a fresh
- * node's failed `seedFromCursor` would become an unbounded `seedFull` from
- * block zero instead of resuming its cursor.
+ * `overdueResync` — a `seedFull` that exhausted its retries. Released, not
+ * forgotten: it fires again every OVERDUE_FULL_RESYNC_RETRY_EVERY ticks.
+ */
+export interface ScanSchedulerState {
+  /** Advances only when a scan settles its slot (success or exhausted). */
+  readonly run: number;
+  readonly pinned?: { readonly options: ScanOptions; readonly failures: number };
+  readonly overdueResync?: { readonly ticksSinceAttempt: number };
+}
+
+export const INITIAL_SCAN_SCHEDULER_STATE: ScanSchedulerState = { run: 0 };
+
+export type ScanOutcome =
+  | { readonly ok: true; readonly found: number }
+  | { readonly ok: false; readonly error: unknown };
+
+/** What the runner should tell the operator, decided by the pure layer. */
+export type ScanReport =
+  | { kind: 'discovered'; found: number }
+  | { kind: 'quiet' }
+  | { kind: 'retryScheduled'; run: number; mode: ScanOptions['mode']; failures: number; error: unknown }
+  | { kind: 'slotReleased'; run: number; mode: ScanOptions['mode']; attempts: number; resyncStaysScheduled: boolean; error: unknown };
+
+/**
+ * Pure: choose this tick's scan and account for overdue-cadence time.
  *
- * BOUNDED PIN. The same failed scan is retried at most
- * MAX_CONSECUTIVE_SAME_SCAN_RETRIES ticks in a row, then its slot is
- * released so the normal cadence (usually `incremental`) resumes — a
- * deterministic failure must not starve discovery of new blocks forever.
- *
- * OVERDUE RESYNC. A released `seedFull` is not forgotten: while overdue, a
- * fresh attempt is injected every OVERDUE_FULL_RESYNC_RETRY_EVERY ticks in
- * place of an incremental scan, until one succeeds.
- *
- * ATOMIC COMMITS. All scheduling state is committed before anything is
- * logged, and the watermark probe has its own error boundary — a throwing
- * log line must neither corrupt the state machine nor be misclassified as a
- * probe failure.
+ * Overdue ticks count on EVERY planned tick, and when the cadence comes due
+ * the owed `seedFull` fires — replacing a pinned `incremental` retry if one
+ * exists (an incremental's work is subsumed by the full re-walk), but never
+ * preempting a pinned `seedFull`/`seedFromCursor`, whose own retries are the
+ * more specific recovery already in progress.
+ */
+export function planScan(
+  state: ScanSchedulerState,
+  watermarkSeeded: boolean,
+  config: ScanSchedulerConfig = {},
+): { scan: ScanOptions; state: ScanSchedulerState } {
+  if (state.overdueResync) {
+    const ticks = state.overdueResync.ticksSinceAttempt + 1;
+    const preemptable = state.pinned === undefined || state.pinned.options.mode === 'incremental';
+    if (ticks >= OVERDUE_FULL_RESYNC_RETRY_EVERY && preemptable) {
+      return {
+        scan: { mode: 'seedFull', throwOnChainScanFailure: true },
+        state: { run: state.run, overdueResync: { ticksSinceAttempt: 0 } },
+      };
+    }
+    state = { ...state, overdueResync: { ticksSinceAttempt: ticks } };
+  }
+  if (state.pinned) {
+    return { scan: state.pinned.options, state };
+  }
+  return {
+    scan: chainDiscoveryScanOptions({
+      run: state.run,
+      watermarkSeeded,
+      pageBudget: config.pageBudget,
+      fullScanEvery: config.fullScanEvery,
+    }),
+    state,
+  };
+}
+
+/**
+ * Pure: fold a scan's outcome into the next state, and say what to report.
+ * The outcome is discriminated — `Promise.reject(undefined)` is a FAILURE
+ * carrying `undefined`, not a success (a sentinel comparison would commit it
+ * as one, consuming the slot and clearing an overdue resync no scan earned).
+ */
+export function commitScanOutcome(
+  state: ScanSchedulerState,
+  scan: ScanOptions,
+  outcome: ScanOutcome,
+): { state: ScanSchedulerState; report: ScanReport } {
+  if (outcome.ok) {
+    return {
+      state: {
+        run: state.run + 1,
+        // A completed full resync settles the overdue debt; any other success
+        // leaves it (still owed, still on cadence).
+        ...(scan.mode !== 'seedFull' && state.overdueResync !== undefined
+          ? { overdueResync: state.overdueResync }
+          : {}),
+      },
+      report: outcome.found > 0 ? { kind: 'discovered', found: outcome.found } : { kind: 'quiet' },
+    };
+  }
+  const failures = (state.pinned?.options === scan ? state.pinned.failures : 0) + 1;
+  if (failures <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES) {
+    return {
+      state: { ...state, pinned: { options: scan, failures } },
+      report: { kind: 'retryScheduled', run: state.run, mode: scan.mode, failures, error: outcome.error },
+    };
+  }
+  // Retries exhausted: release the slot so the cadence proceeds; keep a
+  // failed full resync scheduled instead of forgetting it.
+  return {
+    state: {
+      run: state.run + 1,
+      ...(scan.mode === 'seedFull'
+        ? { overdueResync: { ticksSinceAttempt: 0 } }
+        : state.overdueResync !== undefined
+          ? { overdueResync: state.overdueResync }
+          : {}),
+    },
+    report: {
+      kind: 'slotReleased',
+      run: state.run,
+      mode: scan.mode,
+      attempts: failures,
+      resyncStaysScheduled: scan.mode === 'seedFull',
+      error: outcome.error,
+    },
+  };
+}
+
+const describeError = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/**
+ * The I/O shell (GH#2323): single-flight guard, the watermark probe with its
+ * own narrow error boundary, one state assignment per tick committed BEFORE
+ * any logging, and a log sink that cannot affect scheduling — every policy
+ * decision lives in the pure functions above.
  */
 export function createChainDiscoveryScanRunner(input: {
   agent: {
@@ -105,12 +224,8 @@ export function createChainDiscoveryScanRunner(input: {
   pageBudget?: number;
   fullScanEvery?: number;
 }): () => Promise<void> {
-  let runs = 0;
+  let state = INITIAL_SCAN_SCHEDULER_STATE;
   let inFlight = false;
-  let retryOptions: ScanOptions | undefined;
-  let consecutiveRetries = 0;
-  let fullResyncOverdue = false;
-  let ticksSinceOverdueAttempt = 0;
 
   const safeLog = (msg: string): void => {
     try {
@@ -120,98 +235,63 @@ export function createChainDiscoveryScanRunner(input: {
     }
   };
 
+  const reportLine = (report: ScanReport): string | undefined => {
+    switch (report.kind) {
+      case 'quiet':
+        return undefined;
+      case 'discovered':
+        return `Chain scan: discovered ${report.found} new context graph(s)`;
+      case 'retryScheduled':
+        return (
+          `Chain scan run ${report.run} (${report.mode}) failed; ` +
+          `the same scan retries next tick: ${describeError(report.error)}`
+        );
+      case 'slotReleased':
+        return (
+          `Chain scan run ${report.run} (${report.mode}) failed ${report.attempts}x; ` +
+          `releasing the slot so discovery continues` +
+          (report.resyncStaysScheduled
+            ? ` — the full resync stays scheduled and retries every ${OVERDUE_FULL_RESYNC_RETRY_EVERY} tick(s)`
+            : '') +
+          `: ${describeError(report.error)}`
+        );
+    }
+  };
+
   return async () => {
     if (inFlight) return;
     inFlight = true;
     try {
-      const run = runs;
-
-      // ── Select the scan ────────────────────────────────────────────────
-      let options: ScanOptions;
-      if (retryOptions !== undefined) {
-        options = retryOptions;
-      } else {
-        let watermarkSeeded: boolean;
+      // The probe result only matters when nothing is pinned; a pinned scan
+      // replays its captured options regardless.
+      let watermarkSeeded = false;
+      if (state.pinned === undefined) {
         try {
           watermarkSeeded = await input.agent.hasContextGraphRegistryScanWatermark();
         } catch (err) {
-          // Probe failure: no options exist to pin, and the slot survives —
-          // scoped to the probe call so nothing else can be misclassified.
+          // Scoped to the probe call alone, so nothing else — least of all a
+          // throwing log line — can be misclassified as a probe failure.
           safeLog(
-            `Chain scan run ${run} skipped (watermark probe failed; retrying next tick): ` +
-              `${err instanceof Error ? err.message : String(err)}`,
+            `Chain scan run ${state.run} skipped (watermark probe failed; retrying next tick): ` +
+              `${describeError(err)}`,
           );
           return;
         }
-        options = chainDiscoveryScanOptions({
-          run,
-          watermarkSeeded,
-          pageBudget: input.pageBudget,
-          fullScanEvery: input.fullScanEvery,
-        });
-        if (fullResyncOverdue && options.mode === 'incremental') {
-          ticksSinceOverdueAttempt += 1;
-          if (ticksSinceOverdueAttempt >= OVERDUE_FULL_RESYNC_RETRY_EVERY) {
-            ticksSinceOverdueAttempt = 0;
-            options = { mode: 'seedFull', throwOnChainScanFailure: true };
-          }
-        }
       }
-
-      // ── Run it ─────────────────────────────────────────────────────────
-      let found: number | undefined;
-      let failure: unknown;
+      const planned = planScan(state, watermarkSeeded, {
+        pageBudget: input.pageBudget,
+        fullScanEvery: input.fullScanEvery,
+      });
+      let outcome: ScanOutcome;
       try {
-        found = await input.agent.discoverContextGraphsFromChain(options);
-      } catch (err) {
-        failure = err;
+        outcome = { ok: true, found: await input.agent.discoverContextGraphsFromChain(planned.scan) };
+      } catch (error) {
+        outcome = { ok: false, error };
       }
-
-      // ── Commit ALL state atomically, before any logging ────────────────
-      let released = false;
-      if (failure === undefined) {
-        retryOptions = undefined;
-        consecutiveRetries = 0;
-        runs = run + 1;
-        if (options.mode === 'seedFull') {
-          fullResyncOverdue = false;
-          ticksSinceOverdueAttempt = 0;
-        }
-      } else if (consecutiveRetries < MAX_CONSECUTIVE_SAME_SCAN_RETRIES) {
-        retryOptions = options;
-        consecutiveRetries += 1;
-      } else {
-        // Retries exhausted: release the slot so the cadence proceeds, and
-        // keep a failed full resync scheduled instead of forgetting it.
-        released = true;
-        retryOptions = undefined;
-        consecutiveRetries = 0;
-        runs = run + 1;
-        if (options.mode === 'seedFull') {
-          fullResyncOverdue = true;
-          ticksSinceOverdueAttempt = 0;
-        }
-      }
-
-      // ── Report ─────────────────────────────────────────────────────────
-      if (failure === undefined) {
-        if (found !== undefined && found > 0) {
-          safeLog(`Chain scan: discovered ${found} new context graph(s)`);
-        }
-      } else {
-        const reason = failure instanceof Error ? failure.message : String(failure);
-        safeLog(
-          released
-            ? `Chain scan run ${run} (${options.mode}) failed ${MAX_CONSECUTIVE_SAME_SCAN_RETRIES + 1}x; ` +
-              `releasing the slot so discovery continues` +
-              (options.mode === 'seedFull'
-                ? ` — the full resync stays scheduled and retries every ${OVERDUE_FULL_RESYNC_RETRY_EVERY} tick(s)`
-                : '') +
-              `: ${reason}`
-            : `Chain scan run ${run} (${options.mode}) failed; ` +
-              `the same scan retries next tick: ${reason}`,
-        );
-      }
+      const committed = commitScanOutcome(planned.state, planned.scan, outcome);
+      state = committed.state; // committed before ANY logging
+      const line = reportLine(committed.report);
+      if (line !== undefined) safeLog(line);
     } finally {
       inFlight = false;
     }

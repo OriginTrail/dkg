@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  INITIAL_SCAN_SCHEDULER_STATE,
   MAX_CONSECUTIVE_SAME_SCAN_RETRIES,
   OVERDUE_FULL_RESYNC_RETRY_EVERY,
   chainDiscoveryScanOptions,
+  commitScanOutcome,
   createChainDiscoveryScanRunner,
+  planScan,
 } from '../src/daemon/chain-discovery-scan.js';
 import {
   chainDiscoveryScanOptions as reExportedOptions,
@@ -340,5 +343,149 @@ describe('chainDiscoveryScanOptions', () => {
   it('the relocated scan APIs remain importable from lifecycle.js', () => {
     expect(reExportedOptions).toBe(chainDiscoveryScanOptions);
     expect(reExportedRunner).toBe(createChainDiscoveryScanRunner);
+  });
+
+  // Review round 3 RED — a promise may legally reject with `undefined`; a
+  // sentinel comparison committed that as SUCCESS, consuming the slot (and
+  // able to clear an overdue resync no scan earned).
+  it('a rejection carrying undefined is a failure, not a success', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockRejectedValueOnce(undefined)
+        .mockResolvedValueOnce(0),
+    };
+    const log = vi.fn();
+    const runner = createChainDiscoveryScanRunner({ agent, log });
+
+    await runner();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Chain scan run 0 (seedFull) failed'));
+    await runner();
+
+    // The slot was NOT consumed: the same seedFull retries.
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
+      mode: 'seedFull',
+      throwOnChainScanFailure: true,
+    });
+  });
+
+  // Review round 3 RED — the throwing-log-sink guarantee must hold on the
+  // FAILURE branch too: a failed scan whose failure line throws must neither
+  // reject the timer callback nor lose its captured retry.
+  it('a throwing log sink on the failure branch keeps the retry pinned and the runner resolved', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockRejectedValueOnce(new Error('rpc down'))
+        .mockResolvedValueOnce(0),
+    };
+    const log = vi.fn(() => { throw new Error('log sink broken'); });
+    const runner = createChainDiscoveryScanRunner({ agent, log });
+
+    await expect(runner()).resolves.toBeUndefined();
+    await runner();
+
+    // The captured seedFull retried; the broken sink changed nothing.
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
+      mode: 'seedFull',
+      throwOnChainScanFailure: true,
+    });
+  });
+
+  // Review round 3 — the overdue cadence is a TICK contract, and it must
+  // hold even while incremental scans are themselves failing and retrying:
+  // a failing incremental's retry cycle cannot postpone the owed resync.
+  it('an overdue resync fires on schedule even while incremental scans fail', async () => {
+    const modes: string[] = [];
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi.fn(
+        async (options: ReturnType<typeof chainDiscoveryScanOptions>) => {
+          modes.push(options.mode);
+          throw new Error('everything fails');
+        },
+      ),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    // Exhaust the startup seedFull: initial attempt + MAX retries.
+    for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner();
+    const afterExhaustion = modes.length;
+
+    // Incrementals now fail too (getting pinned and retried). Exactly
+    // OVERDUE_FULL_RESYNC_RETRY_EVERY runner ticks later, the owed seedFull
+    // must fire — replacing the pinned incremental retry, which the full
+    // re-walk subsumes anyway.
+    for (let i = 0; i < OVERDUE_FULL_RESYNC_RETRY_EVERY; i++) await runner();
+    const window = modes.slice(afterExhaustion);
+    expect(window.slice(0, -1).every((m) => m === 'incremental')).toBe(true);
+    expect(window.at(-1)).toBe('seedFull');
+  });
+});
+
+// Review round 3 — the policy is now two pure functions over a discriminated
+// state; pin the transition table directly, not only through tick sequences.
+describe('scan scheduler transitions (GH#2323)', () => {
+  const seedFull = { mode: 'seedFull', throwOnChainScanFailure: true } as const;
+  const incremental = { mode: 'incremental', pageBudget: 30 } as const;
+
+  it('failure pins the executed scan; success releases the pin and advances the run', () => {
+    const planned = planScan(INITIAL_SCAN_SCHEDULER_STATE, true);
+    expect(planned.scan).toEqual(seedFull);
+
+    const failed = commitScanOutcome(planned.state, planned.scan, { ok: false, error: new Error('x') });
+    expect(failed.state).toEqual({ run: 0, pinned: { options: seedFull, failures: 1 } });
+    expect(failed.report.kind).toBe('retryScheduled');
+
+    const replanned = planScan(failed.state, /* probe irrelevant when pinned */ false);
+    expect(replanned.scan).toBe(failed.state.pinned!.options);
+
+    const succeeded = commitScanOutcome(replanned.state, replanned.scan, { ok: true, found: 0 });
+    expect(succeeded.state).toEqual({ run: 1 });
+    expect(succeeded.report.kind).toBe('quiet');
+  });
+
+  it('exhaustion of a seedFull releases the slot AND records the overdue resync', () => {
+    let state = INITIAL_SCAN_SCHEDULER_STATE;
+    for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) {
+      const planned = planScan(state, true);
+      state = commitScanOutcome(planned.state, planned.scan, { ok: false, error: 'e' }).state;
+    }
+    expect(state).toEqual({ run: 1, overdueResync: { ticksSinceAttempt: 0 } });
+  });
+
+  it('a non-seedFull success and a non-seedFull release both PRESERVE the overdue debt', () => {
+    const owing = { run: 3, overdueResync: { ticksSinceAttempt: 1 } };
+    const success = commitScanOutcome(owing, incremental, { ok: true, found: 0 });
+    expect(success.state.overdueResync).toEqual({ ticksSinceAttempt: 1 });
+    const exhausted = commitScanOutcome(
+      { ...owing, pinned: { options: incremental, failures: MAX_CONSECUTIVE_SAME_SCAN_RETRIES } },
+      incremental,
+      { ok: false, error: 'e' },
+    );
+    expect(exhausted.report.kind).toBe('slotReleased');
+    expect(exhausted.state.overdueResync).toEqual({ ticksSinceAttempt: 1 });
+  });
+
+  it('only a completed seedFull settles the overdue debt', () => {
+    const owing = { run: 3, overdueResync: { ticksSinceAttempt: 2 } };
+    const settled = commitScanOutcome(owing, seedFull, { ok: true, found: 0 });
+    expect(settled.state.overdueResync).toBeUndefined();
+  });
+
+  it('the owed resync never preempts a pinned seeding scan', () => {
+    const seeding = { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget: 30 } as const;
+    const state = {
+      run: 0,
+      pinned: { options: seeding, failures: 1 },
+      overdueResync: { ticksSinceAttempt: OVERDUE_FULL_RESYNC_RETRY_EVERY },
+    };
+    const planned = planScan(state, true);
+    // The bootstrap retry is the more specific recovery already in progress.
+    expect(planned.scan).toBe(state.pinned.options);
+    // The debt keeps aging rather than resetting from an attempt that never ran.
+    expect(planned.state.overdueResync!.ticksSinceAttempt).toBeGreaterThan(OVERDUE_FULL_RESYNC_RETRY_EVERY);
   });
 });
