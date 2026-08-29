@@ -27,6 +27,7 @@ import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
+import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
 import type {
   Rfc64AuthorizedSwmRecoveryPlanV1,
   Rfc64SwmRecoveryCoordinatorV1,
@@ -1583,19 +1584,21 @@ export class DKGAgentBase {
    */
   protected readonly catchupOnConnectAt = new Map<string, number>();
   /**
-   * The canonical on-connect scheduler's pending state. A generic connection
-   * event can be upgraded in place when RFC-64 bootstrap supplies an exact
-   * mixed plan before its timer fires; no second queue or cooldown ledger is
-   * involved.
+   * Per-peer admission timestamp for exact RFC-64 recovery plans. Kept
+   * separate from ordinary connection catch-up so one post-catalog upgrade
+   * can bypass an ordinary owner's cooldown without letting every periodic
+   * catalog pass bypass the same cooldown.
    */
-  protected readonly queuedSyncOnConnectPeers = new Set<string>();
-  protected readonly pendingRfc64SwmRecoveries = new Map<
-    string,
-    Readonly<{
-      plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
-      handleSyncError: (remotePeer: string, error: unknown) => void;
-    }>
-  >();
+  protected readonly rfc64ExactCatchupOnConnectAt = new Map<string, number>();
+  /**
+   * One owner per peer with explicit pending lanes. Exact RFC-64 work is
+   * always drained before ordinary work that has not started yet; an upgrade
+   * arriving during either lane remains on the same job and is consumed by
+   * the next drain iteration.
+   */
+  protected syncOnConnectPeerScheduler:
+    | SyncOnConnectPeerScheduler<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>
+    | null = null;
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
   /**

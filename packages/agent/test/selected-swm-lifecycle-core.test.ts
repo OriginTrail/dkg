@@ -352,6 +352,13 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       lastSyncProgressAt: new Map<string, number>(),
       syncReconcilerBackoff: new Map<string, unknown>(),
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
+      rfc64SwmRecoveryCoordinatorV1: {
+        admitSelectedPublic: (peerId, contextGraphIds) => (
+          agent.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds)
+        ),
+      },
+      selectedSwmBootstrapContextGraphIdsForPeer:
+        LifecycleSyncMethods.prototype.selectedSwmBootstrapContextGraphIdsForPeer,
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async (_peerId, contextGraphIds = []) => {
         plannedScopes.push([...contextGraphIds]);
@@ -442,6 +449,13 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       lastSyncProgressAt: new Map<string, number>(),
       syncReconcilerBackoff: new Map<string, unknown>(),
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
+      rfc64SwmRecoveryCoordinatorV1: {
+        admitSelectedPublic: (peerId, contextGraphIds) => (
+          agent.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds)
+        ),
+      },
+      selectedSwmBootstrapContextGraphIdsForPeer:
+        LifecycleSyncMethods.prototype.selectedSwmBootstrapContextGraphIdsForPeer,
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async () => ({
         targets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
@@ -472,7 +486,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
     await callTrySyncFromPeer.call(agent, PEER, (outcome) => accounting.push(outcome));
 
-    expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
+    expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     expect(agent.lastSuccessfulSyncAt.has(PEER)).toBe(false);
     // No freshness/progress callback means the reconciler wrapper classifies
     // this explicit incomplete result as a failed attempt and grows backoff.
@@ -731,8 +745,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.lastSuccessfulSyncAt = new Map([[PEER, Date.now()]]);
       queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
       queueAgent.catchupOnConnectAt = new Map<string, number>();
-      queueAgent.queuedSyncOnConnectPeers = new Set<string>();
-      queueAgent.pendingRfc64SwmRecoveries = new Map();
+      queueAgent.rfc64ExactCatchupOnConnectAt = new Map<string, number>();
+      queueAgent.syncOnConnectPeerScheduler = null;
+      queueAgent.getSyncOnConnectPeerScheduler =
+        LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;
       queueAgent.syncReconcilerBackoff = new Map<string, unknown>();
       queueAgent.syncOnConnectDisconnectBoundary =
         LifecycleSyncMethods.prototype.syncOnConnectDisconnectBoundary;

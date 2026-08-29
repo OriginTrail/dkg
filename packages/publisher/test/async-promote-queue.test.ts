@@ -588,6 +588,28 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(claimed?.lease?.claimToken).toMatch(/^worker-1:/);
   });
 
+  it('10a. default lease remains active past the recovery budget and expires after 15 minutes', async () => {
+    const queue = createQueue();
+    const jobId = await queue.enqueue(makeRequest());
+    const firstClaim = await queue.claimNext('worker-1');
+
+    expect(firstClaim?.jobId).toBe(jobId);
+    const firstClaimToken = firstClaim!.lease!.claimToken;
+
+    advance(11 * 60 * 1000);
+    await expect(queue.claimNext('worker-2')).resolves.toBeNull();
+    const stillRunning = await queue.getStatus(jobId);
+    expect(stillRunning?.state).toBe('running');
+    expect(stillRunning?.lease?.claimToken).toBe(firstClaimToken);
+
+    advance((4 * 60 * 1000) + 1);
+    const reclaimed = await queue.claimNext('worker-2');
+    expect(reclaimed?.jobId).toBe(jobId);
+    expect(reclaimed?.state).toBe('running');
+    expect(reclaimed?.lease?.workerId).toBe('worker-2');
+    expect(reclaimed?.lease?.claimToken).not.toBe(firstClaimToken);
+  });
+
   it('11. claimNext() returns null when paused; resume() restores', async () => {
     const queue = createQueue();
     await queue.enqueue(makeRequest());

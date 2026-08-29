@@ -36,6 +36,11 @@
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
+  isStoreOperationTimeoutError,
+  isReadOnlyStoreOperation,
+  StoreSchedulerBusyError,
+} from '@origintrail-official/dkg-storage';
+import {
   PromoteJobLeaseError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
@@ -74,7 +79,7 @@ export interface PromoteWorkerConfig {
   pollIntervalMs?: number;
   /**
    * Heartbeat interval. Must be SHORTER than the queue's `leaseMs`
-   * (default 5min); default 60s = 5× safety margin.
+   * (default 15min); default 60s = 15× safety margin.
    */
   heartbeatIntervalMs?: number;
   /**
@@ -88,6 +93,12 @@ export interface PromoteWorkerConfig {
   now?: () => number;
   /** Defaults to `console.warn`. The daemon passes its own logger. */
   log?: PromoteWorkerLogger;
+  /** Retry interval for queue-only outcome bookkeeping (default 5s). */
+  bookkeepingRetryIntervalMs?: number;
+  /** Maximum queue-only bookkeeping recovery window (default 10min). */
+  bookkeepingRetryBudgetMs?: number;
+  /** Deterministic sleep hook for tests. */
+  sleep?: (ms: number) => Promise<void>;
   /** Defaults to a no-op. The daemon passes its `memoryGraphChanged` emitter. */
   emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   /**
@@ -112,6 +123,13 @@ export interface PromoteWorkerSupervisor {
    * on every `start()` call (a new supervisor lifecycle).
    */
   getCounters(): PromoteWorkerCounters;
+}
+
+class PromoteWorkerShutdownError extends Error {
+  constructor(jobId: string) {
+    super(`Promote worker shutdown interrupted bookkeeping for ${jobId}`);
+    this.name = 'PromoteWorkerShutdownError';
+  }
 }
 
 export interface PromoteWorkerCounters {
@@ -202,6 +220,17 @@ function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
 }
 
 /**
+ * Queue bookkeeping has its own retry domain. Only typed storage failures
+ * whose write definitely did not start are replayable; an indeterminate
+ * mutation remains fail-closed even if its diagnostic text contains generic
+ * words such as "timeout" or "recovering".
+ */
+function isRetryableQueueBookkeepingError(error: unknown): boolean {
+  return error instanceof StoreSchedulerBusyError
+    || (isStoreOperationTimeoutError(error) && error.outcome === 'not_started');
+}
+
+/**
  * Emit privacy-bounded evidence before queue.fail() makes a terminal row
  * externally clearable. Diagnostics are best-effort and can never change the
  * promote state transition, even when the injected logger fails synchronously
@@ -281,6 +310,54 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     return { classification: 'cap_exceeded', retryable: false };
   }
 
+  // Managed-store recovery can declare the exact operation outcome. A request
+  // rejected before dispatch is safe to retry. Interrupted reads cannot have
+  // mutated WM/SWM. The one safe mutation is atomic exact-graph replacement:
+  // replaying the same frozen promote payload converges from either permitted
+  // old-or-new outcome. Every other interrupted write remains fail-closed.
+  if (isStoreOperationTimeoutError(err)) {
+    if (
+      err.outcome === 'not_started' ||
+      (
+        err.outcome === 'indeterminate' &&
+        err.storeOperation !== undefined &&
+        (
+          isReadOnlyStoreOperation(err.storeOperation)
+          // Promote replaces the complete UAL-derived SWM graph through the
+          // atomic replaceGraph capability. Replaying the same frozen payload
+          // converges from either permitted old-or-new outcome.
+          || err.storeOperation === 'replaceGraph'
+        )
+      )
+    ) {
+      return { classification: 'transient', retryable: true };
+    }
+
+    // Typed store outcomes are authoritative. In particular, never let an
+    // indeterminate mutation fall through to generic words such as "timeout"
+    // below: its first attempt may already have changed durable state.
+    return { classification: 'fatal', retryable: false };
+  }
+
+  // Scheduler overload is a typed pre-dispatch rejection: the store closure
+  // never started, so both promotion execution and fenced queue bookkeeping
+  // may retry it without relying on the diagnostic wording.
+  if (err instanceof StoreSchedulerBusyError) {
+    return { classification: 'transient', retryable: true };
+  }
+
+  // Store failures without the canonical typed outcome are not safe to infer
+  // from prose. Keep them out of the generic network-timeout fallback even
+  // when a legacy message happens to contain words such as "timeout".
+  if (
+    code === 'store_operation_timeout'
+    || code === 'store_scheduler_busy'
+    || message.includes('managed oxigraph')
+    || message.includes('store scheduler')
+  ) {
+    return { classification: 'fatal', retryable: false };
+  }
+
   // 3. Transient network / IO — the rc.10 importer hit "fetch failed"
   //    multiple times under sustained load. Worker should retry.
   if (
@@ -322,6 +399,10 @@ export async function runPromoteJob(
     ) => Promise<{ promotedCount: number }>;
     now: () => number;
     heartbeatIntervalMs: number;
+    bookkeepingRetryIntervalMs?: number;
+    bookkeepingRetryBudgetMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    shutdownSignal?: AbortSignal;
     log: PromoteWorkerLogger;
     emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   },
@@ -333,14 +414,56 @@ export async function runPromoteJob(
     | 'partial_promote_ambiguity';
   error?: ClassifiedPromoteError;
 }> {
-  const { job, queue, runPromote, now, heartbeatIntervalMs, log, emitMemoryGraphChanged } = args;
+  const {
+    job,
+    queue,
+    runPromote,
+    now,
+    heartbeatIntervalMs,
+    bookkeepingRetryIntervalMs = 5_000,
+    bookkeepingRetryBudgetMs = 10 * 60 * 1000,
+    sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    shutdownSignal,
+    log,
+    emitMemoryGraphChanged,
+  } = args;
   if (!job.lease) {
     throw new Error(`runPromoteJob requires a job with an active lease (jobId=${job.jobId})`);
   }
   const claimToken = job.lease.claimToken;
 
+  const throwIfShutdownInterrupted = (): void => {
+    if (shutdownSignal?.aborted) throw new PromoteWorkerShutdownError(job.jobId);
+  };
+
+  const sleepUntilRetry = async (ms: number): Promise<void> => {
+    throwIfShutdownInterrupted();
+    if (!shutdownSignal) {
+      await sleep(ms);
+      return;
+    }
+    let onAbort: (() => void) | null = null;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new PromoteWorkerShutdownError(job.jobId));
+      shutdownSignal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([sleep(ms), interrupted]);
+    } finally {
+      if (onAbort) shutdownSignal.removeEventListener('abort', onAbort);
+    }
+    throwIfShutdownInterrupted();
+  };
+
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let cancelled = false;
+  const stopHeartbeats = (): void => {
+    cancelled = true;
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  };
   if (heartbeatIntervalMs > 0) {
     heartbeatTimer = setInterval(() => {
       if (cancelled) return;
@@ -357,18 +480,51 @@ export async function runPromoteJob(
     }, heartbeatIntervalMs);
     if (heartbeatTimer.unref) heartbeatTimer.unref();
   }
+  shutdownSignal?.addEventListener('abort', stopHeartbeats, { once: true });
+  if (shutdownSignal?.aborted) stopHeartbeats();
+
+  async function persistWithRecovery<T>(
+    label: string,
+    deadlineAt: number,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    let failures = 0;
+    for (;;) {
+      throwIfShutdownInterrupted();
+      try {
+        return await write();
+      } catch (err: unknown) {
+        throwIfShutdownInterrupted();
+        failures += 1;
+        const retryable = isRetryableQueueBookkeepingError(err);
+        if (err instanceof PromoteJobLeaseError || !retryable || now() >= deadlineAt) throw err;
+        if (failures === 1) {
+          bestEffortLog(
+            log,
+            `Queue bookkeeping recovery started for ${job.jobId} (${label}) after a transient error`,
+          );
+        }
+        const remainingBudgetMs = Math.max(0, deadlineAt - now());
+        await sleepUntilRetry(
+          Math.min(Math.max(0, bookkeepingRetryIntervalMs), remainingBudgetMs),
+        );
+      }
+    }
+  }
 
   try {
     let result: { promotedCount: number };
     let promoteStartedMarked = false;
     const markPromoteStarted = async (): Promise<void> => {
       if (promoteStartedMarked) return;
+      throwIfShutdownInterrupted();
       await queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted');
       promoteStartedMarked = true;
     };
     try {
       result = await runPromote(job.request, markPromoteStarted);
     } catch (err: unknown) {
+      throwIfShutdownInterrupted();
       const classified = classifyPromoteError(err);
       const message = err instanceof Error ? err.message : String(err);
       logPromoteAttemptFailure({
@@ -386,7 +542,12 @@ export async function runPromoteJob(
         recordedAt: now(),
       };
       try {
-        await queue.fail(job.jobId, claimToken, attemptError);
+        const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
+        await persistWithRecovery(
+          'record failure',
+          bookkeepingDeadlineAt,
+          () => queue.fail(job.jobId, claimToken, attemptError),
+        );
       } catch (failErr: unknown) {
         if (failErr instanceof PromoteJobLeaseError) {
           bestEffortLog(log, `Lease lost while recording failure for ${job.jobId}: ${message}`);
@@ -395,6 +556,7 @@ export async function runPromoteJob(
         }
       }
       // Determine final outcome by re-reading state — the queue decides retrying vs terminal.
+      throwIfShutdownInterrupted();
       const updated = await queue.getStatus(job.jobId);
       const outcome = updated?.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal';
       return { outcome, error: classified };
@@ -406,10 +568,11 @@ export async function runPromoteJob(
     // gate the queue actually consumes.
     //
     // Codex (#665#discussion_r3302646439): `assertion.promote()` has
-    // ALREADY mutated SWM / gossiped data at this point. If either of
-    // the next two writes throws (store hiccup, lost lease, transient
-    // FS error, …), we MUST NOT let the outer worker catch park this
-    // job as a normal `failed` row — that would expose it to
+    // ALREADY mutated SWM / gossiped data at this point. Retry only the
+    // queue bookkeeping when a recognized transient store/network error
+    // interrupts either of the next two writes. We MUST NOT rerun the
+    // promote itself or let the outer worker park this as a normal
+    // `failed` row — that would expose it to
     // `/promote-async/{jobId}/recover`, which blindly re-queues
     // `failed` jobs. Re-running an already-completed promote risks
     // duplicate WM/SWM writes and re-gossip. Instead, return the
@@ -418,13 +581,20 @@ export async function runPromoteJob(
     // will have expired and `recoverOnStartup()` will correctly route
     // it into the "abandoned partial promote" bucket (promoteStarted
     // = true, swmInserted = false → operator action required).
+    throwIfShutdownInterrupted();
+    const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
     try {
-      await queue.recordCommitMarker(job.jobId, claimToken, 'swmInserted');
-      await queue.succeed(job.jobId, claimToken, {
-        promotedCount: result.promotedCount,
-        succeededAt: now(),
-      });
+      await persistWithRecovery('record swmInserted', bookkeepingDeadlineAt, () =>
+        queue.recordCommitMarker(job.jobId, claimToken, 'swmInserted'),
+      );
+      await persistWithRecovery('record success', bookkeepingDeadlineAt, () =>
+        queue.succeed(job.jobId, claimToken, {
+          promotedCount: result.promotedCount,
+          succeededAt: now(),
+        }),
+      );
     } catch (bookkeepingErr: unknown) {
+      if (bookkeepingErr instanceof PromoteWorkerShutdownError) throw bookkeepingErr;
       const message =
         bookkeepingErr instanceof Error
           ? bookkeepingErr.message
@@ -468,8 +638,8 @@ export async function runPromoteJob(
 
     return { outcome: 'succeeded' };
   } finally {
-    cancelled = true;
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    shutdownSignal?.removeEventListener('abort', stopHeartbeats);
+    stopHeartbeats();
   }
 }
 
@@ -480,15 +650,20 @@ interface WorkerSlot {
   timer: ReturnType<typeof setInterval> | null;
 }
 
-const DEFAULT_PROMOTE_LEASE_MS = 5 * 60 * 1000;
-
 export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): PromoteWorkerSupervisor {
   const concurrency = Math.max(1, config.workerConcurrency ?? 4);
   const pollIntervalMs = Math.max(10, config.pollIntervalMs ?? 100);
   const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 60_000;
-  if (heartbeatIntervalMs > 0 && heartbeatIntervalMs >= DEFAULT_PROMOTE_LEASE_MS) {
+  const effectiveLeaseMs = config.agent.promoteQueue.effectiveLeaseMs;
+  if (heartbeatIntervalMs > 0 && heartbeatIntervalMs >= effectiveLeaseMs) {
     throw new Error(
-      `promoteQueue.heartbeatIntervalMs must be shorter than the queue lease (${DEFAULT_PROMOTE_LEASE_MS}ms)`,
+      `promoteQueue.heartbeatIntervalMs must be shorter than the queue lease (${effectiveLeaseMs}ms)`,
+    );
+  }
+  const bookkeepingRetryBudgetMs = config.bookkeepingRetryBudgetMs ?? 10 * 60 * 1000;
+  if (bookkeepingRetryBudgetMs >= effectiveLeaseMs) {
+    throw new Error(
+      `promoteQueue.bookkeepingRetryBudgetMs must be shorter than the queue lease (${effectiveLeaseMs}ms)`,
     );
   }
   const shutdownTimeoutMs = config.shutdownTimeoutMs ?? 30_000;
@@ -504,6 +679,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   }));
   let shuttingDown = false;
   let started = false;
+  let lifecycleAbortController: AbortController | null = null;
   let counters: PromoteWorkerCounters = freshCounters();
 
   function freshCounters(): PromoteWorkerCounters {
@@ -529,6 +705,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     if (!claimed) return false;
 
     counters.attempted += 1;
+    const shutdownSignal = lifecycleAbortController?.signal;
     const run = (async () => {
       try {
         const outcome = await runPromoteJob({
@@ -552,6 +729,10 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           },
           now,
           heartbeatIntervalMs,
+          bookkeepingRetryIntervalMs: config.bookkeepingRetryIntervalMs,
+          bookkeepingRetryBudgetMs,
+          sleep: config.sleep,
+          shutdownSignal,
           log,
           emitMemoryGraphChanged: config.emitMemoryGraphChanged,
         });
@@ -571,6 +752,13 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof PromoteWorkerShutdownError || shutdownSignal?.aborted) {
+          bestEffortLog(
+            log,
+            `Worker ${slot.workerId} stopped bookkeeping for ${claimed.jobId} after shutdown timeout`,
+          );
+          return;
+        }
         bestEffortLog(log, `Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);
         if (claimed.lease) {
           try {
@@ -644,6 +832,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       if (started) return;
       started = true;
       shuttingDown = false;
+      lifecycleAbortController = new AbortController();
       counters = freshCounters();
       try {
         const summary = await config.agent.promoteQueue.recoverOnStartup();
@@ -654,6 +843,8 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           );
         }
       } catch (err: unknown) {
+        lifecycleAbortController.abort();
+        lifecycleAbortController = null;
         started = false;
         shuttingDown = true;
         throw new Error(`recoverOnStartup failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -681,6 +872,8 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       }
       const activeAtStop = activeShutdownSlotCount();
       if (activeAtStop === 0) {
+        lifecycleAbortController?.abort();
+        lifecycleAbortController = null;
         started = false;
         return;
       }
@@ -697,7 +890,9 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           log,
           `Shutdown timeout (${shutdownTimeoutMs}ms) reached; ${active} in-flight promote(s) abandoned to next-boot recovery`,
         );
+        lifecycleAbortController?.abort();
       }
+      lifecycleAbortController = null;
       started = false;
     },
     async tickOnce() {

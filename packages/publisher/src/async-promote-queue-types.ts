@@ -197,6 +197,12 @@ export interface PromoteRecoverySummary {
 export type PromoteStats = Record<PromoteJobState, number>;
 
 export interface AsyncPromoteQueue {
+  /**
+   * Effective claim lease used by this queue. Worker timing invariants depend
+   * on this value, so every implementation must expose the same policy that
+   * grants its claims; consumers must never guess a fallback duration.
+   */
+  readonly effectiveLeaseMs: number;
   // RFC §3.1
   enqueue(request: PromoteRequest): Promise<string>;
   // RFC §3.2
@@ -238,7 +244,7 @@ export interface AsyncPromoteQueueConfig {
   graphUri?: string;
   /** Defaults to 5 — promote retries are cheap. RFC §4.2. */
   maxRetries?: number;
-  /** Defaults to 5 minutes — matches `AsyncLiftPublisher.lockLeaseMs`. */
+  /** Defaults to 15 minutes — longer than bounded managed-store recovery. */
   leaseMs?: number;
   /** Defaults to `Date.now()`. Tests inject deterministic time. */
   now?: () => number;

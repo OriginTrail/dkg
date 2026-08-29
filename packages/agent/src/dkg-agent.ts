@@ -833,12 +833,20 @@ export class DKGAgent extends DKGAgentBase {
         selectedPublicContextGraphIds: () => this.config.syncContextGraphs ?? [],
         requestSelectedPublicAdmission: (peerId, contextGraphIds) =>
           this.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds),
+        refreshSelectedPublicAdmission: (peerId, contextGraphIds, minimumTerminalAgeMs) =>
+          this.selectedSwmBootstrapAdmission.requestRefresh(
+            peerId,
+            contextGraphIds,
+            minimumTerminalAgeMs,
+          ),
         selectedPublicAdmissionSnapshot: (peerId) =>
           this.selectedSwmBootstrapAdmission.snapshot(peerId),
         configuredRecoveryPlan: (peerId) => resolveRfc64PeerSwmRecoveryPlanV1(
           this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
           peerId,
         ),
+        isCatalogReady: (peerId) =>
+          this.isRfc64CatalogBootstrapSwmRecoveryReadyV1(peerId),
         isPeerAccepted: (peerId) =>
           this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
         isStarted: () => this.started,

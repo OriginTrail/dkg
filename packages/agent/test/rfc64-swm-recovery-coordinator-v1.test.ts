@@ -28,6 +28,7 @@ function dependencies(
     admission: {
       selectedPublicContextGraphIds: () => [PUBLIC],
       requestSelectedPublicAdmission: vi.fn(() => true),
+      refreshSelectedPublicAdmission: vi.fn(() => true),
       selectedPublicAdmissionSnapshot: () => ({
         contextGraphIds: [PUBLIC],
         phase: 'retry-required',
@@ -35,6 +36,7 @@ function dependencies(
       configuredRecoveryPlan: (providerPeerId) => providerPeerId === PROVIDER
         ? mixedPlan()
         : { providerPeerId, targets: [] },
+      isCatalogReady: () => true,
       isPeerAccepted: () => true,
       isStarted: () => true,
       ...overrides,
@@ -59,6 +61,44 @@ describe('RFC-64 SWM recovery authorization', () => {
     expect(deps.admission.requestSelectedPublicAdmission).toHaveBeenCalledWith(
       PROVIDER,
       [PUBLIC],
+    );
+  });
+
+  it('blocks every recovery authorization until the catalog phase is ready', () => {
+    let catalogReady = false;
+    const requestSelectedPublicAdmission = vi.fn(() => true);
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      isCatalogReady: () => catalogReady,
+      requestSelectedPublicAdmission,
+    }));
+
+    expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(false);
+    expect(coordinator.authorize(mixedPlan())).toBeNull();
+    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
+    catalogReady = true;
+    expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(true);
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledWith(PROVIDER, [PUBLIC]);
+    expect(coordinator.authorize(mixedPlan())).not.toBeNull();
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledTimes(2);
+  });
+
+  it('gates anti-entropy refresh on catalog readiness', () => {
+    let catalogReady = false;
+    const refreshSelectedPublicAdmission = vi.fn(() => true);
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      isCatalogReady: () => catalogReady,
+      refreshSelectedPublicAdmission,
+    }));
+
+    expect(coordinator.refreshSelectedPublic(PROVIDER, [PUBLIC], 10_000)).toBe(false);
+    expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
+    catalogReady = true;
+    expect(coordinator.refreshSelectedPublic(PROVIDER, [PUBLIC], 10_000)).toBe(true);
+    expect(refreshSelectedPublicAdmission).toHaveBeenCalledWith(
+      PROVIDER,
+      [PUBLIC],
+      10_000,
     );
   });
 
@@ -154,7 +194,21 @@ describe('RFC-64 SWM recovery authorization', () => {
     accepted = false;
 
     expect(() => coordinator.revalidate(authorized!)).toThrow(
-      'RFC-64 SWM recovery provider is not admitted',
+      'RFC-64 SWM recovery provider is not admitted or catalog-ready',
+    );
+  });
+
+  it('fails closed when catalog readiness is revoked before execution', () => {
+    let catalogReady = true;
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      isCatalogReady: () => catalogReady,
+    }));
+    const authorized = coordinator.authorize(mixedPlan());
+    expect(authorized).not.toBeNull();
+    catalogReady = false;
+
+    expect(() => coordinator.revalidate(authorized!)).toThrow(
+      'RFC-64 SWM recovery provider is not admitted or catalog-ready',
     );
   });
 

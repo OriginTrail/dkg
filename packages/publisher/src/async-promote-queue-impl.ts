@@ -83,11 +83,16 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    */
   private static readonly mutationQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_MAX_RETRIES = 5;
-  private static readonly DEFAULT_LEASE_MS = 5 * 60 * 1000;
+  // A managed-store recovery can legitimately reject every heartbeat and
+  // bookkeeping write for several minutes. Keep the lease longer than the
+  // worker's bounded bookkeeping-retry window so an in-process worker is not
+  // misclassified as a crashed partial promote while it is still trying to
+  // persist the outcome.
+  private static readonly DEFAULT_LEASE_MS = 15 * 60 * 1000;
 
   private readonly graphUri: string;
   private readonly maxRetries: number;
-  private readonly leaseMs: number;
+  readonly effectiveLeaseMs: number;
   private readonly now: () => number;
   private readonly idGenerator: () => string;
   private readonly claimTokenGenerator: () => string;
@@ -101,7 +106,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_PROMOTE_CONTROL_GRAPH_URI;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncPromoteQueue.DEFAULT_MAX_RETRIES;
-    this.leaseMs = config.leaseMs ?? TripleStoreAsyncPromoteQueue.DEFAULT_LEASE_MS;
+    this.effectiveLeaseMs = config.leaseMs ?? TripleStoreAsyncPromoteQueue.DEFAULT_LEASE_MS;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.claimTokenGenerator = config.claimTokenGenerator ?? (() => crypto.randomUUID());
@@ -279,7 +284,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         lease: {
           workerId,
           acquiredAt: now,
-          expiresAt: now + this.leaseMs,
+          expiresAt: now + this.effectiveLeaseMs,
           lastHeartbeatAt: now,
           claimToken,
         },
@@ -309,7 +314,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         updatedAt: now,
         lease: {
           ...job.lease!,
-          expiresAt: now + this.leaseMs,
+          expiresAt: now + this.effectiveLeaseMs,
           lastHeartbeatAt: now,
         },
       };
