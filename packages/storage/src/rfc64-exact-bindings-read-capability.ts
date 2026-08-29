@@ -11,6 +11,9 @@ import {
 } from '@origintrail-official/dkg-rdf-utils';
 
 import type { QueryOptions, QueryResult, TripleStore } from './triple-store.js';
+import { SparqlJsonResultsShapeError } from './adapters/sparql-json-results.js';
+
+const certifiedRfc64ExactBindingsReadStoresV1 = new WeakSet<object>();
 
 export type Rfc64ExactBindingsReadOperationV1 =
   | Rfc64SemanticReadOperationV1
@@ -25,26 +28,96 @@ export interface Rfc64ExactBindingsReadCapabilityV1 {
   ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]>;
 }
 
-export class Rfc64ExactBindingsReadResultErrorV1 extends Error {
-  constructor(message: string) {
-    super(message);
+/** @deprecated Use {@link Rfc64ExactBindingsReadResultErrorV1}. */
+export class Rfc64SemanticReadCapabilityResultErrorV1 extends Error {
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
+    this.name = 'Rfc64SemanticReadCapabilityResultErrorV1';
+  }
+}
+
+export class Rfc64ExactBindingsReadResultErrorV1
+  extends Rfc64SemanticReadCapabilityResultErrorV1 {
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
     this.name = 'Rfc64ExactBindingsReadResultErrorV1';
   }
 }
 
-/** Execute and normalize one member of the closed RFC-64 exact-bindings union. */
+/**
+ * Shared implementation for adapters certified to execute the closed RFC-64
+ * exact-bindings union. The capability returns backend-neutral typed rows,
+ * never a generic SPARQL result.
+ */
 export async function executeRfc64ExactBindingsReadCapabilityV1(
   store: Pick<TripleStore, 'query'>,
   operation: Rfc64ExactBindingsReadOperationV1,
   options: Pick<QueryOptions, 'signal'> = {},
 ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
-  const result = await store.query(operation.sparql, {
-    source: `rfc64.exact-bindings.${operation.queryId}`,
-    priority: 'background',
-    signal: options.signal,
-    maxResponseBytes: operation.responseByteCeiling,
-  });
+  let result: QueryResult;
+  try {
+    result = await store.query(operation.sparql, {
+      source: `rfc64.exact-bindings.${operation.queryId}`,
+      priority: 'background',
+      signal: options.signal,
+      maxResponseBytes: operation.responseByteCeiling,
+    });
+  } catch (cause) {
+    if (cause instanceof SparqlJsonResultsShapeError) {
+      throw new Rfc64ExactBindingsReadResultErrorV1(
+        'exact-bindings read received malformed SPARQL JSON results',
+        { cause },
+      );
+    }
+    throw cause;
+  }
   return normalizeRfc64ExactBindingsReadResultV1(result, operation);
+}
+
+/** @deprecated Use {@link executeRfc64ExactBindingsReadCapabilityV1}. */
+export function executeRfc64SemanticReadCapabilityV1(
+  store: Pick<TripleStore, 'query'>,
+  operation: Rfc64SemanticReadOperationV1,
+  options: Pick<QueryOptions, 'signal'> = {},
+): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
+  return executeRfc64ExactBindingsReadCapabilityV1(store, operation, options);
+}
+
+/**
+ * Declarative opt-in used only by adapters whose closed-read conformance is
+ * covered by the storage certification suite.
+ */
+export function certifyRfc64ExactBindingsReadStoreV1(
+  store: TripleStore,
+  execute: Rfc64ExactBindingsReadCapabilityV1['rfc64ExactBindingsReadV1'] =
+    (operation, options) => executeRfc64ExactBindingsReadCapabilityV1(
+      store,
+      operation,
+      options,
+    ),
+): void {
+  if (certifiedRfc64ExactBindingsReadStoresV1.has(store)) return;
+  Object.defineProperty(store, 'rfc64ExactBindingsReadV1', {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: execute,
+  });
+  Object.defineProperty(store, 'rfc64SemanticReadV1', {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: (
+      operation: Rfc64SemanticReadOperationV1,
+      options?: Pick<QueryOptions, 'signal'>,
+    ) => execute(operation, options),
+  });
+  certifiedRfc64ExactBindingsReadStoresV1.add(store);
+}
+
+/** @deprecated Use {@link certifyRfc64ExactBindingsReadStoreV1}. */
+export function certifyRfc64SemanticReadStoreV1(store: TripleStore): void {
+  certifyRfc64ExactBindingsReadStoreV1(store);
 }
 
 export function isRfc64ExactBindingsReadCapabilityV1(
@@ -52,8 +125,43 @@ export function isRfc64ExactBindingsReadCapabilityV1(
 ): candidate is Rfc64ExactBindingsReadCapabilityV1 {
   return candidate !== null
     && typeof candidate === 'object'
-    && typeof (candidate as Partial<Rfc64ExactBindingsReadCapabilityV1>)
-      .rfc64ExactBindingsReadV1 === 'function';
+    && certifiedRfc64ExactBindingsReadStoresV1.has(candidate)
+    && typeof Object.getOwnPropertyDescriptor(candidate, 'rfc64ExactBindingsReadV1')?.value
+      === 'function';
+}
+
+/** Legacy semantic-only capability retained for the compatibility window. */
+export interface Rfc64SemanticReadCapabilityV1 {
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]>;
+}
+
+/**
+ * Compatibility discovery does not invoke accessors. Certified exact stores
+ * expose an immutable own data method; pre-generalization custom adapters may
+ * expose the legacy method as a data method on their prototype.
+ */
+export function isRfc64SemanticReadCapabilityV1(
+  candidate: unknown,
+): candidate is Rfc64SemanticReadCapabilityV1 {
+  return isRfc64ExactBindingsReadCapabilityV1(candidate)
+    || hasDataMethod(candidate, 'rfc64SemanticReadV1');
+}
+
+function hasDataMethod(candidate: unknown, key: string): boolean {
+  if (candidate === null || typeof candidate !== 'object') return false;
+  let current: object | null = candidate;
+  while (current !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, key);
+    if (descriptor) {
+      return Object.prototype.hasOwnProperty.call(descriptor, 'value')
+        && typeof descriptor.value === 'function';
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return false;
 }
 
 function normalizeRfc64ExactBindingsReadResultV1(

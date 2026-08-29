@@ -30,6 +30,11 @@
       "import": "./dist/query-result.js",
       "default": "./dist/query-result.js"
     },
+    "./strict-data-boundary": {
+      "types": "./dist/strict-data-boundary.d.ts",
+      "import": "./dist/strict-data-boundary.js",
+      "default": "./dist/strict-data-boundary.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },

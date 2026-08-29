@@ -24,6 +24,7 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import type {
   CanonicalAuthorSealStoreRowV1,
+  Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import type {
   Rfc64ExactBindingsReadOperationV1,
@@ -134,6 +135,11 @@ export interface TripleStore {
   /** Execute one member of the certified closed RFC-64 exact-bindings union. */
   rfc64ExactBindingsReadV1?(
     operation: Rfc64ExactBindingsReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
+  /** @deprecated Use rfc64ExactBindingsReadV1. */
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
 

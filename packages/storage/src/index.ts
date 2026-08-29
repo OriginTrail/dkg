@@ -157,11 +157,17 @@ export {
 } from './rfc64-semantic-read-gateway.js';
 export {
   Rfc64ExactBindingsReadResultErrorV1,
+  Rfc64SemanticReadCapabilityResultErrorV1,
+  certifyRfc64ExactBindingsReadStoreV1,
+  certifyRfc64SemanticReadStoreV1,
   executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
   isRfc64ExactBindingsReadCapabilityV1,
+  isRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
   type Rfc64ExactBindingsStoreRowV1,
+  type Rfc64SemanticReadCapabilityV1,
 } from './rfc64-exact-bindings-read-capability.js';
 export {
   MAX_RFC64_AUTHOR_SEAL_READ_TIMEOUT_MS_V1,

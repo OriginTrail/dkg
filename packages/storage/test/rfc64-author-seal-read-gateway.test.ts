@@ -3,15 +3,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   compileRfc64AuthorSealReadOperationV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
+  projectCanonicalGraphScopedAuthorSealStoreRowsV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 
 import {
+  certifyRfc64ExactBindingsReadStoreV1,
   OxigraphStore,
   OxigraphWorkerStore,
+  Rfc64AuthorSealReadGatewayErrorV1,
   Rfc64ExactBindingsReadResultErrorV1,
   SyncAuthorSealStoreV1,
+  type Rfc64ExactBindingsReadCapabilityV1,
   type TripleStore,
 } from '../src/index.js';
 
@@ -147,12 +151,14 @@ describe('SyncAuthorSealStoreV1', () => {
             object: `"${String(index).padStart(2, '0')}${'x'.repeat(5_500)}"`,
           }));
         await store.insert(rows);
-        const operation = compileRfc64AuthorSealReadOperationV1({ coordinate: COORDINATE });
-        await expect(store.rfc64ExactBindingsReadV1!(operation, {})).rejects
-          .toEqual(expect.objectContaining({
-            name: Rfc64ExactBindingsReadResultErrorV1.name,
-            message: expect.stringMatching(/response-byte ceiling/u),
-          }));
+        const error = await rejected(new SyncAuthorSealStoreV1(store).read(
+          { coordinate: COORDINATE },
+          { timeoutMs: 5_000 },
+        ));
+        expect(error).toBeInstanceOf(Rfc64AuthorSealReadGatewayErrorV1);
+        expect(error).toMatchObject({ code: 'rfc64-author-seal-read-result' });
+        expect((error as Error & { cause: unknown }).cause)
+          .toBeInstanceOf(Rfc64ExactBindingsReadResultErrorV1);
       } finally {
         await store.close();
       }
@@ -161,16 +167,14 @@ describe('SyncAuthorSealStoreV1', () => {
 
   it('aborts an in-flight certified read at the caller-supplied deadline', async () => {
     let observedSignal: AbortSignal | undefined;
-    const capability = {
-      rfc64ExactBindingsReadV1: vi.fn((_operation, options) => {
+    const capability = certifiedExactStore(vi.fn((_operation, options) => {
         observedSignal = options?.signal;
         return new Promise<never>((_resolve, reject) => {
           options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
             once: true,
           });
         });
-      }),
-    } as unknown as TripleStore;
+      }));
 
     await expect(new SyncAuthorSealStoreV1(capability).read(
       { coordinate: COORDINATE },
@@ -181,14 +185,14 @@ describe('SyncAuthorSealStoreV1', () => {
 
   it('detects a synchronous backend overrun after dispatch returns', async () => {
     const inner = new OxigraphStore();
-    const capability = {
-      rfc64ExactBindingsReadV1: async (...args: Parameters<NonNullable<TripleStore['rfc64ExactBindingsReadV1']>>) => {
+    const capability = certifiedExactStore(
+      async (...args: Parameters<NonNullable<TripleStore['rfc64ExactBindingsReadV1']>>) => {
         const rows = await inner.rfc64ExactBindingsReadV1!(...args);
         const end = performance.now() + 15;
         while (performance.now() < end) { /* model synchronous post-query normalization */ }
         return rows;
       },
-    } as unknown as TripleStore;
+    );
     try {
       await inner.insert([...projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE)]);
       await expect(new SyncAuthorSealStoreV1(capability).read(
@@ -201,15 +205,13 @@ describe('SyncAuthorSealStoreV1', () => {
   });
 
   it('keeps the deadline authoritative after strict seal decoding', async () => {
-    const rows = projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE);
+    const rows = projectCanonicalGraphScopedAuthorSealStoreRowsV1(PAYLOAD, COORDINATE);
     vi.spyOn(performance, 'now')
       .mockReturnValueOnce(0)
       .mockReturnValueOnce(0)
       .mockReturnValueOnce(1)
       .mockReturnValueOnce(6);
-    const capability = {
-      rfc64ExactBindingsReadV1: vi.fn(async () => rows),
-    } as unknown as TripleStore;
+    const capability = certifiedExactStore(vi.fn(async () => rows));
     await expect(new SyncAuthorSealStoreV1(capability).read(
       { coordinate: COORDINATE },
       { timeoutMs: 5 },
@@ -218,16 +220,14 @@ describe('SyncAuthorSealStoreV1', () => {
 
   it('propagates caller cancellation through the certified capability', async () => {
     const controller = new AbortController();
-    const capability = {
-      rfc64ExactBindingsReadV1: async (
+    const capability = certifiedExactStore(async (
         _operation: Parameters<NonNullable<TripleStore['rfc64ExactBindingsReadV1']>>[0],
         options: Parameters<NonNullable<TripleStore['rfc64ExactBindingsReadV1']>>[1],
       ) => {
         controller.abort(new DOMException('caller stopped the read', 'AbortError'));
         options?.signal?.throwIfAborted();
         return [];
-      },
-    } as unknown as TripleStore;
+      });
 
     await expect(new SyncAuthorSealStoreV1(capability).read(
       { coordinate: COORDINATE },
@@ -235,3 +235,20 @@ describe('SyncAuthorSealStoreV1', () => {
     )).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
+
+function certifiedExactStore(
+  read: Rfc64ExactBindingsReadCapabilityV1['rfc64ExactBindingsReadV1'],
+): TripleStore {
+  const store = {} as TripleStore;
+  certifyRfc64ExactBindingsReadStoreV1(store, read);
+  return store;
+}
+
+async function rejected(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error('expected promise to reject');
+}
