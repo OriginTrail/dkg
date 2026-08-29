@@ -227,11 +227,15 @@ export interface AsyncPromoteQueue {
   resume(): Promise<void>;
   getStats(): Promise<PromoteStats>;
   /**
-   * Optional in-process wake signal for queue workers. Durable queue state
-   * remains authoritative; supervisors must retain periodic polling for
+   * Optional in-process scheduling capability. This is exclusive ownership,
+   * not pub/sub: attaching a new scheduler atomically supersedes the old one,
+   * and a stale detach cannot remove the current owner. Durable queue state
+   * remains authoritative; the owner must retain periodic polling for
    * cross-process writes and retry deadlines.
    */
-  subscribeWorkAvailable?(listener: () => void): () => void;
+  readonly workScheduling?: {
+    attachScheduler(scheduler: { onWorkAvailable(): void }): () => void;
+  };
 }
 
 /**

@@ -667,12 +667,23 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     ]);
   });
 
-  it('signals in-process workers only after enqueue and recovery commit', async () => {
-    const queue = createQueue();
+  it('signals the scheduler only after enqueue and recovery persistence completes', async () => {
+    const controlled = makeFlushBlockingStore(store);
+    const queue = new TripleStoreAsyncPromoteQueue(controlled.store, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
     const notifications: string[] = [];
-    const unsubscribe = queue.subscribeWorkAvailable?.(() => notifications.push('wake'));
+    const detach = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('wake'),
+    });
 
-    const jobId = await queue.enqueue(makeRequest());
+    controlled.arm();
+    const enqueueing = queue.enqueue(makeRequest());
+    await controlled.flushStarted;
+    expect(notifications).toEqual([]);
+    controlled.releaseFlush();
+    const jobId = await enqueueing;
     expect(notifications).toEqual(['wake']);
 
     const claimed = await queue.claimNext('worker-1');
@@ -687,9 +698,50 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await queue.recover(jobId);
     expect(notifications).toEqual(['wake', 'wake']);
 
-    unsubscribe?.();
+    detach();
     await queue.enqueue(makeRequest({ assertionName: 'after-unsubscribe' }));
     expect(notifications).toEqual(['wake', 'wake']);
+  });
+
+  it('does not signal the scheduler when enqueue persistence rejects', async () => {
+    const rejectingStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'flush') return async () => { throw new Error('flush rejected'); };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const queue = new TripleStoreAsyncPromoteQueue(rejectingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+    const notifications: string[] = [];
+    queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('wake'),
+    });
+
+    await expect(queue.enqueue(makeRequest())).rejects.toThrow('flush rejected');
+    expect(notifications).toEqual([]);
+  });
+
+  it('hands scheduler ownership over atomically and ignores stale detach', async () => {
+    const queue = createQueue();
+    const notifications: string[] = [];
+    const detachSuperseded = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('superseded'),
+    });
+    const detachCurrent = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('current'),
+    });
+
+    await queue.enqueue(makeRequest({ assertionName: 'first' }));
+    detachSuperseded();
+    await queue.enqueue(makeRequest({ assertionName: 'second' }));
+    expect(notifications).toEqual(['current', 'current']);
+
+    detachCurrent();
+    await queue.enqueue(makeRequest({ assertionName: 'detached' }));
+    expect(notifications).toEqual(['current', 'current']);
   });
 
   it('13. claimNext() does NOT pick a second job for the same (cgId, subGraphName, assertionName) while one is running', async () => {

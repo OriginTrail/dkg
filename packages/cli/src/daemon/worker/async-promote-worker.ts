@@ -593,7 +593,7 @@ const DEFAULT_PROMOTE_LEASE_MS = 15 * 60 * 1000;
 
 export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): PromoteWorkerSupervisor {
   const concurrency = Math.max(1, config.workerConcurrency ?? 4);
-  const supportsWorkWake = typeof config.agent.promoteQueue.subscribeWorkAvailable === 'function';
+  const supportsWorkWake = typeof config.agent.promoteQueue.workScheduling?.attachScheduler === 'function';
   const pollIntervalMs = Math.max(10, config.pollIntervalMs ?? (supportsWorkWake ? 1_000 : 100));
   const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 60_000;
   const effectiveLeaseMs = config.agent.promoteQueue.effectiveLeaseMs
@@ -622,7 +622,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   let shuttingDown = false;
   let started = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
-  let unsubscribeWorkAvailable: (() => void) | null = null;
+  let detachWorkScheduler: (() => void) | null = null;
   let wakeRequested = false;
   let wakeLoop: Promise<void> | null = null;
   let counters: PromoteWorkerCounters = freshCounters();
@@ -813,7 +813,9 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         return;
       }
       if (supportsWorkWake) {
-        unsubscribeWorkAvailable = config.agent.promoteQueue.subscribeWorkAvailable!(requestWake);
+        detachWorkScheduler = config.agent.promoteQueue.workScheduling!.attachScheduler({
+          onWorkAvailable: requestWake,
+        });
       }
       pollTimer = setInterval(requestWake, pollIntervalMs);
       if (pollTimer.unref) pollTimer.unref();
@@ -821,8 +823,8 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     async stop() {
       if (!started) return;
       shuttingDown = true;
-      unsubscribeWorkAvailable?.();
-      unsubscribeWorkAvailable = null;
+      detachWorkScheduler?.();
+      detachWorkScheduler = null;
       if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;

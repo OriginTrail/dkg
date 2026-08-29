@@ -97,7 +97,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private readonly idGenerator: () => string;
   private readonly claimTokenGenerator: () => string;
   private readonly backoff: (attemptCount: number) => number;
-  private readonly workAvailableListeners = new Set<() => void>();
+  private workScheduler?: { onWorkAvailable(): void };
   private paused = false;
   private graphEnsured = false;
 
@@ -523,12 +523,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     this.notifyWorkAvailable();
   }
 
-  subscribeWorkAvailable(listener: () => void): () => void {
-    this.workAvailableListeners.add(listener);
-    return () => {
-      this.workAvailableListeners.delete(listener);
-    };
-  }
+  readonly workScheduling = {
+    attachScheduler: (scheduler: { onWorkAvailable(): void }): (() => void) => {
+      this.workScheduler = scheduler;
+      return () => {
+        if (this.workScheduler === scheduler) this.workScheduler = undefined;
+      };
+    },
+  };
 
   async getStats(): Promise<PromoteStats> {
     return this.withMutationLock(async () => {
@@ -549,14 +551,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   // ===========================================================================
 
   private notifyWorkAvailable(): void {
-    for (const listener of this.workAvailableListeners) {
-      try {
-        listener();
-      } catch {
-        // Queue persistence has already committed. A best-effort in-process
-        // wake must never change the enqueue/recover result; periodic polling
-        // remains the durable fallback.
-      }
+    try {
+      this.workScheduler?.onWorkAvailable();
+    } catch {
+      // Queue persistence has already committed. A best-effort in-process
+      // wake must never change the enqueue/recover result; periodic polling
+      // remains the durable fallback.
     }
   }
 

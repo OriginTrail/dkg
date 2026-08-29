@@ -1051,6 +1051,91 @@ describe('createPromoteWorkerSupervisor', () => {
     expect((await queue.getStats()).succeeded).toBe(1);
   });
 
+  it('wakes only the latest supervisor after scheduler handoff and stale stop', async () => {
+    const firstOwnerCalls: string[] = [];
+    const currentOwnerCalls: string[] = [];
+    const firstCurrentRun = deferred();
+    const secondCurrentRun = deferred();
+    const firstSupervisor = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        firstOwnerCalls.push(request.assertionName);
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'superseded',
+    });
+    const currentSupervisor = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        currentOwnerCalls.push(request.assertionName);
+        if (currentOwnerCalls.length === 1) firstCurrentRun.resolve();
+        if (currentOwnerCalls.length === 2) secondCurrentRun.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'current',
+    });
+
+    await firstSupervisor.start();
+    await currentSupervisor.start();
+    await queue.enqueue(makeRequest('after-handoff'));
+    await Promise.race([
+      firstCurrentRun.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('handoff wake timed out')), 500)),
+    ]);
+    expect(firstOwnerCalls).toEqual([]);
+
+    // This detach belongs to the superseded attachment and must not remove
+    // the current supervisor's scheduler ownership.
+    await firstSupervisor.stop();
+    await queue.enqueue(makeRequest('after-stale-stop'));
+    await Promise.race([
+      secondCurrentRun.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('post-stop wake timed out')), 500)),
+    ]);
+    await currentSupervisor.stop();
+
+    expect(firstOwnerCalls).toEqual([]);
+    expect(currentOwnerCalls).toEqual(['after-handoff', 'after-stale-stop']);
+  });
+
+  it('wakes immediately on resume when queued work was observed while paused', async () => {
+    const promoted = deferred();
+    let promoteCalls = 0;
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async () => {
+        promoteCalls += 1;
+        promoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'resume',
+    });
+    await sup.start();
+    await queue.pause();
+    await queue.enqueue(makeRequest('paused'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(promoteCalls).toBe(0);
+
+    await queue.resume();
+    await Promise.race([
+      promoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('resume wake timed out')), 500)),
+    ]);
+    await sup.stop();
+
+    expect(promoteCalls).toBe(1);
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
   it('stops probing remaining idle slots after the first empty claim', async () => {
     let claimCalls = 0;
     const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
