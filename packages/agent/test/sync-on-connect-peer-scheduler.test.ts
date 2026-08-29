@@ -22,11 +22,6 @@ describe('sync-on-connect per-peer scheduler', () => {
 
     expect(scheduler.enqueueOrdinary(PEER, onError, 0)).toBe(true);
     expect(scheduler.enqueueSelected(PEER, onError, 0, 'exact-plan')).toBe(true);
-    expect(scheduler.snapshot(PEER)).toEqual({
-      state: 'scheduled',
-      hasPendingSelected: true,
-      pendingOrdinaryMode: 'ordinary-after-selected',
-    });
 
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
     expect(ordering).toEqual([
@@ -79,11 +74,37 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(scheduler.enqueueSelected(PEER, onError, 0, 'plan')).toBe(true);
     await vi.waitFor(() => expect(ordering).toEqual(['selected']));
     expect(scheduler.enqueueOrdinary(PEER, onError, 0)).toBe(true);
-    expect(scheduler.snapshot(PEER)?.pendingOrdinaryMode)
-      .toBe('ordinary-after-selected');
     selected.resolve();
 
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
     expect(ordering).toEqual(['selected', 'ordinary:ordinary-after-selected']);
+  });
+
+  it('drains a selected upgrade during selected work before owed ordinary work', async () => {
+    const firstSelected = deferred();
+    const ordering: string[] = [];
+    const scheduler = new SyncOnConnectPeerScheduler<string>({
+      runSelected: async (_peer, _onError, plan) => {
+        ordering.push(`selected:${plan}`);
+        if (plan === 'plan-a') await firstSelected.promise;
+      },
+      runOrdinary: async (_peer, _onError, mode) => {
+        ordering.push(`ordinary:${mode}`);
+      },
+    });
+    const onError = () => undefined;
+
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0)).toBe(true);
+    expect(scheduler.enqueueSelected(PEER, onError, 0, 'plan-a')).toBe(true);
+    await vi.waitFor(() => expect(ordering).toEqual(['selected:plan-a']));
+    expect(scheduler.enqueueSelected(PEER, onError, 0, 'plan-b')).toBe(true);
+    firstSelected.resolve();
+
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(ordering).toEqual([
+      'selected:plan-a',
+      'selected:plan-b',
+      'ordinary:ordinary-after-selected',
+    ]);
   });
 });

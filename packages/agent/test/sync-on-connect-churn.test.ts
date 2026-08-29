@@ -276,11 +276,6 @@ describe('sync-on-connect churn gates', () => {
     )).toBe(true);
     expect((agent as any).catchupOnConnectAt.size).toBe(1);
     expect((agent as any).syncOnConnectPeerScheduler.size).toBe(1);
-    expect((agent as any).syncOnConnectPeerScheduler.snapshot(PEER_A)).toEqual({
-      state: 'scheduled',
-      hasPendingSelected: true,
-      pendingOrdinaryMode: 'ordinary-after-selected',
-    });
 
     await vi.waitFor(() => expect(genericRun).toHaveBeenCalledOnce());
 
@@ -427,6 +422,90 @@ describe('sync-on-connect churn gates', () => {
     );
     expect(duplicateSelectedSync).not.toHaveBeenCalled();
     expect(errors).toEqual([]);
+  });
+
+  it('preserves incomplete selected retry ownership after successful ordinary replay', async () => {
+    const agent = await createUnstartedAgent('Rfc64IncompleteSelectedThenOrdinary');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).config.nodeRole = 'edge';
+    (agent as any).config.syncContextGraphs = [];
+    (agent as any).config.syncSharedMemoryOnConnect = false;
+    (agent.node as any).node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    (agent as any).getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).planSharedMemorySyncContextGraphs = async () => ({ targets: [] });
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    (agent as any).rfc64SwmRecoveryCoordinatorV1 = {
+      authorize: vi.fn(() => authorized),
+      revalidate: vi.fn(() => authorized),
+    };
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: unknown },
+    ) => ({
+      kind: 'selected-shared-memory' as const,
+      requestedScope: options.requestedScope,
+      shared: emptyDetailedSync(),
+      scopeComplete: false,
+      targetDiagnostics: {
+        selectedPublic: { completed: 0, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
+    });
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    const errors: unknown[] = [];
+    const handleSyncError = (_peerId: string, error: unknown) => { errors.push(error); };
+
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+    )).toBe(true);
+    expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      { providerPeerId: PEER_A, targets: authorized.targets },
+      handleSyncError,
+      0,
+    )).toBe(true);
+
+    await vi.waitFor(() => expect((agent as any).syncOnConnectPeerScheduler.size).toBe(0));
+    expect((agent as any).selectedSwmBootstrapAdmission.isRetryRequired(PEER_A))
+      .toBe(true);
+    expect((agent as any).syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+      failures: 1,
+    });
+    expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect(errors).toEqual([]);
+
+    // Once the bounded backoff/cooldown expires, the retained selected owner
+    // remains directly schedulable instead of being hidden by peer freshness.
+    (agent as any).syncReconcilerBackoff.get(PEER_A).nextRetryAt = Date.now() - 1;
+    (agent as any).catchupOnConnectAt.set(
+      PEER_A,
+      Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
+    );
+    const selectedRetry = vi.spyOn(agent as any, 'runSelectedSwmRetryFromPeerOnConnect')
+      .mockResolvedValue(undefined);
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(true);
+    await vi.waitFor(() => expect(selectedRetry).toHaveBeenCalledOnce());
   });
 
   it('adds owed ordinary work to the same job while exact recovery is running', async () => {

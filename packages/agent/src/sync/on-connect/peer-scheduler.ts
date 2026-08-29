@@ -16,47 +16,15 @@ interface SelectedLane<SelectedPlan> {
   readonly recoveryPlan?: SelectedPlan;
 }
 
-type PendingScheduledLanes<SelectedPlan> =
-  | {
-    selected: SelectedLane<SelectedPlan>;
-    ordinary: OrdinaryLane | null;
-  }
-  | {
-    selected: null;
-    ordinary: OrdinaryLane;
-  };
-
-type OrdinaryDisposition =
-  | { kind: 'available'; pending: OrdinaryLane | null }
-  | { kind: 'already-run' };
-
-type PeerJobState<SelectedPlan> =
-  | {
-    kind: 'scheduled';
-    pending: PendingScheduledLanes<SelectedPlan>;
-  }
-  | {
-    kind: 'running-selected';
-    pendingSelected: SelectedLane<SelectedPlan> | null;
-    ordinary: OrdinaryDisposition;
-  }
-  | {
-    kind: 'running-ordinary';
-    pendingSelected: SelectedLane<SelectedPlan> | null;
-  };
+type PendingLane<SelectedPlan> = OrdinaryLane | SelectedLane<SelectedPlan>;
 
 interface PeerJob<SelectedPlan> {
-  state: PeerJobState<SelectedPlan>;
+  currentLane: PendingLane<SelectedPlan>['kind'] | null;
+  pendingSelected: SelectedLane<SelectedPlan> | null;
+  pendingOrdinary: OrdinaryLane | null;
+  ordinaryStarted: boolean;
   timer: ReturnType<typeof setTimeout> | null;
   handleUnexpectedError: SyncOnConnectErrorHandler;
-}
-
-type ClaimedLane<SelectedPlan> = OrdinaryLane | SelectedLane<SelectedPlan>;
-
-export interface SyncOnConnectPeerSchedulerSnapshot {
-  readonly state: PeerJobState<unknown>['kind'];
-  readonly hasPendingSelected: boolean;
-  readonly pendingOrdinaryMode: OrdinarySyncOnConnectMode | null;
 }
 
 export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
@@ -73,9 +41,8 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
 }
 
 /**
- * One timer and one explicit transition model per remote peer. Selected work
- * preempts ordinary work that has not started; an exact upgrade arriving
- * during either running lane is retained and drained by the same owner.
+ * One timer and one normalized pair of pending slots per remote peer.
+ * Selected work always drains first; ordinary work is admitted at most once.
  */
 export class SyncOnConnectPeerScheduler<SelectedPlan> {
   private readonly jobs = new Map<string, PeerJob<SelectedPlan>>();
@@ -98,31 +65,6 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     this.jobs.delete(remotePeer);
   }
 
-  snapshot(remotePeer: string): SyncOnConnectPeerSchedulerSnapshot | null {
-    const state = this.jobs.get(remotePeer)?.state;
-    if (state === undefined) return null;
-    if (state.kind === 'scheduled') {
-      return {
-        state: state.kind,
-        hasPendingSelected: state.pending.selected !== null,
-        pendingOrdinaryMode: state.pending.ordinary?.mode ?? null,
-      };
-    }
-    if (state.kind === 'running-selected') {
-      return {
-        state: state.kind,
-        hasPendingSelected: state.pendingSelected !== null,
-        pendingOrdinaryMode:
-          state.ordinary.kind === 'available' ? state.ordinary.pending?.mode ?? null : null,
-      };
-    }
-    return {
-      state: state.kind,
-      hasPendingSelected: state.pendingSelected !== null,
-      pendingOrdinaryMode: null,
-    };
-  }
-
   enqueueOrdinary(
     remotePeer: string,
     handleSyncError: SyncOnConnectErrorHandler,
@@ -138,26 +80,15 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       return true;
     }
     existing.handleUnexpectedError = handleSyncError;
-    const state = existing.state;
-    if (state.kind === 'scheduled') {
-      if (state.pending.ordinary !== null) return false;
-      state.pending.ordinary = {
-        kind: 'ordinary',
-        handleSyncError,
-        mode: 'ordinary-after-selected',
-      };
-      return true;
-    }
-    if (state.kind === 'running-selected' && state.ordinary.kind === 'available') {
-      if (state.ordinary.pending !== null) return false;
-      state.ordinary.pending = {
-        kind: 'ordinary',
-        handleSyncError,
-        mode: 'ordinary-after-selected',
-      };
-      return true;
-    }
-    return false;
+    if (existing.ordinaryStarted || existing.pendingOrdinary !== null) return false;
+    existing.pendingOrdinary = {
+      kind: 'ordinary',
+      handleSyncError,
+      mode: existing.currentLane === 'selected' || existing.pendingSelected !== null
+        ? 'ordinary-after-selected'
+        : 'ordinary',
+    };
+    return true;
   }
 
   enqueueSelected(
@@ -177,25 +108,10 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       return true;
     }
     existing.handleUnexpectedError = handleSyncError;
-    const state = existing.state;
-    if (state.kind === 'scheduled') {
-      state.pending.selected = lane;
-      if (state.pending.ordinary !== null) {
-        state.pending.ordinary = {
-          ...state.pending.ordinary,
-          mode: 'ordinary-after-selected',
-        };
-      }
-      return true;
-    }
-    state.pendingSelected = lane;
-    if (
-      state.kind === 'running-selected'
-      && state.ordinary.kind === 'available'
-      && state.ordinary.pending !== null
-    ) {
-      state.ordinary.pending = {
-        ...state.ordinary.pending,
+    existing.pendingSelected = lane;
+    if (existing.pendingOrdinary !== null) {
+      existing.pendingOrdinary = {
+        ...existing.pendingOrdinary,
         mode: 'ordinary-after-selected',
       };
     }
@@ -204,14 +120,14 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
 
   private schedule(
     remotePeer: string,
-    lane: ClaimedLane<SelectedPlan>,
+    lane: PendingLane<SelectedPlan>,
     delayMs: number,
   ): void {
-    const pending: PendingScheduledLanes<SelectedPlan> = lane.kind === 'selected'
-      ? { selected: lane, ordinary: null }
-      : { selected: null, ordinary: lane };
     const job: PeerJob<SelectedPlan> = {
-      state: { kind: 'scheduled', pending },
+      currentLane: null,
+      pendingSelected: lane.kind === 'selected' ? lane : null,
+      pendingOrdinary: lane.kind === 'ordinary' ? lane : null,
+      ordinaryStarted: false,
       timer: null,
       handleUnexpectedError: lane.handleSyncError,
     };
@@ -230,59 +146,39 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     while (this.jobs.get(remotePeer) === job) {
       const lane = this.claimNext(job);
       if (lane === null) return;
-      if (lane.kind === 'selected') {
-        await this.callbacks.runSelected(
-          remotePeer,
-          lane.handleSyncError,
-          lane.recoveryPlan,
-        );
-      } else {
-        await this.callbacks.runOrdinary(
-          remotePeer,
-          lane.handleSyncError,
-          lane.mode,
-        );
+      try {
+        if (lane.kind === 'selected') {
+          await this.callbacks.runSelected(
+            remotePeer,
+            lane.handleSyncError,
+            lane.recoveryPlan,
+          );
+        } else {
+          await this.callbacks.runOrdinary(
+            remotePeer,
+            lane.handleSyncError,
+            lane.mode,
+          );
+        }
+      } finally {
+        if (this.jobs.get(remotePeer) === job) job.currentLane = null;
       }
     }
   }
 
-  private claimNext(job: PeerJob<SelectedPlan>): ClaimedLane<SelectedPlan> | null {
-    const state = job.state;
-    if (state.kind === 'scheduled') {
-      if (state.pending.selected !== null) {
-        const selected = state.pending.selected;
-        job.state = {
-          kind: 'running-selected',
-          pendingSelected: null,
-          ordinary: { kind: 'available', pending: state.pending.ordinary },
-        };
-        return selected;
-      }
-      const ordinary = state.pending.ordinary;
-      job.state = { kind: 'running-ordinary', pendingSelected: null };
-      return ordinary;
-    }
-    if (state.kind === 'running-selected') {
-      if (state.pendingSelected !== null) {
-        const selected = state.pendingSelected;
-        state.pendingSelected = null;
-        return selected;
-      }
-      if (state.ordinary.kind === 'available' && state.ordinary.pending !== null) {
-        const ordinary = state.ordinary.pending;
-        job.state = { kind: 'running-ordinary', pendingSelected: null };
-        return ordinary;
-      }
-      return null;
-    }
-    if (state.pendingSelected !== null) {
-      const selected = state.pendingSelected;
-      job.state = {
-        kind: 'running-selected',
-        pendingSelected: null,
-        ordinary: { kind: 'already-run' },
-      };
+  private claimNext(job: PeerJob<SelectedPlan>): PendingLane<SelectedPlan> | null {
+    if (job.pendingSelected !== null) {
+      const selected = job.pendingSelected;
+      job.pendingSelected = null;
+      job.currentLane = 'selected';
       return selected;
+    }
+    if (job.pendingOrdinary !== null) {
+      const ordinary = job.pendingOrdinary;
+      job.pendingOrdinary = null;
+      job.ordinaryStarted = true;
+      job.currentLane = 'ordinary';
+      return ordinary;
     }
     return null;
   }

@@ -5041,15 +5041,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.skippedNoSyncPeers.add(peerId);
       },
       onPeerSynced: (peerId, outcome) => {
+        const selectedRetryStillRequired = mode === 'ordinary-after-selected'
+          && this.selectedSwmBootstrapAdmission.isRetryRequired(peerId);
         const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
         if (outcome?.progress) {
           this.lastSyncProgressAt.set(peerId, progressAt);
         }
-        if (outcome?.fresh ?? true) {
+        if ((outcome?.fresh ?? true) && !selectedRetryStillRequired) {
           this.lastSuccessfulSyncAt.set(peerId, progressAt);
         }
         this.skippedNoSyncPeers.delete(peerId);
-        this.syncReconcilerBackoff.delete(peerId);
+        // An owed ordinary replay may succeed after selected recovery reported
+        // an incomplete scope. Preserve that selected lane's retry/backoff;
+        // ordinary freshness must not consume its recovery ownership.
+        if (!selectedRetryStillRequired) {
+          this.syncReconcilerBackoff.delete(peerId);
+        }
         if (outcome) {
           onSyncAccounting?.(outcome);
         }
@@ -5401,7 +5408,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const lastDisconnected = this.syncOnConnectDisconnectBoundary(peerId, now);
       const lastProgress = this.lastSyncProgressAt.get(peerId);
       const lastSyncCooldown = Math.max(lastOk ?? 0, lastProgress ?? 0);
-      const stale = lastSyncCooldown === 0
+      const selectedSwmRetryRequired =
+        this.selectedSwmBootstrapAdmission.isRetryRequired(peerId);
+      const stale = selectedSwmRetryRequired
+        || lastSyncCooldown === 0
         || lastSyncCooldown <= lastDisconnected
         || (now - lastSyncCooldown) >= syncTiming.stalenessThresholdMs;
       if (!stale) continue;
