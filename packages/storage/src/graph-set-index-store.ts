@@ -482,6 +482,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       );
     }
     if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(input, options);
+    // Prepare every fallible index-maintenance input before dispatch. Once the
+    // inner capability reports `committed`, only best-effort observation and
+    // index maintenance may remain; malformed caller input must never create a
+    // committed backend mutation that this decorator cannot account for.
+    const touchedGraphs = rfc64AuthorCommitTouchedGraphs(input);
     let result: Rfc64AuthorCommitCasResultV1;
     try {
       result = await this.inner.rfc64AuthorCommitCasV1(input, options);
@@ -494,7 +499,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     if (result === 'conflict') return result;
     this.bumpMutation();
     await this.maintainTouchedGraphs(
-      rfc64AuthorCommitTouchedGraphs(input),
+      touchedGraphs,
       'rfc64AuthorCommitCasV1',
       options,
     );

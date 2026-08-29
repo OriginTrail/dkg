@@ -3,11 +3,11 @@ import {
   RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
   compileRfc64SharedProjectionStreamOperationV1,
   createCgSharedProjectionStreamVerifierV1,
-  snapshotExactDataRecord,
   type Digest32V1,
   type Rfc64SharedProjectionStreamOperationV1,
   type Rfc64SharedProjectionStreamTemplateInputV1,
 } from '@origintrail-official/dkg-core';
+import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
 import { openLazyAbortableStream } from './abortable-stream-work-lifecycle.js';
 import {
@@ -282,10 +282,10 @@ function projectionFailureMessage(cause: unknown): string {
         return 'adapter projection stream is not in canonical byte order';
       case 'projection-duplicate':
         return 'adapter returned a duplicate projection triple';
-      case 'projection-public-count':
-        return error.reason === 'public-count-overflow'
-          ? 'adapter exceeded the author-sealed public triple count'
-          : 'projection stream triple count differs from the author seal';
+      case 'projection-public-count-overflow':
+        return 'adapter exceeded the author-sealed public triple count';
+      case 'projection-public-count-mismatch':
+        return 'projection stream triple count differs from the author seal';
       case 'projection-digest':
         return 'projection stream digest differs from the catalog row';
       case 'projection-resource-refused':

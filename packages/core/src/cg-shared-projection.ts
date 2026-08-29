@@ -86,6 +86,8 @@ export interface CgSharedProjectionStreamVerifierOptionsV1 {
   readonly expectedPublicTripleCount: CountV1;
   readonly expectedProjectionDigest: Digest32V1;
   readonly byteCeiling: number;
+  /** Pre-canonicalization lexical bound; defaults to the protocol line cap. */
+  readonly rawInputByteCeiling?: number;
 }
 
 export interface CgSharedProjectionStreamVerifierV1 {
@@ -104,11 +106,15 @@ export function createCgSharedProjectionStreamVerifierV1(
   options: CgSharedProjectionStreamVerifierOptionsV1,
 ): CgSharedProjectionStreamVerifierV1 {
   const accumulator = createCgSharedProjectionAccumulatorV1(options);
+  const rawInputByteCeiling = normalizeRawInputByteCeiling(
+    options.rawInputByteCeiling,
+  );
   let lineNumber = 0;
 
   return Object.freeze({
     push(rawTriple: CgSharedPublicRootProjectionTripleV1): Uint8Array {
       const triple = snapshotProjectionTriple(rawTriple);
+      assertRawProjectionTripleBound(triple, rawInputByteCeiling);
       assertStreamTripleHasNoRawLineBreaks(triple);
       let content: Uint8Array;
       try {
@@ -188,8 +194,8 @@ function createCgSharedProjectionAccumulatorV1(
       }
       count += 1n;
       if (count > expectedCount) {
-        failPublicCount(
-          'public-count-overflow',
+        fail(
+          'projection-public-count-overflow',
           'projection exceeds the signed publicTripleCount',
         );
       }
@@ -205,8 +211,8 @@ function createCgSharedProjectionAccumulatorV1(
       finalized = true;
       if (count === 0n) fail('projection-empty', 'cg-shared-v1 projection must not be empty');
       if (count !== expectedCount) {
-        failPublicCount(
-          'public-count-mismatch',
+        fail(
+          'projection-public-count-mismatch',
           'projection count differs from signed publicTripleCount',
         );
       }
@@ -294,32 +300,22 @@ export type CgSharedProjectionErrorCode =
   | 'projection-private-cardinality'
   | 'projection-private-subject'
   | 'projection-private-root-mismatch'
-  | 'projection-public-count'
+  | 'projection-public-count-overflow'
+  | 'projection-public-count-mismatch'
   | 'projection-digest'
   | 'projection-structured-root'
   | 'projection-resource-refused'
   | 'projection-capability'
   | 'projection-binding';
 
-export type CgSharedProjectionErrorReason =
-  | 'public-count-overflow'
-  | 'public-count-mismatch';
-
-export interface CgSharedProjectionErrorOptions extends ErrorOptions {
-  readonly reason?: CgSharedProjectionErrorReason;
-}
-
 export class CgSharedProjectionError extends Error {
-  readonly reason?: CgSharedProjectionErrorReason;
-
   constructor(
     readonly code: CgSharedProjectionErrorCode,
     message: string,
-    options: CgSharedProjectionErrorOptions = {},
+    options: ErrorOptions = {},
   ) {
     super(`[${code}] ${message}`, options);
     this.name = 'CgSharedProjectionError';
-    this.reason = options.reason;
   }
 }
 
@@ -1006,13 +1002,58 @@ function fail(
   );
 }
 
-function failPublicCount(
-  reason: Extract<CgSharedProjectionErrorReason, `public-count-${string}`>,
-  message: string,
-): never {
-  throw new CgSharedProjectionError(
-    'projection-public-count',
-    message,
-    { reason },
-  );
+function normalizeRawInputByteCeiling(input: number | undefined): number {
+  const ceiling = input
+    ?? DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxLineBytes;
+  if (
+    !Number.isSafeInteger(ceiling)
+    || ceiling < 1
+    || ceiling > DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxLineBytes
+  ) {
+    fail(
+      'projection-input',
+      'rawInputByteCeiling must be a positive integer within the protocol line cap',
+    );
+  }
+  return ceiling;
+}
+
+function assertRawProjectionTripleBound(
+  triple: Readonly<CgSharedPublicRootProjectionTripleV1>,
+  ceiling: number,
+): void {
+  let total = 0;
+  for (const value of [triple.subject, triple.predicate, triple.object]) {
+    total += boundedUtf8ByteLength(value, ceiling - total);
+    if (total > ceiling) {
+      fail(
+        'projection-resource-refused',
+        'projection triple exceeds the pre-canonicalization lexical byte ceiling',
+      );
+    }
+  }
+}
+
+/** Count without allocating a second string or byte array. */
+function boundedUtf8ByteLength(input: string, remaining: number): number {
+  if (remaining < 0) return 1;
+  let bytes = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    const unit = input.charCodeAt(index);
+    if (unit <= 0x7f) bytes += 1;
+    else if (unit <= 0x7ff) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = input.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+    if (bytes > remaining) return remaining + 1;
+  }
+  return bytes;
 }

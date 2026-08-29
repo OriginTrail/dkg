@@ -24,11 +24,8 @@ import {
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
 } from '@origintrail-official/dkg-core';
-import {
-  executeRfc64ExactBindingsReadCapabilityV1,
-  type Rfc64ExactBindingsReadOperationV1,
-  type Rfc64ExactBindingsStoreRowV1,
-} from '../rfc64-exact-bindings-read-capability.js';
+import { certifyRfc64ExactBindingsReadStoreV1 } from
+  '../rfc64-exact-bindings-read-capability.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -227,14 +224,6 @@ function createStoreOperationDeadline(
  */
 export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
-
-  rfc64ExactBindingsReadV1(
-    operation: Rfc64ExactBindingsReadOperationV1,
-    options?: Pick<QueryOptions, 'signal'>,
-  ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
-    return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
-  }
-
   private readonly url: string;
   private readonly operationTimeoutMs: number;
   private readonly scheduler: StorePriorityScheduler;
@@ -243,6 +232,7 @@ export class BlazegraphStore implements TripleStore {
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
+    certifyRfc64ExactBindingsReadStoreV1(this);
   }
 
   private runStoreWork<T>(

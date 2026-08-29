@@ -25,6 +25,7 @@ import type {
 import type {
   CanonicalAuthorSealStoreRowV1,
   Rfc64SharedProjectionStreamOperationV1,
+  Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import type {
   Rfc64ExactBindingsReadOperationV1,
@@ -145,6 +146,11 @@ export interface TripleStore {
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
   ): Promise<AsyncIterable<Quad>>;
+  /** @deprecated Use rfc64ExactBindingsReadV1. */
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;

@@ -4,6 +4,7 @@ import {
   OxigraphStore,
   SparqlHttpStore,
   createTripleStore,
+  tryReplaceSubjectAtomically,
   tryRfc64AuthorCommitCasV1,
   type TripleStore,
 } from '../src/index.js';
@@ -17,6 +18,62 @@ import {
 describe('RFC-64 author commit remote adapters', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('preserves the deprecated atomicUpdates capability in direct and factory construction', async () => {
+    const requests: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      requests.push(String(init?.body ?? ''));
+      return new Response(null, { status: 200 });
+    });
+    const quads = [{
+      subject: 'urn:test:rfc64:legacy-subject',
+      predicate: 'urn:test:rfc64:legacy-predicate',
+      object: '"legacy"',
+      graph: 'urn:test:rfc64:legacy-graph',
+    }];
+
+    const direct = new SparqlHttpStore({
+      queryEndpoint: 'http://legacy-direct.test/sparql',
+      atomicUpdates: true,
+    });
+    await expect(tryReplaceSubjectAtomically(
+      direct,
+      quads[0]!.graph,
+      quads[0]!.subject,
+      quads,
+    )).resolves.toBe(true);
+
+    const factory = await createTripleStore({
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: 'http://legacy-factory.test/sparql',
+        atomicUpdates: true,
+      },
+    });
+    try {
+      await expect(tryReplaceSubjectAtomically(
+        factory,
+        quads[0]!.graph,
+        quads[0]!.subject,
+        quads,
+      )).resolves.toBe(true);
+    } finally {
+      await direct.close();
+      await factory.close();
+    }
+
+    expect(requests).toHaveLength(2);
+    expect(() => new SparqlHttpStore({
+      queryEndpoint: 'http://legacy-conflict.test/sparql',
+      atomicUpdates: true,
+      consistencyProfile: 'best-effort',
+    })).toThrow(/atomicUpdates conflicts with consistencyProfile/u);
+    expect(() => new SparqlHttpStore({
+      queryEndpoint: 'http://legacy-compatible.test/sparql',
+      atomicUpdates: true,
+      consistencyProfile: 'atomic-readback',
+    })).not.toThrow();
   });
 
   it('fails closed on unsupported and non-transactional endpoints before any request', async () => {
