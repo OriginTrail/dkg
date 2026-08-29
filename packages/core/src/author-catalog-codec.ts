@@ -200,11 +200,11 @@ export function isCatalogForbiddenCodePointV1(codePoint: number): boolean {
 
 /** Build the prefix-free root/subgraph assertion scope used by catalog-v1 seals. */
 export function buildCatalogAssertionScopeV1(lane: CatalogLaneV1): CatalogAssertionScopeV1 {
-  assertCatalogLaneV1(lane);
-  const context = encodeCanonicalIriComponentV1(lane.contextGraphId);
-  const result = lane.subGraphName === null
+  const snapshot = snapshotCatalogLaneV1(lane);
+  const context = encodeCanonicalIriComponentV1(snapshot.contextGraphId);
+  const result = snapshot.subGraphName === null
     ? `v1/root/${context}`
-    : `v1/subgraph/${context}/${encodeCanonicalIriComponentV1(lane.subGraphName)}`;
+    : `v1/subgraph/${context}/${encodeCanonicalIriComponentV1(snapshot.subGraphName)}`;
   return result as CatalogAssertionScopeV1;
 }
 
@@ -214,11 +214,11 @@ export function buildCatalogAssertionSubjectV1(
   authorAddress: EvmAddressV1,
   assertionCoordinate: AssertionCoordinateV1,
 ): CatalogAssertionSubjectV1 {
-  assertCatalogLaneV1(lane);
+  const snapshot = snapshotCatalogLaneV1(lane);
   assertCatalogScalar(() => assertCanonicalEvmAddress(authorAddress, 'authorAddress'));
   assertAssertionCoordinateV1(assertionCoordinate);
   return (
-    `did:dkg:context-graph:${buildCatalogAssertionScopeV1(lane)}`
+    `did:dkg:context-graph:${buildCatalogAssertionScopeV1(snapshot)}`
     + `/assertion/${authorAddress}/${encodeCanonicalIriComponentV1(assertionCoordinate)}`
   ) as CatalogAssertionSubjectV1;
 }
@@ -457,21 +457,32 @@ export function assertAuthorCatalogRowScopeBindingV1(
   assertPackedKaIdAuthorBindingV1(row.kaId, scope.authorAddress);
 }
 
-function assertCatalogLaneV1(lane: unknown): asserts lane is CatalogLaneV1 {
+function snapshotCatalogLaneV1(lane: unknown): Readonly<CatalogLaneV1> {
   if (!isPlainRecord(lane)) {
     fail('catalog-schema', 'catalog lane must be a plain JSON object');
   }
   // AuthorCatalogScopeV1 is itself a CatalogLaneV1, so these helpers must admit
   // that structural superset. Still require the two consumed fields to be own,
   // enumerable data properties before reading them.
-  for (const key of ['contextGraphId', 'subGraphName']) {
-    const descriptor = Object.getOwnPropertyDescriptor(lane, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail('catalog-schema', `catalog lane ${key} must be an enumerable data property`);
-    }
+  const contextGraphDescriptor = Object.getOwnPropertyDescriptor(lane, 'contextGraphId');
+  const subGraphDescriptor = Object.getOwnPropertyDescriptor(lane, 'subGraphName');
+  if (
+    !contextGraphDescriptor?.enumerable
+    || !Object.prototype.hasOwnProperty.call(contextGraphDescriptor, 'value')
+  ) {
+    fail('catalog-schema', 'catalog lane contextGraphId must be an enumerable data property');
   }
-  assertContextGraphIdV1(lane.contextGraphId);
-  if (lane.subGraphName !== null) assertSubGraphNameV1(lane.subGraphName);
+  if (
+    !subGraphDescriptor?.enumerable
+    || !Object.prototype.hasOwnProperty.call(subGraphDescriptor, 'value')
+  ) {
+    fail('catalog-schema', 'catalog lane subGraphName must be an enumerable data property');
+  }
+  const contextGraphId = contextGraphDescriptor.value;
+  const subGraphName = subGraphDescriptor.value;
+  assertContextGraphIdV1(contextGraphId);
+  if (subGraphName !== null) assertSubGraphNameV1(subGraphName);
+  return Object.freeze({ contextGraphId, subGraphName });
 }
 
 function assertCatalogLaneIdentifier(value: unknown, label: string): string {
