@@ -310,18 +310,22 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // mutated WM/SWM. The one safe mutation is atomic exact-graph replacement:
   // replaying the same frozen promote payload converges from either permitted
   // old-or-new outcome. Every other interrupted write remains fail-closed.
-  if (
-    isStoreOperationTimeoutError(err) &&
-    (
+  if (isStoreOperationTimeoutError(err)) {
+    if (
       err.outcome === 'not_started' ||
       (
         err.outcome === 'indeterminate' &&
         err.storeOperation !== undefined &&
         SAFE_INDETERMINATE_STORE_OPERATIONS.has(err.storeOperation)
       )
-    )
-  ) {
-    return { classification: 'transient', retryable: true };
+    ) {
+      return { classification: 'transient', retryable: true };
+    }
+
+    // Typed store outcomes are authoritative. In particular, never let an
+    // indeterminate mutation fall through to generic words such as "timeout"
+    // below: its first attempt may already have changed durable state.
+    return { classification: 'fatal', retryable: false };
   }
 
   // 3. Transient network / IO — the rc.10 importer hit "fetch failed"

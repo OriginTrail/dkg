@@ -167,12 +167,17 @@ describe('classifyPromoteError', () => {
       message: 'Managed Oxigraph recovery interrupted replaceGraph; outcome is indeterminate',
     }))).toEqual({ classification: 'transient', retryable: true });
 
-    expect(classifyPromoteError(new StoreOperationTimeoutError({
-      backend: 'oxigraph-server',
-      operation: 'insert',
-      outcome: 'indeterminate',
-      message: 'managed store write outcome is indeterminate',
-    }))).toEqual({ classification: 'fatal', retryable: false });
+    for (const message of [
+      'insert timed out',
+      'insert timeout after dispatch',
+    ]) {
+      expect(classifyPromoteError(new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'insert',
+        outcome: 'indeterminate',
+        message,
+      }))).toEqual({ classification: 'fatal', retryable: false });
+    }
   });
 
   it('classifies unknown errors as fatal (non-retryable)', () => {
