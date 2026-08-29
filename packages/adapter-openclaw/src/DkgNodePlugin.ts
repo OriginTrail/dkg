@@ -3052,21 +3052,19 @@ export class DkgNodePlugin {
 
   private async handleFindAgents(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
+      // ONE boundary policy for every filter: forward the model's value
+      // VERBATIM and let the daemon validate — it 400s on bad values and
+      // unknown names, and that 400 comes back through daemonError() as the
+      // caller's signal. Coercing here (parseInt, boolean folding) or
+      // dropping a bad value would turn the daemon's 400 into a silently
+      // different query — `limit: 0` becoming "no limit" is the full
+      // ~150 KB registry.
       const filter: Parameters<typeof this.client.getAgents>[0] = {};
-      if (args.framework) filter.framework = String(args.framework);
-      if (args.skill_type) filter.skill_type = String(args.skill_type);
-      // GH#310 daemon filters — validation lives server-side; forward verbatim
-      // so a bad value surfaces as the daemon's 400 instead of being silently
-      // dropped here (a dropped filter returns the full ~150 KB registry).
-      if (args.connection_status) {
-        filter.connection_status = String(args.connection_status) as NonNullable<typeof filter>['connection_status'];
+      for (const key of ['framework', 'skill_type', 'connection_status', 'local', 'limit', 'cursor'] as const) {
+        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
+          (filter as Record<string, unknown>)[key] = args[key];
+        }
       }
-      if (args.local !== undefined) filter.local = args.local === true || args.local === 'true';
-      if (args.limit !== undefined) {
-        const n = parseInt(String(args.limit), 10);
-        if (!isNaN(n) && n > 0) filter.limit = n;
-      }
-      if (args.cursor) filter.cursor = String(args.cursor);
       const result = await this.client.getAgents(Object.keys(filter ?? {}).length ? filter : undefined);
       return this.json(result);
     } catch (err: any) {

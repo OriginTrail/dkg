@@ -703,6 +703,16 @@ describe('DkgDaemonClient', () => {
     expect(result.nextCursor).toBe('n1');
   });
 
+  it('getAgents serializes malformed values verbatim so the daemon can 400 them', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ error: '"limit" must be a positive integer' }), { status: 400 }),
+    );
+    await client.getAgents({ limit: '10junk', local: 'ture' }).catch(() => {});
+    const url = fetchCalls[0][0] as string;
+    expect(url).toContain('limit=10junk');
+    expect(url).toContain('local=ture');
+  });
+
   it('getSkills should GET /api/skills', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ skills: [{ uri: 'ImageAnalysis' }] }), { status: 200 }),

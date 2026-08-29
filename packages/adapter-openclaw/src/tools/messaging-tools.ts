@@ -30,7 +30,7 @@ export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
             type: 'boolean',
             description: "Only this node's own agents — the cheap way to learn your own agent address.",
           },
-          limit: { type: 'number', description: 'Page size; the response carries nextCursor while rows remain.' },
+          limit: { type: 'number', description: 'Page size (positive integer); the response carries nextCursor while rows remain.' },
           cursor: { type: 'string', description: 'Opaque cursor from a previous response; repeat the same filters.' },
         },
         required: [],

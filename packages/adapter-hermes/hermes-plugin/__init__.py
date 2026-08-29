@@ -338,7 +338,8 @@ DKG_FIND_AGENTS_SCHEMA = {
             },
             "limit": {
                 "type": "integer",
-                "description": "Page size; the response carries nextCursor while more rows remain.",
+                "minimum": 1,
+                "description": "Page size (positive integer); the response carries nextCursor while more rows remain.",
             },
             "cursor": {
                 "type": "string",
@@ -1686,7 +1687,13 @@ class DKGMemoryProvider(MemoryProvider):
         if args.get("connection_status"):
             params["connectionStatus"] = args["connection_status"]
         if args.get("local") is not None:
-            params["local"] = "true" if args["local"] in (True, "true") else "false"
+            # Booleans map to the daemon's lowercase literals; any other value
+            # is forwarded VERBATIM so the daemon's 400 surfaces instead of a
+            # typo being silently folded to false.
+            local = args["local"]
+            params["local"] = (
+                "true" if local is True else "false" if local is False else str(local)
+            )
         if args.get("limit") is not None:
             params["limit"] = str(args["limit"])
         if args.get("cursor"):

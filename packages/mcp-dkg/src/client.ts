@@ -464,25 +464,43 @@ export class DkgClient {
   /**
    * List registered agents (human + AI) + their live connection health.
    *
-   * Options map to the GH#310 daemon filters. This helper keeps its
-   * array-of-agents contract (its consumers build name maps), so a
-   * `nextCursor` from a `limit`ed call is dropped — pass a larger limit
-   * rather than paging through this method.
+   * The complete-list convenience its consumers rely on (they build peer name
+   * maps). Filters that cannot truncate are accepted; anything that CAN
+   * truncate (limit/cursor) lives on {@link listAgentsPage}, which returns
+   * the continuation state — a truncating filter on a method that returns a
+   * bare array would make 10-of-11 rows indistinguishable from a complete
+   * result.
    */
   async listAgents(options: {
     framework?: string;
     connectionStatus?: 'self' | 'connected' | 'disconnected';
     local?: boolean;
-    limit?: number;
   } = {}): Promise<unknown[]> {
+    const { agents } = await this.listAgentsPage(options);
+    return agents;
+  }
+
+  /** One page of the agent registry, with the state needed to continue it. */
+  async listAgentsPage(options: {
+    framework?: string;
+    connectionStatus?: 'self' | 'connected' | 'disconnected';
+    local?: boolean;
+    limit?: number;
+    /** Opaque cursor from a previous page. Repeat the same filters. */
+    cursor?: string;
+  } = {}): Promise<{ agents: unknown[]; nextCursor?: string }> {
     const params = new URLSearchParams();
-    if (options.framework) params.set('framework', options.framework);
-    if (options.connectionStatus) params.set('connectionStatus', options.connectionStatus);
+    if (options.framework !== undefined) params.set('framework', options.framework);
+    if (options.connectionStatus !== undefined) params.set('connectionStatus', options.connectionStatus);
     if (options.local !== undefined) params.set('local', String(options.local));
     if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.cursor !== undefined) params.set('cursor', options.cursor);
     const qs = params.toString();
-    const r = await this.request<{ agents?: unknown[] }>('GET', `/api/agents${qs ? `?${qs}` : ''}`);
-    return r.agents ?? [];
+    const r = await this.request<{ agents?: unknown[]; nextCursor?: string }>(
+      'GET',
+      `/api/agents${qs ? `?${qs}` : ''}`,
+    );
+    return { agents: r.agents ?? [], ...(r.nextCursor !== undefined ? { nextCursor: r.nextCursor } : {}) };
   }
 
   // ── Agent-to-agent chat (Phase 1: agent debug chat RFC) ────────

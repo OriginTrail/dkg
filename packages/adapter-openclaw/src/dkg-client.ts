@@ -970,21 +970,28 @@ export class DkgDaemonClient {
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
+  /**
+   * Transport wrapper, deliberately LOOSE: values are serialized verbatim and
+   * the daemon is the single validator (it 400s on bad values AND unknown
+   * parameter names). Coercing or dropping a bad value here would convert the
+   * daemon's intended 400 into a silently different query — `limit: 0`
+   * becoming "no limit" returns the full ~150 KB registry.
+   */
   async getAgents(filter?: {
     framework?: string;
     skill_type?: string;
-    connection_status?: 'self' | 'connected' | 'disconnected';
-    local?: boolean;
-    limit?: number;
+    connection_status?: 'self' | 'connected' | 'disconnected' | (string & {});
+    local?: boolean | string;
+    limit?: number | string;
     cursor?: string;
   }): Promise<{ agents: any[]; nextCursor?: string }> {
     const params = new URLSearchParams();
-    if (filter?.framework) params.set('framework', filter.framework);
-    if (filter?.skill_type) params.set('skill_type', filter.skill_type);
-    if (filter?.connection_status) params.set('connectionStatus', filter.connection_status);
+    if (filter?.framework !== undefined) params.set('framework', String(filter.framework));
+    if (filter?.skill_type !== undefined) params.set('skill_type', String(filter.skill_type));
+    if (filter?.connection_status !== undefined) params.set('connectionStatus', String(filter.connection_status));
     if (filter?.local !== undefined) params.set('local', String(filter.local));
     if (filter?.limit !== undefined) params.set('limit', String(filter.limit));
-    if (filter?.cursor) params.set('cursor', filter.cursor);
+    if (filter?.cursor !== undefined) params.set('cursor', String(filter.cursor));
     const qs = params.toString();
     return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
   }

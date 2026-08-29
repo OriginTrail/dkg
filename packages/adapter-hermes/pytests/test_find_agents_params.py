@@ -72,6 +72,17 @@ def test_local_false_is_sent_not_dropped(provider):
     assert "local=false" in provider._client.gets[0]
 
 
+def test_malformed_values_are_forwarded_not_coerced(provider):
+    # The daemon is the single validator; a typo folded to false (or a bad
+    # limit dropped) would silently change the query instead of surfacing
+    # the daemon's 400.
+    provider._handle_find_agents({"local": "ture", "limit": 0, "connection_status": "onnected"})
+    path = provider._client.gets[0]
+    assert "local=ture" in path
+    assert "limit=0" in path
+    assert "connectionStatus=onnected" in path
+
+
 def test_no_args_keeps_the_bare_path(provider):
     provider._handle_find_agents({})
     assert provider._client.gets[0] == "/api/agents"
