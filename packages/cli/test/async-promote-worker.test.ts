@@ -404,6 +404,107 @@ describe('runPromoteJob', () => {
     expect(final?.result?.promotedCount).toBe(99);
   });
 
+  it('shares one recovery deadline across all post-promote bookkeeping writes', async () => {
+    const job = await enqueueAndClaim();
+    const recoveringQueue = Object.create(queue) as AsyncPromoteQueue;
+    const recordCommitMarker = queue.recordCommitMarker.bind(queue);
+    const startedAt = now;
+    let swmMarkerCalls = 0;
+    let succeedCalls = 0;
+    let promoteCalls = 0;
+    recoveringQueue.recordCommitMarker = async (jobId, claimToken, step) => {
+      if (step === 'swmInserted') {
+        swmMarkerCalls += 1;
+        if (swmMarkerCalls <= 2) {
+          throw new Error('Managed Oxigraph is recovering; query was not started');
+        }
+      }
+      return recordCommitMarker(jobId, claimToken, step);
+    };
+    recoveringQueue.succeed = async () => {
+      succeedCalls += 1;
+      throw new Error('Store scheduler queue wait timeout');
+    };
+
+    const result = await runPromoteJob({
+      job,
+      queue: recoveringQueue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        promoteCalls += 1;
+        await markPromoteStarted();
+        return { promotedCount: 99 };
+      },
+      now: () => now,
+      heartbeatIntervalMs: 0,
+      bookkeepingRetryIntervalMs: 5_000,
+      bookkeepingRetryBudgetMs: 10_000,
+      sleep: async (ms) => {
+        now += ms;
+      },
+      log: (message) => logs.push(message),
+    });
+
+    expect(result.outcome).toBe('partial_promote_ambiguity');
+    expect(promoteCalls).toBe(1);
+    expect(swmMarkerCalls).toBe(3);
+    expect(succeedCalls).toBe(1);
+    expect(now).toBe(startedAt + 10_000);
+    const final = await queue.getStatus(job.jobId);
+    expect(final?.state).toBe('running');
+    expect(final?.commitMarker?.swmInserted).toBe(true);
+  });
+
+  it('stops persistent transient bookkeeping retries at the shared deadline', async () => {
+    const job = await enqueueAndClaim();
+    const recoveringQueue = Object.create(queue) as AsyncPromoteQueue;
+    const recordCommitMarker = queue.recordCommitMarker.bind(queue);
+    const succeed = queue.succeed.bind(queue);
+    const startedAt = now;
+    let swmMarkerCalls = 0;
+    let succeedCalls = 0;
+    let promoteCalls = 0;
+    recoveringQueue.recordCommitMarker = async (jobId, claimToken, step) => {
+      if (step === 'swmInserted') {
+        swmMarkerCalls += 1;
+        throw new Error('Managed Oxigraph is recovering; query was not started');
+      }
+      return recordCommitMarker(jobId, claimToken, step);
+    };
+    recoveringQueue.succeed = async (jobId, claimToken, result) => {
+      succeedCalls += 1;
+      return succeed(jobId, claimToken, result);
+    };
+
+    const result = await runPromoteJob({
+      job,
+      queue: recoveringQueue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        promoteCalls += 1;
+        await markPromoteStarted();
+        return { promotedCount: 99 };
+      },
+      now: () => now,
+      heartbeatIntervalMs: 0,
+      bookkeepingRetryIntervalMs: 5_000,
+      bookkeepingRetryBudgetMs: 10_000,
+      sleep: async (ms) => {
+        now += ms;
+      },
+      log: (message) => logs.push(message),
+    });
+
+    expect(result.outcome).toBe('partial_promote_ambiguity');
+    expect(promoteCalls).toBe(1);
+    expect(swmMarkerCalls).toBe(3);
+    expect(succeedCalls).toBe(0);
+    expect(now).toBe(startedAt + 10_000);
+    const final = await queue.getStatus(job.jobId);
+    expect(final?.state).toBe('running');
+    expect(final?.commitMarker?.swmInserted).toBe(false);
+  });
+
   it('emits memoryGraphChanged on successful promote with >0 triples', async () => {
     const events: any[] = [];
     const job = await enqueueAndClaim();

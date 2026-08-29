@@ -410,8 +410,11 @@ export async function runPromoteJob(
     if (heartbeatTimer.unref) heartbeatTimer.unref();
   }
 
-  async function persistWithRecovery<T>(label: string, write: () => Promise<T>): Promise<T> {
-    const deadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
+  async function persistWithRecovery<T>(
+    label: string,
+    deadlineAt: number,
+    write: () => Promise<T>,
+  ): Promise<T> {
     let failures = 0;
     for (;;) {
       try {
@@ -426,7 +429,8 @@ export async function runPromoteJob(
             `Queue bookkeeping recovery started for ${job.jobId} (${label}) after a transient error`,
           );
         }
-        await sleep(Math.max(0, bookkeepingRetryIntervalMs));
+        const remainingBudgetMs = Math.max(0, deadlineAt - now());
+        await sleep(Math.min(Math.max(0, bookkeepingRetryIntervalMs), remainingBudgetMs));
       }
     }
   }
@@ -459,7 +463,12 @@ export async function runPromoteJob(
         recordedAt: now(),
       };
       try {
-        await persistWithRecovery('record failure', () => queue.fail(job.jobId, claimToken, attemptError));
+        const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
+        await persistWithRecovery(
+          'record failure',
+          bookkeepingDeadlineAt,
+          () => queue.fail(job.jobId, claimToken, attemptError),
+        );
       } catch (failErr: unknown) {
         if (failErr instanceof PromoteJobLeaseError) {
           bestEffortLog(log, `Lease lost while recording failure for ${job.jobId}: ${message}`);
@@ -492,11 +501,12 @@ export async function runPromoteJob(
     // will have expired and `recoverOnStartup()` will correctly route
     // it into the "abandoned partial promote" bucket (promoteStarted
     // = true, swmInserted = false → operator action required).
+    const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
     try {
-      await persistWithRecovery('record swmInserted', () =>
+      await persistWithRecovery('record swmInserted', bookkeepingDeadlineAt, () =>
         queue.recordCommitMarker(job.jobId, claimToken, 'swmInserted'),
       );
-      await persistWithRecovery('record success', () =>
+      await persistWithRecovery('record success', bookkeepingDeadlineAt, () =>
         queue.succeed(job.jobId, claimToken, {
           promotedCount: result.promotedCount,
           succeededAt: now(),
