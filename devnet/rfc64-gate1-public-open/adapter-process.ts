@@ -12,7 +12,11 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import {
+  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  computeNetworkId,
   computeControlSignatureVariantDigestHex,
+  createOperationContext,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -39,6 +43,10 @@ import {
 const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
 const masterKeyHex = process.env.DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX;
+const rolloutModeInput = process.env.DKG_RFC64_ROLLOUT_MODE;
+const rolloutContextGraphId = process.env.DKG_RFC64_ROLLOUT_CONTEXT_GRAPH_ID;
+const rolloutOwnerAddressInput = process.env.DKG_RFC64_ROLLOUT_OWNER_ADDRESS;
+const rolloutKillSwitchInput = process.env.DKG_RFC64_ROLLOUT_KILL_SWITCH;
 if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE1_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
@@ -47,6 +55,27 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 
 const dataDir = resolve(dataDirInput);
 const pinnedMasterKeyHex = masterKeyHex;
+const rolloutMode = parseRolloutMode(rolloutModeInput);
+const rolloutKillSwitch = parseBooleanEnvironment(
+  rolloutKillSwitchInput,
+  'DKG_RFC64_ROLLOUT_KILL_SWITCH',
+);
+const rolloutOwnerAddress = rolloutOwnerAddressInput?.toLowerCase();
+if (
+  rolloutMode !== null
+  && (
+    rolloutContextGraphId === undefined
+    || rolloutOwnerAddress === undefined
+    || !/^0x[0-9a-f]{40}$/u.test(rolloutOwnerAddress)
+  )
+) {
+  throw new Error(
+    'rollout mode requires DKG_RFC64_ROLLOUT_CONTEXT_GRAPH_ID and a lowercase EVM owner',
+  );
+}
+if (rolloutMode === null && rolloutKillSwitch) {
+  throw new Error('rollout kill switch requires DKG_RFC64_ROLLOUT_MODE');
+}
 const RFC64_GATE1_DEPLOYMENT = Object.freeze({
   networkId: 'otp:20430',
   assertedAtChainId: '20430',
@@ -106,6 +135,14 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
+  const rolloutActivation = rolloutMode === null
+    ? null
+    : buildRolloutActivation(
+      rolloutMode,
+      rolloutKillSwitch,
+      rolloutContextGraphId!,
+      rolloutOwnerAddress!,
+    );
   const created = await DKGAgent.create({
     name: `RFC64Gate1${role}`,
     dataDir,
@@ -119,7 +156,15 @@ async function boot(): Promise<void> {
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    rfc64CatalogDeploymentProfile: RFC64_GATE1_DEPLOYMENT as never,
+    ...(rolloutActivation === null ? {
+      rfc64CatalogDeploymentProfile: RFC64_GATE1_DEPLOYMENT as never,
+    } : {
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: RFC64_GATE1_DEPLOYMENT.networkId,
+      },
+      rfc64PublicCatalogActivation: rolloutActivation as never,
+    }),
   });
   agent = created;
   await created.start();
@@ -134,6 +179,8 @@ async function boot(): Promise<void> {
     multiaddr: tcp,
     peerId: created.peerId,
     protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
+    rolloutKillSwitch,
+    rolloutMode,
     startupRepair: null,
   });
 }
@@ -243,6 +290,41 @@ async function handle(command: Command): Promise<void> {
       emitOperationResult(command, currentAgent.rfc64PublicCatalogStatsV1()?.receiver ?? null);
       return;
     }
+    case 'rolloutStatus': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'rolloutStatus input');
+      const contextGraphId = requiredString(
+        input.contextGraphId,
+        'rolloutStatus.contextGraphId',
+      );
+      const manualSwmPlan = await currentAgent.planSharedMemorySyncContextGraphs(
+        undefined,
+        [contextGraphId],
+        createOperationContext('sync'),
+      );
+      emitOperationResult(command, {
+        bootstrapStarted: currentAgent.readRfc64PublicCatalogBootstrapStatusV1() !== null,
+        catalogServiceStarted: currentAgent.rfc64PublicCatalogStatsV1()?.started === true,
+        legacyConfiguredScope: currentAgent.getSyncContextGraphIds().includes(contextGraphId),
+        manualLegacySwmTargetCount: manualSwmPlan.targets.length,
+        vmChainInventorySelected:
+          currentAgent.isRfc64SelectedVmReconcileContextGraph(contextGraphId),
+      });
+      return;
+    }
+    case 'stagedHeadReadback': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'stagedHeadReadback input');
+      const output = await currentAgent.readRfc64StagedAuthorCatalogHeadV1({
+        objectDigest: requiredDigest(input.objectDigest, 'stagedHeadReadback.objectDigest'),
+        signatureVariantDigest: requiredDigest(
+          input.signatureVariantDigest,
+          'stagedHeadReadback.signatureVariantDigest',
+        ),
+      });
+      emitOperationResult(command, output);
+      return;
+    }
     case 'semanticGraphReadback': {
       requireRole('receiver');
       const input = plainRecord(command.input, 'semanticGraphReadback input');
@@ -311,6 +393,69 @@ async function handle(command: Command): Promise<void> {
     default:
       throw new Error(`unknown adapter command: ${command.command}`);
   }
+}
+
+function parseRolloutMode(input: string | undefined): 'legacy' | 'shadow' | 'catalog' | null {
+  if (input === undefined || input === '') return null;
+  if (input === 'legacy' || input === 'shadow' || input === 'catalog') return input;
+  throw new Error('DKG_RFC64_ROLLOUT_MODE must be legacy, shadow, or catalog');
+}
+
+function parseBooleanEnvironment(input: string | undefined, label: string): boolean {
+  if (input === undefined || input === '' || input === '0' || input === 'false') return false;
+  if (input === '1' || input === 'true') return true;
+  throw new Error(`${label} must be true, false, 1, or 0`);
+}
+
+function buildRolloutActivation(
+  mode: 'legacy' | 'shadow' | 'catalog',
+  killSwitch: boolean,
+  contextGraphId: string,
+  ownerAddress: string,
+): Record<string, unknown> {
+  const policy = Object.freeze({
+    networkId: RFC64_GATE1_DEPLOYMENT.networkId,
+    contextGraphId,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    era: '0',
+    version: '0',
+    previousPolicyDigest: null,
+    accessPolicy: 0,
+    publishPolicy: 1,
+    publishAuthority: null,
+    publishAuthorityAccountId: '0',
+    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+    administrativeDelegationDigest: null,
+    source: Object.freeze({
+      kind: 'owner-signed-unregistered',
+      ownerAddress,
+      ownerAuthorityEra: '0',
+    }),
+    effectiveAt: '0',
+    issuedAt: '0',
+  });
+  const policyEnvelope = Object.freeze({
+    issuer: ownerAddress,
+    objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+    payload: policy,
+    signatureEvidence: Object.freeze({ kind: 'none' }),
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  });
+  return Object.freeze({
+    deploymentProfile: RFC64_GATE1_DEPLOYMENT,
+    bootstrap: Object.freeze({
+      acceptedPublicPolicies: Object.freeze([Object.freeze({
+        policyEnvelope,
+        targets: Object.freeze([]),
+      })]),
+    }),
+    rollout: Object.freeze({
+      killSwitch,
+      contextGraphModes: Object.freeze({ [contextGraphId]: mode }),
+    }),
+  });
 }
 
 function compareQuad(left: Quad, right: Quad): number {

@@ -86,3 +86,28 @@ devnet/rfc64-gate1-public-open/artifacts/gate1-verdict.json
 
 The verdict scope is `production-gate1-public-open`; fixture-era
 `harness-contract-only` PASS verdicts are no longer accepted.
+
+## Per-CG rollout transition certificate
+
+```sh
+pnpm test:rfc64-rollout-transition
+```
+
+This executable gate uses the same real `DKGAgent` process adapter and one
+persistent receiver data directory. It publishes a non-empty signed catalog,
+then restarts the receiver through the exact operator sequence:
+
+1. `shadow` — legacy remains authoritative, the signed head is staged, and the
+   catalog does not activate semantic triples;
+2. `catalog` — legacy scope is removed and the exact staged catalog becomes the
+   durable applied SWM authority;
+3. `catalog` plus kill switch — Track 2 stays dormant without legacy fallback,
+   while the applied head and semantic state remain durable;
+4. `catalog` re-enabled — the same head is replay-safe and remains exact;
+5. `legacy` — authority explicitly returns to the legacy scope without deleting
+   previously verified catalog state.
+
+Every phase also proves that finalized public VM inventory selection remains
+chain-based. The adapter reports only product readbacks: service/bootstrap
+liveness, configured legacy scope, manual SWM admission result, chain-VM
+selection, exact staged/applied head, and exact semantic graph bytes.

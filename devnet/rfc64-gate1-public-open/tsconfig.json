@@ -16,6 +16,7 @@
     "model.ts",
     "product-capabilities.test.ts",
     "product-capabilities.ts",
+    "rollout-transition.test.ts",
     "run.ts",
     "verifier.test.ts",
     "verifier.ts",
