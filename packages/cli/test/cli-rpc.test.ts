@@ -118,28 +118,35 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     expect(broadcastTransaction).not.toHaveBeenCalled();
   });
 
-  it('emits a structured RPC_RECEIPT_LOOKUP_FAILED (with the original txHash) when receipt lookup fails on every provider after a successful broadcast', async () => {
-    // #1332 review: drives the REAL CLI receipt emitter end-to-end (broadcast OK,
-    // then retryable receipt failures on all providers) so a regression that drops
-    // txHash or changes the emitted shape fails loudly, not just the synthetic
-    // classifier inputs.
+  it('emits the structured operation RPC_TIMEOUT (with the original txHash) after polling out receipt failures on every provider', async () => {
+    // #1332 review: drives the REAL CLI receipt emitter end-to-end (broadcast OK, then
+    // retryable receipt failures on all providers) so a regression that drops txHash or
+    // changes the emitted shape fails loudly, not just the synthetic classifier inputs.
+    // Exhausted receipt passes are transport failures now, so the wait POLLS them out to its
+    // operation deadline instead of dying on the first pass; the durable contract this row
+    // pins is unchanged where it matters — the terminal error is a structured chain transport
+    // error that still carries the original transaction hash.
     vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let lookups = 0;
     const provider = () => ({
       broadcastTransaction: async () => ({ hash: '0xignored' }),
       getTransactionReceipt: async () => {
+        lookups += 1;
         const e: any = new Error('receipt RPC down');
         e.code = 'SERVER_ERROR';
         throw e;
       },
     }) as any;
     const err = await sendCliRawTransactionWithFailover(
-      writeContext([provider(), provider()]),
+      writeContext([provider(), provider()], 3_000),
       '0xsigned',
       '0xdeadbeef',
     ).catch((e) => e);
-    expect(err.code).toBe('RPC_RECEIPT_LOOKUP_FAILED');
+    expect(err.code).toBe('RPC_TIMEOUT');
     expect(err.txHash).toBe('0xdeadbeef');
     expect(isChainRpcTransportError(err)).toBe(true);
+    // The wait retried past the first exhausted pass rather than dying on it.
+    expect(lookups).toBeGreaterThanOrEqual(3);
   });
 
   it('enforces one configured deadline across every receipt endpoint and polling', async () => {

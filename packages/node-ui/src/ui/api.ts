@@ -1218,7 +1218,11 @@ export interface AssertionInfo {
 export async function listAssertions(
   contextGraphId: string,
   layer: 'wm' | 'swm' = 'wm',
+  opts: { includeQueryCatalog?: boolean } = {},
 ): Promise<AssertionInfo[]> {
+  const includeQueryCatalog = opts.includeQueryCatalog ?? false;
+  const shouldIncludeMetaAssertion = (subGraph: string | undefined, name: string): boolean =>
+    subGraph !== 'meta' || (includeQueryCatalog && name.startsWith('query-catalog-'));
   if (layer === 'swm') {
     // SWM membership comes from the canonical `dkg:memoryLayer "SWM"` lifecycle
     // marker in `<cg>/_meta` (flipped from "WM" by promote) — NOT from
@@ -1240,12 +1244,15 @@ export async function listAssertions(
     // assertions would otherwise linger in the Shared-Memory list. The pointer
     // lives on the lifecycle-URN form; key the exclusion by (subGraph, name) so
     // the data-graph-URI marker row for the same assertion is dropped too.
+    const metaFilter = includeQueryCatalog
+      ? ''
+      : 'FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))';
     const sparql = `SELECT ?g ?vm WHERE {
       GRAPH <${metaGraph}> {
         ?g <http://dkg.io/ontology/memoryLayer> "SWM"
         OPTIONAL { ?g <http://dkg.io/ontology/vmCurrentAssertion> ?vm }
       }
-      FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))
+      ${metaFilter}
     }`;
     const data = await executeQuery(sparql, { contextGraphId });
     const bindings: any[] = data?.result?.bindings ?? [];
@@ -1280,7 +1287,7 @@ export async function listAssertions(
         continue;
       }
       if (!name) continue;
-      if (subGraph === 'meta') continue;
+      if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
       const key = `${subGraph ?? ''} ${name}`;
       rows.push({ key, name, subGraph, g });
       if (vm) published.add(key);
@@ -1373,7 +1380,9 @@ export async function listAssertions(
   // match would also drop a perfectly valid WM assertion whose *name* is
   // `_meta` (names may start with `_`). The parser below keys on the parsed
   // sub-graph segment (`=== 'meta'`), which is fully name-safe.
-  const metaFilter = `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
+  const metaFilter = includeQueryCatalog
+    ? ''
+    : `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
   const listSparql = `SELECT ?g WHERE {
     GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" }
     ${metaFilter}
@@ -1489,7 +1498,7 @@ export async function listAssertions(
     // is UI configuration, not user knowledge, and must never reach the
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
-    if (subGraph === 'meta') continue;
+    if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
     const key = `${subGraph ?? ''}\0${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1881,6 +1890,11 @@ export interface LocalAgentChatResponse {
   correlationId: string;
   sessionId?: string;
   turnId?: string;
+  contextGraphId?: string;
+  profile?: string;
+  toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+  traceFile?: string;
+  readOnly?: boolean;
 }
 
 export interface LocalAgentChatFailurePersistenceOptions {
@@ -1941,6 +1955,10 @@ export type LocalAgentChannelTarget = 'bridge' | 'gateway';
 
 export interface LocalAgentHealthResponse {
   ok: boolean;
+  ready?: boolean;
+  reachable?: boolean;
+  offline?: boolean;
+  initialized?: boolean;
   target?: LocalAgentChannelTarget;
   error?: string;
   profile?: string;
@@ -1965,6 +1983,10 @@ export interface LocalAgentHealthResponse {
   turnState?: 'queued' | 'running';
   clientConnected?: boolean;
   clientDisconnectedAt?: string;
+  initFailure?: string;
+  readOnly?: boolean;
+  contextGraphId?: string;
+  traceFile?: string;
   bridge?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
   gateway?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
 }
@@ -2266,6 +2288,56 @@ export const streamPrimeAgentLocalChat = (
 export const fetchPrimeAgentLocalHealth = () =>
   get<LocalAgentHealthResponse>('/api/prime-agent-channel/health');
 
+interface LocalLlmChatWireResponse {
+  text: string;
+  sessionId: string;
+  contextGraphId?: string;
+  profile: string;
+  toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>;
+  traceFile?: string;
+  readOnly: true;
+}
+
+export const fetchLocalLlmHealth = () =>
+  get<LocalAgentHealthResponse>('/api/local-llm/health');
+
+export async function sendLocalLlmChat(
+  text: string,
+  opts?: LocalAgentChatRequestOptions,
+): Promise<LocalAgentChatResponse> {
+  const correlationId = opts?.correlationId ?? crypto.randomUUID();
+  const res = await fetch('/api/local-llm/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      message: text,
+      sessionId: 'local-llm:dkg-ui',
+      ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
+    }),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
+  }
+  const result = await res.json() as LocalLlmChatWireResponse;
+  return { ...result, correlationId, turnId: correlationId };
+}
+
+export async function streamLocalLlmChat(
+  text: string,
+  opts: LocalAgentChatRequestOptions & {
+    onEvent?: (event: OpenClawStreamEvent) => void;
+  } = {},
+): Promise<LocalAgentChatResponse> {
+  const result = await sendLocalLlmChat(text, opts);
+  opts.onEvent?.({ type: 'final', ...result });
+  return result;
+}
+
+export const clearLocalLlmSession = () =>
+  post<{ ok: true; sessionId: string; readOnly: true }>('/api/local-llm/session/clear', {});
+
 function formatLocalAgentError(body: unknown, fallback: string): string {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fallback;
   const record = body as Record<string, unknown>;
@@ -2442,6 +2514,14 @@ interface LocalAgentSurface {
 }
 
 const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
+  'local-llm': {
+    connectSupported: false,
+    chatSupported: true,
+    defaultSessionId: () => 'local-llm:dkg-ui',
+    resolveChatContext: () => ({}),
+    fetchHealth: fetchLocalLlmHealth,
+    streamChat: streamLocalLlmChat,
+  },
   openclaw: {
     connectSupported: true,
     chatSupported: true,
@@ -2730,8 +2810,10 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
   const chatReady = health?.ok === true && !degraded;
   const bridgeOnline = chatReady;
+  const daemonOwnedChat = id === 'local-llm' && configured && hasChatBridge;
   const persistentChat = configured && hasChatBridge && (
-    chatReady
+    daemonOwnedChat
+    || chatReady
     || runtimeStatus === 'connecting'
     || runtimeStatus === 'degraded'
     || record.runtime?.ready === true
@@ -2952,6 +3034,7 @@ export async function refreshLocalAgentIntegration(id: string): Promise<LocalAge
 }
 
 export async function fetchLocalAgentHealth(id: string) {
+  if (id === 'local-llm') return fetchLocalLlmHealth();
   if (id === 'openclaw') return fetchOpenClawLocalHealth();
   if (id === 'hermes') return fetchHermesLocalHealth();
   if (id === 'prime-agent') return fetchPrimeAgentLocalHealth();
@@ -2963,6 +3046,7 @@ export async function fetchLocalAgentHistory(
   limit = 50,
   opts: { sessionId?: string } = {},
 ): Promise<LocalAgentHistoryMessage[]> {
+  if (id.trim().toLowerCase() === 'local-llm') return [];
   const sessionId = resolveLocalAgentHistorySessionId(id, opts.sessionId);
   if (!sessionId) return [];
   return fetchLocalAgentHistoryBySessionId(sessionId, limit);

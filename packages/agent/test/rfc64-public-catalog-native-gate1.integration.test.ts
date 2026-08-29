@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+  AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   DKGNode,
@@ -352,6 +353,55 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     })).resolves.toMatchObject({
       envelope: { objectDigest: fixture.catalogIssuerDelegation.objectDigest },
     });
+  }, 30_000);
+
+  it('cold-bootstraps a zero-row successor on a fresh receiver', async () => {
+    const fixture = await setupLiveReceiver();
+
+    await expect(fixture.synchronizeAny(fixture.emptySuccessorAnnouncement)).resolves.toMatchObject({
+      catalogHeadDigest: fixture.emptySuccessor.head.objectDigest,
+      inventoryRowCount: 0,
+      activatedTripleCount: 0,
+      appliedHeadStatus: 'applied',
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.emptySuccessor.head.objectDigest,
+      catalogVersion: '2',
+      inventoryRowCount: '0',
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
+  it('rejects malformed zero-row successor descriptors before bundle fetch or head CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    const fetchKaBundle = vi.fn(async () => null);
+    const observed = fixture.createCasObservedReceiver({
+      fetchCatalogObject: async (_remotePeerId, request) => {
+        const envelope = fixture.authorObjects.get(request.targetObjectDigest);
+        if (envelope === undefined) return null;
+        return Object.freeze({
+          envelope,
+          issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
+        });
+      },
+      fetchKaBundle,
+    });
+
+    for (const malformed of fixture.malformedEmptySuccessorAnnouncements) {
+      await expect(fixture.synchronizeAny(malformed, observed.receiver)).rejects.toMatchObject({
+        code: 'catalog-native-receiver-catalog',
+      });
+    }
+
+    expect(fetchKaBundle).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
   }, 30_000);
 
   it('activates every row in one exact bounded multi-asset inventory before one head CAS', async () => {
@@ -2171,6 +2221,27 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     issuedAt: '1773900001002' as never,
     signer,
   });
+  const emptySuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: successor.head,
+    previousDirectoryPath: successor.directoryPath,
+    previousBucket: successor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [],
+    issuedAt: '1773900001001' as never,
+    signer,
+  });
+  const malformedEmptySuccessors = await Promise.all([
+    buildMalformedEmptySuccessor(
+      emptySuccessor.head,
+      emptySuccessor.directoryPath[0]!,
+      { byteLength: '1' },
+    ),
+    buildMalformedEmptySuccessor(
+      emptySuccessor.head,
+      emptySuccessor.directoryPath[0]!,
+      { bucketDigest: `0x${'91'.repeat(32)}` },
+    ),
+  ]);
   const removalSuccessor = await produceSparseAuthorCatalogSuccessorV1({
     previousHead: multiAssetSuccessor.head,
     previousDirectoryPath: multiAssetSuccessor.directoryPath,
@@ -2245,6 +2316,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ...governedGenesis.stagedObjects,
     ...invalidGenesis.stagedObjects,
     ...successor.stagedObjects,
+    ...emptySuccessor.stagedObjects,
+    ...malformedEmptySuccessors.flatMap(({ stagedObjects }) => stagedObjects),
     ...multiAssetSuccessor.stagedObjects,
     ...removalSuccessor.stagedObjects,
     ...threeAssetSuccessor.stagedObjects,
@@ -2414,6 +2487,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const announcement = announcementFor(successor.head);
   const genesisAnnouncement = announcementFor(genesis.head);
   const multiAssetAnnouncement = announcementFor(multiAssetSuccessor.head);
+  const emptySuccessorAnnouncement = announcementFor(emptySuccessor.head);
+  const malformedEmptySuccessorAnnouncements = malformedEmptySuccessors.map(({ head }) => (
+    announcementFor(head)
+  ));
   const removalAnnouncement = announcementFor(removalSuccessor.head);
   const replacementAnnouncement = announcementFor(replacementSuccessor.head);
   const threeAssetAnnouncement = announcementFor(threeAssetSuccessor.head);
@@ -2529,6 +2606,9 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     createCasObservedReceiver,
     createReceiver,
     expiredAnnouncement,
+    emptySuccessor,
+    emptySuccessorAnnouncement,
+    malformedEmptySuccessorAnnouncements,
     forgedCatalogIssuerDelegation,
     genesis,
     genesisAnnouncement,
@@ -2748,6 +2828,40 @@ async function buildInvalidEmptyGenesis(
     computeAuthorCatalogHeadObjectDigestV1(headUnsigned),
   ) as SignedAuthorCatalogHeadEnvelopeV1;
   return Object.freeze({ head, stagedObjects: Object.freeze([sourceDirectory, head]) });
+}
+
+async function buildMalformedEmptySuccessor(
+  sourceHead: SignedAuthorCatalogHeadEnvelopeV1,
+  sourceDirectory: SignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  descriptorOverrides: Readonly<Record<string, string>>,
+): Promise<{
+  head: SignedAuthorCatalogHeadEnvelopeV1;
+  stagedObjects: readonly SignedControlEnvelopeV1[];
+}> {
+  const sourceDescriptor = sourceDirectory.payload.entries[0];
+  if (sourceDescriptor === undefined) throw new Error('empty successor descriptor is missing');
+  const directoryUnsigned = testUnsignedEnvelope(
+    AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+    {
+      ...sourceDirectory.payload,
+      entries: [{ ...sourceDescriptor, ...descriptorOverrides }],
+    },
+  );
+  // Deliberately bypass the directory-specific encoder: these fixtures prove
+  // the receiver rejects signed but structurally malformed empty descriptors.
+  const directory = await signTestEnvelope(
+    directoryUnsigned,
+    computeControlObjectDigestHex(directoryUnsigned) as Digest32V1,
+  ) as SignedAuthorCatalogDirectoryNodeEnvelopeV1;
+  const headUnsigned = testUnsignedEnvelope(AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1, {
+    ...sourceHead.payload,
+    directoryRootDigest: directory.objectDigest,
+  });
+  const head = await signTestEnvelope(
+    headUnsigned,
+    computeAuthorCatalogHeadObjectDigestV1(headUnsigned),
+  ) as SignedAuthorCatalogHeadEnvelopeV1;
+  return Object.freeze({ head, stagedObjects: Object.freeze([directory, head]) });
 }
 
 function testUnsignedEnvelope(

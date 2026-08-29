@@ -6,6 +6,7 @@ import { toEip55Checksum } from '@origintrail-official/dkg-core';
 import {
   decodeQueryCatalogBindings,
   QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
 } from '@origintrail-official/dkg-core/query-catalog';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
@@ -15,11 +16,11 @@ import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
 function queryCatalogEnvelope(bindings: Array<Record<string, unknown>>) {
   return {
-    schemaVersion: 1,
+    schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
     capabilities: QUERY_CATALOG_READ_CAPABILITIES,
     contextGraphId: 'cg-1',
-    graph: 'did:dkg:context-graph:cg-1/meta/query-catalog',
-    items: decodeQueryCatalogBindings(bindings),
+    graph: 'did:dkg:context-graph:cg-1/meta',
+    items: decodeQueryCatalogBindings(bindings, { contextGraphId: 'cg-1' }),
     result: { type: 'bindings' as const, bindings },
   };
 }

@@ -233,6 +233,22 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
     expect(out[0].name).toBe('notes');
   });
 
+  it('opt-in visibility admits only generated query-catalog assertions from meta', async () => {
+    setBindings([
+      bRow('did:dkg:context-graph:cg-A/meta/assertion/0xabc/profile', 8),
+      bRow('did:dkg:context-graph:cg-A/meta/assertion/0xabc/query-catalog-deadbeef', 12),
+      bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5),
+    ]);
+
+    const out = await listAssertions('cg-A', 'wm', { includeQueryCatalog: true });
+
+    expect(out.map(item => item.name)).toEqual(['query-catalog-deadbeef', 'notes']);
+    expect(out[0]).toMatchObject({ subGraph: 'meta', tripleCount: 12 });
+    const [, listInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(listInit.body)).sparql)
+      .not.toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+  });
+
   it('SPARQL excludes the meta namespace by path shape in both queries (Codex #944)', async () => {
     setBindings([bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5)]);
     await listAssertions('cg-A', 'wm');

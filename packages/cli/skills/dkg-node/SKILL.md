@@ -480,9 +480,9 @@ Use this decision order:
    `name`, optional `description`, and the exact read-only SPARQL text. If the
    SPARQL text is not present in the user message or turn context, ask for it;
    do not invent a query and save it as if it came from the user.
-8. If no query catalog tool is available, use `dkg_query` against the profile
-   graph (`did:dkg:context-graph:<id>/meta/query-catalog`) to read saved
-   queries, then run the selected `prof:sparqlQuery` with `dkg_query`.
+8. If no query catalog tool is available, query the Context Graph's registered
+   `meta` subgraph for `prof:SavedQuery` assertions, then run the selected
+   `prof:sparqlQuery` with `dkg_query`.
 9. Only write or change query catalog entries when the user explicitly asks to
    save/update catalog queries.
 
@@ -504,14 +504,11 @@ dkg query-catalog run <context-graph> <query-slug-or-exact-name> --param name=va
 HTTP fallback:
 
 - `POST /api/profile/query-catalog/read`: body `{ "contextGraphId": "<contextGraphId>" }`;
-  returns saved-query and
-  catalog bindings, including `queryParameters` and `executionView`.
+  returns `meta` catalog bindings across WM/SWM/VM with canonical `scopeGraph`.
 - `POST /api/profile/query-catalog/write`: body
-  `{ "contextGraphId": "<contextGraphId>", "mode": "upsert", "quads": [...] }`.
-  Stores triples in `did:dkg:context-graph:<contextGraphId>/meta/query-catalog`
-  regardless of incoming `graph`. `upsert` atomically replaces each complete
-  query/catalog subject, preserves unrelated subjects, and is idempotent;
-  omitting `mode` retains legacy append-only `insert` behavior.
+  `{ "contextGraphId": "<contextGraphId>", "quads": [...] }`.
+  Persists one content-addressed WM assertion in `meta`. Exact retries are
+  idempotent; mutation modes are rejected and RDF subjects are never replaced.
   Prefer `dkg_query_catalog_save` for normal user-requested saves.
 
 Profile RDF shape for writes:
@@ -522,11 +519,13 @@ Profile RDF shape for writes:
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 <urn:dkg:profile:PROJECT:catalog:CATALOG> rdf:type prof:QueryCatalog ;
+  prof:scopeGraph <did:dkg:context-graph:CONTEXT_GRAPH_ID/SUBGRAPH> ;
   prof:forSubGraph "SUBGRAPH" ;
   prof:displayName "Catalog name" ;
   schema:description "Catalog description" ;
   prof:rank "50"^^xsd:integer .
 <urn:dkg:profile:PROJECT:query:QUERY> rdf:type prof:SavedQuery ;
+  prof:scopeGraph <did:dkg:context-graph:CONTEXT_GRAPH_ID/SUBGRAPH> ;
   prof:forSubGraph "SUBGRAPH" ;
   prof:inCatalog <urn:dkg:profile:PROJECT:catalog:CATALOG> ;
   prof:displayName "Saved query name" ;

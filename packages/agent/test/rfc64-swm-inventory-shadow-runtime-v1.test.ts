@@ -68,4 +68,37 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     expect(runtime.inFlightCount).toBe(0);
     expect(runtime.isVmConfirmed(assetKey, '1')).toBe(false);
   });
+
+  it('serializes one author scope while leaving unrelated scopes concurrent', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let markFirstEntered!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+
+    const first = runtime.runScopeExclusive('scope-a', async () => {
+      events.push('first-enter');
+      markFirstEntered();
+      await firstGate;
+      events.push('first-exit');
+      return 1;
+    });
+    await firstEntered;
+    const second = runtime.runScopeExclusive('scope-a', async () => {
+      events.push('second');
+      return 2;
+    });
+    const unrelated = runtime.runScopeExclusive('scope-b', async () => {
+      events.push('unrelated');
+      return 3;
+    });
+    await expect(unrelated).resolves.toBe(3);
+    expect(events).toEqual(['first-enter', 'unrelated']);
+
+    releaseFirst();
+    await expect(first).resolves.toBe(1);
+    await expect(second).resolves.toBe(2);
+    expect(events).toEqual(['first-enter', 'unrelated', 'first-exit', 'second']);
+  });
 });

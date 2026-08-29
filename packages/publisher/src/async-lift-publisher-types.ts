@@ -21,6 +21,7 @@ import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { PublishTransactionObservation } from '@origintrail-official/dkg-chain';
 import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
@@ -189,8 +190,21 @@ export interface AsyncLiftPublisher {
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
+  /**
+   * Run one reconciliation pass and report how many jobs it settled.
+   *
+   * CONCURRENCY CONTRACT: safe to call at any time, including concurrently with any other
+   * in-flight pass. Every call performs its own pass over its own freshly read inventory —
+   * passes are never coalesced. Inventory ACQUISITION, however, is FIFO-ordered: a concurrent
+   * call's read starts only once the previous acquisition completes or exceeds its owner
+   * lease ({@link AsyncLiftPublisherConfig.reconciliationAcquisitionLeaseMs}), so added
+   * latency is bounded per predecessor and a hung read cannot block the seam indefinitely.
+   */
   recover(): Promise<number>;
-  /** Reconcile interrupted work without restarting the runner. Older implementations can omit it. */
+  /**
+   * Reconcile interrupted work without restarting the runner. Older implementations can omit
+   * it. Same concurrency contract as {@link recover}.
+   */
   reconcileTransactions?(): Promise<number>;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
@@ -560,17 +574,24 @@ export interface AsyncKnowledgeAssetVmPublishJobHandler {
  * guessing, which is why nothing may collapse into it that the chain actually answered.
  */
 export type AsyncLiftChainProofResolution =
-  /** The chain carries a publish, mapped to evidence this node can finalize with. */
+  /** The chain carries a publish, mapped to evidence this node can finalize with — the
+   *  publisher-side image of the chain contract's `confirmed`. */
   | { status: 'recovered'; recovery: AsyncLiftPublisherRecoveryResult }
-  /** Mined with a failure receipt: the transaction is accounted for and published nothing. */
-  | { status: 'reverted' }
-  /** Mined and successful, but carrying no publish the adapter recognizes. Not absence. */
-  | { status: 'unrecognized' }
-  /** The node holds the transaction and has not mined it. Never absence. */
-  | { status: 'pending' }
-  /** The node was asked for the TRANSACTION and does not have it: the only proven absence. */
+  /**
+   * The observation variants whose meaning is identical on both surfaces are the CHAIN
+   * contract's named sub-type, not a copy (r2 3879930, narrowed r7 3882283837): `reverted`,
+   * `unrecognized`, and both pending shapes pass through resolvers verbatim.
+   */
+  | PublishTransactionObservation
+  /**
+   * PROOF-QUALIFIED absence, publisher-owned (r7 3882283837 — deliberately NOT inherited from
+   * the chain contract's weaker `not-found`): the resolver may only answer this behind the
+   * finality-snapshot absence rules (nonce consumed, token unminted at a canonical pinned
+   * block), because the disposition table authorizes a CREATE resend on it. A chain adapter's
+   * bare "I have neither receipt nor transaction" is NOT this and must be mapped deliberately.
+   */
   | { status: 'not-found' }
-  /** Nothing was established. Never absence, never proof. */
+  /** Publisher-only: nothing was established. Never absence, never proof. */
   | { status: 'inconclusive' };
 
 /**
@@ -744,6 +765,14 @@ export interface AsyncLiftPublisherConfig {
    * exhausts the budget stops and the remaining jobs are asked on the next cadence.
    */
   chainProofDispatchTimeBudgetMs?: number;
+  /**
+   * The owner LEASE on the serialized inventory-acquisition seam: how long one acquisition may
+   * execute (measured from its execution start) before the next queued acquisition is promoted
+   * past it. Acquisitions are FIFO-ordered; a queued burst therefore waits up to one lease per
+   * predecessor ahead of it, and one hung store read degrades ordering, never availability.
+   * Default 30s.
+   */
+  reconciliationAcquisitionLeaseMs?: number;
   /**
    * GH#2270 PR-3 r20 (🔴 3815617109) — can the chain-proof lane actually settle a job signed by
    * THIS wallet? A node may mix adapters, and the presence of a resolver is a node-wide fact while

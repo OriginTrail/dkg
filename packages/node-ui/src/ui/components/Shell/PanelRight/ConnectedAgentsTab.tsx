@@ -51,8 +51,10 @@ export function ConnectedAgentsTab(props: {
   onConnectIntegration: (id: string) => void;
   onDisconnectIntegration: (id: string) => void;
   onRefreshIntegration: (id: string) => void;
+  onClearIntegrationSession: (id: string) => void;
   connectBusyId: string | null;
   refreshBusyId: string | null;
+  clearBusyId: string | null;
   connectNotice: string | null;
   connectError: string | null;
   localMessages: LocalAgentMessage[];
@@ -87,8 +89,10 @@ export function ConnectedAgentsTab(props: {
     onConnectIntegration,
     onDisconnectIntegration,
     onRefreshIntegration,
+    onClearIntegrationSession,
     connectBusyId,
     refreshBusyId,
+    clearBusyId,
     connectNotice,
     connectError,
     localMessages,
@@ -307,9 +311,12 @@ export function ConnectedAgentsTab(props: {
                   statusLabel={localAgentToolbarLabel(integration, showingSessionHistory)}
                   statusDotClass={bridgeStatusDotClass(integration)}
                   refreshBusy={refreshBusyId === integration.id}
-                  canDisconnect={integration.persistentChat}
+                  clearBusy={clearBusyId === integration.id}
+                  canDisconnect={integration.connectSupported && integration.persistentChat}
+                  canClearSession={integration.id === 'local-llm'}
                   onRefresh={() => onRefreshIntegration(integration.id)}
                   onDisconnect={() => onDisconnectIntegration(integration.id)}
+                  onClearSession={() => onClearIntegrationSession(integration.id)}
                 />
               )}
             </div>
@@ -594,6 +601,14 @@ export function ConnectedAgentsTab(props: {
                           {attachment.fileName}
                         </span>
                       ))}
+                    </div>
+                  )}
+                  {message.role === 'assistant' && (message.toolCalls?.length || message.traceFile) && (
+                    <div className="v10-local-agent-copy" data-testid="local-llm-turn-metadata">
+                      {message.toolCalls?.length
+                        ? `Tools: ${message.toolCalls.map((call) => call.name).join(', ')}`
+                        : 'Tools: none'}
+                      {message.traceFile ? ` · Trace: ${message.traceFile}` : ''}
                     </div>
                   )}
                   {message.ts && (

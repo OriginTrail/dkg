@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import {
   QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
   type QueryCatalogItem,
 } from '@origintrail-official/dkg-core/query-catalog';
 import { ApiClient } from '../src/api-client.js';
@@ -18,6 +19,7 @@ const savedQuery: QueryCatalogItem = {
   catalogName: 'Kamstrup',
   catalogRank: 1,
   subGraph: 'production',
+  scopeGraph: 'did:dkg:context-graph:cg-1/production',
   parameters: [{ name: 'configurationId', type: 'string' }],
   view: 'verifiable-memory',
 };
@@ -31,10 +33,10 @@ function commandProgram(): Command {
 
 function envelope() {
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
     capabilities: QUERY_CATALOG_READ_CAPABILITIES,
     contextGraphId: 'cg-1',
-    graph: 'did:dkg:context-graph:cg-1/meta/query-catalog',
+    graph: 'did:dkg:context-graph:cg-1/meta',
     items: [savedQuery],
     result: { type: 'bindings' as const, bindings: [] },
   };
@@ -118,6 +120,7 @@ describe('dkg query-catalog command', () => {
       catalogIri: 'urn:dkg:profile:cg-1:catalog:other',
       catalogSlug: 'other',
       subGraph: 'archive',
+      scopeGraph: 'did:dkg:context-graph:cg-1/archive',
     };
     const query = vi.fn(async () => ({ result: { type: 'bindings', bindings: [] } }));
     vi.spyOn(ApiClient, 'connect').mockResolvedValue({

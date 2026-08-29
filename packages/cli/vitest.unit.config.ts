@@ -39,6 +39,12 @@ export default defineConfig({
       'test/query-catalog-profile-route.test.ts',
       'test/store-unavailable-response.test.ts',
           'test/status-command-store.test.ts',
+          // Local-LLM command parsing/session controls are pure and never spawn
+          // MCP or llama.cpp in this fast lane.
+          'test/llm-command.test.ts',
+          'test/daemon-local-llm-route.test.ts',
+          'test/daemon-local-llm-service.test.ts',
+          'test/local-llm-runtime-factory.test.ts',
           'test/memory-graph-events.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',

@@ -10,6 +10,7 @@ import { readProfileQueryCatalog } from '../src/ui/api.js';
 import {
   decodeQueryCatalogBindings,
   QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
 } from '@origintrail-official/dkg-core/query-catalog';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -17,14 +18,15 @@ import {
 vi.mock('../src/ui/api.js', () => ({
   executeQuery: vi.fn(async () => ({ result: { bindings: [] } })),
   readProfileQueryCatalog: vi.fn(async () => ({
-    schemaVersion: 1,
+    schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
     capabilities: {
       canonicalItems: true,
       queryParameters: true,
       executionView: true,
+      graphScopeIri: true,
     },
     contextGraphId: 'cg-test',
-    graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
+    graph: 'did:dkg:context-graph:cg-test/meta',
     items: [],
     result: { type: 'bindings', bindings: [] },
   })),
@@ -35,11 +37,11 @@ function queryCatalogResponse(
   contextGraphId = 'cg-test',
 ) {
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
     capabilities: QUERY_CATALOG_READ_CAPABILITIES,
     contextGraphId,
-    graph: `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`,
-    items: decodeQueryCatalogBindings(bindings),
+    graph: `did:dkg:context-graph:${contextGraphId}/meta`,
+    items: decodeQueryCatalogBindings(bindings, { contextGraphId }),
     result: { type: 'bindings' as const, bindings },
   };
 }
@@ -225,15 +227,16 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
 
   it('loads saved queries through the dedicated profile catalog endpoint', async () => {
     vi.mocked(readProfileQueryCatalog).mockResolvedValueOnce(queryCatalogResponse([{
-          q: 'urn:listenerboi:query:open-incidents',
+          q: 'urn:dkg:profile:cg-test:query:open-incidents',
           subGraph: 'incidents',
-          catalog: 'urn:listenerboi:catalog:investigations',
+          catalog: 'urn:dkg:profile:cg-test:catalog:investigations',
           name: 'Open incidents',
           description: 'Find incidents that still need attention.',
           sparql: 'SELECT ?incident WHERE { ?incident ?p ?o }',
           resultColumn: 'incident',
+          executionView: 'working-memory',
           rank: '1',
-          catalogName: 'ListenerBoi investigations',
+          catalogName: 'Incident investigations',
           catalogDescription: 'Reusable incident investigation queries.',
           catalogRank: '2',
     }]));
@@ -247,7 +250,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(captured!.error).toBeUndefined();
     expect(captured!.queryCatalogs).toEqual([expect.objectContaining({
       slug: 'investigations',
-      name: 'ListenerBoi investigations',
+      name: 'Incident investigations',
       description: 'Reusable incident investigation queries.',
       rank: 2,
       queries: [expect.objectContaining({
