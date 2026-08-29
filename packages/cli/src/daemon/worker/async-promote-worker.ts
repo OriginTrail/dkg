@@ -602,7 +602,7 @@ interface WorkerSlot {
 export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): PromoteWorkerSupervisor {
   const concurrency = Math.max(1, config.workerConcurrency ?? 4);
   const supportsWorkWake = typeof config.agent.promoteQueue.workScheduling?.attachScheduler === 'function';
-  const pollIntervalMs = Math.max(10, config.pollIntervalMs ?? (supportsWorkWake ? 1_000 : 100));
+  const pollIntervalMs = Math.max(10, config.pollIntervalMs ?? 100);
   const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 60_000;
   const effectiveLeaseMs = config.agent.promoteQueue.effectiveLeaseMs;
   if (heartbeatIntervalMs > 0 && heartbeatIntervalMs >= effectiveLeaseMs) {
@@ -802,30 +802,41 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       started = true;
       shuttingDown = false;
       counters = freshCounters();
+      let recovering = true;
       try {
         const summary = await config.agent.promoteQueue.recoverOnStartup();
+        recovering = false;
         if (summary.reclaimed > 0 || summary.abandoned > 0) {
           bestEffortLog(
             log,
             `recoverOnStartup: reclaimed=${summary.reclaimed} abandoned=${summary.abandoned}`,
           );
         }
+        if (shuttingDown) {
+          started = false;
+          return;
+        }
+        if (supportsWorkWake) {
+          detachWorkScheduler = config.agent.promoteQueue.workScheduling!.attachScheduler({
+            onWorkAvailable: requestWake,
+          });
+        }
+        pollTimer = setInterval(requestWake, pollIntervalMs);
+        if (pollTimer.unref) pollTimer.unref();
       } catch (err: unknown) {
+        detachWorkScheduler?.();
+        detachWorkScheduler = null;
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
         started = false;
         shuttingDown = true;
-        throw new Error(`recoverOnStartup failed: ${err instanceof Error ? err.message : String(err)}`);
+        if (recovering) {
+          throw new Error(`recoverOnStartup failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        throw err;
       }
-      if (shuttingDown) {
-        started = false;
-        return;
-      }
-      if (supportsWorkWake) {
-        detachWorkScheduler = config.agent.promoteQueue.workScheduling!.attachScheduler({
-          onWorkAvailable: requestWake,
-        });
-      }
-      pollTimer = setInterval(requestWake, pollIntervalMs);
-      if (pollTimer.unref) pollTimer.unref();
     },
     async stop() {
       if (!started) return;
