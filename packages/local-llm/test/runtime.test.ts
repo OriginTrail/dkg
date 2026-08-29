@@ -61,6 +61,35 @@ const catalogSave: McpToolDefinition = {
   annotations: { readOnlyHint: false },
 };
 
+const listProjects: McpToolDefinition = {
+  name: 'dkg_list_projects',
+  description: 'List every Context Graph known to the node',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  annotations: { readOnlyHint: true },
+};
+
+const dkgStatus: McpToolDefinition = {
+  name: 'dkg_status',
+  description: 'Read node status',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  annotations: { readOnlyHint: true },
+};
+
+const memorySearch: McpToolDefinition = {
+  name: 'dkg_memory_search',
+  description: 'Search agent-context and optional project memory',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string' },
+      projectId: { type: 'string' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true },
+};
+
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -134,6 +163,127 @@ describe('DkgLocalLlmRuntime', () => {
     const secondRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
     expect(secondRequest.messages.at(-1).role).toBe('tool');
     expect(secondRequest.messages.at(-1).content).toContain('Structured DKG evidence');
+  });
+
+  it('strictly pins model-supplied graph arguments and excludes unscoped discovery tools', async () => {
+    const strictCatalogList: McpToolDefinition = {
+      ...catalogList,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string' },
+          contextGraphId: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+    };
+    const mcp = makeMcp([strictCatalogList, memorySearch, listProjects, dkgStatus]);
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {
+        projectId: 'graph-b',
+        contextGraphId: 'graph-c',
+      }))
+      .mockResolvedValueOnce(answerResponse('Catalog evidence returned.'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'graph-a',
+      strictProjectScope: true,
+      strictProjectScopeTools: ['dkg_query_catalog_list'],
+      strictProjectScopeUnscopedTools: ['dkg_status'],
+    });
+
+    const result = await runtime.run('List saved queries in graph-b.');
+
+    expect(result.toolCalls).toEqual([{
+      name: 'dkg_query_catalog_list',
+      arguments: { projectId: 'graph-a', contextGraphId: 'graph-a' },
+    }]);
+    expect(mcp.callTool).toHaveBeenCalledWith({
+      name: 'dkg_query_catalog_list',
+      arguments: { projectId: 'graph-a', contextGraphId: 'graph-a' },
+    });
+    const firstRequest = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(firstRequest.tools.map((tool: { function: { name: string } }) => tool.function.name))
+      .toEqual(['dkg_query_catalog_list', 'dkg_status']);
+    expect(JSON.stringify(firstRequest.tools)).not.toContain('dkg_list_projects');
+  });
+
+  it('aborts llama generation without retaining an invisible turn', async () => {
+    let started!: () => void;
+    const began = new Promise<void>((resolve) => { started = resolve; });
+    const fetcher = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      if (fetcher.mock.calls.length === 1) {
+        const signal = init?.signal;
+        if (!signal) {
+          return Promise.reject(new Error('Llama request did not receive an AbortSignal'));
+        }
+        started();
+        return new Promise<Response>((_resolve, reject) => {
+          const rejectFromAbort = () => reject(signal.reason);
+          if (signal.aborted) {
+            rejectFromAbort();
+            return;
+          }
+          signal.addEventListener('abort', rejectFromAbort, { once: true });
+        });
+      }
+      return Promise.resolve(answerResponse('Clean next answer.'));
+    });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp: makeMcp(),
+      fetch: fetcher as typeof fetch,
+    });
+    const controller = new AbortController();
+
+    const aborted = runtime.run('hello', { signal: controller.signal });
+    await began;
+    controller.abort(new Error('caller disconnected'));
+
+    await expect(aborted).rejects.toThrow('caller disconnected');
+    expect(runtime.getSessionHistory()).toEqual([]);
+    const next = await runtime.run('hello again');
+    expect(next.answer).toBe('Clean next answer.');
+    const nextRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    expect(nextRequest.messages[0].content).not.toContain('BOUNDED CHAT SESSION');
+  });
+
+  it('propagates cancellation into MCP tool calls without retaining evidence', async () => {
+    let started!: () => void;
+    const began = new Promise<void>((resolve) => { started = resolve; });
+    const mcp = makeMcp();
+    mcp.callTool.mockImplementationOnce((_input, options) => {
+      const signal = options?.signal;
+      if (!signal) {
+        return Promise.reject(new Error('MCP tool call did not receive an AbortSignal'));
+      }
+      started();
+      return new Promise((_resolve, reject) => {
+        const rejectFromAbort = () => reject(signal.reason);
+        if (signal.aborted) {
+          rejectFromAbort();
+          return;
+        }
+        signal.addEventListener('abort', rejectFromAbort, { once: true });
+      });
+    });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
+      .mockResolvedValueOnce(answerResponse('This answer must not be reached.'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'graph-a',
+    });
+    const controller = new AbortController();
+
+    const aborted = runtime.run('List saved DKG queries.', { signal: controller.signal });
+    await began;
+    controller.abort(new Error('caller disconnected'));
+
+    await expect(aborted).rejects.toThrow('caller disconnected');
+    expect(runtime.getSessionHistory()).toEqual([]);
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it('discards a truncated draft and retries with a generic bounded answer instruction', async () => {
