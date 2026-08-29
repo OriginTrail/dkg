@@ -550,7 +550,7 @@ describe('GH#2270 chain-proof cadence', () => {
       const publisher = h.createPublisher({
         chainProofDispatchBatchSize: 1,
         rand: () => 0,
-        reconciliationAcquisitionWaitCapMs: 50,
+        reconciliationAcquisitionLeaseMs: 50,
         chainProofResolver: async () => ({ status: 'pending-mempool' }),
       });
       await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
@@ -606,7 +606,7 @@ describe('GH#2270 chain-proof cadence', () => {
       const publisher = h.createPublisher({
         chainProofDispatchBatchSize: 1,
         rand: () => 0,
-        reconciliationAcquisitionWaitCapMs: 50,
+        reconciliationAcquisitionLeaseMs: 50,
         chainProofResolver: async () => {
           asks += 1;
           return { status: 'pending-mempool' };
@@ -723,7 +723,7 @@ describe('GH#2270 chain-proof cadence', () => {
       const publisher = h.createPublisher({
         chainProofDispatchBatchSize: 1,
         rand: () => 0,
-        reconciliationAcquisitionWaitCapMs: 50,
+        reconciliationAcquisitionLeaseMs: 50,
         chainProofResolver: async () => {
           asks += 1;
           return { status: 'pending-mempool' };
