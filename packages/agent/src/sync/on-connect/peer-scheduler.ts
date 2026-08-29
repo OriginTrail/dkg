@@ -24,7 +24,6 @@ interface PeerJob<SelectedPlan> {
   pendingOrdinary: OrdinaryLane | null;
   ordinaryStarted: boolean;
   timer: ReturnType<typeof setTimeout> | null;
-  handleUnexpectedError: SyncOnConnectErrorHandler;
 }
 
 export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
@@ -79,7 +78,6 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       }, delayMs);
       return true;
     }
-    existing.handleUnexpectedError = handleSyncError;
     if (existing.ordinaryStarted || existing.pendingOrdinary !== null) return false;
     existing.pendingOrdinary = {
       kind: 'ordinary',
@@ -107,7 +105,6 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       this.schedule(remotePeer, lane, delayMs);
       return true;
     }
-    existing.handleUnexpectedError = handleSyncError;
     existing.pendingSelected = lane;
     if (existing.pendingOrdinary !== null) {
       existing.pendingOrdinary = {
@@ -129,14 +126,11 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       pendingOrdinary: lane.kind === 'ordinary' ? lane : null,
       ordinaryStarted: false,
       timer: null,
-      handleUnexpectedError: lane.handleSyncError,
     };
     this.jobs.set(remotePeer, job);
     job.timer = setTimeout(() => {
       job.timer = null;
-      this.drain(remotePeer, job).catch((error: unknown) => {
-        job.handleUnexpectedError(remotePeer, error);
-      }).finally(() => {
+      this.drain(remotePeer, job).finally(() => {
         if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
       });
     }, delayMs);
@@ -160,6 +154,12 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
             lane.mode,
           );
         }
+      } catch (error: unknown) {
+        // Error ownership belongs to the lane that actually failed. A later
+        // enqueue may replace a pending selected lane, but it must never
+        // redirect an already-running lane's rejection to the newer caller.
+        lane.handleSyncError(remotePeer, error);
+        return;
       } finally {
         if (this.jobs.get(remotePeer) === job) job.currentLane = null;
       }

@@ -107,4 +107,36 @@ describe('sync-on-connect per-peer scheduler', () => {
       'ordinary:ordinary-after-selected',
     ]);
   });
+
+  it('routes a late rejection to the handler owned by the failing lane', async () => {
+    const ordinary = deferred();
+    const ordinaryFailure = new Error('ordinary lane failed');
+    const firstErrors: unknown[] = [];
+    const lateErrors: unknown[] = [];
+    const scheduler = new SyncOnConnectPeerScheduler<string>({
+      runSelected: async () => undefined,
+      runOrdinary: async () => {
+        await ordinary.promise;
+        throw ordinaryFailure;
+      },
+    });
+
+    expect(scheduler.enqueueOrdinary(
+      PEER,
+      (_peer, error) => firstErrors.push(error),
+      0,
+    )).toBe(true);
+    await vi.waitFor(() => expect(scheduler.has(PEER)).toBe(true));
+    expect(scheduler.enqueueSelected(
+      PEER,
+      (_peer, error) => lateErrors.push(error),
+      0,
+      'late-plan',
+    )).toBe(true);
+
+    ordinary.resolve();
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(firstErrors).toEqual([ordinaryFailure]);
+    expect(lateErrors).toEqual([]);
+  });
 });
