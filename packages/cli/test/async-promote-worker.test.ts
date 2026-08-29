@@ -144,7 +144,7 @@ describe('classifyPromoteError', () => {
     }
   });
 
-  it('retries typed indeterminate managed-store reads but fails closed for writes', () => {
+  it('retries typed indeterminate reads and atomic graph replacement but fails closed for other writes', () => {
     for (const operation of [
       'query',
       'construct',
@@ -159,6 +159,13 @@ describe('classifyPromoteError', () => {
         outcome: 'indeterminate',
       }))).toEqual({ classification: 'transient', retryable: true });
     }
+
+    expect(classifyPromoteError(new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'replaceGraph',
+      outcome: 'indeterminate',
+      message: 'Managed Oxigraph recovery interrupted replaceGraph; outcome is indeterminate',
+    }))).toEqual({ classification: 'transient', retryable: true });
 
     expect(classifyPromoteError(new StoreOperationTimeoutError({
       backend: 'oxigraph-server',

@@ -145,13 +145,20 @@ export type ClassifiedPromoteError = {
 };
 
 const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
-const SAFE_INDETERMINATE_STORE_READS = new Set([
+const SAFE_INDETERMINATE_STORE_OPERATIONS = new Set([
   'query',
   'construct',
   'hasGraph',
   'listGraphs',
   'listGraphsByPrefix',
   'countQuads',
+  // Promote replaces the complete UAL-derived SWM graph through the
+  // TripleStore's atomic replaceGraph capability. Its contract permits only
+  // the complete old graph or the complete new graph after an interrupted
+  // response, and the durable promote intent freezes the exact retry payload.
+  // Replaying this one mutation therefore converges safely; additive and
+  // destructive writes such as insert/delete remain fail-closed below.
+  'replaceGraph',
 ]);
 const MANAGED_OXIGRAPH_INTERRUPTED_READ =
   /managed oxigraph recovery interrupted (?:query|construct|hasgraph|listgraphs|listgraphsbyprefix|countquads)\b/;
@@ -299,9 +306,10 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   }
 
   // Managed-store recovery can declare the exact operation outcome. A request
-  // rejected before dispatch is safe to retry. An interrupted read is also
-  // safe because it cannot have mutated WM/SWM; interrupted writes remain
-  // fail-closed because their effect is indeterminate.
+  // rejected before dispatch is safe to retry. Interrupted reads cannot have
+  // mutated WM/SWM. The one safe mutation is atomic exact-graph replacement:
+  // replaying the same frozen promote payload converges from either permitted
+  // old-or-new outcome. Every other interrupted write remains fail-closed.
   if (
     isStoreOperationTimeoutError(err) &&
     (
@@ -309,7 +317,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
       (
         err.outcome === 'indeterminate' &&
         err.storeOperation !== undefined &&
-        SAFE_INDETERMINATE_STORE_READS.has(err.storeOperation)
+        SAFE_INDETERMINATE_STORE_OPERATIONS.has(err.storeOperation)
       )
     )
   ) {
