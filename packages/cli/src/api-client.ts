@@ -14,6 +14,10 @@ import type {
   LiftJobRetryProjection,
 } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
+import {
+  serializeAgentListOptions,
+  type AgentListPageOptions,
+} from './agents-list-wire.js';
 import { loadTokens } from './auth.js';
 import {
   finalizedPublishOptionsPayload,
@@ -550,29 +554,17 @@ export class ApiClient {
     return requireDaemonStatusResponse(status, this.expectedStatusName);
   }
 
-  async agents(options: {
-    framework?: string;
-    skillType?: string;
-    /** Filter on live connection state (GH#310). */
-    connectionStatus?: 'self' | 'connected' | 'disconnected';
-    /** Only this node's own agents — the cheap "what's my agent address" call. */
-    local?: boolean;
-    /** Page size; the response then carries `nextCursor` while rows remain. */
-    limit?: number;
-    /** Opaque cursor from a previous response. Repeat the same filters. */
-    cursor?: string;
-  } = {}): Promise<{
+  /**
+   * List agents (GH#310). Options and their wire spellings come from the
+   * shared contract in src/agents-list-wire.ts — the same module the daemon
+   * route derives its parser vocabulary from, so client and server cannot
+   * drift apart without a compile error.
+   */
+  async agents(options: AgentListPageOptions = {}): Promise<{
     agents: Array<{ agentUri: string; name: string; peerId: string; framework?: string; nodeRole?: string }>;
     nextCursor?: string;
   }> {
-    const params = new URLSearchParams();
-    if (options.framework) params.set('framework', options.framework);
-    if (options.skillType) params.set('skill_type', options.skillType);
-    if (options.connectionStatus) params.set('connectionStatus', options.connectionStatus);
-    if (options.local !== undefined) params.set('local', String(options.local));
-    if (options.limit !== undefined) params.set('limit', String(options.limit));
-    if (options.cursor) params.set('cursor', options.cursor);
-    const qs = params.toString();
+    const qs = serializeAgentListOptions(options);
     return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
   }
 

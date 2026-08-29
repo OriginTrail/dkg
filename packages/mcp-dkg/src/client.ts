@@ -1383,14 +1383,26 @@ export interface AgentListPageOptions extends AgentListFilters {
   cursor?: string;
 }
 
-/** A registry row as the daemon returns it, enriched with connection state. */
+/**
+ * A registry row as GET /api/agents actually returns it. Identity fields and
+ * the enrichment block are GUARANTEES of the route (the SPARQL selection
+ * requires agent/name/peerId; enrichment always stamps connection state), so
+ * they are required here — an all-optional bag would force defensive code on
+ * facts the daemon promises. The index signature keeps forward-compatible
+ * extra response data readable without a cast.
+ */
 export interface AgentListRow {
-  agentUri?: string;
-  name?: string;
-  peerId?: string;
+  agentUri: string;
+  name: string;
+  peerId: string;
+  connectionStatus: 'self' | 'connected' | 'disconnected';
+  connectionTransport: string | null;
+  connectionDirection: string | null;
+  connectedSinceMs: number | null;
+  lastSeen: number | null;
+  latencyMs: number | null;
   framework?: string;
   nodeRole?: string;
-  connectionStatus?: string;
   [key: string]: unknown;
 }
 

@@ -40,20 +40,17 @@ import { createHash } from 'node:crypto';
 import { jsonResponse } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
-export type AgentConnectionStatus = 'self' | 'connected' | 'disconnected';
+import {
+  AGENT_CONNECTION_STATUSES,
+  AGENT_LIST_WIRE_KEY_VALUES,
+  type AgentConnectionStatus,
+  type AgentListFilters,
+} from '../../agents-list-wire.js';
 
-const CONNECTION_STATUSES: readonly AgentConnectionStatus[] = [
-  'self',
-  'connected',
-  'disconnected',
-];
+export type { AgentConnectionStatus };
 
-export interface AgentsListFilters {
-  framework?: string;
-  skillType?: string;
-  connectionStatus?: AgentConnectionStatus;
-  local?: boolean;
-}
+/** The route's filter vocabulary IS the shared wire contract's. */
+export type AgentsListFilters = AgentListFilters;
 
 interface AgentsListCursor {
   readonly identityDigest: string;
@@ -72,14 +69,7 @@ export interface AgentsListQuery extends AgentsListFilters {
  * failure mode strict value validation exists to prevent, and the daemon's
  * clients are programs, for which a loud contract beats a lenient one.
  */
-const KNOWN_QUERY_KEYS = new Set([
-  'framework',
-  'skill_type',
-  'connectionStatus',
-  'local',
-  'limit',
-  'cursor',
-]);
+const KNOWN_QUERY_KEYS = new Set(AGENT_LIST_WIRE_KEY_VALUES);
 
 export type AgentsListQueryResult =
   | { ok: true; query: AgentsListQuery }
@@ -109,10 +99,10 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
 
   const status = searchParams.get('connectionStatus');
   if (status !== null) {
-    if (!(CONNECTION_STATUSES as readonly string[]).includes(status)) {
+    if (!(AGENT_CONNECTION_STATUSES as readonly string[]).includes(status)) {
       return {
         ok: false,
-        error: `"connectionStatus" must be one of ${CONNECTION_STATUSES.join(', ')}`,
+        error: `"connectionStatus" must be one of ${AGENT_CONNECTION_STATUSES.join(', ')}`,
       };
     }
     filters.connectionStatus = status as AgentConnectionStatus;

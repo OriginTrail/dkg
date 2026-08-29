@@ -98,7 +98,7 @@ import type { DkgToolHost } from './tools/tool-host.js';
 import { buildNodeTools } from './tools/node-tools.js';
 import { buildContextGraphTools } from './tools/context-graph-tools.js';
 import { buildQueryTools } from './tools/query-tools.js';
-import { buildMessagingTools } from './tools/messaging-tools.js';
+import { rawFindAgentsQuery,  buildMessagingTools } from './tools/messaging-tools.js';
 import { buildAssertionTools } from './tools/assertion-tools.js';
 import { buildMemoryTools } from './tools/memory-tools.js';
 
@@ -3055,17 +3055,12 @@ export class DkgNodePlugin {
       // ONE boundary policy for every filter: forward the model's value
       // VERBATIM and let the daemon validate — it 400s on bad values and
       // unknown names, and that 400 comes back through daemonError() as the
-      // caller's signal. Coercing here (parseInt, boolean folding) or
-      // dropping a bad value would turn the daemon's 400 into a silently
-      // different query — `limit: 0` becoming "no limit" is the full
-      // ~150 KB registry.
-      const filter: Parameters<typeof this.client.getAgents>[0] = {};
-      for (const key of ['framework', 'skill_type', 'connection_status', 'local', 'limit', 'cursor'] as const) {
-        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
-          (filter as Record<string, unknown>)[key] = args[key];
-        }
-      }
-      const result = await this.client.getAgents(Object.keys(filter ?? {}).length ? filter : undefined);
+      // caller's signal. Raw values go through the query escape hatch, NOT
+      // through the strictly-typed getAgents(): coercing (parseInt, boolean
+      // folding) or dropping a bad value would turn the daemon's 400 into a
+      // silently different query — `limit: 0` becoming "no limit" is the
+      // full ~150 KB registry.
+      const result = await this.client.getAgentsByQuery(rawFindAgentsQuery(args));
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);

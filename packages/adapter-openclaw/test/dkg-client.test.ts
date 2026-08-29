@@ -677,7 +677,7 @@ describe('DkgDaemonClient', () => {
       new Response(JSON.stringify({ agents: [] }), { status: 200 }),
     );
 
-    await client.getAgents({ framework: 'OpenClaw', skill_type: 'ImageAnalysis' });
+    await client.getAgents({ framework: 'OpenClaw', skillType: 'ImageAnalysis' });
     const url = fetchCalls[0][0] as string;
     expect(url).toContain('framework=OpenClaw');
     expect(url).toContain('skill_type=ImageAnalysis');
@@ -689,7 +689,7 @@ describe('DkgDaemonClient', () => {
     );
 
     const result = await client.getAgents({
-      connection_status: 'connected',
+      connectionStatus: 'connected',
       local: true,
       limit: 10,
       cursor: 'cur-1',
@@ -703,18 +703,30 @@ describe('DkgDaemonClient', () => {
     expect(result.nextCursor).toBe('n1');
   });
 
-  it('getAgents serializes malformed values verbatim AND surfaces the daemon 400', async () => {
+  it('getAgentsByQuery forwards a raw query verbatim AND surfaces the daemon 400', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ error: '"limit" must be a positive integer' }), { status: 400 }),
     );
-    // The rejection IS the contract: if getAgents swallowed the 400 into
+    // The rejection IS the contract: if the client swallowed the 400 into
     // {agents: []}, malformed filters would look like successful empty
     // queries and the whole validation chain would be silent.
-    await expect(client.getAgents({ limit: '10junk', local: 'ture' }))
+    await expect(client.getAgentsByQuery('limit=10junk&local=ture'))
       .rejects.toThrow(/responded 400.*positive integer/);
     const url = fetchCalls[0][0] as string;
     expect(url).toContain('limit=10junk');
     expect(url).toContain('local=ture');
+  });
+
+  it('the strict getAgents contract rejects raw model values at compile time', () => {
+    // Raw strings belong to the tool boundary (rawFindAgentsQuery +
+    // getAgentsByQuery), never to the SDK surface.
+    // @ts-expect-error limit must be a number
+    const badLimit = () => client.getAgents({ limit: '10junk' });
+    // @ts-expect-error local must be a boolean
+    const badLocal = () => client.getAgents({ local: 'ture' });
+    // @ts-expect-error snake_case belongs to the wire, not the options
+    const snake = () => client.getAgents({ skill_type: 'ImageAnalysis' });
+    void badLimit; void badLocal; void snake;
   });
 
   it('getSkills should GET /api/skills', async () => {

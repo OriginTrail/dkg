@@ -17,6 +17,26 @@ import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
  * with the existing `responded NNN` substring checks (e.g. the chat-turns 404
  * probe and the `wm/import-file` 404 path).
  */
+/** Strict options for {@link DkgClient.getAgents} (GH#310). */
+export interface AgentListOptions {
+  framework?: string;
+  skillType?: string;
+  connectionStatus?: 'self' | 'connected' | 'disconnected';
+  local?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+/** Option -> query parameter. `satisfies` keeps the map total. */
+const AGENT_LIST_OPTION_WIRE_KEYS = {
+  framework: 'framework',
+  skillType: 'skill_type',
+  connectionStatus: 'connectionStatus',
+  local: 'local',
+  limit: 'limit',
+  cursor: 'cursor',
+} as const satisfies Record<keyof AgentListOptions, string>;
+
 export class DkgDaemonHttpError extends Error {
   readonly status: number;
   readonly body?: unknown;
@@ -971,29 +991,31 @@ export class DkgDaemonClient {
   // ---------------------------------------------------------------------------
 
   /**
-   * Transport wrapper, deliberately LOOSE: values are serialized verbatim and
-   * the daemon is the single validator (it 400s on bad values AND unknown
-   * parameter names). Coercing or dropping a bad value here would convert the
-   * daemon's intended 400 into a silently different query — `limit: 0`
-   * becoming "no limit" returns the full ~150 KB registry.
+   * List agents (GH#310), strictly typed for SDK callers. Serialization goes
+   * through one compiler-checked key map, so an option added without a wire
+   * spelling is a compile error. Untrusted model-produced values do NOT come
+   * through here — the tool boundary serializes them itself and uses
+   * {@link getAgentsByQuery}, keeping raw strings out of this contract.
    */
-  async getAgents(filter?: {
-    framework?: string;
-    skill_type?: string;
-    connection_status?: 'self' | 'connected' | 'disconnected' | (string & {});
-    local?: boolean | string;
-    limit?: number | string;
-    cursor?: string;
-  }): Promise<{ agents: any[]; nextCursor?: string }> {
+  async getAgents(options?: AgentListOptions): Promise<{ agents: any[]; nextCursor?: string }> {
     const params = new URLSearchParams();
-    if (filter?.framework !== undefined) params.set('framework', String(filter.framework));
-    if (filter?.skill_type !== undefined) params.set('skill_type', String(filter.skill_type));
-    if (filter?.connection_status !== undefined) params.set('connectionStatus', String(filter.connection_status));
-    if (filter?.local !== undefined) params.set('local', String(filter.local));
-    if (filter?.limit !== undefined) params.set('limit', String(filter.limit));
-    if (filter?.cursor !== undefined) params.set('cursor', String(filter.cursor));
-    const qs = params.toString();
-    return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
+    if (options) {
+      for (const key of Object.keys(AGENT_LIST_OPTION_WIRE_KEYS) as Array<keyof AgentListOptions>) {
+        const value = options[key];
+        if (value !== undefined) params.set(AGENT_LIST_OPTION_WIRE_KEYS[key], String(value));
+      }
+    }
+    return this.getAgentsByQuery(params.toString());
+  }
+
+  /**
+   * Tool-boundary escape hatch: a pre-serialized agents query forwarded
+   * AS-IS, so the daemon — the single validator — sees exactly what the
+   * caller supplied and its 400 is the caller's signal. `limit: 0` coerced
+   * or dropped client-side would instead return the full ~150 KB registry.
+   */
+  async getAgentsByQuery(queryString: string): Promise<{ agents: any[]; nextCursor?: string }> {
+    return this.get(`/api/agents${queryString ? `?${queryString}` : ''}`);
   }
 
   async getSkills(filter?: { skillType?: string }): Promise<{ skills: any[] }> {

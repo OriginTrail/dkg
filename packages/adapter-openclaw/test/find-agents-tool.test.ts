@@ -37,12 +37,14 @@ describe('dkg_find_agents tool', () => {
     expect(props.connection_status.enum).toEqual(['self', 'connected', 'disconnected']);
   });
 
-  it('forwards well-formed and malformed values verbatim to the client', async () => {
+  it('serializes well-formed and malformed values verbatim onto the wire', async () => {
     const plugin = new DkgNodePlugin();
     const tool = registeredFindAgents(plugin);
-    const getAgentsCalls: unknown[] = [];
+    const queries: string[] = [];
+    // Raw model values travel through the query escape hatch — the strictly
+    // typed getAgents() never sees them.
     (plugin as any).client = {
-      getAgents: async (filter: unknown) => { getAgentsCalls.push(filter); return { agents: [] }; },
+      getAgentsByQuery: async (qs: string) => { queries.push(qs); return { agents: [] }; },
     };
 
     await tool.execute('tc-1', {
@@ -51,24 +53,29 @@ describe('dkg_find_agents tool', () => {
       limit: '10',
       cursor: 'cur-1',
     });
-    expect(getAgentsCalls[0]).toEqual({
-      connection_status: 'connected',
-      local: 'true',
-      limit: '10',
-      cursor: 'cur-1',
-    });
+    expect(queries[0]).toContain('connectionStatus=connected');
+    expect(queries[0]).toContain('local=true');
+    expect(queries[0]).toContain('limit=10');
+    expect(queries[0]).toContain('cursor=cur-1');
 
     // Malformed model output (calls can bypass schema validation) must REACH
-    // the client and thus the daemon's 400 — the documented filter-drop risk:
-    // limit 0 silently becoming "no limit" is the full ~150 KB registry.
-    for (const bad of ['not-a-number', '10junk', 0, 1.9, -5]) {
-      getAgentsCalls.length = 0;
+    // the daemon's 400 — the documented filter-drop risk: limit 0 silently
+    // becoming "no limit" is the full ~150 KB registry.
+    for (const [bad, wire] of [
+      ['not-a-number', 'limit=not-a-number'],
+      ['10junk', 'limit=10junk'],
+      [0, 'limit=0'],
+      [1.9, 'limit=1.9'],
+      [-5, 'limit=-5'],
+    ] as const) {
+      queries.length = 0;
       await tool.execute('tc-bad', { limit: bad });
-      expect(getAgentsCalls[0], `limit=${bad} must be forwarded, not dropped`).toEqual({ limit: bad });
+      expect(queries[0], `limit=${bad} must be forwarded, not dropped`).toBe(wire);
     }
-    getAgentsCalls.length = 0;
+    queries.length = 0;
     await tool.execute('tc-bad-status', { connection_status: 'onnected', local: 'ture' });
-    expect(getAgentsCalls[0]).toEqual({ connection_status: 'onnected', local: 'ture' });
+    expect(queries[0]).toContain('connectionStatus=onnected');
+    expect(queries[0]).toContain('local=ture');
   });
 
   it("surfaces the daemon's validation error as the tool result", async () => {
@@ -77,7 +84,7 @@ describe('dkg_find_agents tool', () => {
     const plugin = new DkgNodePlugin();
     const tool = registeredFindAgents(plugin);
     (plugin as any).client = {
-      getAgents: async () => {
+      getAgentsByQuery: async () => {
         throw new Error('DKG daemon /api/agents responded 400: "limit" must be a positive integer');
       },
     };
