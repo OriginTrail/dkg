@@ -733,6 +733,48 @@ describe('durable sync lifecycle chain binding', () => {
     });
   });
 
+  it('filters catalog-authoritative CGs before direct durable requester admission', async () => {
+    const runLegacyDurableSync = vi.fn(async () => ({
+      ...createDurableSyncAccumulator(),
+      complete: true,
+    }));
+    const agentLike: any = {
+      config: {
+        rfc64CatalogRollout: {
+          enabled: true,
+          selectedContextGraphs: ['legacy-cg', 'catalog-cg'],
+          rollout: {
+            killSwitch: false,
+            contextGraphModes: { 'legacy-cg': 'legacy', 'catalog-cg': 'catalog' },
+          },
+        },
+      },
+      store: {},
+      runLegacyDurableSync,
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-mixed-rollout',
+      ['legacy-cg', 'catalog-cg', 'unselected-cg'],
+    );
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync.mock.calls[0]?.[2]).toEqual([
+      'legacy-cg',
+      'unselected-cg',
+    ]);
+
+    runLegacyDurableSync.mockClear();
+    const catalogOnly = await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-catalog-only',
+      ['catalog-cg'],
+    );
+    expect(runLegacyDurableSync).not.toHaveBeenCalled();
+    expect(catalogOnly.complete).toBe(false);
+  });
+
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {
     const root = new Uint8Array(32);
     root[31] = 2;

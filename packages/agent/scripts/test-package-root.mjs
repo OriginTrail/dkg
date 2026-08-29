@@ -202,6 +202,7 @@ const blockedRfc64Modules = [
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'catalog-rollout-authority-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',

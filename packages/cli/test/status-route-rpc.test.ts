@@ -267,6 +267,13 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           localAgentAddress: '0x3333333333333333333333333333333333333333',
           peerAgentBindings: [],
         },
+        rollout: {
+          killSwitch: true,
+          contextGraphModes: {
+            [publicContextGraph]: 'shadow',
+            [privateContextGraph]: 'legacy',
+          },
+        },
         bootstrap: {
           acceptedPolicies: [rfc64PublicCatalogPolicy(publicContextGraph), {
             policyEnvelope: {
@@ -285,7 +292,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     expect(response.status).toBe(200);
     expect(response.body.rfc64Catalog.privateRecovery).toEqual([{
       contextGraphId: privateContextGraph,
-      mode: 'catalog',
+      mode: 'legacy',
       accessPolicy: 1,
       publishPolicy: 1,
       vmRequired: true,
@@ -312,10 +319,10 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       providerPeerId: publicProvider,
     });
     expect(response.body.rfc64Catalog.rollout).toEqual({
-      killSwitch: false,
+      killSwitch: true,
       contextGraphModes: {
-        [publicContextGraph]: 'catalog',
-        [privateContextGraph]: 'catalog',
+        [publicContextGraph]: 'shadow',
+        [privateContextGraph]: 'legacy',
       },
     });
     expect(JSON.stringify(response.body)).toContain(publicProvider);
@@ -701,6 +708,10 @@ describe('/api/status RFC-64 selected-public activation', () => {
       {
         rfc64PublicCatalog: {
           enabled: true,
+          rollout: {
+            killSwitch: true,
+            contextGraphModes: { 'selected-public-cg': 'shadow' },
+          },
           autoPublish: {
             peers: ['12D3KooReceiver'],
             catalogIssuerDelegationExpiresAt: '1893456000000',
@@ -720,8 +731,8 @@ describe('/api/status RFC-64 selected-public activation', () => {
       enabled: true,
       selectedContextGraphs: ['selected-public-cg'],
       rollout: {
-        killSwitch: false,
-        contextGraphModes: { 'selected-public-cg': 'catalog' },
+        killSwitch: true,
+        contextGraphModes: { 'selected-public-cg': 'shadow' },
       },
       autoPublishEnabled: true,
       completeSwmProviders: [{

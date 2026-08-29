@@ -184,26 +184,29 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
     if (config === undefined || STATES.has(this)) return;
     const service = this.rfc64PublicCatalogServiceV1;
-    if (service === undefined) {
-      throw new Error('RFC-64 bootstrap requires the public catalog service');
-    }
-    for (const accepted of config.acceptedPolicies) {
-      service.acceptPolicySnapshot({
-        policy: accepted.policyEnvelope.payload,
-        policyDigest: computeContextGraphPolicyObjectDigestV1(accepted.policyEnvelope),
-        roster: accepted.rosterEnvelope?.payload,
-      });
-    }
-    const targets = config.acceptedPolicies.flatMap(({
+    const targets = config.acceptedPolicies.flatMap((accepted) => {
+      const {
       policyEnvelope,
       targets: policyTargets,
       completeSwmProviders = [],
-    }) => (
-      policyTargets.map((target) => ({
-        mode: rfc64CatalogTrack2ModeForContextGraphV1(
-          this.config.rfc64CatalogRollout,
-          policyEnvelope.payload.contextGraphId,
-        ) as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
+      } = accepted;
+      const mode = rfc64CatalogTrack2ModeForContextGraphV1(
+        this.config.rfc64CatalogRollout,
+        policyEnvelope.payload.contextGraphId,
+      );
+      if (mode === 'legacy' || rfc64CatalogKillSwitchActiveV1(
+        this.config.rfc64CatalogRollout,
+      )) return [];
+      if (service === undefined) {
+        throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
+      }
+      service.acceptPolicySnapshot({
+        policy: policyEnvelope.payload,
+        policyDigest: computeContextGraphPolicyObjectDigestV1(policyEnvelope),
+        roster: accepted.rosterEnvelope?.payload,
+      });
+      return policyTargets.map((target) => ({
+        mode,
         scope: Object.freeze({
           networkId: policyEnvelope.payload.networkId,
           contextGraphId: policyEnvelope.payload.contextGraphId,
@@ -219,8 +222,27 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         requiresPrivateVm:
           policyEnvelope.payload.accessPolicy === 1
           && policyEnvelope.payload.source.kind === 'finalized-chain',
-      }))
+      }));
+    });
+    const hasLegacyRecoveryProviders = config.acceptedPolicies.some(({
+      policyEnvelope,
+      completeSwmProviders = [],
+    }) => (
+      completeSwmProviders.length > 0
+      && rfc64LegacySyncAuthorityActiveForContextGraphV1(
+        this.config.rfc64CatalogRollout,
+        policyEnvelope.payload.contextGraphId,
+      )
     ));
+    const hasTrack2Policy = !rfc64CatalogKillSwitchActiveV1(
+      this.config.rfc64CatalogRollout,
+    ) && config.acceptedPolicies.some(({ policyEnvelope }) => (
+      rfc64CatalogTrack2ModeForContextGraphV1(
+        this.config.rfc64CatalogRollout,
+        policyEnvelope.payload.contextGraphId,
+      ) !== 'legacy'
+    ));
+    if (!hasTrack2Policy && !hasLegacyRecoveryProviders) return;
     const state: BootstrapStateV1 = {
       config,
       targets: targets.map((target) => ({
@@ -407,60 +429,47 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     let lastError: string | null = null;
     let terminalError: unknown | null = null;
     try {
-      if (target.mode === 'shadow') {
-        const service = this.rfc64PublicCatalogServiceV1;
-        if (service === undefined) throw new Error('RFC-64 shadow bootstrap service is unavailable');
-        const staged = await service.synchronizeCurrentCatalogHeadFromProviders({
-          remotePeerIds: target.providers,
-          scope: target.scope,
-          signal,
-        });
-        if (staged !== null) {
-          if (staged.completionOutcome !== 'staged-only') {
-            throw new Error(
-              `RFC-64 shadow bootstrap unexpectedly completed as ${staged.completionOutcome}`,
-            );
-          }
-          target.outcome = 'shadow-staged';
-          target.completionReason = null;
-          target.providerPeerId = staged.providerPeerIds[0] ?? null;
-          target.attempts = staged.providerAttempts;
-          target.appliedHeadDigest = null;
-          target.stagedHeadDigest = staged.current.announcement.catalogHeadObjectDigest;
-          target.catalogVersion = staged.current.announcement.catalogVersion;
-          target.inventoryRowCount = staged.current.head.envelope.payload.totalRows;
-          target.lastError = null;
-          target.updatedAtMs = Date.now();
-          return;
+      const synchronized = await this.synchronizeRfc64CatalogRolloutFromProvidersV1({
+        remotePeerIds: target.providers,
+        scope: target.scope,
+        signal,
+      });
+      if (synchronized !== null) {
+        if (
+          target.mode === 'shadow'
+          && synchronized.completionOutcome !== 'staged-only'
+        ) {
+          throw new Error(
+            `RFC-64 shadow bootstrap unexpectedly completed as ${synchronized.completionOutcome}`,
+          );
         }
-        target.attempts = target.providers.length;
-      } else {
-        const applied = await this.synchronizeRfc64CatalogFromProvidersV1({
-          remotePeerIds: target.providers,
-          scope: target.scope,
-          signal,
-        });
-        if (applied !== null) {
-          target.outcome = 'applied';
-          target.completionReason = null;
-          target.providerPeerId = applied.appliedProviderPeerId
-            ?? applied.providerPeerIds[0]
-            ?? null;
-          // Discovery is hedged across the full bounded provider set before the
-          // receiver selects an exact highest head for activation.
-          target.attempts = target.providers.length;
-          target.appliedHeadDigest = applied.currentCatalogHeadDigest;
-          target.stagedHeadDigest = null;
-          target.catalogVersion = applied.catalogVersion;
-          target.inventoryRowCount = applied.inventoryRowCount;
-          target.lastError = null;
-          target.updatedAtMs = Date.now();
-          return;
+        if (
+          target.mode === 'catalog'
+          && synchronized.completionOutcome === 'staged-only'
+        ) {
+          throw new Error('RFC-64 catalog bootstrap unexpectedly completed as staged-only');
         }
-        // A null result means the bounded provider loop completed without a
-        // current head. Preserve the number of providers that were attempted.
-        target.attempts = target.providers.length;
+        target.outcome = target.mode === 'shadow' ? 'shadow-staged' : 'applied';
+        target.completionReason = null;
+        target.providerPeerId = synchronized.appliedProviderPeerId
+          ?? synchronized.providerPeerIds[0]
+          ?? null;
+        target.attempts = synchronized.providerAttempts;
+        target.appliedHeadDigest = target.mode === 'catalog'
+          ? synchronized.currentCatalogHeadDigest
+          : null;
+        target.stagedHeadDigest = target.mode === 'shadow'
+          ? synchronized.stagedHeadDigest
+          : null;
+        target.catalogVersion = synchronized.catalogVersion;
+        target.inventoryRowCount = synchronized.inventoryRowCount;
+        target.lastError = null;
+        target.updatedAtMs = Date.now();
+        return;
       }
+      // A null result means the bounded provider loop completed without a
+      // current head. Preserve the number of providers that were attempted.
+      target.attempts = target.providers.length;
     } catch (error) {
       if (signal.aborted) return;
       // The bounded discovery call snapshots and attempts the complete
@@ -488,41 +497,17 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   private resolveRuntimeRfc64CatalogBootstrapV1(
     this: DKGAgent,
   ): BootstrapStateV1['config'] | undefined {
-    if (rfc64CatalogKillSwitchActiveV1(this.config.rfc64CatalogRollout)) {
-      return undefined;
-    }
     const current = this.config.rfc64CatalogBootstrap;
-    if (current !== undefined) {
-      return filterTrack2PoliciesV1(current, this.config.rfc64CatalogRollout);
-    }
+    if (current !== undefined) return current;
     const legacy = this.config.rfc64PublicCatalogBootstrap;
     if (legacy === undefined) return undefined;
-    return filterTrack2PoliciesV1(Object.freeze({
+    return Object.freeze({
       acceptedPolicies: legacy.acceptedPublicPolicies,
       ...(legacy.retryIntervalMs === undefined
         ? {}
         : { retryIntervalMs: legacy.retryIntervalMs }),
-    }), this.config.rfc64CatalogRollout);
+    });
   }
-}
-
-function filterTrack2PoliciesV1(
-  config: BootstrapStateV1['config'],
-  rollout: Parameters<typeof rfc64CatalogTrack2ModeForContextGraphV1>[0],
-): BootstrapStateV1['config'] | undefined {
-  const acceptedPolicies = config.acceptedPolicies.filter(({ policyEnvelope }) => (
-    rfc64CatalogTrack2ModeForContextGraphV1(
-      rollout,
-      policyEnvelope.payload.contextGraphId,
-    ) !== 'legacy'
-  ));
-  if (acceptedPolicies.length === 0) return undefined;
-  return Object.freeze({
-    acceptedPolicies: Object.freeze(acceptedPolicies),
-    ...(config.retryIntervalMs === undefined
-      ? {}
-      : { retryIntervalMs: config.retryIntervalMs }),
-  });
 }
 
 function acceptedPoliciesV1(
