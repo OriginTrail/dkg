@@ -42,6 +42,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   PromoteJobLeaseError,
+  PromoteReplaySafeError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteFailureClassification,
@@ -177,6 +178,7 @@ const SAFE_ERROR_NAMES = new Set([
   'CuratorUnconfirmedError',
   'CuratorRejectedError',
   'AssertionNotPersistedError',
+  'PromoteReplaySafeError',
 ]);
 const SAFE_ERROR_CODES = new Set([
   'PAYLOAD_TOO_LARGE',
@@ -184,6 +186,7 @@ const SAFE_ERROR_CODES = new Set([
   'CURATOR_UNCONFIRMED',
   'CURATOR_REJECTED',
   'ASSERTION_NOT_PERSISTED',
+  'PROMOTE_REPLAY_SAFE_FAILURE',
 ]);
 
 function untagPromoteMessage(message: string): string {
@@ -310,11 +313,17 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     return { classification: 'cap_exceeded', retryable: false };
   }
 
+  // The promotion producer owns workflow-level replay safety. A typed
+  // disposition means it proved that retrying the complete attempt converges;
+  // the worker never infers that from a low-level storage operation name.
+  if (err instanceof PromoteReplaySafeError) {
+    return { classification: 'transient', retryable: true };
+  }
+
   // Managed-store recovery can declare the exact operation outcome. A request
-  // rejected before dispatch is safe to retry. Interrupted reads cannot have
-  // mutated WM/SWM. The one safe mutation is atomic exact-graph replacement:
-  // replaying the same frozen promote payload converges from either permitted
-  // old-or-new outcome. Every other interrupted write remains fail-closed.
+  // rejected before dispatch is safe to retry, and interrupted reads cannot
+  // have mutated WM/SWM. Every interrupted write remains fail-closed unless
+  // the promotion producer supplied the typed replay-safe disposition above.
   if (isStoreOperationTimeoutError(err)) {
     if (
       err.outcome === 'not_started' ||
@@ -323,10 +332,6 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
         err.storeOperation !== undefined &&
         (
           isReadOnlyStoreOperation(err.storeOperation)
-          // Promote replaces the complete UAL-derived SWM graph through the
-          // atomic replaceGraph capability. Replaying the same frozen payload
-          // converges from either permitted old-or-new outcome.
-          || err.storeOperation === 'replaceGraph'
         )
       )
     ) {

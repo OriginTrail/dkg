@@ -110,9 +110,9 @@ describe('runSyncOnConnect callbacks', () => {
       getSyncContextGraphs: () => ['selected', 'ordinary'],
       getDurableSyncContextGraphs: () => ['ordinary'],
       selectedSharedMemoryLane: {
-        getContextGraphIds: async () => ['selected'],
-        syncFromPeer: async (_peerId, contextGraphIds) => {
-          order.push(`shared:${contextGraphIds.join(',')}:selected`);
+        admitPlan: async () => ({ contextGraphIds: ['selected'] }),
+        syncFromPeer: async (_peerId, plan) => {
+          order.push(`shared:${plan.contextGraphIds.join(',')}:selected`);
           return {
             kind: 'selected-shared-memory',
             requestedScope: {

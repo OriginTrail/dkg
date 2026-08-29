@@ -371,6 +371,10 @@ export {
   type PromoteTerminalJobClearer,
 } from './async-promote-queue.js';
 export {
+  PROMOTE_REPLAY_SAFE_ERROR_CODE,
+  PromoteReplaySafeError,
+} from './promote-replay-safety.js';
+export {
   AsyncLiftRunner,
   type AsyncLiftRunnerConfig,
 } from './async-lift-runner.js';

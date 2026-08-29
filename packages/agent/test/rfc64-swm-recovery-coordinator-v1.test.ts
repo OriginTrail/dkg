@@ -83,23 +83,48 @@ describe('RFC-64 SWM recovery authorization', () => {
     expect(requestSelectedPublicAdmission).toHaveBeenCalledTimes(2);
   });
 
-  it('gates anti-entropy refresh on catalog readiness', () => {
+  it('combines catalog-pass refresh and mixed-plan authorization behind catalog readiness', () => {
     let catalogReady = false;
     const refreshSelectedPublicAdmission = vi.fn(() => true);
+    const requestSelectedPublicAdmission = vi.fn(() => {
+      throw new Error('catalog-pass authorization must not perform a second admission mutation');
+    });
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
       isCatalogReady: () => catalogReady,
       refreshSelectedPublicAdmission,
+      requestSelectedPublicAdmission,
     }));
 
-    expect(coordinator.refreshSelectedPublic(PROVIDER, [PUBLIC], 10_000)).toBe(false);
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toBeNull();
     expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
     catalogReady = true;
-    expect(coordinator.refreshSelectedPublic(PROVIDER, [PUBLIC], 10_000)).toBe(true);
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toEqual({
+      kind: 'rfc64-authorized-swm-recovery-v1',
+      providerPeerId: PROVIDER,
+      targets: [
+        { contextGraphId: PRIVATE, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC, lane: 'selected-public' },
+      ],
+    });
     expect(refreshSelectedPublicAdmission).toHaveBeenCalledWith(
       PROVIDER,
       [PUBLIC],
       10_000,
     );
+    expect(refreshSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
+  });
+
+  it('retains an ordinary-private target when catalog-pass public refresh is suppressed', () => {
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      refreshSelectedPublicAdmission: vi.fn(() => false),
+    }));
+
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toEqual({
+      kind: 'rfc64-authorized-swm-recovery-v1',
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    });
   });
 
   it('drops a terminal public scope while retaining the same provider private lane', () => {

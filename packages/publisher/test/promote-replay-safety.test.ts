@@ -1,0 +1,35 @@
+import { describe, expect, it } from 'vitest';
+import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+
+import {
+  classifyExactSwmGraphReplaceFailure,
+  PromoteReplaySafeError,
+} from '../src/promote-replay-safety.js';
+
+describe('promote replay safety', () => {
+  it('certifies only an indeterminate exact SWM graph replacement at the producer boundary', () => {
+    const replaceFailure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      outcome: 'indeterminate',
+    });
+
+    const classified = classifyExactSwmGraphReplaceFailure(replaceFailure);
+    expect(classified).toBeInstanceOf(PromoteReplaySafeError);
+    expect((classified as PromoteReplaySafeError).cause).toBe(replaceFailure);
+  });
+
+  it.each([
+    ['not-started replace', 'replaceGraph', 'not_started'],
+    ['indeterminate insert', 'insert', 'indeterminate'],
+    ['indeterminate read', 'query', 'indeterminate'],
+  ] as const)('does not certify %s', (_label, operation, outcome) => {
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation,
+      outcome,
+    });
+
+    expect(classifyExactSwmGraphReplaceFailure(failure)).toBe(failure);
+  });
+});

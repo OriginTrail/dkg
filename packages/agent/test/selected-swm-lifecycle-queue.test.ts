@@ -373,7 +373,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       getDurableSyncContextGraphs: () => [],
       getSharedMemorySyncContextGraphs: () => [contextGraphId],
       selectedSharedMemoryLane: {
-        getContextGraphIds: () => [contextGraphId],
+        admitPlan: () => ({ contextGraphIds: [contextGraphId] }),
         syncFromPeer: async () => ({
           kind: 'selected-shared-memory',
           requestedScope: {

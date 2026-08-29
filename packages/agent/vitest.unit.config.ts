@@ -126,6 +126,8 @@ export default defineConfig({
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
       "test/sync-on-connect-churn.test.ts",
+      "test/rfc64-sync-on-connect-scheduling.test.ts",
+      "test/sync-on-connect-peer-scheduler.test.ts",
       "test/system-context-graph-policy.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",

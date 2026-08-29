@@ -5,6 +5,7 @@ import {
   sameRfc64SwmRecoveryTargetsV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
   type Rfc64PeerSwmRecoveryPlanV1,
+  type Rfc64SwmRecoveryTargetV1,
 } from './swm-recovery-plan-v1.js';
 
 export type { Rfc64AuthorizedSwmRecoveryPlanV1 } from './swm-recovery-plan-v1.js';
@@ -52,23 +53,41 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       );
   }
 
-  refreshSelectedPublic(
-    providerPeerId: string,
-    contextGraphIds: readonly string[],
-    minimumTerminalAgeMs: number,
-  ): boolean {
-    return this.deps.admission.isCatalogReady(providerPeerId)
-      && this.deps.admission.refreshSelectedPublicAdmission(
-        providerPeerId,
-        contextGraphIds,
-        minimumTerminalAgeMs,
-      );
-  }
-
   authorize(
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
   ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
     if (!this.deps.admission.isCatalogReady(recoveryPlan.providerPeerId)) return null;
+    const eligible = this.eligibleTargets(recoveryPlan);
+    return eligible === null ? null : this.authorizeEligible(recoveryPlan.providerPeerId, eligible);
+  }
+
+  /**
+   * One catalog-pass operation owns stale terminal refresh and authorization.
+   * Ordinary-private targets survive when a selected-public refresh is still
+   * inside its freshness window.
+   */
+  authorizeForCatalogPass(
+    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
+    minimumTerminalAgeMs: number,
+  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
+    if (!this.deps.admission.isCatalogReady(recoveryPlan.providerPeerId)) return null;
+    const eligible = this.eligibleTargets(recoveryPlan);
+    if (eligible === null) return null;
+    const requestedPublic = eligible
+      .filter(({ lane }) => lane === 'selected-public')
+      .map(({ contextGraphId }) => contextGraphId);
+    const publicAccepted = requestedPublic.length > 0
+      && this.deps.admission.refreshSelectedPublicAdmission(
+        recoveryPlan.providerPeerId,
+        requestedPublic,
+        minimumTerminalAgeMs,
+      );
+    return this.authorizedPlan(recoveryPlan.providerPeerId, eligible, publicAccepted);
+  }
+
+  private eligibleTargets(
+    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
+  ): readonly Rfc64SwmRecoveryTargetV1[] | null {
     const selectedPublic = new Set(this.deps.admission.selectedPublicContextGraphIds());
     const canonicalTargets = canonicalizeRfc64SwmRecoveryTargetsV1(recoveryPlan.targets);
     if (canonicalTargets === null) return null;
@@ -84,19 +103,33 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
         || selectedPublic.has(target.contextGraphId)
       )
     ));
-    if (eligible.length === 0) return null;
+    return eligible.length === 0 ? null : eligible;
+  }
+
+  private authorizeEligible(
+    providerPeerId: string,
+    eligible: readonly Rfc64SwmRecoveryTargetV1[],
+  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
     const requestedPublic = eligible
       .filter(({ lane }) => lane === 'selected-public')
       .map(({ contextGraphId }) => contextGraphId);
     const publicAccepted = requestedPublic.length > 0
-      && this.admitSelectedPublic(recoveryPlan.providerPeerId, requestedPublic);
+      && this.admitSelectedPublic(providerPeerId, requestedPublic);
+    return this.authorizedPlan(providerPeerId, eligible, publicAccepted);
+  }
+
+  private authorizedPlan(
+    providerPeerId: string,
+    eligible: readonly Rfc64SwmRecoveryTargetV1[],
+    publicAccepted: boolean,
+  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
     const acceptedTargets = eligible.filter(
       ({ lane }) => lane === 'ordinary-private' || publicAccepted,
     );
     if (acceptedTargets.length === 0) return null;
     return Object.freeze({
       kind: 'rfc64-authorized-swm-recovery-v1',
-      providerPeerId: recoveryPlan.providerPeerId,
+      providerPeerId,
       targets: Object.freeze(acceptedTargets),
     });
   }

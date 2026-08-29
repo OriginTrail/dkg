@@ -16,7 +16,8 @@ describe('sync-on-connect per-peer scheduler', () => {
     const ordering: string[] = [];
     const scheduler = new SyncOnConnectPeerScheduler<string>({
       runSelected: async (_peer, _onError, plan) => { ordering.push(`selected:${plan}`); },
-      runOrdinary: async (_peer, _onError, mode) => { ordering.push(`ordinary:${mode}`); },
+      runOrdinary: async () => { ordering.push('ordinary'); },
+      runOrdinaryAfterSelected: async () => { ordering.push('ordinary-only'); },
     });
     const onError = () => undefined;
 
@@ -26,7 +27,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
     expect(ordering).toEqual([
       'selected:exact-plan',
-      'ordinary:ordinary-after-selected',
+      'ordinary-only',
     ]);
   });
 
@@ -41,6 +42,10 @@ describe('sync-on-connect per-peer scheduler', () => {
       },
       runOrdinary: async () => {
         ordering.push('ordinary');
+        await ordinary.promise;
+      },
+      runOrdinaryAfterSelected: async () => {
+        ordering.push('ordinary-only');
         await ordinary.promise;
       },
     });
@@ -65,9 +70,8 @@ describe('sync-on-connect per-peer scheduler', () => {
         ordering.push('selected');
         await selected.promise;
       },
-      runOrdinary: async (_peer, _onError, mode) => {
-        ordering.push(`ordinary:${mode}`);
-      },
+      runOrdinary: async () => { ordering.push('ordinary'); },
+      runOrdinaryAfterSelected: async () => { ordering.push('ordinary-only'); },
     });
     const onError = () => undefined;
 
@@ -77,7 +81,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     selected.resolve();
 
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
-    expect(ordering).toEqual(['selected', 'ordinary:ordinary-after-selected']);
+    expect(ordering).toEqual(['selected', 'ordinary-only']);
   });
 
   it('drains a selected upgrade during selected work before owed ordinary work', async () => {
@@ -88,9 +92,8 @@ describe('sync-on-connect per-peer scheduler', () => {
         ordering.push(`selected:${plan}`);
         if (plan === 'plan-a') await firstSelected.promise;
       },
-      runOrdinary: async (_peer, _onError, mode) => {
-        ordering.push(`ordinary:${mode}`);
-      },
+      runOrdinary: async () => { ordering.push('ordinary'); },
+      runOrdinaryAfterSelected: async () => { ordering.push('ordinary-only'); },
     });
     const onError = () => undefined;
 
@@ -104,7 +107,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(ordering).toEqual([
       'selected:plan-a',
       'selected:plan-b',
-      'ordinary:ordinary-after-selected',
+      'ordinary-only',
     ]);
   });
 
@@ -120,6 +123,11 @@ describe('sync-on-connect per-peer scheduler', () => {
         if (plan !== undefined) selectedPlans.push(plan);
       },
       runOrdinary: async () => {
+        ordinaryStarted.resolve();
+        await ordinary.promise;
+        throw ordinaryFailure;
+      },
+      runOrdinaryAfterSelected: async () => {
         ordinaryStarted.resolve();
         await ordinary.promise;
         throw ordinaryFailure;

@@ -2,12 +2,10 @@
 
 export type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
 
-export type OrdinarySyncOnConnectMode = 'ordinary' | 'ordinary-after-selected';
-
 interface OrdinaryLane {
   readonly kind: 'ordinary';
   readonly handleSyncError: SyncOnConnectErrorHandler;
-  readonly mode: OrdinarySyncOnConnectMode;
+  readonly afterSelected: boolean;
 }
 
 interface SelectedLane<SelectedPlan> {
@@ -30,7 +28,10 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
   readonly runOrdinary: (
     remotePeer: string,
     handleSyncError: SyncOnConnectErrorHandler,
-    mode: OrdinarySyncOnConnectMode,
+  ) => Promise<void>;
+  readonly runOrdinaryAfterSelected: (
+    remotePeer: string,
+    handleSyncError: SyncOnConnectErrorHandler,
   ) => Promise<void>;
   readonly runSelected: (
     remotePeer: string,
@@ -74,7 +75,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       this.schedule(remotePeer, {
         kind: 'ordinary',
         handleSyncError,
-        mode: 'ordinary',
+        afterSelected: false,
       }, delayMs);
       return true;
     }
@@ -82,9 +83,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     existing.pendingOrdinary = {
       kind: 'ordinary',
       handleSyncError,
-      mode: existing.currentLane === 'selected' || existing.pendingSelected !== null
-        ? 'ordinary-after-selected'
-        : 'ordinary',
+      afterSelected: existing.currentLane === 'selected' || existing.pendingSelected !== null,
     };
     return true;
   }
@@ -109,7 +108,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     if (existing.pendingOrdinary !== null) {
       existing.pendingOrdinary = {
         ...existing.pendingOrdinary,
-        mode: 'ordinary-after-selected',
+        afterSelected: true,
       };
     }
     return true;
@@ -148,11 +147,10 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
             lane.recoveryPlan,
           );
         } else {
-          await this.callbacks.runOrdinary(
-            remotePeer,
-            lane.handleSyncError,
-            lane.mode,
-          );
+          const runOrdinary = lane.afterSelected
+            ? this.callbacks.runOrdinaryAfterSelected
+            : this.callbacks.runOrdinary;
+          await runOrdinary(remotePeer, lane.handleSyncError);
         }
       } catch (error: unknown) {
         // Error ownership belongs to the lane that actually failed. A later
