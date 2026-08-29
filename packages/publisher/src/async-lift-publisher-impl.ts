@@ -7,6 +7,7 @@ import {
   type ChainProofSchedulePass,
   type ChainProofScheduleTurn,
 } from './chain-proof-retry-schedule.js';
+import { ReconciliationSnapshotCoordinator } from './reconciliation-snapshot-coordinator.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -474,17 +475,15 @@ export class TripleStoreAsyncLiftPublisher
   });
 
   /**
-   * The tail of the acquisition queue in {@link takeReconciliationSnapshot}: each slot carries
-   * the acquisition's settlement AND its lease expiry (capMs after it STARTED executing), so a
-   * successor is promoted only past an owner that actually held the seam too long — never past
-   * a healthy owner mid-read, and never in a burst (r12 🔴 3884393225).
+   * Owns the whole snapshot-acquisition ordering protocol (FIFO release gates, owner lease,
+   * scope-before-read) — see reconciliation-snapshot-coordinator.ts for the model. The
+   * publisher only wires its collaborators and calls `acquire()`; constructed in the
+   * constructor body so the resolved lease value is passed directly.
    */
-  private reconciliationAcquisitionTail: { settled: Promise<void>; leaseExpired: Promise<void> } = {
-    settled: Promise.resolve(),
-    leaseExpired: Promise.resolve(),
-  };
-
-  private readonly reconciliationAcquisitionWaitCapMs: number;
+  private readonly reconciliationSnapshotCoordinator: ReconciliationSnapshotCoordinator<
+    LiftJob[],
+    ChainProofSchedulePass
+  >;
   /**
    * r26 (🔴 3821028709) — jobs whose MUTATING recovery repair is currently running. A deadline
    * may stop the dispatcher waiting, but it must never let a second pass enter the same repair
@@ -620,7 +619,11 @@ export class TripleStoreAsyncLiftPublisher
     this.chainProofCapableForWallet = config.chainProofCapableForWallet;
     this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
     this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
-    this.reconciliationAcquisitionWaitCapMs = config.reconciliationAcquisitionWaitCapMs ?? 30_000;
+    this.reconciliationSnapshotCoordinator = new ReconciliationSnapshotCoordinator({
+      readInventory: () => this.list(),
+      beginScope: () => this.chainProofRetrySchedule.beginPass(this.now()),
+      leaseMs: config.reconciliationAcquisitionLeaseMs ?? 30_000,
+    });
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.detachReceiptReconciliation = config.detachReceiptReconciliation ?? false;
     this.publishExecutor = config.publishExecutor;
@@ -2127,73 +2130,6 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   /**
-   * The ONE acquisition seam for a reconciliation pass's shared state: the queue inventory and
-   * the chain-proof pass scope, taken together so the scope's ordering token reflects SNAPSHOT
-   * order (opening it later — e.g. at the dispatcher — would order by arrival, which
-   * overlapping passes can invert; PR #2380 r4 🔴 3883088105). One inventory per pass because
-   * per-lane full reads at an active cadence move the bottleneck into store/control-plane
-   * work; each lane re-reads its candidates under the transition lock before acting, so the
-   * shared snapshot only selects candidates and staleness cannot change a disposition.
-   */
-  private async takeReconciliationSnapshot(): Promise<{
-    inventory: LiftJob[];
-    chainProofPass: ChainProofSchedulePass;
-  }> {
-    // r6 (🔴 3883453447) — acquisition is SERIALIZED, not merely adjacent: two overlapping
-    // `list()` reads can resolve out of store-side capture order (the store runs on a worker
-    // pool), so adjacency alone orders tokens by query COMPLETION. Chaining acquisitions makes
-    // capture order equal completion order equal token order — a real linearization boundary,
-    // scoped to the seam so passes themselves still overlap everywhere else.
-    //
-    // r10 (🔴 3883959795) — the wait on the predecessor is BOUNDED: one non-settling store
-    // read must degrade ordering, not availability — an unbounded chain turns it into a
-    // permanent reconciliation outage for every later pass, the opposite of the documented
-    // fresh-pass contract. A successor that stops waiting replaces the chain with its own
-    // settlement, so the hung acquisition wedges nobody after it. Within the cap the FIFO is
-    // exact; past it, the rare inversion this window re-opens is still bounded by the
-    // schedule's write-time identity guards and the claim-locked re-read. This is deliberately
-    // NOT the package's `withKeyedLocks`: that primitive's contract is strict unbounded
-    // exclusion (what its publish/CAS/SWM callers need), and borrowing it would import the
-    // very unbounded wait this bound removes.
-    // r12 (🔴 3884393225) — the cap is a LEASE on the owner's execution, not a per-waiter
-    // timer: a waiter is promoted only when its immediate predecessor has either settled or
-    // held the seam for capMs after STARTING to execute. A burst of waiters queued behind one
-    // hung read therefore promotes exactly one head (whose fresh lease then covers the next
-    // waiter), instead of all bypassing on their own entry-relative timers and re-opening the
-    // overlapping-read inversion the queue exists to prevent. A healthy-but-slow owner
-    // mid-read is likewise never bypassed before ITS lease runs out.
-    const predecessor = this.reconciliationAcquisitionTail;
-    let markStarted!: () => void;
-    const started = new Promise<void>((resolve) => { markStarted = resolve; });
-    const acquisition = (async () => {
-      await Promise.race([predecessor.settled, predecessor.leaseExpired]);
-      markStarted();
-      // r11 (🔴 3884193885) — ordering authority is reserved BEFORE the read, not after it:
-      // a hung read whose successor was promoted past it keeps the token it drew at its
-      // section start, so when it eventually completes it is fenced as OLDER — its sweep (the
-      // one consumer of token order with deletion authority over other jobs' entries, which no
-      // identity guard contains) cannot collect what the successor installed from genuinely
-      // newer state. In the serialized normal case start order equals capture order, so
-      // nothing changes; in the bypass case the ambiguity resolves conservatively (a late pass
-      // can be under-ranked, never over-ranked).
-      const chainProofPass = this.chainProofRetrySchedule.beginPass(this.now());
-      const inventory = await this.list();
-      return { inventory, chainProofPass };
-    })();
-    // The queue must survive a failed acquisition — carry only settlement, never the result.
-    const settled = acquisition.then(() => undefined, () => undefined);
-    const leaseExpired = started.then(() => new Promise<void>((resolve) => {
-      const lease = setTimeout(resolve, Math.max(0, this.reconciliationAcquisitionWaitCapMs));
-      void settled.finally(() => {
-        clearTimeout(lease);
-        resolve();
-      });
-    }));
-    this.reconciliationAcquisitionTail = { settled, leaseExpired };
-    return acquisition;
-  }
-
-  /**
    * The ONE canonical pass: reports both what it settled and whether actionable live work
    * remains, computed DURING the walk (per-job, from the under-lock re-reads the pass already
    * pays for) — never by a second queue inventory afterwards. The scheduling caller consumes
@@ -2203,7 +2139,14 @@ export class TripleStoreAsyncLiftPublisher
    */
   private async runReconciliationPass(): Promise<{ reconciled: number; pendingWork: boolean }> {
     await this.ensureGraph();
-    const { inventory, chainProofPass } = await this.takeReconciliationSnapshot();
+    // The ONE acquisition seam for a pass's shared state: inventory and chain-proof scope,
+    // taken together (scope BEFORE read, acquisitions lease-ordered) by the coordinator, which
+    // owns the whole ordering protocol — see reconciliation-snapshot-coordinator.ts. One
+    // inventory per pass because per-lane full reads at an active cadence move the bottleneck
+    // into store/control-plane work; each lane re-reads its candidates under the transition
+    // lock before acting, so the shared snapshot only selects candidates and staleness cannot
+    // change a disposition.
+    const { inventory, scope: chainProofPass } = await this.reconciliationSnapshotCoordinator.acquire();
     let reconciled = await this.recoverInterruptedPreBroadcastJobs(inventory);
     // Same actionability rule the scheduling outlook answers with: executor-owned jobs are
     // skipped up front rather than each burning a transition-lock turn to be skipped deeper in.

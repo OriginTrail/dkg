@@ -193,8 +193,11 @@ export interface AsyncLiftPublisher {
    * Run one reconciliation pass and report how many jobs it settled.
    *
    * CONCURRENCY CONTRACT: safe to call at any time, including concurrently with any other
-   * in-flight pass; every call performs its own FRESH pass over fresh state — calls are
-   * neither queued behind nor coalesced into an existing pass.
+   * in-flight pass. Every call performs its own pass over its own freshly read inventory —
+   * passes are never coalesced. Inventory ACQUISITION, however, is FIFO-ordered: a concurrent
+   * call's read starts only once the previous acquisition completes or exceeds its owner
+   * lease ({@link AsyncLiftPublisherConfig.reconciliationAcquisitionLeaseMs}), so added
+   * latency is bounded per predecessor and a hung read cannot block the seam indefinitely.
    */
   recover(): Promise<number>;
   /**
@@ -762,11 +765,13 @@ export interface AsyncLiftPublisherConfig {
    */
   chainProofDispatchTimeBudgetMs?: number;
   /**
-   * How long one reconciliation pass's inventory acquisition waits behind the previous pass's
-   * (acquisitions are ordered; the wait is bounded so one hung store read degrades ordering,
-   * not availability). Default 30s.
+   * The owner LEASE on the serialized inventory-acquisition seam: how long one acquisition may
+   * execute (measured from its execution start) before the next queued acquisition is promoted
+   * past it. Acquisitions are FIFO-ordered; a queued burst therefore waits up to one lease per
+   * predecessor ahead of it, and one hung store read degrades ordering, never availability.
+   * Default 30s.
    */
-  reconciliationAcquisitionWaitCapMs?: number;
+  reconciliationAcquisitionLeaseMs?: number;
   /**
    * GH#2270 PR-3 r20 (🔴 3815617109) — can the chain-proof lane actually settle a job signed by
    * THIS wallet? A node may mix adapters, and the presence of a resolver is a node-wide fact while
