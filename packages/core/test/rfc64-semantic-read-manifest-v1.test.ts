@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
-  RFC64_SEMANTIC_READ_BACKENDS_V1,
   RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1,
   RFC64_SEMANTIC_READ_QUERY_IDS_V1,
   RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1,
@@ -119,44 +118,36 @@ describe('RFC-64 semantic read manifest v1', () => {
     );
   });
 
-  it('renders byte-identical bounded queries for Oxigraph and Blazegraph', () => {
-    expect(RFC64_SEMANTIC_READ_BACKENDS_V1).toEqual(['oxigraph', 'blazegraph']);
+  it('renders one backend-neutral bounded query for every semantic record', () => {
     for (const fixture of CASES) {
-      const oxigraph = compileRfc64SemanticReadOperationV1({
-        backend: 'oxigraph',
+      const operation = compileRfc64SemanticReadOperationV1({
         coordinate: fixture.coordinate,
       });
-      const blazegraph = compileRfc64SemanticReadOperationV1({
-        backend: 'blazegraph',
-        coordinate: fixture.coordinate,
-      });
-      expect(blazegraph.sparql, fixture.coordinate.recordType).toBe(oxigraph.sparql);
-      expect(oxigraph.queryId).toBe(fixture.expectedQueryId);
-      expect(oxigraph.graphIri).toBe(fixture.expectedAddress.graphUri);
-      expect(oxigraph.subjectIri).toBe(fixture.expectedAddress.subject);
-      expect(oxigraph.expectedRowCount).toBe(
+      expect(operation.queryId).toBe(fixture.expectedQueryId);
+      expect(operation.graphIri).toBe(fixture.expectedAddress.graphUri);
+      expect(operation.subjectIri).toBe(fixture.expectedAddress.subject);
+      expect(operation.expectedRowCount).toBe(
         RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1[fixture.coordinate.recordType],
       );
-      expect(oxigraph.rowCeiling).toBe(oxigraph.expectedRowCount + 1);
-      expect(oxigraph.responseByteCeiling).toBe(
+      expect(operation.rowCeiling).toBe(operation.expectedRowCount + 1);
+      expect(operation.responseByteCeiling).toBe(
         MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
       );
-      expect(oxigraph.concurrencyClass).toBe(
+      expect(operation.concurrencyClass).toBe(
         RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1,
       );
-      expect(oxigraph.sparql).toContain(`GRAPH <${oxigraph.graphIri}>`);
-      expect(oxigraph.sparql).toContain(`<${oxigraph.subjectIri}> ?p ?o`);
-      expect(oxigraph.sparql).toMatch(new RegExp(`LIMIT ${oxigraph.rowCeiling}$`, 'u'));
-      expect(oxigraph.sparql).not.toMatch(
+      expect(operation.sparql).toContain(`GRAPH <${operation.graphIri}>`);
+      expect(operation.sparql).toContain(`<${operation.subjectIri}> ?p ?o`);
+      expect(operation.sparql).toMatch(new RegExp(`LIMIT ${operation.rowCeiling}$`, 'u'));
+      expect(operation.sparql).not.toMatch(
         /GRAPH\s+\?|ORDER\s+BY|OFFSET|VALUES|SERVICE|SELECT\s+DISTINCT/iu,
       );
-      expect(Object.isFrozen(oxigraph)).toBe(true);
+      expect(Object.isFrozen(operation)).toBe(true);
     }
   });
 
   it('freezes the exact current-author query vector', () => {
     const operation = compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
       coordinate: CASES[0].coordinate,
     });
     expect(operation.sparql).toBe(
@@ -176,18 +167,12 @@ describe('RFC-64 semantic read manifest v1', () => {
     );
   });
 
-  it('rejects uncertified backends and input adornment', () => {
+  it('rejects correlated discriminants, raw queries, and other input adornment', () => {
     expect(() => compileRfc64SemanticReadOperationV1({
-      backend: 'sparql-http',
-      coordinate: CASES[0].coordinate,
-    })).toThrow(/backend is not certified/u);
-    expect(() => compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
       queryId: 'SYNC_RAW_QUERY_V1',
       coordinate: CASES[0].coordinate,
     })).toThrow(/invalid field set/u);
     expect(() => compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
       coordinate: CASES[0].coordinate,
       sparql: 'SELECT * WHERE { ?s ?p ?o }',
     })).toThrow(/invalid field set/u);
@@ -195,7 +180,7 @@ describe('RFC-64 semantic read manifest v1', () => {
 
   it('rejects accessor-bearing input fields without invoking the accessor', () => {
     let invoked = false;
-    const input: Record<string, unknown> = { backend: 'oxigraph' };
+    const input: Record<string, unknown> = {};
     Object.defineProperty(input, 'coordinate', {
       enumerable: true,
       get() {

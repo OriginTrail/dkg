@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
+import type {
+  Rfc64SemanticReadOperationV1,
+  Rfc64SemanticStoreRowV1,
+} from '@origintrail-official/dkg-core';
+import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -145,8 +150,14 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
-  readonly rfc64SemanticReadBackendV1 = 'oxigraph' as const;
   readonly queryCancellation = 'interruptible' as const;
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
+  }
 
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.

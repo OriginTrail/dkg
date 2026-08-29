@@ -22,6 +22,10 @@ import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
+import type {
+  Rfc64SemanticReadOperationV1,
+  Rfc64SemanticStoreRowV1,
+} from '@origintrail-official/dkg-core';
 
 export interface Quad {
   subject: string;
@@ -125,6 +129,15 @@ export interface TripleStore {
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+  /**
+   * Execute one closed RFC-64 semantic read and return normalized typed rows.
+   * Only adapters with explicit conformance evidence expose this capability;
+   * generic SPARQL support is insufficient.
+   */
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly Rfc64SemanticStoreRowV1[]>;
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;

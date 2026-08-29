@@ -9,14 +9,6 @@ import {
 import { type Rfc64SemanticAddressV1 } from './rfc64-semantic-addresses-v1.js';
 import { isPlainRecord, snapshotExactDataRecord } from './sync-wire-objects.js';
 
-export const RFC64_SEMANTIC_READ_BACKENDS_V1 = Object.freeze([
-  'oxigraph',
-  'blazegraph',
-] as const);
-
-export type Rfc64SemanticReadBackendV1 =
-  (typeof RFC64_SEMANTIC_READ_BACKENDS_V1)[number];
-
 export const RFC64_SEMANTIC_READ_QUERY_IDS_V1 = Object.freeze([
   'SYNC_HEAD_REF_GET_V1',
   'SYNC_MUTATION_GUARD_GET_V1',
@@ -33,12 +25,10 @@ export const RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1 =
   'rfc64-semantic-control-v1' as const;
 
 export interface Rfc64SemanticReadTemplateInputV1 {
-  readonly backend: Rfc64SemanticReadBackendV1;
   readonly coordinate: Rfc64SemanticRecordCoordinateV1;
 }
 
 export interface Rfc64SemanticReadOperationV1 {
-  readonly backend: Rfc64SemanticReadBackendV1;
   readonly queryId: Rfc64SemanticReadQueryIdV1;
   readonly recordType: Rfc64SemanticRecordTypeV1;
   readonly coordinate: Rfc64SemanticRecordCoordinateV1;
@@ -67,8 +57,6 @@ export class Rfc64SemanticReadManifestErrorV1 extends Error {
   }
 }
 
-const BACKENDS = new Set<string>(RFC64_SEMANTIC_READ_BACKENDS_V1);
-
 /**
  * Compile one closed, exact-subject RFC-64 semantic read operation.
  *
@@ -86,7 +74,6 @@ export function compileRfc64SemanticReadOperationV1(
   const expectedRowCount = RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1[coordinate.recordType];
   const rowCeiling = expectedRowCount + 1;
   return Object.freeze({
-    backend: request.backend,
     queryId,
     recordType: coordinate.recordType,
     coordinate,
@@ -103,7 +90,6 @@ export function compileRfc64SemanticReadOperationV1(
 }
 
 function snapshotInput(input: unknown): {
-  readonly backend: Rfc64SemanticReadBackendV1;
   readonly coordinate: unknown;
 } {
   if (!isPlainRecord(input)) {
@@ -113,17 +99,13 @@ function snapshotInput(input: unknown): {
   try {
     request = snapshotExactDataRecord(
       input,
-      ['backend', 'coordinate'],
+      ['coordinate'],
       'RFC-64 semantic read input',
     );
   } catch (cause) {
     fail('semantic read input has an invalid field set', cause);
   }
-  if (typeof request.backend !== 'string' || !BACKENDS.has(request.backend)) {
-    fail('semantic read backend is not certified');
-  }
   return Object.freeze({
-    backend: request.backend as Rfc64SemanticReadBackendV1,
     coordinate: request.coordinate,
   });
 }

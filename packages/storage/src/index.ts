@@ -142,13 +142,16 @@ export {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   Rfc64SemanticReadGatewayErrorV1,
   SyncSemanticStoreV1,
-  isRfc64SemanticReadBackendCapabilityV1,
-  type Rfc64SemanticReadBackendCapabilityV1,
   type Rfc64SemanticReadGatewayErrorCodeV1,
   type Rfc64SemanticReadOptionsV1,
   type Rfc64SemanticReadRequestV1,
   type Rfc64SemanticReadResultV1,
 } from './rfc64-semantic-read-gateway.js';
+export {
+  executeRfc64SemanticReadCapabilityV1,
+  isRfc64SemanticReadCapabilityV1,
+  type Rfc64SemanticReadCapabilityV1,
+} from './rfc64-semantic-read-capability.js';
 export {
   resolveGraphScopedOrLegacyMetadata,
   type GraphScopedOrLegacyMetadata,

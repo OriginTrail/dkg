@@ -20,11 +20,14 @@ import {
 
 import {
   BlazegraphStore,
+  executeRfc64SemanticReadCapabilityV1,
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   OxigraphStore,
+  OxigraphWorkerStore,
   SyncSemanticStoreV1,
   type QueryOptions,
   type QueryResult,
+  type TripleStore,
 } from '../src/index.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
@@ -143,7 +146,6 @@ describe('SyncSemanticStoreV1', () => {
         await store.insert(quads);
       }
       const gateway = new SyncSemanticStoreV1(store);
-      expect(gateway.backend).toBe('oxigraph');
       for (const current of FIXTURES) {
         const result = await gateway.read(requestOf(current), { timeoutMs: 1_000 });
         expect(result.kind, current.record.recordType).toBe('record');
@@ -181,7 +183,6 @@ describe('SyncSemanticStoreV1', () => {
     if (result.kind === 'record') expect(result.decoded.record).toEqual(current.record);
     expect(requests).toHaveLength(1);
     expect(requests[0].body).toBe(compileRfc64SemanticReadOperationV1({
-      backend: 'blazegraph',
       coordinate: current.coordinate,
     }).sparql);
     expect(requests[0].signal).toBeInstanceOf(AbortSignal);
@@ -192,7 +193,7 @@ describe('SyncSemanticStoreV1', () => {
       type: 'bindings',
       bindings: [],
     }));
-    const gateway = new SyncSemanticStoreV1(certifiedStore('oxigraph', query));
+    const gateway = new SyncSemanticStoreV1(certifiedStore(query));
     await expect(gateway.read(requestOf(FIXTURES[3]), { timeoutMs: 1_000 }))
       .resolves.toMatchObject({
       kind: 'absent',
@@ -208,18 +209,46 @@ describe('SyncSemanticStoreV1', () => {
   });
 
   it('finds certification through decorators and rejects uncertified generic stores', async () => {
-    const inner = certifiedStore('blazegraph', async () => ({
+    const inner = certifiedStore(async () => ({
       type: 'bindings',
       bindings: [],
     }));
     const decorated = {
       innerStore: inner,
       query: inner.query,
-    };
-    expect(new SyncSemanticStoreV1(decorated).backend).toBe('blazegraph');
+    } as unknown as TripleStore;
+    await expect(new SyncSemanticStoreV1(decorated).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    )).resolves.toEqual({ kind: 'absent' });
     expect(() => new SyncSemanticStoreV1({
       query: inner.query,
-    })).toThrow(/no certified RFC-64 semantic read backend/u);
+    } as unknown as TripleStore)).toThrow(/no certified RFC-64 semantic read capability/u);
+
+    const getterBacked = { query: inner.query } as Record<string, unknown>;
+    Object.defineProperty(getterBacked, 'rfc64SemanticReadV1', {
+      get: () => inner.rfc64SemanticReadV1,
+    });
+    await expect(new SyncSemanticStoreV1(getterBacked as unknown as TripleStore).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    )).resolves.toEqual({ kind: 'absent' });
+  });
+
+  it('round-trips a semantic record through the real worker adapter capability', async () => {
+    const store = new OxigraphWorkerStore();
+    const current = FIXTURES[0];
+    try {
+      await store.insert(projectRfc64SemanticRecordStoreRowsV1(current.record)
+        .map(renderRfc64SemanticStoreRowV1));
+      const result = await new SyncSemanticStoreV1(store).read(requestOf(current), {
+        timeoutMs: 5_000,
+      });
+      expect(result.kind).toBe('record');
+      if (result.kind === 'record') expect(result.decoded.record).toEqual(current.record);
+    } finally {
+      await store.close();
+    }
   });
 
   it('requires a bounded deadline and never dispatches after caller cancellation', async () => {
@@ -227,7 +256,7 @@ describe('SyncSemanticStoreV1', () => {
       type: 'bindings',
       bindings: [],
     }));
-    const gateway = new SyncSemanticStoreV1(certifiedStore('oxigraph', query));
+    const gateway = new SyncSemanticStoreV1(certifiedStore(query));
     for (const timeoutMs of [0, -1, 1.5, MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1 + 1]) {
       await expect(gateway.read(requestOf(FIXTURES[0]), { timeoutMs })).rejects
         .toThrow(/timeoutMs must be an integer/u);
@@ -251,7 +280,7 @@ describe('SyncSemanticStoreV1', () => {
         });
       });
     });
-    const gateway = new SyncSemanticStoreV1(certifiedStore('blazegraph', query));
+    const gateway = new SyncSemanticStoreV1(certifiedStore(query));
     await expect(gateway.read(requestOf(FIXTURES[0]), { timeoutMs: 10 })).rejects
       .toMatchObject({ name: 'TimeoutError' });
     expect(observedSignal?.aborted).toBe(true);
@@ -266,9 +295,24 @@ describe('SyncSemanticStoreV1', () => {
       }
       return { type: 'bindings', bindings: [] };
     });
-    const gateway = new SyncSemanticStoreV1(certifiedStore('oxigraph', query));
+    const gateway = new SyncSemanticStoreV1(certifiedStore(query));
     await expect(gateway.read(requestOf(FIXTURES[0]), { timeoutMs: 5 })).rejects
       .toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('keeps the deadline authoritative across normalization and record decoding', async () => {
+    const rows = projectRfc64SemanticRecordStoreRowsV1(FIXTURES[0].record);
+    vi.spyOn(performance, 'now')
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(1)
+      .mockReturnValueOnce(6);
+    const capability = {
+      rfc64SemanticReadV1: vi.fn(async () => rows),
+    } as unknown as TripleStore;
+    await expect(new SyncSemanticStoreV1(capability).read(requestOf(FIXTURES[0]), {
+      timeoutMs: 5,
+    })).rejects.toMatchObject({ name: 'TimeoutError' });
   });
 
   it('rejects wrong result kinds, malformed terms, and row overflow', async () => {
@@ -284,10 +328,7 @@ describe('SyncSemanticStoreV1', () => {
         bindings: Array.from({ length: 6 }, () => ({ p: 'urn:test:p', o: '"v"' })),
       },
     ] as QueryResult[]) {
-      const gateway = new SyncSemanticStoreV1(certifiedStore(
-        'oxigraph',
-        async () => result,
-      ));
+      const gateway = new SyncSemanticStoreV1(certifiedStore(async () => result));
       await expect(gateway.read(requestOf(current), { timeoutMs: 1_000 }))
         .rejects.toThrow();
     }
@@ -338,13 +379,14 @@ function requestOf(current: (typeof FIXTURES)[number]) {
 }
 
 function certifiedStore(
-  backend: 'oxigraph' | 'blazegraph',
   query: (sparql: string, options?: QueryOptions) => Promise<QueryResult>,
-) {
+): TripleStore {
   return {
-    rfc64SemanticReadBackendV1: backend,
     query,
-  } as const;
+    rfc64SemanticReadV1(operation, options) {
+      return executeRfc64SemanticReadCapabilityV1({ query }, operation, options);
+    },
+  } as unknown as TripleStore;
 }
 
 function toSparqlJsonBinding(row: Rfc64SemanticStoreRowV1) {
