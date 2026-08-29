@@ -61,16 +61,21 @@ function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasInputV1 {
       'urn:test:changelog:rfc64:seals',
       '"seal"',
     )],
-    currentHeadGraph: 'urn:test:changelog:rfc64:heads',
-    currentHeadSubject: 'urn:test:changelog:rfc64:author',
-    currentHeadPredicate: 'urn:test:changelog:rfc64:current-head',
-    expectedCurrentHeadObject: null,
-    nextCurrentHeadObject: 'urn:test:changelog:rfc64:catalog:new',
-    kaStateDigest: transition('ka-state'),
+    currentHead: {
+      graphUri: 'urn:test:changelog:rfc64:heads',
+      subject: 'urn:test:changelog:rfc64:author',
+      predicate: 'urn:test:changelog:rfc64:current-head',
+      expectedObject: null,
+      quads: [{
+        subject: 'urn:test:changelog:rfc64:author',
+        predicate: 'urn:test:changelog:rfc64:current-head',
+        object: 'urn:test:changelog:rfc64:catalog:new',
+        graph: 'urn:test:changelog:rfc64:heads',
+      }],
+    },
     subgraphMutationGeneration: transition('subgraph-generation'),
     contextGraphMutationGeneration: transition('context-graph-generation'),
     appliedSet: transition('applied-set'),
-    sealInvalidations: [],
   };
 }
 
@@ -585,9 +590,8 @@ describe('ChangelogStore — reserved-graph write protection', () => {
         authorSealGraph: CHANGELOG_GRAPH,
         authorSealQuads: [reservedQuad(baseInput.authorSealSubject, '"seal"')],
       }],
-      ['current head', { ...baseInput, currentHeadGraph: CHANGELOG_GRAPH }],
       ...([
-        'kaStateDigest',
+        'currentHead',
         'subgraphMutationGeneration',
         'contextGraphMutationGeneration',
         'appliedSet',
@@ -599,14 +603,6 @@ describe('ChangelogStore — reserved-graph write protection', () => {
           quads: [reservedQuad(baseInput[role].subject, `"${role}"`)],
         },
       }] as const),
-      ['seal invalidation', {
-        ...baseInput,
-        sealInvalidations: [{
-          graphUri: CHANGELOG_GRAPH,
-          subject: 'urn:test:changelog:rfc64:stale-seal',
-          quads: [],
-        }],
-      }],
     ];
 
     for (const [role, input] of cases) {

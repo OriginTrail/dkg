@@ -146,7 +146,7 @@ describe('RFC-64 author commit decorator integration', () => {
     expect(scans).toBe(2);
   });
 
-  it('maintains added and emptied graphs in a warm index without a full rescan', async () => {
+  it('maintains an added graph and retains an unrelated stale-seal graph without a full rescan', async () => {
     const base = new OxigraphStore();
     await seedOldState(base);
     const addedGraph = 'urn:test:rfc64:added-seal-graph';
@@ -169,16 +169,11 @@ describe('RFC-64 author commit decorator integration', () => {
     await expect(store.rfc64AuthorCommitCasV1(authorCommitInput({
       authorSealGraph: addedGraph,
       authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', addedGraph)],
-      sealInvalidations: [{
-        graphUri: emptiedGraph,
-        subject: INVALIDATED_SEAL,
-        quads: [],
-      }],
     }))).resolves.toBe('committed');
 
     const graphs = await store.listGraphs();
     expect(graphs).toContain(addedGraph);
-    expect(graphs).not.toContain(emptiedGraph);
+    expect(graphs).toContain(emptiedGraph);
     expect(scans).toBe(1);
   });
 

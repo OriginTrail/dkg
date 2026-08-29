@@ -11,7 +11,6 @@ export const STATE_GRAPH = 'urn:test:rfc64:state';
 export const OTHER_GRAPH = 'urn:test:rfc64:unrelated';
 export const AUTHOR = 'urn:test:rfc64:author:alice';
 export const SEAL = 'urn:test:rfc64:seal:alice';
-export const KA_STATE = 'urn:test:rfc64:ka-state';
 export const MUTATION = 'urn:test:rfc64:mutation:subgraph';
 export const CG_MUTATION = 'urn:test:rfc64:mutation:context-graph';
 export const APPLIED_SET = 'urn:test:rfc64:applied-set';
@@ -39,17 +38,12 @@ export function authorCommitInput(
     authorSealGraph: SEAL_GRAPH,
     authorSealSubject: SEAL,
     authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', SEAL_GRAPH)],
-    currentHeadGraph: HEAD_GRAPH,
-    currentHeadSubject: AUTHOR,
-    currentHeadPredicate: P_HEAD,
-    expectedCurrentHeadObject: OLD_HEAD,
-    nextCurrentHeadObject: NEW_HEAD,
-    kaStateDigest: {
-      graphUri: STATE_GRAPH,
-      subject: KA_STATE,
-      predicate: P_VALUE,
+    currentHead: {
+      graphUri: HEAD_GRAPH,
+      subject: AUTHOR,
+      predicate: P_HEAD,
       expectedObject: OLD_HEAD,
-      quads: [quad(KA_STATE, P_VALUE, NEW_HEAD, STATE_GRAPH)],
+      quads: [quad(AUTHOR, P_HEAD, NEW_HEAD, HEAD_GRAPH)],
     },
     subgraphMutationGeneration: {
       graphUri: STATE_GRAPH,
@@ -72,7 +66,6 @@ export function authorCommitInput(
       expectedObject: OLD_HEAD,
       quads: [quad(APPLIED_SET, P_APPLIED, NEW_HEAD, STATE_GRAPH)],
     },
-    sealInvalidations: [],
     ...overrides,
   };
 }
@@ -82,7 +75,6 @@ export async function seedOldState(store: TripleStore): Promise<void> {
     quad('urn:test:rfc64:old', P_VALUE, '"old"', PROJECTION_GRAPH),
     quad(SEAL, P_VALUE, '"old-seal"', SEAL_GRAPH),
     quad(AUTHOR, P_HEAD, OLD_HEAD, HEAD_GRAPH),
-    quad(KA_STATE, P_VALUE, OLD_HEAD, STATE_GRAPH),
     quad(MUTATION, P_GENERATION, '"1"', STATE_GRAPH),
     quad(CG_MUTATION, P_GENERATION, '"10"', STATE_GRAPH),
     quad(APPLIED_SET, P_APPLIED, OLD_HEAD, STATE_GRAPH),

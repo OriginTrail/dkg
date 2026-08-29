@@ -50,6 +50,12 @@ export {
   type Rfc64AuthorCommitSubjectReplacementV1,
 } from './rfc64-author-commit-cas.js';
 export {
+  Rfc64SemanticAuthorCommitErrorV1,
+  compileRfc64SemanticAuthorCommitV1,
+  type Rfc64SemanticAuthorCommitErrorCodeV1,
+  type Rfc64SemanticAuthorCommitInputV1,
+} from './rfc64-semantic-author-commit-v1.js';
+export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,

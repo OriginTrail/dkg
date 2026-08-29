@@ -441,15 +441,19 @@ function rfc64Input(subject: string, object: string): Rfc64AuthorCommitCasInputV
     authorSealGraph: sealGraph,
     authorSealSubject: 'urn:test:blob-race:seal',
     authorSealQuads: [quad('urn:test:blob-race:seal', '"seal"', sealGraph)],
-    currentHeadGraph: headGraph,
-    currentHeadSubject: 'urn:test:blob-race:author',
-    currentHeadPredicate: 'http://schema.org/value',
-    expectedCurrentHeadObject: null,
-    nextCurrentHeadObject: 'urn:test:blob-race:head:new',
-    kaStateDigest: transition('ka-state'),
+    currentHead: {
+      graphUri: headGraph,
+      subject: 'urn:test:blob-race:author',
+      predicate: 'http://schema.org/value',
+      expectedObject: null,
+      quads: [quad(
+        'urn:test:blob-race:author',
+        'urn:test:blob-race:head:new',
+        headGraph,
+      )],
+    },
     subgraphMutationGeneration: transition('subgraph-generation'),
     contextGraphMutationGeneration: transition('context-graph-generation'),
     appliedSet: transition('applied-set'),
-    sealInvalidations: [],
   };
 }

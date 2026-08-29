@@ -290,7 +290,6 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       const stateGraph = `${GRAPH}:rfc64:state`;
       const author = `urn:bg-int:${RUN}:rfc64:author`;
       const seal = `urn:bg-int:${RUN}:rfc64:seal`;
-      const kaState = `urn:bg-int:${RUN}:rfc64:ka-state`;
       const mutation = `urn:bg-int:${RUN}:rfc64:mutation`;
       const cgMutation = `urn:bg-int:${RUN}:rfc64:cg-mutation`;
       const appliedSet = `urn:bg-int:${RUN}:rfc64:applied-set`;
@@ -311,17 +310,12 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
         authorSealQuads: [
           { subject: seal, predicate: pValue, object: '"new-seal"', graph: sealGraph },
         ],
-        currentHeadGraph: headGraph,
-        currentHeadSubject: author,
-        currentHeadPredicate: pHead,
-        expectedCurrentHeadObject: oldHead,
-        nextCurrentHeadObject: newHead,
-        kaStateDigest: {
-          graphUri: stateGraph,
-          subject: kaState,
-          predicate: pValue,
+        currentHead: {
+          graphUri: headGraph,
+          subject: author,
+          predicate: pHead,
           expectedObject: oldHead,
-          quads: [{ subject: kaState, predicate: pValue, object: newHead, graph: stateGraph }],
+          quads: [{ subject: author, predicate: pHead, object: newHead, graph: headGraph }],
         },
         subgraphMutationGeneration: {
           graphUri: stateGraph,
@@ -344,7 +338,6 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
           expectedObject: oldHead,
           quads: [{ subject: appliedSet, predicate: pValue, object: newHead, graph: stateGraph }],
         },
-        sealInvalidations: [],
       };
 
       try {
@@ -352,7 +345,6 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
           { subject: `${author}:ka:old`, predicate: pValue, object: '"old"', graph: projectionGraph },
           { subject: seal, predicate: pValue, object: '"old-seal"', graph: sealGraph },
           { subject: author, predicate: pHead, object: oldHead, graph: headGraph },
-          { subject: kaState, predicate: pValue, object: oldHead, graph: stateGraph },
           { subject: mutation, predicate: pGeneration, object: '"1"', graph: stateGraph },
           { subject: cgMutation, predicate: pGeneration, object: '"10"', graph: stateGraph },
           { subject: appliedSet, predicate: pValue, object: oldHead, graph: stateGraph },
@@ -361,17 +353,16 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
         const competingHead = `urn:bg-int:${RUN}:rfc64:head:competing`;
         const competing = {
           ...input,
-          nextCurrentHeadObject: competingHead,
+          currentHead: {
+            ...input.currentHead,
+            quads: [{ subject: author, predicate: pHead, object: competingHead, graph: headGraph }],
+          },
           sharedProjectionQuads: [
             { subject: `${author}:ka:competing`, predicate: pValue, object: '"competing"', graph: projectionGraph },
           ],
           authorSealQuads: [
             { subject: seal, predicate: pValue, object: '"competing-seal"', graph: sealGraph },
           ],
-          kaStateDigest: {
-            ...input.kaStateDigest,
-            quads: [{ subject: kaState, predicate: pValue, object: competingHead, graph: stateGraph }],
-          },
           subgraphMutationGeneration: {
             ...input.subgraphMutationGeneration,
             quads: [{ subject: mutation, predicate: pGeneration, object: '"3"', graph: stateGraph }],

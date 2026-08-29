@@ -10,7 +10,6 @@ import {
 } from '../src/index.js';
 import {
   AUTHOR,
-  KA_STATE,
   P_HEAD,
   P_VALUE,
   PROJECTION_GRAPH,
@@ -39,28 +38,21 @@ describe('RFC-64 author commit external literal mapping', () => {
     const scalarGraph = 'did:dkg:context-graph:rfc64/control/_shared_memory';
     const oldValue = `"${'old-guard-value'.repeat(10)}"`;
     const nextValue = `"${'next-guard-value'.repeat(10)}"`;
-    await store.insert([quad(KA_STATE, P_VALUE, oldValue, scalarGraph)]);
+    await store.insert([quad(AUTHOR, P_HEAD, oldValue, scalarGraph)]);
     const input = authorCommitInput({
-      kaStateDigest: {
+      currentHead: {
         graphUri: scalarGraph,
-        subject: KA_STATE,
-        predicate: P_VALUE,
+        subject: AUTHOR,
+        predicate: P_HEAD,
         expectedObject: oldValue,
-        quads: [quad(KA_STATE, P_VALUE, nextValue, scalarGraph)],
+        quads: [quad(AUTHOR, P_HEAD, nextValue, scalarGraph)],
       },
-      currentHeadGraph: scalarGraph,
-      currentHeadSubject: AUTHOR,
-      currentHeadPredicate: P_HEAD,
-      expectedCurrentHeadObject: null,
-      nextCurrentHeadObject: nextValue,
     });
     await expect(store.rfc64AuthorCommitCasV1(input)).resolves.toBe('committed');
-    expect(await objectFor(store, scalarGraph, KA_STATE, P_VALUE)).toBe(nextValue);
     expect(await objectFor(store, scalarGraph, AUTHOR, P_HEAD)).toBe(nextValue);
 
     const nextHash = createHash('sha256').update(nextValue, 'utf8').digest('hex');
     const nextRef = `"sha256:${nextHash}"^^<${EXTERNAL_LITERAL_REF_DATATYPE}>`;
-    expect(await objectFor(raw, scalarGraph, KA_STATE, P_VALUE)).toBe(nextRef);
     expect(await objectFor(raw, scalarGraph, AUTHOR, P_HEAD)).toBe(nextRef);
     await expect(readFile(join(blobDir, nextHash), 'utf8')).resolves.toBe(nextValue);
   });
