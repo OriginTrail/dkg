@@ -95,6 +95,8 @@ describe('RFC-64 transferred catalog seal binding', () => {
 
     const snapshot = readVerifiedCatalogSealBindingV1(verified);
     expect(snapshot).toMatchObject({
+      catalogScope: SCOPE,
+      catalogRow: ROW,
       networkId: 'otp:20430',
       authorAddress: AUTHOR,
       kaId: KA_ID,
@@ -115,6 +117,9 @@ describe('RFC-64 transferred catalog seal binding', () => {
       new TextDecoder().decode(SEAL_BYTES),
     );
     expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.catalogScope)).toBe(true);
+    expect(Object.isFrozen(snapshot.catalogRow)).toBe(true);
+    expect(Object.isFrozen(snapshot.catalogRow.transfer)).toBe(true);
     expect(Object.isFrozen(snapshot.seal)).toBe(true);
     expect(Object.isFrozen(snapshot.placement)).toBe(true);
     expect(Object.isFrozen(snapshot.sealRows)).toBe(true);

@@ -59,6 +59,10 @@ export interface VerifiedCatalogSealBindingV1 {
 }
 
 export interface VerifiedCatalogSealBindingSnapshotV1 {
+  /** Canonical immutable scope retained by the verifier. */
+  readonly catalogScope: Readonly<AuthorCatalogScopeV1>;
+  /** Canonical immutable row retained by the verifier. */
+  readonly catalogRow: Readonly<AuthorCatalogRowV1>;
   readonly catalogScopeDigest: Digest32V1;
   readonly catalogRowDigest: Digest32V1;
   readonly networkId: NetworkIdV1;
@@ -237,8 +241,15 @@ export function verifyCatalogSealBindingV1(
   const placement = Object.freeze({ ...classified.placement });
   const sealSnapshot = Object.freeze({ ...classified.payload });
   const sealRows = Object.freeze(classified.rows.map((sealRow) => Object.freeze({ ...sealRow })));
+  const scopeSnapshot = Object.freeze({ ...scope });
+  const rowSnapshot = Object.freeze({
+    ...catalogRow,
+    transfer: Object.freeze({ ...catalogRow.transfer }),
+  });
   const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
   const snapshot = Object.freeze({
+    catalogScope: scopeSnapshot,
+    catalogRow: rowSnapshot,
     catalogScopeDigest,
     catalogRowDigest: computeAuthorCatalogRowDigestV1(
       catalogScopeDigest,

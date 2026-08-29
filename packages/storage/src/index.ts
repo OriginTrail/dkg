@@ -173,6 +173,11 @@ export {
   type Rfc64AuthorSealReadResultV1,
 } from './rfc64-author-seal-read-gateway.js';
 export {
+  isRfc64SharedProjectionStreamCapabilityV1,
+  type Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  type Rfc64SharedProjectionStreamCapabilityV1,
+} from './rfc64-shared-projection-stream-capability.js';
+export {
   resolveGraphScopedOrLegacyMetadata,
   type GraphScopedOrLegacyMetadata,
 } from './graph-knowledge-asset-metadata-loader.js';

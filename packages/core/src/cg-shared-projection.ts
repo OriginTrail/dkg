@@ -12,7 +12,9 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
   type SealTripleCountV1,
 } from './canonical-graph-scoped-author-seal.js';
-import { computeKaProjectionDigestV1 } from './ka-bundle-v1.js';
+import {
+  createKaProjectionDigestAccumulatorV1,
+} from './ka-bundle-v1.js';
 import {
   V10MerkleTree,
 } from './crypto/v10-merkle.js';
@@ -24,9 +26,12 @@ import {
   tripleContentV10,
 } from './crypto/canonicalize.js';
 import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
-import type {
-  ByteLengthV1,
-  Digest32V1,
+import {
+  assertCanonicalDigest,
+  parseCanonicalDecimalU64,
+  type ByteLengthV1,
+  type CountV1,
+  type Digest32V1,
 } from './sync-wire-scalars.js';
 import {
   assertVerifiedTransferredCatalogBundleForInputsV1,
@@ -47,7 +52,6 @@ export const CG_SHARED_PRIVATE_HASH_PREDICATE_V1 =
 const PRIVATE_COMMITMENT_PREDICATE_PREFIX =
   'http://dkg.io/ontology/privateData';
 const XSD_HEX_BINARY_IRI = 'http://www.w3.org/2001/XMLSchema#hexBinary';
-const UTF8 = new TextEncoder();
 const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const SENTINEL_NO_PRIVATE_DIGEST_V10 =
   '0xdfba2a3576c2aa2d73ecd8c55d1c27cfb15691ca9d3237b86434a06592f160ee' as Digest32V1;
@@ -75,6 +79,142 @@ export interface CgSharedPublicRootProjectionTripleV1 {
   readonly subject: string;
   readonly predicate: string;
   readonly object: string;
+}
+
+export interface CgSharedProjectionStreamVerifierOptionsV1 {
+  readonly commitmentSubject: string;
+  readonly expectedPublicTripleCount: CountV1;
+  readonly expectedProjectionDigest: Digest32V1;
+  readonly byteCeiling: number;
+}
+
+export interface CgSharedProjectionStreamVerifierV1 {
+  /** Validate one semantic triple and return one fresh canonical LF-terminated line. */
+  push(triple: CgSharedPublicRootProjectionTripleV1): Uint8Array;
+  /** Prove final count and digest after the complete ordered stream. */
+  finalize(): void;
+}
+
+/**
+ * Core-owned incremental verifier for the canonical cg-shared-v1 byte model.
+ * Buffered bundle verification and storage-backed streaming both use this
+ * exact ordering, commitment-subject, count, byte, and digest state machine.
+ */
+export function createCgSharedProjectionStreamVerifierV1(
+  options: CgSharedProjectionStreamVerifierOptionsV1,
+): CgSharedProjectionStreamVerifierV1 {
+  const accumulator = createCgSharedProjectionAccumulatorV1(options);
+  let lineNumber = 0;
+
+  return Object.freeze({
+    push(rawTriple: CgSharedPublicRootProjectionTripleV1): Uint8Array {
+      const triple = snapshotProjectionTriple(rawTriple);
+      assertStreamTripleHasNoRawLineBreaks(triple);
+      let content: Uint8Array;
+      try {
+        content = tripleContentV10(triple.subject, triple.predicate, triple.object);
+      } catch (cause) {
+        fail('projection-line', 'projection triple cannot be canonicalized', cause);
+      }
+      lineNumber += 1;
+      const parsed = parseCanonicalProjectionLine(content, lineNumber, false);
+      const line = new Uint8Array(content.byteLength + 1);
+      line.set(content);
+      line[line.byteLength - 1] = 0x0a;
+      accumulator.pushCanonicalLine(line, parsed);
+      return line;
+    },
+    finalize(): void {
+      accumulator.finalize();
+    },
+  });
+}
+
+interface CgSharedProjectionAccumulatorV1 {
+  pushCanonicalLine(
+    line: Uint8Array,
+    triple: Readonly<CgSharedPublicRootProjectionTripleV1>,
+  ): void;
+  finalize(): void;
+}
+
+/**
+ * Shared ordered-byte state machine. Callers must supply one already parsed,
+ * semantically valid canonical line, so buffered verification never needs to
+ * serialize or hash the same projection a second time.
+ */
+function createCgSharedProjectionAccumulatorV1(
+  options: CgSharedProjectionStreamVerifierOptionsV1,
+): CgSharedProjectionAccumulatorV1 {
+  let commitmentSubject: string;
+  let expectedCount: bigint;
+  let expectedProjectionDigest: Digest32V1;
+  let byteCeiling: number;
+  try {
+    commitmentSubject = options.commitmentSubject;
+    if (!isAbsoluteRfc3987IriV1(commitmentSubject)) {
+      throw new Error('commitmentSubject must be an absolute IRI');
+    }
+    expectedCount = parseCanonicalDecimalU64(
+      options.expectedPublicTripleCount,
+      'expectedPublicTripleCount',
+    );
+    assertCanonicalDigest(options.expectedProjectionDigest, 'expectedProjectionDigest');
+    expectedProjectionDigest = options.expectedProjectionDigest;
+    byteCeiling = options.byteCeiling;
+    if (!Number.isSafeInteger(byteCeiling) || byteCeiling < 1) {
+      throw new Error('byteCeiling must be a positive safe integer');
+    }
+  } catch (cause) {
+    fail('projection-input', 'projection verifier options are not canonical', cause);
+  }
+  const digest = createKaProjectionDigestAccumulatorV1();
+  let count = 0n;
+  let totalBytes = 0;
+  let previousLine: Uint8Array | undefined;
+  let finalized = false;
+
+  return Object.freeze({
+    pushCanonicalLine(
+      line: Uint8Array,
+      triple: Readonly<CgSharedPublicRootProjectionTripleV1>,
+    ): void {
+      if (finalized) fail('projection-input', 'projection verifier is already finalized');
+      assertStreamCommitmentPlacement(triple, commitmentSubject);
+      if (previousLine !== undefined) {
+        const ordering = compareBytes(previousLine, line);
+        if (ordering === 0) fail('projection-duplicate', 'projection triple duplicates its predecessor');
+        if (ordering > 0) fail('projection-order', 'projection triple is not in raw UTF-8 order');
+      }
+      count += 1n;
+      if (count > expectedCount) {
+        failPublicCount(
+          'public-count-overflow',
+          'projection exceeds the signed publicTripleCount',
+        );
+      }
+      totalBytes += line.byteLength;
+      if (totalBytes > byteCeiling) {
+        fail('projection-resource-refused', 'projection exceeds the effective byte ceiling');
+      }
+      digest.update(line);
+      previousLine = line.slice();
+    },
+    finalize(): void {
+      if (finalized) fail('projection-input', 'projection verifier is already finalized');
+      finalized = true;
+      if (count === 0n) fail('projection-empty', 'cg-shared-v1 projection must not be empty');
+      if (count !== expectedCount) {
+        failPublicCount(
+          'public-count-mismatch',
+          'projection count differs from signed publicTripleCount',
+        );
+      }
+      if (digest.digest() !== expectedProjectionDigest) {
+        fail('projection-digest', 'projection bytes differ from the expected digest');
+      }
+    },
+  });
 }
 
 /**
@@ -161,14 +301,25 @@ export type CgSharedProjectionErrorCode =
   | 'projection-capability'
   | 'projection-binding';
 
+export type CgSharedProjectionErrorReason =
+  | 'public-count-overflow'
+  | 'public-count-mismatch';
+
+export interface CgSharedProjectionErrorOptions extends ErrorOptions {
+  readonly reason?: CgSharedProjectionErrorReason;
+}
+
 export class CgSharedProjectionError extends Error {
+  readonly reason?: CgSharedProjectionErrorReason;
+
   constructor(
     readonly code: CgSharedProjectionErrorCode,
     message: string,
-    options: ErrorOptions = {},
+    options: CgSharedProjectionErrorOptions = {},
   ) {
     super(`[${code}] ${message}`, options);
     this.name = 'CgSharedProjectionError';
+    this.reason = options.reason;
   }
 }
 
@@ -255,17 +406,15 @@ export function verifyCgSharedProjectionV1(
     );
   }
 
-  const projectionDigest = computeKaProjectionDigestV1(projectionBytes);
-  if (
-    projectionDigest !== metadata.projectionDigest
-    || projectionDigest !== metadata.transfer.projectionDigest
-  ) {
-    fail('projection-digest', 'canonical projection bytes differ from the transferred digest');
+  const projectionDigest = metadata.projectionDigest;
+  if (projectionDigest !== metadata.transfer.projectionDigest) {
+    fail('projection-digest', 'catalog and transfer projection digests differ');
   }
 
   const semantic = verifyCanonicalProjectionBytes(
     projectionBytes,
     sealBinding.seal,
+    projectionDigest,
     verificationLimits,
   );
   const snapshot = Object.freeze({
@@ -401,6 +550,7 @@ export function readVerifiedCgSharedProjectionBytesV1(
 function verifyCanonicalProjectionBytes(
   projectionBytes: Uint8Array,
   seal: Readonly<CanonicalGraphScopedAuthorSealV1>,
+  projectionDigest: Digest32V1,
   limits: Readonly<CgSharedProjectionVerificationLimitsV1>,
 ): {
   readonly publicRoot: Digest32V1;
@@ -425,12 +575,16 @@ function verifyCanonicalProjectionBytes(
   const leaves: Uint8Array[] = [];
   let anchor: CanonicalProjectionTripleV1 | undefined;
   let privateHash: CanonicalProjectionTripleV1 | undefined;
-  let previousLine: Uint8Array | undefined;
   let lineStart = 0;
   let lineNumber = 0;
-  const signedPublicTripleCount = BigInt(seal.publicTripleCount);
   const reservedCommitmentSubject =
     `${seal.kaUal}${CG_SHARED_PRIVATE_COMMITMENT_SUFFIX_V1}`;
+  const accumulator = createCgSharedProjectionAccumulatorV1({
+    commitmentSubject: reservedCommitmentSubject,
+    expectedPublicTripleCount: seal.publicTripleCount,
+    expectedProjectionDigest: projectionDigest,
+    byteCeiling: limits.maxProjectionBytes,
+  });
   for (let cursor = 0; cursor < projectionBytes.byteLength; cursor += 1) {
     const byte = projectionBytes[cursor];
     if (byte === 0x0d) {
@@ -439,12 +593,6 @@ function verifyCanonicalProjectionBytes(
     if (byte !== 0x0a) continue;
     const line = projectionBytes.subarray(lineStart, cursor);
     lineNumber += 1;
-    if (BigInt(lineNumber) > signedPublicTripleCount) {
-      fail(
-        'projection-public-count',
-        'projection contains more lines than the signed publicTripleCount',
-      );
-    }
     if (line.byteLength === 0) {
       fail('projection-line', `projection line ${lineNumber} is empty`);
     }
@@ -454,26 +602,8 @@ function verifyCanonicalProjectionBytes(
         `projection line ${lineNumber} exceeds the local in-memory line limit`,
       );
     }
-    if (previousLine !== undefined) {
-      const ordering = compareBytes(previousLine, line);
-      if (ordering === 0) {
-        fail('projection-duplicate', `projection line ${lineNumber} duplicates its predecessor`);
-      }
-      if (ordering > 0) {
-        fail('projection-order', `projection line ${lineNumber} is not in raw UTF-8 order`);
-      }
-    }
     const triple = parseCanonicalProjectionLine(line, lineNumber);
-    if (
-      triple.subject === reservedCommitmentSubject
-      && triple.predicate !== CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1
-      && triple.predicate !== CG_SHARED_PRIVATE_HASH_PREDICATE_V1
-    ) {
-      fail(
-        'projection-private-subject',
-        `projection line ${lineNumber} reuses the reserved commitment subject`,
-      );
-    }
+    accumulator.pushCanonicalLine(projectionBytes.subarray(lineStart, cursor + 1), triple);
     if (triple.predicate === CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1) {
       if (anchor !== undefined) {
         fail('projection-private-cardinality', 'projection contains duplicate private anchors');
@@ -484,26 +614,15 @@ function verifyCanonicalProjectionBytes(
         fail('projection-private-cardinality', 'projection contains duplicate private hashes');
       }
       privateHash = triple;
-    } else if (triple.predicate.startsWith(PRIVATE_COMMITMENT_PREDICATE_PREFIX)) {
-      fail(
-        'projection-private-predicate',
-        `projection line ${lineNumber} uses an unknown reserved private-data predicate`,
-      );
     }
     leaves.push(triple.leaf);
-    previousLine = line;
     lineStart = cursor + 1;
   }
   if (lineStart !== projectionBytes.byteLength) {
     fail('projection-line-ending', 'projection contains bytes after its final complete line');
   }
 
-  if (BigInt(lineNumber) !== BigInt(seal.publicTripleCount)) {
-    fail(
-      'projection-public-count',
-      'canonical projection line count differs from seal publicTripleCount',
-    );
-  }
+  accumulator.finalize();
   assertPrivateCommitment(anchor, privateHash, seal);
 
   const publicTree = new V10MerkleTree(leaves);
@@ -567,9 +686,63 @@ function assertPrivateCommitment(
   }
 }
 
+function snapshotProjectionTriple(
+  input: CgSharedPublicRootProjectionTripleV1,
+): Readonly<CgSharedPublicRootProjectionTripleV1> {
+  if (
+    input === null
+    || typeof input !== 'object'
+    || typeof input.subject !== 'string'
+    || typeof input.predicate !== 'string'
+    || typeof input.object !== 'string'
+  ) {
+    fail('projection-input', 'projection triple must contain string RDF terms');
+  }
+  return Object.freeze({
+    subject: input.subject,
+    predicate: input.predicate,
+    object: input.object,
+  });
+}
+
+function assertStreamTripleHasNoRawLineBreaks(
+  triple: Readonly<CgSharedPublicRootProjectionTripleV1>,
+): void {
+  if (triple.subject.includes('\n') || triple.subject.includes('\r')) {
+    fail('projection-iri', 'projection subject contains a raw line break');
+  }
+  if (triple.predicate.includes('\n') || triple.predicate.includes('\r')) {
+    fail('projection-iri', 'projection predicate contains a raw line break');
+  }
+  if (triple.object.includes('\n') || triple.object.includes('\r')) {
+    fail('projection-literal', 'projection object contains a raw line break');
+  }
+}
+
+function assertStreamCommitmentPlacement(
+  triple: Readonly<CgSharedPublicRootProjectionTripleV1>,
+  commitmentSubject: string,
+): void {
+  const isAnchor = triple.predicate === CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1;
+  const isHash = triple.predicate === CG_SHARED_PRIVATE_HASH_PREDICATE_V1;
+  if ((isAnchor || isHash) && triple.subject !== commitmentSubject) {
+    fail(
+      'projection-private-subject',
+      'private commitment predicate is outside the derived KA commitment subject',
+    );
+  }
+  if (triple.subject === commitmentSubject && !isAnchor && !isHash) {
+    fail('projection-private-subject', 'projection reuses the reserved commitment subject');
+  }
+  if (!isAnchor && !isHash && triple.predicate.startsWith(PRIVATE_COMMITMENT_PREDICATE_PREFIX)) {
+    fail('projection-private-predicate', 'projection uses an unknown private-data predicate');
+  }
+}
+
 function parseCanonicalProjectionLine(
   lineBytes: Uint8Array,
   lineNumber: number,
+  verifySerializedFixedPoint = true,
 ): CanonicalProjectionTripleV1 {
   let line: string;
   try {
@@ -605,16 +778,18 @@ function parseCanonicalProjectionLine(
   const object = line.slice(objectStart, objectEnd);
   assertCanonicalObjectTerm(object, lineNumber);
 
-  const reconstructed = tripleContentV10(
-    subject.value,
-    predicate.value,
-    object,
-  );
-  if (!equalBytes(reconstructed, lineBytes)) {
-    fail(
-      object.startsWith('"') ? 'projection-literal' : 'projection-line',
-      `projection line ${lineNumber} is not a canonical V10 fixed point`,
+  if (verifySerializedFixedPoint) {
+    const reconstructed = tripleContentV10(
+      subject.value,
+      predicate.value,
+      object,
     );
+    if (!equalBytes(reconstructed, lineBytes)) {
+      fail(
+        object.startsWith('"') ? 'projection-literal' : 'projection-line',
+        `projection line ${lineNumber} is not a canonical V10 fixed point`,
+      );
+    }
   }
   return Object.freeze({
     subject: subject.value,
@@ -828,5 +1003,16 @@ function fail(
     code,
     message,
     cause === undefined ? {} : { cause },
+  );
+}
+
+function failPublicCount(
+  reason: Extract<CgSharedProjectionErrorReason, `public-count-${string}`>,
+  message: string,
+): never {
+  throw new CgSharedProjectionError(
+    'projection-public-count',
+    message,
+    { reason },
   );
 }

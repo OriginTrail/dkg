@@ -322,6 +322,8 @@ describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
     ['RFC3987 noncharacter', '<urn:test:\uFFFF> <https://schema.org/name> "Alice" .\n', 'projection-iri'],
     ['fourth graph term', '<https://example.org/s> <https://example.org/p> "x" <https://example.org/g> .\n', 'projection-literal'],
     ['blank-node object', '<https://example.org/s> <https://example.org/p> _:b0 .\n', 'projection-line'],
+    ['malformed literal', '<https://example.org/s> <https://example.org/p> "unterminated .\n', 'projection-literal'],
+    ['embedded literal line break', '<https://example.org/s> <https://example.org/p> "line\nbreak" .\n', 'projection-line'],
     ['RDF-star object', '<https://example.org/s> <https://example.org/p> << <https://example.org/a> <https://example.org/b> "x" >> .\n', 'projection-iri'],
     ['doubled separator', '<https://example.org/s>  <https://example.org/p> "x" .\n', 'projection-iri'],
     ['trailing space', '<https://example.org/s> <https://example.org/p> "x" . \n', 'projection-line'],
