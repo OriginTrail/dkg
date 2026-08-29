@@ -59,7 +59,6 @@ async function runWorker(mode, graphCount, rounds) {
   names.slice(0, Math.min(2_000, names.length)).sort(comparator);
   global.gc();
 
-  const baseline = process.memoryUsage();
   let comparisons = 0;
   let finalOrder = [];
   const countedComparator = (left, right) => {
@@ -71,7 +70,6 @@ async function runWorker(mode, graphCount, rounds) {
     finalOrder = [...names].sort(countedComparator);
   }
   const durationMs = performance.now() - startedAt;
-  const usage = process.memoryUsage();
   return {
     mode,
     graphCount,
@@ -79,7 +77,6 @@ async function runWorker(mode, graphCount, rounds) {
     durationMs,
     comparisons,
     temporaryCodePointArrays: mode === 'old' ? comparisons * 2 : 0,
-    heapUsedDeltaBytes: Math.max(0, usage.heapUsed - baseline.heapUsed),
     fingerprint: fingerprint(finalOrder),
   };
 }
@@ -106,7 +103,6 @@ function runIsolatedTrial(mode, graphCount, rounds) {
 function summarize(trials) {
   return {
     durationMs: median(trials.map((trial) => trial.durationMs)),
-    heapUsedDeltaBytes: median(trials.map((trial) => trial.heapUsedDeltaBytes)),
     comparisons: trials[0].comparisons,
     temporaryCodePointArrays: trials[0].temporaryCodePointArrays,
     fingerprint: trials[0].fingerprint,
@@ -115,10 +111,6 @@ function summarize(trials) {
 
 function formatInteger(value) {
   return new Intl.NumberFormat('en-US').format(Math.round(value));
-}
-
-function formatBytes(bytes) {
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
 }
 
 function runController() {
@@ -158,15 +150,14 @@ function runController() {
   console.log('Graph-plan code-point comparator benchmark');
   console.log(`Node ${process.version}; ${rounds} sort round(s); ${trialsPerMode} isolated trial(s) per mode`);
   console.log('');
-  console.log('| Graphs | Comparisons | Old median | New median | Speedup | Old temporary arrays | New temporary arrays | Old heap delta | New heap delta |');
-  console.log('| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
+  console.log('| Graphs | Comparisons | Old median | New median | Speedup | Old temporary arrays | New temporary arrays |');
+  console.log('| ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
   for (const result of results) {
     console.log(
       `| ${formatInteger(result.graphCount)} | ${formatInteger(result.old.comparisons)} | ` +
       `${result.old.durationMs.toFixed(2)} ms | ${result.new.durationMs.toFixed(2)} ms | ` +
       `${result.speedup.toFixed(1)}x | ${formatInteger(result.old.temporaryCodePointArrays)} | ` +
-      `${formatInteger(result.new.temporaryCodePointArrays)} | ${formatBytes(result.old.heapUsedDeltaBytes)} | ` +
-      `${formatBytes(result.new.heapUsedDeltaBytes)} |`,
+      `${formatInteger(result.new.temporaryCodePointArrays)} |`,
     );
   }
   console.log('');
