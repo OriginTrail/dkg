@@ -2748,7 +2748,7 @@ export class TripleStoreAsyncLiftPublisher
    * {@link describeConfiguredRetryState} projects its reason from, so the counts an operator gets and
    * the reason shown per job are ONE partition rather than two orderings kept in step by hand.
    */
-  async retryDetailed(filter: { status?: 'failed' } = {}): Promise<AsyncLiftRetryOutcome> {
+  async retryDetailed(filter: { status?: 'failed'; jobId?: string } = {}): Promise<AsyncLiftRetryOutcome> {
     await this.ensureGraph();
     if (filter.status && filter.status !== 'failed') {
       return { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
@@ -2761,7 +2761,10 @@ export class TripleStoreAsyncLiftPublisher
     // swept" guarantee does not hold.
     return this.claimCoordinator.runClaimTransaction(async () => {
       const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
-      for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+      const failedJobs = (await this.list({ status: 'failed' }))
+        .filter(isFailedJob)
+        .filter((job) => filter.jobId === undefined || job.jobId === filter.jobId);
+      for (const job of failedJobs) {
         // The WRITE decision, taken over the job alone — the operator's kill-switch is not an
         // input here and the signature cannot accept one.
         const action = classifyRetryAction(job);

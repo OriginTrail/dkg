@@ -611,11 +611,21 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 400, {
         error: "Only status=failed is supported",
       });
+    const jobId = parsed.jobId;
+    if (jobId !== undefined && (typeof jobId !== "string" || jobId.length === 0)) {
+      return jsonResponse(res, 400, {
+        error: "jobId must be a non-empty string when supplied",
+      });
+    }
     // GH#2270 — `retried` keeps its exact pre-#2270 meaning (jobs reaccepted), so an
     // operator script reading it is unaffected; the two additive counts explain the jobs
     // left failed instead of leaving them invisible: `blockedPendingRecovery` may carry an
     // on-chain transaction and needs chain proof, `skipped` has nothing left to reaccept.
-    const outcome = await publisherControl.retryDetailed({ status: "failed" });
+    const retryFilter: { status: "failed"; jobId?: string } = {
+      status: "failed",
+      ...(typeof jobId === "string" ? { jobId } : {}),
+    };
+    const outcome = await publisherControl.retryDetailed(retryFilter);
     return jsonResponse(res, 200, {
       retried: outcome.retried,
       blockedPendingRecovery: outcome.blockedPendingRecovery,
