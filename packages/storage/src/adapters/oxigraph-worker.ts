@@ -10,6 +10,11 @@ import type {
   Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
 import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+} from '../rfc64-author-commit-cas.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -699,6 +704,17 @@ export class OxigraphWorkerStore implements TripleStore {
     // single-message commit, same contract as insert/replaceGraph.
     await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
       this.call('replaceSubject', graphUri, subject, quads));
+  }
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: TripleStoreQueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (options?.signal?.aborted) throw asAbortError(options.signal.reason);
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    return this.runTrackedWrite(
+      { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
+      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', input),
+    );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);

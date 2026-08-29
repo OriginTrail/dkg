@@ -116,6 +116,11 @@ describe('RFC-64 semantic read manifest v1', () => {
     expect(new Set(CASES.map(({ coordinate }) => coordinate.recordType))).toEqual(
       new Set(Object.keys(RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1)),
     );
+    const emittedIds = CASES.map(({ coordinate }) => compileRfc64SemanticReadOperationV1({
+      backend: 'oxigraph',
+      coordinate,
+    }).queryId);
+    expect(new Set(emittedIds)).toEqual(new Set(RFC64_SEMANTIC_READ_QUERY_IDS_V1));
   });
 
   it('renders one backend-neutral bounded query for every semantic record', () => {
