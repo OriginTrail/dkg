@@ -11,6 +11,79 @@ const RDF_LITERAL_SHORT_ESCAPES: Readonly<Record<string, string>> = Object.freez
 
 const RDF_LITERAL_ESCAPE_PATTERN = /["\\\u0000-\u001F\u007F]/g;
 
+export interface DecodeNTriplesUcharEscapesOptions {
+  /** Preserve malformed or non-UCHAR backslash sequences instead of rejecting. */
+  invalidEscape?: 'reject' | 'preserve';
+  /**
+   * `combine` accepts only scalar values and combines adjacent UTF-16 escape
+   * pairs; `allow` preserves legacy isolated surrogate code units; `reject`
+   * rejects every surrogate escape.
+   */
+  surrogatePolicy?: 'combine' | 'allow' | 'reject';
+}
+
+/**
+ * Decode N-Triples UCHAR escapes (`\\uXXXX` and `\\UXXXXXXXX`) with an
+ * explicit malformed-escape and surrogate policy. This is shared by RDF
+ * parsers and consensus canonicalization so their Unicode state machines
+ * cannot drift independently.
+ */
+export function decodeNTriplesUcharEscapes(
+  value: string,
+  options: DecodeNTriplesUcharEscapesOptions = {},
+): string | null {
+  if (!value.includes('\\')) return value;
+  const preserveInvalid = options.invalidEscape === 'preserve';
+  const surrogatePolicy = options.surrogatePolicy ?? 'reject';
+  let decoded = '';
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== '\\') {
+      decoded += value[index];
+      continue;
+    }
+    const marker = value[index + 1];
+    const digits = marker === 'u' ? 4 : marker === 'U' ? 8 : 0;
+    const hex = digits === 0 ? '' : value.slice(index + 2, index + 2 + digits);
+    const rawEscape = digits === 0 ? value.slice(index, index + 2) : `\\${marker}${hex}`;
+    if (digits === 0 || hex.length !== digits || !/^[0-9A-Fa-f]+$/.test(hex)) {
+      if (!preserveInvalid) return null;
+      decoded += rawEscape;
+      index += Math.max(0, rawEscape.length - 1);
+      continue;
+    }
+
+    let codePoint = Number.parseInt(hex, 16);
+    index += digits + 1;
+    if (codePoint > 0x10ffff) {
+      if (!preserveInvalid) return null;
+      decoded += rawEscape;
+      continue;
+    }
+    if (codePoint >= 0xd800 && codePoint <= 0xdbff && surrogatePolicy === 'combine') {
+      const lowHex = value.slice(index + 3, index + 7);
+      if (value.slice(index + 1, index + 3) !== '\\u'
+        || lowHex.length !== 4
+        || !/^[dD][c-fC-F][0-9A-Fa-f]{2}$/.test(lowHex)) {
+        if (!preserveInvalid) return null;
+        decoded += rawEscape;
+        continue;
+      }
+      const low = Number.parseInt(lowHex, 16);
+      codePoint = 0x10000 + ((codePoint - 0xd800) * 0x400) + (low - 0xdc00);
+      index += 6;
+    } else if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+      if (surrogatePolicy !== 'allow') {
+        if (!preserveInvalid) return null;
+        decoded += rawEscape;
+        continue;
+      }
+    }
+    decoded += String.fromCodePoint(codePoint);
+  }
+  return decoded;
+}
+
 /**
  * Escape a plain-text string for use as an RDF/N-Triples literal body.
  * Returns only the escaped body; callers add the surrounding quotes.

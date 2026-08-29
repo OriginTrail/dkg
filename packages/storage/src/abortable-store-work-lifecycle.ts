@@ -46,6 +46,46 @@ export function composeAbortSignals(
   return { signal: combined.signal, dispose };
 }
 
+/**
+ * Race one already-started operation against cancellation without leaking a
+ * listener or an unhandled late settlement. An optional late-result hook owns
+ * resources that arrive after cancellation (for example a backend iterator).
+ */
+export function raceStoreWorkAgainstAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+  onLateResult?: (value: T) => void | Promise<void>,
+): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) {
+    void work.then(onLateResult).catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (!aborted && signal.aborted) onAbort();
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        if (aborted) {
+          void Promise.resolve(onLateResult?.(value)).catch(() => undefined);
+        } else {
+          resolve(value);
+        }
+      },
+      (cause) => {
+        signal.removeEventListener('abort', onAbort);
+        if (!aborted) reject(cause);
+      },
+    );
+  });
+}
+
 interface StoreWorkGeneration {
   readonly controller: AbortController;
   readonly inFlight: Set<Promise<unknown>>;

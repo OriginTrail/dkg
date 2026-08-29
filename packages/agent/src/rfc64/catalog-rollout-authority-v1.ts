@@ -16,6 +16,27 @@ export interface ResolvedRfc64CatalogRolloutConfigV1 {
   readonly contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
 }
 
+export type Rfc64CatalogReconciliationLaneV1 =
+  | 'legacy'
+  | 'shadow-stage'
+  | 'catalog-apply'
+  | 'disabled';
+
+/**
+ * One immutable answer for every runtime authority question about one CG.
+ * Consumers must not reinterpret raw rollout modes independently.
+ */
+export interface Rfc64CatalogAuthorityDecisionV1 {
+  readonly contextGraphId: string;
+  readonly selected: boolean;
+  readonly mode: Rfc64CatalogRolloutModeV1;
+  readonly killSwitchActive: boolean;
+  readonly legacySyncAllowed: boolean;
+  readonly track2Enabled: boolean;
+  readonly authoringAllowed: boolean;
+  readonly reconciliationLane: Rfc64CatalogReconciliationLaneV1;
+}
+
 const RFC64_CATALOG_ROLLOUT_FIELDS_V1 = new Set([
   'contextGraphModes',
   'killSwitch',
@@ -94,6 +115,40 @@ export function rfc64CatalogRolloutModeForContextGraphV1(
   return mode;
 }
 
+/** Resolve the complete restart-stable capability set for one CG exactly once. */
+export function resolveRfc64CatalogAuthorityDecisionV1(
+  activation: Readonly<{
+    enabled?: boolean;
+    selectedContextGraphs: readonly string[];
+    rollout: ResolvedRfc64CatalogRolloutConfigV1;
+  }> | undefined,
+  contextGraphId: string,
+): Rfc64CatalogAuthorityDecisionV1 {
+  const selected = activation?.selectedContextGraphs.includes(contextGraphId) ?? false;
+  const mode = rfc64CatalogRolloutModeForContextGraphV1(activation, contextGraphId);
+  const killSwitchActive = activation?.rollout?.killSwitch ?? false;
+  // The disabled activation preserves the pre-activation direct catalog API
+  // for unselected callers. Selected CGs always have exactly one authority.
+  const compatibilityTrack2 = activation?.enabled === false && !selected;
+  const track2Enabled = !killSwitchActive && (compatibilityTrack2 || mode !== 'legacy');
+  const legacySyncAllowed = !selected || mode !== 'catalog';
+  const reconciliationLane: Rfc64CatalogReconciliationLaneV1 = !track2Enabled
+    ? (legacySyncAllowed ? 'legacy' : 'disabled')
+    : mode === 'shadow'
+      ? 'shadow-stage'
+      : 'catalog-apply';
+  return Object.freeze({
+    contextGraphId,
+    selected,
+    mode,
+    killSwitchActive,
+    legacySyncAllowed,
+    track2Enabled,
+    authoringAllowed: track2Enabled,
+    reconciliationLane,
+  });
+}
+
 /**
  * Preserve the pre-activation catalog API while applying selected-CG rollout
  * only after the new activation block is explicitly enabled.
@@ -106,8 +161,8 @@ export function rfc64CatalogTrack2ModeForContextGraphV1(
   }> | undefined,
   contextGraphId: string,
 ): Rfc64CatalogRolloutModeV1 {
-  if (activation?.enabled === false) return 'catalog';
-  return rfc64CatalogRolloutModeForContextGraphV1(activation, contextGraphId);
+  const decision = resolveRfc64CatalogAuthorityDecisionV1(activation, contextGraphId);
+  return decision.track2Enabled ? decision.mode === 'legacy' ? 'catalog' : decision.mode : 'legacy';
 }
 
 /** Dedicated Track-2 emergency stop; it never changes a CG's persisted mode. */
@@ -125,7 +180,7 @@ export function rfc64LegacySyncAuthorityActiveForContextGraphV1(
   }> | undefined,
   contextGraphId: string,
 ): boolean {
-  return rfc64CatalogRolloutModeForContextGraphV1(activation, contextGraphId) !== 'catalog';
+  return resolveRfc64CatalogAuthorityDecisionV1(activation, contextGraphId).legacySyncAllowed;
 }
 
 /** One deterministic no-dual-authority projection for the legacy sync scope. */

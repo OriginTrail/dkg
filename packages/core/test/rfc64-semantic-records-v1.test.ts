@@ -6,6 +6,7 @@ import {
   RFC64_DIGEST_LIST_DATATYPE_IRI_V1,
   RFC64_SEMANTIC_NULL_IRI_V1,
   RFC64_SEMANTIC_PREDICATES_V1,
+  Rfc64SemanticRecordErrorV1,
   decodeRfc64SemanticRecordStoreRowsV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
@@ -172,6 +173,85 @@ describe('RFC-64 semantic record RDF codec v1', () => {
       + '0x8e38ab4dfb3e25028a2c1863a0d246817222e60842f7bebe997bc5d60bbcf66e/'
       + `${AUTHOR}/current`,
     ]));
+  });
+
+  it('pins independent RDF goldens for the other six record contracts', () => {
+    const encodedNetwork = 'otp%3A20430';
+    const encodedContextGraph = '0x0123456789abcdef0123456789abcdef01234567%2F14';
+    const contextGraphIri = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    const subgraphKey = '0x8e38ab4dfb3e25028a2c1863a0d246817222e60842f7bebe997bc5d60bbcf66e';
+    const xsd = 'http://www.w3.org/2001/XMLSchema#';
+    const dkg = 'http://dkg.io/ontology/';
+    const string = (value: string) => JSON.stringify(value);
+    const integer = (value: string) => `${JSON.stringify(value)}^^<${xsd}integer>`;
+    const digest = (byte: string) => `${JSON.stringify(byte.repeat(64))}^^<${xsd}hexBinary>`;
+    const dateTime = (value: string) => `${JSON.stringify(value)}^^<${xsd}dateTime>`;
+    const golden = (
+      record: Rfc64SemanticRecordV1,
+      route: string,
+      suffix: string,
+      rows: readonly (readonly [string, string])[],
+    ) => {
+      const subject = `urn:dkg:sync:${route}:${encodedNetwork}:${encodedContextGraph}${suffix}`;
+      const graph = `${contextGraphIri}/_sync/${route}${suffix.replaceAll(':', '/')}`;
+      expect(projectRfc64SemanticRecordStoreRowsV1(record).map(renderRfc64SemanticStoreRowV1))
+        .toEqual(rows.map(([predicate, object]) => ({ subject, predicate, object, graph })));
+    };
+
+    golden(records[1], 'applied', `:${subgraphKey}`, [
+      [`${dkg}networkId`, string('otp:20430')],
+      [`${dkg}contextGraphId`, string(CONTEXT_GRAPH)],
+      [`${dkg}subGraphName`, string('research')],
+      [`${dkg}checkpointEra`, integer('3')],
+      [`${dkg}checkpointVersion`, integer('9')],
+      [`${dkg}checkpointDigest`, digest('b')],
+      [`${dkg}mutationGeneration`, integer('11')],
+      [`${dkg}appliedAt`, dateTime(APPLIED_AT)],
+    ]);
+    golden(records[2], 'mutation', `:${subgraphKey}`, [
+      [`${dkg}networkId`, string('otp:20430')],
+      [`${dkg}contextGraphId`, string(CONTEXT_GRAPH)],
+      [`${dkg}subGraphName`, string('research')],
+      [`${dkg}generation`, integer('12')],
+    ]);
+    golden(records[3], 'mutation-cg', '', [
+      [`${dkg}networkId`, string('otp:20430')],
+      [`${dkg}contextGraphId`, string(CONTEXT_GRAPH)],
+      [`${dkg}generation`, integer('13')],
+    ]);
+    const pendingLexical = `["${D('c')}","${D('d')}"]`;
+    golden(records[4], 'reconcile-target', `:${subgraphKey}`, [
+      [`${dkg}networkId`, string('otp:20430')],
+      [`${dkg}contextGraphId`, string(CONTEXT_GRAPH)],
+      [`${dkg}subGraphName`, string('research')],
+      [`${dkg}generation`, integer('14')],
+      [`${dkg}baselineSubgraphCheckpointDigest`, '<urn:dkg:sync:null>'],
+      [`${dkg}activeTargetSubgraphCheckpointDigest`, digest('d')],
+      [
+        `${dkg}pendingTargetCheckpointDigests`,
+        `${JSON.stringify(pendingLexical)}^^<http://dkg.io/ontology/digestListV1>`,
+      ],
+    ]);
+    golden(records[5], 'applied-set', '', [
+      [`${dkg}networkId`, string('otp:20430')],
+      [`${dkg}contextGraphId`, string(CONTEXT_GRAPH)],
+      [`${dkg}generation`, integer('15')],
+      [`${dkg}subgraphIndexEra`, integer('4')],
+      [`${dkg}subgraphIndexVersion`, integer('10')],
+      [`${dkg}subgraphCount`, integer('6')],
+      [`${dkg}appliedDirectoryRootDigest`, digest('e')],
+    ]);
+    golden(records[6], 'applied-cg', '', [
+      [`${dkg}networkId`, string('otp:20430')],
+      [`${dkg}contextGraphId`, string(CONTEXT_GRAPH)],
+      [`${dkg}checkpointEra`, integer('5')],
+      [`${dkg}checkpointVersion`, integer('12')],
+      [`${dkg}checkpointDigest`, digest('f')],
+      [`${dkg}policyDigest`, digest('2')],
+      [`${dkg}chainCoverageDigest`, digest('3')],
+      [`${dkg}mutationGeneration`, integer('16')],
+      [`${dkg}appliedAt`, dateTime(APPLIED_AT)],
+    ]);
   });
 
   it('uses one explicit named-node sentinel for every null branch', () => {
@@ -415,6 +495,95 @@ describe('RFC-64 semantic record RDF codec v1', () => {
       (record.value as { pendingTargetCheckpointDigests: readonly Digest32V1[] })
         .pendingTargetCheckpointDigests,
     )).toBe(true);
+  });
+
+  it('snapshots exactly the pending digest descriptors it validates', () => {
+    let indexedReads = 0;
+    const pending = new Proxy([D('c'), D('d')], {
+      get(target, property, receiver) {
+        if (property === '0' || property === '1') {
+          indexedReads += 1;
+          return 'not-a-digest';
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const record = snapshotRfc64SemanticRecordV1({
+      ...records[4],
+      value: { ...records[4].value, pendingTargetCheckpointDigests: pending },
+    });
+    expect(indexedReads).toBe(0);
+    expect(record.value).toMatchObject({
+      pendingTargetCheckpointDigests: [D('c'), D('d')],
+    });
+    const rows = projectRfc64SemanticRecordStoreRowsV1(record);
+    expect(decodeRfc64SemanticRecordStoreRowsV1(rows, coordinateFor(record)).record)
+      .toEqual(record);
+  });
+
+  it('pins every public rejection category, including coordinates and row structure', () => {
+    const expectCode = (
+      operation: () => unknown,
+      code: Rfc64SemanticRecordErrorV1['code'],
+    ) => {
+      try {
+        operation();
+        throw new Error('expected operation to reject');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Rfc64SemanticRecordErrorV1);
+        expect((error as Rfc64SemanticRecordErrorV1).code).toBe(code);
+      }
+    };
+
+    expectCode(
+      () => snapshotRfc64SemanticRecordV1({ recordType: 'unknown', value: {} }),
+      'rfc64-semantic-schema',
+    );
+    expectCode(
+      () => snapshotRfc64SemanticRecordV1({
+        ...records[3],
+        value: { ...records[3].value, generation: '013' },
+      }),
+      'rfc64-semantic-scalar',
+    );
+    const currentRows = [...projectRfc64SemanticRecordStoreRowsV1(records[0])];
+    expectCode(
+      () => decodeRfc64SemanticRecordStoreRowsV1(currentRows, {
+        ...coordinateFor(records[0]),
+        contextGraphId: 'not canonical' as ContextGraphIdV1,
+      }),
+      'rfc64-semantic-coordinate',
+    );
+    const adorned = Object.assign([...currentRows], { extra: true });
+    expectCode(
+      () => decodeRfc64SemanticRecordStoreRowsV1(adorned, coordinateFor(records[0])),
+      'rfc64-semantic-row-schema',
+    );
+    expectCode(
+      () => decodeRfc64SemanticRecordStoreRowsV1(currentRows.slice(1), coordinateFor(records[0])),
+      'rfc64-semantic-row-cardinality',
+    );
+    expectCode(
+      () => decodeRfc64SemanticRecordStoreRowsV1(
+        [{ ...currentRows[0], graphIri: 'urn:test:wrong' }, ...currentRows.slice(1)],
+        coordinateFor(records[0]),
+      ),
+      'rfc64-semantic-row-term',
+    );
+    expectCode(
+      () => decodeRfc64SemanticRecordStoreRowsV1([
+        {
+          ...currentRows[0],
+          object: {
+            kind: 'literal',
+            value: 'x'.repeat(MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1),
+            datatypeIri: 'http://www.w3.org/2001/XMLSchema#string',
+          },
+        },
+        ...currentRows.slice(1),
+      ], coordinateFor(records[0])),
+      'rfc64-semantic-too-large',
+    );
   });
 });
 

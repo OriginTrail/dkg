@@ -18,9 +18,6 @@ import {
   assertManagedOxigraphSparqlResponseComplete,
 } from './adapters/sparql-response-policy.js';
 import { parseNQuadLine } from './nquads-text.js';
-import type {
-  Rfc64CanonicalProjectionLineV1,
-} from './rfc64-shared-projection-stream-capability.js';
 import type { Quad } from './triple-store.js';
 
 const DEFAULT_SORT_CHUNK_BYTES_V1 = 8 * 1024 * 1024;
@@ -75,7 +72,7 @@ export class Rfc64SharedProjectionHttpSpoolErrorV1 extends Error {
  */
 export async function spoolRfc64SharedProjectionHttpResponseV1(
   options: Rfc64SharedProjectionHttpSpoolOptionsV1,
-): Promise<AsyncIterable<Rfc64CanonicalProjectionLineV1>> {
+): Promise<AsyncIterable<Uint8Array>> {
   const byteCeiling = boundedPositiveInteger(
     options.byteCeiling,
     Math.min(
@@ -260,7 +257,7 @@ async function writeMergedRun(
 async function* streamMemoryRun(
   lines: readonly Buffer[],
   signal: AbortSignal | undefined,
-): AsyncGenerator<Rfc64CanonicalProjectionLineV1, void, undefined> {
+): AsyncGenerator<Uint8Array, void, undefined> {
   for (const line of lines) {
     throwIfAborted(signal);
     yield snapshotCanonicalLine(line);
@@ -271,7 +268,7 @@ function mergeSortedRuns(
   runFiles: readonly string[],
   tempDirectory: string,
   signal: AbortSignal | undefined,
-): AsyncIterable<Rfc64CanonicalProjectionLineV1> {
+): AsyncIterable<Uint8Array> {
   let claimed = false;
   let cleanupPromise: Promise<void> | undefined;
   const cleanup = (): Promise<void> => {
@@ -279,7 +276,7 @@ function mergeSortedRuns(
     return cleanupPromise;
   };
   return Object.freeze({
-    [Symbol.asyncIterator](): AsyncIterator<Rfc64CanonicalProjectionLineV1> {
+    [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
       if (claimed) invalid('temporary projection stream is one-shot');
       claimed = true;
       let source: AsyncIterator<Buffer> | undefined;
@@ -294,7 +291,7 @@ function mergeSortedRuns(
         }
       };
       return Object.freeze({
-        async next(): Promise<IteratorResult<Rfc64CanonicalProjectionLineV1>> {
+        async next(): Promise<IteratorResult<Uint8Array>> {
           if (closed) return { done: true, value: undefined };
           source ??= mergeCanonicalFileLines(runFiles, signal)[Symbol.asyncIterator]();
           try {
@@ -309,11 +306,11 @@ function mergeSortedRuns(
             throw cause;
           }
         },
-        async return(): Promise<IteratorResult<Rfc64CanonicalProjectionLineV1>> {
+        async return(): Promise<IteratorResult<Uint8Array>> {
           await closeSource();
           return { done: true, value: undefined };
         },
-        async throw(cause?: unknown): Promise<IteratorResult<Rfc64CanonicalProjectionLineV1>> {
+        async throw(cause?: unknown): Promise<IteratorResult<Uint8Array>> {
           await closeSource();
           throw cause;
         },
@@ -463,11 +460,11 @@ function parseExactConstructLine(
   return quad;
 }
 
-function snapshotCanonicalLine(line: Uint8Array): Rfc64CanonicalProjectionLineV1 {
+function snapshotCanonicalLine(line: Uint8Array): Uint8Array {
   if (line.byteLength === 0 || line[line.byteLength - 1] !== 0x0a) {
     invalid('temporary sort run is missing its final LF');
   }
-  return Uint8Array.from(line) as Rfc64CanonicalProjectionLineV1;
+  return Uint8Array.from(line);
 }
 
 function stripTrailingCarriageReturn(line: Buffer): Buffer {

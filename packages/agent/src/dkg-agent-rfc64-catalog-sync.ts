@@ -51,12 +51,8 @@ export interface SynchronizeRfc64CatalogFromProvidersResultV1
   readonly signatureVariantDigest: Digest32V1;
 }
 
-/** Rollout-aware postcondition used by bootstrap for both shadow and catalog modes. */
-export interface SynchronizeRfc64CatalogRolloutFromProvidersResultV1 {
-  readonly completionOutcome: 'applied' | 'already-applied' | 'staged-only';
+interface SynchronizeRfc64CatalogRolloutCommonResultV1 {
   readonly currentCatalogHeadDigest: Digest32V1;
-  readonly stagedHeadDigest: Digest32V1 | null;
-  readonly appliedHead: AppliedCatalogHeadSnapshotV1 | null;
   readonly catalogVersion: AppliedCatalogHeadSnapshotV1['catalogVersion'];
   readonly inventoryRowCount: AppliedCatalogHeadSnapshotV1['inventoryRowCount'];
   readonly providerPeerIds: readonly string[];
@@ -64,6 +60,19 @@ export interface SynchronizeRfc64CatalogRolloutFromProvidersResultV1 {
   readonly providerAttempts: number;
   readonly signatureVariantDigest: Digest32V1;
 }
+
+/** Rollout-aware postcondition used by bootstrap for both shadow and catalog modes. */
+export type SynchronizeRfc64CatalogRolloutFromProvidersResultV1 =
+  | Readonly<SynchronizeRfc64CatalogRolloutCommonResultV1 & {
+    readonly completionOutcome: 'staged-only';
+    readonly stagedHeadDigest: Digest32V1;
+    readonly appliedHead?: never;
+  }>
+  | Readonly<SynchronizeRfc64CatalogRolloutCommonResultV1 & {
+    readonly completionOutcome: 'applied' | 'already-applied';
+    readonly stagedHeadDigest?: never;
+    readonly appliedHead: AppliedCatalogHeadSnapshotV1;
+  }>;
 
 export class Rfc64CatalogSyncMethods extends DKGAgentBase {
   /**
@@ -128,9 +137,6 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
       );
     }
     const applied = synchronized.appliedHead;
-    if (applied === null) {
-      throw new Error('RFC-64 current public catalog head lost its durable applied postcondition');
-    }
     return Object.freeze({
       ...applied,
       providerPeerIds: synchronized.providerPeerIds,
@@ -199,17 +205,29 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
     ) {
       throw new Error('RFC-64 current public catalog head did not reach its durable applied postcondition');
     }
-    return Object.freeze({
-      completionOutcome: synchronized.completionOutcome,
+    const common = {
       currentCatalogHeadDigest: announcedHeadDigest,
-      stagedHeadDigest: stagedOnly ? announcedHeadDigest : null,
-      appliedHead: applied,
       catalogVersion: synchronized.current.announcement.catalogVersion,
       inventoryRowCount: synchronized.current.head.envelope.payload.totalRows,
       providerPeerIds: synchronized.providerPeerIds,
       appliedProviderPeerId: synchronized.appliedProviderPeerId,
       providerAttempts: synchronized.providerAttempts,
       signatureVariantDigest: synchronized.current.announcement.signatureVariantDigest,
+    } satisfies SynchronizeRfc64CatalogRolloutCommonResultV1;
+    if (stagedOnly) {
+      return Object.freeze({
+        ...common,
+        completionOutcome: 'staged-only' as const,
+        stagedHeadDigest: announcedHeadDigest,
+      });
+    }
+    if (applied === null) {
+      throw new Error('RFC-64 current public catalog head lost its durable applied postcondition');
+    }
+    return Object.freeze({
+      ...common,
+      completionOutcome: synchronized.completionOutcome,
+      appliedHead: applied,
     });
   }
 }

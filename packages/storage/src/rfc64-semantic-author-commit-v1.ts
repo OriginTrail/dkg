@@ -10,12 +10,12 @@ import {
   projectRfc64SemanticRecordStoreRowsV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
   renderRfc64SemanticStoreRowV1,
-  snapshotExactDataRecord,
   snapshotRfc64SemanticRecordV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type Rfc64SemanticRecordTypeV1,
   type Rfc64SemanticRecordV1,
 } from '@origintrail-official/dkg-core';
+import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
 import {
   type Quad,

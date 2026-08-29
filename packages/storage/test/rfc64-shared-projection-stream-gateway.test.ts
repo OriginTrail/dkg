@@ -11,9 +11,6 @@ import {
   Rfc64SharedProjectionStreamGatewayErrorV1,
   SyncSharedProjectionStoreV1,
 } from '../src/rfc64-shared-projection-stream-gateway.js';
-import type {
-  Rfc64CanonicalProjectionLineV1,
-} from '../src/rfc64-shared-projection-stream-capability.js';
 import type { TripleStore } from '../src/triple-store.js';
 import {
   createRfc64SharedProjectionTestFixture,
@@ -53,7 +50,7 @@ describe('SyncSharedProjectionStoreV1', () => {
     expect(captured).toMatchObject({
       graphIri: FIXTURE.graph,
       signedByteCeiling: 4096,
-      resultKind: 'quad-stream',
+      resultKind: 'canonical-line-byte-stream',
     });
     expect(capturedByteCeiling).toBe(2048);
   });
@@ -61,7 +58,7 @@ describe('SyncSharedProjectionStoreV1', () => {
   it('rejects a capability line that is not one canonical LF-terminated record', async () => {
     const malformed = new TextEncoder().encode(
       '<urn:a> <urn:p> "alpha" .\r\n',
-    ) as Rfc64CanonicalProjectionLineV1;
+    );
     const result = await new SyncSharedProjectionStoreV1(
       fakeStore(async () => streamCanonicalLines([malformed])),
     ).open(REQUEST, { operatorByteCeiling: 4096, timeoutMs: 1000 });
@@ -182,7 +179,7 @@ describe('SyncSharedProjectionStoreV1', () => {
 
   it('enforces the deadline when adapter acquisition ignores cancellation', async () => {
     const gateway = new SyncSharedProjectionStoreV1(fakeStore(
-      () => new Promise<AsyncIterable<Rfc64CanonicalProjectionLineV1>>(() => undefined),
+      () => new Promise<AsyncIterable<Uint8Array>>(() => undefined),
     ));
     const result = await gateway.open(REQUEST, {
       operatorByteCeiling: 4096,
@@ -193,9 +190,9 @@ describe('SyncSharedProjectionStoreV1', () => {
   });
 
   it('closes an adapter stream that arrives after its acquisition deadline', async () => {
-    const pending = Promise.withResolvers<AsyncIterable<Rfc64CanonicalProjectionLineV1>>();
+    const pending = Promise.withResolvers<AsyncIterable<Uint8Array>>();
     let closed = false;
-    const lateSource: AsyncIterable<Rfc64CanonicalProjectionLineV1> = {
+    const lateSource: AsyncIterable<Uint8Array> = {
       [Symbol.asyncIterator]() {
         return {
           async next() {
@@ -222,10 +219,10 @@ describe('SyncSharedProjectionStoreV1', () => {
 
   it('enforces the deadline on a non-cooperative iterator read and closes it', async () => {
     let returned = false;
-    const source: AsyncIterable<Rfc64CanonicalProjectionLineV1> = {
+    const source: AsyncIterable<Uint8Array> = {
       [Symbol.asyncIterator]() {
         return {
-      next: () => new Promise<IteratorResult<Rfc64CanonicalProjectionLineV1>>(() => undefined),
+      next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
           async return() {
             returned = true;
             return { done: true, value: undefined };
@@ -339,32 +336,32 @@ function fakeStore(
   open: (
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: { readonly byteCeiling: number; readonly signal?: AbortSignal },
-  ) => Promise<AsyncIterable<Rfc64CanonicalProjectionLineV1>>,
+  ) => Promise<AsyncIterable<Uint8Array>>,
 ): TripleStore {
   return { rfc64SharedProjectionStreamV1: open } as unknown as TripleStore;
 }
 
 async function* streamLines(
   triples: readonly Rfc64ProjectionTestTriple[],
-): AsyncGenerator<Rfc64CanonicalProjectionLineV1> {
+): AsyncGenerator<Uint8Array> {
   yield* linesFor(triples);
 }
 
 async function* streamCanonicalLines(
-  lines: readonly Rfc64CanonicalProjectionLineV1[],
-): AsyncGenerator<Rfc64CanonicalProjectionLineV1> {
+  lines: readonly Uint8Array[],
+): AsyncGenerator<Uint8Array> {
   for (const line of lines) yield line;
 }
 
 function linesFor(
   triples: readonly Rfc64ProjectionTestTriple[],
-): Rfc64CanonicalProjectionLineV1[] {
+): Uint8Array[] {
   return triples.map((triple) => {
     const content = tripleContentV10(triple.subject, triple.predicate, triple.object);
     const line = new Uint8Array(content.byteLength + 1);
     line.set(content);
     line[line.byteLength - 1] = 0x0a;
-    return line as Rfc64CanonicalProjectionLineV1;
+    return line;
   });
 }
 
