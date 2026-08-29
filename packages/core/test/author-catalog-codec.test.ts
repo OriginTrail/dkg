@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   MAX_AUTHOR_CATALOG_BUCKET_COUNT_V1,
+  MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1,
   MAX_AUTHOR_CATALOG_ROW_BYTES_V1,
   MAX_AUTHOR_CATALOG_ROW_DIGEST_INPUT_BYTES_V1,
   MAX_AUTHOR_CATALOG_SCOPE_BYTES_V1,
@@ -87,6 +88,19 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
       .toBe(
         `did:dkg:context-graph:v1/subgraph/cg/caf%C3%A9/assertion/${AUTHOR}/name%20%CE%BB`,
       );
+  });
+
+  it('does not let JavaScript callers relax the catalog identifier ceiling', () => {
+    const callFromJavaScript = iriComponentV1 as unknown as (
+      value: string,
+      ignoredMaxBytes?: number,
+    ) => string;
+    const oversized = 'a'.repeat(MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1 + 1);
+
+    expect(() => callFromJavaScript(
+      oversized,
+      MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1 + 1,
+    )).toThrow(AuthorCatalogCodecError);
   });
 
   it('enforces exact network/context grammar, NFC, and UTF-8 byte ceilings', () => {
