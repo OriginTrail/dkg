@@ -145,6 +145,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly rfc64SemanticReadBackendV1 = 'oxigraph' as const;
   readonly queryCancellation = 'interruptible' as const;
 
   // Assigned by spawnWorker(), which the constructor always calls — hence the

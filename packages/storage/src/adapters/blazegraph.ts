@@ -221,6 +221,7 @@ function createStoreOperationDeadline(
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
 export class BlazegraphStore implements TripleStore {
+  readonly rfc64SemanticReadBackendV1 = 'blazegraph' as const;
   readonly queryCancellation = 'interruptible' as const;
 
   private readonly url: string;

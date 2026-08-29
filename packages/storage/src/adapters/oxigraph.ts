@@ -47,6 +47,7 @@ type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
+  readonly rfc64SemanticReadBackendV1 = 'oxigraph' as const;
   readonly queryCancellation = 'pre-dispatch' as const;
 
   private store: OxStore;

@@ -139,6 +139,17 @@ export {
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {
+  MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
+  Rfc64SemanticReadGatewayErrorV1,
+  SyncSemanticStoreV1,
+  isRfc64SemanticReadBackendCapabilityV1,
+  type Rfc64SemanticReadBackendCapabilityV1,
+  type Rfc64SemanticReadGatewayErrorCodeV1,
+  type Rfc64SemanticReadOptionsV1,
+  type Rfc64SemanticReadRequestV1,
+  type Rfc64SemanticReadResultV1,
+} from './rfc64-semantic-read-gateway.js';
+export {
   resolveGraphScopedOrLegacyMetadata,
   type GraphScopedOrLegacyMetadata,
 } from './graph-knowledge-asset-metadata-loader.js';
