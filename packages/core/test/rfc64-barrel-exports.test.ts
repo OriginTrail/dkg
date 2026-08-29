@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 // module-level behavior tests stay green.
 import {
   MAX_KA_TRANSFER_BYTES_V1,
+  MAX_RFC64_PENDING_TARGET_DIGESTS_V1,
+  RFC64_DIGEST_LIST_DATATYPE_IRI_V1,
+  RFC64_SEMANTIC_NULL_IRI_V1,
   RFC64_SUBGRAPH_KEY_DOMAIN_V1,
   assertCanonicalChainId,
   assertCanonicalDecimalU64,
@@ -16,12 +19,17 @@ import {
   assertKaTransferDescriptorV1,
   canonicalizeKaTransferDescriptorV1,
   computeRfc64SubGraphKeyV1,
+  decodeRfc64SemanticRecordStoreRowsV1,
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
   deriveRfc64SubgraphSemanticAddressesV1,
   parseCanonicalDecimalU64,
   parseCanonicalDecimalU256,
   parseCanonicalKaTransferDescriptorV1,
+  projectRfc64SemanticRecordStoreRowsV1,
+  renderRfc64SemanticStoreRowV1,
+  snapshotRfc64SemanticRecordCoordinateV1,
+  snapshotRfc64SemanticRecordV1,
 } from '../src/index.js';
 
 const VALID_MIN = {
@@ -65,6 +73,23 @@ describe('RFC-64 transfer descriptor + wire scalars public package barrel', () =
     expect(computeRfc64SubGraphKeyV1(null)).toBe(
       '0x746bfff91a7c229a180489f0149b250944da97e5038b125af5df5a74916518e4',
     );
+  });
+
+  it('re-exports the dormant RFC-64 semantic-record codec', () => {
+    expect(RFC64_SEMANTIC_NULL_IRI_V1).toBe('urn:dkg:sync:null');
+    expect(RFC64_DIGEST_LIST_DATATYPE_IRI_V1).toBe(
+      'http://dkg.io/ontology/digestListV1',
+    );
+    expect(MAX_RFC64_PENDING_TARGET_DIGESTS_V1).toBe(64);
+    for (const [name, fn] of [
+      ['decodeRfc64SemanticRecordStoreRowsV1', decodeRfc64SemanticRecordStoreRowsV1],
+      ['projectRfc64SemanticRecordStoreRowsV1', projectRfc64SemanticRecordStoreRowsV1],
+      ['renderRfc64SemanticStoreRowV1', renderRfc64SemanticStoreRowV1],
+      ['snapshotRfc64SemanticRecordCoordinateV1', snapshotRfc64SemanticRecordCoordinateV1],
+      ['snapshotRfc64SemanticRecordV1', snapshotRfc64SemanticRecordV1],
+    ] as const) {
+      expect(typeof fn, name).toBe('function');
+    }
   });
 
   it('re-exports the full canonical wire scalar API from ../src/index.js', () => {
