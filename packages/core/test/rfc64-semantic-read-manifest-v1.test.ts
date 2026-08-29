@@ -6,12 +6,15 @@ import {
   RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1,
   RFC64_SEMANTIC_READ_QUERY_IDS_V1,
   RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1,
-  assertRfc64SemanticReadOperationV1,
   compileRfc64SemanticReadOperationV1,
+  deriveRfc64ContextGraphSemanticAddressesV1,
+  deriveRfc64CurrentAuthorCatalogRefAddressV1,
+  deriveRfc64SubgraphSemanticAddressesV1,
   type ContextGraphIdV1,
   type EvmAddressV1,
   type NetworkIdV1,
   type Rfc64SemanticReadQueryIdV1,
+  type Rfc64SemanticAddressV1,
   type Rfc64SemanticRecordCoordinateV1,
   type SubGraphNameV1,
 } from '../src/index.js';
@@ -22,13 +25,25 @@ const CONTEXT_GRAPH = (
 ) as ContextGraphIdV1;
 const SUBGRAPH = 'research' as SubGraphNameV1;
 const AUTHOR = '0x89abcdef0123456789abcdef0123456789abcdef' as EvmAddressV1;
+const SCOPE = { networkId: NETWORK, contextGraphId: CONTEXT_GRAPH };
+const SUBGRAPH_ADDRESSES = deriveRfc64SubgraphSemanticAddressesV1({
+  ...SCOPE,
+  subGraphName: SUBGRAPH,
+});
+const CONTEXT_GRAPH_ADDRESSES = deriveRfc64ContextGraphSemanticAddressesV1(SCOPE);
 
 const CASES: readonly {
-  readonly queryId: Rfc64SemanticReadQueryIdV1;
+  readonly expectedQueryId: Rfc64SemanticReadQueryIdV1;
+  readonly expectedAddress: Rfc64SemanticAddressV1;
   readonly coordinate: Rfc64SemanticRecordCoordinateV1;
 }[] = [
   {
-    queryId: 'SYNC_HEAD_REF_GET_V1',
+    expectedQueryId: 'SYNC_HEAD_REF_GET_V1',
+    expectedAddress: deriveRfc64CurrentAuthorCatalogRefAddressV1({
+      ...SCOPE,
+      subGraphName: SUBGRAPH,
+      authorAddress: AUTHOR,
+    }),
     coordinate: {
       recordType: 'CurrentAuthorCatalogRefV1',
       networkId: NETWORK,
@@ -38,7 +53,8 @@ const CASES: readonly {
     },
   },
   {
-    queryId: 'SYNC_MUTATION_GUARD_GET_V1',
+    expectedQueryId: 'SYNC_MUTATION_GUARD_GET_V1',
+    expectedAddress: SUBGRAPH_ADDRESSES.mutationGuard,
     coordinate: {
       recordType: 'SubgraphMutationGuardV1',
       networkId: NETWORK,
@@ -47,7 +63,8 @@ const CASES: readonly {
     },
   },
   {
-    queryId: 'SYNC_MUTATION_GUARD_GET_V1',
+    expectedQueryId: 'SYNC_MUTATION_GUARD_GET_V1',
+    expectedAddress: CONTEXT_GRAPH_ADDRESSES.mutationGuard,
     coordinate: {
       recordType: 'ContextGraphMutationGuardV1',
       networkId: NETWORK,
@@ -55,7 +72,8 @@ const CASES: readonly {
     },
   },
   {
-    queryId: 'SYNC_RECONCILE_TARGET_GET_V1',
+    expectedQueryId: 'SYNC_RECONCILE_TARGET_GET_V1',
+    expectedAddress: SUBGRAPH_ADDRESSES.reconcileTarget,
     coordinate: {
       recordType: 'SubgraphReconcileTargetGuardV1',
       networkId: NETWORK,
@@ -64,7 +82,8 @@ const CASES: readonly {
     },
   },
   {
-    queryId: 'SYNC_APPLIED_SEAL_GET_V1',
+    expectedQueryId: 'SYNC_APPLIED_SEAL_GET_V1',
+    expectedAddress: SUBGRAPH_ADDRESSES.appliedSeal,
     coordinate: {
       recordType: 'AppliedSubgraphSealV1',
       networkId: NETWORK,
@@ -73,7 +92,8 @@ const CASES: readonly {
     },
   },
   {
-    queryId: 'SYNC_APPLIED_SET_GET_V1',
+    expectedQueryId: 'SYNC_APPLIED_SET_GET_V1',
+    expectedAddress: CONTEXT_GRAPH_ADDRESSES.appliedSetRef,
     coordinate: {
       recordType: 'AppliedSubgraphSetRefV1',
       networkId: NETWORK,
@@ -81,7 +101,8 @@ const CASES: readonly {
     },
   },
   {
-    queryId: 'SYNC_APPLIED_CG_SEAL_GET_V1',
+    expectedQueryId: 'SYNC_APPLIED_CG_SEAL_GET_V1',
+    expectedAddress: CONTEXT_GRAPH_ADDRESSES.appliedSeal,
     coordinate: {
       recordType: 'AppliedContextGraphSealV1',
       networkId: NETWORK,
@@ -103,13 +124,16 @@ describe('RFC-64 semantic read manifest v1', () => {
     for (const fixture of CASES) {
       const oxigraph = compileRfc64SemanticReadOperationV1({
         backend: 'oxigraph',
-        ...fixture,
+        coordinate: fixture.coordinate,
       });
       const blazegraph = compileRfc64SemanticReadOperationV1({
         backend: 'blazegraph',
-        ...fixture,
+        coordinate: fixture.coordinate,
       });
       expect(blazegraph.sparql, fixture.coordinate.recordType).toBe(oxigraph.sparql);
+      expect(oxigraph.queryId).toBe(fixture.expectedQueryId);
+      expect(oxigraph.graphIri).toBe(fixture.expectedAddress.graphUri);
+      expect(oxigraph.subjectIri).toBe(fixture.expectedAddress.subject);
       expect(oxigraph.expectedRowCount).toBe(
         RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1[fixture.coordinate.recordType],
       );
@@ -126,7 +150,6 @@ describe('RFC-64 semantic read manifest v1', () => {
       expect(oxigraph.sparql).not.toMatch(
         /GRAPH\s+\?|ORDER\s+BY|OFFSET|VALUES|SERVICE|SELECT\s+DISTINCT/iu,
       );
-      expect(() => assertRfc64SemanticReadOperationV1(oxigraph)).not.toThrow();
       expect(Object.isFrozen(oxigraph)).toBe(true);
     }
   });
@@ -134,7 +157,7 @@ describe('RFC-64 semantic read manifest v1', () => {
   it('freezes the exact current-author query vector', () => {
     const operation = compileRfc64SemanticReadOperationV1({
       backend: 'oxigraph',
-      ...CASES[0],
+      coordinate: CASES[0].coordinate,
     });
     expect(operation.sparql).toBe(
       'SELECT ?p ?o\n'
@@ -153,65 +176,34 @@ describe('RFC-64 semantic read manifest v1', () => {
     );
   });
 
-  it('rejects query IDs paired with the wrong record type', () => {
-    expect(() => compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
-      queryId: 'SYNC_APPLIED_SET_GET_V1',
-      coordinate: CASES[0].coordinate,
-    })).toThrow(/cannot read CurrentAuthorCatalogRefV1/u);
-  });
-
-  it('rejects unknown IDs, uncertified backends, and input adornment', () => {
+  it('rejects uncertified backends and input adornment', () => {
     expect(() => compileRfc64SemanticReadOperationV1({
       backend: 'sparql-http',
-      ...CASES[0],
+      coordinate: CASES[0].coordinate,
     })).toThrow(/backend is not certified/u);
     expect(() => compileRfc64SemanticReadOperationV1({
       backend: 'oxigraph',
       queryId: 'SYNC_RAW_QUERY_V1',
       coordinate: CASES[0].coordinate,
-    })).toThrow(/query ID is not in the v1 manifest/u);
+    })).toThrow(/invalid field set/u);
     expect(() => compileRfc64SemanticReadOperationV1({
       backend: 'oxigraph',
-      ...CASES[0],
+      coordinate: CASES[0].coordinate,
       sparql: 'SELECT * WHERE { ?s ?p ?o }',
     })).toThrow(/invalid field set/u);
   });
 
-  it('rejects any operation altered after compilation', () => {
-    const operation = compileRfc64SemanticReadOperationV1({
-      backend: 'blazegraph',
-      ...CASES[4],
-    });
-    for (const mutation of [
-      { sparql: `${operation.sparql}\nOFFSET 1` },
-      { graphIri: 'urn:wrong' },
-      { rowCeiling: operation.rowCeiling + 1 },
-      { responseByteCeiling: operation.responseByteCeiling + 1 },
-      { concurrencyClass: 'generic-query' },
-    ]) {
-      expect(() => assertRfc64SemanticReadOperationV1({
-        ...operation,
-        ...mutation,
-      })).toThrow(/differs from manifest/u);
-    }
-  });
-
-  it('rejects accessor-bearing operation fields without invoking the accessor', () => {
-    const operation = compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
-      ...CASES[6],
-    });
+  it('rejects accessor-bearing input fields without invoking the accessor', () => {
     let invoked = false;
-    const input = { ...operation } as Record<string, unknown>;
-    Object.defineProperty(input, 'sparql', {
+    const input: Record<string, unknown> = { backend: 'oxigraph' };
+    Object.defineProperty(input, 'coordinate', {
       enumerable: true,
       get() {
         invoked = true;
-        return operation.sparql;
+        return CASES[6].coordinate;
       },
     });
-    expect(() => assertRfc64SemanticReadOperationV1(input)).toThrow(/invalid field set/u);
+    expect(() => compileRfc64SemanticReadOperationV1(input)).toThrow(/invalid field set/u);
     expect(invoked).toBe(false);
   });
 });

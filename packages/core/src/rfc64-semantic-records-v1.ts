@@ -374,7 +374,7 @@ export function decodeRfc64SemanticRecordStoreRowsV1(
   expectedCoordinate: unknown,
 ): DecodedRfc64SemanticRecordV1 {
   const coordinate = snapshotRfc64SemanticRecordCoordinateV1(expectedCoordinate);
-  const address = deriveCoordinateAddress(coordinate);
+  const address = deriveRfc64SemanticRecordAddressV1(coordinate);
   const fields = RECORD_FIELDS[coordinate.recordType];
   const typedRows = snapshotSemanticRows(rows, fields.length);
   const allowed = new Map<string, FieldSpec>(
@@ -762,12 +762,14 @@ function snapshotRowClosed(
 }
 
 function deriveSemanticRecordAddress(record: Rfc64SemanticRecordV1): Rfc64SemanticAddressV1 {
-  return deriveCoordinateAddress(coordinateFromRecord(record));
+  return deriveRfc64SemanticRecordAddressV1(coordinateFromRecord(record));
 }
 
-function deriveCoordinateAddress(
-  coordinate: Rfc64SemanticRecordCoordinateV1,
+/** Resolve the one canonical graph and subject for a validated semantic coordinate. */
+export function deriveRfc64SemanticRecordAddressV1(
+  input: unknown,
 ): Rfc64SemanticAddressV1 {
+  const coordinate = snapshotRfc64SemanticRecordCoordinateV1(input);
   const scope = {
     networkId: coordinate.networkId,
     contextGraphId: coordinate.contextGraphId,
