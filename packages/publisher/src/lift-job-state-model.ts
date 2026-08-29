@@ -1,5 +1,6 @@
 import {
   LIFT_JOB_IMMUTABLE_FIELDS,
+  LIFT_JOB_STATES,
   assertLiftJobTransition,
   type LiftJob,
   type LiftJobAdmissionMetadata,
@@ -191,69 +192,103 @@ export function canonicalLiftJobFinalizationMetadata(
   };
 }
 
-/**
- * Strict, source-independent durable projection. A candidate either already has the exact fields
- * of one writable union member or it is rejected; transition-only shedding is never hidden here.
- */
-export function projectCanonicalLiftJob(job: StructurallyValidLiftJobPayload): LiftJob | null {
-  const reject = (fields: ReadonlyArray<keyof StructurallyValidLiftJobPayload>): void =>
-    rejectDefinedLiftJobFields(job, fields);
-  const base = (): Omit<LiftJobBase, 'status'> => canonicalLiftJobBase(job);
-  const baseWithoutRecovery = (): Omit<LiftJobBase, 'status' | 'recovery'> =>
-    canonicalLiftJobBaseWithoutRecovery(job);
+const PROGRESS_FIELDS = [
+  'claim',
+  'validation',
+  'broadcast',
+  'inclusion',
+  'finalization',
+  'failure',
+] as const;
 
-  switch (job.status) {
+type LiftJobProgressField = (typeof PROGRESS_FIELDS)[number];
+type LiftJobConstructionField = LiftJobProgressField | 'recovery';
+type LiftJobProgressValues = Pick<StructurallyValidLiftJobPayload, LiftJobProgressField>;
+
+interface LiftJobConstructionSource {
+  value<Field extends LiftJobProgressField>(
+    field: Field,
+  ): LiftJobProgressValues[Field];
+  reject(fields: readonly LiftJobConstructionField[], status: LiftJobState): void;
+}
+
+function isLiftJobState(status: string): status is LiftJobState {
+  return LIFT_JOB_STATES.some((candidate) => candidate === status);
+}
+
+/**
+ * The one per-state construction table. Durable decoding supplies fields directly and rejects
+ * every forbidden persisted field. Transitions supply inherited/patched values and reject only
+ * forbidden patch fields, so deliberate lifecycle shedding is visible at that boundary.
+ */
+function constructCanonicalLiftJob(
+  status: LiftJobState,
+  base: Omit<LiftJobBase, 'status'>,
+  source: LiftJobConstructionSource,
+): LiftJob {
+  const reject = (fields: readonly LiftJobConstructionField[]): void =>
+    source.reject(fields, status);
+  const required = <Field extends LiftJobProgressField>(
+    field: Field,
+  ): Exclude<LiftJobProgressValues[Field], undefined> =>
+    requiredLiftJobField(source.value(field), field) as Exclude<
+      LiftJobProgressValues[Field],
+      undefined
+    >;
+  const baseWithoutRecovery = (): Omit<LiftJobBase, 'status' | 'recovery'> => {
+    const { recovery: _recovery, ...withoutRecovery } = base;
+    return withoutRecovery;
+  };
+
+  switch (status) {
     case 'accepted':
       reject(['claim', 'validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
-      return { ...base(), status: 'accepted' };
+      return { ...base, status: 'accepted' };
     case 'claimed':
       reject(['validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
       return {
-        ...base(),
+        ...base,
         status: 'claimed',
-        claim: requiredLiftJobField(job.claim, 'claim'),
+        claim: required('claim'),
       };
     case 'validated':
       reject(['broadcast', 'inclusion', 'finalization', 'failure']);
       return {
-        ...base(),
+        ...base,
         status: 'validated',
-        claim: requiredLiftJobField(job.claim, 'claim'),
-        validation: requiredLiftJobField(job.validation, 'validation'),
+        claim: required('claim'),
+        validation: required('validation'),
       };
     case 'broadcast':
       reject(['inclusion', 'finalization', 'failure']);
       return {
-        ...base(),
+        ...base,
         status: 'broadcast',
-        claim: requiredLiftJobField(job.claim, 'claim'),
-        validation: requiredLiftJobField(job.validation, 'validation'),
-        broadcast: requiredLiftJobField(job.broadcast, 'broadcast'),
+        claim: required('claim'),
+        validation: required('validation'),
+        broadcast: required('broadcast'),
       };
     case 'included': {
       reject(['finalization', 'failure']);
-      const broadcast = requiredLiftJobField(job.broadcast, 'broadcast');
+      const broadcast = required('broadcast');
       return {
-        ...base(),
+        ...base,
         status: 'included',
-        claim: requiredLiftJobField(job.claim, 'claim'),
-        validation: requiredLiftJobField(job.validation, 'validation'),
+        claim: required('claim'),
+        validation: required('validation'),
         broadcast,
-        inclusion: canonicalLiftJobInclusion(
-          requiredLiftJobField(job.inclusion, 'inclusion'),
-          broadcast,
-        ),
+        inclusion: canonicalLiftJobInclusion(required('inclusion'), broadcast),
       };
     }
     case 'finalized': {
       reject(['failure']);
-      const claim = requiredLiftJobField(job.claim, 'claim');
-      const validation = requiredLiftJobField(job.validation, 'validation');
-      const finalization = requiredLiftJobField(job.finalization, 'finalization');
+      const claim = required('claim');
+      const validation = required('validation');
+      const finalization = required('finalization');
       if (finalization.mode === 'noop') {
         reject(['broadcast', 'inclusion']);
         return {
-          ...base(),
+          ...base,
           status: 'finalized',
           claim,
           validation,
@@ -263,7 +298,7 @@ export function projectCanonicalLiftJob(job: StructurallyValidLiftJobPayload): L
       if (finalization.mode === 'local') {
         reject(['broadcast', 'inclusion']);
         return {
-          ...base(),
+          ...base,
           status: 'finalized',
           claim,
           validation,
@@ -271,27 +306,27 @@ export function projectCanonicalLiftJob(job: StructurallyValidLiftJobPayload): L
         };
       }
       const { mode, ...publishedFields } = finalization;
-      const broadcast = requiredLiftJobField(job.broadcast, 'broadcast');
+      const broadcast = required('broadcast');
       return {
-        ...base(),
+        ...base,
         status: 'finalized',
         claim,
         validation,
         broadcast,
-        inclusion: canonicalLiftJobInclusion(
-          requiredLiftJobField(job.inclusion, 'inclusion'),
-          broadcast,
-        ),
+        inclusion: canonicalLiftJobInclusion(required('inclusion'), broadcast),
         finalization: { ...publishedFields, ...(mode === 'published' ? { mode } : {}) },
       };
     }
     case 'failed': {
       reject(['finalization']);
-      const failure = requiredLiftJobField(job.failure, 'failure');
-      const recovery = canonicalLiftJobFailureRecovery(job.recovery);
+      const failure = required('failure');
+      const recovery = canonicalLiftJobFailureRecovery(base.recovery);
       switch (failure.failedFromState) {
         case 'accepted':
           reject(['claim', 'validation', 'broadcast', 'inclusion', 'recovery']);
+          if (base.recovery !== undefined) {
+            throw new Error('recovery is forbidden for status failed');
+          }
           return {
             ...baseWithoutRecovery(),
             status: 'failed',
@@ -303,7 +338,7 @@ export function projectCanonicalLiftJob(job: StructurallyValidLiftJobPayload): L
             ...baseWithoutRecovery(),
             ...(recovery ? { recovery } : {}),
             status: 'failed',
-            claim: requiredLiftJobField(job.claim, 'claim'),
+            claim: required('claim'),
             failure: { ...failure, failedFromState: 'claimed' },
           };
         case 'validated':
@@ -312,8 +347,8 @@ export function projectCanonicalLiftJob(job: StructurallyValidLiftJobPayload): L
             ...baseWithoutRecovery(),
             ...(recovery ? { recovery } : {}),
             status: 'failed',
-            claim: requiredLiftJobField(job.claim, 'claim'),
-            validation: requiredLiftJobField(job.validation, 'validation'),
+            claim: required('claim'),
+            validation: required('validation'),
             failure: { ...failure, failedFromState: 'validated' },
           };
         case 'broadcast': {
@@ -322,14 +357,15 @@ export function projectCanonicalLiftJob(job: StructurallyValidLiftJobPayload): L
             ...baseWithoutRecovery(),
             ...(recovery ? { recovery } : {}),
             status: 'failed' as const,
-            claim: requiredLiftJobField(job.claim, 'claim'),
-            validation: requiredLiftJobField(job.validation, 'validation'),
+            claim: required('claim'),
+            validation: required('validation'),
           };
-          return job.broadcast === undefined
+          const broadcast = source.value('broadcast');
+          return broadcast === undefined
             ? { ...failedBase, failure: { ...failure, failedFromState: 'broadcast' } }
             : {
                 ...failedBase,
-                broadcast: job.broadcast,
+                broadcast,
                 failure: { ...failure, failedFromState: 'broadcast' },
               };
         }
@@ -338,38 +374,39 @@ export function projectCanonicalLiftJob(job: StructurallyValidLiftJobPayload): L
             ...baseWithoutRecovery(),
             ...(recovery ? { recovery } : {}),
             status: 'failed' as const,
-            claim: requiredLiftJobField(job.claim, 'claim'),
-            validation: requiredLiftJobField(job.validation, 'validation'),
+            claim: required('claim'),
+            validation: required('validation'),
           };
-          if (job.broadcast === undefined) {
+          const broadcast = source.value('broadcast');
+          if (broadcast === undefined) {
             reject(['inclusion']);
             return { ...failedBase, failure: { ...failure, failedFromState: 'included' } };
           }
           return {
             ...failedBase,
-            broadcast: job.broadcast,
-            inclusion: canonicalLiftJobInclusion(
-              requiredLiftJobField(job.inclusion, 'inclusion'),
-              job.broadcast,
-            ),
+            broadcast,
+            inclusion: canonicalLiftJobInclusion(required('inclusion'), broadcast),
             failure: { ...failure, failedFromState: 'included' },
           };
         }
       }
     }
-    default:
-      return null;
   }
 }
 
-const PROGRESS_FIELDS = [
-  'claim',
-  'validation',
-  'broadcast',
-  'inclusion',
-  'finalization',
-  'failure',
-] as const;
+/** Strict source-independent durable projection through the shared per-state constructor. */
+export function projectCanonicalLiftJob(job: StructurallyValidLiftJobPayload): LiftJob | null {
+  if (!isLiftJobState(job.status)) return null;
+  const source: LiftJobConstructionSource = {
+    value: (field) => job[field],
+    reject: (fields) => rejectDefinedLiftJobFields(job, fields),
+  };
+  return constructCanonicalLiftJob(
+    job.status,
+    canonicalLiftJobBase(job),
+    source,
+  );
+}
 
 function hasOwn(value: object, field: PropertyKey): boolean {
   return Object.prototype.hasOwnProperty.call(value, field);
@@ -504,232 +541,36 @@ function transitionBase(
   };
 }
 
-function requiredTransitionField<T>(
-  current: LiftJob,
-  status: LiftJobState,
-  value: T | undefined,
-  field: string,
-): T {
-  if (value === undefined) {
-    throw new Error(`LiftJob ${current.jobId}: ${field} is required for ${status}`);
-  }
-  return value;
-}
-
-function buildAcceptedTransition(
-  _current: LiftJob,
-  patch: LiftJobTransitionPatch,
-  base: Omit<LiftJobBase, 'status'>,
-): Extract<LiftJob, { status: 'accepted' }> {
-  rejectTransitionPatchFields(
-    patch,
-    ['claim', 'validation', 'broadcast', 'inclusion', 'finalization', 'failure'],
-    'accepted',
-  );
-  return { ...base, status: 'accepted' };
-}
-
-function buildClaimedTransition(
+function transitionConstructionSource(
   current: LiftJob,
   patch: LiftJobTransitionPatch,
-  base: Omit<LiftJobBase, 'status'>,
-): Extract<LiftJob, { status: 'claimed' }> {
-  rejectTransitionPatchFields(
-    patch,
-    ['validation', 'broadcast', 'inclusion', 'finalization', 'failure'],
-    'claimed',
-  );
+): LiftJobConstructionSource {
+  const claim = fieldFromPatch(patch.claim, current.claim);
+  const validation = fieldFromPatch(patch.validation, current.validation);
+  const broadcast = broadcastFromPatch(current, patch);
+  const inclusion = inclusionFromPatch(current, patch);
+  const finalization = fieldFromPatch(patch.finalization, current.finalization);
+  const failure = fieldFromPatch(patch.failure, current.failure);
+  const values: LiftJobProgressValues = {
+    ...(claim !== undefined ? { claim } : {}),
+    ...(validation !== undefined ? { validation } : {}),
+    ...(broadcast !== undefined ? { broadcast } : {}),
+    ...(inclusion !== undefined ? { inclusion } : {}),
+    ...(finalization !== undefined ? { finalization } : {}),
+    ...(failure !== undefined ? { failure } : {}),
+  };
   return {
-    ...base,
-    status: 'claimed',
-    claim: requiredTransitionField(
-      current,
-      'claimed',
-      fieldFromPatch(patch.claim, current.claim),
-      'claim',
-    ),
+    value: (field) => values[field],
+    reject: (fields, status) => rejectTransitionPatchFields(patch, fields, status),
   };
 }
 
-function buildValidatedTransition(
+function assertFailureOriginRetainsTransactionEvidence(
   current: LiftJob,
-  patch: LiftJobTransitionPatch,
-  base: Omit<LiftJobBase, 'status'>,
-): Extract<LiftJob, { status: 'validated' }> {
-  rejectTransitionPatchFields(
-    patch,
-    ['broadcast', 'inclusion', 'finalization', 'failure'],
-    'validated',
-  );
-  return {
-    ...base,
-    status: 'validated',
-    claim: requiredTransitionField(
-      current,
-      'validated',
-      fieldFromPatch(patch.claim, current.claim),
-      'claim',
-    ),
-    validation: requiredTransitionField(
-      current,
-      'validated',
-      fieldFromPatch(patch.validation, current.validation),
-      'validation',
-    ),
-  };
-}
-
-function buildBroadcastTransition(
-  current: LiftJob,
-  patch: LiftJobTransitionPatch,
-  base: Omit<LiftJobBase, 'status'>,
-): Extract<LiftJob, { status: 'broadcast' }> {
-  rejectTransitionPatchFields(patch, ['inclusion', 'finalization', 'failure'], 'broadcast');
-  return {
-    ...base,
-    status: 'broadcast',
-    claim: requiredTransitionField(
-      current,
-      'broadcast',
-      fieldFromPatch(patch.claim, current.claim),
-      'claim',
-    ),
-    validation: requiredTransitionField(
-      current,
-      'broadcast',
-      fieldFromPatch(patch.validation, current.validation),
-      'validation',
-    ),
-    broadcast: requiredTransitionField(
-      current,
-      'broadcast',
-      broadcastFromPatch(current, patch),
-      'broadcast',
-    ),
-  };
-}
-
-function buildIncludedTransition(
-  current: LiftJob,
-  patch: LiftJobTransitionPatch,
-  base: Omit<LiftJobBase, 'status'>,
-): Extract<LiftJob, { status: 'included' }> {
-  rejectTransitionPatchFields(patch, ['finalization', 'failure'], 'included');
-  const broadcast = requiredTransitionField(
-    current,
-    'included',
-    broadcastFromPatch(current, patch),
-    'broadcast',
-  );
-  return {
-    ...base,
-    status: 'included',
-    claim: requiredTransitionField(
-      current,
-      'included',
-      fieldFromPatch(patch.claim, current.claim),
-      'claim',
-    ),
-    validation: requiredTransitionField(
-      current,
-      'included',
-      fieldFromPatch(patch.validation, current.validation),
-      'validation',
-    ),
-    broadcast,
-    inclusion: canonicalLiftJobInclusion(
-      requiredTransitionField(
-        current,
-        'included',
-        inclusionFromPatch(current, patch),
-        'inclusion',
-      ),
-      broadcast,
-    ),
-  };
-}
-
-function buildFinalizedTransition(
-  current: LiftJob,
-  patch: LiftJobTransitionPatch,
-  base: Omit<LiftJobBase, 'status'>,
-): Extract<LiftJob, { status: 'finalized' }> {
-  rejectTransitionPatchFields(patch, ['failure'], 'finalized');
-  const claim = requiredTransitionField(
-    current,
-    'finalized',
-    fieldFromPatch(patch.claim, current.claim),
-    'claim',
-  );
-  const validation = requiredTransitionField(
-    current,
-    'finalized',
-    fieldFromPatch(patch.validation, current.validation),
-    'validation',
-  );
-  const finalization = requiredTransitionField(
-    current,
-    'finalized',
-    fieldFromPatch(patch.finalization, current.finalization),
-    'finalization',
-  );
-  if (finalization.mode === 'noop') {
-    rejectTransitionPatchFields(patch, ['broadcast', 'inclusion'], 'finalized');
-    return {
-      ...base,
-      status: 'finalized',
-      claim,
-      validation,
-      finalization: { ...finalization, mode: 'noop' },
-    };
-  }
-  if (finalization.mode === 'local') {
-    rejectTransitionPatchFields(patch, ['broadcast', 'inclusion'], 'finalized');
-    return {
-      ...base,
-      status: 'finalized',
-      claim,
-      validation,
-      finalization: { ...finalization, mode: 'local' },
-    };
-  }
-  const broadcast = requiredTransitionField(
-    current,
-    'finalized',
-    broadcastFromPatch(current, patch),
-    'broadcast',
-  );
-  return {
-    ...base,
-    status: 'finalized',
-    claim,
-    validation,
-    broadcast,
-    inclusion: canonicalLiftJobInclusion(
-      requiredTransitionField(
-        current,
-        'finalized',
-        inclusionFromPatch(current, patch),
-        'inclusion',
-      ),
-      broadcast,
-    ),
-    finalization,
-  };
-}
-
-function buildFailedTransition(
-  current: LiftJob,
-  patch: LiftJobTransitionPatch,
-  base: Omit<LiftJobBase, 'status'>,
-): Extract<LiftJob, { status: 'failed' }> {
-  rejectTransitionPatchFields(patch, ['finalization'], 'failed');
-  const failure = requiredTransitionField(
-    current,
-    'failed',
-    fieldFromPatch(patch.failure, current.failure),
-    'failure',
-  );
+  source: LiftJobConstructionSource,
+): void {
+  const failure = source.value('failure');
+  if (failure === undefined) return;
   if (
     (current.status === 'broadcast' || current.status === 'included')
     && failure.failedFromState !== current.status
@@ -739,116 +580,6 @@ function buildFailedTransition(
       + `${current.status} transaction evidence`,
     );
   }
-
-  const recovery = canonicalLiftJobFailureRecovery(base.recovery);
-  const { recovery: _recovery, ...baseWithoutRecovery } = base;
-  if (failure.failedFromState === 'accepted') {
-    rejectTransitionPatchFields(
-      patch,
-      ['claim', 'validation', 'broadcast', 'inclusion', 'recovery'],
-      'failed',
-    );
-    if (base.recovery !== undefined) throw new Error('recovery is forbidden for status failed');
-    return {
-      ...baseWithoutRecovery,
-      status: 'failed',
-      failure: { ...failure, failedFromState: 'accepted' },
-    };
-  }
-
-  const failedBase = {
-    ...baseWithoutRecovery,
-    ...(recovery ? { recovery } : {}),
-    status: 'failed' as const,
-  };
-  if (failure.failedFromState === 'claimed') {
-    rejectTransitionPatchFields(patch, ['validation', 'broadcast', 'inclusion'], 'failed');
-    return {
-      ...failedBase,
-      claim: requiredTransitionField(
-        current,
-        'failed',
-        fieldFromPatch(patch.claim, current.claim),
-        'claim',
-      ),
-      failure: { ...failure, failedFromState: 'claimed' },
-    };
-  }
-  if (failure.failedFromState === 'validated') {
-    rejectTransitionPatchFields(patch, ['broadcast', 'inclusion'], 'failed');
-    return {
-      ...failedBase,
-      claim: requiredTransitionField(
-        current,
-        'failed',
-        fieldFromPatch(patch.claim, current.claim),
-        'claim',
-      ),
-      validation: requiredTransitionField(
-        current,
-        'failed',
-        fieldFromPatch(patch.validation, current.validation),
-        'validation',
-      ),
-      failure: { ...failure, failedFromState: 'validated' },
-    };
-  }
-
-  const claim = requiredTransitionField(
-    current,
-    'failed',
-    fieldFromPatch(patch.claim, current.claim),
-    'claim',
-  );
-  const validation = requiredTransitionField(
-    current,
-    'failed',
-    fieldFromPatch(patch.validation, current.validation),
-    'validation',
-  );
-  const broadcast = broadcastFromPatch(current, patch);
-  if (failure.failedFromState === 'broadcast') {
-    rejectTransitionPatchFields(patch, ['inclusion'], 'failed');
-    return broadcast === undefined
-      ? {
-          ...failedBase,
-          claim,
-          validation,
-          failure: { ...failure, failedFromState: 'broadcast' },
-        }
-      : {
-          ...failedBase,
-          claim,
-          validation,
-          broadcast,
-          failure: { ...failure, failedFromState: 'broadcast' },
-        };
-  }
-  if (broadcast === undefined) {
-    rejectTransitionPatchFields(patch, ['inclusion'], 'failed');
-    return {
-      ...failedBase,
-      claim,
-      validation,
-      failure: { ...failure, failedFromState: 'included' },
-    };
-  }
-  return {
-    ...failedBase,
-    claim,
-    validation,
-    broadcast,
-    inclusion: canonicalLiftJobInclusion(
-      requiredTransitionField(
-        current,
-        'failed',
-        inclusionFromPatch(current, patch),
-        'inclusion',
-      ),
-      broadcast,
-    ),
-    failure: { ...failure, failedFromState: 'included' },
-  };
 }
 
 function checkedRecoveryTxHash(job: LiftJob): LiftJobHex | undefined {
@@ -975,16 +706,9 @@ export function buildCanonicalLiftJobAdministrativeTransition(
   if (current.status !== status) assertLiftJobTransition(current.status, status);
   assertNoImmutableLiftJobPatch(current, patch);
   const base = transitionBase(current, status, patch, now);
-  let next: LiftJob;
-  switch (status) {
-    case 'accepted': next = buildAcceptedTransition(current, patch, base); break;
-    case 'claimed': next = buildClaimedTransition(current, patch, base); break;
-    case 'validated': next = buildValidatedTransition(current, patch, base); break;
-    case 'broadcast': next = buildBroadcastTransition(current, patch, base); break;
-    case 'included': next = buildIncludedTransition(current, patch, base); break;
-    case 'finalized': next = buildFinalizedTransition(current, patch, base); break;
-    case 'failed': next = buildFailedTransition(current, patch, base); break;
-  }
+  const source = transitionConstructionSource(current, patch);
+  if (status === 'failed') assertFailureOriginRetainsTransactionEvidence(current, source);
+  const next = constructCanonicalLiftJob(status, base, source);
   assertTransactionEvidenceRetained(current, next);
   return next;
 }

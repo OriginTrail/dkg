@@ -88,6 +88,36 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(other))?.status).toBe('finalized'); // untouched
   });
 
+  it('reads, lists, and clears a pre-upgrade local finalization with retained chain evidence', async () => {
+    const p = createPublisher();
+    const jobId = await driveToValidated(p, { name: 'legacy-local-finalization' });
+    await p.update(jobId, 'broadcast', { broadcast: bx });
+    await p.update(jobId, 'included', { inclusion: inc });
+    const included = await p.getStatus(jobId);
+    if (!included || included.status !== 'included') throw new Error('expected included job');
+    const legacyFinalized = {
+      ...included,
+      status: 'finalized',
+      timestamps: { ...included.timestamps, finalizedAt: ++now, updatedAt: now },
+      finalization: { mode: 'local' },
+    } as const;
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(legacyFinalized as never, DEFAULT_CONTROL_GRAPH_URI));
+
+    await expect(p.getStatus(jobId)).resolves.toMatchObject({
+      status: 'finalized',
+      broadcast: included.broadcast,
+      inclusion: included.inclusion,
+      finalization: { mode: 'local' },
+    });
+    expect((await p.list()).find((job) => job.jobId === jobId)).toMatchObject({
+      broadcast: included.broadcast,
+      inclusion: included.inclusion,
+    });
+    await expect(p.clearTerminalJob(jobId)).resolves.toEqual({ outcome: 'cleared' });
+    await expect(p.getStatus(jobId)).resolves.toBeNull();
+  });
+
   it('clears an exact terminal (non-retryable) failed job', async () => {
     const p = createPublisher();
     const jobId = await driveToTerminalFailed(p);
@@ -136,6 +166,39 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // equivalent at the public boundary, and queue inventory is not poisoned by the rejected patch.
     await expect(p.getStatus(jobId)).resolves.toEqual(before);
     expect((await p.list()).filter((job) => job.jobId === jobId)).toEqual([before]);
+  });
+
+  it('does not mutate a durable row when an administrative update changes recovery evidence', async () => {
+    const p = createPublisher();
+    const jobId = await p.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'recovery-evidence' }),
+    );
+    const accepted = await p.getStatus(jobId);
+    if (!accepted || accepted.status !== 'accepted') throw new Error('expected accepted job');
+    const recovered = {
+      ...accepted,
+      recovery: {
+        action: 'reset_to_accepted',
+        recoveredFromStatus: 'broadcast',
+        txHashChecked: `0x${'ab'.repeat(32)}`,
+        txHashAccounted: true,
+        operationKind: 'create',
+        walletIdChecked: 'wallet-recovery',
+        nonceChecked: 7,
+      },
+    } as const;
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(recovered, DEFAULT_CONTROL_GRAPH_URI));
+    const query = `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`;
+    const durableBefore = await store.query(query);
+
+    await expect(p.update(jobId, 'claimed', {
+      claim: { walletId: 'wallet-1' },
+      recovery: { ...recovered.recovery, nonceChecked: 8 },
+    } as never)).rejects.toThrow(/transition cannot change checked recovery\.nonceChecked/);
+
+    expect(await store.query(query)).toEqual(durableBefore);
+    await expect(p.getStatus(jobId)).resolves.toEqual(recovered);
   });
 
   it('rejects a validated job as nonterminal without mutation', async () => {

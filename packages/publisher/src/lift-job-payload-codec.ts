@@ -297,18 +297,27 @@ type RequiredKeys<T extends object> = Exclude<keyof T, OptionalKeys<T>>;
 type ObjectRuntimeSchema<T extends object> =
   & { readonly [K in RequiredKeys<T>]: RuntimeParser<T[K]> }
   & { readonly [K in OptionalKeys<T>]: OptionalRuntimeParser<Exclude<T[K], undefined>> };
+type UnknownKeyPolicy = 'reject' | 'strip';
 
 function optional<T>(parser: RuntimeParser<T>): OptionalRuntimeParser<T> {
   return { optional: true, parser };
 }
 
 /**
- * The schema map is exhaustive over T, including optional fields. Adding a metadata field now
- * breaks this declaration at compile time instead of silently making newly written rows unreadable.
+ * The schema map is exhaustive over T, including optional fields. Unknown keys are rejected by
+ * default so canonical durable decoding can never silently perform a lossy projection. A caller
+ * that intentionally owns a compatibility projection must opt in to stripping explicitly.
  */
-function objectParser<T extends object>(schema: ObjectRuntimeSchema<T>): RuntimeParser<T> {
+function objectParser<T extends object>(
+  schema: ObjectRuntimeSchema<T>,
+  unknownKeys: UnknownKeyPolicy = 'reject',
+): RuntimeParser<T> {
   return (value, path) => {
     const record = expectRecord(value, path);
+    if (unknownKeys === 'reject') {
+      const unknownKey = Object.keys(record).find((key) => !Object.hasOwn(schema, key));
+      if (unknownKey !== undefined) throw new Error(`${path}.${unknownKey} is unsupported`);
+    }
     const parsed: Record<string, unknown> = {};
     for (const [key, field] of Object.entries(schema)) {
       if (typeof field === 'object' && field !== null && 'optional' in field) {

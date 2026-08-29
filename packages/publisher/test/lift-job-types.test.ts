@@ -305,6 +305,30 @@ describe('LiftJob request and record types', () => {
     expect(malformed).toMatchObject({ kind: 'malformed', reason: expect.stringContaining('claim is forbidden') });
   });
 
+  it('rejects unknown durable keys at both the root and nested metadata boundaries', () => {
+    const accepted: LiftJobAccepted = {
+      jobId: 'job-strict-codec',
+      jobSlug: 'music-social/person-profile/create/op-strict-codec/rihana',
+      request: rawJobRequest(rawLift({ shareOperationId: 'op-strict-codec' })),
+      status: 'accepted',
+      timestamps: { acceptedAt: 1, updatedAt: 1 },
+      retries: { retryCount: 0, maxRetries: 3 },
+    };
+    const encode = (value: unknown): string => literal(JSON.stringify(value));
+
+    expect(decodeLiftJobPayload(encode({ ...accepted, futurePolicy: 2 }))).toMatchObject({
+      kind: 'malformed',
+      reason: 'payload.futurePolicy is unsupported',
+    });
+    expect(decodeLiftJobPayload(encode({
+      ...accepted,
+      retries: { ...accepted.retries, futurePolicy: 2 },
+    }))).toMatchObject({
+      kind: 'malformed',
+      reason: 'retries.futurePolicy is unsupported',
+    });
+  });
+
   it('accepts only documented failed compatibility shapes, not arbitrary cross-state mixtures', () => {
     const accepted: LiftJobAccepted = {
       jobId: 'job-failed-codec',

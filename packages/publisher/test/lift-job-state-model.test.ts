@@ -61,7 +61,7 @@ function failureFor<State extends Exclude<LiftJobState, 'finalized' | 'failed'>>
 }
 
 describe('LiftJob canonical state model', () => {
-  it('constructs and round-trips every writable lifecycle state through the durable decoder', () => {
+  it('uses the shared per-state constructor for transitions and durable round-trips', () => {
     const claimed = buildCanonicalLiftJobTransition(
       accepted,
       'claimed',
@@ -332,6 +332,66 @@ describe('LiftJob canonical state model', () => {
       } as never,
       2,
     )).toThrow(/jobId is immutable and cannot be changed/);
+  });
+
+  it.each([
+    ['erased recovery', undefined],
+    ['changed tx hash', {
+      action: 'reset_to_accepted',
+      recoveredFromStatus: 'broadcast',
+      txHashChecked: `0x${'cd'.repeat(32)}`,
+      txHashAccounted: true,
+      operationKind: 'create',
+      walletIdChecked: 'wallet-recovery',
+      nonceChecked: 7,
+    }],
+    ['changed wallet', {
+      action: 'reset_to_accepted',
+      recoveredFromStatus: 'broadcast',
+      txHashChecked: `0x${'ab'.repeat(32)}`,
+      txHashAccounted: true,
+      operationKind: 'create',
+      walletIdChecked: 'wallet-other',
+      nonceChecked: 7,
+    }],
+    ['changed nonce', {
+      action: 'reset_to_accepted',
+      recoveredFromStatus: 'broadcast',
+      txHashChecked: `0x${'ab'.repeat(32)}`,
+      txHashAccounted: true,
+      operationKind: 'create',
+      walletIdChecked: 'wallet-recovery',
+      nonceChecked: 8,
+    }],
+    ['changed operation kind', {
+      action: 'reset_to_accepted',
+      recoveredFromStatus: 'broadcast',
+      txHashChecked: `0x${'ab'.repeat(32)}`,
+      txHashAccounted: true,
+      operationKind: 'update',
+      walletIdChecked: 'wallet-recovery',
+      nonceChecked: 7,
+    }],
+  ] as const)('rejects %s when recovery is the only transaction evidence carrier', (_label, recovery) => {
+    const recoveredAccepted: LiftJobAccepted = {
+      ...accepted,
+      recovery: {
+        action: 'reset_to_accepted',
+        recoveredFromStatus: 'broadcast',
+        txHashChecked: `0x${'ab'.repeat(32)}`,
+        txHashAccounted: true,
+        operationKind: 'create',
+        walletIdChecked: 'wallet-recovery',
+        nonceChecked: 7,
+      },
+    };
+
+    expect(() => buildCanonicalLiftJobTransition(
+      recoveredAccepted,
+      'claimed',
+      { claim: { walletId: 'wallet-1' }, recovery } as never,
+      2,
+    )).toThrow(/transition cannot change checked recovery/);
   });
 
   it('does not carry reset provenance into an accepted-origin failure', () => {
