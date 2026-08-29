@@ -1,0 +1,258 @@
+import type { ContextGraphReconcileResult } from '@origintrail-official/dkg-agent';
+
+export type Gate1RolloutMode = 'legacy' | 'shadow' | 'catalog';
+export type Gate1VmChainScenario = 'valid' | 'inactive' | 'private' | 'root-count-drift';
+
+export const GATE1_VM_CHAIN_READ_KEYS = Object.freeze([
+  'accessPolicy',
+  'active',
+  'author',
+  'count',
+  'kaAt',
+  'latestRoot',
+  'nameHashResolution',
+  'publisher',
+  'rootCount',
+  'storageAddress',
+] as const);
+
+export type Gate1VmChainReadKey = typeof GATE1_VM_CHAIN_READ_KEYS[number];
+export type Gate1VmChainReadCounts = Readonly<Record<Gate1VmChainReadKey, number>>;
+
+/** Minimal process-safe projection of the agent replication telemetry contract. */
+export interface Gate1ReplicationEvent {
+  readonly ts: number;
+  readonly contextGraphId: string;
+  readonly onChainCgId?: string;
+  readonly action:
+    | 'sweep'
+    | 'fetch'
+    | 'promote'
+    | 'already'
+    | 'defer'
+    | 'cursor-advance'
+    | 'core-fill';
+  readonly ual?: string;
+  readonly ordinal?: number;
+  readonly kaId?: string;
+  readonly fromWatermark?: number;
+  readonly toWatermark?: number;
+  readonly head?: number;
+  readonly reconciled?: number;
+  readonly pending?: number;
+  readonly detail?: string;
+}
+
+export interface Gate1RolloutStatusResult {
+  readonly bootstrapStarted: boolean;
+  readonly catalogServiceStarted: boolean;
+  readonly legacyConfiguredScope: boolean;
+  readonly manualLegacySwmTargetCount: number;
+  readonly vmChainInventorySelected: boolean;
+}
+
+export interface Gate1VmReconcileResult {
+  readonly chainReadDelta: Gate1VmChainReadCounts;
+  readonly replicationEvents: readonly Gate1ReplicationEvent[];
+  readonly result: ContextGraphReconcileResult;
+}
+
+export interface Gate1SeedVmSourceSwmResult {
+  readonly swmGraph: string;
+  readonly tripleCount: number;
+}
+
+export interface Gate1RolloutCommandMap {
+  readonly rolloutStatus: {
+    readonly input: {
+      readonly contextGraphId: string;
+      readonly completeProviderPeerId: string;
+    };
+    readonly output: Gate1RolloutStatusResult;
+  };
+  readonly vmReconcile: {
+    readonly input: { readonly contextGraphId: string };
+    readonly output: Gate1VmReconcileResult;
+  };
+  readonly seedVmSourceSwm: {
+    readonly input: { readonly contextGraphId: string };
+    readonly output: Gate1SeedVmSourceSwmResult;
+  };
+  readonly stagedHeadReadback: {
+    readonly input: {
+      readonly objectDigest: string;
+      readonly signatureVariantDigest: string;
+    };
+    readonly output: string | null;
+  };
+}
+
+export type Gate1RolloutCommand = keyof Gate1RolloutCommandMap;
+export type Gate1RolloutCommandInput<K extends Gate1RolloutCommand> =
+  Gate1RolloutCommandMap[K]['input'];
+export type Gate1RolloutCommandOutput<K extends Gate1RolloutCommand> =
+  Gate1RolloutCommandMap[K]['output'];
+
+/** Parse the JSON process boundary once; scenario code consumes typed results. */
+export function parseGate1RolloutCommandOutput<K extends Gate1RolloutCommand>(
+  command: K,
+  value: unknown,
+): Gate1RolloutCommandOutput<K> {
+  if (command === 'stagedHeadReadback') {
+    if (value !== null && typeof value !== 'string') {
+      throw new TypeError('stagedHeadReadback output must be a digest or null');
+    }
+    return value as Gate1RolloutCommandOutput<K>;
+  }
+  const output = plainRecord(value, `${command} output`);
+  if (command === 'rolloutStatus') {
+    return Object.freeze({
+      bootstrapStarted: requiredBoolean(output.bootstrapStarted, 'rolloutStatus.bootstrapStarted'),
+      catalogServiceStarted: requiredBoolean(
+        output.catalogServiceStarted,
+        'rolloutStatus.catalogServiceStarted',
+      ),
+      legacyConfiguredScope: requiredBoolean(
+        output.legacyConfiguredScope,
+        'rolloutStatus.legacyConfiguredScope',
+      ),
+      manualLegacySwmTargetCount: requiredNonNegativeInteger(
+        output.manualLegacySwmTargetCount,
+        'rolloutStatus.manualLegacySwmTargetCount',
+      ),
+      vmChainInventorySelected: requiredBoolean(
+        output.vmChainInventorySelected,
+        'rolloutStatus.vmChainInventorySelected',
+      ),
+    }) as Gate1RolloutCommandOutput<K>;
+  }
+  if (command === 'seedVmSourceSwm') {
+    return Object.freeze({
+      swmGraph: requiredString(output.swmGraph, 'seedVmSourceSwm.swmGraph'),
+      tripleCount: requiredNonNegativeInteger(
+        output.tripleCount,
+        'seedVmSourceSwm.tripleCount',
+      ),
+    }) as Gate1RolloutCommandOutput<K>;
+  }
+  const reads = plainRecord(output.chainReadDelta, 'vmReconcile.chainReadDelta');
+  const chainReadDelta = Object.freeze(Object.fromEntries(
+    GATE1_VM_CHAIN_READ_KEYS.map((key) => [
+      key,
+      requiredNonNegativeInteger(reads[key], `vmReconcile.chainReadDelta.${key}`),
+    ]),
+  )) as Gate1VmChainReadCounts;
+  const events = output.replicationEvents;
+  if (!Array.isArray(events)) throw new TypeError('vmReconcile.replicationEvents must be an array');
+  const replicationEvents = Object.freeze(events.map(parseReplicationEvent));
+  const result = parseContextGraphReconcileResult(output.result);
+  return Object.freeze({ chainReadDelta, replicationEvents, result }) as
+    Gate1RolloutCommandOutput<K>;
+}
+
+function parseContextGraphReconcileResult(value: unknown): ContextGraphReconcileResult {
+  const result = plainRecord(value, 'vmReconcile.result');
+  const source = requiredString(result.source, 'vmReconcile.result.source');
+  const status = requiredString(result.status, 'vmReconcile.result.status');
+  if (!['live', 'manual', 'periodic'].includes(source)) {
+    throw new TypeError('vmReconcile.result.source is invalid');
+  }
+  if (!['current', 'progress', 'pending', 'watermark-ahead'].includes(status)) {
+    throw new TypeError('vmReconcile.result.status is invalid');
+  }
+  return Object.freeze({
+    contextGraphId: requiredString(result.contextGraphId, 'vmReconcile.result.contextGraphId'),
+    onChainId: requiredString(result.onChainId, 'vmReconcile.result.onChainId'),
+    source: source as ContextGraphReconcileResult['source'],
+    status: status as ContextGraphReconcileResult['status'],
+    attempted: requiredBoolean(result.attempted, 'vmReconcile.result.attempted'),
+    headOrdinal: requiredNonNegativeInteger(result.headOrdinal, 'vmReconcile.result.headOrdinal'),
+    watermarkBefore: requiredNonNegativeInteger(
+      result.watermarkBefore,
+      'vmReconcile.result.watermarkBefore',
+    ),
+    watermarkAfter: requiredNonNegativeInteger(
+      result.watermarkAfter,
+      'vmReconcile.result.watermarkAfter',
+    ),
+    reconciledOrdinals: requiredNonNegativeInteger(
+      result.reconciledOrdinals,
+      'vmReconcile.result.reconciledOrdinals',
+    ),
+    unresolvedOrdinals: requiredNonNegativeInteger(
+      result.unresolvedOrdinals,
+      'vmReconcile.result.unresolvedOrdinals',
+    ),
+  });
+}
+
+function parseReplicationEvent(value: unknown): Gate1ReplicationEvent {
+  const event = plainRecord(value, 'vmReconcile replication event');
+  const action = requiredString(event.action, 'vmReconcile replication event action');
+  if (!['sweep', 'fetch', 'promote', 'already', 'defer', 'cursor-advance', 'core-fill']
+    .includes(action)) {
+    throw new TypeError('vmReconcile replication event action is invalid');
+  }
+  return Object.freeze({
+    ts: requiredNonNegativeInteger(event.ts, 'vmReconcile replication event ts'),
+    contextGraphId: requiredString(
+      event.contextGraphId,
+      'vmReconcile replication event contextGraphId',
+    ),
+    action: action as Gate1ReplicationEvent['action'],
+    ...optionalStringField(event, 'onChainCgId'),
+    ...optionalStringField(event, 'ual'),
+    ...optionalNonNegativeIntegerField(event, 'ordinal'),
+    ...optionalStringField(event, 'kaId'),
+    ...optionalNonNegativeIntegerField(event, 'fromWatermark'),
+    ...optionalNonNegativeIntegerField(event, 'toWatermark'),
+    ...optionalNonNegativeIntegerField(event, 'head'),
+    ...optionalNonNegativeIntegerField(event, 'reconciled'),
+    ...optionalNonNegativeIntegerField(event, 'pending'),
+    ...optionalStringField(event, 'detail'),
+  });
+}
+
+function optionalStringField<K extends string>(
+  record: Record<string, unknown>,
+  key: K,
+): Readonly<Record<string, string>> {
+  const value = record[key];
+  return value === undefined ? {} : { [key]: requiredString(value, `replication event ${key}`) };
+}
+
+function optionalNonNegativeIntegerField<K extends string>(
+  record: Record<string, unknown>,
+  key: K,
+): Readonly<Record<string, number>> {
+  const value = record[key];
+  return value === undefined
+    ? {}
+    : { [key]: requiredNonNegativeInteger(value, `replication event ${key}`) };
+}
+
+function plainRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requiredBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw new TypeError(`${label} must be a boolean`);
+  return value;
+}
+
+function requiredNonNegativeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new TypeError(`${label} must be a non-negative safe integer`);
+  }
+  return value as number;
+}

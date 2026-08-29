@@ -157,11 +157,17 @@ export {
 } from './rfc64-semantic-read-gateway.js';
 export {
   Rfc64ExactBindingsReadResultErrorV1,
+  Rfc64SemanticReadCapabilityResultErrorV1,
+  certifyRfc64ExactBindingsReadStoreV1,
+  certifyRfc64SemanticReadStoreV1,
   executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
   isRfc64ExactBindingsReadCapabilityV1,
+  isRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
   type Rfc64ExactBindingsStoreRowV1,
+  type Rfc64SemanticReadCapabilityV1,
 } from './rfc64-exact-bindings-read-capability.js';
 export {
   MAX_RFC64_AUTHOR_SEAL_READ_TIMEOUT_MS_V1,
@@ -173,8 +179,12 @@ export {
   type Rfc64AuthorSealReadResultV1,
 } from './rfc64-author-seal-read-gateway.js';
 export {
+  issueManagedOxigraphRuntimeCapabilityV1,
+  isManagedOxigraphRuntimeCapabilityV1,
+  type ManagedOxigraphRuntimeCapabilityV1,
+} from './managed-oxigraph-runtime-capability.js';
+export {
   isRfc64SharedProjectionStreamCapabilityV1,
-  type Rfc64CanonicalProjectionLineV1,
   type Rfc64SharedProjectionStreamCapabilityOptionsV1,
   type Rfc64SharedProjectionStreamCapabilityV1,
 } from './rfc64-shared-projection-stream-capability.js';

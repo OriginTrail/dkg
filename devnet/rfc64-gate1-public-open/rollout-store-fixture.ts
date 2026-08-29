@@ -24,6 +24,7 @@ export interface RolloutStoreFixtureOptions {
   readonly fetchImpl?: typeof fetch;
   readonly requestTimeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly storesPerRole?: Readonly<Partial<Record<RolloutStoreRole, number>>>;
 }
 
 interface BlazegraphRuntimeContract {
@@ -31,6 +32,7 @@ interface BlazegraphRuntimeContract {
 }
 
 const DEFAULT_MANAGEMENT_TIMEOUT_MS = 30_000;
+const DEFAULT_STORES_PER_ROLE = Object.freeze({ author: 1, receiver: 3 });
 const require = createRequire(import.meta.url);
 const { renderBlazegraphNamespaceXml } = require(
   '../../packages/cli/blazegraph-image-metadata.cjs',
@@ -50,6 +52,7 @@ export async function createRolloutStoreFixture(
     fetchImpl: options.fetchImpl ?? fetch,
     requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_MANAGEMENT_TIMEOUT_MS,
     signal: options.signal,
+    storesPerRole: normalizeStoresPerRole(options.storesPerRole),
   });
 }
 
@@ -115,9 +118,11 @@ class OxigraphRolloutStoreFixture implements RolloutStoreFixture {
 class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
   readonly backend = 'blazegraph' as const;
   private readonly dataDirs = new Map<RolloutStoreRole, string>();
+  private readonly endpointByStore = new Map<string, string>();
+  private readonly assignedStoreCount = new Map<RolloutStoreRole, number>();
 
   private constructor(
-    private readonly endpoints: Readonly<Record<RolloutStoreRole, string>>,
+    private readonly endpoints: Readonly<Record<RolloutStoreRole, readonly string[]>>,
     private readonly namespaceUrls: readonly string[],
     private readonly fetchImpl: typeof fetch,
     private readonly requestTimeoutMs: number,
@@ -129,26 +134,27 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
     fetchImpl: typeof fetch;
     requestTimeoutMs: number;
     signal?: AbortSignal;
+    storesPerRole: Readonly<Record<RolloutStoreRole, number>>;
   }>): Promise<BlazegraphRolloutStoreFixture> {
     const namespaceApiUrl = blazegraphNamespaceApiUrl(input.configuredUrl);
     const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const names = Object.freeze({
-      author: `rfc64-rollout-${nonce}-author`,
-      receiver: `rfc64-rollout-${nonce}-receiver`,
-    });
     const createdNamespaceUrls: string[] = [];
+    const endpoints: Record<RolloutStoreRole, string[]> = { author: [], receiver: [] };
     try {
       for (const role of ['author', 'receiver'] as const) {
-        await createBlazegraphNamespace({
-          namespaceApiUrl,
-          namespace: names[role],
-          fetchImpl: input.fetchImpl,
-          requestTimeoutMs: input.requestTimeoutMs,
-          signal: input.signal,
-        });
-        createdNamespaceUrls.push(
-          `${namespaceApiUrl}/${encodeURIComponent(names[role])}`,
-        );
+        for (let index = 0; index < input.storesPerRole[role]; index += 1) {
+          const namespace = `rfc64-rollout-${nonce}-${role}-${index}`;
+          await createBlazegraphNamespace({
+            namespaceApiUrl,
+            namespace,
+            fetchImpl: input.fetchImpl,
+            requestTimeoutMs: input.requestTimeoutMs,
+            signal: input.signal,
+          });
+          const namespaceUrl = `${namespaceApiUrl}/${encodeURIComponent(namespace)}`;
+          createdNamespaceUrls.push(namespaceUrl);
+          endpoints[role].push(`${namespaceUrl}/sparql`);
+        }
       }
     } catch (error) {
       await cleanupBlazegraphNamespaces(
@@ -160,8 +166,8 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
     }
     return new BlazegraphRolloutStoreFixture(
       Object.freeze({
-        author: `${createdNamespaceUrls[0]}/sparql`,
-        receiver: `${createdNamespaceUrls[1]}/sparql`,
+        author: Object.freeze(endpoints.author),
+        receiver: Object.freeze(endpoints.receiver),
       }),
       Object.freeze(createdNamespaceUrls),
       input.fetchImpl,
@@ -172,9 +178,22 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
 
   envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>> {
     this.dataDirs.set(role, dataDir);
+    const storeKey = roleDataDirKey(role, dataDir);
+    let endpoint = this.endpointByStore.get(storeKey);
+    if (endpoint === undefined) {
+      const assignedCount = this.assignedStoreCount.get(role) ?? 0;
+      endpoint = this.endpoints[role][assignedCount];
+      if (endpoint === undefined) {
+        throw new Error(
+          `Blazegraph rollout fixture exhausted its ${role} store pool at ${assignedCount}`,
+        );
+      }
+      this.endpointByStore.set(storeKey, endpoint);
+      this.assignedStoreCount.set(role, assignedCount + 1);
+    }
     return Object.freeze({
       DKG_RFC64_GATE1_STORE_BACKEND: this.backend,
-      DKG_RFC64_GATE1_BLAZEGRAPH_URL: this.endpoints[role],
+      DKG_RFC64_GATE1_BLAZEGRAPH_URL: endpoint,
     });
   }
 
@@ -189,7 +208,10 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       join(dataDir, 'store.nq'),
       `Blazegraph ${role} unexpectedly created an Oxigraph fallback store`,
     );
-    const endpoint = this.endpoints[role];
+    const endpoint = this.endpointByStore.get(roleDataDirKey(role, dataDir));
+    if (endpoint === undefined) {
+      throw new Error(`Blazegraph ${role} endpoint is not registered`);
+    }
     const graph = sparqlIri(graphUri, 'graph URI');
     const count = await this.queryJson(endpoint,
       `SELECT (COUNT(*) AS ?count) WHERE { GRAPH ${graph} { ?s ?p ?o } }`);
@@ -233,6 +255,25 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
     }
     return await response.json() as Record<string, unknown>;
   }
+}
+
+function normalizeStoresPerRole(
+  input: Readonly<Partial<Record<RolloutStoreRole, number>>> | undefined,
+): Readonly<Record<RolloutStoreRole, number>> {
+  const normalized = {
+    author: input?.author ?? DEFAULT_STORES_PER_ROLE.author,
+    receiver: input?.receiver ?? DEFAULT_STORES_PER_ROLE.receiver,
+  };
+  for (const [role, count] of Object.entries(normalized)) {
+    if (!Number.isSafeInteger(count) || count < 1) {
+      throw new Error(`Blazegraph rollout ${role} store count must be a positive safe integer`);
+    }
+  }
+  return Object.freeze(normalized);
+}
+
+function roleDataDirKey(role: RolloutStoreRole, dataDir: string): string {
+  return `${role}\u0000${dataDir}`;
 }
 
 function blazegraphNamespaceApiUrl(configuredUrl: string): string {

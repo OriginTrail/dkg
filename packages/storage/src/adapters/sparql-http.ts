@@ -85,6 +85,10 @@ import type {
 import {
   spoolRfc64SharedProjectionHttpResponseV1,
 } from '../rfc64-shared-projection-http-spool.js';
+import {
+  isManagedOxigraphRuntimeCapabilityV1,
+  type ManagedOxigraphRuntimeCapabilityV1,
+} from '../managed-oxigraph-runtime-capability.js';
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
@@ -227,10 +231,15 @@ export interface SparqlHttpStoreOptions {
    */
   managedByDkg?: boolean;
   /**
-   * Runtime-only marker issued by the daemon supervisor for the Oxigraph
-   * process it launched. This is deliberately independent of
-   * `managedByDkg`, which only describes namespace/cache ownership and may be
-   * present in persisted operator configuration.
+   * Unforgeable process-local proof issued after the daemon supervisor starts
+   * its Oxigraph child. Persisted adapter configuration cannot activate
+   * managed-server guarantees or RFC-64 capabilities.
+   * @internal
+   */
+  managedOxigraphRuntimeCapability?: ManagedOxigraphRuntimeCapabilityV1;
+  /**
+   * @deprecated Ignored. Retained only so old persisted configuration fails
+   * closed instead of failing boot; it never grants managed guarantees.
    */
   managedOxigraph?: boolean;
   /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
@@ -245,6 +254,14 @@ export interface SparqlHttpStoreOptions {
    * `atomic-readback`; all other endpoints default to `best-effort`.
    */
   consistencyProfile?: SparqlHttpConsistencyProfile;
+  /**
+   * @deprecated Use `consistencyProfile: 'atomic-update'` instead.
+   *
+   * This compatibility alias preserves the pre-profile public API. It grants
+   * transactional update capability only; receipt-bearing CAS still requires
+   * `atomic-readback` or a daemon-certified managed Oxigraph endpoint.
+   */
+  atomicUpdates?: boolean;
   /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
   slowQueryThresholdMs?: number;
   /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
@@ -302,12 +319,14 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
-    this.managedOxigraph = options.managedOxigraph === true;
+    this.managedOxigraph = isManagedOxigraphRuntimeCapabilityV1(
+      options.managedOxigraphRuntimeCapability,
+    );
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
-      : normalizeConsistencyProfile(options.consistencyProfile);
+      : resolveConsistencyProfile(options);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -866,12 +885,6 @@ export class SparqlHttpStore implements TripleStore {
     });
   }
 
-  /**
-   * The only dispatch path for public remote mutations. The request owns its
-   * write scope, HTTP dispatch, lifecycle transitions, graph-list invalidation,
-   * timeout classification, and optional staging cleanup as one operation.
-   * There is no callback a caller can omit while still sending an update.
-   */
   private supportsConsistency(
     required: Exclude<SparqlHttpConsistencyProfile, 'best-effort'>,
   ): boolean {
@@ -879,6 +892,12 @@ export class SparqlHttpStore implements TripleStore {
       || this.consistencyProfile === required;
   }
 
+  /**
+   * The only dispatch path for public remote mutations. The request owns its
+   * write scope, HTTP dispatch, lifecycle transitions, graph-list invalidation,
+   * timeout classification, and optional staging cleanup as one operation.
+   * There is no callback a caller can omit while still sending an update.
+   */
   private async runRemoteGraphMutation(opts: {
     scope: GraphWriteScope;
     update: string;
@@ -1232,6 +1251,28 @@ function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfi
   throw new Error(
     'sparql-http consistencyProfile must be best-effort, atomic-update, or atomic-readback',
   );
+}
+
+function resolveConsistencyProfile(
+  options: Pick<SparqlHttpStoreOptions, 'consistencyProfile' | 'atomicUpdates'>,
+): SparqlHttpConsistencyProfile {
+  const profile = normalizeConsistencyProfile(options.consistencyProfile);
+  if (options.atomicUpdates === undefined) return profile;
+
+  const legacyProfile: SparqlHttpConsistencyProfile = options.atomicUpdates
+    ? 'atomic-update'
+    : 'best-effort';
+  if (options.consistencyProfile === undefined) return legacyProfile;
+
+  const compatible = options.atomicUpdates
+    ? profile === 'atomic-update' || profile === 'atomic-readback'
+    : profile === 'best-effort';
+  if (!compatible) {
+    throw new Error(
+      'sparql-http atomicUpdates conflicts with consistencyProfile; remove the deprecated alias',
+    );
+  }
+  return profile;
 }
 
 function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {

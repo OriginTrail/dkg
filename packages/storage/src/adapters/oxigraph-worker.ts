@@ -6,10 +6,19 @@ import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOpt
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
 import {
-  Rfc64ExactBindingsReadResultErrorV1,
+  certifyRfc64ExactBindingsReadStoreV1,
   type Rfc64ExactBindingsReadOperationV1,
   type Rfc64ExactBindingsStoreRowV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+} from '../rfc64-author-commit-cas.js';
+import {
+  deserializeWorkerErrorV1,
+  type WorkerErrorCodeV1,
+} from '../worker-error-protocol.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -93,6 +102,40 @@ function asAbortError(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
+function waitForRespawnOrAbort(
+  respawn: Promise<void>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  timeoutError: () => Error,
+): Promise<void> {
+  if (signal?.aborted) return Promise.reject(asAbortError(signal.reason));
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      action();
+    };
+    const onAbort = () => finish(() => reject(asAbortError(signal?.reason)));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => finish(() => reject(timeoutError())), timeoutMs);
+      if (typeof timer.unref === 'function') timer.unref();
+    }
+    respawn.then(
+      () => finish(resolve),
+      (cause) => finish(() => reject(cause)),
+    );
+  });
+}
+
 /**
  * Side-effect-free read methods. ONLY these are bounded by the per-op timeout:
  * rejecting a read after the bound is a clean, determinate failure (nothing was
@@ -112,6 +155,23 @@ export interface OxigraphWorkerTimeoutError extends Error {
   method: string;
   /** The bound that was exceeded. */
   timeoutMs: number;
+}
+
+function createOxigraphWorkerTimeoutError(
+  method: string,
+  timeoutMs: number,
+): OxigraphWorkerTimeoutError {
+  const error = new Error(
+    `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. `
+      + 'The embedded store runs on a single worker thread, so a long-running or '
+      + 'stuck operation blocks all reads queued behind it. For heavy workloads '
+      + 'point the node at an external SPARQL server (store.backend "sparql-http" '
+      + '/ "blazegraph"), or raise / disable store.options.operationTimeoutMs.',
+  ) as OxigraphWorkerTimeoutError;
+  error.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
+  error.method = method;
+  error.timeoutMs = timeoutMs;
+  return error;
 }
 
 /**
@@ -156,24 +216,13 @@ export class OxigraphWorkerStore implements TripleStore {
     operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
-    try {
-      return await this.callWithTimeout<readonly Rfc64ExactBindingsStoreRowV1[]>(
-        this.operationTimeoutMs,
-        options?.signal,
-        'rfc64ExactBindingsReadV1',
-        operation,
-      );
-    } catch (cause) {
-      if (
-        cause instanceof Error
-        && cause.name === Rfc64ExactBindingsReadResultErrorV1.name
-      ) {
-        throw new Rfc64ExactBindingsReadResultErrorV1(cause.message);
-      }
-      throw cause;
-    }
+    return this.callWithTimeout<readonly Rfc64ExactBindingsStoreRowV1[]>(
+      this.operationTimeoutMs,
+      options?.signal,
+      'rfc64ExactBindingsReadV1',
+      operation,
+    );
   }
-
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.
   private worker!: Worker;
@@ -276,6 +325,10 @@ export class OxigraphWorkerStore implements TripleStore {
     this.workerPath = workerPath;
     this.persistPath = persistPath;
     this.spawnWorker();
+    certifyRfc64ExactBindingsReadStoreV1(
+      this,
+      this.rfc64ExactBindingsReadV1.bind(this),
+    );
   }
 
   /**
@@ -356,7 +409,7 @@ export class OxigraphWorkerStore implements TripleStore {
       id: number;
       result?: unknown;
       error?: string;
-      errorName?: string;
+      errorCode?: WorkerErrorCodeV1;
     }) => {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the
@@ -366,9 +419,10 @@ export class OxigraphWorkerStore implements TripleStore {
       if (!p) return;
       this.pending.delete(msg.id);
       if (msg.error) {
-        const error = new Error(msg.error);
-        if (msg.errorName) error.name = msg.errorName;
-        p.reject(error);
+        p.reject(deserializeWorkerErrorV1({
+          message: msg.error,
+          ...(msg.errorCode === undefined ? {} : { code: msg.errorCode }),
+        }));
       }
       else p.resolve(msg.result);
     });
@@ -531,8 +585,8 @@ export class OxigraphWorkerStore implements TripleStore {
    * double-settling this promise. Only read-only ops are ever given a non-zero
    * timeout (see `call`), so a fired timeout is always a determinate,
    * side-effect-free failure. If a crashed worker is being replaced, the op
-   * first parks on the respawn (the timeout starts only once it is actually
-   * posted — backoff is capped well below the default read bound anyway).
+   * first parks on the respawn. The same timeout covers both recovery wait and
+   * posted work, so a backoff cannot extend the caller-visible read bound.
    */
   private callWithTimeout<T>(
     timeoutMs: number,
@@ -544,7 +598,10 @@ export class OxigraphWorkerStore implements TripleStore {
     // respawn instead of failing it: the store is disk-persisted and about to
     // come back, so the caller sees a slightly slower success rather than a
     // spurious "store is closed" for a condition the store is already fixing.
-    if (this.respawnPromise) return this.callAfterRespawn<T>(timeoutMs, signal, method, args);
+    if (this.respawnPromise) {
+      const deadlineAt = timeoutMs > 0 ? performance.now() + timeoutMs : undefined;
+      return this.callAfterRespawn<T>(timeoutMs, deadlineAt, signal, method, args);
+    }
     return this.postToWorker<T>(timeoutMs, signal, method, args);
   }
 
@@ -557,12 +614,33 @@ export class OxigraphWorkerStore implements TripleStore {
    */
   private async callAfterRespawn<T>(
     timeoutMs: number,
+    deadlineAt: number | undefined,
     signal: AbortSignal | undefined,
     method: string,
     args: unknown[],
   ): Promise<T> {
-    while (this.respawnPromise) await this.respawnPromise;
-    return this.postToWorker<T>(timeoutMs, signal, method, args);
+    while (this.respawnPromise) {
+      const remainingMs = deadlineAt === undefined
+        ? 0
+        : Math.ceil(deadlineAt - performance.now());
+      if (deadlineAt !== undefined && remainingMs <= 0) {
+        throw createOxigraphWorkerTimeoutError(method, timeoutMs);
+      }
+      await waitForRespawnOrAbort(
+        this.respawnPromise,
+        signal,
+        remainingMs,
+        () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+      );
+    }
+    if (signal?.aborted) throw asAbortError(signal.reason);
+    const remainingMs = deadlineAt === undefined
+      ? 0
+      : Math.ceil(deadlineAt - performance.now());
+    if (deadlineAt !== undefined && remainingMs <= 0) {
+      throw createOxigraphWorkerTimeoutError(method, timeoutMs);
+    }
+    return this.postToWorker<T>(remainingMs, signal, method, args);
   }
 
   private postToWorker<T>(
@@ -614,17 +692,7 @@ export class OxigraphWorkerStore implements TripleStore {
         timer = setTimeout(() => {
           if (this.pending.delete(id)) {
             cleanup();
-            const err = new Error(
-              `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. ` +
-              `The embedded store runs on a single worker thread, so a long-running or ` +
-              `stuck operation blocks all reads queued behind it. For heavy workloads ` +
-              `point the node at an external SPARQL server (store.backend "sparql-http" ` +
-              `/ "blazegraph"), or raise / disable store.options.operationTimeoutMs.`,
-            ) as OxigraphWorkerTimeoutError;
-            err.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
-            err.method = method;
-            err.timeoutMs = timeoutMs;
-            reject(err);
+            reject(createOxigraphWorkerTimeoutError(method, timeoutMs));
           }
         }, timeoutMs);
         // A pending-op timer must not keep the process alive on its own.
@@ -723,6 +791,17 @@ export class OxigraphWorkerStore implements TripleStore {
     // single-message commit, same contract as insert/replaceGraph.
     await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
       this.call('replaceSubject', graphUri, subject, quads));
+  }
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: TripleStoreQueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (options?.signal?.aborted) throw asAbortError(options.signal.reason);
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    return this.runTrackedWrite(
+      { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
+      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', input),
+    );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);

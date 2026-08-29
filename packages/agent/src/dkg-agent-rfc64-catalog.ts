@@ -104,8 +104,7 @@ import {
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
 import {
   rfc64CatalogKillSwitchActiveV1,
-  rfc64CatalogRolloutModeForContextGraphV1,
-  rfc64CatalogTrack2ModeForContextGraphV1,
+  resolveRfc64CatalogAuthorityDecisionV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -300,10 +299,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (
       selectedContextGraphs.length > 0
       && selectedContextGraphs.every((contextGraphId) => (
-        rfc64CatalogRolloutModeForContextGraphV1(
+        !resolveRfc64CatalogAuthorityDecisionV1(
           this.config.rfc64CatalogRollout,
           contextGraphId,
-        ) === 'legacy'
+        ).track2Enabled
       ))
     ) {
       this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
@@ -318,8 +317,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
-      resolveContextGraphMode: (contextGraphId) =>
-        rfc64CatalogTrack2ModeForContextGraphV1(
+      resolveContextGraphAuthority: (contextGraphId) =>
+        resolveRfc64CatalogAuthorityDecisionV1(
           this.config.rfc64CatalogRollout,
           contextGraphId,
         ),
@@ -553,11 +552,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     if (
       contextGraphId !== undefined
-      && this.config.rfc64CatalogRollout.selectedContextGraphs.includes(contextGraphId)
-      && rfc64CatalogRolloutModeForContextGraphV1(
+      && !resolveRfc64CatalogAuthorityDecisionV1(
         this.config.rfc64CatalogRollout,
         contextGraphId,
-      ) === 'legacy'
+      ).authoringAllowed
     ) {
       throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
     }

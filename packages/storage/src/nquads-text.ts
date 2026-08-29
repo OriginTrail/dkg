@@ -1,4 +1,5 @@
 import type { Quad as DKGQuad } from './triple-store.js';
+import { decodeNTriplesUcharEscapes } from '@origintrail-official/dkg-rdf-utils';
 
 export type NQuadLineScan =
   | { readonly line: string; readonly parsed: true; readonly quad: DKGQuad }
@@ -68,40 +69,7 @@ export function parseNQuadsTextTolerant(text: string): DKGQuad[] {
 
 function decodeIriTerm(term: string): string | null {
   if (!term.startsWith('<') || !term.endsWith('>')) return term;
-  return decodeNTriplesIriEscapes(term.slice(1, -1));
-}
-
-/** Decode N-Triples UCHAR escapes in IRIREF positions, including UTF-16 pairs. */
-function decodeNTriplesIriEscapes(iri: string): string | null {
-  if (!iri.includes('\\')) return iri;
-  let decoded = '';
-  for (let index = 0; index < iri.length; index += 1) {
-    if (iri[index] !== '\\') {
-      decoded += iri[index];
-      continue;
-    }
-    const marker = iri[index + 1];
-    const digits = marker === 'u' ? 4 : marker === 'U' ? 8 : 0;
-    const hex = digits === 0 ? '' : iri.slice(index + 2, index + 2 + digits);
-    if (digits === 0 || hex.length !== digits || !/^[0-9A-Fa-f]+$/.test(hex)) {
-      return null;
-    }
-    let codePoint = Number.parseInt(hex, 16);
-    index += digits + 1;
-    if (marker === 'u' && codePoint >= 0xd800 && codePoint <= 0xdbff) {
-      const lowPrefix = iri.slice(index + 1, index + 3);
-      const lowHex = iri.slice(index + 3, index + 7);
-      if (lowPrefix !== '\\u' || !/^[dD][c-fC-F][0-9A-Fa-f]{2}$/.test(lowHex)) {
-        return null;
-      }
-      const low = Number.parseInt(lowHex, 16);
-      codePoint = 0x10000 + ((codePoint - 0xd800) * 0x400) + (low - 0xdc00);
-      index += 6;
-    } else if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
-      return null;
-    }
-    if (codePoint > 0x10ffff) return null;
-    decoded += String.fromCodePoint(codePoint);
-  }
-  return decoded;
+  return decodeNTriplesUcharEscapes(term.slice(1, -1), {
+    surrogatePolicy: 'combine',
+  });
 }

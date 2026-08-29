@@ -109,7 +109,7 @@ describe('planManagedOxigraph', () => {
     });
     expect(plan!.storeConfigTemplate).toEqual({
       backend: 'sparql-http',
-      options: { managedByDkg: true, managedOxigraph: true, timeout: 30_000 },
+      options: { managedByDkg: true, timeout: 30_000 },
     });
     expect(plan!.queryTimeoutS).toBeUndefined();
     expect(plan!.clientTimeoutMs).toBe(30_000);
@@ -288,7 +288,6 @@ describe('planManagedOxigraph', () => {
     expect(plan!.clientTimeoutMs).toBe(30_000);
     expect(plan!.storeConfigTemplate.options).toEqual({
       managedByDkg: true,
-      managedOxigraph: true,
       timeout: 30_000,
     });
   });
@@ -646,7 +645,9 @@ describe('startManagedOxigraph (real download + real server)', () => {
           backend: 'sparql-http',
           options: {
             managedByDkg: true,
-            managedOxigraph: true,
+            managedOxigraphRuntimeCapability: {
+              kind: 'dkg-managed-oxigraph-runtime-v1',
+            },
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,

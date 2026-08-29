@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  computeKaProjectionDigestV1,
   RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
   type Rfc64SharedProjectionStreamOperationV1,
 } from '@origintrail-official/dkg-core';
@@ -17,6 +18,10 @@ const GRAPH = RFC64_PROJECTION_TEST_GRAPH;
 const LINE_A = '<urn:a> <urn:p> "alpha" .\n';
 const LINE_M = '<urn:m> <urn:p> "middle" .\n';
 const LINE_Z = '<urn:z> <urn:p> "zeta" .\n';
+const INTEGER_DATATYPE = 'http://www.w3.org/2001/XMLSchema#integer';
+const PADDED_INTEGER_LINE =
+  `<urn:a> <urn:p> "00000000000000000001"^^<${INTEGER_DATATYPE}> .\n`;
+const CANONICAL_INTEGER_LINE = `<urn:a> <urn:p> "1"^^<${INTEGER_DATATYPE}> .\n`;
 
 describe('RFC-64 shared-projection HTTP spool', () => {
   it('externally sorts a chunked response and removes every spill artifact on exhaustion', async () => {
@@ -168,6 +173,51 @@ describe('RFC-64 shared-projection HTTP spool', () => {
     expect(await collect(source)).toEqual([line]);
   });
 
+  it('rejects a fragmented oversized line before LF or EOF arrives', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('12345'));
+        controller.enqueue(new TextEncoder().encode('67890'));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    await expect(spoolRfc64SharedProjectionHttpResponseV1({
+      body,
+      operation: operation({ publicTripleCount: '1' }),
+      byteCeiling: 4096,
+      inputLineByteCeiling: 8,
+    })).rejects.toThrow('local input-line ceiling');
+    expect(cancelled).toBe(true);
+  });
+
+  it.each([
+    ['memory', undefined],
+    ['spill', 1],
+  ] as const)(
+    'canonicalizes backend lexical bytes before accounting and emission on the %s path',
+    async (_name, sortChunkLines) => {
+      const source = await spoolRfc64SharedProjectionHttpResponseV1({
+        body: byteStream([PADDED_INTEGER_LINE]),
+        operation: operation({
+          publicTripleCount: '1',
+          signedByteCeiling: CANONICAL_INTEGER_LINE.length,
+        }),
+        byteCeiling: CANONICAL_INTEGER_LINE.length,
+        ...(sortChunkLines === undefined ? {} : { sortChunkLines }),
+      });
+      const emitted = await collectRaw(source);
+      expect(emitted.map((line) => new TextDecoder().decode(line)))
+        .toEqual([CANONICAL_INTEGER_LINE]);
+      expect(computeKaProjectionDigestV1(joinBytes(emitted)))
+        .toBe(computeKaProjectionDigestV1(new TextEncoder().encode(CANONICAL_INTEGER_LINE)));
+      expect(PADDED_INTEGER_LINE.length).toBeGreaterThan(CANONICAL_INTEGER_LINE.length);
+    },
+  );
+
   it('emits identical owned LF-terminated bytes from memory and spilled paths', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-spool-test-'));
     try {
@@ -285,7 +335,7 @@ function operation(
     publicTripleCount: '3',
     signedByteCeiling: 4096,
     protocolByteCeiling: RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
-    resultKind: 'quad-stream',
+    resultKind: 'canonical-line-byte-stream',
     concurrencyClass: 'rfc64-shared-projection-v1',
     sparql: `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${GRAPH}> { ?s ?p ?o . } }`,
     ...overrides,
@@ -312,4 +362,14 @@ async function collectRaw(source: AsyncIterable<Uint8Array>): Promise<Uint8Array
   const lines: Uint8Array[] = [];
   for await (const value of source) lines.push(value);
   return lines;
+}
+
+function joinBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const joined = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return joined;
 }

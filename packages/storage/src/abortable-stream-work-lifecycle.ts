@@ -1,4 +1,7 @@
-import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
+import {
+  composeAbortSignals,
+  raceStoreWorkAgainstAbort,
+} from './abortable-store-work-lifecycle.js';
 
 export interface LazyAbortableStreamOptions<T> {
   /** Absolute monotonic deadline shared by open, reads, and cleanup. */
@@ -33,7 +36,7 @@ export function openLazyAbortableStream<T>(
       const pendingSource = options.open(signalScope.signal);
       let source: AsyncIterable<T>;
       try {
-        source = await raceAgainstAbort(
+        source = await raceStoreWorkAgainstAbort(
           pendingSource,
           signalScope.signal,
           async (lateSource) => {
@@ -54,7 +57,7 @@ export function openLazyAbortableStream<T>(
           assertActive(signalScope.signal, options.deadlineAt, options.timeoutMessage);
           let next: IteratorResult<T>;
           try {
-            next = await raceAgainstAbort(
+            next = await raceStoreWorkAgainstAbort(
               Promise.resolve(iterator.next()),
               signalScope.signal,
             );
@@ -71,7 +74,7 @@ export function openLazyAbortableStream<T>(
         }
       } finally {
         if (!complete) {
-          await raceAgainstAbort(
+          await raceStoreWorkAgainstAbort(
             Promise.resolve(iterator.return?.()),
             signalScope.signal,
           ).catch(() => undefined);
@@ -82,41 +85,6 @@ export function openLazyAbortableStream<T>(
       signalScope.dispose();
     }
   }
-}
-
-async function raceAgainstAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-  onLateResult?: (value: T) => void | Promise<void>,
-): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) {
-    void work.then(onLateResult).catch(() => undefined);
-    signal.throwIfAborted();
-  }
-  return new Promise<T>((resolve, reject) => {
-    let aborted = false;
-    const onAbort = () => {
-      aborted = true;
-      reject(signal.reason);
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (!aborted && signal.aborted) onAbort();
-    work.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        if (aborted) {
-          void Promise.resolve(onLateResult?.(value)).catch(() => undefined);
-        } else {
-          resolve(value);
-        }
-      },
-      (cause) => {
-        signal.removeEventListener('abort', onAbort);
-        if (!aborted) reject(cause);
-      },
-    );
-  });
 }
 
 async function closeAsyncIterable(source: AsyncIterable<unknown>): Promise<void> {

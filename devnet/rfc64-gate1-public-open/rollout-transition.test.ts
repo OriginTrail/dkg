@@ -30,6 +30,12 @@ import {
   parseRolloutStoreBackend,
   type RolloutStoreFixture,
 } from './rollout-store-fixture.js';
+import type {
+  Gate1RolloutMode,
+  Gate1RolloutStatusResult,
+  Gate1VmChainScenario,
+  Gate1VmReconcileResult,
+} from './rollout-process-protocol.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
@@ -38,8 +44,6 @@ const children = new ChildProcessRegistry(20_000);
 const temporaryRoots: string[] = [];
 const STORE_BACKEND = parseRolloutStoreBackend(process.env.DKG_RFC64_GATE1_STORE_BACKEND);
 let storeFixture: RolloutStoreFixture | undefined;
-
-type RolloutMode = 'legacy' | 'shadow' | 'catalog';
 
 after(async () => {
   await children.terminateAllThenCleanup(async () => {
@@ -139,12 +143,11 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     manualTargets: 1,
     bootstrap: true,
   }));
-  const seededVmSource = output(await shadow.child.request(
+  const seededVmSource = await shadow.child.requestRollout(
     'seedVmSourceSwm',
     'shadow-seed-vm-source',
-    'operation-completed',
     { contextGraphId: CONTEXT_GRAPH_ID },
-  ));
+  );
   assert.equal(seededVmSource.tripleCount, 2);
   const shadowVm = await reconcileVm(shadow.child, 'shadow');
   assertVmChainRead(shadowVm, 'shadow');
@@ -223,7 +226,43 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertSemanticExact(await semanticGraph(reenabled.child, swmGraph, 'reenabled'), swmGraph);
   await reenabled.child.stop('stop-reenabled');
 
-  const legacy = await startReceiver('legacy', false, receiverDataDir, author, authorReady, false);
+  const unsafeLegacy = spawnAgent(
+    'receiver',
+    receiverDataDir,
+    'legacy',
+    false,
+    authorReady.peerId as string,
+  );
+  const unsafeLegacyFailure = await unsafeLegacy.waitFor('boot-failed');
+  assert.match(
+    String(unsafeLegacyFailure.message),
+    /catalog authority downgrade requires semantic deactivation/u,
+  );
+  const unsafeLegacyExit = await unsafeLegacy.tracked.closed;
+  assert.equal(unsafeLegacyExit.code, 1);
+
+  const inactiveDataDir = await makeTemp('inactive-chain');
+  const inactive = await startReceiver(
+    'shadow',
+    false,
+    inactiveDataDir,
+    author,
+    authorReady,
+    false,
+    'inactive',
+  );
+  await inactive.child.requestRollout(
+    'seedVmSourceSwm',
+    'inactive-seed-vm-source',
+    { contextGraphId: CONTEXT_GRAPH_ID },
+  );
+  const inactiveVm = await reconcileVm(inactive.child, 'inactive');
+  assertVmAuthorityRejected(inactiveVm, 'inactive');
+  assert.equal((await semanticGraph(inactive.child, vmGraph, 'inactive-vm')).activatedQuadCount, 0);
+  await inactive.child.stop('stop-inactive');
+
+  const legacyDataDir = await makeTemp('legacy-fresh');
+  const legacy = await startReceiver('legacy', false, legacyDataDir, author, authorReady, false);
   assert.deepEqual(await rolloutStatus(
     legacy.child,
     authorReady.peerId as string,
@@ -234,23 +273,29 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     manualTargets: 1,
     bootstrap: true,
   }));
+  await legacy.child.requestRollout(
+    'seedVmSourceSwm',
+    'legacy-seed-vm-source',
+    { contextGraphId: CONTEXT_GRAPH_ID },
+  );
   const legacyVm = await reconcileVm(legacy.child, 'legacy');
   assertVmChainRead(legacyVm, 'legacy');
   assertVmReconciled(legacyVm, 'legacy');
   assertSemanticExact(await semanticGraph(legacy.child, vmGraph, 'legacy-vm'), vmGraph);
-  assertAppliedExact(await appliedHead(legacy.child, catalogScopeDigest, 'legacy'), headDigest);
+  assert.equal(await appliedHead(legacy.child, catalogScopeDigest, 'legacy'), null);
   assertSemanticExact(await semanticGraph(legacy.child, swmGraph, 'legacy'), swmGraph);
   await legacy.child.stop('stop-legacy');
   await author.stop('stop-author');
 });
 
 async function startReceiver(
-  mode: RolloutMode,
+  mode: Gate1RolloutMode,
   killSwitch: boolean,
   dataDir: string,
   author: Gate1AgentChild,
   authorReady: Gate1AgentEvent,
   connect = true,
+  vmChainScenario: Gate1VmChainScenario = 'valid',
 ): Promise<Readonly<{ child: Gate1AgentChild; ready: Gate1AgentEvent }>> {
   const child = spawnAgent(
     'receiver',
@@ -258,6 +303,7 @@ async function startReceiver(
     mode,
     killSwitch,
     authorReady.peerId as string,
+    vmChainScenario,
   );
   const ready = await child.waitFor('ready');
   assertReady(ready, mode, killSwitch);
@@ -311,9 +357,10 @@ async function connectBothWays(
 function spawnAgent(
   role: 'author' | 'receiver',
   dataDir: string,
-  mode: RolloutMode | null = null,
+  mode: Gate1RolloutMode | null = null,
   killSwitch = false,
   completeSwmProvider?: string,
+  vmChainScenario: Gate1VmChainScenario = 'valid',
 ): Gate1AgentChild {
   return new Gate1AgentChild({
     eventTimeoutMs: 60_000,
@@ -334,6 +381,7 @@ function spawnAgent(
           DKG_RFC64_ROLLOUT_KILL_SWITCH: killSwitch ? 'true' : 'false',
           DKG_RFC64_ROLLOUT_CONTEXT_GRAPH_ID: CONTEXT_GRAPH_ID,
           DKG_RFC64_ROLLOUT_OWNER_ADDRESS: AUTHOR_ADDRESS,
+          DKG_RFC64_ROLLOUT_VM_CHAIN_SCENARIO: vmChainScenario,
           ...(completeSwmProvider === undefined
             ? {}
             : { DKG_RFC64_ROLLOUT_COMPLETE_SWM_PROVIDER: completeSwmProvider }),
@@ -357,33 +405,56 @@ async function rolloutStatus(
   child: Gate1AgentChild,
   completeProviderPeerId: string,
   label: string,
-): Promise<unknown> {
-  return output(await child.request('rolloutStatus', `${label}-status`, 'operation-completed', {
+): Promise<Gate1RolloutStatusResult> {
+  return child.requestRollout('rolloutStatus', `${label}-status`, {
     contextGraphId: CONTEXT_GRAPH_ID,
     completeProviderPeerId,
-  }));
+  });
 }
 
 async function reconcileVm(
   child: Gate1AgentChild,
   label: string,
-): Promise<Record<string, unknown>> {
-  return output(await child.request('vmReconcile', `${label}-vm-reconcile`, 'operation-completed', {
+): Promise<Gate1VmReconcileResult> {
+  return child.requestRollout('vmReconcile', `${label}-vm-reconcile`, {
     contextGraphId: CONTEXT_GRAPH_ID,
-  }));
+  });
 }
 
-function assertVmChainRead(value: Record<string, unknown>, label: string): void {
-  const reads = record(value.chainReadDelta, `${label} VM chain-read delta`);
-  assert.equal(Number(reads.nameHashResolution) >= 2, true);
-  assert.equal(Number(reads.count) >= 1, true);
-  const result = record(value.result, `${label} VM reconcile result`);
+function assertVmChainRead(value: Gate1VmReconcileResult, label: string): void {
+  const reads = value.chainReadDelta;
+  assert.equal(reads.nameHashResolution >= 2, true);
+  assert.equal(reads.count >= 1, true);
+  if (label === 'shadow') {
+    for (const key of [
+      'accessPolicy',
+      'active',
+      'author',
+      'kaAt',
+      'latestRoot',
+      'publisher',
+      'rootCount',
+      'storageAddress',
+    ] as const) {
+      assert.equal(reads[key] >= 1, true, `shadow did not perform required ${key} chain read`);
+    }
+    assert.equal(
+      value.replicationEvents.some((event) => (
+        event.action === 'promote'
+        && event.contextGraphId === CONTEXT_GRAPH_ID
+        && event.ordinal === 0
+      )),
+      true,
+      `shadow emitted no exact promotion event: ${JSON.stringify(value.replicationEvents)}`,
+    );
+  }
+  const result = value.result;
   assert.equal(result.contextGraphId, CONTEXT_GRAPH_ID);
   assert.equal(result.source, 'manual');
 }
 
-function assertVmReconciled(value: Record<string, unknown>, label: string): void {
-  const result = record(value.result, `${label} VM reconcile result`);
+function assertVmReconciled(value: Gate1VmReconcileResult, label: string): void {
+  const result = value.result;
   assert.equal(
     result.status,
     'current',
@@ -394,12 +465,25 @@ function assertVmReconciled(value: Record<string, unknown>, label: string): void
   assert.equal(result.unresolvedOrdinals, 0);
 }
 
+function assertVmAuthorityRejected(value: Gate1VmReconcileResult, label: string): void {
+  assert.equal(value.chainReadDelta.active >= 1, true);
+  assert.equal(value.chainReadDelta.accessPolicy >= 1, true);
+  assert.equal(
+    value.replicationEvents.some((event) => event.action === 'promote'),
+    false,
+    `${label} unexpectedly emitted a VM promotion`,
+  );
+  assert.equal(value.result.status, 'pending');
+  assert.equal(value.result.watermarkAfter, 0);
+  assert.equal(value.result.unresolvedOrdinals, 1);
+}
+
 function expectedStatus(input: Readonly<{
   service: boolean;
   legacy: boolean;
   manualTargets: number;
   bootstrap: boolean;
-}>): Record<string, unknown> {
+}>): Gate1RolloutStatusResult {
   return {
     bootstrapStarted: input.bootstrap,
     catalogServiceStarted: input.service,
@@ -415,12 +499,11 @@ async function stagedHead(
   signatureVariantDigest: string,
   label: string,
 ): Promise<unknown> {
-  return (await child.request(
+  return child.requestRollout(
     'stagedHeadReadback',
     `${label}-staged`,
-    'operation-completed',
     { objectDigest, signatureVariantDigest },
-  )).output;
+  );
 }
 
 async function appliedHead(
@@ -464,7 +547,7 @@ function assertSemanticExact(value: Record<string, unknown>, swmGraph: string): 
 
 function assertReady(
   event: Gate1AgentEvent,
-  mode: RolloutMode | null,
+  mode: Gate1RolloutMode | null,
   killSwitch: boolean,
 ): void {
   assert.equal(event.agentClass, 'DKGAgent');

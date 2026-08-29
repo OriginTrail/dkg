@@ -7,7 +7,6 @@ import {
   validateSubGraphName,
   contextGraphCatalogUri,
   createGraphKnowledgeAssetScope,
-  isRfc64SemanticControlGraphV1,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
@@ -39,6 +38,7 @@ import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
+import { isLegacySyncGraphAdmittedV1 } from '../legacy-sync-graph-admission.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -1436,27 +1436,11 @@ function createAdmissionContext(
   const cgPrefix = contextGraphDataGraphUri(contextGraphId);
   const topMetaGraph = contextGraphMetaGraphUri(contextGraphId);
   const isCandidateGraph = (graph: string): boolean => {
-    if (graph !== cgPrefix && !graph.startsWith(`${cgPrefix}/`)) return false;
-    if (!opts.includeTopMeta && graph === topMetaGraph) return false;
-    // `<cg>/<subGraph>/_meta` is protocol control metadata for the subgraph
-    // itself (for example local migration markers).  It is not KA payload and
-    // must not enter the durable-data integrity verifier.  Keep deeper
-    // `.../_meta` graphs admitted: assertion and partition metadata are
-    // integrity-bearing durable material served alongside their data graph.
-    const relative = graph.startsWith(`${cgPrefix}/`)
-      ? graph.slice(cgPrefix.length + 1)
-      : '';
-    if (relative.split('/').length === 2 && relative.endsWith('/_meta')) return false;
-    const segments = relative.split('/').filter(Boolean);
-    if (isRfc64SemanticControlGraphV1(graph, contextGraphId)) return false;
-    // Working memory is transient and has no durable metadata anchor (the
-    // durable-meta phase deliberately excludes memoryLayer=WM). Serving an
-    // orphan or abandoned WM graph here therefore creates unverifiable payload
-    // and, on real stores, can sort millions of unrelated draft rows. SWM has a
-    // dedicated phase and private graphs are never served by durable sync.
-    if (segments.includes('_working_memory')) return false;
-    if (segments.includes('_shared_memory') || segments.includes('_shared_memory_meta')) return false;
-    return !segments.includes('_private');
+    return isLegacySyncGraphAdmittedV1(
+      graph,
+      contextGraphId,
+      opts.includeTopMeta ? 'changelog' : 'durable-data',
+    );
   };
   let assertionGraphs: Set<string> | null = null;
   const isAdmitted = (signal?: AbortSignal) => async (graph: string): Promise<boolean> => {

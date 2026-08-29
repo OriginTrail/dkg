@@ -41,6 +41,7 @@ test('bounds cleanup when Blazegraph accepts namespaces but never deletes them',
     blazegraphTestUrl: BLAZEGRAPH_URL,
     fetchImpl,
     requestTimeoutMs: 20,
+    storesPerRole: { author: 1, receiver: 1 },
   });
   const startedAt = Date.now();
   await assert.rejects(
@@ -48,6 +49,32 @@ test('bounds cleanup when Blazegraph accepts namespaces but never deletes them',
     /could not clean isolated Blazegraph namespaces/u,
   );
   assert(Date.now() - startedAt < 500, 'namespace cleanup did not settle within its deadline');
+});
+
+test('isolates fresh Blazegraph data directories and reuses restart endpoints', async () => {
+  const fetchImpl: typeof fetch = async () => new Response('', { status: 201 });
+  const fixture = await createRolloutStoreFixture({
+    backendInput: 'blazegraph',
+    blazegraphTestUrl: BLAZEGRAPH_URL,
+    fetchImpl,
+    storesPerRole: { author: 1, receiver: 2 },
+  });
+  const first = fixture.envForRole('receiver', '/tmp/receiver-a');
+  const restarted = fixture.envForRole('receiver', '/tmp/receiver-a');
+  const fresh = fixture.envForRole('receiver', '/tmp/receiver-b');
+  assert.equal(
+    first.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+    restarted.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+  );
+  assert.notEqual(
+    first.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+    fresh.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+  );
+  assert.throws(
+    () => fixture.envForRole('receiver', '/tmp/receiver-c'),
+    /exhausted its receiver store pool/u,
+  );
+  await fixture.dispose();
 });
 
 test('removes every temporary root when remote fixture cleanup fails', async () => {
