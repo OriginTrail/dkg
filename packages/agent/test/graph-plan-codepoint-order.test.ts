@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareCodePoint } from '../src/sync/responder/graph-plan.js';
+import { compareCodePoint } from '../src/sync/code-point-order.js';
 
 function allocatingReference(a: string, b: string): number {
   const left = Array.from(a);
@@ -48,14 +48,14 @@ function buildCorpus(): string[] {
 }
 
 describe('graph-plan code-point ordering', () => {
-  it('matches the allocating comparator exactly across Unicode boundaries', () => {
+  it('matches the allocating comparator direction across Unicode boundaries', () => {
     const corpus = buildCorpus();
     let comparisons = 0;
     for (const left of corpus) {
       for (const right of corpus) {
         const expected = allocatingReference(left, right);
         const actual = compareCodePoint(left, right);
-        if (actual !== expected) {
+        if (Math.sign(actual) !== Math.sign(expected)) {
           throw new Error(
             `comparison mismatch for ${JSON.stringify(left)} and ${JSON.stringify(right)}: ` +
             `expected ${expected}, received ${actual}`,
@@ -65,6 +65,12 @@ describe('graph-plan code-point ordering', () => {
       }
     }
     expect(comparisons).toBeGreaterThan(100_000);
+  });
+
+  it('returns normalized results for exhausted prefixes', () => {
+    const longSuffix = 'x'.repeat(1_000_000);
+    expect(compareCodePoint('a', `a${longSuffix}`)).toBe(-1);
+    expect(compareCodePoint(`a${longSuffix}`, 'a')).toBe(1);
   });
 
   it('produces the same deterministic graph order as the allocating comparator', () => {

@@ -54,7 +54,7 @@ async function runWorker(mode, graphCount, rounds) {
   }
   const comparator = mode === 'old'
     ? allocatingComparator
-    : (await import('../dist/sync/responder/graph-plan.js')).compareCodePoint;
+    : (await import('../dist/sync/code-point-order.js')).compareCodePoint;
   const names = makeGraphNames(graphCount);
   names.slice(0, Math.min(2_000, names.length)).sort(comparator);
   global.gc();
