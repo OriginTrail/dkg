@@ -29,4 +29,27 @@ describe('canonical storage N-Quads text parser', () => {
     expect(parseNQuadsTextTolerant(`# generated response\nignored server noise\n${line}\n`))
       .toEqual([expected]);
   });
+
+  it('decodes UCHAR escapes only in IRI positions, including supplementary scalars', () => {
+    expect(parseNQuadLine(String.raw`<urn:caf\u00E9> <urn:p\U0001F600> <urn:o\uD83D\uDE00> <urn:g\u00E9> .`))
+      .toEqual({
+        subject: 'urn:café',
+        predicate: 'urn:p😀',
+        object: 'urn:o😀',
+        graph: 'urn:gé',
+      });
+    expect(parseNQuadLine(String.raw`<urn:s> <urn:p> "literal:\u00E9" .`))
+      .toMatchObject({ object: String.raw`"literal:\u00E9"` });
+  });
+
+  it('rejects malformed, out-of-range, or unpaired UCHAR escapes in IRIs', () => {
+    for (const subject of [
+      String.raw`urn:bad\uZZZZ`,
+      String.raw`urn:bad\U00110000`,
+      String.raw`urn:bad\uD800`,
+      String.raw`urn:bad\uDC00`,
+    ]) {
+      expect(parseNQuadLine(`<${subject}> <urn:p> "value" .`)).toBeUndefined();
+    }
+  });
 });

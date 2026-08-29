@@ -5,7 +5,9 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import { SyncSharedProjectionStoreV1 } from '../src/rfc64-shared-projection-stream-gateway.js';
+import { runRfc64HttpProjectionCapabilityConformance } from './helpers/rfc64-http-projection-capability-conformance.js';
+import { createRfc64SharedProjectionTestFixture } from './helpers/rfc64-shared-projection-fixture.js';
 
 const ORIGINAL_FETCH = globalThis.fetch;
 const GRAPH = 'did:dkg:context-graph:v1/root/a%2Fb/_shared_memory/0x3333333333333333333333333333333333333333/7';
@@ -20,18 +22,13 @@ afterEach(() => {
 });
 
 describe('Blazegraph RFC-64 shared-projection stream', () => {
-  it('executes only the frozen query under background admission and emits canonical bytes', async () => {
-    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
-    const schedule = vi.spyOn(scheduler, 'run');
+  it('uses the frozen query and Blazegraph-specific request headers', async () => {
     let request: RequestInit | undefined;
     globalThis.fetch = (async (_input, init) => {
       request = init;
       return new Response(byteStream([LINE_Z, LINE_A]), { status: 200 });
     }) as typeof fetch;
-    const store = new BlazegraphStore('http://blazegraph.invalid/sparql', {
-      scheduler,
-      timeout: 1_000,
-    });
+    const store = new BlazegraphStore('http://blazegraph.invalid/sparql', { timeout: 1_000 });
 
     const source = await store.rfc64SharedProjectionStreamV1(OPERATION, {
       byteCeiling: 4096,
@@ -44,94 +41,38 @@ describe('Blazegraph RFC-64 shared-projection stream', () => {
       'Content-Type': 'application/sparql-query; charset=utf-8',
       'X-BIGDATA-MAX-QUERY-MILLIS': '4000',
     });
-    expect(schedule).toHaveBeenCalledWith(
-      'background',
-      'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1',
-      expect.any(Function),
-      expect.any(AbortSignal),
-      { storeOperation: 'construct' },
-    );
   });
 
-  it('accepts the exact named graph and rejects a foreign graph', async () => {
-    globalThis.fetch = (async () => new Response(
-      `<urn:a> <urn:p> "alpha" <${GRAPH}> .\n`,
-      { status: 200 },
-    )) as typeof fetch;
+  it('normalizes Blazegraph UCHAR escapes in every IRI position through the gateway', async () => {
+    const fixture = createRfc64SharedProjectionTestFixture({
+      triples: [{
+        subject: 'urn:café',
+        predicate: 'urn:predicate:😀',
+        object: 'urn:object:😀',
+      }],
+    });
+    const escaped = String.raw`<urn:caf\u00E9> <urn:predicate:\U0001F600> <urn:object:\uD83D\uDE00> .`;
+    globalThis.fetch = (async () => new Response(`${escaped}\n`, {
+      status: 200,
+    })) as typeof fetch;
     const store = new BlazegraphStore('http://blazegraph.invalid/sparql');
-    const exact = await store.rfc64SharedProjectionStreamV1(
-      operation({ publicTripleCount: '1' }),
-      { byteCeiling: 4096 },
-    );
-    expect(await collect(exact)).toEqual(new TextEncoder().encode(LINE_A));
 
-    globalThis.fetch = (async () => new Response(
-      '<urn:a> <urn:p> "alpha" <urn:foreign> .\n',
-      { status: 200 },
-    )) as typeof fetch;
-    await expect(store.rfc64SharedProjectionStreamV1(
-      operation({ publicTripleCount: '1' }),
-      { byteCeiling: 4096 },
-    )).rejects.toThrow('escaped the exact authenticated graph');
+    const result = await new SyncSharedProjectionStoreV1(store).open(fixture.request, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 1000,
+    });
+
+    expect(await collect(result.bytes)).toEqual(fixture.projectionBytes);
   });
 
-  it('holds scheduler admission through the response body and cancels promptly', async () => {
-    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
-    const started = Promise.withResolvers<void>();
-    let transportSignal: AbortSignal | null = null;
-    globalThis.fetch = (async (_input, init) => {
-      transportSignal = init?.signal as AbortSignal;
-      return new Response(new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(LINE_A));
-          started.resolve();
-          transportSignal?.addEventListener('abort', () => {
-            controller.error(transportSignal?.reason);
-          }, { once: true });
-        },
-      }), { status: 200 });
-    }) as typeof fetch;
-    const store = new BlazegraphStore('http://blazegraph.invalid/sparql', {
-      scheduler,
-      timeout: 30_000,
-    });
-    const abort = new AbortController();
+});
 
-    const pending = store.rfc64SharedProjectionStreamV1(
-      operation({ publicTripleCount: '2' }),
-      { byteCeiling: 4096, signal: abort.signal },
-    );
-    await started.promise;
-    expect(scheduler.snapshot.backgroundInflight).toBe(1);
-    abort.abort(new DOMException('caller stopped', 'AbortError'));
-
-    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
-    expect(transportSignal?.aborted).toBe(true);
-    expect(scheduler.snapshot.backgroundInflight).toBe(0);
-  });
-
-  it('keeps caller cancellation live after the HTTP spool has released its scheduler slot', async () => {
-    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
-    globalThis.fetch = (async () => new Response(
-      byteStream([LINE_Z, LINE_A]),
-      { status: 200 },
-    )) as typeof fetch;
-    const store = new BlazegraphStore('http://blazegraph.invalid/sparql', {
-      scheduler,
-      timeout: 1_000,
-    });
-    const abort = new AbortController();
-
-    const source = await store.rfc64SharedProjectionStreamV1(OPERATION, {
-      byteCeiling: 4096,
-      signal: abort.signal,
-    });
-    expect(scheduler.snapshot.backgroundInflight).toBe(0);
-
-    const reason = new DOMException('consumer stopped', 'AbortError');
-    abort.abort(reason);
-    await expect(collect(source)).rejects.toBe(reason);
-  });
+runRfc64HttpProjectionCapabilityConformance({
+  adapterName: 'Blazegraph',
+  createStore: (scheduler, timeout) => new BlazegraphStore(
+    'http://blazegraph.invalid/sparql',
+    { scheduler, timeout },
+  ),
 });
 
 function operation(
