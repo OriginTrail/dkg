@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -205,6 +205,23 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     const db = createArg?.chainEventCursorStore?.cursors?.db
       ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
     db?.close?.();
+  });
+
+  // End-to-end teardown-determinism proof against the REAL writer: the
+  // ordering test above pins that the rejection settles after shutdown() was
+  // CALLED, but a mock-level assertion cannot catch a shutdown() that
+  // resolves without actually draining, or a tee left installed. Nothing may
+  // land in DKG_HOME once the boot has rejected — that is the property the
+  // plain-rm() afterEach depends on (#2270's ENOTEMPTY race).
+  it('a failed boot writes nothing more into DKG_HOME after it rejects (#2270)', async () => {
+    await expect(bootWith({ maxAttempts: 3 })).rejects.toThrow('after-agent-create');
+    const logFile = join(tempHome!, 'daemon.log');
+    const sizeAtRejection = (await stat(logFile)).size;
+    expect(sizeAtRejection).toBeGreaterThan(0);
+    process.stdout.write('post-rejection straggler probe\n');
+    process.stderr.write('post-rejection straggler probe\n');
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await stat(logFile)).size).toBe(sizeAtRejection);
   });
 
   it('boots past the boundary with a fully valid retry-knob block', async () => {
