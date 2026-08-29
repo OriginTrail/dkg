@@ -1470,16 +1470,16 @@ describe('sync responder pagination interleaving', () => {
 
     const initial = memo.get({ refresh: true });
     firstRefresh.resolve(['old']);
-    await expect(initial).resolves.toEqual(['old']);
+    expect((await initial).graphs).toEqual(['old']);
 
     const refreshing = memo.get({ refresh: true });
     const overlappingRefresh = memo.get({ refresh: true });
     const deepPage = memo.get();
     secondRefresh.resolve(['new']);
 
-    await expect(refreshing).resolves.toEqual(['new']);
-    await expect(overlappingRefresh).resolves.toEqual(['new']);
-    await expect(deepPage).resolves.toEqual(['new']);
+    expect((await refreshing).graphs).toEqual(['new']);
+    expect((await overlappingRefresh).graphs).toEqual(['new']);
+    expect((await deepPage).graphs).toEqual(['new']);
     expect(calls).toBe(2);
   });
 
@@ -1500,33 +1500,33 @@ describe('sync responder pagination interleaving', () => {
     } as unknown as OxigraphStore;
     const memo = createResponderGraphListMemo(store);
 
-    await expect(memo.get({
+    expect((await memo.get({
       refresh: true,
       refreshGeneration: 'session-1',
-    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
-    await expect(memo.get({
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect((await memo.get({
       refresh: true,
       refreshGeneration: 'session-2',
-    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(calls).toBe(1);
 
     // Dispatch: the endpoint has not committed yet, so a refresh can still
     // observe and memoize the old graph set at this intermediate generation.
     generation++;
     stable = false;
-    await expect(memo.get({
+    expect((await memo.get({
       refresh: true,
       refreshGeneration: 'pending-mutation',
-    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(calls).toBe(2);
 
     // The remote mutation is still pending at the same revision. Stability,
     // not generation change alone, must prevent reuse of the completed read.
     graphs = ['urn:graph:c', 'urn:graph:a'];
-    await expect(memo.get({
+    expect((await memo.get({
       refresh: true,
       refreshGeneration: 'same-pending-mutation',
-    })).resolves.toEqual(['urn:graph:a', 'urn:graph:c']);
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:c']);
     expect(calls).toBe(3);
 
     // Settlement must advance again so the next session cannot reuse the
@@ -1534,10 +1534,10 @@ describe('sync responder pagination interleaving', () => {
     graphs = ['urn:graph:d', 'urn:graph:a'];
     generation++;
     stable = true;
-    await expect(memo.get({
+    expect((await memo.get({
       refresh: true,
       refreshGeneration: 'session-3',
-    })).resolves.toEqual(['urn:graph:a', 'urn:graph:d']);
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:d']);
     expect(calls).toBe(4);
   });
 
@@ -1558,8 +1558,8 @@ describe('sync responder pagination interleaving', () => {
     const simultaneous = memo.get({ refresh: true });
     await vi.waitFor(() => expect(calls).toBe(1));
     firstRead.resolve(['urn:graph:b', 'urn:graph:a']);
-    await expect(first).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
-    await expect(simultaneous).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect((await first).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect((await simultaneous).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(calls).toBe(1);
 
     // Unstable completed results are never reused, even though simultaneous
@@ -1567,7 +1567,7 @@ describe('sync responder pagination interleaving', () => {
     const later = memo.get({ refresh: true });
     await vi.waitFor(() => expect(calls).toBe(2));
     secondRead.resolve(['urn:graph:c']);
-    await expect(later).resolves.toEqual(['urn:graph:c']);
+    expect((await later).graphs).toEqual(['urn:graph:c']);
   });
 
   it('supersedes an in-flight graph list when write generation changes', async () => {
@@ -1590,10 +1590,10 @@ describe('sync responder pagination interleaving', () => {
     const afterWrite = memo.get({ refresh: true, refreshGeneration: 'new-session' });
 
     oldGraphs.resolve(['urn:graph:old']);
-    await expect(beforeWrite).resolves.toEqual(['urn:graph:old']);
+    expect((await beforeWrite).graphs).toEqual(['urn:graph:old']);
     await vi.waitFor(() => expect(calls).toBe(2));
     newGraphs.resolve(['urn:graph:new']);
-    await expect(afterWrite).resolves.toEqual(['urn:graph:new']);
+    expect((await afterWrite).graphs).toEqual(['urn:graph:new']);
   });
 
   it('retains the TTL backstop for writers outside the tracked store process', async () => {
@@ -1627,8 +1627,9 @@ describe('sync responder pagination interleaving', () => {
     const memo = createResponderGraphListMemo(store);
 
     const initial = await memo.get({ refresh: true, refreshGeneration: 'initial' });
-    expect(initial).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(initial.graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(Object.isFrozen(initial)).toBe(true);
+    expect(Object.isFrozen(initial.graphs)).toBe(true);
 
     // A write inside an existing graph advances the store revision, but the
     // named-graph listing still describes the same set in a different order.
@@ -1641,7 +1642,7 @@ describe('sync responder pagination interleaving', () => {
     graphs = ['urn:graph:c', 'urn:graph:a', 'urn:graph:b'];
     const membershipChange = await memo.get({ refresh: true, refreshGeneration: 'graph-added' });
     expect(membershipChange).not.toBe(initial);
-    expect(membershipChange).toEqual(['urn:graph:a', 'urn:graph:b', 'urn:graph:c']);
+    expect(membershipChange.graphs).toEqual(['urn:graph:a', 'urn:graph:b', 'urn:graph:c']);
 
     // Preserve the old deduplication contract: a malformed duplicate listing
     // cannot make a same-length equality check retain absent graphs.
@@ -1649,7 +1650,7 @@ describe('sync responder pagination interleaving', () => {
     graphs = ['urn:graph:a', 'urn:graph:a', 'urn:graph:b'];
     const duplicateListing = await memo.get({ refresh: true, refreshGeneration: 'graph-removed' });
     expect(duplicateListing).not.toBe(membershipChange);
-    expect(duplicateListing).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(duplicateListing.graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(calls).toBe(4);
   });
 
@@ -1676,10 +1677,10 @@ describe('sync responder pagination interleaving', () => {
     await Promise.resolve();
     expect(graphCalls).toBe(1);
     oldGraphs.resolve(['urn:graph:old']);
-    await expect(oldGraphSession).resolves.toEqual(['urn:graph:old']);
+    expect((await oldGraphSession).graphs).toEqual(['urn:graph:old']);
     await vi.waitFor(() => expect(graphCalls).toBe(2));
     newGraphs.resolve(['urn:graph:new']);
-    await expect(newGraphSession).resolves.toEqual(['urn:graph:new']);
+    expect((await newGraphSession).graphs).toEqual(['urn:graph:new']);
 
     const cgId = 'generation-aware-subgraphs';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
