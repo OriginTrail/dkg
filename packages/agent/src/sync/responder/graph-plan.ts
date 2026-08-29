@@ -7,6 +7,7 @@ import {
   validateSubGraphName,
   contextGraphCatalogUri,
   createGraphKnowledgeAssetScope,
+  isRfc64SemanticControlGraphV1,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
@@ -1447,6 +1448,7 @@ function createAdmissionContext(
       : '';
     if (relative.split('/').length === 2 && relative.endsWith('/_meta')) return false;
     const segments = relative.split('/').filter(Boolean);
+    if (isRfc64SemanticControlGraphV1(graph, contextGraphId)) return false;
     // Working memory is transient and has no durable metadata anchor (the
     // durable-meta phase deliberately excludes memoryLayer=WM). Serving an
     // orphan or abandoned WM graph here therefore creates unverifiable payload

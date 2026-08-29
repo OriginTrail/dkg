@@ -43,12 +43,14 @@ import {
   type ContextGraphIdV1,
   type SubGraphNameV1,
 } from './author-lane-scope-v1.js';
+import { iriComponentV1 } from './canonical-iri-component-v1.js';
 
 declare const ASSERTION_COORDINATE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SCOPE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SUBJECT_V1_BRAND: unique symbol;
 
 export type { NetworkIdV1 } from './sync-wire-identifiers.js';
+export { iriComponentV1 } from './canonical-iri-component-v1.js';
 export {
   AUTHOR_LANE_SCOPE_KEYS_V1,
   type AuthorLaneScopeV1,
@@ -184,25 +186,6 @@ export function isCatalogForbiddenCodePointV1(codePoint: number): boolean {
     || codePoint === 0x3000
     || codePoint === 0xfeff
   );
-}
-
-/** Percent-encode one already canonical catalog-v1 identifier component. */
-export function iriComponentV1(value: string): string {
-  const identifier = assertNfcUtf8Identifier(
-    value,
-    'IRI component',
-    MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1,
-  );
-  const bytes = UTF8.encode(identifier);
-  let encoded = '';
-  for (const byte of bytes) {
-    if (isUnescapedIriComponentByte(byte)) {
-      encoded += String.fromCharCode(byte);
-    } else {
-      encoded += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
-    }
-  }
-  return encoded;
 }
 
 /** Build the prefix-free root/subgraph assertion scope used by catalog-v1 seals. */
@@ -536,18 +519,6 @@ function assertWellFormedUnicode(value: string, label: string): void {
       fail('catalog-identifier', `${label} contains an unpaired UTF-16 surrogate`);
     }
   }
-}
-
-function isUnescapedIriComponentByte(byte: number): boolean {
-  return (
-    (byte >= 0x41 && byte <= 0x5a)
-    || (byte >= 0x61 && byte <= 0x7a)
-    || (byte >= 0x30 && byte <= 0x39)
-    || byte === 0x2d
-    || byte === 0x2e
-    || byte === 0x5f
-    || byte === 0x7e
-  );
 }
 
 function assertClosedKeys(

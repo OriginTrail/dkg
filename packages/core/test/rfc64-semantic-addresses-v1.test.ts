@@ -5,6 +5,7 @@ import {
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
   deriveRfc64SubgraphSemanticAddressesV1,
+  isRfc64SemanticControlGraphV1,
   type ContextGraphIdV1,
   type EvmAddressV1,
   type NetworkIdV1,
@@ -26,6 +27,17 @@ describe('RFC-64 semantic addresses v1', () => {
     expect(computeRfc64SubGraphKeyV1(SUBGRAPH)).toBe(
       '0x8e38ab4dfb3e25028a2c1863a0d246817222e60842f7bebe997bc5d60bbcf66e',
     );
+    expect(computeRfc64SubGraphKeyV1('é' as SubGraphNameV1)).toBe(
+      '0x8a7068aa6fcfe381b4d665af280edc5bee02bf16ba7140dd8c6cd75f7cbdc2bb',
+    );
+  });
+
+  it('identifies only the directly reserved RFC-64 control-graph family', () => {
+    const base = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    expect(isRfc64SemanticControlGraphV1(`${base}/_sync`, CONTEXT_GRAPH)).toBe(true);
+    expect(isRfc64SemanticControlGraphV1(`${base}/_sync/catalog/key`, CONTEXT_GRAPH)).toBe(true);
+    expect(isRfc64SemanticControlGraphV1(`${base}/research/_sync`, CONTEXT_GRAPH)).toBe(false);
+    expect(isRfc64SemanticControlGraphV1(`${base}/_sync-not`, CONTEXT_GRAPH)).toBe(false);
   });
 
   it('derives the exact current-author catalog graph and collision-safe subject', () => {

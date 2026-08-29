@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   parseDeterministicKnowledgeAssetUal,
+  isRfc64SemanticControlGraphV1,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
@@ -1311,6 +1312,7 @@ async function runDurableSyncWithBudget(
         processed.verifiedMeta,
         processed.verifiedGraphScopedDataGraphs ?? [],
       );
+      assertNoLegacyRfc64ControlGraphs(pid, partitioned);
       if (
         partitioned.assets.length > 0
         && exactAssetSelection?.kind !== 'challenge-pinned'
@@ -1713,6 +1715,28 @@ function partitionVerifiedGraphScopedAssets(
       ),
     ),
   };
+}
+
+function assertNoLegacyRfc64ControlGraphs(
+  contextGraphId: string,
+  partitioned: ReturnType<typeof partitionVerifiedGraphScopedAssets>,
+): void {
+  const reject = (graph: string): void => {
+    if (!isRfc64SemanticControlGraphV1(graph, contextGraphId)) return;
+    throw Object.assign(
+      new Error(
+        `Legacy durable sync returned reserved RFC-64 control graph ${graph}`,
+      ),
+      { code: 'RFC64_CONTROL_GRAPH_LEGACY_SYNC_REJECTED' },
+    );
+  };
+  for (const asset of partitioned.assets) {
+    reject(asset.assertionGraph);
+    for (const quad of asset.dataQuads) reject(quad.graph);
+    for (const quad of asset.metadataQuads) reject(quad.graph);
+  }
+  for (const quad of partitioned.remainingData) reject(quad.graph);
+  for (const quad of partitioned.remainingMeta) reject(quad.graph);
 }
 
 function stripLiteral(raw: string): string {

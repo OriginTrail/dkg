@@ -2,16 +2,18 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 
 import { canonicalizeJson, type CanonicalJsonValue } from './canonical-json.js';
+import { iriComponentV1 } from './canonical-iri-component-v1.js';
 import { contextGraphDataUri } from './constants.js';
 import {
-  assertContextGraphIdV1,
-  assertNetworkIdV1,
-  assertSubGraphNameV1,
-  iriComponentV1,
+  assertAuthorLaneContextGraphIdV1,
+  assertAuthorLaneSubGraphNameV1,
   type ContextGraphIdV1,
-  type NetworkIdV1,
   type SubGraphNameV1,
-} from './author-catalog-codec.js';
+} from './author-lane-scope-v1.js';
+import {
+  assertNetworkIdV1,
+  type NetworkIdV1,
+} from './sync-wire-identifiers.js';
 import {
   assertCanonicalEvmAddress,
   type Digest32V1,
@@ -33,6 +35,11 @@ export type Rfc64SyncSubjectIriV1 = string & {
   readonly [RFC64_SYNC_SUBJECT_IRI_V1_BRAND]: true;
 };
 
+export interface Rfc64SemanticAddressV1 {
+  readonly graphUri: Rfc64SyncGraphIriV1;
+  readonly subject: Rfc64SyncSubjectIriV1;
+}
+
 export interface Rfc64SemanticScopeV1 {
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: ContextGraphIdV1;
@@ -46,41 +53,42 @@ export interface Rfc64AuthorSemanticScopeV1 extends Rfc64SubgraphSemanticScopeV1
   readonly authorAddress: EvmAddressV1;
 }
 
-export interface Rfc64CurrentAuthorCatalogRefAddressV1 {
+export interface Rfc64CurrentAuthorCatalogRefAddressV1 extends Rfc64SemanticAddressV1 {
   readonly subGraphKey: Digest32V1;
-  readonly graphUri: Rfc64SyncGraphIriV1;
-  readonly subject: Rfc64SyncSubjectIriV1;
 }
 
 export interface Rfc64SubgraphSemanticAddressesV1 {
   readonly subGraphKey: Digest32V1;
-  readonly appliedSeal: Readonly<{
-    graphUri: Rfc64SyncGraphIriV1;
-    subject: Rfc64SyncSubjectIriV1;
-  }>;
-  readonly mutationGuard: Readonly<{
-    graphUri: Rfc64SyncGraphIriV1;
-    subject: Rfc64SyncSubjectIriV1;
-  }>;
-  readonly reconcileTarget: Readonly<{
-    graphUri: Rfc64SyncGraphIriV1;
-    subject: Rfc64SyncSubjectIriV1;
-  }>;
+  readonly appliedSeal: Rfc64SemanticAddressV1;
+  readonly mutationGuard: Rfc64SemanticAddressV1;
+  readonly reconcileTarget: Rfc64SemanticAddressV1;
 }
 
 export interface Rfc64ContextGraphSemanticAddressesV1 {
-  readonly mutationGuard: Readonly<{
-    graphUri: Rfc64SyncGraphIriV1;
-    subject: Rfc64SyncSubjectIriV1;
-  }>;
-  readonly appliedSetRef: Readonly<{
-    graphUri: Rfc64SyncGraphIriV1;
-    subject: Rfc64SyncSubjectIriV1;
-  }>;
-  readonly appliedSeal: Readonly<{
-    graphUri: Rfc64SyncGraphIriV1;
-    subject: Rfc64SyncSubjectIriV1;
-  }>;
+  readonly mutationGuard: Rfc64SemanticAddressV1;
+  readonly appliedSetRef: Rfc64SemanticAddressV1;
+  readonly appliedSeal: Rfc64SemanticAddressV1;
+}
+
+type Rfc64SemanticRouteV1 =
+  | 'applied'
+  | 'mutation'
+  | 'reconcile-target'
+  | 'mutation-cg'
+  | 'applied-set'
+  | 'applied-cg';
+
+/**
+ * True only for the RFC-64 control-graph family reserved directly below one
+ * context graph. Legacy durable and changelog sync must never serve or import
+ * these records; they move only through the signed RFC-64 manifest lane.
+ */
+export function isRfc64SemanticControlGraphV1(
+  graphUri: string,
+  contextGraphId: string,
+): boolean {
+  const base = `${contextGraphDataUri(contextGraphId)}/_sync`;
+  return graphUri === base || graphUri.startsWith(`${base}/`);
 }
 
 /**
@@ -91,7 +99,7 @@ export interface Rfc64ContextGraphSemanticAddressesV1 {
 export function computeRfc64SubGraphKeyV1(
   subGraphName: SubGraphNameV1 | null,
 ): Digest32V1 {
-  if (subGraphName !== null) assertSubGraphNameV1(subGraphName);
+  if (subGraphName !== null) assertAuthorLaneSubGraphNameV1(subGraphName);
   const canonical = canonicalizeJson({ subGraphName } as CanonicalJsonValue, {
     maxBytes: 512,
     maxDepth: 1,
@@ -108,7 +116,7 @@ export function deriveRfc64CurrentAuthorCatalogRefAddressV1(
   scope: Rfc64AuthorSemanticScopeV1,
 ): Rfc64CurrentAuthorCatalogRefAddressV1 {
   assertSemanticScope(scope);
-  if (scope.subGraphName !== null) assertSubGraphNameV1(scope.subGraphName);
+  if (scope.subGraphName !== null) assertAuthorLaneSubGraphNameV1(scope.subGraphName);
   assertCanonicalEvmAddress(scope.authorAddress, 'authorAddress');
   const base = semanticGraphBase(scope.contextGraphId);
   const subGraphKey = computeRfc64SubGraphKeyV1(scope.subGraphName);
@@ -132,25 +140,25 @@ export function deriveRfc64SubgraphSemanticAddressesV1(
   scope: Rfc64SubgraphSemanticScopeV1,
 ): Rfc64SubgraphSemanticAddressesV1 {
   assertSemanticScope(scope);
-  if (scope.subGraphName !== null) assertSubGraphNameV1(scope.subGraphName);
+  if (scope.subGraphName !== null) assertAuthorLaneSubGraphNameV1(scope.subGraphName);
   const subGraphKey = computeRfc64SubGraphKeyV1(scope.subGraphName);
   const base = semanticGraphBase(scope.contextGraphId);
   return Object.freeze({
     subGraphKey,
     appliedSeal: semanticAddress(
-      `${base}/applied/${subGraphKey}`,
+      base,
       'applied',
       scope,
       subGraphKey,
     ),
     mutationGuard: semanticAddress(
-      `${base}/mutation/${subGraphKey}`,
+      base,
       'mutation',
       scope,
       subGraphKey,
     ),
     reconcileTarget: semanticAddress(
-      `${base}/reconcile-target/${subGraphKey}`,
+      base,
       'reconcile-target',
       scope,
       subGraphKey,
@@ -165,9 +173,9 @@ export function deriveRfc64ContextGraphSemanticAddressesV1(
   assertSemanticScope(scope);
   const base = semanticGraphBase(scope.contextGraphId);
   return Object.freeze({
-    mutationGuard: semanticAddress(`${base}/mutation-cg`, 'mutation-cg', scope),
-    appliedSetRef: semanticAddress(`${base}/applied-set`, 'applied-set', scope),
-    appliedSeal: semanticAddress(`${base}/applied-cg`, 'applied-cg', scope),
+    mutationGuard: semanticAddress(base, 'mutation-cg', scope),
+    appliedSetRef: semanticAddress(base, 'applied-set', scope),
+    appliedSeal: semanticAddress(base, 'applied-cg', scope),
   });
 }
 
@@ -176,7 +184,7 @@ function assertSemanticScope(scope: Rfc64SemanticScopeV1): void {
     throw new Error('RFC-64 semantic scope must be an object');
   }
   assertNetworkIdV1(scope.networkId);
-  assertContextGraphIdV1(scope.contextGraphId);
+  assertAuthorLaneContextGraphIdV1(scope.contextGraphId);
 }
 
 function semanticGraphBase(contextGraphId: ContextGraphIdV1): string {
@@ -184,17 +192,15 @@ function semanticGraphBase(contextGraphId: ContextGraphIdV1): string {
 }
 
 function semanticAddress(
-  graphUri: string,
-  role: string,
+  base: string,
+  route: Rfc64SemanticRouteV1,
   scope: Rfc64SemanticScopeV1,
   ...suffixes: readonly string[]
-): Readonly<{
-  graphUri: Rfc64SyncGraphIriV1;
-  subject: Rfc64SyncSubjectIriV1;
-}> {
+): Rfc64SemanticAddressV1 {
+  const path = [base, route, ...suffixes].join('/');
   return Object.freeze({
-    graphUri: graphUri as Rfc64SyncGraphIriV1,
-    subject: semanticSubject(role, scope.networkId, scope.contextGraphId, ...suffixes),
+    graphUri: path as Rfc64SyncGraphIriV1,
+    subject: semanticSubject(route, scope.networkId, scope.contextGraphId, ...suffixes),
   });
 }
 
