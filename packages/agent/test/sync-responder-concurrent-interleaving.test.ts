@@ -1613,6 +1613,38 @@ describe('sync responder pagination interleaving', () => {
     expect(calls).toBe(2);
   });
 
+  it('reuses the immutable graph membership snapshot across content-only writes', async () => {
+    let generation = 0;
+    let graphs = ['urn:graph:b', 'urn:graph:a'];
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation, stable: true }),
+      listGraphs: async () => {
+        calls += 1;
+        return graphs;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const initial = await memo.get({ refresh: true, refreshGeneration: 'initial' });
+    expect(initial).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(Object.isFrozen(initial)).toBe(true);
+
+    // A write inside an existing graph advances the store revision, but the
+    // named-graph listing still describes the same set in a different order.
+    generation += 1;
+    graphs = ['urn:graph:a', 'urn:graph:b'];
+    const contentOnly = await memo.get({ refresh: true, refreshGeneration: 'content-write' });
+    expect(contentOnly).toBe(initial);
+
+    generation += 1;
+    graphs = ['urn:graph:c', 'urn:graph:a', 'urn:graph:b'];
+    const membershipChange = await memo.get({ refresh: true, refreshGeneration: 'graph-added' });
+    expect(membershipChange).not.toBe(initial);
+    expect(membershipChange).toEqual(['urn:graph:a', 'urn:graph:b', 'urn:graph:c']);
+    expect(calls).toBe(3);
+  });
+
   it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {
     const oldGraphs = deferred<string[]>();
     const newGraphs = deferred<string[]>();
