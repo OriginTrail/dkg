@@ -37,6 +37,7 @@
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   isStoreOperationTimeoutError,
+  isReadOnlyStoreOperation,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
@@ -148,21 +149,6 @@ export type ClassifiedPromoteError = {
 };
 
 const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
-const SAFE_INDETERMINATE_STORE_OPERATIONS = new Set([
-  'query',
-  'construct',
-  'hasGraph',
-  'listGraphs',
-  'listGraphsByPrefix',
-  'countQuads',
-  // Promote replaces the complete UAL-derived SWM graph through the
-  // TripleStore's atomic replaceGraph capability. Its contract permits only
-  // the complete old graph or the complete new graph after an interrupted
-  // response, and the durable promote intent freezes the exact retry payload.
-  // Replaying this one mutation therefore converges safely; additive and
-  // destructive writes such as insert/delete remain fail-closed below.
-  'replaceGraph',
-]);
 const PROMOTE_DIAGNOSTIC_STAGES = new Set([
   'ensureSubGraphRegistered',
   'assertGraphScopedLifecycleWritable',
@@ -328,7 +314,13 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
       (
         err.outcome === 'indeterminate' &&
         err.storeOperation !== undefined &&
-        SAFE_INDETERMINATE_STORE_OPERATIONS.has(err.storeOperation)
+        (
+          isReadOnlyStoreOperation(err.storeOperation)
+          // Promote replaces the complete UAL-derived SWM graph through the
+          // atomic replaceGraph capability. Replaying the same frozen payload
+          // converges from either permitted old-or-new outcome.
+          || err.storeOperation === 'replaceGraph'
+        )
       )
     ) {
       return { classification: 'transient', retryable: true };
