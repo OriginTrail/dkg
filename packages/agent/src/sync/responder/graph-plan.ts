@@ -564,14 +564,35 @@ function createSubGraphNameMemo(
 }
 
 export function compareCodePoint(a: string, b: string): number {
-  const left = Array.from(a);
-  const right = Array.from(b);
-  const len = Math.min(left.length, right.length);
-  for (let i = 0; i < len; i++) {
-    const delta = left[i].codePointAt(0)! - right[i].codePointAt(0)!;
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < a.length && rightIndex < b.length) {
+    const leftCodePoint = a.codePointAt(leftIndex)!;
+    const rightCodePoint = b.codePointAt(rightIndex)!;
+    const delta = leftCodePoint - rightCodePoint;
     if (delta !== 0) return delta;
+
+    leftIndex += leftCodePoint > 0xFFFF ? 2 : 1;
+    rightIndex += rightCodePoint > 0xFFFF ? 2 : 1;
   }
-  return left.length - right.length;
+
+  // Preserve the previous comparator's exact numeric result for prefix pairs:
+  // Array.from(a).length - Array.from(b).length. Usually only the sign matters
+  // to Array#sort, but callers and cursors should not observe an avoidable
+  // contract change. Counting only the unmatched suffix keeps the hot equal
+  // prefix path allocation-free.
+  let remainingCodePointDelta = 0;
+  while (leftIndex < a.length) {
+    const codePoint = a.codePointAt(leftIndex)!;
+    leftIndex += codePoint > 0xFFFF ? 2 : 1;
+    remainingCodePointDelta += 1;
+  }
+  while (rightIndex < b.length) {
+    const codePoint = b.codePointAt(rightIndex)!;
+    rightIndex += codePoint > 0xFFFF ? 2 : 1;
+    remainingCodePointDelta -= 1;
+  }
+  return remainingCodePointDelta;
 }
 
 export function compareRows(a: SyncRow, b: SyncRow): number {
