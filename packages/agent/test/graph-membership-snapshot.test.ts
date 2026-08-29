@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { compareCodePoint } from '../src/sync/code-point-order.js';
-import {
-  createGraphMembershipSnapshot,
-  graphMembershipSnapshotFor,
-} from '../src/sync/graph-membership-snapshot.js';
+import { createGraphMembershipSnapshot } from '../src/sync/graph-membership-snapshot.js';
 
 describe('graph membership snapshot', () => {
   it('keeps one immutable sorted membership index', () => {
@@ -21,8 +18,8 @@ describe('graph membership snapshot', () => {
       'urn:graph:a/😀',
       'urn:graph:z',
     ].sort(compareCodePoint));
+    expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.graphs)).toBe(true);
-    expect(graphMembershipSnapshotFor(snapshot.graphs)).toBe(snapshot);
     expect(snapshot.has('urn:graph:a/child')).toBe(true);
     expect(snapshot.has('urn:graph:missing')).toBe(false);
   });

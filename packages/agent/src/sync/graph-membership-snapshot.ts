@@ -14,7 +14,6 @@ export interface GraphMembershipSnapshot {
   ): string[];
 }
 
-const snapshotByGraphArray = new WeakMap<readonly string[], GraphMembershipSnapshot>();
 const acceptEveryGraph = () => true;
 
 function lowerBound(graphs: readonly string[], target: string): number {
@@ -76,16 +75,5 @@ export function createGraphMembershipSnapshot(
       return selected;
     },
   });
-  snapshotByGraphArray.set(graphs, snapshot);
   return snapshot;
-}
-
-/**
- * Recover the index attached to a responder memo result. Direct callers that
- * supply an ordinary array receive an equivalent one-shot snapshot.
- */
-export function graphMembershipSnapshotFor(
-  graphs: readonly string[],
-): GraphMembershipSnapshot {
-  return snapshotByGraphArray.get(graphs) ?? createGraphMembershipSnapshot(graphs);
 }

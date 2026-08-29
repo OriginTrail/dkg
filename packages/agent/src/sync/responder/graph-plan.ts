@@ -41,7 +41,6 @@ import type { ExactGraphReadMode } from './durable-data-request-policy.js';
 import { compareCodePoint } from '../code-point-order.js';
 import {
   createGraphMembershipSnapshot,
-  graphMembershipSnapshotFor,
   type GraphMembershipSnapshot,
 } from '../graph-membership-snapshot.js';
 
@@ -87,7 +86,7 @@ export interface GraphListMemo {
     refresh?: boolean;
     refreshGeneration?: string;
     signal?: AbortSignal;
-  }): Promise<readonly string[]>;
+  }): Promise<GraphMembershipSnapshot>;
 }
 
 export interface SubGraphNameMemo {
@@ -293,7 +292,7 @@ export function createResponderGraphListMemo(
         // identity. Concurrent reads at the same unstable generation share
         // one enumeration; the result is simply discarded for later callers.
         if (!supersedesInflight(pending.revision, revision)) {
-          return (await raceAgainstAbort(pending.promise, options?.signal)).graphs;
+          return raceAgainstAbort(pending.promise, options?.signal);
         }
         try {
           await raceAgainstAbort(pending.promise, options?.signal);
@@ -308,7 +307,7 @@ export function createResponderGraphListMemo(
         cached &&
         now - cached.cachedAt < ttlMs &&
         (!options?.refresh || (writeRevisionSource !== null && isWriteRevision(revision) && revision.stable))
-      ) return cached.value.graphs;
+      ) return cached.value;
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
@@ -338,7 +337,7 @@ export function createResponderGraphListMemo(
       };
       const snapshot = await load;
       throwIfAborted(options?.signal);
-      return snapshot.graphs;
+      return snapshot;
     },
   };
 }
@@ -814,7 +813,7 @@ export function serializeResponderRowsWithinByteBudget(
 
 export async function readSwmMetaPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   registeredSubGraphNames: readonly string[];
   contextGraphId: string;
   cutoffIso: string | null;
@@ -828,8 +827,7 @@ export async function readSwmMetaPage(params: {
   freshMetaPlanMemo?: FreshSwmMetaPlanMemo;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
-  const graphMembership = graphMembershipSnapshotFor(params.graphList);
-  const candidateGraphs = graphs.filter((graph) => graphMembership.has(graph));
+  const candidateGraphs = graphs.filter((graph) => params.graphMembership.has(graph));
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
@@ -937,7 +935,7 @@ export async function readSwmMetaPage(params: {
 
 export async function readSwmDataPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   registeredSubGraphNames: readonly string[];
   contextGraphId: string;
   cutoffIso: string | null;
@@ -952,8 +950,7 @@ export async function readSwmDataPage(params: {
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
-  const graphMembership = graphMembershipSnapshotFor(params.graphList);
-  const candidateGraphsFor = (graph: string) => graphMembership.equalOrUnder(
+  const candidateGraphsFor = (graph: string) => params.graphMembership.equalOrUnder(
     graph,
     (candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph),
   );
@@ -985,7 +982,7 @@ export async function readSwmDataPage(params: {
     const loadPlan = () => buildFreshSwmDataGraphPlan(
       params.store,
       dataGraphs,
-      graphMembership,
+      params.graphMembership,
       params.cutoffIso!,
       signal,
     );
@@ -1596,7 +1593,7 @@ export async function readChangelogDeltaPage(params: {
 
 export async function readDurableDataPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   contextGraphId: string;
   sinceBatchId: bigint | null;
   offset: number;
@@ -1661,8 +1658,6 @@ export async function readDurableDataPage(params: {
     );
   }
 
-  const graphMembership = graphMembershipSnapshotFor(params.graphList);
-
   if (params.sinceBatchId == null) {
     return readPagedRowsFromExactGraphPlanLoader(
       params.store,
@@ -1694,7 +1689,7 @@ export async function readDurableDataPage(params: {
         // Legacy-only CGs retain the graph-list path, so their existing local
         // data remains readable and can still be synchronized on that lane.
         const legacyCandidateGraphs = manifest.knownGraphs.size === 0
-          ? graphMembership.equalOrUnder(cgPrefix, isCandidateGraph)
+          ? params.graphMembership.equalOrUnder(cgPrefix, isCandidateGraph)
           : [];
         const candidateGraphs = dedupeStrings([
           ...legacyCandidateGraphs,
@@ -1730,7 +1725,7 @@ export async function readDurableDataPage(params: {
       graphScopedVmManifest: manifest,
     });
   const candidateGraphs = dedupeStrings([
-    ...graphMembership.equalOrUnder(cgPrefix, isCandidateGraph),
+    ...params.graphMembership.equalOrUnder(cgPrefix, isCandidateGraph),
     ...manifest.confirmedEntries
       .filter((entry) => entry.rowCount > 0)
       .map((entry) => entry.graph),
@@ -3322,7 +3317,7 @@ async function readBoundedFreshSwmMetaSnapshot(
 async function readFreshSwmDataRows(
   store: TripleStore,
   dataGraphs: readonly string[],
-  graphSet: Pick<ReadonlySet<string>, 'has'>,
+  graphMembership: GraphMembershipSnapshot,
   candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
   signal?: AbortSignal,
@@ -3330,7 +3325,7 @@ async function readFreshSwmDataRows(
   const rows: SyncRow[] = [];
   for (const graph of dataGraphs) {
     const metaGraph = `${graph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
+    if (!graphMembership.has(metaGraph)) continue;
     const roots = await readFreshSwmRoots(store, metaGraph, cutoffIso, signal);
     if (roots.size === 0) continue;
     const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
@@ -3391,7 +3386,7 @@ function parseSparqlInteger(value: string | undefined): number {
 async function buildFreshSwmDataGraphPlan(
   store: TripleStore,
   dataGraphs: readonly string[],
-  graphSet: Pick<ReadonlySet<string>, 'has'>,
+  graphMembership: GraphMembershipSnapshot,
   cutoffIso: string,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
@@ -3399,7 +3394,7 @@ async function buildFreshSwmDataGraphPlan(
   for (const bucketGraph of dedupeStrings(dataGraphs).sort(compareCodePoint)) {
     throwIfAborted(signal);
     const metaGraph = `${bucketGraph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
+    if (!graphMembership.has(metaGraph)) continue;
     const roots = [...await readFreshSwmRoots(store, metaGraph, cutoffIso, signal)]
       .sort(compareCodePoint);
     for (const chunk of chunkValues(roots, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
@@ -3426,7 +3421,7 @@ async function buildFreshSwmDataGraphPlan(
         if (
           !graph
           || !root
-          || !graphSet.has(graph)
+          || !graphMembership.has(graph)
           || !chunkSet.has(root)
           || (graph !== bucketGraph
             && !isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph))
