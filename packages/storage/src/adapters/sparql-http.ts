@@ -238,6 +238,14 @@ export interface SparqlHttpStoreOptions {
    * `atomic-readback`; all other endpoints default to `best-effort`.
    */
   consistencyProfile?: SparqlHttpConsistencyProfile;
+  /**
+   * @deprecated Use `consistencyProfile: 'atomic-update'` instead.
+   *
+   * This compatibility alias preserves the pre-profile public API. It grants
+   * transactional update capability only; receipt-bearing CAS still requires
+   * `atomic-readback` or a daemon-certified managed Oxigraph endpoint.
+   */
+  atomicUpdates?: boolean;
   /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
   slowQueryThresholdMs?: number;
   /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
@@ -294,7 +302,7 @@ export class SparqlHttpStore implements TripleStore {
     this.getRecoveryState = options.getRecoveryState;
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
-      : normalizeConsistencyProfile(options.consistencyProfile);
+      : resolveConsistencyProfile(options);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -791,12 +799,6 @@ export class SparqlHttpStore implements TripleStore {
     });
   }
 
-  /**
-   * The only dispatch path for public remote mutations. The request owns its
-   * write scope, HTTP dispatch, lifecycle transitions, graph-list invalidation,
-   * timeout classification, and optional staging cleanup as one operation.
-   * There is no callback a caller can omit while still sending an update.
-   */
   private supportsConsistency(
     required: Exclude<SparqlHttpConsistencyProfile, 'best-effort'>,
   ): boolean {
@@ -804,6 +806,12 @@ export class SparqlHttpStore implements TripleStore {
       || this.consistencyProfile === required;
   }
 
+  /**
+   * The only dispatch path for public remote mutations. The request owns its
+   * write scope, HTTP dispatch, lifecycle transitions, graph-list invalidation,
+   * timeout classification, and optional staging cleanup as one operation.
+   * There is no callback a caller can omit while still sending an update.
+   */
   private async runRemoteGraphMutation(opts: {
     scope: GraphWriteScope;
     update: string;
@@ -1157,6 +1165,28 @@ function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfi
   throw new Error(
     'sparql-http consistencyProfile must be best-effort, atomic-update, or atomic-readback',
   );
+}
+
+function resolveConsistencyProfile(
+  options: Pick<SparqlHttpStoreOptions, 'consistencyProfile' | 'atomicUpdates'>,
+): SparqlHttpConsistencyProfile {
+  const profile = normalizeConsistencyProfile(options.consistencyProfile);
+  if (options.atomicUpdates === undefined) return profile;
+
+  const legacyProfile: SparqlHttpConsistencyProfile = options.atomicUpdates
+    ? 'atomic-update'
+    : 'best-effort';
+  if (options.consistencyProfile === undefined) return legacyProfile;
+
+  const compatible = options.atomicUpdates
+    ? profile === 'atomic-update' || profile === 'atomic-readback'
+    : profile === 'best-effort';
+  if (!compatible) {
+    throw new Error(
+      'sparql-http atomicUpdates conflicts with consistencyProfile; remove the deprecated alias',
+    );
+  }
+  return profile;
 }
 
 function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {

@@ -43,14 +43,13 @@ import {
   type ContextGraphIdV1,
   type SubGraphNameV1,
 } from './author-lane-scope-v1.js';
-import { iriComponentV1 } from './canonical-iri-component-v1.js';
+import { encodeCanonicalIriComponentV1 } from './canonical-iri-component-v1.js';
 
 declare const ASSERTION_COORDINATE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SCOPE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SUBJECT_V1_BRAND: unique symbol;
 
 export type { NetworkIdV1 } from './sync-wire-identifiers.js';
-export { iriComponentV1 } from './canonical-iri-component-v1.js';
 export {
   AUTHOR_LANE_SCOPE_KEYS_V1,
   type AuthorLaneScopeV1,
@@ -136,6 +135,13 @@ export class AuthorCatalogCodecError extends Error {
   }
 }
 
+/** Catalog-compatible public wrapper around the neutral percent encoder. */
+export function iriComponentV1(value: string, maxBytes = 256): string {
+  return encodeCanonicalIriComponentV1(
+    assertNfcUtf8Identifier(value, 'IRI component', maxBytes),
+  );
+}
+
 export function assertNetworkIdV1(
   value: unknown,
   label = 'networkId',
@@ -191,10 +197,10 @@ export function isCatalogForbiddenCodePointV1(codePoint: number): boolean {
 /** Build the prefix-free root/subgraph assertion scope used by catalog-v1 seals. */
 export function buildCatalogAssertionScopeV1(lane: CatalogLaneV1): CatalogAssertionScopeV1 {
   assertCatalogLaneV1(lane);
-  const context = iriComponentV1(lane.contextGraphId);
+  const context = encodeCanonicalIriComponentV1(lane.contextGraphId);
   const result = lane.subGraphName === null
     ? `v1/root/${context}`
-    : `v1/subgraph/${context}/${iriComponentV1(lane.subGraphName)}`;
+    : `v1/subgraph/${context}/${encodeCanonicalIriComponentV1(lane.subGraphName)}`;
   return result as CatalogAssertionScopeV1;
 }
 
@@ -209,7 +215,7 @@ export function buildCatalogAssertionSubjectV1(
   assertAssertionCoordinateV1(assertionCoordinate);
   return (
     `did:dkg:context-graph:${buildCatalogAssertionScopeV1(lane)}`
-    + `/assertion/${authorAddress}/${iriComponentV1(assertionCoordinate)}`
+    + `/assertion/${authorAddress}/${encodeCanonicalIriComponentV1(assertionCoordinate)}`
   ) as CatalogAssertionSubjectV1;
 }
 

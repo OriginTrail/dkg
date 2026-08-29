@@ -249,6 +249,52 @@ function runGraphScopedDurableSync(options: {
 }
 
 describe('durable graph-scoped KA materialization', () => {
+  it('rejects an RFC-64 control graph before graph-scoped materialization', async () => {
+    const controlGraph = `did:dkg:context-graph:${contextGraphId}/_sync/applied/test`;
+    const controlData = { ...dataQuad(2), graph: controlGraph };
+    const controlMeta = metadata(2).map((quad) => (
+      quad.predicate === `${DKG}assertionGraph`
+        ? { ...quad, object: controlGraph }
+        : quad
+    ));
+    const storeGraphScopedAsset = vi.fn(async (): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    const result = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-rfc64-control-graph',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }) => (
+        phase === 'data' ? page(phase, [controlData]) : page(phase, controlMeta)
+      ),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [controlData],
+        verifiedMeta: controlMeta,
+        verifiedGraphScopedDataGraphs: [controlGraph],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: controlMeta.length,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      storeInsert: async () => {},
+      storeGraphScopedAsset: ({ asset, authenticationDeadline }) => (
+        storeGraphScopedAsset(asset, authenticationDeadline)
+      ),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(result.failedPhases).toBe(1);
+    expect(result.insertedTriples).toBe(0);
+    expect(storeGraphScopedAsset).not.toHaveBeenCalled();
+  });
+
   it('authenticates a historical challenge pin without consulting the newer live root', async () => {
     const historicalData = dataQuad(1);
     const historicalRoot = computeFlatKCRootV10([historicalData], []);

@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
   parseDeterministicKnowledgeAssetUal,
-  isRfc64SemanticControlGraphV1,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
@@ -61,6 +60,7 @@ import {
   type ExactAssetSelection,
   type UalOnlyExactAssetSelection,
 } from '../exact-assets.js';
+import { classifyLegacySyncGraphV1 } from '../legacy-sync-graph-admission.js';
 
 export {
   createContextGraphSyncDeadline,
@@ -1306,13 +1306,18 @@ async function runDurableSyncWithBudget(
 
       startPhase('store');
       const storeStartedAt = Date.now();
+      assertNoLegacyRfc64ControlGraphs(
+        pid,
+        processed.verifiedData,
+        processed.verifiedMeta,
+        processed.verifiedGraphScopedDataGraphs ?? [],
+      );
       const partitioned = partitionVerifiedGraphScopedAssets(
         pid,
         processed.verifiedData,
         processed.verifiedMeta,
         processed.verifiedGraphScopedDataGraphs ?? [],
       );
-      assertNoLegacyRfc64ControlGraphs(pid, partitioned);
       if (
         partitioned.assets.length > 0
         && exactAssetSelection?.kind !== 'challenge-pinned'
@@ -1719,14 +1724,16 @@ function partitionVerifiedGraphScopedAssets(
 
 function assertNoLegacyRfc64ControlGraphs(
   contextGraphId: string,
-  partitioned: ReturnType<typeof partitionVerifiedGraphScopedAssets>,
+  verifiedData: readonly Quad[],
+  verifiedMeta: readonly Quad[],
+  verifiedGraphScopedDataGraphs: readonly string[],
 ): void {
   const reject = (graph: unknown): void => {
     // This boundary classifies only reserved graph IRIs. Structural quad
     // validation remains owned by the verified-batch pipeline and store; a
     // non-string test double or malformed value cannot name an RFC-64 graph.
     if (typeof graph !== 'string') return;
-    if (!isRfc64SemanticControlGraphV1(graph, contextGraphId)) return;
+    if (classifyLegacySyncGraphV1(graph, contextGraphId) !== 'rfc64-control') return;
     throw Object.assign(
       new Error(
         `Legacy durable sync returned reserved RFC-64 control graph ${graph}`,
@@ -1734,13 +1741,9 @@ function assertNoLegacyRfc64ControlGraphs(
       { code: 'RFC64_CONTROL_GRAPH_LEGACY_SYNC_REJECTED' },
     );
   };
-  for (const asset of partitioned.assets) {
-    reject(asset.assertionGraph);
-    for (const quad of asset.dataQuads) reject(quad.graph);
-    for (const quad of asset.metadataQuads) reject(quad.graph);
-  }
-  for (const quad of partitioned.remainingData) reject(quad.graph);
-  for (const quad of partitioned.remainingMeta) reject(quad.graph);
+  for (const quad of verifiedData) reject(quad.graph);
+  for (const quad of verifiedMeta) reject(quad.graph);
+  for (const graph of verifiedGraphScopedDataGraphs) reject(graph);
 }
 
 function stripLiteral(raw: string): string {
