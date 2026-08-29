@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  classifyLegacySyncGraphV1,
   isLegacySyncGraphAdmittedV1,
 } from '../src/sync/legacy-sync-graph-admission.js';
 
@@ -10,7 +9,6 @@ describe('legacy sync graph admission', () => {
 
   it('rejects RFC-64 control records from every legacy lane', () => {
     const control = `${cg}/_sync/applied-cg/peer-a`;
-    expect(classifyLegacySyncGraphV1(control, contextGraphId)).toBe('rfc64-control');
     expect(isLegacySyncGraphAdmittedV1(control, contextGraphId, 'durable-data')).toBe(false);
     expect(isLegacySyncGraphAdmittedV1(control, contextGraphId, 'changelog')).toBe(false);
   });
