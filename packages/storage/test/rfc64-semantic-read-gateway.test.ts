@@ -20,7 +20,7 @@ import {
 
 import {
   BlazegraphStore,
-  executeRfc64SemanticReadCapabilityV1,
+  executeRfc64ExactBindingsReadCapabilityV1,
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   OxigraphStore,
   OxigraphWorkerStore,
@@ -201,7 +201,7 @@ describe('SyncSemanticStoreV1', () => {
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('LIMIT 4'),
       expect.objectContaining({
-        source: 'rfc64.semantic.SYNC_MUTATION_GUARD_GET_V1',
+        source: 'rfc64.exact-bindings.SYNC_MUTATION_GUARD_GET_V1',
         priority: 'background',
         maxResponseBytes: MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
       }),
@@ -226,8 +226,8 @@ describe('SyncSemanticStoreV1', () => {
     } as unknown as TripleStore)).toThrow(/no certified RFC-64 semantic read capability/u);
 
     const getterBacked = { query: inner.query } as Record<string, unknown>;
-    Object.defineProperty(getterBacked, 'rfc64SemanticReadV1', {
-      get: () => inner.rfc64SemanticReadV1,
+    Object.defineProperty(getterBacked, 'rfc64ExactBindingsReadV1', {
+      get: () => inner.rfc64ExactBindingsReadV1,
     });
     await expect(new SyncSemanticStoreV1(getterBacked as unknown as TripleStore).read(
       requestOf(FIXTURES[0]),
@@ -308,7 +308,7 @@ describe('SyncSemanticStoreV1', () => {
       .mockReturnValueOnce(1)
       .mockReturnValueOnce(6);
     const capability = {
-      rfc64SemanticReadV1: vi.fn(async () => rows),
+      rfc64ExactBindingsReadV1: vi.fn(async () => rows),
     } as unknown as TripleStore;
     await expect(new SyncSemanticStoreV1(capability).read(requestOf(FIXTURES[0]), {
       timeoutMs: 5,
@@ -383,8 +383,8 @@ function certifiedStore(
 ): TripleStore {
   return {
     query,
-    rfc64SemanticReadV1(operation, options) {
-      return executeRfc64SemanticReadCapabilityV1({ query }, operation, options);
+    rfc64ExactBindingsReadV1(operation, options) {
+      return executeRfc64ExactBindingsReadCapabilityV1({ query }, operation, options);
     },
   } as unknown as TripleStore;
 }

@@ -36,13 +36,12 @@ import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
   JAVA_WRITE_UTF_MAX_BYTES,
-  type CanonicalAuthorSealStoreRowV1,
-  type Rfc64AuthorSealReadOperationV1,
-  type Rfc64SemanticReadOperationV1,
-  type Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
-import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
-import { executeRfc64AuthorSealReadCapabilityV1 } from '../rfc64-author-seal-read-capability.js';
+import {
+  executeRfc64ExactBindingsReadCapabilityV1,
+  type Rfc64ExactBindingsReadOperationV1,
+  type Rfc64ExactBindingsStoreRowV1,
+} from '../rfc64-exact-bindings-read-capability.js';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -55,18 +54,11 @@ type OxQuad = oxigraph.Quad;
 export class OxigraphStore implements TripleStore {
   readonly queryCancellation = 'pre-dispatch' as const;
 
-  rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV1,
+  rfc64ExactBindingsReadV1(
+    operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
-  ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
-    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
-  }
-
-  rfc64AuthorSealReadV1(
-    operation: Rfc64AuthorSealReadOperationV1,
-    options?: Pick<TripleStoreQueryOptions, 'signal'>,
-  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]> {
-    return executeRfc64AuthorSealReadCapabilityV1(this, operation, options);
+  ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
+    return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
   }
 
   private store: OxStore;

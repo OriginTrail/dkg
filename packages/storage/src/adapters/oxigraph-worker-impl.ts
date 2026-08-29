@@ -7,12 +7,20 @@ parentPort!.on('message', async (msg: { id: number; method: string; args: unknow
   try {
     const fn = (store as any)[msg.method];
     if (typeof fn !== 'function') {
-      parentPort!.postMessage({ id: msg.id, error: `Unknown method: ${msg.method}` });
+      parentPort!.postMessage({
+        id: msg.id,
+        error: `Unknown method: ${msg.method}`,
+        errorName: 'Error',
+      });
       return;
     }
     const result = await fn.apply(store, msg.args);
     parentPort!.postMessage({ id: msg.id, result });
   } catch (err) {
-    parentPort!.postMessage({ id: msg.id, error: err instanceof Error ? err.message : String(err) });
+    parentPort!.postMessage({
+      id: msg.id,
+      error: err instanceof Error ? err.message : String(err),
+      errorName: err instanceof Error ? err.name : 'Error',
+    });
   }
 });

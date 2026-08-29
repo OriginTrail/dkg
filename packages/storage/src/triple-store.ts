@@ -24,10 +24,10 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import type {
   CanonicalAuthorSealStoreRowV1,
-  Rfc64AuthorSealReadOperationV1,
-  Rfc64SemanticReadOperationV1,
-  Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
+import type {
+  Rfc64ExactBindingsReadOperationV1,
+} from './rfc64-exact-bindings-read-capability.js';
 
 export interface Quad {
   subject: string;
@@ -131,18 +131,9 @@ export interface TripleStore {
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
-  /**
-   * Execute one closed RFC-64 semantic read and return normalized typed rows.
-   * Only adapters with explicit conformance evidence expose this capability;
-   * generic SPARQL support is insufficient.
-   */
-  rfc64SemanticReadV1?(
-    operation: Rfc64SemanticReadOperationV1,
-    options?: Pick<QueryOptions, 'signal'>,
-  ): Promise<readonly Rfc64SemanticStoreRowV1[]>;
-  /** Execute the sole certified fixed-subject RFC-64 author-seal read. */
-  rfc64AuthorSealReadV1?(
-    operation: Rfc64AuthorSealReadOperationV1,
+  /** Execute one member of the certified closed RFC-64 exact-bindings union. */
+  rfc64ExactBindingsReadV1?(
+    operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
 

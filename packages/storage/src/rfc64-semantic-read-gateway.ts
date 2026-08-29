@@ -4,19 +4,20 @@ import {
   snapshotExactDataRecord,
   type DecodedRfc64SemanticRecordV1,
   type Rfc64SemanticRecordCoordinateV1,
-  type Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
 
-import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
+import {
+  runRfc64ClosedBindingsReadV1,
+  snapshotRfc64ClosedBindingsReadOptionsV1,
+} from './rfc64-closed-bindings-read-runner.js';
+import {
+  isRfc64ExactBindingsReadCapabilityV1,
+  type Rfc64ExactBindingsReadCapabilityV1,
+} from './rfc64-exact-bindings-read-capability.js';
 import {
   findTripleStoreCapability,
   type TripleStore,
 } from './triple-store.js';
-import {
-  Rfc64SemanticReadCapabilityResultErrorV1,
-  isRfc64SemanticReadCapabilityV1,
-  type Rfc64SemanticReadCapabilityV1,
-} from './rfc64-semantic-read-capability.js';
 
 export const MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1 = 30_000;
 
@@ -61,12 +62,12 @@ export class Rfc64SemanticReadGatewayErrorV1 extends Error {
  * closed manifest immediately before execution.
  */
 export class SyncSemanticStoreV1 {
-  private readonly capability: Rfc64SemanticReadCapabilityV1;
+  private readonly capability: Rfc64ExactBindingsReadCapabilityV1;
 
   constructor(store: TripleStore) {
     const capability = findTripleStoreCapability(
       store,
-      isRfc64SemanticReadCapabilityV1,
+      isRfc64ExactBindingsReadCapabilityV1,
     );
     if (!capability) {
       fail(
@@ -87,43 +88,28 @@ export class SyncSemanticStoreV1 {
       coordinate: request.coordinate,
     });
 
-    const deadlineAt = performance.now() + readOptions.timeoutMs;
-    const deadlineSignal = AbortSignal.timeout(readOptions.timeoutMs);
-    const signalScope = composeAbortSignals(readOptions.signal, deadlineSignal);
-    try {
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
-      let rows: readonly Rfc64SemanticStoreRowV1[];
-      try {
-        rows = await this.capability.rfc64SemanticReadV1(operation, {
-          signal: signalScope.signal,
-        });
-      } catch (cause) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
-        if (cause instanceof Rfc64SemanticReadCapabilityResultErrorV1) {
-          fail('rfc64-semantic-read-result', cause.message, cause);
-        }
-        throw cause;
-      }
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
-      if (rows.length === 0) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
-        return Object.freeze({ kind: 'absent' });
-      }
-      let decoded: DecodedRfc64SemanticRecordV1;
-      try {
-        decoded = decodeRfc64SemanticRecordStoreRowsV1(rows, operation.coordinate);
-      } catch (cause) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
-        throw cause;
-      }
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
-      return Object.freeze({
+    return runRfc64ClosedBindingsReadV1({
+      options: readOptions,
+      deadlineLabel: 'RFC-64 semantic read',
+      dispatch: (signal) => this.capability.rfc64ExactBindingsReadV1(
+        operation,
+        { signal },
+      ),
+      decode: (rows) => decodeRfc64SemanticRecordStoreRowsV1(
+        rows,
+        operation.coordinate,
+      ),
+      absent: (): Rfc64SemanticReadResultV1 => Object.freeze({ kind: 'absent' }),
+      present: (decoded): Rfc64SemanticReadResultV1 => Object.freeze({
         kind: 'record',
         decoded,
-      });
-    } finally {
-      signalScope.dispose();
-    }
+      }),
+      invalidResult: (message, cause) => fail(
+        'rfc64-semantic-read-result',
+        message,
+        cause,
+      ),
+    });
   }
 }
 
@@ -140,30 +126,12 @@ function snapshotRequest(input: unknown): Rfc64SemanticReadRequestV1 {
 }
 
 function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
-  const options = snapshotExactRecord(
+  return snapshotRfc64ClosedBindingsReadOptionsV1(
     input,
-    isRecordWithOwnKey(input, 'signal') ? ['signal', 'timeoutMs'] : ['timeoutMs'],
+    MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
     'RFC-64 semantic read options',
-    'rfc64-semantic-read-options',
-  );
-  if (
-    typeof options.timeoutMs !== 'number'
-    || !Number.isSafeInteger(options.timeoutMs)
-    || options.timeoutMs < 1
-    || options.timeoutMs > MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1
-  ) {
-    fail(
-      'rfc64-semantic-read-options',
-      `timeoutMs must be an integer from 1 to ${MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1}`,
-    );
-  }
-  if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) {
-    fail('rfc64-semantic-read-options', 'signal must be an AbortSignal');
-  }
-  return Object.freeze({
-    timeoutMs: options.timeoutMs,
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  }) as Rfc64SemanticReadOptionsV1;
+    (message, cause) => fail('rfc64-semantic-read-options', message, cause),
+  ) as Rfc64SemanticReadOptionsV1;
 }
 
 function snapshotExactRecord(
@@ -176,22 +144,6 @@ function snapshotExactRecord(
     return snapshotExactDataRecord(input, expectedKeys, label);
   } catch (cause) {
     fail(code, `${label} has an invalid field set`, cause);
-  }
-}
-
-function isRecordWithOwnKey(input: unknown, key: string): boolean {
-  return input !== null
-    && typeof input === 'object'
-    && Object.prototype.hasOwnProperty.call(input, key);
-}
-
-function assertBeforeDeadline(
-  signal: AbortSignal | undefined,
-  deadlineAt: number,
-): void {
-  signal?.throwIfAborted();
-  if (performance.now() >= deadlineAt) {
-    throw new DOMException('RFC-64 semantic read deadline exceeded', 'TimeoutError');
   }
 }
 

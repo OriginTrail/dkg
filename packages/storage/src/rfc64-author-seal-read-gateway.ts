@@ -6,14 +6,15 @@ import {
   type DecodedCanonicalGraphScopedAuthorSealRowsV1,
 } from '@origintrail-official/dkg-core';
 
-import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
-import { findTripleStoreCapability, type TripleStore } from './triple-store.js';
 import {
-  isRfc64AuthorSealReadCapabilityV1,
-  type Rfc64AuthorSealReadCapabilityV1,
-} from './rfc64-author-seal-read-capability.js';
-import { Rfc64SemanticReadCapabilityResultErrorV1 } from
-  './rfc64-semantic-read-capability.js';
+  runRfc64ClosedBindingsReadV1,
+  snapshotRfc64ClosedBindingsReadOptionsV1,
+} from './rfc64-closed-bindings-read-runner.js';
+import {
+  isRfc64ExactBindingsReadCapabilityV1,
+  type Rfc64ExactBindingsReadCapabilityV1,
+} from './rfc64-exact-bindings-read-capability.js';
+import { findTripleStoreCapability, type TripleStore } from './triple-store.js';
 
 export const MAX_RFC64_AUTHOR_SEAL_READ_TIMEOUT_MS_V1 = 30_000;
 
@@ -52,10 +53,13 @@ export class Rfc64AuthorSealReadGatewayErrorV1 extends Error {
 
 /** Narrow post-commit author-seal read; callers never receive raw SPARQL. */
 export class SyncAuthorSealStoreV1 {
-  private readonly capability: Rfc64AuthorSealReadCapabilityV1;
+  private readonly capability: Rfc64ExactBindingsReadCapabilityV1;
 
   constructor(store: TripleStore) {
-    const capability = findTripleStoreCapability(store, isRfc64AuthorSealReadCapabilityV1);
+    const capability = findTripleStoreCapability(
+      store,
+      isRfc64ExactBindingsReadCapabilityV1,
+    );
     if (!capability) {
       fail(
         'rfc64-author-seal-read-capability',
@@ -72,37 +76,28 @@ export class SyncAuthorSealStoreV1 {
     const request = snapshotRequest(input);
     const readOptions = snapshotOptions(options);
     const operation = compileRfc64AuthorSealReadOperationV1(request);
-    const deadlineAt = performance.now() + readOptions.timeoutMs;
-    const deadlineSignal = AbortSignal.timeout(readOptions.timeoutMs);
-    const signalScope = composeAbortSignals(readOptions.signal, deadlineSignal);
-    try {
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
-      let rows;
-      try {
-        rows = await this.capability.rfc64AuthorSealReadV1(operation, {
-          signal: signalScope.signal,
-        });
-      } catch (cause) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
-        if (cause instanceof Rfc64SemanticReadCapabilityResultErrorV1) {
-          fail('rfc64-author-seal-read-result', cause.message, cause);
-        }
-        throw cause;
-      }
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
-      if (rows.length === 0) return Object.freeze({ kind: 'absent' });
-      let decoded: DecodedCanonicalGraphScopedAuthorSealRowsV1;
-      try {
-        decoded = decodeCanonicalGraphScopedAuthorSealRowsV1(rows, operation.coordinate);
-      } catch (cause) {
-        assertBeforeDeadline(signalScope.signal, deadlineAt);
-        throw cause;
-      }
-      assertBeforeDeadline(signalScope.signal, deadlineAt);
-      return Object.freeze({ kind: 'seal', decoded });
-    } finally {
-      signalScope.dispose();
-    }
+    return runRfc64ClosedBindingsReadV1({
+      options: readOptions,
+      deadlineLabel: 'RFC-64 author-seal read',
+      dispatch: (signal) => this.capability.rfc64ExactBindingsReadV1(
+        operation,
+        { signal },
+      ),
+      decode: (rows) => decodeCanonicalGraphScopedAuthorSealRowsV1(
+        rows,
+        operation.coordinate,
+      ),
+      absent: (): Rfc64AuthorSealReadResultV1 => Object.freeze({ kind: 'absent' }),
+      present: (decoded): Rfc64AuthorSealReadResultV1 => Object.freeze({
+        kind: 'seal',
+        decoded,
+      }),
+      invalidResult: (message, cause) => fail(
+        'rfc64-author-seal-read-result',
+        message,
+        cause,
+      ),
+    });
   }
 }
 
@@ -119,30 +114,12 @@ function snapshotRequest(input: unknown): Rfc64AuthorSealReadRequestV1 {
 }
 
 function snapshotOptions(input: unknown): Rfc64AuthorSealReadOptionsV1 {
-  const options = snapshotExactRecord(
+  return snapshotRfc64ClosedBindingsReadOptionsV1(
     input,
-    isRecordWithOwnKey(input, 'signal') ? ['signal', 'timeoutMs'] : ['timeoutMs'],
+    MAX_RFC64_AUTHOR_SEAL_READ_TIMEOUT_MS_V1,
     'RFC-64 author-seal read options',
-    'rfc64-author-seal-read-options',
-  );
-  if (
-    typeof options.timeoutMs !== 'number'
-    || !Number.isSafeInteger(options.timeoutMs)
-    || options.timeoutMs < 1
-    || options.timeoutMs > MAX_RFC64_AUTHOR_SEAL_READ_TIMEOUT_MS_V1
-  ) {
-    fail(
-      'rfc64-author-seal-read-options',
-      `timeoutMs must be an integer from 1 to ${MAX_RFC64_AUTHOR_SEAL_READ_TIMEOUT_MS_V1}`,
-    );
-  }
-  if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) {
-    fail('rfc64-author-seal-read-options', 'signal must be an AbortSignal');
-  }
-  return Object.freeze({
-    timeoutMs: options.timeoutMs,
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  }) as Rfc64AuthorSealReadOptionsV1;
+    (message, cause) => fail('rfc64-author-seal-read-options', message, cause),
+  ) as Rfc64AuthorSealReadOptionsV1;
 }
 
 function snapshotExactRecord(
@@ -155,19 +132,6 @@ function snapshotExactRecord(
     return snapshotExactDataRecord(input, expectedKeys, label);
   } catch (cause) {
     fail(code, `${label} has an invalid field set`, cause);
-  }
-}
-
-function isRecordWithOwnKey(input: unknown, key: string): boolean {
-  return input !== null
-    && typeof input === 'object'
-    && Object.prototype.hasOwnProperty.call(input, key);
-}
-
-function assertBeforeDeadline(signal: AbortSignal | undefined, deadlineAt: number): void {
-  signal?.throwIfAborted();
-  if (performance.now() >= deadlineAt) {
-    throw new DOMException('RFC-64 author-seal read deadline exceeded', 'TimeoutError');
   }
 }
 

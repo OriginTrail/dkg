@@ -5,14 +5,11 @@ import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
-import type {
-  CanonicalAuthorSealStoreRowV1,
-  Rfc64AuthorSealReadOperationV1,
-  Rfc64SemanticReadOperationV1,
-  Rfc64SemanticStoreRowV1,
-} from '@origintrail-official/dkg-core';
-import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
-import { executeRfc64AuthorSealReadCapabilityV1 } from '../rfc64-author-seal-read-capability.js';
+import {
+  Rfc64ExactBindingsReadResultErrorV1,
+  type Rfc64ExactBindingsReadOperationV1,
+  type Rfc64ExactBindingsStoreRowV1,
+} from '../rfc64-exact-bindings-read-capability.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -105,7 +102,7 @@ function asAbortError(reason: unknown): Error {
  * would be unsafe with the current call sites.
  */
 const READ_ONLY_METHODS = new Set<string>([
-  'query', 'hasGraph', 'listGraphs', 'countQuads',
+  'query', 'hasGraph', 'listGraphs', 'countQuads', 'rfc64ExactBindingsReadV1',
 ]);
 
 /** Rejection raised when a read op exceeds its per-op timeout. */
@@ -155,18 +152,26 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
-  rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV1,
+  async rfc64ExactBindingsReadV1(
+    operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
-  ): Promise<readonly Rfc64SemanticStoreRowV1[]> {
-    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
-  }
-
-  rfc64AuthorSealReadV1(
-    operation: Rfc64AuthorSealReadOperationV1,
-    options?: Pick<TripleStoreQueryOptions, 'signal'>,
-  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]> {
-    return executeRfc64AuthorSealReadCapabilityV1(this, operation, options);
+  ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
+    try {
+      return await this.callWithTimeout<readonly Rfc64ExactBindingsStoreRowV1[]>(
+        this.operationTimeoutMs,
+        options?.signal,
+        'rfc64ExactBindingsReadV1',
+        operation,
+      );
+    } catch (cause) {
+      if (
+        cause instanceof Error
+        && cause.name === Rfc64ExactBindingsReadResultErrorV1.name
+      ) {
+        throw new Rfc64ExactBindingsReadResultErrorV1(cause.message);
+      }
+      throw cause;
+    }
   }
 
   // Assigned by spawnWorker(), which the constructor always calls — hence the
@@ -347,7 +352,12 @@ export class OxigraphWorkerStore implements TripleStore {
     // this: a spawn only happens in the constructor or within respawn(), which
     // bails the moment a close() is seen.
     this.markSpawnedLive();
-    worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {
+    worker.on('message', (msg: {
+      id: number;
+      result?: unknown;
+      error?: string;
+      errorName?: string;
+    }) => {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the
       // crash-loop accounting window (see MAX_CONSECUTIVE_RESPAWNS).
@@ -355,7 +365,11 @@ export class OxigraphWorkerStore implements TripleStore {
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(msg.error));
+      if (msg.error) {
+        const error = new Error(msg.error);
+        if (msg.errorName) error.name = msg.errorName;
+        p.reject(error);
+      }
       else p.resolve(msg.result);
     });
     worker.on('error', (err) => {
