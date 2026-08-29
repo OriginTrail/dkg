@@ -270,6 +270,25 @@ describe('RFC-64 author commit decorator integration', () => {
     expect(scans).toBe(1);
   });
 
+  it('rejects invalid author-commit metadata before a permissive inner store is dispatched', async () => {
+    const base = new OxigraphStore();
+    let dispatches = 0;
+    const inner = overrideStore(base, {
+      rfc64AuthorCommitCasV1: async () => {
+        dispatches += 1;
+        return 'committed';
+      },
+    });
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 60_000 });
+    const invalidInput = {
+      ...authorCommitInput(),
+      sharedProjectionGraph: undefined,
+    } as unknown as Rfc64AuthorCommitCasInputV1;
+
+    await expect(store.rfc64AuthorCommitCasV1(invalidInput)).rejects.toThrow();
+    expect(dispatches).toBe(0);
+  });
+
   it('keeps a warm graph index on RFC-64 conflict and proven not-started refusal', async () => {
     for (const outcome of ['conflict', 'not-started'] as const) {
       const base = new OxigraphStore();
