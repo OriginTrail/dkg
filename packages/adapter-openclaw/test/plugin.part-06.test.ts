@@ -248,7 +248,7 @@ describe("DkgNodePlugin", () => {
   });
 
 
-  it('registers session_end hook and all exported tools via register()', () => {
+  it('registers session_end hook and all exported tools via register()', async () => {
     const plugin = new DkgNodePlugin();
     const registeredHooks: Array<{ event: string; name?: string }> = [];
     const registeredTools: OpenClawTool[] = [];
@@ -283,6 +283,33 @@ describe("DkgNodePlugin", () => {
     expect(toolNames).toContain('dkg_subscribe');
     expect(toolNames).toContain('dkg_query');
     expect(toolNames).toContain('dkg_find_agents');
+    {
+      // GH#310 — the tool must ADVERTISE the daemon's new filters, or no
+      // model ever discovers them and the feature stays unreachable.
+      const findAgents = registeredTools.find((t: any) => t.name === 'dkg_find_agents') as any;
+      for (const key of ['connection_status', 'local', 'limit', 'cursor']) {
+        expect(Object.keys(findAgents.parameters.properties)).toContain(key);
+      }
+      // And the HANDLER must map them onto the client call — tool args arrive
+      // as loosely-typed model output ('true' as a string, limit as a string),
+      // and a dropped filter silently returns the full ~150 KB registry.
+      const getAgentsCalls: unknown[] = [];
+      (plugin as any).client = {
+        getAgents: async (filter: unknown) => { getAgentsCalls.push(filter); return { agents: [] }; },
+      };
+      await findAgents.execute('tc-1', {
+        connection_status: 'connected',
+        local: 'true',
+        limit: '10',
+        cursor: 'cur-1',
+      });
+      expect(getAgentsCalls[0]).toEqual({
+        connection_status: 'connected',
+        local: true,
+        limit: 10,
+        cursor: 'cur-1',
+      });
+    }
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');

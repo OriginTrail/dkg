@@ -683,6 +683,26 @@ describe('DkgDaemonClient', () => {
     expect(url).toContain('skill_type=ImageAnalysis');
   });
 
+  it('getAgents passes the GH#310 connection/local/pagination filters', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ agents: [], nextCursor: 'n1' }), { status: 200 }),
+    );
+
+    const result = await client.getAgents({
+      connection_status: 'connected',
+      local: true,
+      limit: 10,
+      cursor: 'cur-1',
+    });
+    const url = fetchCalls[0][0] as string;
+    // Adapter args are snake_case; the daemon parameter is camelCase.
+    expect(url).toContain('connectionStatus=connected');
+    expect(url).toContain('local=true');
+    expect(url).toContain('limit=10');
+    expect(url).toContain('cursor=cur-1');
+    expect(result.nextCursor).toBe('n1');
+  });
+
   it('getSkills should GET /api/skills', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ skills: [{ uri: 'ImageAnalysis' }] }), { status: 200 }),

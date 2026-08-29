@@ -461,9 +461,27 @@ export class DkgClient {
     return this.request('GET', '/api/agent/identity');
   }
 
-  /** List registered agents (human + AI) + their live connection health. */
-  async listAgents(): Promise<unknown[]> {
-    const r = await this.request<{ agents?: unknown[] }>('GET', '/api/agents');
+  /**
+   * List registered agents (human + AI) + their live connection health.
+   *
+   * Options map to the GH#310 daemon filters. This helper keeps its
+   * array-of-agents contract (its consumers build name maps), so a
+   * `nextCursor` from a `limit`ed call is dropped — pass a larger limit
+   * rather than paging through this method.
+   */
+  async listAgents(options: {
+    framework?: string;
+    connectionStatus?: 'self' | 'connected' | 'disconnected';
+    local?: boolean;
+    limit?: number;
+  } = {}): Promise<unknown[]> {
+    const params = new URLSearchParams();
+    if (options.framework) params.set('framework', options.framework);
+    if (options.connectionStatus) params.set('connectionStatus', options.connectionStatus);
+    if (options.local !== undefined) params.set('local', String(options.local));
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    const qs = params.toString();
+    const r = await this.request<{ agents?: unknown[] }>('GET', `/api/agents${qs ? `?${qs}` : ''}`);
     return r.agents ?? [];
   }
 

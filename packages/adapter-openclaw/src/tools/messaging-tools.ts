@@ -21,6 +21,17 @@ export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
         properties: {
           framework: { type: 'string', description: 'Filter by framework (e.g. "OpenClaw", "ElizaOS").' },
           skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis").' },
+          connection_status: {
+            type: 'string',
+            enum: ['self', 'connected', 'disconnected'],
+            description: 'Only agents in this live connection state.',
+          },
+          local: {
+            type: 'boolean',
+            description: "Only this node's own agents — the cheap way to learn your own agent address.",
+          },
+          limit: { type: 'number', description: 'Page size; the response carries nextCursor while rows remain.' },
+          cursor: { type: 'string', description: 'Opaque cursor from a previous response; repeat the same filters.' },
         },
         required: [],
       },

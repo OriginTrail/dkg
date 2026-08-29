@@ -550,10 +550,30 @@ export class ApiClient {
     return requireDaemonStatusResponse(status, this.expectedStatusName);
   }
 
-  async agents(): Promise<{
+  async agents(options: {
+    framework?: string;
+    skillType?: string;
+    /** Filter on live connection state (GH#310). */
+    connectionStatus?: 'self' | 'connected' | 'disconnected';
+    /** Only this node's own agents — the cheap "what's my agent address" call. */
+    local?: boolean;
+    /** Page size; the response then carries `nextCursor` while rows remain. */
+    limit?: number;
+    /** Opaque cursor from a previous response. Repeat the same filters. */
+    cursor?: string;
+  } = {}): Promise<{
     agents: Array<{ agentUri: string; name: string; peerId: string; framework?: string; nodeRole?: string }>;
+    nextCursor?: string;
   }> {
-    return this.get('/api/agents');
+    const params = new URLSearchParams();
+    if (options.framework) params.set('framework', options.framework);
+    if (options.skillType) params.set('skill_type', options.skillType);
+    if (options.connectionStatus) params.set('connectionStatus', options.connectionStatus);
+    if (options.local !== undefined) params.set('local', String(options.local));
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    const qs = params.toString();
+    return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
   }
 
   /**

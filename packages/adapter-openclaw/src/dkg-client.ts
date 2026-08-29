@@ -970,10 +970,21 @@ export class DkgDaemonClient {
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
-  async getAgents(filter?: { framework?: string; skill_type?: string }): Promise<{ agents: any[] }> {
+  async getAgents(filter?: {
+    framework?: string;
+    skill_type?: string;
+    connection_status?: 'self' | 'connected' | 'disconnected';
+    local?: boolean;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ agents: any[]; nextCursor?: string }> {
     const params = new URLSearchParams();
     if (filter?.framework) params.set('framework', filter.framework);
     if (filter?.skill_type) params.set('skill_type', filter.skill_type);
+    if (filter?.connection_status) params.set('connectionStatus', filter.connection_status);
+    if (filter?.local !== undefined) params.set('local', String(filter.local));
+    if (filter?.limit !== undefined) params.set('limit', String(filter.limit));
+    if (filter?.cursor) params.set('cursor', filter.cursor);
     const qs = params.toString();
     return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
   }

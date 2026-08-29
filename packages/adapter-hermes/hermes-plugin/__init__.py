@@ -16,6 +16,7 @@ Config via $HERMES_HOME/dkg.json:
 from __future__ import annotations
 
 import json
+import urllib.parse
 import logging
 import os
 import hashlib
@@ -325,6 +326,23 @@ DKG_FIND_AGENTS_SCHEMA = {
             "skill_type": {
                 "type": "string",
                 "description": "Filter by skill URI to find agents offering a specific capability.",
+            },
+            "connection_status": {
+                "type": "string",
+                "enum": ["self", "connected", "disconnected"],
+                "description": "Only agents in this live connection state.",
+            },
+            "local": {
+                "type": "boolean",
+                "description": "Only this node's own agents — the cheap way to learn your own agent address.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Page size; the response carries nextCursor while more rows remain.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque cursor from a previous response; repeat the same filters.",
             },
         },
         "required": [],
@@ -1663,7 +1681,17 @@ class DKGMemoryProvider(MemoryProvider):
             params["framework"] = args["framework"]
         if args.get("skill_type"):
             params["skill_type"] = args["skill_type"]
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        # GH#310 daemon filters — forwarded verbatim; the daemon validates and
+        # 400s on bad values, which beats silently returning the full registry.
+        if args.get("connection_status"):
+            params["connectionStatus"] = args["connection_status"]
+        if args.get("local") is not None:
+            params["local"] = "true" if args["local"] in (True, "true") else "false"
+        if args.get("limit") is not None:
+            params["limit"] = str(args["limit"])
+        if args.get("cursor"):
+            params["cursor"] = args["cursor"]
+        qs = urllib.parse.urlencode(params)
         path = f"/api/agents?{qs}" if qs else "/api/agents"
         return json.dumps(self._client._get(path))
 

@@ -338,10 +338,45 @@ describe('ApiClient', () => {
 
     it('agents() calls /api/agents', async () => {
       const body = { agents: [{ agentUri: 'urn:a', name: 'A', peerId: 'p1' }] };
-      const { fetch } = createTrackingFetch({ ok: true, status: 200, body });
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
       globalThis.fetch = fetch;
       const result = await client.agents();
       expect(result.agents).toHaveLength(1);
+      // The parameterless call keeps the bare path — no stray '?' that a
+      // strict daemon-side unknown-parameter check could trip over.
+      expect(calls[0].url.endsWith('/api/agents')).toBe(true);
+    });
+
+    it('agents() forwards the GH#310 filters and pagination params', async () => {
+      const body = { agents: [], nextCursor: 'next-1' };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.agents({
+        framework: 'eliza',
+        skillType: 'ImageAnalysis',
+        connectionStatus: 'connected',
+        local: true,
+        limit: 5,
+        cursor: 'c123',
+      });
+      const url = calls[0].url;
+      expect(url).toContain('framework=eliza');
+      // The route's parameter is snake_case skill_type; the option is camelCase.
+      expect(url).toContain('skill_type=ImageAnalysis');
+      expect(url).toContain('connectionStatus=connected');
+      expect(url).toContain('local=true');
+      expect(url).toContain('limit=5');
+      expect(url).toContain('cursor=c123');
+      expect(result.nextCursor).toBe('next-1');
+    });
+
+    it('agents({ local: false }) sends local=false, not nothing', async () => {
+      // false must reach the daemon — dropping it silently would flip the
+      // call from "everyone else's agents" to "everyone's agents".
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+      globalThis.fetch = fetch;
+      await client.agents({ local: false });
+      expect(calls[0].url).toContain('local=false');
     });
 
     it('skills() calls /api/skills', async () => {
