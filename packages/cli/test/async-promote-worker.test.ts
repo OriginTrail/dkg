@@ -14,7 +14,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  StoreOperationTimeoutError,
+} from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
@@ -131,6 +134,7 @@ describe('classifyPromoteError', () => {
       'STORE_OPERATION_TIMEOUT Managed Oxigraph is recovering; query was not started',
       'Managed Oxigraph recovery interrupted query execution',
       'Managed Oxigraph recovery interrupted listGraphs; outcome is indeterminate',
+      'Managed Oxigraph recovery interrupted countQuads; outcome is indeterminate',
       'Store scheduler queue wait timeout',
     ]) {
       expect(classifyPromoteError(new Error(message))).toEqual({
@@ -138,6 +142,30 @@ describe('classifyPromoteError', () => {
         retryable: true,
       });
     }
+  });
+
+  it('retries typed indeterminate managed-store reads but fails closed for writes', () => {
+    for (const operation of [
+      'query',
+      'construct',
+      'hasGraph',
+      'listGraphs',
+      'listGraphsByPrefix',
+      'countQuads',
+    ] as const) {
+      expect(classifyPromoteError(new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation,
+        outcome: 'indeterminate',
+      }))).toEqual({ classification: 'transient', retryable: true });
+    }
+
+    expect(classifyPromoteError(new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'insert',
+      outcome: 'indeterminate',
+      message: 'managed store write outcome is indeterminate',
+    }))).toEqual({ classification: 'fatal', retryable: false });
   });
 
   it('classifies unknown errors as fatal (non-retryable)', () => {

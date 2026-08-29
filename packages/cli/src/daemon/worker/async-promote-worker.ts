@@ -35,6 +35,7 @@
  */
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isStoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import {
   PromoteJobLeaseError,
   type AsyncPromoteQueue,
@@ -144,6 +145,16 @@ export type ClassifiedPromoteError = {
 };
 
 const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
+const SAFE_INDETERMINATE_STORE_READS = new Set([
+  'query',
+  'construct',
+  'hasGraph',
+  'listGraphs',
+  'listGraphsByPrefix',
+  'countQuads',
+]);
+const MANAGED_OXIGRAPH_INTERRUPTED_READ =
+  /managed oxigraph recovery interrupted (?:query|construct|hasgraph|listgraphs|listgraphsbyprefix|countquads)\b/;
 const PROMOTE_DIAGNOSTIC_STAGES = new Set([
   'ensureSubGraphRegistered',
   'assertGraphScopedLifecycleWritable',
@@ -287,6 +298,24 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     return { classification: 'cap_exceeded', retryable: false };
   }
 
+  // Managed-store recovery can declare the exact operation outcome. A request
+  // rejected before dispatch is safe to retry. An interrupted read is also
+  // safe because it cannot have mutated WM/SWM; interrupted writes remain
+  // fail-closed because their effect is indeterminate.
+  if (
+    isStoreOperationTimeoutError(err) &&
+    (
+      err.outcome === 'not_started' ||
+      (
+        err.outcome === 'indeterminate' &&
+        err.storeOperation !== undefined &&
+        SAFE_INDETERMINATE_STORE_READS.has(err.storeOperation)
+      )
+    )
+  ) {
+    return { classification: 'transient', retryable: true };
+  }
+
   // 3. Transient network / IO — the rc.10 importer hit "fetch failed"
   //    multiple times under sustained load. Worker should retry.
   if (
@@ -299,8 +328,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     message.includes('timeout') ||
     message.includes('timed out') ||
     message.includes('managed oxigraph is recovering') ||
-    message.includes('managed oxigraph recovery interrupted query') ||
-    message.includes('managed oxigraph recovery interrupted listgraphs') ||
+    MANAGED_OXIGRAPH_INTERRUPTED_READ.test(message) ||
     message.includes('store scheduler queue wait timeout')
   ) {
     return { classification: 'transient', retryable: true };
