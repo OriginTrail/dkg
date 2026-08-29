@@ -1,17 +1,4 @@
 import {
-  assertAuthorCatalogRowV1,
-  assertAuthorCatalogScopeV1,
-  assertCanonicalGraphScopedAuthorSealV1,
-  canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
-  compileRfc64SharedProjectionStreamOperationV1,
-  computeCanonicalGraphScopedAuthorSealDigestV1,
-  computeKaProjectionDigestV1,
-  RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
-  verifyCatalogSealBindingV1,
-  type AuthorCatalogRowV1,
-  type AuthorCatalogScopeV1,
-  type CanonicalGraphScopedAuthorSealV1,
-  type CatalogSealDeploymentProfileV1,
   type Rfc64SharedProjectionStreamOperationV1,
 } from '@origintrail-official/dkg-core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -21,82 +8,23 @@ import {
   SyncSharedProjectionStoreV1,
 } from '../src/index.js';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
-import type { Quad } from '../src/triple-store.js';
+import {
+  createRfc64SharedProjectionTestFixture,
+  RFC64_PROJECTION_TEST_GRAPH,
+} from './helpers/rfc64-shared-projection-fixture.js';
 import {
   startOxigraphSparqlEndpoint,
   type OxigraphSparqlEndpoint,
 } from './helpers/oxigraph-sparql-endpoint.js';
 
 const ORIGINAL_FETCH = globalThis.fetch;
-const GRAPH = 'did:dkg:context-graph:v1/root/a%2Fb/_shared_memory/0x3333333333333333333333333333333333333333/7';
+const GRAPH = RFC64_PROJECTION_TEST_GRAPH;
 const LINE_A = '<urn:a> <urn:p> "alpha" .\n';
 const LINE_Z = '<urn:z> <urn:p> "zeta" .\n';
-const PROJECTION_BYTES = new TextEncoder().encode(LINE_A + LINE_Z);
-const AUTHOR = '0x3333333333333333333333333333333333333333';
-const KAV10 = '0x4444444444444444444444444444444444444444';
-const KA_ID =
-  '23158417847463239084714197001737581570653996933112267175388663934063917137927';
-const SCOPE = validScope({
-  networkId: 'otp:20430',
-  contextGraphId: 'a/b',
-  governanceChainId: '20430',
-  governanceContractAddress: '0x5555555555555555555555555555555555555555',
-  ownershipTransitionDigest: null,
-  subGraphName: null,
-  authorAddress: AUTHOR,
-  era: '0',
-  bucketCount: '1',
-});
-const PROFILE = {
-  networkId: 'otp:20430',
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: KAV10,
-} as CatalogSealDeploymentProfileV1;
-const SEAL = validSeal({
-  assertionMerkleRoot: `0x${'aa'.repeat(32)}`,
-  authorAddress: AUTHOR,
-  authorAttestationR: `0x${'11'.repeat(32)}`,
-  authorAttestationVS: `0x${'22'.repeat(32)}`,
-  authorSchemeVersion: '1',
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: KAV10,
-  reservedKaId: KA_ID,
-  assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
-  contentScopeVersion: '2',
-  kaUal: `did:dkg:otp:20430/${AUTHOR}/7`,
-  assertionVersion: '2',
-  publicTripleCount: '2',
-  privateTripleCount: '0',
-  privateMerkleRoot: null,
-});
-const PROJECTION_DIGEST = computeKaProjectionDigestV1(PROJECTION_BYTES);
-const ROW = validRow({
-  kaId: KA_ID,
-  assertionCoordinate: 'name λ',
-  assertionVersion: '2',
-  projectionId: 'cg-shared-v1',
-  projectionDigest: PROJECTION_DIGEST,
-  sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(SEAL),
-  transfer: {
-    codec: 'dkg-ka-bundle-v1',
-    projectionId: 'cg-shared-v1',
-    projectionDigest: PROJECTION_DIGEST,
-    byteLength: '4096',
-    chunkSize: '262144',
-    chunkCount: '1',
-    blobDigest: `0x${'11'.repeat(32)}`,
-    chunkTreeRoot: `0x${'22'.repeat(32)}`,
-  },
-});
-const REQUEST = Object.freeze({
-  sealBinding: verifyCatalogSealBindingV1(
-    SCOPE,
-    ROW,
-    canonicalizeCanonicalGraphScopedAuthorSealBytesV1(SEAL),
-    PROFILE,
-  ),
-});
-const OPERATION = compileRfc64SharedProjectionStreamOperationV1(REQUEST);
+const FIXTURE = createRfc64SharedProjectionTestFixture();
+const PROJECTION_BYTES = FIXTURE.projectionBytes;
+const REQUEST = FIXTURE.request;
+const OPERATION = FIXTURE.operation;
 let oxigraph: OxigraphSparqlEndpoint;
 
 beforeAll(async () => {
@@ -130,7 +58,7 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     );
   });
 
-  it('uses the frozen exact CONSTRUCT and exposes a sorted bounded quad stream', async () => {
+  it('uses the frozen exact CONSTRUCT and exposes sorted canonical line bytes', async () => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
     const schedule = vi.spyOn(scheduler, 'run');
     let request: RequestInit | undefined;
@@ -189,10 +117,7 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       byteCeiling: 4096,
     });
 
-    expect(await collect(source)).toEqual([
-      quad('urn:a', '"alpha"'),
-      quad('urn:z', '"zeta"'),
-    ]);
+    expect(await collectBytes(source)).toEqual(PROJECTION_BYTES);
     const total = oxigraph.store.query(
       'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
     ) as Map<string, { value: string }>[];
@@ -258,10 +183,41 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' });
   });
 
+  it('preserves the typed managed-Oxigraph cancellation trailer classification', async () => {
+    globalThis.fetch = (async () => new Response(byteStream([
+      LINE_A,
+      LINE_Z,
+      'The SPARQL operation has been cancelled',
+    ]), { status: 200 })) as typeof fetch;
+    const store = new SparqlHttpStore({
+      queryEndpoint: 'http://managed-oxigraph.invalid/query',
+      managedOxigraph: true,
+    });
+
+    await expect(store.rfc64SharedProjectionStreamV1!(OPERATION, {
+      byteCeiling: 4096,
+    })).rejects.toMatchObject({
+      code: 'STORE_OPERATION_TIMEOUT',
+      backend: 'oxigraph-server',
+      operation: 'construct',
+      retryable: true,
+    });
+  });
+
   it('preserves typed HTTP refusal evidence without parsing an unbounded error body', async () => {
-    globalThis.fetch = (async () => new Response('managed endpoint refused the query', {
-      status: 503,
-    })) as typeof fetch;
+    let pulls = 0;
+    let cancelled = false;
+    const oversized = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(1024).fill(0x78));
+        if (pulls >= 8) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    globalThis.fetch = (async () => new Response(oversized, { status: 503 })) as typeof fetch;
     const store = new SparqlHttpStore({
       queryEndpoint: 'http://managed-oxigraph.invalid/query',
       managedOxigraph: true,
@@ -273,8 +229,10 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       name: 'SparqlHttpResponseError',
       operation: 'rfc64-shared-projection',
       status: 503,
-      responseExcerpt: 'managed endpoint refused the query',
+      responseExcerpt: '',
     });
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(8);
   });
 });
 
@@ -282,17 +240,7 @@ function operation(
   overrides: Partial<Rfc64SharedProjectionStreamOperationV1> = {},
 ): Rfc64SharedProjectionStreamOperationV1 {
   return Object.freeze({
-    queryId: 'SYNC_KA_SHARED_PROJECTION_STREAM_V1',
-    graphIri: GRAPH,
-    commitmentSubject:
-      'did:dkg:otp:20430/0x3333333333333333333333333333333333333333/7/_cg-shared-v1',
-    projectionDigest: `0x${'11'.repeat(32)}`,
-    publicTripleCount: '2',
-    signedByteCeiling: 4096,
-    protocolByteCeiling: RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
-    resultKind: 'quad-stream',
-    concurrencyClass: 'rfc64-shared-projection-v1',
-    sparql: `CONSTRUCT { ?s ?p ?o }\nWHERE {\n  GRAPH <${GRAPH}> {\n    ?s ?p ?o .\n  }\n}`,
+    ...OPERATION,
     ...overrides,
   }) as Rfc64SharedProjectionStreamOperationV1;
 }
@@ -305,16 +253,6 @@ function byteStream(chunks: readonly string[]): ReadableStream<Uint8Array> {
       controller.close();
     },
   });
-}
-
-function quad(subject: string, object: string): Quad {
-  return Object.freeze({ subject, predicate: 'urn:p', object, graph: GRAPH });
-}
-
-async function collect(source: AsyncIterable<Quad>): Promise<Quad[]> {
-  const quads: Quad[] = [];
-  for await (const value of source) quads.push(value);
-  return quads;
 }
 
 async function collectBytes(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
@@ -331,19 +269,4 @@ async function collectBytes(source: AsyncIterable<Uint8Array>): Promise<Uint8Arr
     offset += chunk.byteLength;
   }
   return bytes;
-}
-
-function validScope(value: unknown): AuthorCatalogScopeV1 {
-  assertAuthorCatalogScopeV1(value);
-  return value;
-}
-
-function validRow(value: unknown): AuthorCatalogRowV1 {
-  assertAuthorCatalogRowV1(value);
-  return value;
-}
-
-function validSeal(value: unknown): CanonicalGraphScopedAuthorSealV1 {
-  assertCanonicalGraphScopedAuthorSealV1(value);
-  return value;
 }

@@ -30,6 +30,7 @@ import type {
   Rfc64ExactBindingsReadOperationV1,
 } from './rfc64-exact-bindings-read-capability.js';
 import type {
+  Rfc64CanonicalProjectionLineV1,
   Rfc64SharedProjectionStreamCapabilityOptionsV1,
 } from './rfc64-shared-projection-stream-capability.js';
 
@@ -144,7 +145,7 @@ export interface TripleStore {
   rfc64SharedProjectionStreamV1?(
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
-  ): Promise<AsyncIterable<Quad>>;
+  ): Promise<AsyncIterable<Rfc64CanonicalProjectionLineV1>>;
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;

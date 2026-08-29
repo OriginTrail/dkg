@@ -14,7 +14,13 @@ import {
   type Rfc64SharedProjectionStreamOperationV1,
 } from '@origintrail-official/dkg-core';
 
+import {
+  assertManagedOxigraphSparqlResponseComplete,
+} from './adapters/sparql-response-policy.js';
 import { parseNQuadLine } from './nquads-text.js';
+import type {
+  Rfc64CanonicalProjectionLineV1,
+} from './rfc64-shared-projection-stream-capability.js';
 import type { Quad } from './triple-store.js';
 
 const DEFAULT_SORT_CHUNK_BYTES_V1 = 8 * 1024 * 1024;
@@ -47,6 +53,8 @@ export interface Rfc64SharedProjectionHttpSpoolOptionsV1 {
   readonly inputLineByteCeiling?: number;
   /** Maximum sorted runs opened at once during each external-merge pass. */
   readonly mergeFanIn?: number;
+  /** Apply the managed Oxigraph terminal cancellation-trailer policy. */
+  readonly managedOxigraph?: boolean;
 }
 
 export class Rfc64SharedProjectionHttpSpoolErrorV1 extends Error {
@@ -58,7 +66,7 @@ export class Rfc64SharedProjectionHttpSpoolErrorV1 extends Error {
 
 /**
  * Consume one exact-graph CONSTRUCT response with bounded memory, form sorted
- * canonical runs, and return a one-shot k-way merged quad stream.
+ * canonical runs, and return a one-shot k-way merged canonical-line stream.
  *
  * The HTTP body is never materialized as one string or quad array. Small
  * projections stay inside one bounded in-memory run. Larger projections spill
@@ -67,7 +75,7 @@ export class Rfc64SharedProjectionHttpSpoolErrorV1 extends Error {
  */
 export async function spoolRfc64SharedProjectionHttpResponseV1(
   options: Rfc64SharedProjectionHttpSpoolOptionsV1,
-): Promise<AsyncIterable<Quad>> {
+): Promise<AsyncIterable<Rfc64CanonicalProjectionLineV1>> {
   const byteCeiling = boundedPositiveInteger(
     options.byteCeiling,
     Math.min(
@@ -130,7 +138,11 @@ export async function spoolRfc64SharedProjectionHttpResponseV1(
       options.signal,
     )) {
       throwIfAborted(options.signal);
-      const quad = parseExactConstructLine(rawLine, options.operation.graphIri);
+      const quad = parseExactConstructLine(
+        rawLine,
+        options.operation.graphIri,
+        options.managedOxigraph === true,
+      );
       if (quad === null) continue;
       let content: Uint8Array;
       try {
@@ -164,7 +176,6 @@ export async function spoolRfc64SharedProjectionHttpResponseV1(
       run.sort(Buffer.compare);
       return streamMemoryRun(
         run,
-        options.operation.graphIri,
         options.consumptionSignal ?? options.signal,
       );
     }
@@ -180,7 +191,6 @@ export async function spoolRfc64SharedProjectionHttpResponseV1(
     return mergeSortedRuns(
       finalRunFiles,
       directory,
-      options.operation.graphIri,
       options.consumptionSignal ?? options.signal,
     );
   } catch (cause) {
@@ -237,11 +247,8 @@ async function writeMergedRun(
   };
   try {
     for await (const line of mergeCanonicalFileLines(runFiles, signal)) {
-      const terminated = Buffer.allocUnsafe(line.byteLength + 1);
-      terminated.set(line);
-      terminated[terminated.byteLength - 1] = 0x0a;
-      batch.push(terminated);
-      batchBytes += terminated.byteLength;
+      batch.push(line);
+      batchBytes += line.byteLength;
       if (batchBytes >= MERGE_WRITE_BATCH_BYTES_V1) await flush();
     }
     await flush();
@@ -252,28 +259,67 @@ async function writeMergedRun(
 
 async function* streamMemoryRun(
   lines: readonly Buffer[],
-  graphIri: string,
   signal: AbortSignal | undefined,
-): AsyncGenerator<Quad, void, undefined> {
+): AsyncGenerator<Rfc64CanonicalProjectionLineV1, void, undefined> {
   for (const line of lines) {
     throwIfAborted(signal);
-    yield parseCanonicalSpoolLine(line, graphIri);
+    yield snapshotCanonicalLine(line);
   }
 }
 
-async function* mergeSortedRuns(
+function mergeSortedRuns(
   runFiles: readonly string[],
   tempDirectory: string,
-  graphIri: string,
   signal: AbortSignal | undefined,
-): AsyncGenerator<Quad, void, undefined> {
-  try {
-    for await (const line of mergeCanonicalFileLines(runFiles, signal)) {
-      yield parseCanonicalSpoolLine(line, graphIri);
-    }
-  } finally {
-    await removeTempDirectory(tempDirectory);
-  }
+): AsyncIterable<Rfc64CanonicalProjectionLineV1> {
+  let claimed = false;
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanup = (): Promise<void> => {
+    cleanupPromise ??= removeTempDirectory(tempDirectory);
+    return cleanupPromise;
+  };
+  return Object.freeze({
+    [Symbol.asyncIterator](): AsyncIterator<Rfc64CanonicalProjectionLineV1> {
+      if (claimed) invalid('temporary projection stream is one-shot');
+      claimed = true;
+      let source: AsyncIterator<Buffer> | undefined;
+      let closed = false;
+      const closeSource = async (): Promise<void> => {
+        if (closed) return;
+        closed = true;
+        try {
+          await source?.return?.();
+        } finally {
+          await cleanup();
+        }
+      };
+      return Object.freeze({
+        async next(): Promise<IteratorResult<Rfc64CanonicalProjectionLineV1>> {
+          if (closed) return { done: true, value: undefined };
+          source ??= mergeCanonicalFileLines(runFiles, signal)[Symbol.asyncIterator]();
+          try {
+            const next = await source.next();
+            if (next.done) {
+              await closeSource();
+              return { done: true, value: undefined };
+            }
+            return { done: false, value: snapshotCanonicalLine(next.value) };
+          } catch (cause) {
+            await closeSource();
+            throw cause;
+          }
+        },
+        async return(): Promise<IteratorResult<Rfc64CanonicalProjectionLineV1>> {
+          await closeSource();
+          return { done: true, value: undefined };
+        },
+        async throw(cause?: unknown): Promise<IteratorResult<Rfc64CanonicalProjectionLineV1>> {
+          await closeSource();
+          throw cause;
+        },
+      });
+    },
+  });
 }
 
 async function* mergeCanonicalFileLines(
@@ -383,7 +429,7 @@ async function* readCanonicalFileLines(
       let start = 0;
       for (let index = 0; index < joined.byteLength; index += 1) {
         if (joined[index] !== 0x0a) continue;
-        yield joined.subarray(start, index);
+        yield Buffer.from(joined.subarray(start, index + 1));
         start = index + 1;
       }
       pending = start < joined.byteLength ? Buffer.from(joined.subarray(start)) : Buffer.alloc(0);
@@ -394,12 +440,19 @@ async function* readCanonicalFileLines(
   }
 }
 
-function parseExactConstructLine(line: Buffer, graphIri: string): Quad | null {
+function parseExactConstructLine(
+  line: Buffer,
+  graphIri: string,
+  managedOxigraph: boolean,
+): Quad | null {
   let text: string;
   try {
     text = UTF8.decode(stripTrailingCarriageReturn(line)).trim();
   } catch (cause) {
     invalid('CONSTRUCT response is not strict UTF-8', cause);
+  }
+  if (managedOxigraph) {
+    assertManagedOxigraphSparqlResponseComplete(text, 'construct');
   }
   if (text.length === 0 || text.startsWith('#')) return null;
   const quad = parseNQuadLine(text);
@@ -407,24 +460,14 @@ function parseExactConstructLine(line: Buffer, graphIri: string): Quad | null {
   if (quad.graph !== '' && quad.graph !== graphIri) {
     invalid('CONSTRUCT response escaped the exact authenticated graph');
   }
-  return Object.freeze({ ...quad, graph: graphIri });
+  return quad;
 }
 
-function parseCanonicalSpoolLine(line: Buffer, graphIri: string): Quad {
-  let text: string;
-  try {
-    const canonicalContent = line.byteLength > 0 && line[line.byteLength - 1] === 0x0a
-      ? line.subarray(0, line.byteLength - 1)
-      : line;
-    text = UTF8.decode(canonicalContent);
-  } catch (cause) {
-    invalid('temporary sort run is not strict UTF-8', cause);
+function snapshotCanonicalLine(line: Uint8Array): Rfc64CanonicalProjectionLineV1 {
+  if (line.byteLength === 0 || line[line.byteLength - 1] !== 0x0a) {
+    invalid('temporary sort run is missing its final LF');
   }
-  const quad = parseNQuadLine(text);
-  if (quad === undefined || quad.graph !== '') {
-    invalid('temporary sort run contains a malformed canonical triple');
-  }
-  return Object.freeze({ ...quad, graph: graphIri });
+  return Uint8Array.from(line) as Rfc64CanonicalProjectionLineV1;
 }
 
 function stripTrailingCarriageReturn(line: Buffer): Buffer {

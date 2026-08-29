@@ -335,7 +335,7 @@ export class SparqlHttpStore implements TripleStore {
   private openManagedOxigraphSharedProjectionV1(
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
-  ): Promise<AsyncIterable<DKGQuad>> {
+  ): ReturnType<Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1']> {
     return this.runStoreWork(
       'construct',
       {
@@ -382,6 +382,7 @@ export class SparqlHttpStore implements TripleStore {
               byteCeiling: options.byteCeiling,
               signal: lifecycleSignal,
               consumptionSignal: options.signal,
+              managedOxigraph: true,
             });
           },
         );

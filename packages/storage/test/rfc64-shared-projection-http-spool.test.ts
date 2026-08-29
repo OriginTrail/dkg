@@ -11,9 +11,9 @@ import { describe, expect, it } from 'vitest';
 import {
   spoolRfc64SharedProjectionHttpResponseV1,
 } from '../src/rfc64-shared-projection-http-spool.js';
-import type { Quad } from '../src/triple-store.js';
+import { RFC64_PROJECTION_TEST_GRAPH } from './helpers/rfc64-shared-projection-fixture.js';
 
-const GRAPH = 'did:dkg:context-graph:a/b/_shared_memory/0x3333333333333333333333333333333333333333/7';
+const GRAPH = RFC64_PROJECTION_TEST_GRAPH;
 const LINE_A = '<urn:a> <urn:p> "alpha" .\n';
 const LINE_M = '<urn:m> <urn:p> "middle" .\n';
 const LINE_Z = '<urn:z> <urn:p> "zeta" .\n';
@@ -33,10 +33,30 @@ describe('RFC-64 shared-projection HTTP spool', () => {
 
       expect(await readdir(tempRoot)).toHaveLength(1);
       expect(await collect(source)).toEqual([
-        quad('urn:a', '"alpha"'),
-        quad('urn:m', '"middle"'),
-        quad('urn:z', '"zeta"'),
+        LINE_A,
+        LINE_M,
+        LINE_Z,
       ]);
+      expect(await readdir(tempRoot)).toEqual([]);
+    } finally {
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('removes a spilled projection when an unstarted iterator is returned', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-spool-test-'));
+    try {
+      const source = await spoolRfc64SharedProjectionHttpResponseV1({
+        body: byteStream([LINE_Z, LINE_A]),
+        operation: operation({ publicTripleCount: '2' }),
+        byteCeiling: 4096,
+        tempRoot,
+        sortChunkLines: 1,
+      });
+      expect(await readdir(tempRoot)).toHaveLength(1);
+
+      await source[Symbol.asyncIterator]().return?.();
+
       expect(await readdir(tempRoot)).toEqual([]);
     } finally {
       await rm(tempRoot, { force: true, recursive: true });
@@ -73,6 +93,32 @@ describe('RFC-64 shared-projection HTTP spool', () => {
     }
   });
 
+  it('keeps a distinct consumption signal live through spilled iteration', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-spool-test-'));
+    try {
+      const construction = new AbortController();
+      const consumption = new AbortController();
+      const source = await spoolRfc64SharedProjectionHttpResponseV1({
+        body: byteStream([LINE_Z, LINE_A, LINE_M]),
+        operation: operation({ publicTripleCount: '3' }),
+        byteCeiling: 4096,
+        signal: construction.signal,
+        consumptionSignal: consumption.signal,
+        tempRoot,
+        sortChunkLines: 1,
+      });
+      const iterator = source[Symbol.asyncIterator]();
+
+      consumption.abort(new DOMException('consumer stopped', 'AbortError'));
+
+      await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' });
+      expect(construction.signal.aborted).toBe(false);
+      expect(await readdir(tempRoot)).toEqual([]);
+    } finally {
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
   it('uses bounded fan-in passes instead of opening every spill run at once', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-spool-test-'));
     const lines = [
@@ -96,13 +142,13 @@ describe('RFC-64 shared-projection HTTP spool', () => {
       const [spoolDirectory] = await readdir(tempRoot);
       expect(spoolDirectory).toBeDefined();
       expect(await readdir(join(tempRoot, spoolDirectory!))).toHaveLength(2);
-      expect((await collect(source)).map((value) => value.subject)).toEqual([
-        'urn:a',
-        'urn:b',
-        'urn:c',
-        'urn:d',
-        'urn:e',
-        'urn:f',
+      expect(await collect(source)).toEqual([
+        '<urn:a> <urn:p> "1" .\n',
+        '<urn:b> <urn:p> "2" .\n',
+        '<urn:c> <urn:p> "3" .\n',
+        '<urn:d> <urn:p> "4" .\n',
+        '<urn:e> <urn:p> "5" .\n',
+        '<urn:f> <urn:p> "6" .\n',
       ]);
       expect(await readdir(tempRoot)).toEqual([]);
     } finally {
@@ -119,7 +165,51 @@ describe('RFC-64 shared-projection HTTP spool', () => {
       byteCeiling: 4096,
     });
 
-    expect(await collect(source)).toEqual([quad('urn:a', JSON.stringify(literal))]);
+    expect(await collect(source)).toEqual([line]);
+  });
+
+  it('emits identical owned LF-terminated bytes from memory and spilled paths', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-spool-test-'));
+    try {
+      const base = {
+        body: byteStream([LINE_Z, LINE_A, LINE_M]),
+        operation: operation({ publicTripleCount: '3' }),
+        byteCeiling: 4096,
+      };
+      const memory = await spoolRfc64SharedProjectionHttpResponseV1(base);
+      const spilled = await spoolRfc64SharedProjectionHttpResponseV1({
+        ...base,
+        body: byteStream([LINE_Z, LINE_A, LINE_M]),
+        tempRoot,
+        sortChunkLines: 1,
+      });
+      const memoryLines = await collectRaw(memory);
+      const spilledLines = await collectRaw(spilled);
+
+      expect(spilledLines).toEqual(memoryLines);
+      expect(memoryLines.every((line) => line.at(-1) === 0x0a)).toBe(true);
+      spilledLines[0].fill(0x7f);
+      expect(new TextDecoder().decode(memoryLines[0])).toBe(LINE_A);
+      expect(await readdir(tempRoot)).toEqual([]);
+    } finally {
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('removes prior spill runs when later response validation fails', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-spool-test-'));
+    try {
+      await expect(spoolRfc64SharedProjectionHttpResponseV1({
+        body: byteStream([LINE_A, '<urn:broken>\n']),
+        operation: operation({ publicTripleCount: '2' }),
+        byteCeiling: 4096,
+        tempRoot,
+        sortChunkLines: 1,
+      })).rejects.toThrow('malformed N-Quads line');
+      expect(await readdir(tempRoot)).toEqual([]);
+    } finally {
+      await rm(tempRoot, { force: true, recursive: true });
+    }
   });
 
   it.each([
@@ -214,12 +304,12 @@ function byteStream(chunks: readonly (string | Uint8Array)[]): ReadableStream<Ui
   });
 }
 
-function quad(subject: string, object: string): Quad {
-  return Object.freeze({ subject, predicate: 'urn:p', object, graph: GRAPH });
+async function collect(source: AsyncIterable<Uint8Array>): Promise<string[]> {
+  return (await collectRaw(source)).map((line) => new TextDecoder().decode(line));
 }
 
-async function collect(source: AsyncIterable<Quad>): Promise<Quad[]> {
-  const quads: Quad[] = [];
-  for await (const value of source) quads.push(value);
-  return quads;
+async function collectRaw(source: AsyncIterable<Uint8Array>): Promise<Uint8Array[]> {
+  const lines: Uint8Array[] = [];
+  for await (const value of source) lines.push(value);
+  return lines;
 }
