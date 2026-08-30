@@ -98,6 +98,9 @@ import type {
 } from './inventory-v1/index.js';
 import type { Rfc64KaBundleOperationsV1 } from './ka-bundle-store-v1.js';
 import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
+import type {
+  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+} from './catalog-applied-head-evidence-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
@@ -218,6 +221,12 @@ export interface Rfc64PublicCatalogNativeCommittedHeadTokenV1 {
   readonly inventoryDigest: Digest32V1;
 }
 
+/** Operation-owned evidence returned only after every post-head worker settles. */
+export interface Rfc64PublicCatalogNativeAfterAppliedHeadEvidenceV1 {
+  readonly finalizedSwmRetirementLifecycleReceipts:
+    readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[];
+}
+
 /** A rollback-capable primary precommit, before any post-head coordination. */
 export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
   (
@@ -237,7 +246,9 @@ export interface Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
   readonly transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
   readonly afterAppliedHead: ((
     committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
-  ) => void | Promise<void>) | null;
+  ) => void
+    | Rfc64PublicCatalogNativeAfterAppliedHeadEvidenceV1
+    | Promise<void | Rfc64PublicCatalogNativeAfterAppliedHeadEvidenceV1>) | null;
 }
 
 /** Backward-compatible root receiver result plus the explicit post-head lifecycle. */
@@ -318,8 +329,11 @@ export interface Rfc64PublicCatalogNativeGenesisEvidenceV1 {
 }
 
 export type Rfc64PublicCatalogNativeSynchronizationEvidenceV1 =
-  | Rfc64PublicCatalogNativeGenesisEvidenceV1
-  | Rfc64PublicCatalogNativeSuccessorEvidenceV1;
+  (Rfc64PublicCatalogNativeGenesisEvidenceV1 | Rfc64PublicCatalogNativeSuccessorEvidenceV1)
+  & Readonly<{
+    readonly finalizedSwmRetirementLifecycleReceipts?:
+      readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[];
+  }>;
 
 export type Rfc64PublicCatalogNativeReceiverErrorCodeV1 =
   | 'catalog-native-receiver-input'
@@ -407,13 +421,17 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
     afterAppliedHead: ((
       committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
-    ) => void | Promise<void>) | null;
+    ) => void
+      | Rfc64PublicCatalogNativeAfterAppliedHeadEvidenceV1
+      | Promise<void | Rfc64PublicCatalogNativeAfterAppliedHeadEvidenceV1>) | null;
   }>> {
     const precommitSignal = signal ?? new AbortController().signal;
     let transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null;
     let afterAppliedHead: ((
       committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
-    ) => void | Promise<void>) | null = null;
+    ) => void
+      | Rfc64PublicCatalogNativeAfterAppliedHeadEvidenceV1
+      | Promise<void | Rfc64PublicCatalogNativeAfterAppliedHeadEvidenceV1>) | null = null;
     try {
       throwIfAborted(precommitSignal);
       const returned = await this.options.beforeAppliedHeadCommit?.(
@@ -750,10 +768,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       throw cause;
     }
     await precommitLifecycle.transaction?.commit();
-    await precommitLifecycle.afterAppliedHead?.(committedHeadTokenV1(
+    const afterAppliedHeadEvidence = await precommitLifecycle.afterAppliedHead?.(
+      committedHeadTokenV1(
       head.objectDigest as Digest32V1,
       inventoryDigest,
-    ));
+      ),
+    );
     return Object.freeze({
       inventoryDigest,
       catalogHeadDigest: head.objectDigest as Digest32V1,
@@ -761,6 +781,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       activatedTripleCount: 0 as const,
       stagedObjectCount: 3 as const,
       appliedHeadStatus,
+      ...(afterAppliedHeadEvidence === undefined ? {} : afterAppliedHeadEvidence),
     });
   }
 
@@ -1365,10 +1386,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     // the exact head and primary transaction are durable and the post-read has
     // succeeded. A cleanup failure is retryable by replay, never by restoring
     // the predecessor behind an already-committed head.
-    await precommitLifecycle.afterAppliedHead?.(committedHeadTokenV1(
-      head.objectDigest as Digest32V1,
-      completion.inventoryDigest,
-    ));
+    const afterAppliedHeadEvidence = await precommitLifecycle.afterAppliedHead?.(
+      committedHeadTokenV1(
+        head.objectDigest as Digest32V1,
+        completion.inventoryDigest,
+      ),
+    );
 
     if (activatedRows.length === 1) {
       const [only] = activatedRows;
@@ -1389,6 +1412,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         removedRows: Object.freeze(removedRows),
         removedRowCount: removedRows.length,
         appliedHeadStatus,
+        ...(afterAppliedHeadEvidence === undefined ? {} : afterAppliedHeadEvidence),
       });
     }
     return Object.freeze({
@@ -1400,6 +1424,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       removedRows: Object.freeze(removedRows),
       removedRowCount: removedRows.length,
       appliedHeadStatus,
+      ...(afterAppliedHeadEvidence === undefined ? {} : afterAppliedHeadEvidence),
     });
   }
 

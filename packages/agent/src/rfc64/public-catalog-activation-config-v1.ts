@@ -211,10 +211,15 @@ export type ResolvedRfc64SelectedCatalogAuthoringControlV1 = Readonly<{
  * fallback and can never admit a private policy.
  */
 export interface ResolvedRfc64CatalogAuthoringPolicyV1 {
-  readonly selectedByContextGraph: Readonly<
+  readonly byContextGraph: Readonly<
     Record<string, ResolvedRfc64SelectedCatalogAuthoringControlV1>
   >;
-  readonly legacyPublicFallback?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+  /** Source-compatible default for legacy public-only dynamic policy acceptance. */
+  readonly publicDefault?: Readonly<{
+    readonly announcementPeers: readonly string[];
+    readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
+    readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+  }>;
 }
 
 export interface Rfc64PublicCatalogControlInputsV1 {
@@ -647,12 +652,9 @@ export function resolveRfc64CatalogAuthoringPolicyV1(input: Readonly<{
   readonly selectedCatalogAuthoringControls:
     readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[];
   readonly legacyPublicFallback?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+  readonly acceptedPolicies: Rfc64CatalogBootstrapConfigV1['acceptedPolicies'];
 }>): ResolvedRfc64CatalogAuthoringPolicyV1 | undefined {
-  if (
-    input.selectedCatalogAuthoringControls.length === 0
-    && input.legacyPublicFallback === undefined
-  ) return undefined;
-  const selectedByContextGraph: Record<
+  const byContextGraph: Record<
     string,
     ResolvedRfc64SelectedCatalogAuthoringControlV1
   > = Object.create(null) as Record<
@@ -660,18 +662,49 @@ export function resolveRfc64CatalogAuthoringPolicyV1(input: Readonly<{
     ResolvedRfc64SelectedCatalogAuthoringControlV1
   >;
   for (const control of input.selectedCatalogAuthoringControls) {
-    if (selectedByContextGraph[control.contextGraphId] !== undefined) {
+    if (byContextGraph[control.contextGraphId] !== undefined) {
       throw new TypeError(
         `rfc64Catalog has duplicate authoring control for ${control.contextGraphId}`,
       );
     }
-    selectedByContextGraph[control.contextGraphId] = control;
+    byContextGraph[control.contextGraphId] = control;
   }
+  const legacy = input.legacyPublicFallback;
+  const publicDefault = legacy?.mode === 'all-accepted-public'
+    ? Object.freeze({
+      announcementPeers: legacy.config.peers,
+      catalogIssuerDelegationEffectiveAt:
+        legacy.config.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
+      catalogIssuerDelegationExpiresAt:
+        legacy.config.catalogIssuerDelegationExpiresAt,
+    })
+    : undefined;
+  if (legacy !== undefined) {
+    for (const accepted of input.acceptedPolicies) {
+      const policy = accepted.policyEnvelope.payload;
+      if (
+        policy.accessPolicy !== 0
+        || byContextGraph[policy.contextGraphId] !== undefined
+        || (
+          legacy.mode === 'selected-public'
+          && !legacy.selectedContextGraphs.includes(policy.contextGraphId)
+        )
+      ) continue;
+      byContextGraph[policy.contextGraphId] = Object.freeze({
+        kind: 'selected-public',
+        contextGraphId: policy.contextGraphId,
+        announcementPeers: legacy.config.peers,
+        catalogIssuerDelegationEffectiveAt:
+          legacy.config.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
+        catalogIssuerDelegationExpiresAt:
+          legacy.config.catalogIssuerDelegationExpiresAt,
+      });
+    }
+  }
+  if (Object.keys(byContextGraph).length === 0 && publicDefault === undefined) return undefined;
   return Object.freeze({
-    selectedByContextGraph: Object.freeze(selectedByContextGraph),
-    ...(input.legacyPublicFallback === undefined
-      ? {}
-      : { legacyPublicFallback: input.legacyPublicFallback }),
+    byContextGraph: Object.freeze(byContextGraph),
+    ...(publicDefault === undefined ? {} : { publicDefault }),
   });
 }
 

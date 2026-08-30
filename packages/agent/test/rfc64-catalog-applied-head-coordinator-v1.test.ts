@@ -17,7 +17,6 @@ import { ethers } from 'ethers';
 
 import {
   createRfc64CatalogAppliedHeadCoordinatorV1,
-  type Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
 } from '../src/rfc64/catalog-applied-head-coordinator-v1.js';
 import {
   reconcileFinalizedSwmTwinFromCatalogProjection,
@@ -428,7 +427,6 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const completed: string[] = [];
-    const recorded: Rfc64FinalizedSwmRetirementLifecycleReceiptV1[] = [];
     const combinedPlan = Object.freeze({
       ...first.plan,
       rows: Object.freeze([...first.plan.rows, ...second.plan.rows]),
@@ -449,7 +447,6 @@ describe('RFC-64 catalog applied-head coordinator', () => {
         }
         completed.push(swmGraph);
       }),
-      recordRetirementLifecycleReceipt: (receipt) => recorded.push(receipt),
     });
     const lifecycle = await handler(combinedPlan, new AbortController().signal);
     await lifecycle.transaction!.commit();
@@ -464,7 +461,11 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     } finally {
       releaseFirst();
     }
-    await afterAppliedHead;
+    const postHeadEvidence = await afterAppliedHead;
+    if (postHeadEvidence === undefined) {
+      throw new Error('finalized lifecycle did not return its retirement evidence');
+    }
+    const recorded = postHeadEvidence.finalizedSwmRetirementLifecycleReceipts;
     expect(completed).toEqual(expect.arrayContaining([first.swmGraph, second.swmGraph]));
     expect(recorded).toHaveLength(2);
     expect(recorded.map((receipt) => receipt.kaUal).sort()).toEqual(
@@ -505,7 +506,6 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     let signalRejectedEntered!: () => void;
     const rejectedEntered = new Promise<void>((resolve) => { signalRejectedEntered = resolve; });
     let gatedFinished = false;
-    const recorded: Rfc64FinalizedSwmRetirementLifecycleReceiptV1[] = [];
     const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
       acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
         acceptedRfc64VmPolicySnapshot().policy.source,
@@ -524,7 +524,6 @@ describe('RFC-64 catalog applied-head coordinator', () => {
         signalRejectedEntered();
         throw new Error('one finalized SWM retirement failed');
       }),
-      recordRetirementLifecycleReceipt: (receipt) => recorded.push(receipt),
     });
     const lifecycle = await handler(combinedPlan, new AbortController().signal);
     await lifecycle.transaction!.commit();
@@ -538,12 +537,10 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     await Promise.all([gatedEntered, rejectedEntered]);
     await Promise.resolve();
     expect(settled).toBe(false);
-    expect(recorded).toEqual([]);
     releaseGated();
 
     await expect(afterAppliedHead).rejects.toThrow('one finalized SWM retirement failed');
     expect(gatedFinished).toBe(true);
-    expect(recorded).toEqual([]);
     await store.close();
   });
 

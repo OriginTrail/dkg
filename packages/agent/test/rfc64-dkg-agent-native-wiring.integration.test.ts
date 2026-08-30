@@ -820,11 +820,16 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       }));
 
     expect((author as any).config.rfc64CatalogAuthoringPolicy).toMatchObject({
-      legacyPublicFallback: { mode: 'all-accepted-public' },
+      byContextGraph: {
+        [publicContextGraphId]: {
+          kind: 'selected-public',
+          announcementPeers: [publicAnnouncementPeerId],
+        },
+      },
     });
     expect(Object.keys(
-      (author as any).config.rfc64CatalogAuthoringPolicy.selectedByContextGraph,
-    )).toEqual([]);
+      (author as any).config.rfc64CatalogAuthoringPolicy.byContextGraph,
+    )).toEqual([publicContextGraphId]);
     expect(author.resolveRfc64CatalogAuthoringLaneV1(CONTEXT_GRAPH_ID, null)).toBeNull();
     expect(author.resolveRfc64CatalogAuthoringLaneV1(publicContextGraphId, null))
       .toMatchObject({
@@ -832,12 +837,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         workspaceVisibility: 'public-only',
         announcementPeers: [publicAnnouncementPeerId],
       });
-    expect(author.resolveRfc64AcceptedPublicRootLaneV1(CONTEXT_GRAPH_ID, null)).toBeNull();
-    expect(author.resolveRfc64AcceptedPublicRootLaneV1(publicContextGraphId, null))
-      .toMatchObject({
-        autoPublishConfig: { peers: [publicAnnouncementPeerId] },
-      });
-
     const seal = assertionSealFromCanonical(await authorSeal(25n, PROJECTION_QUADS));
     await expect(author.recordRfc64PublicCatalogAssetV1({
       contextGraphId: publicContextGraphId,
@@ -883,7 +882,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
     expect((author as any).config.rfc64CatalogAuthoringPolicy)
       .toMatchObject({
-        selectedByContextGraph: {
+        byContextGraph: {
           [CONTEXT_GRAPH_ID]: {
             kind: 'selected-private',
             announcementPeers: [providerPeerId],
@@ -896,8 +895,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         workspaceVisibility: 'restricted-only',
         announcementPeers: [providerPeerId],
       });
-    expect(author.resolveRfc64AcceptedPublicRootLaneV1(CONTEXT_GRAPH_ID, null)).toBeNull();
-
     const assertionCoordinate = 'ordinary-private-swm';
     const shareOperationId = 'ordinary-private-swm-operation';
     const { seal, assertionUri } = await seedSignedSwmWorkspaceV1(author, {

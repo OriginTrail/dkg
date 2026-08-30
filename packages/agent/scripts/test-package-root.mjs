@@ -95,7 +95,6 @@ const requiredCatalogMethods = [
   'synchronizeRfc64PublicCatalogFromProviderV1',
   'readRfc64PublicCatalogBootstrapStatusV1',
   'whenRfc64PublicCatalogBootstrapIdleV1',
-  'resolveRfc64AcceptedPublicRootLaneV1',
   'resolveRfc64CatalogAuthoringLaneV1',
 ];
 for (const method of requiredCatalogMethods) {
@@ -206,6 +205,7 @@ const blockedRfc64Modules = [
   'catalog-authority-config-v1.js',
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-state-v1.js',
+  'catalog-applied-head-evidence-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',

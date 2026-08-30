@@ -35,7 +35,6 @@ import type {
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogSuccessorAssetInputV1,
 } from './dkg-agent-rfc64-catalog.js';
-import type { Rfc64PublicCatalogAutoPublishConfigV1 } from './dkg-agent-types.js';
 import type { ReconcileRfc64PublicRootCatalogExactSetResultV1 } from
   './dkg-agent-rfc64-catalog-upsert.js';
 import {
@@ -82,14 +81,6 @@ export type ResolvedRfc64CatalogAuthoringLaneV1 =
     readonly kind: 'private';
     readonly workspaceVisibility: 'restricted-only';
   }>;
-
-/** @deprecated Use ResolvedRfc64CatalogAuthoringLaneV1. */
-export interface ResolvedRfc64AcceptedPublicRootLaneV1 {
-  readonly networkId: NetworkIdV1;
-  readonly service: Rfc64PublicCatalogServiceV1;
-  readonly autoPublishConfig: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
-  readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
-}
 
 type Rfc64CatalogAuthoringLaneDecisionV1 =
   | Readonly<{ readonly status: 'inactive' }>
@@ -142,29 +133,6 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     if (decision.status === 'inactive') return null;
     if (decision.status === 'unavailable') throw decision.error;
     return decision.lane;
-  }
-
-  /**
-   * @deprecated Compatibility adapter for the former public-only DKGAgent API.
-   * Private selected-CG lanes remain invisible through this method.
-   */
-  resolveRfc64AcceptedPublicRootLaneV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    subGraphName: string | null | undefined,
-  ): ResolvedRfc64AcceptedPublicRootLaneV1 | null {
-    const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
-    if (lane === null || lane.kind !== 'public') return null;
-    return Object.freeze({
-      networkId: lane.networkId,
-      service: lane.service,
-      autoPublishConfig: Object.freeze({
-        peers: lane.announcementPeers,
-        catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
-        catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
-      }),
-      scopeBase: lane.scopeBase,
-    });
   }
 
   createRfc64CatalogAuthorSignerV1(
@@ -340,16 +308,10 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       contextGraphId,
     ).authoringAllowed) return Object.freeze({ status: 'inactive' });
     const authoringPolicy = this.config.rfc64CatalogAuthoringPolicy;
-    const selectedControl = authoringPolicy?.selectedByContextGraph[contextGraphId];
-    const legacyPublicFallback = selectedControl === undefined
-      ? authoringPolicy?.legacyPublicFallback
-      : undefined;
-    const selectedByLegacyPublic = legacyPublicFallback !== undefined && (
-      legacyPublicFallback.mode === 'all-accepted-public'
-      || legacyPublicFallback.selectedContextGraphs.includes(contextGraphId)
-    );
+    const exactControl = authoringPolicy?.byContextGraph[contextGraphId];
+    const publicDefault = authoringPolicy?.publicDefault;
     if (
-      (selectedControl === undefined && !selectedByLegacyPublic)
+      (exactControl === undefined && publicDefault === undefined)
       || (subGraphName !== undefined && subGraphName !== null)
     ) return Object.freeze({ status: 'inactive' });
     assertContextGraphIdV1(contextGraphId, 'RFC-64 catalog authoring contextGraphId');
@@ -377,49 +339,36 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         ),
       });
     }
-    if (acceptedPolicy.policy.accessPolicy === 1 && selectedControl === undefined) {
-      // Compatibility and legacy public controls are incapable of selecting a
-      // private CG, even when its accepted policy is present in the union.
+    if (exactControl === undefined && acceptedPolicy.policy.accessPolicy !== 0) {
       return Object.freeze({ status: 'inactive' });
     }
+    const selectedControl = exactControl ?? Object.freeze({
+      kind: 'selected-public' as const,
+      contextGraphId,
+      announcementPeers: publicDefault!.announcementPeers,
+      catalogIssuerDelegationEffectiveAt:
+        publicDefault!.catalogIssuerDelegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt:
+        publicDefault!.catalogIssuerDelegationExpiresAt,
+    });
     if (
-      selectedControl !== undefined
-      && (
-        (acceptedPolicy.policy.accessPolicy === 0 && selectedControl.kind !== 'selected-public')
-        || (acceptedPolicy.policy.accessPolicy === 1
-          && selectedControl.kind !== 'selected-private')
-      )
+      (acceptedPolicy.policy.accessPolicy === 0 && selectedControl.kind !== 'selected-public')
+      || (acceptedPolicy.policy.accessPolicy === 1
+        && selectedControl.kind !== 'selected-private')
     ) {
       return Object.freeze({
         status: 'unavailable',
         error: new Error('RFC-64 selected-CG authoring policy changed after activation'),
       });
     }
-    let announcementPeers: readonly string[];
-    let catalogIssuerDelegationEffectiveAt: TimestampMsV1;
-    let catalogIssuerDelegationExpiresAt: TimestampMsV1;
-    if (selectedControl !== undefined) {
-      announcementPeers = selectedControl.announcementPeers;
-      catalogIssuerDelegationEffectiveAt =
-        selectedControl.catalogIssuerDelegationEffectiveAt;
-      catalogIssuerDelegationExpiresAt =
-        selectedControl.catalogIssuerDelegationExpiresAt;
-    } else if (legacyPublicFallback !== undefined) {
-      announcementPeers = legacyPublicFallback.config.peers;
-      catalogIssuerDelegationEffectiveAt =
-        legacyPublicFallback.config.catalogIssuerDelegationEffectiveAt
-          ?? ('0' as TimestampMsV1);
-      catalogIssuerDelegationExpiresAt =
-        legacyPublicFallback.config.catalogIssuerDelegationExpiresAt;
-    } else {
-      return Object.freeze({ status: 'inactive' });
-    }
     const commonLane = Object.freeze({
       networkId,
       service,
-      announcementPeers,
-      catalogIssuerDelegationEffectiveAt,
-      catalogIssuerDelegationExpiresAt,
+      announcementPeers: selectedControl.announcementPeers,
+      catalogIssuerDelegationEffectiveAt:
+        selectedControl.catalogIssuerDelegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt:
+        selectedControl.catalogIssuerDelegationExpiresAt,
       scopeBase: Object.freeze({
         networkId,
         contextGraphId,

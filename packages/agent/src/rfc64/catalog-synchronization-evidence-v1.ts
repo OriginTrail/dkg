@@ -2,7 +2,7 @@
 
 import type {
   Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
-} from './catalog-applied-head-coordinator-v1.js';
+} from './catalog-applied-head-evidence-v1.js';
 import type {
   Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './public-catalog-native-receiver-v1.js';
@@ -22,8 +22,25 @@ export type Rfc64CatalogSynchronizationEvidenceV1 = Readonly<
 
 export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   evidence: Readonly<Rfc64PublicCatalogNativeSynchronizationEvidenceV1>,
-  receipts: readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[],
 ): Rfc64CatalogSynchronizationEvidenceV1 {
+  const receipts = evidence.finalizedSwmRetirementLifecycleReceipts ?? [];
+  const seenUals = new Set<string>();
+  for (const receipt of receipts) {
+    if (
+      receipt.catalogHeadDigest !== evidence.catalogHeadDigest
+      || receipt.inventoryDigest !== evidence.inventoryDigest
+      || receipt.committedHead.catalogHeadDigest !== evidence.catalogHeadDigest
+      || receipt.committedHead.inventoryDigest !== evidence.inventoryDigest
+    ) {
+      throw new TypeError(
+        'RFC-64 lifecycle receipt differs from its synchronization evidence head',
+      );
+    }
+    if (seenUals.has(receipt.kaUal)) {
+      throw new TypeError(`RFC-64 synchronization evidence duplicates receipt ${receipt.kaUal}`);
+    }
+    seenUals.add(receipt.kaUal);
+  }
   return Object.freeze({
     ...evidence,
     finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts.map((receipt) =>

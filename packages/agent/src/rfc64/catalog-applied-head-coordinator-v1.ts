@@ -4,7 +4,6 @@ import {
   createOperationContext,
   readVerifiedCatalogSealBindingV1,
   type AuthorCatalogScopeV1,
-  type Digest32V1,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -23,33 +22,19 @@ import type {
   Rfc64FinalizedVmAgentPrecommitHandlerV1,
   Rfc64FinalizedVmAgentPrecommitTransactionV1,
 } from './finalized-vm-agent-precommit-v1.js';
+import type {
+  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+} from './catalog-applied-head-evidence-v1.js';
 import {
   reconcileFinalizedSwmTwinFromCatalogProjection,
-  type FinalizedSwmTwinReconciliationOutcome,
   type FinalizedSwmTwinRetirement,
 } from '../sync/requester/finalized-swm-twin-reconciliation.js';
 
 const POST_HEAD_TWIN_RECONCILIATION_CONCURRENCY_V1 = 4;
 
-/**
- * Explicit per-KA proof of the only safe finalized-twin lifecycle:
- * verified VM post-read, VM transaction commit, durable applied-head token,
- * then SWM retirement.
- */
-export interface Rfc64FinalizedSwmRetirementLifecycleReceiptV1 {
-  readonly kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1';
-  readonly catalogHeadDigest: Digest32V1;
-  readonly inventoryDigest: Digest32V1;
-  readonly contextGraphId: string;
-  readonly subGraphName?: string;
-  readonly kaUal: string;
-  readonly assertionVersion: string;
-  readonly vmGraphIri: string;
-  readonly vmPostReadDigest: Digest32V1;
-  readonly vmMaterializationStatus: 'materialized' | 'existing';
-  readonly committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>;
-  readonly swmReconciliationOutcome: FinalizedSwmTwinReconciliationOutcome;
-}
+export type {
+  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+} from './catalog-applied-head-evidence-v1.js';
 
 export interface Rfc64CatalogAppliedHeadCoordinatorOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
@@ -59,9 +44,6 @@ export interface Rfc64CatalogAppliedHeadCoordinatorOptionsV1 {
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly retire: (retirement: FinalizedSwmTwinRetirement, ctx: OperationContext) => Promise<void>;
-  readonly recordRetirementLifecycleReceipt?: (
-    receipt: Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>,
-  ) => void;
   readonly logInfo?: (ctx: OperationContext, message: string) => void;
 }
 
@@ -172,9 +154,6 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
           }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV1;
         },
       );
-      for (const receipt of receipts) {
-        options.recordRetirementLifecycleReceipt?.(receipt);
-      }
       const retired = receipts.filter(
         ({ swmReconciliationOutcome }) => swmReconciliationOutcome === 'retired',
       ).length;
@@ -184,6 +163,9 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
           `Retired ${retired} byte-identical finalized SWM catalog twin(s) after applied-head commit`,
         );
       }
+      return Object.freeze({
+        finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts),
+      });
     },
   } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
 }

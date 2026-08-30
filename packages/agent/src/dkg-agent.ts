@@ -1006,10 +1006,6 @@ export class DKGAgent extends DKGAgentBase {
             activationPeerAgentBindings!.get(remotePeerId) ?? null
           ),
         }));
-    const rfc64CatalogAuthoringPolicy = resolveRfc64CatalogAuthoringPolicyV1({
-      selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
-      legacyPublicFallback: rfc64PublicCatalogControls.autoPublishPolicy,
-    });
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
       catalogActivation.bootstrap,
@@ -1020,6 +1016,11 @@ export class DKGAgent extends DKGAgentBase {
         ? rfc64PublicCatalogBootstrap
         : undefined,
     );
+    const rfc64CatalogAuthoringPolicy = resolveRfc64CatalogAuthoringPolicyV1({
+      selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
+      legacyPublicFallback: rfc64PublicCatalogControls.autoPublishPolicy,
+      acceptedPolicies: rfc64CatalogBootstrap?.acceptedPolicies ?? [],
+    });
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
