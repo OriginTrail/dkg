@@ -512,10 +512,16 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
-  it('marks an indeterminate exact SWM replacement as replay-safe through assertionPromote', async () => {
+  it('replays an indeterminate committed exact SWM replacement to convergence', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     const finalized = await finalizeAssertion();
+    await store.insert([{
+      subject: 'urn:test:stale-swm-row',
+      predicate: 'http://schema.org/name',
+      object: '"Stale"',
+      graph: finalized.sharedGraphUri,
+    }]);
     const failure = new StoreOperationTimeoutError({
       backend: 'managed-oxigraph',
       operation: 'replaceGraph',
@@ -528,11 +534,22 @@ describe('Working Memory Assertion Lifecycle', () => {
       async (graphUri, quads) => {
         if (!injected && graphUri === finalized.sharedGraphUri) {
           injected = true;
+          await replaceGraph(graphUri, quads);
           throw failure;
         }
         return replaceGraph(graphUri, quads);
       },
     );
+
+    const expectExactSwmGraph = async () => {
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(TRIPLES.length);
+      for (const quad of TRIPLES) {
+        await expect(store.query(
+          `ASK { GRAPH <${finalized.sharedGraphUri}> { ` +
+            `<${quad.subject}> <${quad.predicate}> ${quad.object} } }`,
+        )).resolves.toEqual({ type: 'boolean', value: true });
+      }
+    };
 
     try {
       let rejection: unknown;
@@ -547,6 +564,15 @@ describe('Working Memory Assertion Lifecycle', () => {
         cause: failure,
       });
       expect(injected).toBe(true);
+      await expectExactSwmGraph();
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(
+        TRIPLES.length,
+      );
+
+      const replayed = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      expect(replayed).toMatchObject({ promotedCount: 0, promotedAllRoots: true });
+      await expectExactSwmGraph();
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(0);
     } finally {
       replaceGraphSpy.mockRestore();
     }
