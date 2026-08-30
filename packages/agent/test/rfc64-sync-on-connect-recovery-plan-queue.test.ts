@@ -13,6 +13,27 @@ import {
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
 describe('RFC-64 recovery-plan queue authorization', () => {
+  it('rejects a network-denied provider at the authorized queue boundary', async () => {
+    const agent = await createUnstartedAgent('Rfc64AuthorizedPlanNetworkDenial');
+    agent.networkAdmissionCoordinator.isAcceptedPeer = () => false;
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const selectedRun = vi.fn(async () => undefined);
+    installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
+
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      vi.fn(),
+      0,
+    )).toBe(false);
+    expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0);
+    await flushTimers();
+    expect(selectedRun).not.toHaveBeenCalled();
+  });
+
   it('accepts the original raw recovery-plan queue contract', async () => {
     const agent = await createUnstartedAgent('Rfc64RawPlanQueueCompatibility');
     allowAllNetworkAdmission(agent);

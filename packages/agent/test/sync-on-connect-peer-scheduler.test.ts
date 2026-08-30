@@ -102,6 +102,57 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(runOrdinary).toHaveBeenCalledOnce();
   });
 
+  it('contains an error-handler rejection after timer ownership ends', async () => {
+    const phaseFailure = new Error('ordinary phase failed');
+    const consumerFailure = new Error('error consumer failed');
+    const finish = vi.fn();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => { unhandled.push(error); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const scheduler = createScheduler({
+        runSelected: async () => undefined,
+        runOrdinary: async () => { throw phaseFailure; },
+        finish,
+      });
+
+      expect(scheduler.enqueueOrdinary(
+        PEER,
+        () => { throw consumerFailure; },
+        0,
+      )).toBe(true);
+      await vi.waitFor(() => expect(scheduler.size).toBe(0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(finish).toHaveBeenCalledOnce();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('contains a finalizer rejection after cleaning up the peer job', async () => {
+    const finalizerFailure = new Error('runner finalizer failed');
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => { unhandled.push(error); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const scheduler = createScheduler({
+        runSelected: async () => undefined,
+        runOrdinary: async () => undefined,
+        finish: () => { throw finalizerFailure; },
+      });
+
+      expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
+      await vi.waitFor(() => expect(scheduler.size).toBe(0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('finalizes an active peer job once when it is cleared during a phase', async () => {
     const ordinary = deferred();
     const ordinaryStarted = deferred();
