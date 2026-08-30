@@ -2,8 +2,9 @@
 
 /**
  * Selected-CG RFC-64 SWM inventory and public-catalog authoring support.
- * Finalized VM remains inventoried by the chain; confirmation retracts the
- * corresponding SWM-only catalog row.
+ * Finalized VM remains inventoried by the chain. Public/owner-signed lanes
+ * retract confirmed SWM-only rows; finalized private lanes publish the
+ * authenticated recovery placement only after confirmation.
  */
 
 import {
@@ -41,8 +42,10 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from
-  './dkg-agent-rfc64-swm-catalog-projection.js';
+import {
+  rfc64CatalogLaneAcceptsWorkspaceHeadV1,
+  rfc64CatalogLaneUsesFinalizedChainRecoveryV1,
+} from './dkg-agent-rfc64-swm-catalog-projection.js';
 import type {
   Rfc64CatalogSuccessorAssetInputV1,
 } from './dkg-agent-rfc64-catalog.js';
@@ -173,6 +176,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     try {
       const result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
       if (result.status === 'applied' || result.status === 'existing') {
+        const lane = this.resolveRfc64CatalogAuthoringLaneV1(
+          params.contextGraphId,
+          params.subGraphName,
+        );
+        if (lane !== null && rfc64CatalogLaneUsesFinalizedChainRecoveryV1(lane)) return;
         this.requestRfc64SwmCatalogProjectionV1({
           contextGraphId: params.contextGraphId as ContextGraphIdV1,
           authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
@@ -224,11 +232,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical post-confirmation observer for exact SWM-inventory removal.
-   * Finalized VM is already inventoried by the chain. Remove its SWM row and
-   * enqueue selected-catalog convergence so RFC-64 no longer advertises
-   * the asset as SWM-only. The irreversible publish response never waits for
-   * catalog signing, storage, or peer fan-out.
+   * Canonical post-confirmation observer. SWM-only lanes retract the pending
+   * row. A finalized private lane first appends the now-chain-backed placement
+   * to its durable recovery catalog, then removes only the pending inventory
+   * row. The irreversible publish response never waits for this observer.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
@@ -262,11 +269,40 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       authorAddress: confirmedSeal.authorAddress,
       assertionCoordinate,
     });
-    shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion);
+    let finalizedPrivateRecovery = false;
+    try {
+      const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
+      finalizedPrivateRecovery = lane !== null
+        && rfc64CatalogLaneUsesFinalizedChainRecoveryV1(lane);
+    } catch (cause) {
+      this.log.warn(
+        params.ctx,
+        `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      return;
+    }
+    if (!finalizedPrivateRecovery) {
+      shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion);
+    }
     try {
       await shadowRuntime.runExclusive(
         assetKey,
         async () => {
+          if (finalizedPrivateRecovery) {
+            const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1({
+              contextGraphId: contextGraphId as ContextGraphIdV1,
+              authorAddress: confirmedSeal.authorAddress,
+              assertionCoordinate,
+              assertionVersion: confirmedSeal.assertionVersion,
+            });
+            if (applied === null) return;
+            await this.removeRfc64SwmAuthorInventoryShadowV1({
+              contextGraphId,
+              subGraphName,
+              seal: params.seal,
+            });
+            return;
+          }
           const result = await this.removeRfc64SwmAuthorInventoryShadowV1({
             contextGraphId,
             subGraphName,
@@ -473,7 +509,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }
   }
 
-  /** Remove a row after VM confirmation; the chain becomes the VM inventory. */
+  /** Remove one pending SWM-inventory row after its lane-specific confirmation work. */
   async removeRfc64SwmAuthorInventoryShadowV1(
     this: DKGAgent,
     params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,

@@ -4158,6 +4158,194 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
   }, 60_000);
 
+  it('publishes finalized private recovery placement only after chain confirmation', async () => {
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
+    const kaNumber = 39n;
+    const finalizedAsset = Object.freeze({
+      assertionRoot: ASSERTION_ROOT,
+      assertionVersion: '1',
+      authorAddress: AUTHOR,
+      kaId: ((BigInt(AUTHOR) << 96n) | kaNumber).toString(),
+      publisherAddress: AUTHOR,
+    });
+    const fixture = Object.freeze({
+      accessPolicy: 1 as const,
+      active: true,
+      assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
+      assertedAtKav10Address: KAV10,
+      knowledgeAssetStorageAddress: KA_STORAGE,
+      assets: Object.freeze([finalizedAsset]),
+      blockHash: FINALIZED_BLOCK_HASH,
+      blockNumberQuantity: '0x7c',
+      contextGraphStorageAddress: CONTEXT_GRAPH_STORAGE,
+      nameHash: nameHash as Digest32V1,
+      networkId: NETWORK_ID,
+      onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+      publishPolicy: 0 as const,
+    } satisfies FinalizedVmLoopbackFixtureConfigV1);
+    const rpc = createFinalizedVmLoopbackRpcV1(fixture);
+    const rpcServer = await rpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(response, call, rpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(
+          response,
+          call,
+          -32602,
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    });
+    const adapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+    await adapter.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0, nameHash });
+
+    const policy: ContextGraphPolicyV1 = {
+      ...finalizedPublicCatalogPolicy({ publishPolicy: 0, publishAuthority: AUTHOR }),
+      accessPolicy: 1,
+    };
+    const policyEnvelope = {
+      issuer: CONTEXT_GRAPH_STORAGE,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: policy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
+    const roster = privateCatalogRoster(policy, policyDigest);
+    const rosterEnvelope = {
+      issuer: CONTEXT_GRAPH_STORAGE,
+      objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+      payload: roster,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedMemberRosterEnvelopeV1;
+
+    const peerAddresses = new Map<string, EvmAddressV1>();
+    const provider = await startNativeAgentWithOptions({
+      name: 'finalized-private-auto-publish-provider',
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId) => peerAddresses.get(peerId) ?? null,
+      },
+      finalizedRuntime: { rpcUrl: rpcServer.url, chainAdapter: adapter },
+    });
+    provider.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster });
+    const author = await startNativeAgentWithOptions({
+      name: 'finalized-private-auto-publish-author',
+      catalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          peerAgentBindings: [{ peerId: provider.peerId, agentAddress: AUTHOR }],
+        },
+        autoPublish: {
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope,
+            rosterEnvelope,
+            targets: [{ authorAddress: AUTHOR, providers: [provider.peerId] }],
+            completeSwmProviders: [provider.peerId],
+          }],
+        },
+      },
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    peerAddresses.set(author.peerId, AUTHOR);
+    await connectBothWays(author, provider);
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    const assertionCoordinate = 'finalized-private-auto-publish';
+    const shareOperationId = 'finalized-private-auto-publish-operation';
+    const { seal, assertionUri } = await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      assertionCoordinate,
+      kaNumber,
+      accessPolicy: 'ownerOnly',
+    });
+    await author.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+
+    const scope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: policy.governanceChainId,
+      governanceContractAddress: policy.governanceContractAddress,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: policy.era,
+      bucketCount: '1',
+    } as const);
+    const { bucketCount: _bucketCount, ...inventoryScope } = scope;
+    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(inventoryScope);
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { totalRows: '1' } } });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(announce).not.toHaveBeenCalled();
+
+    await author.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      seal,
+      assertionUri,
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    const authorHead = author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    });
+    expect(authorHead).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: authorHead?.currentCatalogHeadDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+    expect(announce).toHaveBeenCalledTimes(1);
+
+    await author.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      seal,
+      assertionUri,
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toEqual(authorHead);
+    expect(announce).toHaveBeenCalledTimes(1);
+  }, 60_000);
+
   it('awaits production private retirement and reports a real finalized missing-placement path', async () => {
     const providerAgentAddress = `0x${'91'.repeat(20)}` as EvmAddressV1;
     const coldAgentAddress = `0x${'92'.repeat(20)}` as EvmAddressV1;

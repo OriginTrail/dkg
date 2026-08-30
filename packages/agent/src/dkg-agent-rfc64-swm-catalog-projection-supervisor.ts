@@ -17,6 +17,8 @@ import type { DKGAgent } from './dkg-agent.js';
 import {
   partitionRfc64CatalogBootstrapV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
+import { rfc64CatalogLaneUsesFinalizedChainRecoveryV1 } from
+  './dkg-agent-rfc64-swm-catalog-projection.js';
 import type {
   Rfc64CatalogBootstrapConfigV1,
   Rfc64CatalogBootstrapPolicyV1,
@@ -114,7 +116,8 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     const repairs = partition.track2Policies.flatMap(
       ({ policyEnvelope }): MutableAuthorRepairStatusV1[] => {
         const contextGraphId = policyEnvelope.payload.contextGraphId as ContextGraphIdV1;
-        if (this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null) === null) {
+        const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
+        if (lane === null || rfc64CatalogLaneUsesFinalizedChainRecoveryV1(lane)) {
           return [];
         }
         return localAuthors.flatMap((authorAddress) => {
@@ -188,7 +191,8 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     // author seal and local signing capability. Startup discovery remains
     // restricted to registered local authors; live requests do not repeat a
     // registry check that can lag custodial author activation.
-    if (this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null) === null) {
+    const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
+    if (lane === null || rfc64CatalogLaneUsesFinalizedChainRecoveryV1(lane)) {
       return false;
     }
 
