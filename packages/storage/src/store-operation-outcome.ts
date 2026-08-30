@@ -14,6 +14,7 @@ export const STORE_OPERATIONS = [
   'replaceGraph',
   'replaceGraphAndSubject',
   'replaceSubject',
+  'replaceSubjectPrefix',
   'listGraphs',
   'listGraphsByPrefix',
   'deleteBySubjectPrefix',

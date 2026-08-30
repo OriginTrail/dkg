@@ -21,6 +21,7 @@ import {
   OxigraphStore,
   createTripleStore,
   tryReplaceSubjectAtomically,
+  tryReplaceSubjectPrefixAtomically,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -122,6 +123,60 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       expect(await agentStore.listGraphs()).toContain(removable);
       expect(await tryReplaceSubjectAtomically(agentStore, removable, 'urn:s:only', [])).toBe(true);
       expect(await agentStore.listGraphs()).not.toContain(removable);
+    } finally {
+      await agentStore.close();
+    }
+  });
+
+  it('forwards rooted profile replacement through the complete production store stack', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'replace-profile-agent-'));
+    tempDirs.push(dir);
+    const inner = await createTripleStore({
+      backend: 'oxigraph',
+      changelog: true,
+      largeLiteralStorage: { enabled: true, directory: dir },
+    });
+    const invalidatedGraphs: Array<string | undefined> = [];
+    const agentStore = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      () => {},
+      (_quads, targetGraph) => { invalidatedGraphs.push(targetGraph); },
+    );
+    const registryGraph = 'did:dkg:context-graph:agents';
+    const root = 'did:dkg:agent:0x1111111111111111111111111111111111111111';
+    const other = 'did:dkg:agent:0x2222222222222222222222222222222222222222';
+    const registryQuad = (subject: string, predicate: string, object: string): Quad => ({
+      subject,
+      predicate,
+      object,
+      graph: registryGraph,
+    });
+
+    try {
+      expect(typeof agentStore.replaceSubjectPrefix).toBe('function');
+      await agentStore.insert([
+        registryQuad(root, 'urn:test:status', '"old"'),
+        registryQuad(`${root}/child`, 'urn:test:name', '"obsolete"'),
+        registryQuad(other, 'urn:test:status', '"retained"'),
+      ]);
+      const changelogBefore = await changelogSnapshot(agentStore);
+
+      expect(await tryReplaceSubjectPrefixAtomically(agentStore, registryGraph, root, [
+        registryQuad(root, 'urn:test:status', '"fresh"'),
+      ])).toBe(true);
+
+      const rows = await agentStore.query(
+        `SELECT ?s ?p ?o WHERE { GRAPH <${registryGraph}> { ?s ?p ?o } }`,
+      );
+      expect(rows.type === 'bindings' ? rows.bindings : []).toEqual(expect.arrayContaining([
+        { s: root, p: 'urn:test:status', o: '"fresh"' },
+        { s: other, p: 'urn:test:status', o: '"retained"' },
+      ]));
+      expect(rows.type === 'bindings' ? rows.bindings : []).not.toEqual(expect.arrayContaining([
+        { s: `${root}/child`, p: 'urn:test:name', o: '"obsolete"' },
+      ]));
+      expect(invalidatedGraphs).toContain(registryGraph);
+      expect(await changelogSnapshot(agentStore)).not.toBe(changelogBefore);
     } finally {
       await agentStore.close();
     }

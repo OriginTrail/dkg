@@ -36,6 +36,7 @@ export type GraphSetMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectPrefix'
   | 'query'
   | 'update';
 
@@ -46,6 +47,7 @@ type TouchedGraphMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectPrefix'
   | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
@@ -482,6 +484,31 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     }
     this.bumpMutation();
     await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
+  }
+
+  async replaceSubjectPrefix(
+    graphUri: string,
+    prefix: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceSubjectPrefix !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectPrefix', 'GraphSetIndexStore');
+    }
+    if (!this.enabled) {
+      await this.inner.replaceSubjectPrefix(graphUri, prefix, quads, options);
+      return;
+    }
+    try {
+      await this.inner.replaceSubjectPrefix(graphUri, prefix, quads, options);
+    } catch (error) {
+      if (!isAtomicReplaceOperationNotStarted(error, 'replaceSubjectPrefix')) {
+        this.scheduleFullRefresh('replaceSubjectPrefix');
+      }
+      throw error;
+    }
+    this.bumpMutation();
+    await this.maintainTouchedGraphs([graphUri], 'replaceSubjectPrefix', options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {

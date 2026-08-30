@@ -216,7 +216,7 @@ export interface DurableSyncGraphScopedStoreRequest {
   readonly signal?: AbortSignal;
 }
 
-export interface DurableAuthoritativeSnapshotMaterializationRequest {
+export interface DurableDataMaterializationRequest {
   readonly contextGraphId: string;
   readonly graphUri: string;
   readonly verifiedQuads: readonly Quad[];
@@ -227,13 +227,17 @@ export interface DurableAuthoritativeSnapshotMaterializationRequest {
   readonly completeSnapshot: boolean;
   readonly snapshot?: VerifiedFullSnapshot;
   readonly signal?: AbortSignal;
+  /** Strategy-owned synchronous transition paired with retained DATA state. */
+  readonly transitionCheckpoint?: (decision: 'advance' | 'discard') => void;
 }
 
-export interface DurableAuthoritativeSnapshotMaterializer {
-  /** Reconcile private staging with the paired requester state before DATA fetch. */
+export interface DurableDataMaterializer {
+  /** True when this strategy owns the full-snapshot callback boundary. */
+  readonly handlesFullSnapshotBoundary: boolean;
+  /** Reconcile strategy-owned state with requester state before DATA fetch. */
   prepareFetch(contextGraphId: string, graphUri: string): void;
   materialize(
-    request: DurableAuthoritativeSnapshotMaterializationRequest,
+    request: DurableDataMaterializationRequest,
   ): Promise<{
     readonly committedTriples: number;
     readonly committed: boolean;
@@ -405,8 +409,8 @@ export interface DurableSyncContext {
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (request: DurableSyncStoreInsertRequest) => Promise<void>;
-  /** All-or-nothing materialization for mutable authoritative graph snapshots. */
-  authoritativeSnapshotMaterializer?: DurableAuthoritativeSnapshotMaterializer;
+  /** Optional lifecycle-selected strategy; ordinary sync normalizes to append. */
+  dataMaterializer?: DurableDataMaterializer;
   /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
   storeGraphScopedAsset?: (
     request: DurableSyncGraphScopedStoreRequest,
@@ -660,7 +664,7 @@ async function runDurableSyncWithBudget(
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
-    authoritativeSnapshotMaterializer,
+    dataMaterializer: configuredDataMaterializer,
     storeGraphScopedAsset,
     authenticateChallengePinnedAsset,
     proofOnlyChallengeFetch = false,
@@ -672,6 +676,21 @@ async function runDurableSyncWithBudget(
     logWarn,
     logDebug,
   } = context;
+
+  // Normalize lane-specific policy once. From this boundary onward the engine
+  // has one page-consumption operation for empty, partial, and complete DATA;
+  // it never branches between direct inserts and a special snapshot mode.
+  const dataMaterializer: DurableDataMaterializer = configuredDataMaterializer ?? {
+    handlesFullSnapshotBoundary: false,
+    prepareFetch: () => {},
+    materialize: async ({ verifiedQuads, signal: operationSignal }) => {
+      if (verifiedQuads.length === 0) {
+        return { committedTriples: 0, committed: false };
+      }
+      await storeInsert({ quads: [...verifiedQuads], signal: operationSignal });
+      return { committedTriples: verifiedQuads.length, committed: true };
+    },
+  };
 
   const throwIfOperationAborted = () => {
     if (!signal?.aborted) return;
@@ -876,7 +895,7 @@ async function runDurableSyncWithBudget(
         shouldStopAfterPage?: (progress: SyncPageProgress) => boolean,
       ): Promise<SyncPageResult> => {
         if (phase === 'data') {
-          authoritativeSnapshotMaterializer?.prepareFetch(pid, graphUri);
+          dataMaterializer.prepareFetch(pid, graphUri);
         }
         return fetchSyncPages({
           ctx,
@@ -1253,7 +1272,7 @@ async function runDurableSyncWithBudget(
         };
       };
       const notifyVerifiedFullSnapshot = async (): Promise<void> => {
-        if (!onVerifiedFullSnapshot || authoritativeSnapshotMaterializer) return;
+        if (!onVerifiedFullSnapshot || dataMaterializer.handlesFullSnapshotBoundary) return;
         const snapshot = verifiedFullSnapshot(false);
         if (snapshot) await onVerifiedFullSnapshot(snapshot);
       };
@@ -1295,12 +1314,13 @@ async function runDurableSyncWithBudget(
         && !metaResult.timedOut
         && effectiveDataResult.completed
         && !effectiveDataResult.timedOut;
-      const materializeAuthoritativeSnapshot = async (
+      const materializeVerifiedData = async (
         verifiedQuads: readonly Quad[],
       ): Promise<void> => {
-        if (!authoritativeSnapshotMaterializer) return;
-        const snapshot = verifiedFullSnapshot(true);
-        const materialized = await authoritativeSnapshotMaterializer.materialize({
+        const snapshot = dataMaterializer.handlesFullSnapshotBoundary
+          ? verifiedFullSnapshot(true)
+          : verifiedFullSnapshot(false);
+        const materialized = await dataMaterializer.materialize({
           contextGraphId: pid,
           graphUri: dataGraph,
           verifiedQuads,
@@ -1309,6 +1329,21 @@ async function runDurableSyncWithBudget(
           completeSnapshot: snapshot !== undefined,
           ...(snapshot ? { snapshot } : {}),
           signal,
+          transitionCheckpoint: dataMaterializer.handlesFullSnapshotBoundary
+            ? (decision) => {
+                if (decision === 'discard') {
+                  deleteCheckpoint(effectiveDataResult.checkpointKey);
+                } else {
+                  recordPhaseOutcome(effectiveDataResult, {
+                    updateCheckpoint: updateDataCheckpoint,
+                    emptyPhase: processed.emptyResponses > 0,
+                    manifestPlan: graphScopedManifest ?? undefined,
+                    terminal: reachedContextGraphTerminalBoundary,
+                  });
+                }
+                dataCheckpointRecordedByMaterializer = true;
+              }
+            : undefined,
         });
         if (materialized.committedTriples > 0) {
           recordDurableSyncDiagnostics(accumulator, {
@@ -1316,10 +1351,16 @@ async function runDurableSyncWithBudget(
             insertedDataTriples: materialized.committedTriples,
           });
         }
-        if (materialized.committed && snapshot && onVerifiedFullSnapshot) {
+        if (
+          dataMaterializer.handlesFullSnapshotBoundary
+          && materialized.committed
+          && snapshot
+          && onVerifiedFullSnapshot
+        ) {
           await onVerifiedFullSnapshot(snapshot);
         }
       };
+      let dataCheckpointRecordedByMaterializer = false;
       const settledExactDisposition = (): ExactDurableFetchDisposition => (
         classifyExactDurableFetch({
           requestedAssetCount: exactAssetUals?.length ?? 0,
@@ -1338,11 +1379,9 @@ async function runDurableSyncWithBudget(
         processed.dataRejectedMissingMeta > 0 ||
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
-        if (authoritativeSnapshotMaterializer) {
-          startPhase('store');
-          await materializeAuthoritativeSnapshot(processed.verifiedData);
-          endPhase();
-        }
+        startPhase('store');
+        await materializeVerifiedData(processed.verifiedData);
+        endPhase();
         await notifyVerifiedFullSnapshot();
         throwIfOperationAborted();
         // The verifier reports an empty batch only when both fetched phase
@@ -1355,12 +1394,14 @@ async function runDurableSyncWithBudget(
           countProgress: !metadataOnlyResponse,
           emptyPhase,
         });
-        recordPhaseOutcome(effectiveDataResult, {
-          updateCheckpoint: updateDataCheckpoint,
-          emptyPhase,
-          manifestPlan: graphScopedManifest ?? undefined,
-          terminal: reachedContextGraphTerminalBoundary,
-        });
+        if (!dataCheckpointRecordedByMaterializer) {
+          recordPhaseOutcome(effectiveDataResult, {
+            updateCheckpoint: updateDataCheckpoint,
+            emptyPhase,
+            manifestPlan: graphScopedManifest ?? undefined,
+            terminal: reachedContextGraphTerminalBoundary,
+          });
+        }
         markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
         if (exactFetchDispositionIndex !== undefined) {
           exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
@@ -1488,20 +1529,8 @@ async function runDurableSyncWithBudget(
         endPhase();
         break;
       }
-      if (authoritativeSnapshotMaterializer) {
-        throwIfOperationAborted();
-        await materializeAuthoritativeSnapshot(partitioned.remainingData);
-      } else if (partitioned.remainingData.length > 0) {
-        throwIfOperationAborted();
-        await storeInsert({
-          quads: partitioned.remainingData,
-          signal,
-        });
-        recordDurableSyncDiagnostics(accumulator, {
-          insertedTriples: partitioned.remainingData.length,
-          insertedDataTriples: partitioned.remainingData.length,
-        });
-      }
+      throwIfOperationAborted();
+      await materializeVerifiedData(partitioned.remainingData);
       if (partitioned.remainingMeta.length > 0) {
         throwIfOperationAborted();
         await storeInsert({
@@ -1520,12 +1549,14 @@ async function runDurableSyncWithBudget(
       await notifyVerifiedFullSnapshot();
       throwIfOperationAborted();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-      recordPhaseOutcome(effectiveDataResult, {
-        updateCheckpoint: updateDataCheckpoint,
-        checkpointAdvanceAlreadyRecorded: incrementalCheckpointAdvanceRecorded,
-        manifestPlan: graphScopedManifest ?? undefined,
-        terminal: reachedContextGraphTerminalBoundary,
-      });
+      if (!dataCheckpointRecordedByMaterializer) {
+        recordPhaseOutcome(effectiveDataResult, {
+          updateCheckpoint: updateDataCheckpoint,
+          checkpointAdvanceAlreadyRecorded: incrementalCheckpointAdvanceRecorded,
+          manifestPlan: graphScopedManifest ?? undefined,
+          terminal: reachedContextGraphTerminalBoundary,
+        });
+      }
       markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
       if (exactFetchDispositionIndex !== undefined) {
         exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();

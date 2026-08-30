@@ -14,7 +14,10 @@ import {
 } from '../src/sync/backpressure.js';
 import { syncPriorityClass } from '../src/sync/policy.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
+import {
+  createDurableSyncAccumulator,
+  createIncompleteDurableSyncResult,
+} from '../src/sync/durable-progress.js';
 
 const ctx = createOperationContext('sync');
 const noop = () => {};
@@ -200,7 +203,7 @@ describe('requester per-CG priority admission', () => {
       log: { info: noop, warn: noop },
     };
 
-    const lane = await (LifecycleSyncMethods.prototype.runChangelogLane as any).call(
+    const lane = await (LifecycleSyncMethods.prototype.runPrioritizedSyncPlan as any).call(
       agent,
       ctx,
       'peer',
@@ -254,7 +257,7 @@ describe('requester per-CG priority admission', () => {
       log: { info: noop, warn: noop },
     };
 
-    const lane = await (LifecycleSyncMethods.prototype.runChangelogLane as any).call(
+    const lane = await (LifecycleSyncMethods.prototype.runPrioritizedSyncPlan as any).call(
       agent,
       ctx,
       'peer',
@@ -314,7 +317,7 @@ describe('requester per-CG priority admission', () => {
       log: { info: noop, warn: noop },
     };
 
-    const lane = await (LifecycleSyncMethods.prototype.runChangelogLane as any).call(
+    const lane = await (LifecycleSyncMethods.prototype.runPrioritizedSyncPlan as any).call(
       agent,
       ctx,
       'peer',
@@ -326,6 +329,105 @@ describe('requester per-CG priority admission', () => {
     expect(lane.result.insertedTriples).toBe(2);
     expect(lane.result.deferredBackpressure).toBe(1);
     expect(lane.remainingLegacyCgs).toEqual([]);
+  });
+
+  it('keeps private durable work in the same cross-lane priority plan', async () => {
+    const admissions: string[] = [];
+    const durableRuns: string[] = [];
+    const agent = {
+      config: { syncContextGraphPriorities: { private: 50, public: -10 } },
+      getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
+      isPrivateContextGraph: async (contextGraphId: string) => contextGraphId === 'private',
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        contextGraphId: string,
+        _lane: string,
+        _label: string,
+        work: () => Promise<unknown>,
+      ) => {
+        admissions.push(contextGraphId);
+        return work();
+      },
+      runLegacyDurableSyncForContextGraph: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+      ) => {
+        durableRuns.push(contextGraphId);
+        return { ...createIncompleteDurableSyncResult(), completedPhases: 2, complete: true };
+      },
+      runChangelogSyncForCg: async () => ({
+        ...createIncompleteDurableSyncResult(),
+        completedPhases: 1,
+        complete: true,
+      }),
+      log: { info: noop, warn: noop },
+    };
+
+    const plan = await (LifecycleSyncMethods.prototype.runPrioritizedSyncPlan as any).call(
+      agent,
+      ctx,
+      'peer',
+      ['public', 'private'],
+    );
+
+    expect(admissions).toEqual(['private', 'public']);
+    expect(durableRuns).toEqual(['private']);
+    expect(plan.remainingLegacyCgs).toEqual([]);
+  });
+
+  it('serializes ordinary and planned AGENTS entry points before admission', async () => {
+    let releaseFirst!: () => void;
+    let signalFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { signalFirstEntered = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let admissionCalls = 0;
+    let activeAdmissions = 0;
+    let maximumActiveAdmissions = 0;
+    const agent: any = {
+      config: { syncContextGraphPriorities: {} },
+      getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
+      isPrivateContextGraph: async () => false,
+      runContextGraphSyncWithBackpressure: async () => {
+        admissionCalls += 1;
+        activeAdmissions += 1;
+        maximumActiveAdmissions = Math.max(maximumActiveAdmissions, activeAdmissions);
+        if (admissionCalls === 1) {
+          signalFirstEntered();
+          await firstGate;
+        }
+        activeAdmissions -= 1;
+        return createDurableSyncAccumulator();
+      },
+      runLegacyDurableSyncForContextGraph: async () => createIncompleteDurableSyncResult(),
+      runChangelogSyncForCg: async () => createIncompleteDurableSyncResult(),
+      log: { info: noop, warn: noop, debug: noop },
+    };
+
+    const ordinary = LifecycleSyncMethods.prototype.runLegacyDurableSync.call(
+      agent,
+      ctx,
+      'same-peer',
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS],
+    );
+    await firstEntered;
+    const planned = LifecycleSyncMethods.prototype.runPrioritizedSyncPlan.call(
+      agent,
+      ctx,
+      'same-peer',
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS],
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The planned entry point waits on the shared peer+CG durable lock before
+    // consuming a global admission slot or starting physical paging.
+    expect(admissionCalls).toBe(1);
+    releaseFirst();
+    await Promise.all([ordinary, planned]);
+
+    expect(admissionCalls).toBe(2);
+    expect(maximumActiveAdmissions).toBe(1);
   });
 
   it('preserves completed shared-memory progress when a later admission is deferred', async () => {

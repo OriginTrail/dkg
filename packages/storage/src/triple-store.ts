@@ -184,6 +184,17 @@ export interface TripleStore {
     quads: Quad[],
     options?: QueryOptions,
   ): Promise<void>;
+  /**
+   * Atomically replace a canonical root subject and all of its `/`- or
+   * `#`-delimited descendants inside one shared graph, leaving unrelated roots
+   * untouched.
+   */
+  replaceSubjectPrefix?(
+    graphUri: string,
+    subjectPrefix: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -393,6 +404,30 @@ export async function tryReplaceSubjectAtomically(
     if (
       error instanceof UnsupportedTripleStoreCapabilityError &&
       error.capability === 'replaceSubject'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/** Attempt one atomic rooted-subject-tree replacement inside a shared graph. */
+export async function tryReplaceSubjectPrefixAtomically(
+  store: TripleStore,
+  graphUri: string,
+  subjectPrefix: string,
+  quads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replace = store.replaceSubjectPrefix;
+  if (typeof replace !== 'function') return false;
+  try {
+    await replace.call(store, graphUri, subjectPrefix, quads, options);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceSubjectPrefix'
     ) {
       return false;
     }

@@ -63,6 +63,7 @@ export default defineConfig({
       "test/durable-sync-graph-scoped-materialization.test.ts",
       "test/finalized-swm-twin-reconciliation.test.ts",
       "test/durable-sync-lifecycle-binding.test.ts",
+      "test/authoritative-agents-durable-sync.test.ts",
       "test/durable-manifest-digest.test.ts",
       "test/durable-manifest-continuation.test.ts",
       "test/durable-recovery-coordinator.test.ts",

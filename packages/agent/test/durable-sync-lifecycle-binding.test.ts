@@ -66,13 +66,10 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
 });
 
 import {
-  contextGraphDataUri,
   PROTOCOL_SYNC_CHANGELOG,
-  SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import {
   createDurableSyncAccumulator,
-  createIncompleteDurableSyncResult,
 } from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
@@ -96,11 +93,6 @@ import {
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
-import {
-  getSyncCheckpointKey,
-  MemorySyncCheckpointStore,
-} from '../src/sync/checkpoint/state.js';
-import { AuthoritativeGraphSnapshotMaterializer } from '../src/sync/requester/authoritative-graph-snapshot.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -578,198 +570,6 @@ describe('durable sync lifecycle chain binding', () => {
     });
   });
 
-  it('atomically replaces the completed AGENTS snapshot and removes obsolete rows', async () => {
-    const graph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
-    const obsolete = {
-      subject: 'did:dkg:agent:old',
-      predicate: `${DKG}peerId`,
-      object: '"peer-old"',
-      graph,
-    };
-    const fresh = {
-      subject: 'did:dkg:agent:new',
-      predicate: `${DKG}peerId`,
-      object: '"peer-new"',
-      graph,
-    };
-    let live = [obsolete];
-    const replaceGraph = vi.fn(async (_graph: string, quads: typeof live) => {
-      live = [...quads];
-    });
-    const syncCheckpoints = new MemorySyncCheckpointStore();
-    const authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(
-      syncCheckpoints,
-    );
-    const insertSyncedQuadsAndInvalidateListCache = vi.fn(async () => {});
-    const agentLike: any = {
-      config: {},
-      store: { replaceGraph },
-      syncCheckpoints,
-      authoritativeAgentSnapshots,
-      processDurableBatchInWorker: async () => ({}),
-      insertSyncedQuadsAndInvalidateListCache,
-      oversizeTombstoneLog: { record: vi.fn() },
-      invalidateListContextGraphsCache: vi.fn(),
-      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
-      log: { info: () => {}, warn: () => {}, debug: () => {} },
-    };
-    mockedRunDurableSync.mockImplementationOnce(async (syncContext) => {
-      const checkpointKey = getSyncCheckpointKey(
-        'peer-agents',
-        SYSTEM_CONTEXT_GRAPHS.AGENTS,
-        false,
-        'data',
-      );
-      syncCheckpoints.setResponderSession(
-        checkpointKey,
-        'agents-session-complete',
-        Date.now() + 60_000,
-        Date.now(),
-        undefined,
-        undefined,
-        1,
-      );
-      const materialized = await syncContext.authoritativeSnapshotMaterializer!.materialize({
-        contextGraphId: SYSTEM_CONTEXT_GRAPHS.AGENTS,
-        graphUri: graph,
-        verifiedQuads: [fresh],
-        page: {
-          quads: [fresh],
-          bytesReceived: 1,
-          resumedFromOffset: 0,
-          rawResumedFromOffset: 0,
-          nextOffset: 1,
-          rawNextOffset: 1,
-          checkpointKey,
-          completed: true,
-          timedOut: false,
-        },
-        retainablePrefix: true,
-        completeSnapshot: true,
-        snapshot: {
-          contextGraphId: SYSTEM_CONTEXT_GRAPHS.AGENTS,
-          verifiedDataGraphs: new Set([graph]),
-          verifiedMetaGraphs: new Set(),
-          metaFetched: false,
-        },
-      });
-      return {
-        ...createIncompleteDurableSyncResult(),
-        insertedTriples: materialized.committedTriples,
-        insertedDataTriples: materialized.committedTriples,
-        completedPhases: 2,
-        complete: true,
-      };
-    });
-
-    const result = await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
-      agentLike,
-      ctx,
-      'peer-agents',
-      SYSTEM_CONTEXT_GRAPHS.AGENTS,
-      1,
-    );
-
-    expect(result.complete).toBe(true);
-    expect(replaceGraph).toHaveBeenCalledWith(
-      graph,
-      [fresh],
-      expect.objectContaining({ source: 'agent.durableSync.authoritativeAgentsReplace' }),
-    );
-    expect(insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
-    expect(live).toEqual([fresh]);
-    expect(live).not.toContainEqual(obsolete);
-  });
-
-  it('keeps the previous AGENTS snapshot intact when row-paged sync is interrupted', async () => {
-    const graph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
-    const obsolete = {
-      subject: 'did:dkg:agent:old',
-      predicate: `${DKG}peerId`,
-      object: '"peer-old"',
-      graph,
-    };
-    const fresh = {
-      subject: 'did:dkg:agent:new',
-      predicate: `${DKG}peerId`,
-      object: '"peer-new"',
-      graph,
-    };
-    let live = [obsolete];
-    const replaceGraph = vi.fn(async (_graph: string, quads: typeof live) => {
-      live = [...quads];
-    });
-    const syncCheckpoints = new MemorySyncCheckpointStore();
-    const authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(
-      syncCheckpoints,
-    );
-    const agentLike: any = {
-      config: {},
-      store: { replaceGraph },
-      syncCheckpoints,
-      authoritativeAgentSnapshots,
-      processDurableBatchInWorker: async () => ({}),
-      insertSyncedQuadsAndInvalidateListCache: vi.fn(async () => {}),
-      oversizeTombstoneLog: { record: vi.fn() },
-      invalidateListContextGraphsCache: vi.fn(),
-      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
-      log: { info: () => {}, warn: () => {}, debug: () => {} },
-    };
-    mockedRunDurableSync.mockImplementationOnce(async (syncContext) => {
-      const checkpointKey = getSyncCheckpointKey(
-        'peer-agents',
-        SYSTEM_CONTEXT_GRAPHS.AGENTS,
-        false,
-        'data',
-      );
-      syncCheckpoints.setResponderSession(
-        checkpointKey,
-        'agents-session-partial',
-        Date.now() + 60_000,
-        Date.now(),
-        undefined,
-        undefined,
-        1,
-      );
-      const materialized = await syncContext.authoritativeSnapshotMaterializer!.materialize({
-        contextGraphId: SYSTEM_CONTEXT_GRAPHS.AGENTS,
-        graphUri: graph,
-        verifiedQuads: [fresh],
-        page: {
-          quads: [fresh],
-          bytesReceived: 1,
-          resumedFromOffset: 0,
-          rawResumedFromOffset: 0,
-          nextOffset: 1,
-          rawNextOffset: 1,
-          checkpointKey,
-          completed: false,
-          timedOut: true,
-        },
-        retainablePrefix: true,
-        completeSnapshot: false,
-      });
-      return {
-        ...createIncompleteDurableSyncResult(),
-        insertedTriples: materialized.committedTriples,
-        insertedDataTriples: materialized.committedTriples,
-      };
-    });
-
-    const result = await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
-      agentLike,
-      ctx,
-      'peer-agents',
-      SYSTEM_CONTEXT_GRAPHS.AGENTS,
-      1,
-    );
-
-    expect(result.complete).toBe(false);
-    expect(result.insertedTriples).toBe(0);
-    expect(replaceGraph).not.toHaveBeenCalled();
-    expect(live).toEqual([obsolete]);
-  });
-
   it('labels standalone SWM recovery admissions at the call site', async () => {
     // The sibling of the VM-recovery assertion above, and the one that had NO
     // coverage: a regression dropping this source would report SWM recovery
@@ -891,7 +691,7 @@ describe('durable sync lifecycle chain binding', () => {
   });
 
   it('keeps caller-signalled durable sync off the non-cancellable changelog lane', async () => {
-    const runChangelogLane = vi.fn(async () => ({ remainingLegacyCgs: [] }));
+    const runPrioritizedSyncPlan = vi.fn(async () => ({ remainingLegacyCgs: [] }));
     const runLegacyDurableSync = vi.fn(async () => ({
       insertedTriples: 0,
       complete: false,
@@ -906,7 +706,7 @@ describe('durable sync lifecycle chain binding', () => {
     const agentLike: any = {
       config: {},
       store: changelogCapableStore,
-      runChangelogLane,
+      runPrioritizedSyncPlan,
       runLegacyDurableSync,
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -916,7 +716,7 @@ describe('durable sync lifecycle chain binding', () => {
       'peer-changelog-capable',
       [contextGraphId],
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runPrioritizedSyncPlan).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync).not.toHaveBeenCalled();
 
     const controller = new AbortController();
@@ -930,7 +730,7 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       { signal: controller.signal },
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runPrioritizedSyncPlan).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
       signal: controller.signal,

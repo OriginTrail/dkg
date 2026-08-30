@@ -167,6 +167,24 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     await this.inner.replaceSubject(graphUri, subject, externalized, options);
   }
 
+  async replaceSubjectPrefix(
+    graphUri: string,
+    prefix: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceSubjectPrefix !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceSubjectPrefix',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    const externalized = await Promise.all(
+      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    );
+    await this.inner.replaceSubjectPrefix(graphUri, prefix, externalized, options);
+  }
+
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('update', 'SharedMemoryLiteralBlobStore');

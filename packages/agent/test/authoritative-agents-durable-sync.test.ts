@@ -6,7 +6,7 @@ import {
   createOperationContext,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   getSyncCheckpointKey,
@@ -18,20 +18,23 @@ import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 const contextGraphId = SYSTEM_CONTEXT_GRAPHS.AGENTS;
 const graph = contextGraphDataUri(contextGraphId);
 const remotePeerId = '12D3KooWAuthoritativeAgentsPeer';
-const checkpointKey = getSyncCheckpointKey(
-  remotePeerId,
-  contextGraphId,
-  false,
-  'data',
-);
+const ownedRoot = 'did:dkg:agent:0x1111111111111111111111111111111111111111';
+const otherRoot = 'did:dkg:agent:0x2222222222222222222222222222222222222222';
+const peerIdPredicate = 'https://dkg.network/ontology#peerId';
+const lastSeenPredicate = 'https://dkg.network/ontology#lastSeen';
+const multiaddrPredicate = 'https://dkg.network/ontology#multiaddr';
+const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, false, 'data');
 
-function agentQuad(id: string): Quad {
-  return {
-    subject: `did:dkg:agent:${id}`,
-    predicate: 'http://dkg.io/ontology/peerId',
-    object: `"peer-${id}"`,
-    graph,
-  };
+function quad(subject: string, predicate: string, object: string): Quad {
+  return { subject, predicate, object, graph };
+}
+
+function profile(root: string, peerId: string, lastSeen: string, multiaddr: string): Quad[] {
+  return [
+    quad(root, peerIdPredicate, `"${peerId}"`),
+    quad(root, lastSeenPredicate, `"${lastSeen}"`),
+    quad(root, multiaddrPredicate, `"${multiaddr}"`),
+  ];
 }
 
 function page(input: {
@@ -50,20 +53,30 @@ function page(input: {
   };
 }
 
-function createHarness(responses: SyncPageResult[]) {
-  const syncCheckpoints = new MemorySyncCheckpointStore();
-  const authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(
-    syncCheckpoints,
+async function graphQuads(store: OxigraphStore): Promise<Quad[]> {
+  const result = await store.query(
+    `SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
   );
-  const obsolete = agentQuad('obsolete');
-  let live = [obsolete];
-  const replaceGraph = vi.fn(async (_graph: string, quads: readonly Quad[]) => {
-    live = [...quads];
-  });
+  if (result.type !== 'bindings') return [];
+  return result.bindings.map((row) => ({
+    subject: row['s']!,
+    predicate: row['p']!,
+    object: row['o']!,
+    graph,
+  }));
+}
+
+async function createHarness(responses: SyncPageResult[], initial: Quad[] = []) {
+  const syncCheckpoints = new MemorySyncCheckpointStore();
+  const authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(syncCheckpoints);
+  const store = new OxigraphStore();
+  await store.insert(initial);
+  const replaceSubjectPrefix = vi.spyOn(store, 'replaceSubjectPrefix');
+  const markAllDirty = vi.fn();
   let responseIndex = 0;
   const agentLike: any = {
     config: { syncAgentsMeta: false },
-    store: { replaceGraph },
+    store,
     syncCheckpoints,
     authoritativeAgentSnapshots,
     fetchSyncPages: async (
@@ -99,10 +112,10 @@ function createHarness(responses: SyncPageResult[]) {
       verifiedPrivateOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
     }),
-    insertSyncedQuadsAndInvalidateListCache: vi.fn(async () => {}),
+    insertSyncedQuadsAndInvalidateListCache: vi.fn(async (quads: Quad[]) => store.insert(quads)),
     oversizeTombstoneLog: { record: vi.fn() },
     invalidateListContextGraphsCache: vi.fn(),
-    contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+    contextGraphMetaProjection: { markAllDirty },
     log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
   };
   const run = () => LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
@@ -114,19 +127,20 @@ function createHarness(responses: SyncPageResult[]) {
   );
   return {
     run,
-    replaceGraph,
+    replaceSubjectPrefix,
+    markAllDirty,
     syncCheckpoints,
     authoritativeAgentSnapshots,
-    live: () => live,
+    live: () => graphQuads(store),
   };
 }
 
-describe('authoritative AGENTS durable snapshot materialization', () => {
+describe('authority-scoped AGENTS durable snapshot materialization', () => {
   it('discards retained bytes when the responder session is superseded', async () => {
     const checkpoints = new MemorySyncCheckpointStore();
     const materializer = new AuthoritativeGraphSnapshotMaterializer(checkpoints);
     const partial = page({
-      quads: [agentQuad('partial')],
+      quads: [quad(ownedRoot, peerIdPredicate, `"${remotePeerId}"`)],
       resumedFromOffset: 0,
       nextOffset: 1,
       completed: false,
@@ -147,8 +161,11 @@ describe('authoritative AGENTS durable snapshot materialization', () => {
       retainablePrefix: true,
       completeSnapshot: false,
       commit: vi.fn(),
+      transitionCheckpoint: (decision) => {
+        expect(decision).toBe('advance');
+        checkpoints.set(checkpointKey, 1, Date.now(), 1);
+      },
     });
-    checkpoints.set(checkpointKey, 1, Date.now(), 1);
     checkpoints.setResponderSession(
       checkpointKey,
       'session-b',
@@ -165,27 +182,146 @@ describe('authoritative AGENTS durable snapshot materialization', () => {
     expect(checkpoints.get(checkpointKey)).toBeUndefined();
   });
 
-  it('installs a complete zero-offset snapshot and reports committed rows', async () => {
-    const fresh = agentQuad('fresh');
-    const harness = createHarness([page({
-      quads: [fresh],
+  it('rolls retained state and its requester checkpoint back together on a failed transition', async () => {
+    const checkpoints = new MemorySyncCheckpointStore();
+    const materializer = new AuthoritativeGraphSnapshotMaterializer(checkpoints);
+    const partial = page({
+      quads: [quad(ownedRoot, peerIdPredicate, `"${remotePeerId}"`)],
       resumedFromOffset: 0,
       nextOffset: 1,
+      completed: false,
+      timedOut: true,
+    });
+    checkpoints.setResponderSession(
+      checkpointKey,
+      'session-failure',
+      Date.now() + 60_000,
+      Date.now(),
+      undefined,
+      undefined,
+      1,
+    );
+
+    await expect(materializer.materialize({
+      page: partial,
+      verifiedQuads: partial.quads,
+      retainablePrefix: true,
+      completeSnapshot: false,
+      commit: vi.fn(),
+      transitionCheckpoint: () => { throw new Error('injected checkpoint failure'); },
+    })).rejects.toThrow('injected checkpoint failure');
+
+    expect(materializer.retainedTriples(checkpointKey)).toBe(0);
+    expect(checkpoints.get(checkpointKey)).toBeUndefined();
+  });
+
+  it('replaces only the authenticated responder profile and invalidates removed policies', async () => {
+    const oldOwned = profile(ownedRoot, remotePeerId, '2026-08-29T00:00:00.000Z', '/ip4/old');
+    const oldCapability = quad(
+      `${ownedRoot}/.well-known/genid/cap1`,
+      'https://schema.org/name',
+      '"obsolete-capability"',
+    );
+    const oldKey = quad(
+      `${ownedRoot}#x25519-obsolete`,
+      'https://dkg.network/ontology#revokedAt',
+      '"2026-08-29T00:00:00.000Z"',
+    );
+    const retainedOther = profile(
+      otherRoot,
+      'peer-other',
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/other',
+    );
+    const freshOwned = profile(
+      ownedRoot,
+      remotePeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/new',
+    );
+    const harness = await createHarness([
+      page({
+        quads: freshOwned,
+        resumedFromOffset: 0,
+        nextOffset: freshOwned.length,
+        completed: true,
+        timedOut: false,
+      }),
+    ], [...oldOwned, oldCapability, oldKey, ...retainedOther]);
+
+    const result = await harness.run();
+    const live = await harness.live();
+
+    expect(result.complete).toBe(true);
+    expect(result.insertedTriples).toBe(freshOwned.length);
+    expect(harness.replaceSubjectPrefix).toHaveBeenCalledTimes(1);
+    expect(harness.markAllDirty).toHaveBeenCalledTimes(1);
+    expect(live).toEqual(expect.arrayContaining([...freshOwned, ...retainedOther]));
+    expect(live).not.toContainEqual(oldOwned[2]);
+    expect(live).not.toContainEqual(oldCapability);
+    expect(live).not.toContainEqual(oldKey);
+  });
+
+  it('does not let an empty completed snapshot erase local or learned profiles', async () => {
+    const initial = [
+      ...profile(ownedRoot, remotePeerId, '2026-08-30T00:00:00.000Z', '/ip4/owned'),
+      ...profile(otherRoot, 'peer-other', '2026-08-30T00:00:00.000Z', '/ip4/other'),
+    ];
+    const harness = await createHarness([page({
+      quads: [],
+      resumedFromOffset: 0,
+      nextOffset: 0,
       completed: true,
       timedOut: false,
-    })]);
+    })], initial);
 
     const result = await harness.run();
 
     expect(result.complete).toBe(true);
-    expect(result.insertedTriples).toBe(1);
-    expect(result.insertedDataTriples).toBe(1);
-    expect(harness.replaceGraph).toHaveBeenCalledTimes(1);
-    expect(harness.live()).toEqual([fresh]);
+    expect(result.insertedTriples).toBe(0);
+    expect(harness.replaceSubjectPrefix).not.toHaveBeenCalled();
+    expect(harness.markAllDirty).not.toHaveBeenCalled();
+    expect(await harness.live()).toEqual(expect.arrayContaining(initial));
+  });
+
+  it('does not roll an established responder profile back to an older snapshot', async () => {
+    const current = profile(
+      ownedRoot,
+      remotePeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/current',
+    );
+    const stale = profile(
+      ownedRoot,
+      remotePeerId,
+      '2026-08-29T00:00:00.000Z',
+      '/ip4/stale',
+    );
+    const harness = await createHarness([page({
+      quads: stale,
+      resumedFromOffset: 0,
+      nextOffset: stale.length,
+      completed: true,
+      timedOut: false,
+    })], current);
+
+    const result = await harness.run();
+
+    expect(result.complete).toBe(true);
+    expect(result.insertedTriples).toBe(0);
+    expect(harness.replaceSubjectPrefix).not.toHaveBeenCalled();
+    expect(await harness.live()).toEqual(expect.arrayContaining(current));
+    expect(await harness.live()).not.toContainEqual(stale[2]);
   });
 
   it('refuses a completed nonzero suffix when no matching prefix is retained', async () => {
-    const suffix = agentQuad('suffix-only');
+    const current = profile(
+      ownedRoot,
+      remotePeerId,
+      '2026-08-29T00:00:00.000Z',
+      '/ip4/current',
+    );
+    const suffix = quad(ownedRoot, multiaddrPredicate, '"/ip4/suffix-only"');
     const response = page({
       quads: [suffix],
       resumedFromOffset: 50,
@@ -193,7 +329,7 @@ describe('authoritative AGENTS durable snapshot materialization', () => {
       completed: true,
       timedOut: false,
     });
-    const harness = createHarness([response]);
+    const harness = await createHarness([response], current);
     harness.syncCheckpoints.set(checkpointKey, 50, Date.now(), 50);
     harness.syncCheckpoints.setResponderSession(
       checkpointKey,
@@ -209,43 +345,52 @@ describe('authoritative AGENTS durable snapshot materialization', () => {
 
     expect(result.complete).toBe(false);
     expect(result.insertedTriples).toBe(0);
-    expect(harness.replaceGraph).not.toHaveBeenCalled();
-    expect(harness.live()).toEqual([agentQuad('obsolete')]);
+    expect(harness.replaceSubjectPrefix).not.toHaveBeenCalled();
+    expect(await harness.live()).toEqual(expect.arrayContaining(current));
   });
 
-  it('resumes a partial snapshot on the second invocation and commits atomically', async () => {
-    const first = agentQuad('first');
-    const second = agentQuad('second');
-    const harness = createHarness([
+  it('resumes a partial snapshot and promotes it without exposing the prefix', async () => {
+    const current = profile(
+      ownedRoot,
+      remotePeerId,
+      '2026-08-29T00:00:00.000Z',
+      '/ip4/old',
+    );
+    const first = [
+      quad(ownedRoot, peerIdPredicate, `"${remotePeerId}"`),
+      quad(ownedRoot, lastSeenPredicate, '"2026-08-30T00:00:00.000Z"'),
+    ];
+    const second = [quad(ownedRoot, multiaddrPredicate, '"/ip4/new"')];
+    const harness = await createHarness([
       page({
-        quads: [first],
+        quads: first,
         resumedFromOffset: 0,
-        nextOffset: 1,
+        nextOffset: first.length,
         completed: false,
         timedOut: true,
       }),
       page({
-        quads: [second],
-        resumedFromOffset: 1,
-        nextOffset: 2,
+        quads: second,
+        resumedFromOffset: first.length,
+        nextOffset: first.length + second.length,
         completed: true,
         timedOut: false,
       }),
-    ]);
+    ], current);
 
     const partial = await harness.run();
     expect(partial.complete).toBe(false);
     expect(partial.insertedTriples).toBe(0);
-    expect(harness.replaceGraph).not.toHaveBeenCalled();
-    expect(harness.live()).toEqual([agentQuad('obsolete')]);
-    expect(harness.authoritativeAgentSnapshots.retainedTriples(checkpointKey)).toBe(1);
+    expect(harness.replaceSubjectPrefix).not.toHaveBeenCalled();
+    expect(await harness.live()).toEqual(expect.arrayContaining(current));
+    expect(harness.authoritativeAgentSnapshots.retainedTriples(checkpointKey)).toBe(first.length);
 
     const completed = await harness.run();
     expect(completed.complete).toBe(true);
-    expect(completed.insertedTriples).toBe(2);
-    expect(completed.insertedDataTriples).toBe(2);
-    expect(harness.replaceGraph).toHaveBeenCalledTimes(1);
-    expect(harness.live()).toEqual([first, second]);
+    expect(completed.insertedTriples).toBe(first.length + second.length);
+    expect(harness.replaceSubjectPrefix).toHaveBeenCalledTimes(1);
+    expect(await harness.live()).toEqual(expect.arrayContaining([...first, ...second]));
+    expect(await harness.live()).not.toContainEqual(current[2]);
     expect(harness.authoritativeAgentSnapshots.retainedTriples(checkpointKey)).toBe(0);
   });
 });
