@@ -163,6 +163,8 @@ describe('Blazegraph namespace XML rendering', () => {
     'quote"break',
     '<entry>', // XML injection
     'a'.repeat(129), // over the length cap
+    '.', // URL dot segment
+    '..', // URL dot segment
   ])('rejects namespaces outside the conservative charset: %j', (namespace) => {
     expect(() => contract.renderBlazegraphNamespaceXml(namespace)).toThrow(/must match/);
     const result = runCli('--namespace-xml', namespace);

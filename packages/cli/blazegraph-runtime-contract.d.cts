@@ -6,6 +6,7 @@ interface BlazegraphImageMetadata {
 
 interface BlazegraphRuntimeContract {
   readonly BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: string;
+  assertBlazegraphNamespace(namespace: string): void;
   formatBlazegraphImageMetadata(metadata: unknown): string;
   parseBlazegraphImageMetadata(
     value: unknown,
