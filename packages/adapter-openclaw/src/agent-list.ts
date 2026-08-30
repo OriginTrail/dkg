@@ -15,6 +15,7 @@
  */
 
 import {
+  AGENT_CONNECTION_STATUSES,
   AGENT_LIST_WIRE_KEYS,
   serializeAgentListOptions as serializeCanonicalOptions,
   type AgentListPageOptions,
@@ -48,7 +49,9 @@ export const FIND_AGENTS_TOOL_SCHEMA_PROPERTIES = {
   skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis").' },
   connection_status: {
     type: 'string',
-    enum: ['self', 'connected', 'disconnected'],
+    // Derived, not restated: a status added to the canonical domain reaches
+    // the advertised tool contract without a second edit.
+    enum: AGENT_CONNECTION_STATUSES,
     description: 'Only agents in this live connection state.',
   },
   local: {

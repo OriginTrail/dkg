@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { AGENT_CONNECTION_STATUSES } from '@origintrail-official/dkg-core';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
@@ -31,10 +32,19 @@ describe('dkg_find_agents tool', () => {
       expect(Object.keys(props)).toContain(key);
     }
     // The machine-readable contract must match the daemon contract — an
-    // unrestricted `number` admits 0 and 1.9, both guaranteed daemon 400s.
+    // unrestricted `number` admits 0 and 1.9, both guaranteed daemon 400s,
+    // and every advertised TYPE is a user-facing contract that can regress
+    // independently of serialization.
     expect(props.limit.type).toBe('integer');
     expect(props.limit.minimum).toBe(1);
-    expect(props.connection_status.enum).toEqual(['self', 'connected', 'disconnected']);
+    expect(props.local.type).toBe('boolean');
+    expect(props.cursor.type).toBe('string');
+    expect(props.connection_status.type).toBe('string');
+    expect(props.framework.type).toBe('string');
+    expect(props.skill_type.type).toBe('string');
+    // The enum is DERIVED from dkg-core's canonical domain — same reference
+    // vocabulary, not a restated copy.
+    expect(props.connection_status.enum).toEqual([...AGENT_CONNECTION_STATUSES]);
   });
 
   it('hands every filter — old and new, well-formed and malformed — to the unvalidated client path', async () => {
