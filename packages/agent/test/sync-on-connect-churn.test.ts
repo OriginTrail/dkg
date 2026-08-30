@@ -27,7 +27,6 @@ describe('sync-on-connect churn gates', () => {
     const configuredGraph = 'configured-default-cg';
 
     const outcome = await runSyncOnConnect({
-      ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer: PEER_A,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -53,7 +52,6 @@ describe('sync-on-connect churn gates', () => {
     const refreshMetaSyncedFlags = recorder(async () => undefined);
 
     const outcome = await runSyncOnConnect({
-      ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer: PEER_A,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -78,7 +76,6 @@ describe('sync-on-connect churn gates', () => {
     const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
 
     const outcome = await runSyncOnConnect({
-      ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer: PEER_A,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],

@@ -1156,10 +1156,11 @@ describe('runSyncOnConnect callbacks', () => {
     const remotePeer = freshPeerIdString();
     const syncFromPeer = recorder(async () => 3);
     const syncSharedMemoryFromPeer = recorder(async () => 11);
+    const resolveOrdinaryWork = recorder(() => ['devnet-test']);
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
-      ordinarySharedMemoryLane: ordinaryLane(() => ['devnet-test'], syncSharedMemoryFromPeer),
+      ordinarySharedMemoryLane: ordinaryLane(resolveOrdinaryWork, syncSharedMemoryFromPeer),
       remotePeer,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -1175,6 +1176,7 @@ describe('runSyncOnConnect callbacks', () => {
 
     expect(outcome).toBe('synced');
     expect(syncFromPeer.calls).toHaveLength(1);
+    expect(resolveOrdinaryWork.calls).toEqual([]);
     expect(syncSharedMemoryFromPeer.calls).toEqual([]);
     expect(synced).toEqual([{ peerId: remotePeer, fresh: true }]);
   });

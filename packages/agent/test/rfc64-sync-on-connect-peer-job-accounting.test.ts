@@ -606,6 +606,37 @@ describe('RFC-64 peer-job accounting and order', () => {
     );
   });
 
+  it('commits at most once and rejects new phases after finalization', async () => {
+    const agent = await createUnstartedAgent('Rfc64PeerJobTerminalState');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.trySelectedSwmRetryFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: false,
+        progress: true,
+      });
+      return 'synced';
+    };
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runSelected();
+    runner.finish();
+    runner.finish();
+    runner.cancel();
+
+    expect(applyJobAccounting).toHaveBeenCalledOnce();
+    await expect(runner.runOrdinary()).rejects.toThrow(
+      'Sync-on-connect peer job is already finished',
+    );
+    expect(applyJobAccounting).toHaveBeenCalledOnce();
+  });
+
   it('discards accumulated accounting when an active peer job is cleared', async () => {
     const agent = await createUnstartedAgent('Rfc64CancelledPeerJobAccounting');
     allowAllNetworkAdmission(agent);

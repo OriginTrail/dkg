@@ -68,8 +68,8 @@ export interface SyncOnConnectContext {
   getDurableSyncContextGraphs?: () => string[];
   /** Cohesive selected lane; its scope resolver and typed producer cannot be mis-wired separately. */
   selectedSharedMemoryLane?: SelectedSharedMemorySyncLane;
-  /** Cohesive ordinary lane; orchestration and execution share one immutable work item. */
-  ordinarySharedMemoryLane: OrdinarySharedMemorySyncLane;
+  /** Absent when this run has no ordinary shared-memory phase. */
+  ordinarySharedMemoryLane?: OrdinarySharedMemorySyncLane;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<DurableSyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
@@ -532,30 +532,27 @@ export async function runSyncOnConnect(
     }
 
     durableSyncCompleted = true;
-    const ordinarySharedMemoryWork = await runNonTransportStep(() => Promise.resolve(
-      ordinarySharedMemoryLane.resolveWork(remotePeer),
-    ));
-    const allWsContextGraphIds = ordinarySharedMemoryWork.contextGraphIds;
-    const prioritySharedMemoryContextGraphIdSet = new Set(
-      admittedPrioritySharedMemoryWork?.contextGraphIds ?? [],
-    );
-    const wsContextGraphIds = allWsContextGraphIds.filter(
-      (contextGraphId) => !prioritySharedMemoryContextGraphIdSet.has(contextGraphId),
-    );
-    if (
-      wsContextGraphIds.length !== allWsContextGraphIds.length
-    ) {
-      throw new TypeError('Ordinary and selected shared-memory work scopes overlap');
-    }
-    if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
+    if (syncSharedMemoryOnConnect && ordinarySharedMemoryLane !== undefined) {
+      const ordinarySharedMemoryWork = await runNonTransportStep(() => Promise.resolve(
+        ordinarySharedMemoryLane.resolveWork(remotePeer),
+      ));
+      const allWsContextGraphIds = ordinarySharedMemoryWork.contextGraphIds;
+      const prioritySharedMemoryContextGraphIdSet = new Set(
+        admittedPrioritySharedMemoryWork?.contextGraphIds ?? [],
+      );
+      const wsContextGraphIds = allWsContextGraphIds.filter(
+        (contextGraphId) => !prioritySharedMemoryContextGraphIdSet.has(contextGraphId),
+      );
+      if (wsContextGraphIds.length !== allWsContextGraphIds.length) {
+        throw new TypeError('Ordinary and selected shared-memory work scopes overlap');
+      }
+      if (wsContextGraphIds.length === 0) return finishSyncAccounting();
       const wsSynced = await ordinarySharedMemoryWork.syncFromPeer();
       const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
       logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
       if (sharedAccounting.deferredByBackpressure) {
         logInfo(ctx, `Shared-memory sync from peer ${shortPeer} deferred by local admission pressure`);
       }
-    } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
-      logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }
 
     return finishSyncAccounting();

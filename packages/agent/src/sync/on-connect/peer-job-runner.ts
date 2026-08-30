@@ -40,6 +40,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   }>> = [];
   private automaticSelectedPhase: SyncAttempt | null;
   private pendingInitialProbe: Readonly<{ value: Probe }> | null;
+  private terminalState: 'active' | 'cancelled' | 'finished' = 'active';
 
   constructor(
     private readonly dependencies: ReconciledSyncOnConnectPeerJobDependencies<
@@ -58,11 +59,13 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   }
 
   async runSelected(recoveryPlan?: SelectedPlan): Promise<SyncReconcilerAttemptOutcome> {
+    this.assertActive();
     this.automaticSelectedPhase = null;
     return this.runSelectedPhase(() => this.dependencies.runSelected(recoveryPlan));
   }
 
   async runOrdinary(): Promise<SyncReconcilerAttemptOutcome> {
+    this.assertActive();
     const automaticSelectedPhase = this.automaticSelectedPhase;
     this.automaticSelectedPhase = null;
     let selectedError: unknown;
@@ -82,11 +85,20 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   }
 
   cancel(): void {
+    if (this.terminalState !== 'active') return;
+    this.terminalState = 'cancelled';
+    this.automaticSelectedPhase = null;
+    this.pendingInitialProbe = null;
     this.accounting.cancel();
   }
 
   finish(): void {
+    if (this.terminalState !== 'active') return;
+    this.terminalState = 'finished';
     const combined = this.accounting.combine();
+    // Close the ledger before invoking external commit logic. Repeated finish
+    // calls and any late callback from an already-running phase are inert.
+    this.accounting.cancel();
     if (combined === null) return;
     const outcome: SyncOnConnectPeerOutcome = this.selectedPhaseExecutions.length > 0
       && this.dependencies.selectedRetryStillRequired()
@@ -101,6 +113,12 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
       this.dependencies.resetBackoffBeforeRetry();
     }
     this.dependencies.commitAccounting(outcome, combined.probe);
+  }
+
+  private assertActive(): void {
+    if (this.terminalState !== 'active') {
+      throw new Error(`Sync-on-connect peer job is already ${this.terminalState}`);
+    }
   }
 
   private async acquirePhaseProbe(): Promise<Probe | null> {
@@ -126,7 +144,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
 
   private async attemptPhase(attempt: SyncAttempt): Promise<SyncReconcilerAttemptOutcome> {
     const probe = await this.acquirePhaseProbe();
-    if (probe === null) return 'not-started';
+    if (probe === null || this.terminalState !== 'active') return 'not-started';
     return executeSyncOnConnectAttempt(attempt, {
       recordAccounting: (outcome) => { this.accounting.record(outcome, probe); },
       onBackpressure: this.dependencies.logBackpressure,

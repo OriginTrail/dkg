@@ -18,24 +18,6 @@ export interface SyncOnConnectAttemptResult {
   readonly accounting: SyncOnConnectPeerOutcome | null;
 }
 
-export type SyncOnConnectAttemptExecution =
-  | Readonly<{
-      state: 'completed';
-      outcome: SyncReconcilerAttemptOutcome;
-      /** Present only when a thrown error was normalized as local backpressure. */
-      backpressureDetail?: string;
-    }>
-  | Readonly<{
-      state: 'failed';
-      error: unknown;
-    }>;
-
-export interface ClassifiedSyncOnConnectAttempt {
-  readonly execution: SyncOnConnectAttemptExecution;
-  /** Accounting emitted by the sync or synthesized from its terminal result. */
-  readonly accounting?: SyncOnConnectPeerOutcome;
-}
-
 const RETRY_ACCOUNTING: SyncOnConnectPeerOutcome = Object.freeze({
   reconcilerDisposition: 'retry',
   fresh: false,
@@ -69,62 +51,33 @@ export async function captureSyncOnConnectAttempt(
 }
 
 /**
- * Execute and classify one sync phase through the single reconciler policy.
- * Immediate callers apply the returned accounting at once; queued peer jobs
- * aggregate the same value and apply it once when every admitted lane drains.
- */
-export async function classifySyncOnConnectAttempt(
-  attempt: () => Promise<SyncOnConnectAttemptResult>,
-): Promise<ClassifiedSyncOnConnectAttempt> {
-  try {
-    const result = await attempt();
-    return {
-      execution: { state: 'completed', outcome: result.outcome },
-      ...(result.accounting === null ? {} : { accounting: result.accounting }),
-    };
-  } catch (error: unknown) {
-    const backpressureError = getSyncBackpressureBusyError(error);
-    if (backpressureError) {
-      return {
-        execution: {
-          state: 'completed',
-          outcome: 'deferred-backpressure',
-          backpressureDetail: backpressureError.message,
-        },
-      };
-    }
-    const retryEligible = !(error instanceof SyncOnConnectPostSyncError)
-      || error.backoffEligible;
-    return {
-      execution: { state: 'failed', error },
-      ...(retryEligible ? { accounting: RETRY_ACCOUNTING } : {}),
-    };
-  }
-}
-
-/**
  * Apply the common attempt policy to either an immediate accounting sink or a
  * deferred peer-job accumulator. Callers only choose the sink; normalization,
  * local-backpressure logging, and error propagation stay centralized here.
  */
 export async function executeSyncOnConnectAttempt(
-  attempt: Parameters<typeof classifySyncOnConnectAttempt>[0],
+  attempt: () => Promise<SyncOnConnectAttemptResult>,
   options: Readonly<{
     recordAccounting: (accounting: SyncOnConnectPeerOutcome) => void;
     onBackpressure: (detail?: string) => void;
   }>,
 ): Promise<SyncReconcilerAttemptOutcome> {
-  const classified = await classifySyncOnConnectAttempt(attempt);
-  if (classified.accounting !== undefined) {
-    options.recordAccounting(classified.accounting);
+  try {
+    const result = await attempt();
+    if (result.accounting !== null) options.recordAccounting(result.accounting);
+    if (result.outcome === 'deferred-backpressure') options.onBackpressure();
+    return result.outcome;
+  } catch (error: unknown) {
+    const backpressureError = getSyncBackpressureBusyError(error);
+    if (backpressureError) {
+      options.onBackpressure(backpressureError.message);
+      return 'deferred-backpressure';
+    }
+    if (!(error instanceof SyncOnConnectPostSyncError) || error.backoffEligible) {
+      options.recordAccounting(RETRY_ACCOUNTING);
+    }
+    throw error;
   }
-  if (classified.execution.state === 'failed') {
-    throw classified.execution.error;
-  }
-  if (classified.execution.outcome === 'deferred-backpressure') {
-    options.onBackpressure(classified.execution.backpressureDetail);
-  }
-  return classified.execution.outcome;
 }
 
 export interface CombinedSyncOnConnectPeerAccounting<Probe> {

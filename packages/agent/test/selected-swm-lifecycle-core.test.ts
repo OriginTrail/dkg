@@ -26,7 +26,6 @@ import {
   type SelectedProviderSelectionAgent,
   type SelectedSwmLifecycleAgentFixture,
 } from './selected-swm-test-helpers.js';
-import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
   it('accounts a real complete private-only no-op without reconciler backoff', async () => {
@@ -596,7 +595,6 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
       const onSyncAccounting = vi.fn();
       const outcome = await runSyncOnConnect({
-        ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
         remotePeer: PEER,
         syncingPeers: new Set(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
