@@ -139,9 +139,9 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   }
 
   /**
-   * Explicit dormant R1.1 entrypoint. Reconcile one complete, already-verified
-   * target through deterministic one-KA successors. Ordinary SHARE does not
-   * call this method until the later runtime activation slice.
+   * Reconcile one complete, already-verified target through deterministic
+   * one-KA successors. The selected-CG lifecycle calls this after durable SWM
+   * inventory mutations; explicit callers retain the same repair surface.
    */
   async reconcileRfc64PublicRootCatalogExactSetV1(
     this: DKGAgent,
