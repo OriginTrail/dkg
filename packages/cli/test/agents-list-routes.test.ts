@@ -3,7 +3,7 @@ import {
   paginateAgentRows,
   parseAgentsListQuery,
 } from '../src/daemon/routes/agents-list.js';
-import { serializeAgentListOptions } from '../src/agents-list-wire.js';
+import { serializeAgentListOptions } from '@origintrail-official/dkg-core';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import {

@@ -46,7 +46,7 @@ import {
   AGENT_LIST_WIRE_KEY_VALUES,
   type AgentConnectionStatus,
   type AgentListFilters,
-} from '../../agents-list-wire.js';
+} from '@origintrail-official/dkg-core';
 
 export type { AgentConnectionStatus };
 

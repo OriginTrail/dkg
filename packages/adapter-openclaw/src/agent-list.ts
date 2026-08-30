@@ -14,33 +14,27 @@
  * return the full ~150 KB registry instead of the daemon's 400.
  */
 
-/** Strict options for {@link DkgClient.getAgents}. */
-export interface AgentListOptions {
-  framework?: string;
-  skillType?: string;
+import {
+  AGENT_LIST_WIRE_KEYS,
+  serializeAgentListOptions as serializeCanonicalOptions,
+  type AgentListPageOptions,
+} from '@origintrail-official/dkg-core';
+
+/**
+ * Strict options for {@link DkgClient.getAgents}: the REPOSITORY-WIDE
+ * canonical options from dkg-core, plus this adapter's one local concern —
+ * the deprecated pre-GH#310 `skill_type` alias.
+ */
+export interface AgentListOptions extends AgentListPageOptions {
   /**
    * @deprecated Use `skillType`. Compatibility alias from the pre-GH#310
    * signature; both spellings serialize to the daemon's `skill_type`.
    * Supplying both with different values is an error.
    */
   skill_type?: string;
-  connectionStatus?: 'self' | 'connected' | 'disconnected';
-  local?: boolean;
-  limit?: number;
-  cursor?: string;
 }
 
-type CanonicalOption = Exclude<keyof AgentListOptions, 'skill_type'>;
-
-/** Canonical option -> query parameter. `satisfies` keeps the map total. */
-const OPTION_WIRE_KEYS = {
-  framework: 'framework',
-  skillType: 'skill_type',
-  connectionStatus: 'connectionStatus',
-  local: 'local',
-  limit: 'limit',
-  cursor: 'cursor',
-} as const satisfies Record<CanonicalOption, string>;
+type CanonicalOption = keyof AgentListPageOptions;
 
 /**
  * The dkg_find_agents JSON-schema properties — THE canonical declaration of
@@ -78,7 +72,7 @@ export type FindAgentsToolArg = keyof typeof FIND_AGENTS_TOOL_SCHEMA_PROPERTIES;
 /**
  * dkg_find_agents tool arg -> canonical option. EXHAUSTIVE over the derived
  * vocabulary, and values are OPTION KEYS, so the wire spelling is always
- * looked up through {@link OPTION_WIRE_KEYS} — an argument advertised in the
+ * looked up through dkg-core's {@link AGENT_LIST_WIRE_KEYS} — an argument advertised in the
  * schema without a mapping here does not compile.
  */
 export const RAW_ARG_TO_OPTION = {
@@ -90,28 +84,28 @@ export const RAW_ARG_TO_OPTION = {
   cursor: 'cursor',
 } as const satisfies Record<FindAgentsToolArg, CanonicalOption>;
 
-/** Serialize strict SDK options. `undefined` means "omit". */
+/**
+ * Serialize strict SDK options: resolve the adapter-local alias, then hand
+ * the canonical options to the SHARED dkg-core serializer — this adapter
+ * owns no wire spellings of its own.
+ */
 export function serializeAgentListOptions(options: AgentListOptions): string {
-  const { skill_type: deprecatedSkillType, ...rest } = options;
+  const { skill_type: deprecatedSkillType, ...canonical } = options;
   if (
     deprecatedSkillType !== undefined &&
-    rest.skillType !== undefined &&
-    deprecatedSkillType !== rest.skillType
+    canonical.skillType !== undefined &&
+    deprecatedSkillType !== canonical.skillType
   ) {
     throw new Error(
       "Conflicting skill filters: 'skillType' and the deprecated 'skill_type' alias differ",
     );
   }
-  const canonical: Record<CanonicalOption, unknown> = {
-    ...rest,
-    skillType: rest.skillType ?? deprecatedSkillType,
-  } as Record<CanonicalOption, unknown>;
-  const params = new URLSearchParams();
-  for (const option of Object.keys(OPTION_WIRE_KEYS) as CanonicalOption[]) {
-    const value = canonical[option];
-    if (value !== undefined) params.set(OPTION_WIRE_KEYS[option], String(value));
-  }
-  return params.toString();
+  return serializeCanonicalOptions({
+    ...canonical,
+    ...(canonical.skillType ?? deprecatedSkillType) !== undefined
+      ? { skillType: canonical.skillType ?? deprecatedSkillType }
+      : {},
+  });
 }
 
 /**
@@ -129,7 +123,7 @@ export function serializeRawAgentListArgs(args: Record<string, unknown>): string
   for (const [rawKey, value] of Object.entries(args)) {
     if (value === undefined || value === null) continue;
     const wireKey = Object.hasOwn(RAW_ARG_TO_OPTION, rawKey)
-      ? OPTION_WIRE_KEYS[RAW_ARG_TO_OPTION[rawKey as FindAgentsToolArg]]
+      ? AGENT_LIST_WIRE_KEYS[RAW_ARG_TO_OPTION[rawKey as FindAgentsToolArg]]
       : rawKey;
     params.set(wireKey, String(value));
   }

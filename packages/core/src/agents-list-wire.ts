@@ -2,11 +2,11 @@
  * The GET /api/agents wire contract, defined ONCE (GH#310).
  *
  * The daemon 400s on unknown parameter names and bad values, so the mapping
- * from client options to query keys is load-bearing. Both sides of the
- * contract inside this package — the route parser
- * (daemon/routes/agents-list.ts) and ApiClient.agents() — derive their
- * vocabulary from this module, so a route change that touches the filter
- * surface breaks the client's compile rather than drifting silently.
+ * from client options to query keys is load-bearing — and it is REPOSITORY-
+ * WIDE: the cli route parser and ApiClient, the OpenClaw adapter, and the
+ * MCP client all derive their vocabulary from this one module, so a change
+ * to the filter surface breaks every consumer's compile instead of drifting
+ * silently in whichever package was not edited.
  */
 
 export const AGENT_CONNECTION_STATUSES = ['self', 'connected', 'disconnected'] as const;

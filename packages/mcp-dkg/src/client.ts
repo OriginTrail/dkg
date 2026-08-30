@@ -6,6 +6,14 @@
  * `/api/context-graph/*`).
  */
 import type { DkgConfig } from './config.js';
+import {
+  serializeAgentListOptions,
+  type AgentConnectionStatus,
+  type AgentListFilters,
+  type AgentListPageOptions,
+} from '@origintrail-official/dkg-core';
+
+export type { AgentListFilters, AgentListPageOptions } from '@origintrail-official/dkg-core';
 
 export interface SparqlBinding {
   [key: string]: {
@@ -478,7 +486,7 @@ export class DkgClient {
 
   /** One page of the agent registry, with the state needed to continue it. */
   async listAgentsPage(options: AgentListPageOptions = {}): Promise<AgentListPage> {
-    const qs = serializeAgentListQuery(options);
+    const qs = serializeAgentListOptions(options);
     const r = await this.request<{ agents?: AgentListRow[]; nextCursor?: string }>(
       'GET',
       `/api/agents${qs ? `?${qs}` : ''}`,
@@ -1367,22 +1375,6 @@ export function bindingValue(cell: SparqlBinding[string] | undefined): string {
   return cell.value ?? '';
 }
 
-/** Filters accepted by every agent-list call. Maps 1:1 onto GET /api/agents. */
-export interface AgentListFilters {
-  framework?: string;
-  /** Serialized as the daemon's `skill_type` parameter. */
-  skillType?: string;
-  connectionStatus?: 'self' | 'connected' | 'disconnected';
-  local?: boolean;
-}
-
-/** {@link AgentListFilters} plus the truncating/pagination controls. */
-export interface AgentListPageOptions extends AgentListFilters {
-  limit?: number;
-  /** Opaque cursor from a previous page. Repeat the same filters. */
-  cursor?: string;
-}
-
 /**
  * A registry row as GET /api/agents actually returns it. Identity fields and
  * the enrichment block are GUARANTEES of the route (the SPARQL selection
@@ -1395,7 +1387,7 @@ export interface AgentListRow {
   agentUri: string;
   name: string;
   peerId: string;
-  connectionStatus: 'self' | 'connected' | 'disconnected';
+  connectionStatus: AgentConnectionStatus;
   connectionTransport: string | null;
   connectionDirection: string | null;
   connectedSinceMs: number | null;
@@ -1411,18 +1403,3 @@ export interface AgentListPage {
   nextCursor?: string;
 }
 
-/**
- * The ONE serializer both agent-list methods share — the daemon 400s on
- * unknown parameter names, so this mapping is a hard contract, and two
- * copies of it would drift.
- */
-function serializeAgentListQuery(options: AgentListPageOptions): string {
-  const params = new URLSearchParams();
-  if (options.framework !== undefined) params.set('framework', options.framework);
-  if (options.skillType !== undefined) params.set('skill_type', options.skillType);
-  if (options.connectionStatus !== undefined) params.set('connectionStatus', options.connectionStatus);
-  if (options.local !== undefined) params.set('local', String(options.local));
-  if (options.limit !== undefined) params.set('limit', String(options.limit));
-  if (options.cursor !== undefined) params.set('cursor', options.cursor);
-  return params.toString();
-}

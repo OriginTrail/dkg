@@ -17,7 +17,7 @@ import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
-} from './agents-list-wire.js';
+} from '@origintrail-official/dkg-core';
 import { loadTokens } from './auth.js';
 import {
   finalizedPublishOptionsPayload,
