@@ -3,6 +3,11 @@ import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import {
+  captureSyncOnConnectAttempt,
+  executeSyncOnConnectAttempt,
+} from '../src/sync/on-connect/attempt-accounting.js';
+import { SyncOnConnectPostSyncError } from '../src/sync/on-connect/sync-on-connect.js';
+import {
   allowAllNetworkAdmission,
   createRfc64CoordinatorStub,
   createUnstartedAgent,
@@ -14,6 +19,50 @@ import {
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
 describe('RFC-64 peer-job accounting and order', () => {
+  it('executes the ordinary-only job plan as optional selected then invariant ordinary', async () => {
+    const agent = await createUnstartedAgent('Rfc64OrdinaryOnlyPhasePlan');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.config.syncContextGraphs = ['selected-cg'];
+    agent.config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { contextGraphId: 'selected-cg', accessPolicy: 0 } },
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    const order: string[] = [];
+    agent.trySelectedSwmRetryFromPeer = vi.fn(async (_peerId, onSyncAccounting) => {
+      order.push('selected');
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: false,
+        progress: true,
+      });
+      return 'synced';
+    });
+    agent.trySyncFromPeer = vi.fn(async (_peerId, onSyncAccounting) => {
+      order.push('ordinary');
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      });
+      return 'synced';
+    });
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runOrdinary();
+    runner.finish();
+
+    expect(order).toEqual(['selected', 'ordinary']);
+    expect(agent.trySelectedSwmRetryFromPeer).toHaveBeenCalledOnce();
+    expect(agent.trySyncFromPeer).toHaveBeenCalledOnce();
+  });
+
   it('replays the real ordinary lane past backoff without duplicating selected SWM', async () => {
     const agent = await createUnstartedAgent('Rfc64RealOrdinaryReplay');
     allowAllNetworkAdmission(agent);
@@ -203,7 +252,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     });
     agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
     agent.trySelectedSwmRetryFromPeer = async () => 'deferred-backpressure';
-    agent.tryOrdinarySyncFromPeer = async (
+    agent.trySyncFromPeer = async (
       _peerId,
       onSyncAccounting,
     ) => {
@@ -250,7 +299,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       });
       return 'synced';
     };
-    agent.tryOrdinarySyncFromPeer = async (_peerId, onSyncAccounting) => {
+    agent.trySyncFromPeer = async (_peerId, onSyncAccounting) => {
       onSyncAccounting?.({
         reconcilerDisposition: 'clear',
         fresh: true,
@@ -395,7 +444,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       });
       return 'synced' as const;
     });
-    agent.tryOrdinarySyncFromPeer = ordinaryRun;
+    agent.trySyncFromPeer = ordinaryRun;
     const selectedErrors: unknown[] = [];
     const ordinaryErrors: unknown[] = [];
     const authorized = {
@@ -431,6 +480,130 @@ describe('RFC-64 peer-job accounting and order', () => {
       expect.any(Object),
     );
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+  });
+
+  it('commits a later ordinary failure against its contemporaneous connection probe', async () => {
+    const agent = await createUnstartedAgent('Rfc64PeerJobLaterConnectionFailure');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    const probeA = { protocolsKey: PROTOCOL_SYNC, connectionKey: 'connection-a' };
+    const probeB = { protocolsKey: PROTOCOL_SYNC, connectionKey: 'connection-b' };
+    const probes = [probeA, probeB];
+    agent.getSyncReconcilerProbe = vi.fn(async () => probes.shift()!);
+    agent.trySelectedSwmRetryFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: false,
+        progress: true,
+      });
+      return 'synced';
+    };
+    const ordinaryFailure = new Error('ordinary failed after reconnect');
+    agent.trySyncFromPeer = async () => { throw ordinaryFailure; };
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runSelected();
+    await expect(runner.runOrdinary()).rejects.toBe(ordinaryFailure);
+    runner.finish();
+
+    expect(agent.getSyncReconcilerProbe).toHaveBeenCalledTimes(2);
+    expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+      failures: 1,
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: 'connection-b',
+    });
+    expect(agent.hasSyncReconcilerProbeChanged(
+      agent.syncReconcilerBackoff.get(PEER_A),
+      probeB,
+    )).toBe(false);
+  });
+
+  it('keeps immediate retry when only the old connection owned the failure', async () => {
+    const agent = await createUnstartedAgent('Rfc64PeerJobOldConnectionFailure');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    const probeA = { protocolsKey: PROTOCOL_SYNC, connectionKey: 'connection-a' };
+    const probeB = { protocolsKey: PROTOCOL_SYNC, connectionKey: 'connection-b' };
+    const probes = [probeA, probeB];
+    agent.getSyncReconcilerProbe = vi.fn(async () => probes.shift()!);
+    const selectedFailure = new Error('selected failed on old connection');
+    agent.trySelectedSwmRetryFromPeer = async () => { throw selectedFailure; };
+    agent.trySyncFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      });
+      return 'synced';
+    };
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await expect(runner.runSelected()).rejects.toBe(selectedFailure);
+    await runner.runOrdinary();
+    runner.finish();
+
+    expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+      failures: 1,
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: 'connection-a',
+    });
+    expect(agent.hasSyncReconcilerProbeChanged(
+      agent.syncReconcilerBackoff.get(PEER_A),
+      probeB,
+    )).toBe(true);
+  });
+
+  it.each([
+    ['defer then clear', true],
+    ['clear then defer', false],
+  ])('preserves direct reducer defer precedence for %s', async (_scenario, selectedDefers) => {
+    const agent = await createUnstartedAgent(
+      selectedDefers ? 'Rfc64PeerJobDeferClear' : 'Rfc64PeerJobClearDefer',
+    );
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.trySelectedSwmRetryFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.(selectedDefers
+        ? { reconcilerDisposition: 'defer', fresh: false, progress: true }
+        : { reconcilerDisposition: 'clear', fresh: true, progress: false });
+      return 'synced';
+    };
+    agent.trySyncFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.(selectedDefers
+        ? { reconcilerDisposition: 'clear', fresh: true, progress: false }
+        : { reconcilerDisposition: 'defer', fresh: false, progress: true });
+      return 'synced';
+    };
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runSelected();
+    await runner.runOrdinary();
+    runner.finish();
+
+    expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(false);
+    expect(applyJobAccounting).toHaveBeenCalledOnce();
+    expect(applyJobAccounting).toHaveBeenCalledWith(
+      PEER_A,
+      {
+        reconcilerDisposition: 'defer',
+        fresh: false,
+        progress: true,
+      },
+      expect.any(Object),
+    );
   });
 
   it('discards accumulated accounting when an active peer job is cleared', async () => {
@@ -501,5 +674,90 @@ describe('RFC-64 peer-job accounting and order', () => {
     expect(agent.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
     expect(agent.lastSyncProgressAt.has(PEER_A)).toBe(false);
     expect(agent.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+  });
+});
+
+describe('sync-on-connect structured attempt accounting', () => {
+  it('turns callback-free success into one explicit retry result', async () => {
+    await expect(captureSyncOnConnectAttempt(async () => 'synced')).resolves.toEqual({
+      outcome: 'synced',
+      accounting: {
+        reconcilerDisposition: 'retry',
+        fresh: false,
+        progress: false,
+      },
+    });
+  });
+
+  it('carries explicit retry accounting in the terminal result', async () => {
+    const result = await captureSyncOnConnectAttempt(async (recordAccounting) => {
+      recordAccounting({
+        reconcilerDisposition: 'retry',
+        fresh: false,
+        progress: true,
+      });
+      return 'synced';
+    });
+    const recordAccounting = vi.fn();
+
+    await expect(executeSyncOnConnectAttempt(async () => result, {
+      recordAccounting,
+      onBackpressure: vi.fn(),
+    })).resolves.toBe('synced');
+    expect(recordAccounting).toHaveBeenCalledOnce();
+    expect(recordAccounting).toHaveBeenCalledWith({
+      reconcilerDisposition: 'retry',
+      fresh: false,
+      progress: true,
+    });
+  });
+
+  it('normalizes local backpressure without inventing retry accounting', async () => {
+    const recordAccounting = vi.fn();
+    const onBackpressure = vi.fn();
+
+    await expect(executeSyncOnConnectAttempt(async () => {
+      throw new SyncBackpressureBusyError('sync queue full');
+    }, {
+      recordAccounting,
+      onBackpressure,
+    })).resolves.toBe('deferred-backpressure');
+    expect(recordAccounting).not.toHaveBeenCalled();
+    expect(onBackpressure).toHaveBeenCalledWith('sync queue full');
+  });
+
+  it('keeps thrown post-sync retry eligibility in the structured policy', async () => {
+    const nonRetryable = new SyncOnConnectPostSyncError(
+      'peer-a',
+      new Error('discovery failed'),
+      { backoffEligible: false },
+    );
+    const retryable = new SyncOnConnectPostSyncError(
+      'peer-a',
+      new Error('shared memory failed'),
+      { backoffEligible: true },
+    );
+    const recordNonRetryable = vi.fn();
+    const recordRetryable = vi.fn();
+
+    await expect(executeSyncOnConnectAttempt(async () => {
+      throw nonRetryable;
+    }, {
+      recordAccounting: recordNonRetryable,
+      onBackpressure: vi.fn(),
+    })).rejects.toBe(nonRetryable);
+    expect(recordNonRetryable).not.toHaveBeenCalled();
+
+    await expect(executeSyncOnConnectAttempt(async () => {
+      throw retryable;
+    }, {
+      recordAccounting: recordRetryable,
+      onBackpressure: vi.fn(),
+    })).rejects.toBe(retryable);
+    expect(recordRetryable).toHaveBeenCalledWith({
+      reconcilerDisposition: 'retry',
+      fresh: false,
+      progress: false,
+    });
   });
 });

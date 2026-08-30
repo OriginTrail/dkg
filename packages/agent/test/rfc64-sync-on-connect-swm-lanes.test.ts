@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   allowAllNetworkAdmission,
   createRfc64CoordinatorStub,
@@ -77,6 +78,8 @@ describe('RFC-64 SWM lane partition and admission', () => {
       .toBe(true);
     await flushTimers();
     expect(queuedRun).toHaveBeenCalledOnce();
+    agent.createSyncOnConnectPeerJobRunner =
+      LifecycleSyncMethods.prototype.createSyncOnConnectPeerJobRunner as typeof agent.createSyncOnConnectPeerJobRunner;
 
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
     agent.planSharedMemorySyncContextGraphs = async () => ({
@@ -94,7 +97,11 @@ describe('RFC-64 SWM lane partition and admission', () => {
     agent.refreshMetaSyncedFlags = async () => undefined;
     agent.discoverContextGraphsFromStore = async () => 0;
 
-    expect(await agent.trySyncFromPeer(PEER_A, undefined, 'reconcile'))
+    expect(await agent.attemptSyncFromPeerWithReconcilerAccounting(
+      PEER_A,
+      { protocolsKey: PROTOCOL_SYNC, connectionKey: null },
+      'reconcile',
+    ))
       .toBe('synced');
     expect(agent.rfc64SwmRecoveryCoordinatorV1.admitSelectedPublic)
       .toHaveBeenCalledWith(PEER_A, ['selected-cg']);
@@ -173,7 +180,11 @@ describe('RFC-64 SWM lane partition and admission', () => {
     agent.refreshMetaSyncedFlags = async () => undefined;
     agent.discoverContextGraphsFromStore = async () => 0;
 
-    expect(await agent.trySyncFromPeer(PEER_A, undefined, 'reconcile'))
+    expect(await agent.attemptSyncFromPeerWithReconcilerAccounting(
+      PEER_A,
+      { protocolsKey: PROTOCOL_SYNC, connectionKey: null },
+      'reconcile',
+    ))
       .toBe('synced');
 
     expect(planner).toHaveBeenCalledTimes(2);

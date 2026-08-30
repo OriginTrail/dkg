@@ -12,6 +12,12 @@ export type SyncReconcilerAttemptOutcome =
   | 'not-started'
   | 'deferred-backpressure';
 
+/** One explicit terminal value for a callback-based legacy sync operation. */
+export interface SyncOnConnectAttemptResult {
+  readonly outcome: SyncOnConnectOutcome | 'not-started';
+  readonly accounting: SyncOnConnectPeerOutcome | null;
+}
+
 export type SyncOnConnectAttemptExecution =
   | Readonly<{
       state: 'completed';
@@ -44,27 +50,37 @@ function outcomeNeedsRetryAccounting(outcome: SyncReconcilerAttemptOutcome): boo
 }
 
 /**
+ * Adapt the legacy sync callback at one boundary. Downstream attempt policy
+ * consumes only the returned terminal value; it never inspects mutable caller
+ * state or waits for a second accounting channel.
+ */
+export async function captureSyncOnConnectAttempt(
+  attempt: (
+    onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
+  ) => Promise<SyncOnConnectOutcome | 'not-started'>,
+): Promise<SyncOnConnectAttemptResult> {
+  let accounting: SyncOnConnectPeerOutcome | undefined;
+  const outcome = await attempt((next) => { accounting = next; });
+  return Object.freeze({
+    outcome,
+    accounting: accounting
+      ?? (outcomeNeedsRetryAccounting(outcome) ? RETRY_ACCOUNTING : null),
+  });
+}
+
+/**
  * Execute and classify one sync phase through the single reconciler policy.
  * Immediate callers apply the returned accounting at once; queued peer jobs
  * aggregate the same value and apply it once when every admitted lane drains.
  */
 export async function classifySyncOnConnectAttempt(
-  attempt: (
-    onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
-  ) => Promise<SyncOnConnectOutcome | 'not-started'>,
+  attempt: () => Promise<SyncOnConnectAttemptResult>,
 ): Promise<ClassifiedSyncOnConnectAttempt> {
-  let accounting: SyncOnConnectPeerOutcome | undefined;
   try {
-    const outcome = await attempt((next) => { accounting = next; });
-    const synthesizedAccounting = accounting === undefined
-      && outcomeNeedsRetryAccounting(outcome)
-      ? RETRY_ACCOUNTING
-      : undefined;
+    const result = await attempt();
     return {
-      execution: { state: 'completed', outcome },
-      ...(accounting === undefined
-        ? synthesizedAccounting === undefined ? {} : { accounting: synthesizedAccounting }
-        : { accounting }),
+      execution: { state: 'completed', outcome: result.outcome },
+      ...(result.accounting === null ? {} : { accounting: result.accounting }),
     };
   } catch (error: unknown) {
     const backpressureError = getSyncBackpressureBusyError(error);
@@ -111,48 +127,61 @@ export async function executeSyncOnConnectAttempt(
   return classified.execution.outcome;
 }
 
-export interface CombinedSyncOnConnectPeerAccounting {
+export interface CombinedSyncOnConnectPeerAccounting<Probe> {
   readonly outcome: SyncOnConnectPeerOutcome;
+  /** Probe owned by the phase that determines the final disposition. */
+  readonly probe: Probe;
   readonly resetBackoffBeforeRetry: boolean;
 }
 
 /** One cancellation-aware ledger for every phase admitted to a peer job. */
-export class SyncOnConnectPeerAccountingAccumulator {
-  private readonly outcomes: SyncOnConnectPeerOutcome[] = [];
+export class SyncOnConnectPeerAccountingAccumulator<Probe> {
+  private readonly entries: Array<Readonly<{
+    outcome: SyncOnConnectPeerOutcome;
+    probe: Probe;
+  }>> = [];
   private cancelled = false;
 
-  record(accounting: SyncOnConnectPeerOutcome | undefined): void {
-    if (!this.cancelled && accounting !== undefined) this.outcomes.push(accounting);
+  record(accounting: SyncOnConnectPeerOutcome | undefined, probe: Probe): void {
+    if (!this.cancelled && accounting !== undefined) {
+      this.entries.push({ outcome: accounting, probe });
+    }
   }
 
   cancel(): void {
     this.cancelled = true;
-    this.outcomes.length = 0;
+    this.entries.length = 0;
   }
 
-  combine(): CombinedSyncOnConnectPeerAccounting | null {
-    if (this.cancelled || this.outcomes.length === 0) return null;
+  combine(): CombinedSyncOnConnectPeerAccounting<Probe> | null {
+    if (this.cancelled || this.entries.length === 0) return null;
     let disposition: SyncOnConnectPeerOutcome['reconcilerDisposition'] | undefined;
+    let ownerProbe = this.entries[0]!.probe;
     let progress = false;
     let anyFresh = false;
     let effectiveClearBeforeRetry = false;
     let resetBackoffBeforeRetry = false;
     // Reduce in phase order. A retry/defer owner cannot be erased by a later
     // clear, while clear-before-retry begins a fresh backoff generation.
-    for (const outcome of this.outcomes) {
+    for (const { outcome, probe } of this.entries) {
       progress ||= outcome.progress;
       anyFresh ||= outcome.fresh;
       if (outcome.reconcilerDisposition === 'retry') {
         resetBackoffBeforeRetry ||= effectiveClearBeforeRetry;
         disposition = 'retry';
+        ownerProbe = probe;
         continue;
       }
       if (outcome.reconcilerDisposition === 'defer') {
-        if (disposition !== 'retry') disposition = 'defer';
+        if (disposition !== 'retry') {
+          disposition = 'defer';
+          ownerProbe = probe;
+        }
         continue;
       }
       if (disposition === undefined || disposition === 'clear') {
         disposition = 'clear';
+        ownerProbe = probe;
         effectiveClearBeforeRetry = true;
       }
     }
@@ -163,6 +192,7 @@ export class SyncOnConnectPeerAccountingAccumulator {
           fresh: anyFresh,
           progress,
         },
+        probe: ownerProbe,
         resetBackoffBeforeRetry: false,
       };
     }
@@ -172,6 +202,7 @@ export class SyncOnConnectPeerAccountingAccumulator {
         fresh: false,
         progress,
       },
+      probe: ownerProbe,
       resetBackoffBeforeRetry,
     };
   }

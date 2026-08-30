@@ -81,9 +81,11 @@ export function installSyncOnConnectPeerJobStub(
   agent.createSyncOnConnectPeerJobRunner = (remotePeer) => ({
     runOrdinary: async () => {
       await callbacks.runOrdinary?.(remotePeer);
+      return 'not-started' as const;
     },
     runSelected: async (recoveryPlan) => {
       await callbacks.runSelected?.(remotePeer, recoveryPlan);
+      return 'not-started' as const;
     },
     cancel: () => { callbacks.cancel?.(remotePeer); },
     finish: () => { callbacks.finish?.(remotePeer); },

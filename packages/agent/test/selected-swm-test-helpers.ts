@@ -321,15 +321,44 @@ export interface SelectedProviderSelectionAgent {
 export async function callTrySyncFromPeer(
   this: SelectedProviderSelectionAgent,
   remotePeer: string,
-  onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
+  onSyncAccounting?: (outcome: {
+    reconcilerDisposition: 'clear' | 'retry' | 'defer';
+    fresh: boolean;
+    progress: boolean;
+  }) => void,
 ): Promise<unknown> {
-  return LifecycleSyncMethods.prototype.trySyncFromPeerWithSelectedLaneAdmission.call(
-    this as never,
+  const agent = this as SelectedProviderSelectionAgent & {
+    trySelectedSwmRetryFromPeer:
+      typeof LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
+    trySyncFromPeer: typeof LifecycleSyncMethods.prototype.trySyncFromPeer;
+    getSyncReconcilerProbe: () => Promise<{
+      protocolsKey: string | null;
+      connectionKey: string | null;
+    }>;
+  };
+  agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
+  agent.trySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer;
+  agent.getSyncReconcilerProbe = async () => ({
+    protocolsKey: null,
+    connectionKey: null,
+  });
+  const applyAccounting = agent.applySyncOnConnectAccounting;
+  if (onSyncAccounting) {
+    agent.applySyncOnConnectAccounting = (
+      _peerId: string,
+      outcome: Parameters<typeof onSyncAccounting>[0],
+    ) => { onSyncAccounting(outcome); };
+  }
+  const runner = LifecycleSyncMethods.prototype.createSyncOnConnectPeerJobRunner.call(
+    agent as never,
     remotePeer,
-    onSyncAccounting as never,
-    'on-connect',
-    'admit',
   );
+  try {
+    return await runner.runOrdinary();
+  } finally {
+    runner.finish();
+    agent.applySyncOnConnectAccounting = applyAccounting;
+  }
 }
 
 export interface AdmissionProbe {

@@ -6,6 +6,10 @@ import {
   runSelectedSharedMemoryRetry,
   runSyncOnConnect,
 } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  captureSyncOnConnectAttempt,
+  executeSyncOnConnectAttempt,
+} from '../src/sync/on-connect/attempt-accounting.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import {
@@ -75,11 +79,9 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
         log: { info: () => {} },
       };
-      await LifecycleSyncMethods.prototype.accountSyncAttemptWithReconciler.call(
-        accountingAgent as never,
-        PEER,
-        {} as never,
-        (onSyncAccounting) => runSelectedSharedMemoryRetry({
+      await executeSyncOnConnectAttempt(
+        () => captureSyncOnConnectAttempt((onSyncAccounting) => (
+          runSelectedSharedMemoryRetry({
           remotePeer: PEER,
           syncingPeers: new Set(),
           getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -93,7 +95,19 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
             if (outcome) onSyncAccounting(outcome);
           },
           logInfo: () => {},
-        }),
+          })
+        )),
+        {
+          recordAccounting: (outcome) => {
+            accountingAgent.applySyncOnConnectAccounting.call(
+              accountingAgent as never,
+              PEER,
+              outcome,
+              {} as never,
+            );
+          },
+          onBackpressure: () => {},
+        },
       );
 
       expect(backoff.has(PEER)).toBe(false);
@@ -425,12 +439,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       { contextGraphIds: [publicCg], selected: true },
       { contextGraphIds: [privateCg], selected: false },
     ]);
-    expect(plannedScopes.length).toBeGreaterThan(0);
-    expect(plannedScopes.every((scope) => (
-      scope.includes(publicCg)
-      && scope.includes(privateCg)
-      && !scope.includes(unselectedPublicCg)
-    ))).toBe(true);
+    expect(plannedScopes).toEqual([
+      [publicCg],
+      [publicCg, privateCg],
+    ]);
+    expect(plannedScopes.every((scope) => !scope.includes(unselectedPublicCg)))
+      .toBe(true);
   });
 
   it('does not stamp a max-pass incomplete selected provider fresh', async () => {

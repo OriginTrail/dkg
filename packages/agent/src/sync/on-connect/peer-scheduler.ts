@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { SyncReconcilerAttemptOutcome } from './attempt-accounting.js';
+
 export type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
 
 interface OrdinaryLane {
@@ -25,8 +27,10 @@ interface PeerJob<SelectedPlan> {
 }
 
 export interface SyncOnConnectPeerJobRunner<SelectedPlan> {
-  readonly runOrdinary: () => Promise<void>;
-  readonly runSelected: (recoveryPlan?: SelectedPlan) => Promise<void>;
+  readonly runOrdinary: () => Promise<SyncReconcilerAttemptOutcome>;
+  readonly runSelected: (
+    recoveryPlan?: SelectedPlan,
+  ) => Promise<SyncReconcilerAttemptOutcome>;
   /** Discard deferred accounting when the owning peer job is cancelled. */
   readonly cancel: () => void;
   /** Commit the job's combined reconciler accounting exactly once. */

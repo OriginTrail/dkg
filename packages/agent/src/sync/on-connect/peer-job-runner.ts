@@ -3,27 +3,21 @@
 import {
   executeSyncOnConnectAttempt,
   SyncOnConnectPeerAccountingAccumulator,
+  type SyncOnConnectAttemptResult,
+  type SyncReconcilerAttemptOutcome,
 } from './attempt-accounting.js';
 import type { SyncOnConnectPeerJobRunner } from './peer-scheduler.js';
-import type {
-  SyncOnConnectOutcome,
-  SyncOnConnectPeerOutcome,
-} from './sync-on-connect.js';
+import type { SyncOnConnectPeerOutcome } from './sync-on-connect.js';
 
-type SyncAttempt = (
-  onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
-) => Promise<SyncOnConnectOutcome | 'not-started'>;
+type SyncAttempt = () => Promise<SyncOnConnectAttemptResult>;
 
 export interface ReconciledSyncOnConnectPeerJobDependencies<SelectedPlan, Probe> {
   readonly acquireProbe: () => Promise<Probe | null>;
   readonly runSelected: (
     recoveryPlan: SelectedPlan | undefined,
-    onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
-  ) => Promise<SyncOnConnectOutcome | 'not-started'>;
-  readonly runOrdinary: (
-    selectedAttempted: boolean,
-    onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
-  ) => Promise<SyncOnConnectOutcome | 'not-started'>;
+  ) => Promise<SyncOnConnectAttemptResult>;
+  readonly runAutomaticSelected?: () => Promise<SyncOnConnectAttemptResult>;
+  readonly runOrdinary: () => Promise<SyncOnConnectAttemptResult>;
   readonly selectedRetryStillRequired: () => boolean;
   readonly resetBackoffBeforeRetry: () => void;
   readonly commitAccounting: (
@@ -39,29 +33,52 @@ export interface ReconciledSyncOnConnectPeerJobDependencies<SelectedPlan, Probe>
  */
 export class ReconciledSyncOnConnectPeerJobRunner<SelectedPlan, Probe>
 implements SyncOnConnectPeerJobRunner<SelectedPlan> {
-  private readonly accounting = new SyncOnConnectPeerAccountingAccumulator();
-  private probe: Probe | null | undefined;
-  private probePromise: Promise<Probe | null> | null = null;
-  private selectedAttempted = false;
+  private readonly accounting = new SyncOnConnectPeerAccountingAccumulator<Probe>();
+  private readonly selectedPhaseExecutions: Array<Readonly<{
+    outcome?: SyncReconcilerAttemptOutcome;
+    error?: unknown;
+  }>> = [];
+  private automaticSelectedPhase: SyncAttempt | null;
+  private pendingInitialProbe: Readonly<{ value: Probe }> | null;
 
   constructor(
     private readonly dependencies: ReconciledSyncOnConnectPeerJobDependencies<
       SelectedPlan,
       Probe
     >,
-  ) {}
-
-  async runSelected(recoveryPlan?: SelectedPlan): Promise<void> {
-    this.selectedAttempted = true;
-    await this.attemptPhase((onSyncAccounting) => (
-      this.dependencies.runSelected(recoveryPlan, onSyncAccounting)
-    ));
+    options: Readonly<{ initialProbe?: Probe }> = {},
+  ) {
+    // A job is one explicit phase plan: optional automatic selected work,
+    // followed by invariant ordinary work. An explicitly queued selected lane
+    // consumes/replaces the automatic item before ordinary execution.
+    this.automaticSelectedPhase = this.dependencies.runAutomaticSelected ?? null;
+    this.pendingInitialProbe = options.initialProbe === undefined
+      ? null
+      : { value: options.initialProbe };
   }
 
-  async runOrdinary(): Promise<void> {
-    await this.attemptPhase((onSyncAccounting) => (
-      this.dependencies.runOrdinary(this.selectedAttempted, onSyncAccounting)
-    ));
+  async runSelected(recoveryPlan?: SelectedPlan): Promise<SyncReconcilerAttemptOutcome> {
+    this.automaticSelectedPhase = null;
+    return this.runSelectedPhase(() => this.dependencies.runSelected(recoveryPlan));
+  }
+
+  async runOrdinary(): Promise<SyncReconcilerAttemptOutcome> {
+    const automaticSelectedPhase = this.automaticSelectedPhase;
+    this.automaticSelectedPhase = null;
+    let selectedError: unknown;
+    if (automaticSelectedPhase !== null) {
+      try {
+        await this.runSelectedPhase(automaticSelectedPhase);
+      } catch (error: unknown) {
+        // Automatic selected work must not starve unrelated ordinary work.
+        // Its retry accounting remains in the job ledger and its error is
+        // reported by the owning ordinary lane after that work drains.
+        selectedError = error;
+      }
+    }
+    const ordinaryOutcome = await this.attemptPhase(this.dependencies.runOrdinary);
+    if (selectedError !== undefined) throw selectedError;
+    return ordinaryOutcome;
   }
 
   cancel(): void {
@@ -70,8 +87,8 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
 
   finish(): void {
     const combined = this.accounting.combine();
-    if (combined === null || this.probe === null || this.probe === undefined) return;
-    const outcome: SyncOnConnectPeerOutcome = this.selectedAttempted
+    if (combined === null) return;
+    const outcome: SyncOnConnectPeerOutcome = this.selectedPhaseExecutions.length > 0
       && this.dependencies.selectedRetryStillRequired()
       && combined.outcome.reconcilerDisposition === 'clear'
       ? {
@@ -83,19 +100,35 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     if (combined.resetBackoffBeforeRetry) {
       this.dependencies.resetBackoffBeforeRetry();
     }
-    this.dependencies.commitAccounting(outcome, this.probe);
+    this.dependencies.commitAccounting(outcome, combined.probe);
   }
 
-  private async ensureProbe(): Promise<Probe | null> {
-    this.probePromise ??= this.dependencies.acquireProbe();
-    this.probe = await this.probePromise;
-    return this.probe;
+  private async acquirePhaseProbe(): Promise<Probe | null> {
+    const initial = this.pendingInitialProbe;
+    if (initial !== null) {
+      this.pendingInitialProbe = null;
+      return initial.value;
+    }
+    return this.dependencies.acquireProbe();
   }
 
-  private async attemptPhase(attempt: SyncAttempt): Promise<void> {
-    if (await this.ensureProbe() === null) return;
-    await executeSyncOnConnectAttempt(attempt, {
-      recordAccounting: (outcome) => { this.accounting.record(outcome); },
+  private async runSelectedPhase(attempt: SyncAttempt): Promise<SyncReconcilerAttemptOutcome> {
+    const execution: { outcome?: SyncReconcilerAttemptOutcome; error?: unknown } = {};
+    this.selectedPhaseExecutions.push(execution);
+    try {
+      execution.outcome = await this.attemptPhase(attempt);
+      return execution.outcome;
+    } catch (error: unknown) {
+      execution.error = error;
+      throw error;
+    }
+  }
+
+  private async attemptPhase(attempt: SyncAttempt): Promise<SyncReconcilerAttemptOutcome> {
+    const probe = await this.acquirePhaseProbe();
+    if (probe === null) return 'not-started';
+    return executeSyncOnConnectAttempt(attempt, {
+      recordAccounting: (outcome) => { this.accounting.record(outcome, probe); },
       onBackpressure: this.dependencies.logBackpressure,
     });
   }

@@ -42,9 +42,10 @@ function freshPeerIdString(): string {
 const noopLog = (_ctx: OperationContext, _message: string) => {};
 
 async function flushMicrotasks(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  // The peer-job transaction now crosses explicit phase-result and accounting
+  // boundaries before its single final commit. Drain the bounded promise chain
+  // without introducing a wall-clock/timer dependency.
+  for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
 
 function deferred<T>() {
