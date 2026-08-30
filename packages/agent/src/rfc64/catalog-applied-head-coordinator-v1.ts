@@ -8,7 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
-import { mapWithConcurrency } from '../map-with-concurrency.js';
+import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
@@ -55,7 +55,9 @@ export interface Rfc64CatalogAppliedHeadCoordinatorOptionsV1 {
  */
 export function createRfc64CatalogAppliedHeadCoordinatorV1(
   options: Rfc64CatalogAppliedHeadCoordinatorOptionsV1,
-): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
+): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1<
+  Rfc64CatalogAppliedHeadEvidenceV1
+> {
   return Object.freeze(async (plan, signal) => {
     const accepted = options.acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
     if (
@@ -69,7 +71,9 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
       kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
       transaction: transaction ?? null,
       afterAppliedHead: null,
-    } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
+    } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<
+      Rfc64CatalogAppliedHeadEvidenceV1
+    >);
   });
 }
 
@@ -77,7 +81,9 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
   options: Rfc64CatalogAppliedHeadCoordinatorOptionsV1,
   plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
   signal: AbortSignal,
-): Promise<Rfc64PublicCatalogNativeAppliedHeadLifecycleV1> {
+): Promise<Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<
+  Rfc64CatalogAppliedHeadEvidenceV1
+>> {
   const finalizedVmTransaction = await options.finalizedVmPrecommit(plan, signal);
   let catalogProjectionEvidence: readonly ReturnType<
     typeof catalogProjectionEvidenceForRow
@@ -169,7 +175,9 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
         finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts),
       } satisfies Rfc64CatalogAppliedHeadEvidenceV1);
     },
-  } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
+  } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<
+    Rfc64CatalogAppliedHeadEvidenceV1
+  >);
 }
 
 async function mapWithConcurrencyAndDrainV1<T, R>(
@@ -177,13 +185,7 @@ async function mapWithConcurrencyAndDrainV1<T, R>(
   limit: number,
   fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-  const settled = await mapWithConcurrency(items, limit, async (item, index) => {
-    try {
-      return Object.freeze({ status: 'fulfilled' as const, value: await fn(item, index) });
-    } catch (reason) {
-      return Object.freeze({ status: 'rejected' as const, reason });
-    }
-  });
+  const settled = await mapWithConcurrencySettled(items, limit, fn);
   const failures = settled.filter(
     (outcome): outcome is Readonly<{ readonly status: 'rejected'; readonly reason: unknown }> =>
       outcome.status === 'rejected',
