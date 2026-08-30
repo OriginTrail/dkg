@@ -46,8 +46,7 @@ import {
 } from '../rfc64-gate2-multi-asset-completeness/two-agent-harness.ts';
 import { planPrivateCatalogConstructionV1 } from './batch-plan.ts';
 import {
-  assertColdMaterializedVmReceiptV1,
-  decodeRetirementLifecycleReceiptsV1,
+  assertPrivateColdRetirementLifecycleV1,
 } from './lifecycle-receipts.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
@@ -301,28 +300,15 @@ async function execute(): Promise<void> {
     exact(synchronization.inventoryRowCount, ASSET_COUNT, 'private inventory row count');
     exact(synchronization.activatedTripleCount, ASSET_COUNT * 2, 'private SWM triple count');
     exact(synchronization.appliedHeadStatus, 'applied', 'private applied head status');
-    const lifecycle = output(await receiver.request(
-      'retirementLifecycleReadback',
-      'private-retirement-lifecycle',
-      'operation-completed',
-      { catalogHeadDigest: headDigest },
-    ), 'private retirement lifecycle');
-    const decodedLifecycle = decodeRetirementLifecycleReceiptsV1(lifecycle.receipts);
-    exact(
-      decodedLifecycle.receipts.length,
-      ASSET_COUNT,
-      'private retirement lifecycle receipt count',
-    );
-    const lifecycleByUal = decodedLifecycle.byUal;
-
-    let swmActivated = 0;
-    let swmRetired = 0;
-    let vmRecovered = 0;
+    const lifecycleExpectationsByUal = new Map<string, Readonly<{
+      readonly assertionVersion: string;
+      readonly vmGraphIri: string;
+      readonly lineFramedProjectionNQuads: string;
+    }>>();
     const recoveredChainOrdinals = new Set<number>();
     for (const [index, value] of rows.entries()) {
       const row = record(value, `private row ${index}`);
       exact(row.activatedTripleCount, 2, `private SWM ${index} activated triple count`);
-      swmActivated += 1;
       const semantic = output(await receiver.request(
         'semanticGraphReadback',
         `private-semantic-${index}`,
@@ -335,7 +321,6 @@ async function execute(): Promise<void> {
       // twin after committing the exact VM graph.
       exact(semantic.activatedQuadCount, 0, `private SWM ${index} retired triple count`);
       exact(semantic.projectionNQuads, '\n', `private SWM ${index} retired projection`);
-      swmRetired += 1;
 
       const kaId = requiredString(row.kaId, `private row ${index} KA ID`);
       const kaNumber = BigInt(kaId) & ((1n << 96n) - 1n);
@@ -354,49 +339,6 @@ async function execute(): Promise<void> {
         AUTHOR,
         Number(kaNumber),
       );
-      const lifecycleReceipt = lifecycleByUal.get(ual);
-      if (lifecycleReceipt === undefined) {
-        throw new Error(`private row ${index} has no exact retirement lifecycle receipt`);
-      }
-      exact(
-        lifecycleReceipt.kind,
-        'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-        `private lifecycle ${index} kind`,
-      );
-      exact(lifecycleReceipt.catalogHeadDigest, headDigest, `private lifecycle ${index} head`);
-      exact(
-        lifecycleReceipt.inventoryDigest,
-        synchronization.inventoryDigest,
-        `private lifecycle ${index} inventory`,
-      );
-      const committedHead = lifecycleReceipt.committedHead;
-      exact(
-        committedHead.kind,
-        'rfc64-public-catalog-native-committed-head-token-v1',
-        `private lifecycle ${index} committed-head kind`,
-      );
-      exact(
-        committedHead.catalogHeadDigest,
-        headDigest,
-        `private lifecycle ${index} committed-head digest`,
-      );
-      exact(
-        committedHead.inventoryDigest,
-        synchronization.inventoryDigest,
-        `private lifecycle ${index} committed inventory`,
-      );
-      exact(
-        lifecycleReceipt.contextGraphId,
-        CONTEXT_GRAPH_ID,
-        `private lifecycle ${index} context graph`,
-      );
-      exact(lifecycleReceipt.assertionVersion, '1', `private lifecycle ${index} version`);
-      exact(lifecycleReceipt.vmGraphIri, vmGraph, `private lifecycle ${index} VM graph`);
-      exact(
-        lifecycleReceipt.swmReconciliationOutcome,
-        'retired',
-        `private lifecycle ${index} SWM outcome`,
-      );
       const vm = output(await receiver.request(
         'vmGraphReadback',
         `private-vm-${index}`,
@@ -405,10 +347,14 @@ async function execute(): Promise<void> {
       ), `private VM ${index}`);
       exact(vm.tripleCount, 2, `private VM ${index} triple count`);
       exact(vm.projectionNQuads, PROJECTION_NQUADS, `private VM ${index} projection`);
-      assertColdMaterializedVmReceiptV1(
-        lifecycleReceipt,
-        requiredString(vm.projectionNQuads, `private VM ${index} projection`),
-      );
+      lifecycleExpectationsByUal.set(ual, Object.freeze({
+        assertionVersion: '1',
+        vmGraphIri: vmGraph,
+        lineFramedProjectionNQuads: requiredString(
+          vm.projectionNQuads,
+          `private VM ${index} projection`,
+        ),
+      }));
       const metadata = array(vm.metadataBindings, `private VM ${index} metadata`)
         .map((item, metadataIndex) => record(item, `private VM ${index} metadata ${metadataIndex}`));
       metadataObject(metadata, 'status', '"confirmed"');
@@ -420,12 +366,23 @@ async function execute(): Promise<void> {
       // The mock finalized snapshot places every KA at block 123, transaction index 0.
       // The KA number above, not materializedVersion, proves the exact chain ordinal set.
       metadataObject(metadata, 'materializedVersion', '"123:0"');
-      vmRecovered += 1;
     }
     exactJson(
       [...recoveredChainOrdinals].sort((left, right) => left - right),
       Array.from({ length: ASSET_COUNT }, (_, ordinal) => ordinal),
       'private recovered finalized chain ordinal set',
+    );
+    const decodedLifecycle = assertPrivateColdRetirementLifecycleV1(
+      synchronization.finalizedSwmRetirementLifecycleReceipts,
+      {
+        catalogHeadDigest: headDigest as Digest32V1,
+        inventoryDigest: requiredString(
+          synchronization.inventoryDigest,
+          'private synchronization inventory digest',
+        ) as Digest32V1,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        byUal: lifecycleExpectationsByUal,
+      },
     );
 
     const [authorStopped, receiverStopped] = await Promise.all([
@@ -456,14 +413,14 @@ async function execute(): Promise<void> {
       chainExpectedAssets: ASSET_COUNT,
       swm: {
         expectedActivated: ASSET_COUNT,
-        activated: swmActivated,
+        activated: rows.length,
         expectedRetiredAfterVm: ASSET_COUNT,
-        retiredAfterVm: swmRetired,
+        retiredAfterVm: rows.length,
         lifecycleReceipts: Object.freeze(
           [...decodedLifecycle.receipts],
         ),
       },
-      vm: { expected: ASSET_COUNT, recovered: vmRecovered },
+      vm: { expected: ASSET_COUNT, recovered: recoveredChainOrdinals.size },
       processBoundary: {
         authorExitCode: authorStopped.exit.code,
         receiverExitCode: receiverStopped.exit.code,
@@ -479,8 +436,9 @@ async function execute(): Promise<void> {
       new TextEncoder().encode(canonicalDocument(artifact as unknown as CanonicalValue)),
     );
     process.stdout.write(
-      `[rfc64-private-cp2] PASS swm-activated=${swmActivated}/${ASSET_COUNT} `
-      + `swm-retired=${swmRetired}/${ASSET_COUNT} vm=${vmRecovered}/${ASSET_COUNT} `
+      `[rfc64-private-cp2] PASS swm-activated=${rows.length}/${ASSET_COUNT} `
+      + `swm-retired=${rows.length}/${ASSET_COUNT} `
+      + `vm=${recoveredChainOrdinals.size}/${ASSET_COUNT} `
       + `artifact=${ARTIFACT} sha256=${receipt.sha256}\n`,
     );
     operationFailed = false;

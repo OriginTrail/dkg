@@ -22,6 +22,7 @@ export type Rfc64CatalogSynchronizationEvidenceV1 = Readonly<
 
 export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   evidence: Readonly<Rfc64PublicCatalogNativeSynchronizationEvidenceV1>,
+  previous?: Readonly<Rfc64CatalogSynchronizationEvidenceV1>,
 ): Rfc64CatalogSynchronizationEvidenceV1 {
   const extension = evidence.postAppliedHeadExtension;
   if (
@@ -36,12 +37,23 @@ export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   const receipts = (extension?.finalizedSwmRetirementLifecycleReceipts ?? []) as
     readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[];
   const { postAppliedHeadExtension: _postAppliedHeadExtension, ...baseEvidence } = evidence;
+  if (
+    previous !== undefined
+    && (
+      previous.catalogHeadDigest !== evidence.catalogHeadDigest
+      || previous.inventoryDigest !== evidence.inventoryDigest
+    )
+  ) {
+    throw new TypeError('RFC-64 prior synchronization evidence belongs to a different head');
+  }
+  const previousByUal = new Map(
+    (previous?.finalizedSwmRetirementLifecycleReceipts ?? [])
+      .map((receipt) => [receipt.kaUal, receipt] as const),
+  );
   const seenUals = new Set<string>();
   for (const receipt of receipts) {
     if (
-      receipt.catalogHeadDigest !== evidence.catalogHeadDigest
-      || receipt.inventoryDigest !== evidence.inventoryDigest
-      || receipt.committedHead.catalogHeadDigest !== evidence.catalogHeadDigest
+      receipt.committedHead.catalogHeadDigest !== evidence.catalogHeadDigest
       || receipt.committedHead.inventoryDigest !== evidence.inventoryDigest
     ) {
       throw new TypeError(
@@ -55,10 +67,16 @@ export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   }
   return Object.freeze({
     ...baseEvidence,
-    finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts.map((receipt) =>
-      Object.freeze({
-        ...receipt,
-        committedHead: Object.freeze({ ...receipt.committedHead }),
-      }))),
+    finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts.map((receipt) => {
+      const prior = previousByUal.get(receipt.kaUal);
+      const retained = prior?.vmMaterializationStatus === 'materialized'
+        && receipt.vmMaterializationStatus === 'existing'
+        ? prior
+        : receipt;
+      return Object.freeze({
+        ...retained,
+        committedHead: Object.freeze({ ...retained.committedHead }),
+      });
+    })),
   });
 }

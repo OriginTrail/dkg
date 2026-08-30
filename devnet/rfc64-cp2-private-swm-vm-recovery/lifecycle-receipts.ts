@@ -1,132 +1,150 @@
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
-import type { Rfc64FinalizedSwmRetirementLifecycleReceiptV1 } from
-  '../../packages/agent/src/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.ts';
-
 const MAX_RECEIPTS = 1_024;
 const POST_READ_DIGEST_DOMAIN_V1 = ethers.toUtf8Bytes(
   'OT-RFC-64:finalized-vm-post-read:v1\0',
 );
-const RECONCILIATION_OUTCOMES = Object.freeze([
-  'retired',
-  'already-retired-finalized',
-  'head-missing-or-ambiguous',
-  'head-version-mismatch',
-  'vm-metadata-mismatch',
-  'swm-commitment-mismatch',
-  'vm-changed',
-  'content-mismatch',
-] as const);
 
-export interface DecodedRetirementLifecycleReceiptsV1 {
-  readonly receipts: readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[];
-  readonly byUal: ReadonlyMap<
-    string,
-    Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>
-  >;
+export interface PrivateColdRetirementLifecycleReceiptV1 {
+  readonly kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1';
+  readonly committedHead: Readonly<{
+    readonly kind: 'rfc64-public-catalog-native-committed-head-token-v1';
+    readonly catalogHeadDigest: Digest32V1;
+    readonly inventoryDigest: Digest32V1;
+  }>;
+  readonly contextGraphId: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly vmGraphIri: string;
+  readonly vmPostReadDigest: Digest32V1;
+  readonly vmMaterializationStatus: 'materialized';
+  readonly swmReconciliationOutcome: 'retired';
 }
 
-/** Decode the process boundary once, preserving the complete canonical receipt contract. */
-export function decodeRetirementLifecycleReceiptsV1(
+export interface PrivateColdRetirementLifecycleExpectationV1 {
+  readonly catalogHeadDigest: Digest32V1;
+  readonly inventoryDigest: Digest32V1;
+  readonly contextGraphId: string;
+  readonly byUal: ReadonlyMap<string, Readonly<{
+    readonly assertionVersion: string;
+    readonly vmGraphIri: string;
+    readonly lineFramedProjectionNQuads: string;
+  }>>;
+}
+
+/**
+ * Assert the complete CP2 PASS boundary in one pass. This intentionally models
+ * only the cold, root-lane, materialized-and-retired state certified by this
+ * scenario; other valid production lifecycle states are not CP2 PASS states.
+ */
+export function assertPrivateColdRetirementLifecycleV1(
   input: unknown,
-): Readonly<DecodedRetirementLifecycleReceiptsV1> {
-  if (!Array.isArray(input) || input.length > MAX_RECEIPTS) {
-    throw new TypeError('private retirement lifecycle receipts must be a bounded array');
+  expected: Readonly<PrivateColdRetirementLifecycleExpectationV1>,
+): Readonly<{
+  readonly receipts: readonly Readonly<PrivateColdRetirementLifecycleReceiptV1>[];
+  readonly byUal: ReadonlyMap<string, Readonly<PrivateColdRetirementLifecycleReceiptV1>>;
+}> {
+  if (
+    !Array.isArray(input)
+    || input.length > MAX_RECEIPTS
+    || input.length !== expected.byUal.size
+  ) {
+    throw new TypeError('private cold retirement lifecycle must be the exact bounded asset set');
   }
-  const byUal = new Map<
-    string,
-    Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>
-  >();
+  const byUal = new Map<string, Readonly<PrivateColdRetirementLifecycleReceiptV1>>();
   let previousUal: string | undefined;
   const receipts = input.map((value, index) => {
-    const receipt = record(value, `private retirement lifecycle receipt ${index}`);
-    const kaUal = requiredString(receipt.kaUal, `private lifecycle ${index} KA UAL`);
-    if (byUal.has(kaUal)) {
-      throw new Error(`private retirement lifecycle duplicates ${kaUal}`);
+    const label = `private cold lifecycle ${index}`;
+    const receipt = exactRecord(value, [
+      'kind',
+      'committedHead',
+      'contextGraphId',
+      'kaUal',
+      'assertionVersion',
+      'vmGraphIri',
+      'vmPostReadDigest',
+      'vmMaterializationStatus',
+      'swmReconciliationOutcome',
+    ], label);
+    const kaUal = requiredString(receipt.kaUal, `${label} KA UAL`);
+    const expectation = expected.byUal.get(kaUal);
+    if (expectation === undefined || byUal.has(kaUal)) {
+      throw new Error(`${label} has an unexpected or duplicate KA UAL ${kaUal}`);
     }
     if (previousUal !== undefined && previousUal.localeCompare(kaUal) >= 0) {
-      throw new Error(
-        `private retirement lifecycle is out of canonical UAL order at ${kaUal}`,
-      );
+      throw new Error(`${label} is out of canonical UAL order at ${kaUal}`);
     }
     previousUal = kaUal;
-    const committedHead = record(
-      receipt.committedHead,
-      `private lifecycle ${index} committed head`,
-    );
-    const subGraphName = optionalString(
-      receipt.subGraphName,
-      `private lifecycle ${index} subgraph`,
-    );
+    const committedHead = exactRecord(receipt.committedHead, [
+      'kind',
+      'catalogHeadDigest',
+      'inventoryDigest',
+    ], `${label} committed head`);
     const decoded = Object.freeze({
       kind: exactString(
         receipt.kind,
         'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-        `private lifecycle ${index} kind`,
-      ),
-      catalogHeadDigest: requiredDigest(
-        receipt.catalogHeadDigest,
-        `private lifecycle ${index} catalog head`,
-      ),
-      inventoryDigest: requiredDigest(
-        receipt.inventoryDigest,
-        `private lifecycle ${index} inventory`,
-      ),
-      contextGraphId: requiredString(
-        receipt.contextGraphId,
-        `private lifecycle ${index} context graph`,
-      ),
-      ...(subGraphName === undefined ? {} : { subGraphName }),
-      kaUal,
-      assertionVersion: requiredString(
-        receipt.assertionVersion,
-        `private lifecycle ${index} assertion version`,
-      ),
-      vmGraphIri: requiredString(
-        receipt.vmGraphIri,
-        `private lifecycle ${index} VM graph`,
-      ),
-      vmPostReadDigest: requiredDigest(
-        receipt.vmPostReadDigest,
-        `private lifecycle ${index} VM post-read`,
-      ),
-      vmMaterializationStatus: oneOf(
-        receipt.vmMaterializationStatus,
-        ['materialized', 'existing'] as const,
-        `private lifecycle ${index} VM materialization status`,
+        `${label} kind`,
       ),
       committedHead: Object.freeze({
         kind: exactString(
           committedHead.kind,
           'rfc64-public-catalog-native-committed-head-token-v1',
-          `private lifecycle ${index} committed-head kind`,
+          `${label} committed-head kind`,
         ),
-        catalogHeadDigest: requiredDigest(
+        catalogHeadDigest: exactDigest(
           committedHead.catalogHeadDigest,
-          `private lifecycle ${index} committed-head digest`,
+          expected.catalogHeadDigest,
+          `${label} committed-head digest`,
         ),
-        inventoryDigest: requiredDigest(
+        inventoryDigest: exactDigest(
           committedHead.inventoryDigest,
-          `private lifecycle ${index} committed inventory`,
+          expected.inventoryDigest,
+          `${label} committed inventory`,
         ),
       }),
-      swmReconciliationOutcome: oneOf(
-        receipt.swmReconciliationOutcome,
-        RECONCILIATION_OUTCOMES,
-        `private lifecycle ${index} SWM reconciliation outcome`,
+      contextGraphId: exactString(
+        receipt.contextGraphId,
+        expected.contextGraphId,
+        `${label} context graph`,
       ),
-    }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV1;
+      kaUal,
+      assertionVersion: exactString(
+        receipt.assertionVersion,
+        expectation.assertionVersion,
+        `${label} assertion version`,
+      ),
+      vmGraphIri: exactString(
+        receipt.vmGraphIri,
+        expectation.vmGraphIri,
+        `${label} VM graph`,
+      ),
+      vmPostReadDigest: exactDigest(
+        receipt.vmPostReadDigest,
+        computeFinalizedVmPostReadDigestFromHarnessReadbackV1(
+          expectation.lineFramedProjectionNQuads,
+        ),
+        `${label} VM post-read digest`,
+      ),
+      vmMaterializationStatus: exactString(
+        receipt.vmMaterializationStatus,
+        'materialized',
+        `${label} VM materialization status`,
+      ),
+      swmReconciliationOutcome: exactString(
+        receipt.swmReconciliationOutcome,
+        'retired',
+        `${label} SWM reconciliation outcome`,
+      ),
+    }) satisfies PrivateColdRetirementLifecycleReceiptV1;
     byUal.set(kaUal, decoded);
     return decoded;
   });
-  return Object.freeze({
-    receipts: Object.freeze(receipts),
-    byUal,
-  });
+  return Object.freeze({ receipts: Object.freeze(receipts), byUal });
 }
 
-/** Independently derive the production v1 post-read digest from storage-canonical N-Quads. */
+/** Independently derive the production v1 post-read digest from canonical N-Quads. */
 export function computeFinalizedVmPostReadDigestV1(
   canonicalProjectionNQuads: string,
 ): Digest32V1 {
@@ -136,11 +154,6 @@ export function computeFinalizedVmPostReadDigestV1(
   ])).toLowerCase() as Digest32V1;
 }
 
-/**
- * Convert the process adapter's line-framed readback to the storage renderer's
- * no-trailing-newline representation before independently applying the v1
- * production digest contract.
- */
 export function computeFinalizedVmPostReadDigestFromHarnessReadbackV1(
   lineFramedProjectionNQuads: string,
 ): Digest32V1 {
@@ -154,27 +167,21 @@ export function computeFinalizedVmPostReadDigestFromHarnessReadbackV1(
   return computeFinalizedVmPostReadDigestV1(lineFramedProjectionNQuads.slice(0, -1));
 }
 
-/** Bind a cold receiver's lifecycle receipt to its independently read VM bytes. */
-export function assertColdMaterializedVmReceiptV1(
-  receipt: Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>,
-  lineFramedProjectionNQuads: string,
-): void {
-  if (receipt.vmMaterializationStatus !== 'materialized') {
-    throw new Error(`private lifecycle ${receipt.kaUal} did not materialize on the cold receiver`);
-  }
-  if (
-    receipt.vmPostReadDigest
-    !== computeFinalizedVmPostReadDigestFromHarnessReadbackV1(lineFramedProjectionNQuads)
-  ) {
-    throw new Error(`private lifecycle ${receipt.kaUal} VM post-read digest differs`);
-  }
-}
-
-function record(value: unknown, label: string): Record<string, unknown> {
+function exactRecord(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object`);
   }
-  return value as Record<string, unknown>;
+  const result = value as Record<string, unknown>;
+  const actualKeys = Object.keys(result).sort();
+  const expectedKeys = [...keys].sort();
+  if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+    throw new TypeError(`${label} has unexpected or missing fields`);
+  }
+  return result;
 }
 
 function requiredString(value: unknown, label: string): string {
@@ -184,15 +191,9 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
-function optionalString(value: unknown, label: string): string | undefined {
-  if (value === undefined) return undefined;
-  return requiredString(value, label);
-}
-
-function requiredDigest(value: unknown, label: string): Digest32V1 {
-  const result = requiredString(value, label);
-  if (!/^0x[0-9a-f]{64}$/u.test(result)) throw new TypeError(`${label} is not a digest`);
-  return result as Digest32V1;
+function exactDigest(value: unknown, expected: Digest32V1, label: string): Digest32V1 {
+  if (value !== expected) throw new TypeError(`${label} is invalid`);
+  return expected;
 }
 
 function exactString<const T extends string>(
@@ -202,15 +203,4 @@ function exactString<const T extends string>(
 ): T {
   if (value !== expected) throw new TypeError(`${label} is invalid`);
   return expected;
-}
-
-function oneOf<const T extends string>(
-  value: unknown,
-  allowed: readonly T[],
-  label: string,
-): T {
-  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
-    throw new TypeError(`${label} is invalid`);
-  }
-  return value as T;
 }

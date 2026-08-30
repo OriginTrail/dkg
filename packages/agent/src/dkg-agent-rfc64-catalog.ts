@@ -85,8 +85,6 @@ import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-age
 import {
   createRfc64CatalogAppliedHeadCoordinatorV1,
 } from './rfc64/catalog-applied-head-coordinator-v1.js';
-import type { Rfc64FinalizedSwmRetirementLifecycleReceiptV1 } from
-  './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
 import {
   snapshotRfc64CatalogSynchronizationEvidenceV1,
   type Rfc64CatalogSynchronizationEvidenceV1,
@@ -939,7 +937,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           nativeReceiver: Object.freeze({
             synchronizeBoundedPublicRootCatalog: async (...args) => {
               const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(...args);
-              const observed = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
+              const observed = snapshotRfc64CatalogSynchronizationEvidenceV1(
+                evidence,
+                this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
+                  evidence.catalogHeadDigest,
+                ),
+              );
               this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
                 evidence.catalogHeadDigest,
                 observed,

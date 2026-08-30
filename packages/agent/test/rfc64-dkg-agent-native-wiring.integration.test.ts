@@ -42,6 +42,7 @@ import {
   GraphManager,
   OxigraphStore,
   quadsToNQuads,
+  readExactGraphPaged,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
   type Quad,
@@ -323,6 +324,7 @@ interface SeedSignedSwmWorkspaceParamsV1 {
   readonly shareOperationId: string;
   readonly kaNumber: bigint;
   readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers?: readonly string[];
   readonly publicQuads?: readonly Quad[];
 }
 
@@ -372,6 +374,7 @@ async function seedSignedSwmWorkspaceV1(
     privateTripleCount: Number(canonicalSeal.privateTripleCount),
     publisherPeerId: agent.peerId,
     accessPolicy: params.accessPolicy,
+    ...(params.allowedPeers === undefined ? {} : { allowedPeers: params.allowedPeers }),
     agentAddress: AUTHOR,
     timestamp: new Date(canonicalSeal.assertionFinalizedAt),
   });
@@ -951,13 +954,56 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       peers: [providerPeerId],
     }));
 
+    const allowListCoordinate = 'ordinary-private-allow-list-swm';
+    const allowListOperationId = 'ordinary-private-allow-list-swm-operation';
+    const { seal: allowListSeal, assertionUri: allowListAssertionUri } =
+      await seedSignedSwmWorkspaceV1(author, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        shareOperationId: allowListOperationId,
+        assertionCoordinate: allowListCoordinate,
+        kaNumber: 24n,
+        accessPolicy: 'allowList',
+        allowedPeers: [providerPeerId],
+      });
+    await author.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: allowListCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: allowListOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { totalRows: '2' } },
+      rows: expect.arrayContaining([
+        expect.objectContaining({
+          assertionCoordinate: allowListCoordinate,
+          shareOperationId: allowListOperationId,
+        }),
+      ]),
+    });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    expect(announce.mock.calls.at(-1)?.[0]).toMatchObject({ peers: [providerPeerId] });
+
     const mismatchedCoordinate = 'public-share-under-private-policy';
     const mismatchedOperationId = 'public-share-under-private-policy-operation';
     await seedSignedSwmWorkspaceV1(author, {
       contextGraphId: CONTEXT_GRAPH_ID,
       shareOperationId: mismatchedOperationId,
       assertionCoordinate: mismatchedCoordinate,
-      kaNumber: 24n,
+      kaNumber: 25n,
       accessPolicy: 'public',
     });
     await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
@@ -969,7 +1015,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest,
       authorAddress: AUTHOR,
-    })?.rows).toHaveLength(1);
+    })?.rows).toHaveLength(2);
 
     const announcementCountBeforeVm = announce.mock.calls.length;
     await author.observeRfc64ConfirmedVmV1({
@@ -985,13 +1031,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest,
       authorAddress: AUTHOR,
     })).toMatchObject({
-      head: { payload: { totalRows: '0' } },
-      rows: [],
+      head: { payload: { totalRows: '1' } },
+      rows: [expect.objectContaining({ assertionCoordinate: allowListCoordinate })],
     });
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
+    })).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
     await provider.whenRfc64PublicCatalogReceiverIdleV1();
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
@@ -1001,10 +1047,32 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         catalogScopeDigest: catalogScopeDigest(),
         authorAddress: AUTHOR,
       })?.currentCatalogHeadDigest,
-      catalogVersion: '2',
-      inventoryRowCount: '0',
+      catalogVersion: '3',
+      inventoryRowCount: '1',
     });
-    expect(announce).toHaveBeenCalledTimes(announcementCountBeforeVm + 1);
+    await author.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: allowListCoordinate,
+      seal: allowListSeal,
+      assertionUri: allowListAssertionUri,
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '0' });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '0' });
+    expect(announce).toHaveBeenCalledTimes(announcementCountBeforeVm + 2);
     expect(announce.mock.calls.at(-1)?.[0]).toMatchObject({
       peers: [providerPeerId],
     });
@@ -4389,17 +4457,25 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     });
     expect(appliedFinalizedHead).not.toBeNull();
+    const finalizedVmPostRead = await readExactGraphPaged(
+      authorizedCold.store,
+      preexistingTwin.vmGraph,
+      { expectedQuadCount: PROJECTION_QUADS.length, outputGraph: '' },
+    );
+    const finalizedVmPostReadDigest = ethers.keccak256(ethers.concat([
+      ethers.toUtf8Bytes('OT-RFC-64:finalized-vm-post-read:v1\0'),
+      ethers.toUtf8Bytes(quadsToNQuads(finalizedVmPostRead)),
+    ])).toLowerCase();
+    expect(finalizedVmPostReadDigest).toBe(FINALIZED_VM_POST_READ_DIGEST);
     expect(authorizedCold.readRfc64PublicCatalogSynchronizationEvidenceV1(
       successor.headObjectDigest,
     )?.finalizedSwmRetirementLifecycleReceipts).toMatchObject([{
       kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-      catalogHeadDigest: successor.headObjectDigest,
-      inventoryDigest: appliedFinalizedHead!.appliedInventoryDigest,
       contextGraphId: CONTEXT_GRAPH_ID,
       kaUal: finalizedSeal.kaUal,
       assertionVersion: finalizedSeal.assertionVersion,
       vmGraphIri: preexistingTwin.vmGraph,
-      vmPostReadDigest: FINALIZED_VM_POST_READ_DIGEST,
+      vmPostReadDigest: finalizedVmPostReadDigest,
       vmMaterializationStatus: 'existing',
       committedHead: {
         kind: 'rfc64-public-catalog-native-committed-head-token-v1',

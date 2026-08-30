@@ -138,8 +138,7 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
           });
           return Object.freeze({
             kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-            catalogHeadDigest: plan.catalogHeadDigest,
-            inventoryDigest: plan.inventoryDigest,
+            committedHead: Object.freeze({ ...committedHead }),
             contextGraphId: plan.catalogScope.contextGraphId,
             ...(plan.catalogScope.subGraphName === null
               ? {}
@@ -149,7 +148,6 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
             vmGraphIri: materialization.vmGraphIri,
             vmPostReadDigest: materialization.postReadDigest,
             vmMaterializationStatus: materialization.status,
-            committedHead: Object.freeze({ ...committedHead }),
             swmReconciliationOutcome,
           }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV1;
         },

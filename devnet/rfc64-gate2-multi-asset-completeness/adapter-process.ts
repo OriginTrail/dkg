@@ -488,21 +488,6 @@ async function handle(command: Command): Promise<void> {
       emitOperationResult(command, wireSynchronizationEvidence(output));
       return;
     }
-    case 'retirementLifecycleReadback': {
-      requireRole('receiver');
-      const input = plainRecord(command.input, 'retirementLifecycleReadback input');
-      const catalogHeadDigest = requiredDigest(
-        input.catalogHeadDigest,
-        'retirementLifecycleReadback.catalogHeadDigest',
-      );
-      const evidence = currentAgent.readRfc64PublicCatalogSynchronizationEvidenceV1(
-        catalogHeadDigest,
-      );
-      emitOperationResult(command, Object.freeze({
-        receipts: evidence?.finalizedSwmRetirementLifecycleReceipts ?? [],
-      }));
-      return;
-    }
     case 'prepareForgedAuthorizationGenesis': {
       requireRole('author');
       const output = await prepareForgedAuthorizationGenesis(
@@ -918,7 +903,16 @@ function compareQuad(left: Quad, right: Quad): number {
 function wireSynchronizationEvidence(output: unknown): unknown {
   if (output === null) return null;
   const evidence = plainRecord(output, 'exact synchronization evidence');
-  if (evidence.inventoryRowCount === 0) return evidence;
+  const lifecycleReceipts = Object.freeze(plainArray(
+    evidence.finalizedSwmRetirementLifecycleReceipts ?? [],
+    'synchronization.finalizedSwmRetirementLifecycleReceipts',
+  ).map((value, index) => plainRecord(value, `synchronization lifecycle ${index}`)));
+  if (evidence.inventoryRowCount === 0) {
+    return Object.freeze({
+      ...evidence,
+      finalizedSwmRetirementLifecycleReceipts: lifecycleReceipts,
+    });
+  }
   const wired = evidence.inventoryRowCount === 1
     ? [wireLegacySingleRowSynchronizationEvidence(evidence)]
     : plainArray(evidence.rows, 'synchronization.rows').map(
@@ -933,6 +927,7 @@ function wireSynchronizationEvidence(output: unknown): unknown {
     appliedHeadStatus: evidence.appliedHeadStatus,
     rows: Object.freeze(wired.map((entry) => entry.row)),
     verifiedControlObjectCount,
+    finalizedSwmRetirementLifecycleReceipts: lifecycleReceipts,
   });
 }
 
@@ -1036,8 +1031,6 @@ function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string,
     announce: typeof surface.announceRfc64PublicCatalogHeadV1 === 'function',
     appliedHeadReadback: typeof surface.readRfc64AppliedCatalogHeadV1 === 'function',
     exactInventoryReadback:
-      typeof surface.readRfc64PublicCatalogSynchronizationEvidenceV1 === 'function',
-    retirementLifecycleReadback:
       typeof surface.readRfc64PublicCatalogSynchronizationEvidenceV1 === 'function',
     publishExactSetSuccessor:
       typeof surface.publishOpenAuthorCatalogExactSetSuccessorV1 === 'function',

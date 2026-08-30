@@ -17,8 +17,6 @@ function receipt(
 ) {
   return {
     kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1' as const,
-    catalogHeadDigest,
-    inventoryDigest,
     contextGraphId: 'private-evidence-v1',
     kaUal,
     assertionVersion: '1',
@@ -59,8 +57,6 @@ describe('RFC-64 catalog synchronization evidence', () => {
 
     expect(snapshot.finalizedSwmRetirementLifecycleReceipts).toEqual([expect.objectContaining({
       kaUal: 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/1',
-      catalogHeadDigest: digest('11'),
-      inventoryDigest: digest('22'),
       committedHead: expect.objectContaining({
         catalogHeadDigest: digest('11'),
         inventoryDigest: digest('22'),
@@ -85,5 +81,26 @@ describe('RFC-64 catalog synchronization evidence', () => {
     expect(() => snapshotRfc64CatalogSynchronizationEvidenceV1(
       evidence([same, receipt()]),
     )).toThrow('duplicates receipt');
+  });
+
+  it('preserves original materialization proof across an exact-head replay', () => {
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
+    const replayReceipt = {
+      ...receipt(),
+      vmMaterializationStatus: 'existing' as const,
+      swmReconciliationOutcome: 'already-retired-finalized' as const,
+    };
+    const replay = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      { ...evidence([replayReceipt]), appliedHeadStatus: 'existing' as const },
+      first,
+    );
+
+    expect(replay.appliedHeadStatus).toBe('existing');
+    expect(replay.finalizedSwmRetirementLifecycleReceipts).toEqual([
+      expect.objectContaining({
+        vmMaterializationStatus: 'materialized',
+        swmReconciliationOutcome: 'retired',
+      }),
+    ]);
   });
 });
