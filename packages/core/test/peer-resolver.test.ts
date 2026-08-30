@@ -36,11 +36,13 @@ interface MockNetwork extends Network {
   __conns: Map<NodeIdentity, Array<{ remoteAddr: { toString(): string } }>>;
   __addedAddresses: Array<{ peerId: NodeIdentity; addrs: Address[] }>;
   __findPeerImpl: FindPeerImpl | null;
+  __connectCalls: Array<{ peerId: NodeIdentity; addrs: readonly Address[] }>;
 }
 
 function makeNetwork(): MockNetwork {
   const conns = new Map<NodeIdentity, Array<{ remoteAddr: { toString(): string } }>>();
   const added: Array<{ peerId: NodeIdentity; addrs: Address[] }> = [];
+  const connectCalls: Array<{ peerId: NodeIdentity; addrs: readonly Address[] }> = [];
   let findPeerImpl: FindPeerImpl | null = null;
   const net: Partial<MockNetwork> = {
     localId: PEER_A,
@@ -50,6 +52,9 @@ function makeNetwork(): MockNetwork {
     async stop() {},
     async dialProtocol() {
       throw new Error('not used in resolver tests');
+    },
+    async connectPeer(peerId: NodeIdentity, addrs: readonly Address[]) {
+      connectCalls.push({ peerId, addrs });
     },
     async handle() {},
     async unhandle() {},
@@ -66,6 +71,7 @@ function makeNetwork(): MockNetwork {
   };
   Object.defineProperty(net, '__conns', { value: conns, enumerable: false });
   Object.defineProperty(net, '__addedAddresses', { value: added, enumerable: false });
+  Object.defineProperty(net, '__connectCalls', { value: connectCalls, enumerable: false });
   Object.defineProperty(net, '__findPeerImpl', {
     get: () => findPeerImpl,
     set: (v) => {
@@ -125,6 +131,34 @@ describe('PeerResolver', () => {
       peerId: PEER_B,
       addrs: ['/ip4/1.2.3.4/tcp/9090'],
     });
+  });
+
+  it('connect uses the same ordered resolver output at the Network boundary', async () => {
+    net.__findPeerImpl = async () => ['/ip4/1.2.3.4/tcp/9090/p2p/12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6'];
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    const addresses = await resolver.connect(PEER_B);
+
+    expect(net.__connectCalls).toEqual([{ peerId: PEER_B, addrs: addresses }]);
+  });
+
+  it('connect propagates caller cancellation instead of reporting an empty lookup', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('caller deadline'));
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(PEER_B, { signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(net.__connectCalls).toEqual([]);
   });
 
   it('step 2: opts.skipDht bypasses findPeer entirely', async () => {

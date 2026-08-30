@@ -187,6 +187,13 @@ export interface ResolveOpts {
   signal?: AbortSignal;
 }
 
+export interface ConnectOpts extends ResolveOpts {
+  /** Per-address cap used by the transport's ordered candidate walk. */
+  candidateTimeoutMs?: number;
+  /** Optional diagnostic sink for transport candidate selection. */
+  log?: (message: string) => void;
+}
+
 const DEFAULT_PER_STEP_TIMEOUT_MS = 5_000;
 const DEFAULT_AGENT_DIRECTORY_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 const MAX_CONFIGURED_RELAY_FALLBACKS = 4;
@@ -491,6 +498,27 @@ export class PeerResolver {
 
   isHealthy(_addr: Address): boolean {
     return true;
+  }
+
+  /**
+   * Resolve and connect through one canonical boundary. Every production
+   * resolver consumer uses this method so address ordering, relay preconnect,
+   * cancellation, and identity fallback cannot drift between call sites.
+   * An empty result means resolution completed without finding an address;
+   * transport failures after a non-empty result are thrown.
+   */
+  async connect(peerId: NodeIdentity, opts: ConnectOpts = {}): Promise<Address[]> {
+    const addresses = await this.resolve(peerId, opts);
+    if (opts.signal?.aborted) {
+      throw new DOMException('Peer connection aborted', 'AbortError');
+    }
+    if (addresses.length === 0) return addresses;
+    await this.network.connectPeer(peerId, addresses, {
+      signal: opts.signal,
+      candidateTimeoutMs: opts.candidateTimeoutMs,
+      log: opts.log,
+    });
+    return addresses;
   }
 }
 

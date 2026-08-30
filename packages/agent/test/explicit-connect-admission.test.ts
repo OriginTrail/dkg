@@ -3,7 +3,6 @@ import { peerIdFromString } from '@libp2p/peer-id';
 
 const peerConnectMocks = vi.hoisted(() => ({
   connectToMultiaddr: vi.fn(async () => undefined),
-  dialResolvedPeer: vi.fn(async () => undefined),
   ensurePeerConnected: vi.fn(async () => undefined),
   primeCatchupConnections: vi.fn(async () => undefined),
 }));
@@ -33,7 +32,7 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
       },
     },
     peerResolver: {
-      resolve: vi.fn(async () => [DIRECT_MULTIADDR]),
+      connect: vi.fn(async () => [DIRECT_MULTIADDR]),
     },
     networkAdmissionCoordinator: {
       enabled: true,
@@ -69,7 +68,6 @@ function admittedCoordinator(peerId: string): NetworkAdmissionCoordinator {
 describe('explicit connect network admission', () => {
   beforeEach(() => {
     peerConnectMocks.connectToMultiaddr.mockClear();
-    peerConnectMocks.dialResolvedPeer.mockClear();
     peerConnectMocks.ensurePeerConnected.mockClear();
     peerConnectMocks.primeCatchupConnections.mockClear();
   });
@@ -141,15 +139,8 @@ describe('explicit connect network admission', () => {
       AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_REJECTED' });
 
-    expect(agent.peerResolver.resolve).toHaveBeenCalledWith(
+    expect(agent.peerResolver.connect).toHaveBeenCalledWith(
       PEER_ID,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
-    expect(peerConnectMocks.dialResolvedPeer).toHaveBeenCalledWith(
-      agent.node.libp2p,
-      PEER_ID,
-      [DIRECT_MULTIADDR],
-      expect.any(Function),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(agent.networkAdmissionCoordinator.ensureExplicitConnectAdmitted).toHaveBeenCalledWith(
@@ -185,7 +176,7 @@ describe('explicit connect network admission', () => {
         timeoutMs: expect.any(Number),
       }),
     );
-    expect(agent.peerResolver.resolve).not.toHaveBeenCalled();
+    expect(agent.peerResolver.connect).not.toHaveBeenCalled();
     expect(agent.node.libp2p.dial).not.toHaveBeenCalled();
     expect(agent.log.info).not.toHaveBeenCalledWith(
       expect.objectContaining({ operationName: 'connect' }),
@@ -193,10 +184,10 @@ describe('explicit connect network admission', () => {
     );
   });
 
-  it('walks an explicit resolver circuit when the target has no public direct address', async () => {
+  it('delegates cold-peer connection policy to the canonical resolver boundary', async () => {
     const agent = makeAgent({
       peerResolver: {
-        resolve: vi.fn(async () => [
+        connect: vi.fn(async () => [
           DIRECT_MULTIADDR,
           CIRCUIT_MULTIADDR,
         ]),
@@ -208,13 +199,42 @@ describe('explicit connect network admission', () => {
       AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
     ).resolves.toBeUndefined();
 
-    expect(peerConnectMocks.dialResolvedPeer).toHaveBeenCalledWith(
-      agent.node.libp2p,
+    expect(agent.peerResolver.connect).toHaveBeenCalledWith(
       PEER_ID,
-      [DIRECT_MULTIADDR, CIRCUIT_MULTIADDR],
-      expect.any(Function),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(agent.node.libp2p.dial).not.toHaveBeenCalled();
+  });
+
+  it('classifies a candidate-local AbortError as DIAL_FAILED while the caller budget is active', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async () => {
+          throw new DOMException('candidate timed out', 'AbortError');
+        }),
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({ code: 'DIAL_FAILED' });
+  });
+
+  it('classifies an abort from the caller-owned deadline as CONNECT_TIMEOUT', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async (_peerId: string, options: { signal?: AbortSignal }) => {
+          await new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () => {
+              reject(new DOMException('caller timed out', 'AbortError'));
+            }, { once: true });
+          });
+        }),
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 10 }),
+    ).rejects.toMatchObject({ code: 'CONNECT_TIMEOUT' });
   });
 });

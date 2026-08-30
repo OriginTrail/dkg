@@ -144,7 +144,7 @@ import {
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
-import { connectToMultiaddr, dialResolvedPeer, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
+import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import {
   NetworkAdmissionRejectedError,
   NetworkAdmissionInvalidPeerIdError,
@@ -1974,42 +1974,13 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // caller's deadline by a wide margin. Using one signal threads the
     // remaining budget through both phases.
     this.log.info(ctx, `Resolving ${peerIdStr} via PeerResolver...`);
-    const addrs = await this.peerResolver.resolve(peerIdStr, {
-      signal,
-      perStepTimeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
-    });
-    if (addrs.length === 0) {
-      // Codex PR #499 round 5: distinguish "abort/timeout swallowed by
-      // best-effort resolver" from "genuine negative lookup". Without
-      // this, transient routing failures (DHT timeout, network blip)
-      // surface as 404 PEER_NOT_FOUND in /api/connect — which the UI
-      // treats as terminal. Mapping aborted-signal → CONNECT_TIMEOUT
-      // (504) preserves the retriable-vs-terminal distinction that
-      // PR #431's inline walk had.
-      if (signal.aborted) {
-        const error = new Error(
-          `CONNECT_TIMEOUT: PeerResolver did not return addresses for ${peerIdStr} ` +
-            `within ${timeoutMs}ms (caller signal aborted; transient routing failure)`,
-        );
-        (error as any).code = 'CONNECT_TIMEOUT';
-        throw error;
-      }
-      const error = new Error(
-        `PEER_NOT_FOUND: PeerResolver returned no addresses for ${peerIdStr}`,
-      );
-      (error as any).code = 'PEER_NOT_FOUND';
-      throw error;
-    }
-    this.log.info(ctx, `Resolved ${peerIdStr} → ${addrs.length} addr(s); dialling...`);
-
+    let addrs: string[];
     try {
-      await dialResolvedPeer(
-        this.node.libp2p as any,
-        peerIdStr,
-        addrs,
-        (message) => this.log.info(ctx, message),
-        { signal },
-      );
+      addrs = await this.peerResolver.connect(peerIdStr, {
+        signal,
+        perStepTimeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
+        log: (message) => this.log.info(ctx, message),
+      });
     } catch (err: any) {
       // Codex PR #499 round 5 (dkg-agent.ts:4096): the shared signal
       // covers BOTH resolution and dial. If most of the budget went
@@ -2019,15 +1990,9 @@ export class AgentRegistryMethods extends DKGAgentBase {
       // peer that resolves right before the deadline gets misclassified
       // and the UI's retry logic stops working.
       //
-      // signal.aborted is the definitive check — it's our signal, so
-      // an abort means the timeout fired. Also accept AbortError-named
-      // errors (libp2p's transport layer surfaces those via DOMException
-      // when the dial is cancelled).
-      const isAbort =
-        signal.aborted ||
-        err?.name === 'AbortError' ||
-        err?.code === 'ABORT_ERR';
-      if (isAbort) {
+      // Only the caller-owned signal defines an overall timeout. A candidate
+      // can abort on its local cap without changing the API classification.
+      if (signal.aborted) {
         const error = new Error(
           `CONNECT_TIMEOUT: dial to ${peerIdStr} aborted after ` +
             `${Date.now() - startedAt}ms of ${timeoutMs}ms budget ` +
@@ -2042,6 +2007,27 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'DIAL_FAILED';
       throw error;
     }
+    if (addrs.length === 0) {
+      // Codex PR #499 round 5: distinguish "abort/timeout swallowed by
+      // best-effort resolver" from "genuine negative lookup". Without
+      // this, transient routing failures (DHT timeout, network blip)
+      // surface as 404 PEER_NOT_FOUND in /api/connect — which the UI
+      // treats as terminal.
+      if (signal.aborted) {
+        const error = new Error(
+          `CONNECT_TIMEOUT: PeerResolver did not return addresses for ${peerIdStr} ` +
+            `within ${timeoutMs}ms (caller signal aborted; transient routing failure)`,
+        );
+        (error as any).code = 'CONNECT_TIMEOUT';
+        throw error;
+      }
+      const error = new Error(
+        `PEER_NOT_FOUND: PeerResolver returned no addresses for ${peerIdStr}`,
+      );
+      (error as any).code = 'PEER_NOT_FOUND';
+      throw error;
+    }
+    this.log.info(ctx, `Resolved and connected to ${peerIdStr} via ${addrs.length} addr(s)`);
     await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
       signal,
       timeoutMs: remainingTimeoutMs(),

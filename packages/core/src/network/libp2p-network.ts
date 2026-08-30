@@ -12,7 +12,15 @@
 import type { Stream, Connection } from '@libp2p/interface';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
-import type { Network, NodeIdentity, Address, DialOpts, ProtocolHandler } from './network.js';
+import type {
+  Network,
+  NodeIdentity,
+  Address,
+  DialOpts,
+  PeerConnectOpts,
+  ProtocolHandler,
+} from './network.js';
+import { connectLibp2pPeer } from './libp2p-peer-connect.js';
 import type { DKGNode } from '../node.js';
 
 const DEFAULT_DIAL_TIMEOUT_MS = 10_000;
@@ -70,6 +78,14 @@ export class LibP2PNetwork implements Network {
       signal,
       runOnLimitedConnection: true,
     });
+  }
+
+  async connectPeer(
+    peerId: NodeIdentity,
+    resolvedAddresses: readonly Address[],
+    opts?: PeerConnectOpts,
+  ): Promise<void> {
+    await connectLibp2pPeer(this.node.libp2p, peerId, resolvedAddresses, opts);
   }
 
   async handle(protocolId: string, handler: ProtocolHandler): Promise<void> {

@@ -3,6 +3,7 @@ export type {
   NodeIdentity,
   Address,
   DialOpts,
+  PeerConnectOpts,
   ProtocolHandler,
 } from './network.js';
 
@@ -22,6 +23,7 @@ export type {
   PeerResolverDeps,
   PeerResolverLogger,
   ResolveOpts,
+  ConnectOpts,
 } from './peer-resolver.js';
 export { PeerResolver } from './peer-resolver.js';
 export type { ConfiguredRelayTarget } from './relay-target.js';

@@ -2234,8 +2234,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       outboxStore,
       // PR feat/chain-agents-cg-phonebook: stall-recovery now routes
       // through the full PeerResolver instead of raw DHT findPeer.
-      // The dial fast-path (ProtocolRouter) already prefers
-      // PeerResolver.resolve() on every attempt, but the outbox
+      // The dial fast-path (ProtocolRouter) already uses the canonical
+      // PeerResolver.connect() boundary on every attempt, but the outbox
       // stall-walk (the Messenger peer-recovery scheduler) was hardcoded
       // to a DHT-only path — so an entry that timed out 5x because
       // its addresses were stale couldn't recover by consulting
@@ -2244,7 +2244,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // remains the step-2 DHT lookup inside resolve(), so we don't
       // lose any pre-existing recovery path.
       resolvePeer: async (peerId, { signal }) => {
-        await peerResolver.resolve(peerId, { signal }).catch(() => undefined);
+        await peerResolver.connect(peerId, { signal }).catch(() => undefined);
       },
     });
     // A remote join handler that aborts before persisting its decision can be
@@ -9083,13 +9083,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peerId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<void> {
-    const resolvedAddresses = await this.peerResolver.resolve(peerId, {
-      signal: options.signal,
-    });
-    await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId, {
-      ...options,
-      resolvedAddresses,
-    });
+    await ensurePeerConnectedAtom(this.peerResolver, peerId, options);
     if (await this.networkAdmissionCoordinator.ensureAdmitted(
       peerId,
       createOperationContext('connect'),

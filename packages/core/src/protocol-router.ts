@@ -380,7 +380,7 @@ export class ProtocolRouter {
       (peerResolver
         ? async (peerIdStr: string, opts: { signal?: AbortSignal }) => {
             await peerResolver
-              .resolve(peerIdStr, { signal: opts.signal })
+              .connect(peerIdStr, { signal: opts.signal })
               .catch(() => undefined);
           }
         : undefined);
@@ -1022,7 +1022,7 @@ export class ProtocolRouter {
 
         if (this.peerResolver && !fastStream) {
           await this.peerResolver
-            .resolve(peerIdStr, { signal: attemptSignal, perStepTimeoutMs: remaining })
+            .connect(peerIdStr, { signal: attemptSignal, perStepTimeoutMs: remaining })
             .catch(() => undefined);
         }
 

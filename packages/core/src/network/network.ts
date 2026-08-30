@@ -44,6 +44,15 @@ export interface DialOpts {
   signal?: AbortSignal;
 }
 
+export interface PeerConnectOpts {
+  /** One caller-owned deadline shared by resolution and every dial attempt. */
+  signal?: AbortSignal;
+  /** Per-candidate cap so one stale route cannot starve later candidates. */
+  candidateTimeoutMs?: number;
+  /** Optional diagnostic sink for the transport's candidate walk. */
+  log?: (message: string) => void;
+}
+
 /**
  * Handler invoked for every inbound stream on a registered protocol.
  * Implementations should fully consume `stream` (read + close) before
@@ -76,6 +85,17 @@ export interface Network {
    * populating the transport's address book before calling this.
    */
   dialProtocol(peerId: NodeIdentity, protocolId: string, opts?: DialOpts): Promise<Stream>;
+
+  /**
+   * Establish a connection using an ordered resolver result. Implementations
+   * own address filtering, transport-specific relay setup, candidate timeout,
+   * and the final identity-only fallback.
+   */
+  connectPeer(
+    peerId: NodeIdentity,
+    resolvedAddresses: readonly Address[],
+    opts?: PeerConnectOpts,
+  ): Promise<void>;
 
   /**
    * Register `handler` for inbound streams on `protocolId`. Idempotent
