@@ -3,7 +3,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 
-import { snapshotRfc64CatalogSynchronizationEvidenceV1 } from
+import {
+  reduceRfc64CatalogSynchronizationEvidenceReplayV1,
+  snapshotRfc64CatalogSynchronizationEvidenceV1,
+} from
   '../src/rfc64/catalog-synchronization-evidence-v1.js';
 import type { Rfc64FinalizedSwmRetirementLifecycleReceiptV1 } from
   '../src/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
@@ -90,9 +93,11 @@ describe('RFC-64 catalog synchronization evidence', () => {
       vmMaterializationStatus: 'existing' as const,
       swmReconciliationOutcome: 'already-retired-finalized' as const,
     };
-    const replay = snapshotRfc64CatalogSynchronizationEvidenceV1(
-      { ...evidence([replayReceipt]), appliedHeadStatus: 'existing' as const },
+    const replay = reduceRfc64CatalogSynchronizationEvidenceReplayV1(
       first,
+      snapshotRfc64CatalogSynchronizationEvidenceV1(
+        { ...evidence([replayReceipt]), appliedHeadStatus: 'existing' as const },
+      ),
     );
 
     expect(replay.appliedHeadStatus).toBe('existing');
@@ -102,5 +107,58 @@ describe('RFC-64 catalog synchronization evidence', () => {
         swmReconciliationOutcome: 'retired',
       }),
     ]);
+  });
+
+  it.each([
+    ['content mismatch', { swmReconciliationOutcome: 'content-mismatch' as const }],
+    ['VM change', { swmReconciliationOutcome: 'vm-changed' as const }],
+    ['head-version mismatch', { swmReconciliationOutcome: 'head-version-mismatch' as const }],
+    ['VM metadata mismatch', { swmReconciliationOutcome: 'vm-metadata-mismatch' as const }],
+    ['receipt metadata mismatch', { assertionVersion: '2' }],
+    ['post-read mismatch', { vmPostReadDigest: digest('55') }],
+  ])('keeps current %s evidence visible instead of retaining stale success', (_label, change) => {
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
+    const currentReceipt = {
+      ...receipt(),
+      vmMaterializationStatus: 'existing' as const,
+      swmReconciliationOutcome: 'already-retired-finalized' as const,
+      ...change,
+    };
+    const current = snapshotRfc64CatalogSynchronizationEvidenceV1({
+      ...evidence([currentReceipt]),
+      appliedHeadStatus: 'existing' as const,
+    });
+
+    const reduced = reduceRfc64CatalogSynchronizationEvidenceReplayV1(first, current);
+
+    expect(reduced.finalizedSwmRetirementLifecycleReceipts).toEqual([currentReceipt]);
+  });
+
+  it('rejects replay accumulation across different synchronization heads', () => {
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
+    const otherHead = digest('66');
+    const current = snapshotRfc64CatalogSynchronizationEvidenceV1({
+      ...evidence([receipt(otherHead)]),
+      catalogHeadDigest: otherHead,
+      appliedHeadStatus: 'existing' as const,
+    });
+
+    expect(() => reduceRfc64CatalogSynchronizationEvidenceReplayV1(first, current))
+      .toThrow('belongs to a different head');
+  });
+
+  it('uses a repaired rematerialization receipt as the new current proof', () => {
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
+    const rematerializedReceipt = {
+      ...receipt(),
+      vmPostReadDigest: digest('77'),
+    };
+    const current = snapshotRfc64CatalogSynchronizationEvidenceV1({
+      ...evidence([rematerializedReceipt]),
+      appliedHeadStatus: 'existing' as const,
+    });
+
+    expect(reduceRfc64CatalogSynchronizationEvidenceReplayV1(first, current)
+      .finalizedSwmRetirementLifecycleReceipts).toEqual([rematerializedReceipt]);
   });
 });

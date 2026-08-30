@@ -1,5 +1,5 @@
 import type { Rfc64CatalogAppliedHeadEvidenceV1 } from
-  '../src/rfc64/catalog-applied-head-evidence-v1.js';
+  '../src/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
 import type { Rfc64CatalogSynchronizationEvidenceV1 } from
   '../src/rfc64/catalog-synchronization-evidence-v1.js';
 import type {

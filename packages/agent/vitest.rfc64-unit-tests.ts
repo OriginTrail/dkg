@@ -20,6 +20,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-finalized-vm-precommit-shipped-pool.test.ts",
   "test/rfc64-catalog-applied-head-coordinator-v1.test.ts",
   "test/rfc64-catalog-synchronization-evidence-v1.test.ts",
+  "test/rfc64-finalized-private-placement-repair-store-v1.test.ts",
   "test/rfc64-swm-recovery-coordinator-v1.test.ts",
   "test/rfc64-agent-inventory-lifecycle.test.ts",
   "test/rfc64-author-catalog-producer.test.ts",

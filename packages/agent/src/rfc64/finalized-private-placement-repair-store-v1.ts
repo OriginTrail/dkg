@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { createHash } from 'node:crypto';
+import { readdir, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+
+import {
+  assertAssertionCoordinateV1,
+  assertCanonicalDeterministicUalV1,
+  assertCanonicalDigest,
+  assertCanonicalEvmAddress,
+  assertContextGraphIdV1,
+  parseCanonicalDecimalU64,
+  type AssertionCoordinateV1,
+  type CanonicalDeterministicUalV1,
+  type ContextGraphIdV1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type PositiveDecimalU64V1,
+} from '@origintrail-official/dkg-core';
+
+import {
+  assertRfc64ExistingDirectoryV1,
+  createRfc64DurableFileStoreV1,
+} from './durable-file-store-v1.js';
+import { fsyncRfc64DirectoryV1 } from './secure-filesystem-policy-v1.js';
+
+const DIRECTORY_V1 = 'finalized-private-placement-repairs-v1';
+const MAX_MARKER_BYTES_V1 = 8 * 1024;
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const MARKER_FILENAME_V1 = /^[0-9a-f]{64}\.json$/u;
+
+export interface Rfc64FinalizedPrivatePlacementRepairV1 {
+  readonly version: 1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly authorAddress: EvmAddressV1;
+  readonly assertionCoordinate: AssertionCoordinateV1;
+  readonly assertionVersion: PositiveDecimalU64V1;
+  readonly kaUal: CanonicalDeterministicUalV1;
+  readonly sealDigest: Digest32V1;
+}
+
+export interface Rfc64FinalizedPrivatePlacementRepairStoreV1 {
+  list(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[];
+  put(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void>;
+  delete(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void>;
+}
+
+export async function openRfc64FinalizedPrivatePlacementRepairStoreV1(
+  persistenceRoot: string,
+): Promise<Rfc64FinalizedPrivatePlacementRepairStoreV1> {
+  const durableFiles = createRfc64DurableFileStoreV1<'placement-repair'>(persistenceRoot);
+  const directoryPath = join(persistenceRoot, DIRECTORY_V1);
+  let entries: Array<{ readonly name: string; isFile(): boolean }>;
+  let directoryExists = true;
+  try {
+    entries = await readdir(directoryPath, { withFileTypes: true, encoding: 'utf8' });
+  } catch (cause) {
+    if (isNodeErrorV1(cause, 'ENOENT')) {
+      entries = [];
+      directoryExists = false;
+    }
+    else throw cause;
+  }
+  if (directoryExists) {
+    await assertRfc64ExistingDirectoryV1(
+      directoryPath,
+      'RFC-64 finalized-private placement repair directory',
+      { access: 'owner-only' },
+    );
+  }
+  const repairs = new Map<string, Readonly<Rfc64FinalizedPrivatePlacementRepairV1>>();
+  for (const entry of entries) {
+    if (!entry.isFile() || !MARKER_FILENAME_V1.test(entry.name)) {
+      throw new Error('RFC-64 finalized-private placement repair directory is malformed');
+    }
+    const bytes = await durableFiles.readOptionalBoundedBytes({
+      relativePath: `${DIRECTORY_V1}/${entry.name}`,
+      maxBytes: MAX_MARKER_BYTES_V1,
+      label: 'RFC-64 finalized-private placement repair marker',
+    });
+    if (bytes === null) {
+      throw new Error('RFC-64 finalized-private placement repair marker disappeared during open');
+    }
+    const repair = parseRepairV1(bytes);
+    if (markerFilenameV1(repair) !== entry.name || repairs.has(entry.name)) {
+      throw new Error('RFC-64 finalized-private placement repair marker identity is invalid');
+    }
+    repairs.set(entry.name, repair);
+  }
+
+  return Object.freeze({
+    list: () => Object.freeze([...repairs.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, repair]) => repair)),
+    put: async (input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
+      const repair = snapshotRepairV1(input);
+      const filename = markerFilenameV1(repair);
+      await durableFiles.putExactBytes({
+        relativePath: `${DIRECTORY_V1}/${filename}`,
+        bytes: encodeRepairV1(repair),
+        maxBytes: MAX_MARKER_BYTES_V1,
+        label: 'RFC-64 finalized-private placement repair marker',
+        kind: 'placement-repair',
+      });
+      repairs.set(filename, repair);
+    },
+    delete: async (input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
+      const repair = snapshotRepairV1(input);
+      const filename = markerFilenameV1(repair);
+      const current = repairs.get(filename);
+      if (current === undefined) return;
+      if (!bytesEqualV1(encodeRepairV1(current), encodeRepairV1(repair))) {
+        throw new Error('RFC-64 finalized-private placement repair deletion conflicts');
+      }
+      const stored = await durableFiles.readOptionalBoundedBytes({
+        relativePath: `${DIRECTORY_V1}/${filename}`,
+        maxBytes: MAX_MARKER_BYTES_V1,
+        label: 'RFC-64 finalized-private placement repair marker',
+      });
+      if (stored === null || !bytesEqualV1(stored, encodeRepairV1(repair))) {
+        throw new Error('RFC-64 finalized-private placement repair marker changed before delete');
+      }
+      try {
+        await unlink(join(directoryPath, filename));
+      } catch (cause) {
+        if (!isNodeErrorV1(cause, 'ENOENT')) throw cause;
+      }
+      await fsyncRfc64DirectoryV1(directoryPath);
+      repairs.delete(filename);
+    },
+  });
+}
+
+export function snapshotRfc64FinalizedPrivatePlacementRepairV1(
+  input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> {
+  return snapshotRepairV1(input);
+}
+
+function snapshotRepairV1(
+  input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> {
+  if (input.version !== 1) throw new TypeError('RFC-64 placement repair version is invalid');
+  assertContextGraphIdV1(input.contextGraphId, 'placement repair contextGraphId');
+  assertCanonicalEvmAddress(input.authorAddress, 'placement repair authorAddress');
+  assertAssertionCoordinateV1(input.assertionCoordinate, 'placement repair assertionCoordinate');
+  parseCanonicalDecimalU64(input.assertionVersion, 'placement repair assertionVersion');
+  if (BigInt(input.assertionVersion) < 1n) {
+    throw new TypeError('RFC-64 placement repair assertionVersion must be positive');
+  }
+  const canonicalUal = assertCanonicalDeterministicUalV1(input.kaUal);
+  assertCanonicalDigest(input.sealDigest, 'placement repair sealDigest');
+  return Object.freeze({
+    version: 1,
+    contextGraphId: input.contextGraphId,
+    authorAddress: input.authorAddress,
+    assertionCoordinate: input.assertionCoordinate,
+    assertionVersion: input.assertionVersion,
+    kaUal: canonicalUal.ual,
+    sealDigest: input.sealDigest,
+  });
+}
+
+function encodeRepairV1(
+  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+): Uint8Array {
+  return UTF8_ENCODER.encode(`${JSON.stringify(repair)}\n`);
+}
+
+function parseRepairV1(bytes: Uint8Array): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(UTF8_DECODER.decode(bytes));
+  } catch (cause) {
+    throw new Error('RFC-64 finalized-private placement repair marker is not valid JSON', {
+      cause,
+    });
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('RFC-64 finalized-private placement repair marker is malformed');
+  }
+  const value = parsed as Record<string, unknown>;
+  const expectedKeys = [
+    'assertionCoordinate',
+    'assertionVersion',
+    'authorAddress',
+    'contextGraphId',
+    'kaUal',
+    'sealDigest',
+    'version',
+  ];
+  if (Object.keys(value).sort().join('\n') !== expectedKeys.join('\n')) {
+    throw new Error('RFC-64 finalized-private placement repair marker has unknown fields');
+  }
+  try {
+    return snapshotRepairV1(value as unknown as Rfc64FinalizedPrivatePlacementRepairV1);
+  } catch (cause) {
+    throw new Error('RFC-64 finalized-private placement repair marker is malformed', { cause });
+  }
+}
+
+function markerFilenameV1(
+  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+): string {
+  return `${createHash('sha256').update(encodeRepairV1(repair)).digest('hex')}.json`;
+}
+
+function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength
+    && left.every((value, index) => value === right[index]);
+}
+
+function isNodeErrorV1(cause: unknown, code: string): cause is NodeJS.ErrnoException {
+  return cause instanceof Error && (cause as NodeJS.ErrnoException).code === code;
+}

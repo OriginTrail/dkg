@@ -4307,27 +4307,33 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       finalizedRuntime: { rpcUrl: rpcServer.url, chainAdapter: adapter },
     });
     provider.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster });
-    const author = await startNativeAgentWithOptions({
-      name: 'finalized-private-auto-publish-author',
-      catalogActivation: {
-        enabled: true,
-        deploymentProfile: NATIVE_DEPLOYMENT,
-        accessPolicyAuthority: {
-          localAgentAddress: AUTHOR,
-          peerAgentBindings: [{ peerId: provider.peerId, agentAddress: AUTHOR }],
-        },
-        autoPublish: {
-          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
-        },
-        bootstrap: {
-          acceptedPolicies: [{
-            policyEnvelope,
-            rosterEnvelope,
-            targets: [{ authorAddress: AUTHOR, providers: [provider.peerId] }],
-            completeSwmProviders: [provider.peerId],
-          }],
-        },
+    const authorDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-finalized-private-repair-'));
+    tempDirs.push(authorDataDir);
+    const authorPersistentStorePath = join(authorDataDir, 'oxigraph');
+    const catalogActivation = {
+      enabled: true,
+      deploymentProfile: NATIVE_DEPLOYMENT,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        peerAgentBindings: [{ peerId: provider.peerId, agentAddress: AUTHOR }],
       },
+      autoPublish: {
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+      bootstrap: {
+        acceptedPolicies: [{
+          policyEnvelope,
+          rosterEnvelope,
+          targets: [{ authorAddress: AUTHOR, providers: [provider.peerId] }],
+          completeSwmProviders: [provider.peerId],
+        }],
+      },
+    };
+    let author = await startNativeAgentWithOptions({
+      name: 'finalized-private-auto-publish-author',
+      existingDataDir: authorDataDir,
+      persistentStorePath: authorPersistentStorePath,
+      catalogActivation,
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -4336,7 +4342,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     peerAddresses.set(author.peerId, AUTHOR);
     await connectBothWays(author, provider);
-    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    let announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
     const assertionCoordinate = 'finalized-private-auto-publish';
     const shareOperationId = 'finalized-private-auto-publish-operation';
     const { seal, assertionUri } = await seedSignedSwmWorkspaceV1(author, {
@@ -4378,6 +4384,39 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
     expect(announce).not.toHaveBeenCalled();
 
+    // A durable pre-confirmation row is intentionally not repairable. Restart
+    // cannot infer chain confirmation from its mere presence.
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+    let failedPlacementAttempts = 0;
+    author = await startNativeAgentWithOptions({
+      name: 'finalized-private-auto-publish-author-pre-confirmation-restart',
+      existingDataDir: authorDataDir,
+      persistentStorePath: authorPersistentStorePath,
+      catalogActivation,
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+        vi.spyOn(agent as any, 'publishRfc64FinalizedPrivateCatalogPlacementV1')
+          .mockImplementationOnce(async () => {
+            failedPlacementAttempts += 1;
+            throw new Error('simulated post-confirmation catalog failure');
+          });
+      },
+    });
+    peerAddresses.set(author.peerId, AUTHOR);
+    await connectBothWays(author, provider);
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { totalRows: '1' } } });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(failedPlacementAttempts).toBe(0);
+
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
@@ -4385,6 +4424,63 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       assertionUri,
       ctx: createOperationContext('publish'),
       publicationLabel: 'publish',
+    });
+    // Confirmation is durable, but the injected first placement failure must
+    // leave the pending row intact rather than losing the transition.
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { totalRows: '1' } } });
+    expect(failedPlacementAttempts).toBe(1);
+
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+    let releaseStartupRepair!: () => void;
+    let markStartupRepairEntered!: () => void;
+    const startupRepairGate = new Promise<void>((resolve) => {
+      releaseStartupRepair = resolve;
+    });
+    const startupRepairEntered = new Promise<void>((resolve) => {
+      markStartupRepairEntered = resolve;
+    });
+    author = await startNativeAgentWithOptions({
+      name: 'finalized-private-auto-publish-author-confirmed-restart',
+      existingDataDir: authorDataDir,
+      persistentStorePath: authorPersistentStorePath,
+      catalogActivation,
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+        const original = (agent as any)
+          .publishRfc64FinalizedPrivateCatalogPlacementV1.bind(agent);
+        vi.spyOn(agent as any, 'publishRfc64FinalizedPrivateCatalogPlacementV1')
+          .mockImplementation(async (...args: unknown[]) => {
+            markStartupRepairEntered();
+            await startupRepairGate;
+            return original(...args);
+          });
+      },
+    });
+    peerAddresses.set(author.peerId, AUTHOR);
+    await startupRepairEntered;
+    await connectBothWays(author, provider);
+    announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    releaseStartupRepair();
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    await provider.synchronizeRfc64PublicCatalogFromProviderV1({
+      remotePeerId: author.peerId,
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: policy.era,
+      },
     });
     await provider.whenRfc64PublicCatalogReceiverIdleV1();
     const authorHead = author.readRfc64AppliedCatalogHeadV1({
@@ -4419,7 +4515,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })).toEqual(authorHead);
     expect(announce).toHaveBeenCalledTimes(1);
-  }, 60_000);
+  }, 90_000);
 
   it('awaits production private retirement and reports a real finalized missing-placement path', async () => {
     const providerAgentAddress = `0x${'91'.repeat(20)}` as EvmAddressV1;
