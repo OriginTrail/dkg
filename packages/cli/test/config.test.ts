@@ -32,7 +32,7 @@ import {
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
-  resolveManualUpdateContext,
+  resolveUpdatePreferences,
   resolveContextGraphSubscriptionRehydrationEnabled,
   resolveApprovalPolicy,
   resolveChainConfig,
@@ -1069,11 +1069,9 @@ describe('resolveAutoUpdateSource', () => {
   });
 });
 
-describe('resolveManualUpdateContext', () => {
-  it('preserves disabled local update policy and local source selection', () => {
-    const classifyInstall = vi.fn((source: 'auto' | 'npm' | 'git' | 'monorepo' | undefined) =>
-      source === 'npm');
-    expect(resolveManualUpdateContext(
+describe('resolveUpdatePreferences', () => {
+  it('preserves disabled local update policy and local precedence', () => {
+    expect(resolveUpdatePreferences(
       {
         autoUpdate: {
           enabled: false,
@@ -1093,17 +1091,15 @@ describe('resolveManualUpdateContext', () => {
           channel: 'testnet',
         },
       },
-      classifyInstall,
     )).toEqual({
-      installMode: 'npm',
+      source: 'npm',
       allowPrerelease: false,
       channel: 'mainnet',
     });
-    expect(classifyInstall).toHaveBeenCalledWith('npm');
   });
 
   it('inherits network source, channel, and prerelease policy field by field', () => {
-    expect(resolveManualUpdateContext(
+    expect(resolveUpdatePreferences(
       { autoUpdate: { enabled: false } },
       {
         autoUpdate: {
@@ -1116,21 +1112,42 @@ describe('resolveManualUpdateContext', () => {
           channel: 'mainnet',
         },
       },
-      (source) => source === 'npm',
     )).toEqual({
-      installMode: 'source',
+      source: 'git',
       allowPrerelease: false,
       channel: 'mainnet',
     });
   });
 
-  it('defaults prerelease policy while leaving install detection canonical', () => {
-    const classifyInstall = vi.fn(() => true);
-    expect(resolveManualUpdateContext(undefined, undefined, classifyInstall)).toEqual({
-      installMode: 'npm',
+  it('defaults prerelease policy when neither layer supplies preferences', () => {
+    expect(resolveUpdatePreferences(undefined, undefined)).toEqual({
       allowPrerelease: true,
     });
-    expect(classifyInstall).toHaveBeenCalledWith(undefined);
+  });
+
+  it('is the preference model consumed by automatic polling', () => {
+    const config = {
+      autoUpdate: {
+        enabled: true,
+        source: 'npm' as const,
+        allowPrerelease: false,
+      },
+    };
+    const network = {
+      autoUpdate: {
+        enabled: true,
+        repo: 'owner/dkg',
+        branch: 'main',
+        checkIntervalMinutes: 30,
+        source: 'git' as const,
+        allowPrerelease: true,
+        channel: 'mainnet',
+      },
+    };
+
+    expect(resolveAutoUpdateConfig(config, network)).toMatchObject(
+      resolveUpdatePreferences(config, network),
+    );
   });
 });
 

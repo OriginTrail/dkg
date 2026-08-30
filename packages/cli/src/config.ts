@@ -1431,6 +1431,32 @@ function resolveOptionalAutoUpdateVerifyTagSignature(
 }
 
 /**
+ * Update-selection preferences shared by automatic polling and explicit
+ * `dkg update`. They resolve independently of the automatic-polling enabled
+ * gate so disabling polling does not discard manual update policy.
+ */
+export type ResolvedUpdatePreferences = {
+  source?: AutoUpdateConfig['source'];
+  allowPrerelease: boolean;
+  channel?: string;
+};
+
+export function resolveUpdatePreferences(
+  config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
+  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
+): ResolvedUpdatePreferences {
+  const cfg = config?.autoUpdate;
+  const net = network?.autoUpdate;
+  const source = cfg?.source ?? net?.source;
+  const channel = cfg?.channel ?? net?.channel;
+  return {
+    allowPrerelease: cfg?.allowPrerelease ?? net?.allowPrerelease ?? true,
+    ...(source ? { source } : {}),
+    ...(channel ? { channel } : {}),
+  };
+}
+
+/**
  * Field-level merge of the effective auto-update configuration.
  *
  * Precedence per field: `~/.dkg/config.json` → `network/<env>.json` →
@@ -1451,18 +1477,16 @@ export function resolveAutoUpdateConfig(
   const net = network?.autoUpdate;
   const enabled = cfg?.enabled ?? net?.enabled ?? false;
   if (!enabled) return null;
+  const preferences = resolveUpdatePreferences(config, network);
 
   const proj = loadProjectConfig();
   const repo = cfg?.repo ?? net?.repo ?? proj.repo;
   const branch = cfg?.branch ?? net?.branch ?? proj.defaultBranch;
   const ref = cfg?.ref ?? net?.ref;
-  const allowPrerelease = cfg?.allowPrerelease ?? net?.allowPrerelease ?? true;
   const sshKeyPath = cfg?.sshKeyPath ?? net?.sshKeyPath;
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
   const updateJitterMinutes = cfg?.updateJitterMinutes ?? net?.updateJitterMinutes;
-  const source = cfg?.source ?? net?.source;
-  const channel = cfg?.channel ?? net?.channel;
   const cfgHasVerifyTagSignature = !!cfg && Object.prototype.hasOwnProperty.call(cfg, 'verifyTagSignature');
   const netHasVerifyTagSignature = !!net && Object.prototype.hasOwnProperty.call(net, 'verifyTagSignature');
   const verifyTagSignature = resolveOptionalAutoUpdateVerifyTagSignature(
@@ -1489,14 +1513,14 @@ export function resolveAutoUpdateConfig(
     repo,
     branch,
     ...(ref ? { ref } : {}),
-    allowPrerelease,
+    allowPrerelease: preferences.allowPrerelease,
     ...(sshKeyPath ? { sshKeyPath } : {}),
     ...(sshCommand ? { sshCommand } : {}),
     checkIntervalMinutes,
     ...(updateJitterMinutes !== undefined ? { updateJitterMinutes } : {}),
     ...(buildTimeoutMs ? { buildTimeoutMs } : {}),
-    ...(source ? { source } : {}),
-    ...(channel ? { channel } : {}),
+    ...(preferences.source ? { source: preferences.source } : {}),
+    ...(preferences.channel ? { channel: preferences.channel } : {}),
     ...(verifyTagSignature !== undefined ? { verifyTagSignature } : {}),
   };
 }
@@ -1505,35 +1529,7 @@ export function resolveAutoUpdateSource(
   config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
   network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
 ): AutoUpdateConfig['source'] {
-  return config?.autoUpdate?.source ?? network?.autoUpdate?.source;
-}
-
-export type ManualUpdateContext = {
-  installMode: 'npm' | 'source';
-  allowPrerelease: boolean;
-  channel?: string;
-};
-
-/**
- * Resolve the complete policy needed by an explicit `dkg update` without
- * exposing the workflow to the broader automatic-update configuration.
- * Manual updates intentionally keep these preferences when automatic polling
- * is disabled.
- */
-export function resolveManualUpdateContext(
-  config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
-  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
-  isNpmInstall: (source: AutoUpdateConfig['source']) => boolean,
-): ManualUpdateContext {
-  const cfg = config?.autoUpdate;
-  const net = network?.autoUpdate;
-  const source = cfg?.source ?? net?.source;
-  const channel = cfg?.channel ?? net?.channel;
-  return {
-    installMode: isNpmInstall(source) ? 'npm' : 'source',
-    allowPrerelease: cfg?.allowPrerelease ?? net?.allowPrerelease ?? true,
-    ...(channel ? { channel } : {}),
-  };
+  return resolveUpdatePreferences(config, network).source;
 }
 
 /**

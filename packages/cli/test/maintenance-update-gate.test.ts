@@ -249,6 +249,10 @@ describe('dkg update command stable-only wiring', () => {
     };
     const performNpmUpdate = vi.fn(async () => 'updated' as const);
     const performNpmUpdateEdge = vi.fn(async () => 'updated' as const);
+    const reporter = {
+      writeStdout: vi.fn(),
+      writeStderr: vi.fn(),
+    };
     const resolveTag = vi.fn(async (): Promise<NpmDistTagResult> => resolvedTag === null
       ? { status: 'not-found' }
       : { status: 'resolved', version: resolvedTag });
@@ -269,14 +273,21 @@ describe('dkg update command stable-only wiring', () => {
       stopDaemonIfRunning: vi.fn(async () => true),
       runPreflight,
     };
-    return { config, deps, performNpmUpdate, performNpmUpdateEdge, runPreflight };
+    return {
+      config,
+      deps,
+      performNpmUpdate,
+      performNpmUpdateEdge,
+      reporter,
+      runPreflight,
+    };
   }
 
   it('refuses an explicit prerelease before dispatching either installer', async () => {
     const harness = commandHarness();
     const outcome = await runMaintenanceUpdateWorkflow({
       versionOrRef: '10.1.0-rc.1',
-    }, harness.deps);
+    }, harness.deps, harness.reporter);
     expect(outcome.exitCode).toBe(1);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
@@ -286,7 +297,7 @@ describe('dkg update command stable-only wiring', () => {
     const harness = commandHarness('10.1.0-rc.1');
     const outcome = await runMaintenanceUpdateWorkflow({
       versionOrRef: 'latest',
-    }, harness.deps);
+    }, harness.deps, harness.reporter);
     expect(outcome.exitCode).toBe(1);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
@@ -296,9 +307,9 @@ describe('dkg update command stable-only wiring', () => {
     const harness = commandHarness('10.0.1');
     const outcome = await runMaintenanceUpdateWorkflow({
       versionOrRef: 'latest',
-    }, harness.deps);
+    }, harness.deps, harness.reporter);
     expect(outcome.exitCode).toBe(0);
-    expect(outcome.stdout).toContain(
+    expect(harness.reporter.writeStdout).toHaveBeenCalledWith(
       'Update applied. Run "dkg start" to start with the new version.',
     );
     expect(harness.runPreflight).toHaveBeenCalledWith(harness.config);
@@ -331,9 +342,10 @@ describe('dkg update command stable-only wiring', () => {
 
     const outcome = await runMaintenanceUpdateWorkflow({
       versionOrRef: '10.0.1',
-    }, harness.deps);
+    }, harness.deps, harness.reporter);
     expect(outcome.exitCode).toBe(2);
-    expect(outcome.stderr).toContain('  • [install-layout] layout mismatch');
+    expect(harness.reporter.writeStderr)
+      .toHaveBeenCalledWith('  • [install-layout] layout mismatch');
     expect(runPreflight).toHaveBeenCalledWith(harness.config);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
@@ -348,10 +360,11 @@ describe('dkg update command stable-only wiring', () => {
     const installer = vi.fn(() => pendingInstall);
     harness.deps.performNpmUpdateEdge = installer;
     const writeStdout = vi.fn();
+    const writeStderr = vi.fn();
 
     const update = runMaintenanceUpdateWorkflow({
       versionOrRef: '10.0.1',
-    }, harness.deps, { writeStdout });
+    }, harness.deps, { writeStdout, writeStderr });
 
     await vi.waitFor(() => expect(installer).toHaveBeenCalledOnce());
     expect(writeStdout).toHaveBeenCalledWith(
@@ -387,7 +400,7 @@ describe('dkg update command stable-only wiring', () => {
     const outcome = await runMaintenanceUpdateWorkflow({
       versionOrRef: '10.1.0-rc.1',
       allowPrerelease: true,
-    }, harness.deps);
+    }, harness.deps, harness.reporter);
     expect(outcome.exitCode).toBe(0);
     expect(harness.performNpmUpdateEdge).toHaveBeenCalledWith(
       '10.1.0-rc.1',
@@ -406,7 +419,7 @@ describe('dkg update command stable-only wiring', () => {
 
     const outcome = await runMaintenanceUpdateWorkflow({
       check: true,
-    }, harness.deps);
+    }, harness.deps, harness.reporter);
 
     expect(outcome.exitCode).toBe(0);
     expect(harness.deps.checkForNpmVersionUpdate).toHaveBeenCalledWith(

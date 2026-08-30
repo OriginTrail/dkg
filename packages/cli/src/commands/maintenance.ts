@@ -22,12 +22,11 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadResolvedNetworkConfig, resolveManualUpdateContext, resolveChainConfig,
+  loadNetworkConfig, loadResolvedNetworkConfig, resolveUpdatePreferences, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
-  type ManualUpdateContext,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
@@ -131,15 +130,24 @@ export type MaintenanceUpdateWorkflowOptions = {
   allowPrerelease?: boolean;
 };
 
-export type MaintenanceUpdateWorkflowOutput = {
-  writeStdout?: (message: string) => void;
-  writeStderr?: (message: string) => void;
+export type ManualUpdateContext = {
+  installMode: 'npm' | 'source';
+  allowPrerelease: boolean;
+  channel?: string;
+};
+
+export type MaintenanceUpdateWorkflowReporter = {
+  writeStdout: (message: string) => void;
+  writeStderr: (message: string) => void;
 };
 
 export type MaintenanceUpdateWorkflowOutcome = {
   exitCode: 0 | 1 | 2;
-  stdout: string[];
-  stderr: string[];
+};
+
+const SILENT_MAINTENANCE_UPDATE_REPORTER: MaintenanceUpdateWorkflowReporter = {
+  writeStdout: () => undefined,
+  writeStderr: () => undefined,
 };
 
 export type MaintenanceUpdateDoctorOps = {
@@ -159,7 +167,12 @@ async function loadResolvedManualUpdateContext(
   config: Awaited<ReturnType<typeof loadConfig>>,
 ): Promise<ManualUpdateContext> {
   const { network } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
-  return resolveManualUpdateContext(config, network, resolveStandaloneInstall);
+  const preferences = resolveUpdatePreferences(config, network);
+  return {
+    installMode: resolveStandaloneInstall(preferences.source) ? 'npm' : 'source',
+    allowPrerelease: preferences.allowPrerelease,
+    ...(preferences.channel ? { channel: preferences.channel } : {}),
+  };
 }
 
 export async function runDefaultUpdatePreflight(
@@ -211,18 +224,10 @@ function createMaintenanceUpdateWorkflowDeps(): MaintenanceUpdateWorkflowDeps {
 export async function runMaintenanceUpdateWorkflow(
   options: MaintenanceUpdateWorkflowOptions,
   deps: MaintenanceUpdateWorkflowDeps = createMaintenanceUpdateWorkflowDeps(),
-  output: MaintenanceUpdateWorkflowOutput = {},
+  reporter: MaintenanceUpdateWorkflowReporter = SILENT_MAINTENANCE_UPDATE_REPORTER,
 ): Promise<MaintenanceUpdateWorkflowOutcome> {
-  const stdout: string[] = [];
-  const stderr: string[] = [];
-  const log = (message: string) => {
-    stdout.push(message);
-    output.writeStdout?.(message);
-  };
-  const error = (message: string) => {
-    stderr.push(message);
-    output.writeStderr?.(message);
-  };
+  const log = (message: string) => reporter.writeStdout(message);
+  const error = (message: string) => reporter.writeStderr(message);
   const config = await deps.loadConfig();
   const updateContext = await deps.loadManualUpdateContext(config);
   const standalone = updateContext.installMode === 'npm';
@@ -242,9 +247,9 @@ export async function runMaintenanceUpdateWorkflow(
         log('No updates available.');
       } else {
         error('Update check failed. See logs above for details.');
-        return { exitCode: 1, stdout, stderr };
+        return { exitCode: 1 };
       }
-      return { exitCode: 0, stdout, stderr };
+      return { exitCode: 0 };
     }
 
     // RFC-41 §4.7.7 invocation pattern #3: before applying an update,
@@ -260,7 +265,7 @@ export async function runMaintenanceUpdateWorkflow(
         if (finding.advisory) error(`      → ${finding.advisory}`);
       }
       error('\nRun `dkg doctor --json` for the full diagnostic report.\n');
-      return { exitCode: 2, stdout, stderr };
+      return { exitCode: 2 };
     }
 
     let version = options.versionOrRef ?? null;
@@ -273,7 +278,7 @@ export async function runMaintenanceUpdateWorkflow(
       const gate = await deps.resolveExplicitNpmUpdateTarget(version, allowPre);
       if (gate.status !== 'allowed') {
         error(`[dkg update] Refusing to update: ${gate.reason}.`);
-        return { exitCode: 1, stdout, stderr };
+        return { exitCode: 1 };
       }
       // Dist-tags are mutable. Install the exact version that passed policy.
       version = gate.version;
@@ -285,13 +290,13 @@ export async function runMaintenanceUpdateWorkflow(
         version = check.version;
       } else if (check.status === 'no-target') {
         log(`No acceptable target for channel "${check.channel}" (tag unpublished, or a pre-release rejected by allowPrerelease=false) — nothing to update to.`);
-        return { exitCode: 0, stdout, stderr };
+        return { exitCode: 0 };
       } else if (check.status === 'up-to-date') {
         log('No update needed — already on latest.');
-        return { exitCode: 0, stdout, stderr };
+        return { exitCode: 0 };
       } else {
         error('Update check failed. See logs above for details.');
-        return { exitCode: 1, stdout, stderr };
+        return { exitCode: 1 };
       }
     }
 
@@ -305,15 +310,15 @@ export async function runMaintenanceUpdateWorkflow(
       : await deps.performNpmUpdate(version, log);
     if (updateStatus !== 'updated') {
       error('Update failed. Check logs and retry.');
-      return { exitCode: 1, stdout, stderr };
+      return { exitCode: 1 };
     }
     const stopped = await deps.stopDaemonIfRunning();
     if (!stopped) {
       error('Update applied but old daemon is still running. Stop it manually and run "dkg start".');
-      return { exitCode: 1, stdout, stderr };
+      return { exitCode: 1 };
     }
     log('Update applied. Run "dkg start" to start with the new version.');
-    return { exitCode: 0, stdout, stderr };
+    return { exitCode: 0 };
   }
 
   error(
@@ -336,7 +341,7 @@ export async function runMaintenanceUpdateWorkflow(
     '  Guide: https://github.com/OriginTrail/dkg/blob/main/docs/use-dkg/updates-and-rollback.md\n' +
     '\n',
   );
-  return { exitCode: 1, stdout, stderr };
+  return { exitCode: 1 };
 }
 
 export function registerUpdateCommand(
