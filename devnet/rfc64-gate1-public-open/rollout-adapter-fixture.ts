@@ -2,17 +2,23 @@ import {
   DKGAgent,
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
+  type DKGAgentConfig,
+  type ReplicationEvent,
   type Rfc64PublicCatalogActivationInputV1,
 } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   assertCanonicalEvmAddress,
+  assertCanonicalDigest,
   assertContextGraphIdV1,
   assertUnsignedContextGraphPolicyEnvelopeV1,
+  computeNetworkId,
+  createOperationContext,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
   type ContextGraphIdV1,
+  type Digest32V1,
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -38,7 +44,12 @@ import {
 } from './fixture.js';
 import {
   GATE1_VM_CHAIN_READ_KEYS,
+  isGate1RolloutCommand,
+  parseGate1RolloutCommandInput,
   type Gate1ReplicationEvent,
+  type Gate1RolloutCommand,
+  type Gate1RolloutCommandInput,
+  type Gate1RolloutCommandOutput,
   type Gate1RolloutMode,
   type Gate1VmReconcileResult,
   type Gate1VmChainReadCounts,
@@ -53,6 +64,24 @@ export interface Gate1RolloutAdapterConfig {
   readonly ownerAddress: EvmAddressV1;
   readonly vmChainScenario: Gate1VmChainScenario;
 }
+
+type Gate1RolloutAgentOptions = Readonly<
+  Pick<
+    DKGAgentConfig,
+    | 'networkIdentity'
+    | 'onReplicationEvent'
+    | 'rfc64PublicCatalogActivation'
+    | 'syncReconcilerEnabled'
+  >
+  & Partial<Pick<DKGAgentConfig, 'chainAdapter'>>
+>;
+
+type Gate1RolloutCommandHandlerMap = {
+  readonly [K in Gate1RolloutCommand]: (
+    currentAgent: DKGAgent,
+    input: Gate1RolloutCommandInput<K>,
+  ) => Promise<Gate1RolloutCommandOutput<K>>;
+};
 
 export function parseGate1RolloutAdapterConfig(
   env: NodeJS.ProcessEnv,
@@ -125,35 +154,104 @@ export function buildGate1RolloutActivation(
  */
 export class Gate1RolloutAdapterFixture {
   readonly activation: Rfc64PublicCatalogActivationInputV1;
+  readonly agentOptions: Gate1RolloutAgentOptions;
   readonly vmChain: Gate1VmChainAdapter | undefined;
   readonly #replicationEvents: Gate1ReplicationEvent[] = [];
-  #store: TripleStore | undefined;
+  readonly #handlers: Gate1RolloutCommandHandlerMap;
 
   private constructor(
     readonly config: Gate1RolloutAdapterConfig,
+    readonly store: TripleStore,
     vmChain: Gate1VmChainAdapter | undefined,
+    networkId: string,
   ) {
     this.activation = buildGate1RolloutActivation(config);
     this.vmChain = vmChain;
+    this.agentOptions = Object.freeze({
+      networkIdentity: {
+        networkId,
+        chainId: GATE1_DEPLOYMENT.networkId,
+      },
+      onReplicationEvent: this.onReplicationEvent,
+      rfc64PublicCatalogActivation: this.activation,
+      syncReconcilerEnabled: vmChain !== undefined,
+      ...(vmChain === undefined ? {} : { chainAdapter: vmChain }),
+    });
+    this.#handlers = Object.freeze({
+      rolloutStatus: async (currentAgent, input) => {
+        const manualSwmPlan = await currentAgent.planSharedMemorySyncContextGraphs(
+          input.completeProviderPeerId,
+          [input.contextGraphId],
+          createOperationContext('sync'),
+          { requireCompleteProviderMatch: true },
+        );
+        return Object.freeze({
+          bootstrapStarted:
+            currentAgent.readRfc64PublicCatalogBootstrapStatusV1() !== null,
+          catalogServiceStarted:
+            currentAgent.rfc64PublicCatalogStatsV1()?.started === true,
+          legacyConfiguredScope:
+            currentAgent.getSyncContextGraphIds().includes(input.contextGraphId),
+          manualLegacySwmTargetCount: manualSwmPlan.targets.length,
+          vmChainInventorySelected:
+            currentAgent.isRfc64SelectedVmReconcileContextGraph(input.contextGraphId),
+        });
+      },
+      vmReconcile: (currentAgent, input) => (
+        this.reconcileVm(currentAgent, input.contextGraphId)
+      ),
+      seedVmSourceSwm: (currentAgent, input) => (
+        this.seedVmSourceSwm(currentAgent, input.contextGraphId)
+      ),
+      stagedHeadReadback: async (currentAgent, input) => {
+        assertCanonicalDigest(input.objectDigest, 'stagedHeadReadback.objectDigest');
+        assertCanonicalDigest(
+          input.signatureVariantDigest,
+          'stagedHeadReadback.signatureVariantDigest',
+        );
+        return currentAgent.readRfc64StagedAuthorCatalogHeadV1({
+          objectDigest: input.objectDigest as Digest32V1,
+          signatureVariantDigest: input.signatureVariantDigest as Digest32V1,
+        });
+      },
+    });
   }
 
   static async create(
     config: Gate1RolloutAdapterConfig,
     role: 'author' | 'receiver',
+    store: TripleStore,
   ): Promise<Gate1RolloutAdapterFixture> {
     const vmChain = role === 'receiver'
       ? await Gate1VmChainAdapter.create(config.contextGraphId, config.vmChainScenario)
       : undefined;
-    return new Gate1RolloutAdapterFixture(config, vmChain);
+    return new Gate1RolloutAdapterFixture(
+      config,
+      store,
+      vmChain,
+      await computeNetworkId(),
+    );
   }
 
-  readonly onReplicationEvent = (event: Gate1ReplicationEvent): void => {
-    this.#replicationEvents.push(event);
+  readonly onReplicationEvent = (event: ReplicationEvent): void => {
+    this.#replicationEvents.push(Object.freeze({
+      action: event.action,
+      contextGraphId: event.contextGraphId,
+      ...(event.ordinal === undefined ? {} : { ordinal: event.ordinal }),
+    }));
   };
 
-  attachStore(store: TripleStore): void {
-    if (this.#store !== undefined) throw new Error('rollout store is already attached');
-    this.#store = store;
+  supportsCommand(command: string): command is Gate1RolloutCommand {
+    return isGate1RolloutCommand(command);
+  }
+
+  async dispatch<K extends Gate1RolloutCommand>(
+    currentAgent: DKGAgent,
+    command: K,
+    rawInput: unknown,
+  ): Promise<Gate1RolloutCommandOutput<K>> {
+    const input = parseGate1RolloutCommandInput(command, rawInput);
+    return this.#handlers[command](currentAgent, input);
   }
 
   async reconcileVm(
@@ -179,8 +277,7 @@ export class Gate1RolloutAdapterFixture {
     agent: DKGAgent,
     contextGraphId: string,
   ): Promise<Readonly<{ swmGraph: string; tripleCount: number }>> {
-    if (this.#store === undefined) throw new Error('rollout store fixture is unavailable');
-    return seedGate1VmSourceSwm(agent, this.#store, contextGraphId);
+    return seedGate1VmSourceSwm(agent, this.store, contextGraphId);
   }
 }
 

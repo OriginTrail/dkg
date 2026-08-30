@@ -176,6 +176,7 @@ test('certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assert.equal(seededVmSource.tripleCount, 2);
   const shadowVm = await reconcileVm(shadow.child, 'shadow');
   assertVmChainRead(shadowVm, 'shadow');
+  assertShadowVmEvidence(shadowVm);
   assertVmReconciled(shadowVm, 'shadow');
   assertSemanticExact(await semanticGraph(shadow.child, vmGraph, 'shadow-vm'), vmGraph);
   await connectBothWays(author, shadow.child, authorReady, shadow.ready, 'shadow-connect');
@@ -476,34 +477,36 @@ async function reconcileVm(
 
 function assertVmChainRead(value: Gate1VmReconcileResult, label: string): void {
   const reads = value.chainReadDelta;
-  assert.equal(reads.nameHashResolution >= 2, true);
-  assert.equal(reads.count >= 1, true);
-  if (label === 'shadow') {
-    for (const key of [
-      'accessPolicy',
-      'active',
-      'author',
-      'kaAt',
-      'latestRoot',
-      'publisher',
-      'rootCount',
-      'storageAddress',
-    ] as const) {
-      assert.equal(reads[key] >= 1, true, `shadow did not perform required ${key} chain read`);
-    }
-    assert.equal(
-      value.replicationEvents.some((event) => (
-        event.action === 'promote'
-        && event.contextGraphId === CONTEXT_GRAPH_ID
-        && event.ordinal === 0
-      )),
-      true,
-      `shadow emitted no exact promotion event: ${JSON.stringify(value.replicationEvents)}`,
-    );
-  }
+  assert.equal(reads.nameHashResolution >= 2, true, `${label} omitted name-hash resolution`);
+  assert.equal(reads.count >= 1, true, `${label} omitted chain inventory count`);
   const result = value.result;
   assert.equal(result.contextGraphId, CONTEXT_GRAPH_ID);
   assert.equal(result.source, 'manual');
+}
+
+function assertShadowVmEvidence(value: Gate1VmReconcileResult): void {
+  const reads = value.chainReadDelta;
+  for (const key of [
+    'accessPolicy',
+    'active',
+    'author',
+    'kaAt',
+    'latestRoot',
+    'publisher',
+    'rootCount',
+    'storageAddress',
+  ] as const) {
+    assert.equal(reads[key] >= 1, true, `shadow did not perform required ${key} chain read`);
+  }
+  assert.equal(
+    value.replicationEvents.some((event) => (
+      event.action === 'promote'
+      && event.contextGraphId === CONTEXT_GRAPH_ID
+      && event.ordinal === 0
+    )),
+    true,
+    `shadow emitted no exact promotion event: ${JSON.stringify(value.replicationEvents)}`,
+  );
 }
 
 function assertVmReconciled(value: Gate1VmReconcileResult, label: string): void {

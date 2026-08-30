@@ -1,4 +1,7 @@
-import type { ContextGraphReconcileResult } from '@origintrail-official/dkg-agent';
+import type {
+  ContextGraphReconcileResult,
+  ReplicationEvent,
+} from '@origintrail-official/dkg-agent';
 
 export type Gate1RolloutMode = 'legacy' | 'shadow' | 'catalog';
 export type Gate1VmChainScenario = 'valid' | 'inactive' | 'private' | 'root-count-drift';
@@ -19,29 +22,11 @@ export const GATE1_VM_CHAIN_READ_KEYS = Object.freeze([
 export type Gate1VmChainReadKey = typeof GATE1_VM_CHAIN_READ_KEYS[number];
 export type Gate1VmChainReadCounts = Readonly<Record<Gate1VmChainReadKey, number>>;
 
-/** Minimal process-safe projection of the agent replication telemetry contract. */
-export interface Gate1ReplicationEvent {
-  readonly ts: number;
-  readonly contextGraphId: string;
-  readonly onChainCgId?: string;
-  readonly action:
-    | 'sweep'
-    | 'fetch'
-    | 'promote'
-    | 'already'
-    | 'defer'
-    | 'cursor-advance'
-    | 'core-fill';
-  readonly ual?: string;
-  readonly ordinal?: number;
-  readonly kaId?: string;
-  readonly fromWatermark?: number;
-  readonly toWatermark?: number;
-  readonly head?: number;
-  readonly reconciled?: number;
-  readonly pending?: number;
-  readonly detail?: string;
-}
+/** Exact evidence projection consumed by the transition certificate. */
+export type Gate1ReplicationEvent = Readonly<Pick<
+  ReplicationEvent,
+  'action' | 'contextGraphId' | 'ordinal'
+>>;
 
 export interface Gate1RolloutStatusResult {
   readonly bootstrapStarted: boolean;
@@ -286,31 +271,13 @@ function parseReplicationEvent(value: unknown): Gate1ReplicationEvent {
     throw new TypeError('vmReconcile replication event action is invalid');
   }
   return Object.freeze({
-    ts: requiredNonNegativeInteger(event.ts, 'vmReconcile replication event ts'),
     contextGraphId: requiredString(
       event.contextGraphId,
       'vmReconcile replication event contextGraphId',
     ),
     action: action as Gate1ReplicationEvent['action'],
-    ...optionalStringField(event, 'onChainCgId'),
-    ...optionalStringField(event, 'ual'),
     ...optionalNonNegativeIntegerField(event, 'ordinal'),
-    ...optionalStringField(event, 'kaId'),
-    ...optionalNonNegativeIntegerField(event, 'fromWatermark'),
-    ...optionalNonNegativeIntegerField(event, 'toWatermark'),
-    ...optionalNonNegativeIntegerField(event, 'head'),
-    ...optionalNonNegativeIntegerField(event, 'reconciled'),
-    ...optionalNonNegativeIntegerField(event, 'pending'),
-    ...optionalStringField(event, 'detail'),
   });
-}
-
-function optionalStringField<K extends string>(
-  record: Record<string, unknown>,
-  key: K,
-): Readonly<Record<string, string>> {
-  const value = record[key];
-  return value === undefined ? {} : { [key]: requiredString(value, `replication event ${key}`) };
 }
 
 function optionalNonNegativeIntegerField<K extends string>(

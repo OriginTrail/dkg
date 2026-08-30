@@ -12,9 +12,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import {
-  computeNetworkId,
   computeControlSignatureVariantDigestHex,
-  createOperationContext,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -44,13 +42,6 @@ import {
   Gate1RolloutAdapterFixture,
   parseGate1RolloutAdapterConfig,
 } from './rollout-adapter-fixture.js';
-import {
-  isGate1RolloutCommand,
-  parseGate1RolloutCommandInput,
-  type Gate1RolloutCommand,
-  type Gate1RolloutCommandInput,
-  type Gate1RolloutCommandOutput,
-} from './rollout-process-protocol.js';
 
 const roleInput = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
@@ -122,13 +113,10 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
+  const store = new OxigraphStore(join(dataDir, 'store.nq'));
   rolloutFixture = rolloutConfig === null
     ? undefined
-    : await Gate1RolloutAdapterFixture.create(rolloutConfig, role);
-  const rolloutActivation = rolloutFixture?.activation ?? null;
-  const vmChain = rolloutFixture?.vmChain;
-  const store = new OxigraphStore(join(dataDir, 'store.nq'));
-  rolloutFixture?.attachStore(store);
+    : await Gate1RolloutAdapterFixture.create(rolloutConfig, role, store);
   const created = await DKGAgent.create({
     name: `RFC64Gate1${role}`,
     dataDir,
@@ -138,21 +126,13 @@ async function boot(): Promise<void> {
     nodeRole: 'edge',
     store,
     syncSharedMemoryOnConnect: false,
-    syncReconcilerEnabled: vmChain !== undefined,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    onReplicationEvent: rolloutFixture?.onReplicationEvent,
-    ...(vmChain === undefined ? {} : { chainAdapter: vmChain }),
-    ...(rolloutActivation === null ? {
+    ...(rolloutFixture === undefined ? {
+      syncReconcilerEnabled: false,
       rfc64CatalogDeploymentProfile: GATE1_DEPLOYMENT,
-    } : {
-      networkIdentity: {
-        networkId: await computeNetworkId(),
-        chainId: GATE1_DEPLOYMENT.networkId,
-      },
-      rfc64PublicCatalogActivation: rolloutActivation,
-    }),
+    } : rolloutFixture.agentOptions),
   });
   agent = created;
   await created.start();
@@ -178,9 +158,9 @@ async function handle(command: Command): Promise<void> {
     throw new Error('requestId is required');
   }
   const currentAgent = requireAgent();
-  if (isGate1RolloutCommand(command.command)) {
+  if (rolloutFixture?.supportsCommand(command.command) === true) {
     requireRole('receiver');
-    emitOperationResult(command, await dispatchGate1RolloutCommand(
+    emitOperationResult(command, await rolloutFixture.dispatch(
       currentAgent,
       command.command,
       command.input,
@@ -355,62 +335,6 @@ async function handle(command: Command): Promise<void> {
     default:
       throw new Error(`unknown adapter command: ${command.command}`);
   }
-}
-
-type Gate1RolloutCommandHandlerMap = {
-  readonly [K in Gate1RolloutCommand]: (
-    currentAgent: DKGAgent,
-    input: Gate1RolloutCommandInput<K>,
-  ) => Promise<Gate1RolloutCommandOutput<K>>;
-};
-
-const GATE1_ROLLOUT_COMMAND_HANDLERS: Gate1RolloutCommandHandlerMap = Object.freeze({
-  rolloutStatus: async (currentAgent, input) => {
-    const manualSwmPlan = await currentAgent.planSharedMemorySyncContextGraphs(
-      input.completeProviderPeerId,
-      [input.contextGraphId],
-      createOperationContext('sync'),
-      { requireCompleteProviderMatch: true },
-    );
-    return Object.freeze({
-      bootstrapStarted: currentAgent.readRfc64PublicCatalogBootstrapStatusV1() !== null,
-      catalogServiceStarted: currentAgent.rfc64PublicCatalogStatsV1()?.started === true,
-      legacyConfiguredScope: currentAgent.getSyncContextGraphIds().includes(input.contextGraphId),
-      manualLegacySwmTargetCount: manualSwmPlan.targets.length,
-      vmChainInventorySelected:
-        currentAgent.isRfc64SelectedVmReconcileContextGraph(input.contextGraphId),
-    });
-  },
-  vmReconcile: async (currentAgent, input) => {
-    if (rolloutFixture === undefined) {
-      throw new Error('rollout adapter fixture is unavailable');
-    }
-    return rolloutFixture.reconcileVm(currentAgent, input.contextGraphId);
-  },
-  seedVmSourceSwm: async (currentAgent, input) => {
-    if (rolloutFixture === undefined) {
-      throw new Error('rollout adapter fixture is unavailable');
-    }
-    return rolloutFixture.seedVmSourceSwm(currentAgent, input.contextGraphId);
-  },
-  stagedHeadReadback: async (currentAgent, input) => (
-    currentAgent.readRfc64StagedAuthorCatalogHeadV1({
-      objectDigest: requiredDigest(input.objectDigest, 'stagedHeadReadback.objectDigest'),
-      signatureVariantDigest: requiredDigest(
-        input.signatureVariantDigest,
-        'stagedHeadReadback.signatureVariantDigest',
-      ),
-    })
-  ),
-});
-
-async function dispatchGate1RolloutCommand<K extends Gate1RolloutCommand>(
-  currentAgent: DKGAgent,
-  command: K,
-  rawInput: unknown,
-): Promise<Gate1RolloutCommandOutput<K>> {
-  const input = parseGate1RolloutCommandInput(command, rawInput);
-  return GATE1_ROLLOUT_COMMAND_HANDLERS[command](currentAgent, input);
 }
 
 function compareQuad(left: Quad, right: Quad): number {
