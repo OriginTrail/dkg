@@ -7,6 +7,7 @@ export type LookupType =
 export type QueryStatus =
   | 'OK'
   | 'ERROR'
+  | 'BUSY'
   | 'ACCESS_DENIED'
   | 'RATE_LIMITED'
   | 'NOT_FOUND'
@@ -35,6 +36,14 @@ export interface QueryResponse {
   resultCount: number;
   gasConsumed?: number;
   error?: string;
+  /** Stable machine-readable code for retryable protocol outcomes. */
+  code?: string;
+  /** True only when repeating the same request is safe. */
+  retryable?: boolean;
+  /** Bounded delay suggested by the responding node. */
+  retryAfterMs?: number;
+  /** Bounded scheduler reason when the request was rejected before dispatch. */
+  reason?: 'queue_full' | 'queue_wait_timeout';
 }
 
 export interface ContextGraphQueryPolicy {

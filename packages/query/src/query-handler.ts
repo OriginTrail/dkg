@@ -1,6 +1,6 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
 import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
-import { quadsToNQuads } from '@origintrail-official/dkg-storage';
+import { quadsToNQuads, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
@@ -18,6 +18,7 @@ const MAX_LIMIT = 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TIMEOUT_MS = 30000;
 const MAX_RESULT_BYTES = 1_048_576; // 1 MB
+const STORE_BUSY_RETRY_AFTER_MS = 1_000;
 // PR #1107 review (🔴): cache isContextGraphPublic verdicts so repeated
 // remote queries against the same CG don't each burn an RPC round-trip on
 // the chain adapter. Short TTL keeps policy flips (public → private)
@@ -145,6 +146,7 @@ export class QueryHandler {
 
       return this.enforceResultSize(response);
     } catch (err) {
+      if (isStoreSchedulerBusyError(err)) return storeBusyResponse(opId, err);
       return errorResponse(opId, 'ERROR', 'Internal error processing query');
     }
   }
@@ -308,7 +310,8 @@ export class QueryHandler {
         truncated: false,
         resultCount: resolved.quads.length,
       };
-    } catch {
+    } catch (err) {
+      if (isStoreSchedulerBusyError(err)) throw err;
       return errorResponse(opId, 'ERROR', `Failed to resolve UAL: ${ual}`);
     }
   }
@@ -460,6 +463,36 @@ function errorResponse(opId: string, status: QueryStatus, error: string): QueryR
     truncated: false,
     resultCount: 0,
     error,
+  };
+}
+
+function isStoreSchedulerBusyError(
+  error: unknown,
+): error is StoreSchedulerBusyError {
+  return error instanceof StoreSchedulerBusyError || (
+    typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === 'STORE_SCHEDULER_BUSY'
+  );
+}
+
+function storeBusyResponse(
+  opId: string,
+  error: StoreSchedulerBusyError,
+): QueryResponse {
+  const reason = error.reason === 'queue_full' || error.reason === 'queue_wait_timeout'
+    ? error.reason
+    : undefined;
+  return {
+    operationId: opId,
+    status: 'BUSY',
+    truncated: false,
+    resultCount: 0,
+    error: 'Node storage is temporarily busy. Retry later.',
+    code: 'STORE_BUSY',
+    retryable: true,
+    retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
+    ...(reason ? { reason } : {}),
   };
 }
 
