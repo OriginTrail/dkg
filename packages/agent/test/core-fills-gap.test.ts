@@ -1048,6 +1048,85 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch.calls).toHaveLength(0);
   });
 
+  it('rehydrates clean-miss evidence and reuses it after a peer disappears', async () => {
+    const durable = new Map<string, VmReconcileNegativeRecord>();
+    let durableLoads = 0;
+    let durableSaves = 0;
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (key) => {
+        durableLoads += 1;
+        const record = durable.get(key);
+        return record ? structuredClone(record) : null;
+      },
+      saveVmReconcileNegative: async (record) => {
+        durableSaves += 1;
+        durable.set(record.cacheKey, structuredClone(record));
+      },
+      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
+      deleteVmReconcileNegativesForContextGraph: async (cg) => {
+        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
+      },
+    };
+    const localCgId = '59';
+    const onChainCgId = 59n;
+    const kaId = 9059n;
+    let connectedPeers = ['peer-stable', 'peer-flaky'];
+    let internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+    const provenPeers = ['peer-stable', 'peer-flaky'];
+    const initialFetch = recorder(async () => ({
+      catchup: emptyCatchupStats(),
+      cleanMissPeerIds: [provenPeers.shift()!],
+    }));
+    (internals as any).syncVmRecoveryFromConnectedPeers = initialFetch;
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(initialFetch.calls).toHaveLength(2);
+    expect(durableSaves).toBe(1);
+    expect(durable.size).toBe(1);
+    const savedRecord = [...durable.values()][0]!;
+    expect(savedRecord.peerTopology).toMatchObject({
+      kind: 'readable',
+      peers: expect.arrayContaining([
+        { peerId: 'peer-stable', core: false },
+        { peerId: 'peer-flaky', core: false },
+      ]),
+    });
+    expect(savedRecord.cleanMissPeerIds).toEqual(['peer-stable', 'peer-flaky']);
+
+    const loadsBeforeRestart = durableLoads;
+    await agent!.stop();
+    agent = null;
+    connectedPeers = ['peer-stable'];
+    internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+    const restartedFetch = recorder(async () => ({
+      catchup: emptyCatchupStats(),
+      cleanMissPeerIds: ['peer-stable'],
+    }));
+    (internals as any).syncVmRecoveryFromConnectedPeers = restartedFetch;
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans += 1;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(durableLoads).toBeGreaterThan(loadsBeforeRestart);
+    expect(restartedFetch.calls).toHaveLength(0);
+    expect(expensiveScans).toBe(0);
+  });
+
   it('rescans after restart when an incomplete operation payload appears only in a per-KA child graph', async () => {
     const durable = new Map<string, VmReconcileNegativeRecord>();
     const subscriptionStore: ContextGraphSubscriptionStore = {
