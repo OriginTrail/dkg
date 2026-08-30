@@ -1,6 +1,15 @@
 import Database from 'better-sqlite3';
 import type { DashboardDB } from './db.js';
 
+type RegistryScanCursorKey = {
+  chainId: string;
+  deploymentId: string;
+  registryAddress: string;
+};
+type RoleAwareRegistryScanCursorKey = RegistryScanCursorKey & {
+  cursorKind: 'historical' | 'tip';
+};
+
 function parsePositiveSafeInteger(value: number | string | undefined): number | undefined {
   if (value == null) return undefined;
   const parsed = Number(value);
@@ -97,23 +106,38 @@ export class SqliteContextGraphRegistryScanCursorStore {
     this.legacyCursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
   }
 
-  async load(key: { chainId: string; deploymentId: string; registryAddress: string; cursorKind: 'historical' | 'tip' }): Promise<number | undefined> {
-    const current = this.cursors.load(this.scope(key), this.registryKey(key));
-    if (current !== undefined || key.cursorKind === 'tip') return current;
+  async load(
+    key: RegistryScanCursorKey | RoleAwareRegistryScanCursorKey,
+  ): Promise<number | undefined> {
+    const cursorKind = this.cursorKind(key);
+    const current = this.cursors.load(this.scope(key), this.registryKey(key, cursorKind));
+    if (current !== undefined || cursorKind === 'tip') return current;
     return this.cursors.load(this.scope(key), this.legacyRegistryKey(key))
       ?? this.legacyCursors.load(this.legacyKey(key));
   }
 
-  async save(key: { chainId: string; deploymentId: string; registryAddress: string; cursorKind: 'historical' | 'tip' }, nextBlock: number): Promise<void> {
-    this.cursors.save(this.scope(key), this.registryKey(key), nextBlock);
+  async save(
+    key: RegistryScanCursorKey | RoleAwareRegistryScanCursorKey,
+    nextBlock: number,
+  ): Promise<void> {
+    this.cursors.save(this.scope(key), this.registryKey(key, this.cursorKind(key)), nextBlock);
   }
 
   private scope(key: { chainId: string; deploymentId: string }): string {
     return `${key.chainId}:${key.deploymentId}`;
   }
 
-  private registryKey(key: { registryAddress: string; cursorKind: 'historical' | 'tip' }): string {
-    return `${key.cursorKind}:${key.registryAddress.toLowerCase()}`;
+  private cursorKind(
+    key: RegistryScanCursorKey | RoleAwareRegistryScanCursorKey,
+  ): 'historical' | 'tip' {
+    return 'cursorKind' in key ? key.cursorKind : 'historical';
+  }
+
+  private registryKey(
+    key: { registryAddress: string },
+    cursorKind: 'historical' | 'tip',
+  ): string {
+    return `${cursorKind}:${key.registryAddress.toLowerCase()}`;
   }
 
   private legacyRegistryKey(key: { registryAddress: string }): string {

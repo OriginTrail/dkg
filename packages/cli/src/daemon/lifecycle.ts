@@ -1852,7 +1852,7 @@ async function runDaemonInnerWithStartupOwnership(
     syncCheckpointStore,
     changelogCursorStore,
     chainEventCursorStore,
-    contextGraphRegistryScanCursorPersistence: {
+    contextGraphRegistryScanCursorStore: {
       kind: 'roleAware',
       store: contextGraphRegistryScanCursorStore,
     },

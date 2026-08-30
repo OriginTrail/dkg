@@ -37,7 +37,7 @@ const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
     createArg?.chainEventCursorStore?.cursors?.db ??
-    createArg?.contextGraphRegistryScanCursorPersistence?.store?.cursors?.db;
+    createArg?.contextGraphRegistryScanCursorStore?.store?.cursors?.db;
   db?.close?.();
 }
 
@@ -242,7 +242,7 @@ describe('daemon startup network validation', () => {
         loadLane: expect.any(Function),
         saveLane: expect.any(Function),
       },
-      contextGraphRegistryScanCursorPersistence: {
+      contextGraphRegistryScanCursorStore: {
         kind: 'roleAware',
         store: {
           load: expect.any(Function),

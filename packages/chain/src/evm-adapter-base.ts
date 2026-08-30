@@ -23,6 +23,9 @@ import type {
   OnChainPublishResult,
   PreBroadcastSignal,
   SignedTransactionEnvelope,
+  ContextGraphRegistryRoleAwareScanCursorStore,
+  ContextGraphRegistryScanCursorStore,
+  ContextGraphRegistryScanCursorStoreConfig,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
@@ -53,6 +56,33 @@ import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
+
+function bindRoleAwareRegistryCursorStore(
+  store: ContextGraphRegistryRoleAwareScanCursorStore,
+  cursorKind: 'historical' | 'tip',
+): ContextGraphRegistryScanCursorStore {
+  return {
+    load: (key) => store.load({ ...key, cursorKind }),
+    save: (key, nextBlock) => store.save({ ...key, cursorKind }, nextBlock),
+  };
+}
+
+function normalizeRegistryCursorStores(
+  config: ContextGraphRegistryScanCursorStoreConfig | undefined,
+): {
+  historical?: ContextGraphRegistryScanCursorStore;
+  tip?: ContextGraphRegistryScanCursorStore;
+} {
+  if (!config) return {};
+  if (!('kind' in config)) return { historical: config };
+  if (config.kind === 'legacy') {
+    return { historical: config.historical, tip: config.tip };
+  }
+  return {
+    historical: bindRoleAwareRegistryCursorStore(config.store, 'historical'),
+    tip: bindRoleAwareRegistryCursorStore(config.store, 'tip'),
+  };
+}
 
 type ContractWriteSender = (
   contract: Contract,
@@ -1317,30 +1347,18 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
-    const registryCursorPersistence = config.contextGraphRegistryScanCursorPersistence;
-    const historicalRegistryCursorStore = registryCursorPersistence?.kind === 'roleAware'
-      ? { kind: 'roleAware' as const, store: registryCursorPersistence.store }
-      : registryCursorPersistence?.kind === 'legacy'
-        ? { kind: 'legacy' as const, store: registryCursorPersistence.historical }
-        : config.contextGraphRegistryScanCursorStore
-          ? { kind: 'legacy' as const, store: config.contextGraphRegistryScanCursorStore }
-          : undefined;
-    const tipRegistryCursorStore = registryCursorPersistence?.kind === 'roleAware'
-      ? { kind: 'roleAware' as const, store: registryCursorPersistence.store }
-      : registryCursorPersistence?.kind === 'legacy' && registryCursorPersistence.tip
-        ? { kind: 'legacy' as const, store: registryCursorPersistence.tip }
-        : undefined;
+    const registryCursorStores = normalizeRegistryCursorStores(
+      config.contextGraphRegistryScanCursorStore,
+    );
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
-      cursorKind: 'historical',
-      store: historicalRegistryCursorStore,
+      store: registryCursorStores.historical,
     });
     this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
-      cursorKind: 'tip',
-      store: tipRegistryCursorStore,
+      store: registryCursorStores.tip,
     });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;

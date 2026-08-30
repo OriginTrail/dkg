@@ -606,6 +606,11 @@ export type ContextGraphRegistryScanCursorPersistence =
       store: ContextGraphRegistryRoleAwareScanCursorStore;
     };
 
+/** Single public configuration slot: original stores remain valid; new persistence is tagged. */
+export type ContextGraphRegistryScanCursorStoreConfig =
+  | ContextGraphRegistryScanCursorStore
+  | ContextGraphRegistryScanCursorPersistence;
+
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
 /**

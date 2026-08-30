@@ -3,13 +3,11 @@
 import type {
   ContextGraphRegistryScanCursorKey,
   ContextGraphRegistryScanCursorStore,
-  ContextGraphRegistryRoleAwareScanCursorKey,
-  ContextGraphRegistryRoleAwareScanCursorStore,
 } from './chain-adapter.js';
 
-export type ContextGraphRegistryScanCursorStoreBinding =
-  | { kind: 'legacy'; store: ContextGraphRegistryScanCursorStore }
-  | { kind: 'roleAware'; store: ContextGraphRegistryRoleAwareScanCursorStore };
+export type ContextGraphRegistryScanCursorLoadResult =
+  | { status: 'loaded'; watermark?: number }
+  | { status: 'failed'; error: unknown };
 
 /**
  * Durable cursor policy for ContextGraphNameRegistry scans.
@@ -25,8 +23,7 @@ export class ContextGraphRegistryScanCursor {
     private readonly input: {
       chainId: string;
       deploymentId: string;
-      cursorKind: ContextGraphRegistryRoleAwareScanCursorKey['cursorKind'];
-      store?: ContextGraphRegistryScanCursorStoreBinding;
+      store?: ContextGraphRegistryScanCursorStore;
     },
   ) {}
 
@@ -39,25 +36,30 @@ export class ContextGraphRegistryScanCursor {
   }
 
   async loadWatermark(registryAddress: string): Promise<number | undefined> {
+    const result = await this.loadWatermarkResult(registryAddress);
+    return result.status === 'loaded' ? result.watermark : undefined;
+  }
+
+  async loadWatermarkResult(
+    registryAddress: string,
+  ): Promise<ContextGraphRegistryScanCursorLoadResult> {
     const cacheKey = this.cacheKey(registryAddress);
     const cached = this.normalize(this.watermarks.get(cacheKey));
-    if (cached != null) return cached;
+    if (cached != null) return { status: 'loaded', watermark: cached };
 
-    if (!this.input.store) return undefined;
+    if (!this.input.store) return { status: 'loaded' };
     try {
-      const persisted = this.input.store.kind === 'roleAware'
-        ? await this.input.store.store.load(this.roleAwareCursorKey(cacheKey))
-        : await this.input.store.store.load(this.legacyCursorKey(cacheKey));
+      const persisted = await this.input.store.load(this.cursorKey(cacheKey));
       const normalized = this.normalize(persisted);
       if (normalized != null) {
         this.watermarks.set(cacheKey, normalized);
       }
-      return normalized;
+      return { status: 'loaded', watermark: normalized };
     } catch (err) {
       console.warn(
         `[chain] ContextGraphNameRegistry scan cursor load failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return undefined;
+      return { status: 'failed', error: err };
     }
   }
 
@@ -72,11 +74,7 @@ export class ContextGraphRegistryScanCursor {
     this.watermarks.set(cacheKey, normalized);
     if (!this.input.store) return;
     try {
-      if (this.input.store.kind === 'roleAware') {
-        await this.input.store.store.save(this.roleAwareCursorKey(cacheKey), normalized);
-      } else {
-        await this.input.store.store.save(this.legacyCursorKey(cacheKey), normalized);
-      }
+      await this.input.store.save(this.cursorKey(cacheKey), normalized);
     } catch (err) {
       console.warn(
         `[chain] ContextGraphNameRegistry scan cursor save failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -88,18 +86,11 @@ export class ContextGraphRegistryScanCursor {
     return registryAddress.toLowerCase();
   }
 
-  private legacyCursorKey(registryAddress: string): ContextGraphRegistryScanCursorKey {
+  private cursorKey(registryAddress: string): ContextGraphRegistryScanCursorKey {
     return {
       chainId: this.input.chainId,
       deploymentId: this.input.deploymentId,
       registryAddress,
-    };
-  }
-
-  private roleAwareCursorKey(registryAddress: string): ContextGraphRegistryRoleAwareScanCursorKey {
-    return {
-      ...this.legacyCursorKey(registryAddress),
-      cursorKind: this.input.cursorKind,
     };
   }
 

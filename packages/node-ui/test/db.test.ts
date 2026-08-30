@@ -2225,6 +2225,15 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     await store.save({ ...key, cursorKind: 'tip' }, 9000);
     expect(await store.load(key)).toBe(5000);
     expect(await store.load({ ...key, cursorKind: 'tip' })).toBe(9000);
+    const originalKey = {
+      chainId: key.chainId,
+      deploymentId: key.deploymentId,
+      registryAddress: '0x2222222222222222222222222222222222222222',
+    };
+    await store.save(originalKey, 4000);
+    expect(await store.load(originalKey)).toBe(4000);
+    expect(await store.load({ ...originalKey, cursorKind: 'historical' })).toBe(4000);
+    expect(await store.load({ ...originalKey, cursorKind: 'tip' })).toBeUndefined();
     expect(db.db.prepare(
       `SELECT value FROM runtime_cursors
        WHERE namespace = 'contextGraphRegistryScan.cursor'

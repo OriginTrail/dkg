@@ -165,7 +165,7 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
   function closeAgentCreateDb(): void {
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
     const db = createArg?.chainEventCursorStore?.cursors?.db
-      ?? createArg?.contextGraphRegistryScanCursorPersistence?.store?.cursors?.db;
+      ?? createArg?.contextGraphRegistryScanCursorStore?.store?.cursors?.db;
     db?.close?.();
   }
 

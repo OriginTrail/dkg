@@ -35,21 +35,17 @@ describe('DKGAgent chain cursor wiring', () => {
         minPublisherNativeWei: 123n,
         minPublisherTracWei: 456n,
       },
-      contextGraphRegistryScanCursorPersistence: {
+      contextGraphRegistryScanCursorStore: {
         kind: 'legacy',
         historical: historicalRegistryCursorStore,
         tip: tipRegistryCursorStore,
       },
     });
 
-    expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toEqual({
-      kind: 'legacy',
-      store: historicalRegistryCursorStore,
-    });
-    expect((agent as any).chain.contextGraphRegistryTipScanCursor?.input?.store).toEqual({
-      kind: 'legacy',
-      store: tipRegistryCursorStore,
-    });
+    expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store)
+      .toBe(historicalRegistryCursorStore);
+    expect((agent as any).chain.contextGraphRegistryTipScanCursor?.input?.store)
+      .toBe(tipRegistryCursorStore);
     expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);

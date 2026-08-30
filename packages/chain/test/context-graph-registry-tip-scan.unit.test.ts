@@ -57,7 +57,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       }),
     });
     const { adapter, provider } = makeAdapter(registry, head, {
-      contextGraphRegistryScanCursorPersistence: persistence,
+      contextGraphRegistryScanCursorStore: persistence,
     });
     provider.getBlockNumber.setImpl(async () => head);
 
@@ -78,7 +78,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
 
     head = 13_200;
     const { adapter: restartedAdapter, provider: restartedProvider } = makeAdapter(registry, head, {
-      contextGraphRegistryScanCursorPersistence: persistence,
+      contextGraphRegistryScanCursorStore: persistence,
     });
     restartedProvider.getBlockNumber.setImpl(async () => head);
     registry.queryFilter.clear();
@@ -117,7 +117,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       }),
     });
     const { adapter } = makeAdapter(registry, 10_000, {
-      contextGraphRegistryScanCursorPersistence: persistence,
+      contextGraphRegistryScanCursorStore: persistence,
     });
 
     await expect(collectRegistryScan(adapter, { mode: 'tip' }))
@@ -133,7 +133,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
         : [],
     );
     const { adapter: restarted } = makeAdapter(registry, head, {
-      contextGraphRegistryScanCursorPersistence: persistence,
+      contextGraphRegistryScanCursorStore: persistence,
     });
 
     const recovered = await collectRegistryScan(restarted, { mode: 'tip' });
@@ -172,6 +172,27 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
     expect(registry.queryFilter.calls[0]?.slice(1)).toEqual([1_950, 2_949]);
   });
 
+  it('keeps tip progress in memory when only the original legacy store is configured', async () => {
+    const historical = new JsonLegacyRegistryScanCursorStore();
+    historical.seed(LEGACY_KEY, 2_000);
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 10_000, {
+      contextGraphRegistryScanCursorStore: historical,
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    await collectRegistryScan(adapter, { mode: 'tip' });
+
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [8_001, 10_000],
+    ]);
+    expect(historical.loads).toEqual([]);
+    expect(historical.saves).toEqual([]);
+    expect(historical.values.get(JSON.stringify(LEGACY_KEY))).toBe(2_000);
+    expect((adapter as any).contextGraphRegistryTipScanCursor.getCachedWatermark(REGISTRY))
+      .toBe(10_001);
+  });
+
   it('persists independent tip progress across restart with split legacy stores', async () => {
     const historical = new JsonLegacyRegistryScanCursorStore();
     const tip = new JsonLegacyRegistryScanCursorStore();
@@ -187,7 +208,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       ),
     });
     const { adapter } = makeAdapter(registry, head, {
-      contextGraphRegistryScanCursorPersistence: persistence,
+      contextGraphRegistryScanCursorStore: persistence,
     });
 
     await collectRegistryScan(adapter, { mode: 'tip' });
@@ -199,7 +220,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
     head = 13_200;
     registry.queryFilter.clear();
     const { adapter: restarted, provider } = makeAdapter(registry, head, {
-      contextGraphRegistryScanCursorPersistence: persistence,
+      contextGraphRegistryScanCursorStore: persistence,
     });
     provider.getBlockNumber.setImpl(async () => head);
     const recovered = await collectRegistryScan(restarted, { mode: 'tip' });
@@ -238,7 +259,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       }),
     });
     const { adapter, provider } = makeAdapter(registry, head, {
-      contextGraphRegistryScanCursorPersistence: roleAwareRegistryCursorPersistence(store),
+      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
     });
     provider.getBlockNumber.setImpl(async () => head);
 
@@ -261,6 +282,50 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
     }
   });
 
+  it('fails closed when the first tip cursor read fails instead of overwriting older progress', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let persisted = 8_001;
+    let loadAttempts = 0;
+    const store = {
+      load: vi.fn(async () => {
+        loadAttempts += 1;
+        if (loadAttempts === 1) throw new Error('temporary cursor read failure');
+        return persisted;
+      }),
+      save: vi.fn(async (_key: unknown, nextBlock: number) => {
+        persisted = nextBlock;
+      }),
+    };
+    const eventBlock = 10_000;
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) =>
+        lo <= eventBlock && eventBlock <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: eventBlock }]
+          : [],
+      ),
+    });
+    const persistence = roleAwareRegistryCursorPersistence(store);
+    const { adapter } = makeAdapter(registry, 20_000, {
+      contextGraphRegistryScanCursorStore: persistence,
+    });
+
+    try {
+      await expect(collectRegistryScan(adapter, { mode: 'tip' }))
+        .rejects.toThrow('tip cursor load failed');
+      expect(registry.queryFilter.calls).toEqual([]);
+      expect(store.save).not.toHaveBeenCalled();
+      expect(persisted).toBe(8_001);
+
+      const recovered = await collectRegistryScan(adapter, { mode: 'tip' });
+
+      expect(recovered.map((cg) => cg.blockNumber)).toEqual([eventBlock]);
+      expect(registry.queryFilter.calls[0]?.slice(1)).toEqual([7_951, 9_950]);
+      expect(persisted).toBe(20_001);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('revisits a fetched tip page when local application never acknowledges it', async () => {
     const store = new MemoryRegistryScanCursorStore();
     const persistence = roleAwareRegistryCursorPersistence(store);
@@ -273,7 +338,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       ),
     });
     const { adapter } = makeAdapter(registry, 10_000, {
-      contextGraphRegistryScanCursorPersistence: persistence,
+      contextGraphRegistryScanCursorStore: persistence,
     });
     const iterator = adapter.scanContextGraphRegistryPages({ mode: 'tip' })[Symbol.asyncIterator]();
 
@@ -285,7 +350,7 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
 
     registry.queryFilter.clear();
     const { adapter: restarted } = makeAdapter(registry, 10_000, {
-      contextGraphRegistryScanCursorPersistence: persistence,
+      contextGraphRegistryScanCursorStore: persistence,
     });
     const retried = await collectRegistryScan(restarted, { mode: 'tip' });
 
