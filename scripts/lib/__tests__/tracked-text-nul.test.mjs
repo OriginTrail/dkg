@@ -40,8 +40,8 @@ test('enumerates every tracked path once and classifies file buffers', () => {
   assert.deepEqual(calls[0][1], ['ls-files', '-z']);
 });
 
-test('preserves invalid UTF-8 pathname bytes through file lookup', () => {
-  const invalidPath = Buffer.from([0xff, 0x2e, 0x74, 0x73]);
+test('preserves and inspects invalid UTF-8 pathname bytes even with a binary-looking suffix', () => {
+  const invalidPath = Buffer.concat([Buffer.from([0xff]), Buffer.from('.png')]);
   let openedPath;
   const offenders = findTrackedFilesWithNul({
     repoRoot: '/repo',

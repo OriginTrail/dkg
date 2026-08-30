@@ -59,6 +59,10 @@ function runGit(spawnProcess, args, repoRoot) {
 
 function isExplicitBinaryPath(filePath) {
   const diagnosticPath = filePath.toString('utf8');
+  // Binary exceptions are a text policy. Invalid UTF-8 must never acquire an
+  // exception through replacement-character decoding, even when its decoded
+  // suffix happens to look like a known binary format.
+  if (!Buffer.from(diagnosticPath, 'utf8').equals(filePath)) return false;
   const basename = path.posix.basename(diagnosticPath);
   return TRACKED_BINARY_PATHS.exact.includes(diagnosticPath)
     || TRACKED_BINARY_PATHS.basenames.includes(basename)
