@@ -87,76 +87,64 @@ export interface CombinedSyncOnConnectPeerAccounting<Probe> {
   readonly resetBackoffBeforeRetry: boolean;
 }
 
-/** One cancellation-aware ledger for every phase admitted to a peer job. */
-export class SyncOnConnectPeerAccountingAccumulator<Probe> {
-  private readonly entries: Array<Readonly<{
-    outcome: SyncOnConnectPeerOutcome;
-    probe: Probe;
-  }>> = [];
-  private cancelled = false;
+export interface SyncOnConnectPeerAccountingEntry<Probe> {
+  readonly outcome: SyncOnConnectPeerOutcome;
+  readonly probe: Probe;
+}
 
-  record(accounting: SyncOnConnectPeerOutcome | undefined, probe: Probe): void {
-    if (!this.cancelled && accounting !== undefined) {
-      this.entries.push({ outcome: accounting, probe });
+/** Pure phase-order reduction; lifecycle and late-record gating stay in the runner. */
+export function combineSyncOnConnectPeerAccounting<Probe>(
+  entries: readonly Readonly<SyncOnConnectPeerAccountingEntry<Probe>>[],
+): CombinedSyncOnConnectPeerAccounting<Probe> | null {
+  if (entries.length === 0) return null;
+  let disposition: SyncOnConnectPeerOutcome['reconcilerDisposition'] | undefined;
+  let ownerProbe = entries[0]!.probe;
+  let progress = false;
+  let anyFresh = false;
+  let effectiveClearBeforeRetry = false;
+  let resetBackoffBeforeRetry = false;
+  // Reduce in phase order. A retry/defer owner cannot be erased by a later
+  // clear, while clear-before-retry begins a fresh backoff generation.
+  for (const { outcome, probe } of entries) {
+    progress ||= outcome.progress;
+    anyFresh ||= outcome.fresh;
+    if (outcome.reconcilerDisposition === 'retry') {
+      resetBackoffBeforeRetry ||= effectiveClearBeforeRetry;
+      disposition = 'retry';
+      ownerProbe = probe;
+      continue;
+    }
+    if (outcome.reconcilerDisposition === 'defer') {
+      if (disposition !== 'retry') {
+        disposition = 'defer';
+        ownerProbe = probe;
+      }
+      continue;
+    }
+    if (disposition === undefined || disposition === 'clear') {
+      disposition = 'clear';
+      ownerProbe = probe;
+      effectiveClearBeforeRetry = true;
     }
   }
-
-  cancel(): void {
-    this.cancelled = true;
-    this.entries.length = 0;
-  }
-
-  combine(): CombinedSyncOnConnectPeerAccounting<Probe> | null {
-    if (this.cancelled || this.entries.length === 0) return null;
-    let disposition: SyncOnConnectPeerOutcome['reconcilerDisposition'] | undefined;
-    let ownerProbe = this.entries[0]!.probe;
-    let progress = false;
-    let anyFresh = false;
-    let effectiveClearBeforeRetry = false;
-    let resetBackoffBeforeRetry = false;
-    // Reduce in phase order. A retry/defer owner cannot be erased by a later
-    // clear, while clear-before-retry begins a fresh backoff generation.
-    for (const { outcome, probe } of this.entries) {
-      progress ||= outcome.progress;
-      anyFresh ||= outcome.fresh;
-      if (outcome.reconcilerDisposition === 'retry') {
-        resetBackoffBeforeRetry ||= effectiveClearBeforeRetry;
-        disposition = 'retry';
-        ownerProbe = probe;
-        continue;
-      }
-      if (outcome.reconcilerDisposition === 'defer') {
-        if (disposition !== 'retry') {
-          disposition = 'defer';
-          ownerProbe = probe;
-        }
-        continue;
-      }
-      if (disposition === undefined || disposition === 'clear') {
-        disposition = 'clear';
-        ownerProbe = probe;
-        effectiveClearBeforeRetry = true;
-      }
-    }
-    if (disposition === 'clear') {
-      return {
-        outcome: {
-          reconcilerDisposition: 'clear',
-          fresh: anyFresh,
-          progress,
-        },
-        probe: ownerProbe,
-        resetBackoffBeforeRetry: false,
-      };
-    }
+  if (disposition === 'clear') {
     return {
       outcome: {
-        reconcilerDisposition: disposition ?? 'defer',
-        fresh: false,
+        reconcilerDisposition: 'clear',
+        fresh: anyFresh,
         progress,
       },
       probe: ownerProbe,
-      resetBackoffBeforeRetry,
+      resetBackoffBeforeRetry: false,
     };
   }
+  return {
+    outcome: {
+      reconcilerDisposition: disposition ?? 'defer',
+      fresh: false,
+      progress,
+    },
+    probe: ownerProbe,
+    resetBackoffBeforeRetry,
+  };
 }

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  combineSyncOnConnectPeerAccounting,
   executeSyncOnConnectAttempt,
-  SyncOnConnectPeerAccountingAccumulator,
   type SyncOnConnectAttemptResult,
+  type SyncOnConnectPeerAccountingEntry,
   type SyncReconcilerAttemptOutcome,
 } from './attempt-accounting.js';
 import type { SyncOnConnectPeerJobRunner } from './peer-scheduler.js';
@@ -33,11 +34,8 @@ export interface ReconciledSyncOnConnectPeerJobDependencies<SelectedPlan, Probe>
  */
 export class ReconciledSyncOnConnectPeerJobRunner<SelectedPlan, Probe>
 implements SyncOnConnectPeerJobRunner<SelectedPlan> {
-  private readonly accounting = new SyncOnConnectPeerAccountingAccumulator<Probe>();
-  private readonly selectedPhaseExecutions: Array<Readonly<{
-    outcome?: SyncReconcilerAttemptOutcome;
-    error?: unknown;
-  }>> = [];
+  private readonly accountingEntries: SyncOnConnectPeerAccountingEntry<Probe>[] = [];
+  private selectedPhaseExecuted = false;
   private automaticSelectedPhase: SyncAttempt | null;
   private pendingInitialProbe: Readonly<{ value: Probe }> | null;
   private terminalState: 'active' | 'cancelled' | 'finished' = 'active';
@@ -89,18 +87,16 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     this.terminalState = 'cancelled';
     this.automaticSelectedPhase = null;
     this.pendingInitialProbe = null;
-    this.accounting.cancel();
+    this.accountingEntries.length = 0;
   }
 
   finish(): void {
     if (this.terminalState !== 'active') return;
     this.terminalState = 'finished';
-    const combined = this.accounting.combine();
-    // Close the ledger before invoking external commit logic. Repeated finish
-    // calls and any late callback from an already-running phase are inert.
-    this.accounting.cancel();
+    const combined = combineSyncOnConnectPeerAccounting(this.accountingEntries);
+    this.accountingEntries.length = 0;
     if (combined === null) return;
-    const outcome: SyncOnConnectPeerOutcome = this.selectedPhaseExecutions.length > 0
+    const outcome: SyncOnConnectPeerOutcome = this.selectedPhaseExecuted
       && this.dependencies.selectedRetryStillRequired()
       && combined.outcome.reconcilerDisposition === 'clear'
       ? {
@@ -131,22 +127,19 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   }
 
   private async runSelectedPhase(attempt: SyncAttempt): Promise<SyncReconcilerAttemptOutcome> {
-    const execution: { outcome?: SyncReconcilerAttemptOutcome; error?: unknown } = {};
-    this.selectedPhaseExecutions.push(execution);
-    try {
-      execution.outcome = await this.attemptPhase(attempt);
-      return execution.outcome;
-    } catch (error: unknown) {
-      execution.error = error;
-      throw error;
-    }
+    this.selectedPhaseExecuted = true;
+    return this.attemptPhase(attempt);
   }
 
   private async attemptPhase(attempt: SyncAttempt): Promise<SyncReconcilerAttemptOutcome> {
     const probe = await this.acquirePhaseProbe();
     if (probe === null || this.terminalState !== 'active') return 'not-started';
     return executeSyncOnConnectAttempt(attempt, {
-      recordAccounting: (outcome) => { this.accounting.record(outcome, probe); },
+      recordAccounting: (outcome) => {
+        if (this.terminalState === 'active') {
+          this.accountingEntries.push({ outcome, probe });
+        }
+      },
       onBackpressure: this.dependencies.logBackpressure,
     });
   }
