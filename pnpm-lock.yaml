@@ -654,6 +654,9 @@ importers:
       n3:
         specifier: ^2.0.1
         version: 2.0.1
+      semver:
+        specifier: ^7.7.4
+        version: 7.7.4
       typescript:
         specifier: ^5.7
         version: 5.9.3
@@ -667,6 +670,9 @@ importers:
       '@types/n3':
         specifier: ^1.26.1
         version: 1.26.1
+      '@types/semver':
+        specifier: ^7.8.0
+        version: 7.8.0
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
@@ -3179,6 +3185,9 @@ packages:
 
   '@types/secp256k1@4.0.7':
     resolution: {integrity: sha512-Rcvjl6vARGAKRO6jHeKMatGrvOMGrR/AR11N1x2LqintPCyDZ7NBhrh238Z2VZc7aM7KIwnFpFQ7fnfK4H/9Qw==}
+
+  '@types/semver@7.8.0':
+    resolution: {integrity: sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ==}
 
   '@types/stats.js@0.17.4':
     resolution: {integrity: sha512-jIBvWWShCvlBqBNIZt0KAshWpvSjhkwkEu4ZUcASoAvhmrgAUI2t1dXrjSL4xXVLB4FznPrIsX3nKXFl/Dt4vA==}
@@ -9162,6 +9171,8 @@ snapshots:
   '@types/secp256k1@4.0.7':
     dependencies:
       '@types/node': 22.19.11
+
+  '@types/semver@7.8.0': {}
 
   '@types/stats.js@0.17.4': {}
 

@@ -5,11 +5,12 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "node -e \"const fs=require('fs'); ['dist','tsconfig.tsbuildinfo'].forEach((p)=>fs.rmSync(p,{recursive:true,force:true}))\" && tsc",
+    "build": "node -e \"const fs=require('fs'); ['dist','tsconfig.tsbuildinfo'].forEach((p)=>fs.rmSync(p,{recursive:true,force:true}))\" && tsc && pnpm run test:types",
     "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=896 vite build",
     "build:full": "pnpm build && pnpm build:ui",
     "dev:ui": "vite",
     "test": "vitest run",
+    "test:types": "tsc --project tsconfig.type-tests.json",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
     "test:e2e:devnet-local": "cross-env PW_DEVNET_LOCAL=1 playwright test e2e/specs/devnet-local",

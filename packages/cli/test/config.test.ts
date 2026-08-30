@@ -32,6 +32,7 @@ import {
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
+  resolveUpdatePreferences,
   resolveContextGraphSubscriptionRehydrationEnabled,
   resolveApprovalPolicy,
   resolveChainConfig,
@@ -1065,6 +1066,88 @@ describe('resolveAutoUpdateSource', () => {
       { autoUpdate: { enabled: false } },
       { autoUpdate: { enabled: false } as any },
     )).toBeUndefined();
+  });
+});
+
+describe('resolveUpdatePreferences', () => {
+  it('preserves disabled local update policy and local precedence', () => {
+    expect(resolveUpdatePreferences(
+      {
+        autoUpdate: {
+          enabled: false,
+          source: 'npm',
+          allowPrerelease: false,
+          channel: 'mainnet',
+        },
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/dkg',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          source: 'git',
+          allowPrerelease: true,
+          channel: 'testnet',
+        },
+      },
+    )).toEqual({
+      source: 'npm',
+      allowPrerelease: false,
+      channel: 'mainnet',
+    });
+  });
+
+  it('inherits network source, channel, and prerelease policy field by field', () => {
+    expect(resolveUpdatePreferences(
+      { autoUpdate: { enabled: false } },
+      {
+        autoUpdate: {
+          enabled: false,
+          repo: 'owner/dkg',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          source: 'git',
+          allowPrerelease: false,
+          channel: 'mainnet',
+        },
+      },
+    )).toEqual({
+      source: 'git',
+      allowPrerelease: false,
+      channel: 'mainnet',
+    });
+  });
+
+  it('defaults prerelease policy when neither layer supplies preferences', () => {
+    expect(resolveUpdatePreferences(undefined, undefined)).toEqual({
+      allowPrerelease: true,
+    });
+  });
+
+  it('is the preference model consumed by automatic polling', () => {
+    const config = {
+      autoUpdate: {
+        enabled: true,
+        source: 'npm' as const,
+        allowPrerelease: false,
+      },
+    };
+    const network = {
+      autoUpdate: {
+        enabled: true,
+        repo: 'owner/dkg',
+        branch: 'main',
+        checkIntervalMinutes: 30,
+        source: 'git' as const,
+        allowPrerelease: true,
+        channel: 'mainnet',
+      },
+    };
+
+    expect(resolveAutoUpdateConfig(config, network)).toMatchObject(
+      resolveUpdatePreferences(config, network),
+    );
   });
 });
 
