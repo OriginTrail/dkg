@@ -22,12 +22,12 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadResolvedNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
+  loadNetworkConfig, loadResolvedNetworkConfig, resolveManualUpdateContext, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
-  type AutoUpdateConfig,
+  type ManualUpdateContext,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
@@ -111,12 +111,9 @@ export type MaintenanceUpdatePreflightResult =
 
 export type MaintenanceUpdateWorkflowDeps = {
   loadConfig: typeof loadConfig;
-  loadNetworkConfig: typeof loadNetworkConfig;
-  loadResolvedNetworkConfig: typeof loadResolvedNetworkConfig;
-  loadProjectConfig: typeof loadProjectConfig;
-  resolveAutoUpdateConfig: typeof resolveAutoUpdateConfig;
-  resolveAutoUpdateSource: typeof resolveAutoUpdateSource;
-  resolveStandaloneInstall: typeof resolveStandaloneInstall;
+  loadManualUpdateContext: (
+    config: Awaited<ReturnType<typeof loadConfig>>,
+  ) => Promise<ManualUpdateContext>;
   resolveExplicitNpmUpdateTarget: typeof resolveExplicitNpmUpdateTarget;
   checkForNpmVersionUpdate: typeof checkForNpmVersionUpdate;
   performNpmUpdate: typeof performNpmUpdate;
@@ -158,6 +155,13 @@ async function loadMaintenanceUpdateDoctorOps(): Promise<MaintenanceUpdateDoctor
   };
 }
 
+async function loadResolvedManualUpdateContext(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+): Promise<ManualUpdateContext> {
+  const { network } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
+  return resolveManualUpdateContext(config, network, resolveStandaloneInstall);
+}
+
 export async function runDefaultUpdatePreflight(
   config: Awaited<ReturnType<typeof loadConfig>>,
   doctorOps?: MaintenanceUpdateDoctorOps,
@@ -193,12 +197,7 @@ export async function runDefaultUpdatePreflight(
 function createMaintenanceUpdateWorkflowDeps(): MaintenanceUpdateWorkflowDeps {
   return {
     loadConfig,
-    loadNetworkConfig,
-    loadResolvedNetworkConfig,
-    loadProjectConfig,
-    resolveAutoUpdateConfig,
-    resolveAutoUpdateSource,
-    resolveStandaloneInstall,
+    loadManualUpdateContext: loadResolvedManualUpdateContext,
     resolveExplicitNpmUpdateTarget,
     checkForNpmVersionUpdate,
     performNpmUpdate,
@@ -225,39 +224,16 @@ export async function runMaintenanceUpdateWorkflow(
     output.writeStderr?.(message);
   };
   const config = await deps.loadConfig();
-  const { network: net } = await deps.loadResolvedNetworkConfig(
-    config,
-    deps.loadNetworkConfig,
-  );
-  // Resolve field-by-field across local/network/project so defaults flow
-  // through even when the local config omits repo/branch.
-  const au = deps.resolveAutoUpdateConfig(config, net) ?? (() => {
-    const proj = deps.loadProjectConfig();
-    return {
-      // Mirror resolveAutoUpdateConfig precedence for the fields a manual
-      // `dkg update` depends on — auto-apply being disabled must NOT drop the
-      // operator's stable-only (allowPrerelease) intent or channel pin.
-      enabled: true,
-      repo: proj.repo,
-      branch: proj.defaultBranch,
-      allowPrerelease: config.autoUpdate?.allowPrerelease ?? net?.autoUpdate?.allowPrerelease ?? true,
-      checkIntervalMinutes: 30,
-      channel: config.autoUpdate?.channel ?? net?.autoUpdate?.channel,
-      source: undefined as 'auto' | 'npm' | 'git' | undefined,
-    };
-  })();
-  // Honour `autoUpdate.source` override so `dkg update` from a beacon-01
-  // operator with `source: "npm"` configured goes through the npm install
-  // path even if .git is still present in the working tree.
-  const standalone = deps.resolveStandaloneInstall(
-    au.source ?? deps.resolveAutoUpdateSource(config, net),
-  );
-  const allowPre = options.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
+  const updateContext = await deps.loadManualUpdateContext(config);
+  const standalone = updateContext.installMode === 'npm';
+  const allowPre = options.allowPrerelease === true
+    ? true
+    : updateContext.allowPrerelease;
 
   if (standalone) {
     if (options.check) {
       log('Checking NPM registry for updates...');
-      const check = await deps.checkForNpmVersionUpdate(log, allowPre, au.channel);
+      const check = await deps.checkForNpmVersionUpdate(log, allowPre, updateContext.channel);
       if (check.status === 'available' && check.version) {
         log(`Update available: ${check.version}`);
       } else if (check.status === 'no-target') {
@@ -304,7 +280,7 @@ export async function runMaintenanceUpdateWorkflow(
     }
     if (!version) {
       log('Checking NPM registry for updates...');
-      const check = await deps.checkForNpmVersionUpdate(log, allowPre, au.channel);
+      const check = await deps.checkForNpmVersionUpdate(log, allowPre, updateContext.channel);
       if (check.status === 'available' && check.version) {
         version = check.version;
       } else if (check.status === 'no-target') {

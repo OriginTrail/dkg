@@ -72,7 +72,7 @@ import {
 import {
   compareSemver,
   isValidSemver,
-  resolveLatestNpmVersion,
+  resolveNpmVersionTarget,
   type NpmRegistryFailure,
   type NpmVersionNoTargetReason,
 } from '../update/npm-registry.js';
@@ -80,8 +80,6 @@ export {
   compareSemver,
   isPrerelease,
   isValidSemver,
-  resolveLatestNpmVersion,
-  type NpmVersionResult,
 } from '../update/npm-registry.js';
 
 const execAsync = promisify(exec);
@@ -343,6 +341,45 @@ function logNpmNoTarget(
   }
 }
 
+/**
+ * Compatibility contract for callers that import the daemon's historical
+ * npm-version helper. The structured registry result stays internal to the
+ * update boundary; this facade preserves the old arguments, result shape,
+ * and operator-facing log messages.
+ */
+export type NpmVersionResult =
+  | { version: string; error?: false }
+  | { version: null; error: true }
+  | { version: null; error: false };
+
+export async function resolveLatestNpmVersion(
+  log: (message: string) => void,
+  allowPrerelease = true,
+  channel?: string,
+): Promise<NpmVersionResult> {
+  const result = await resolveNpmVersionTarget(allowPrerelease, channel, {
+    fetch: _autoUpdateIo.fetch,
+  });
+  if (result.status === 'resolved') return { version: result.version };
+  if (result.status === 'error') {
+    if (result.failure.kind !== 'invalid-response') {
+      logNpmRegistryFailure(log, result.failure);
+    }
+    return { version: null, error: true };
+  }
+
+  switch (result.reason.kind) {
+    case 'no-valid-candidates':
+      break;
+    case 'unacceptable-latest':
+      log('Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping');
+      break;
+    default:
+      logNpmNoTarget(log, result.reason);
+  }
+  return { version: null, error: false };
+}
+
 export type NpmVersionStatus = {
   status: "available" | "up-to-date" | "error" | "no-target";
   version?: string;
@@ -369,7 +406,7 @@ export async function checkForNpmVersionUpdate(
     return { status: "error" };
   }
 
-  const result = await resolveLatestNpmVersion(allowPrerelease, channel, {
+  const result = await resolveNpmVersionTarget(allowPrerelease, channel, {
     fetch: _autoUpdateIo.fetch,
   });
   if (result.status !== 'resolved') {

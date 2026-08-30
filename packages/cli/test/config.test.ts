@@ -32,6 +32,7 @@ import {
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
+  resolveManualUpdateContext,
   resolveContextGraphSubscriptionRehydrationEnabled,
   resolveApprovalPolicy,
   resolveChainConfig,
@@ -1065,6 +1066,71 @@ describe('resolveAutoUpdateSource', () => {
       { autoUpdate: { enabled: false } },
       { autoUpdate: { enabled: false } as any },
     )).toBeUndefined();
+  });
+});
+
+describe('resolveManualUpdateContext', () => {
+  it('preserves disabled local update policy and local source selection', () => {
+    const classifyInstall = vi.fn((source: 'auto' | 'npm' | 'git' | 'monorepo' | undefined) =>
+      source === 'npm');
+    expect(resolveManualUpdateContext(
+      {
+        autoUpdate: {
+          enabled: false,
+          source: 'npm',
+          allowPrerelease: false,
+          channel: 'mainnet',
+        },
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/dkg',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          source: 'git',
+          allowPrerelease: true,
+          channel: 'testnet',
+        },
+      },
+      classifyInstall,
+    )).toEqual({
+      installMode: 'npm',
+      allowPrerelease: false,
+      channel: 'mainnet',
+    });
+    expect(classifyInstall).toHaveBeenCalledWith('npm');
+  });
+
+  it('inherits network source, channel, and prerelease policy field by field', () => {
+    expect(resolveManualUpdateContext(
+      { autoUpdate: { enabled: false } },
+      {
+        autoUpdate: {
+          enabled: false,
+          repo: 'owner/dkg',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          source: 'git',
+          allowPrerelease: false,
+          channel: 'mainnet',
+        },
+      },
+      (source) => source === 'npm',
+    )).toEqual({
+      installMode: 'source',
+      allowPrerelease: false,
+      channel: 'mainnet',
+    });
+  });
+
+  it('defaults prerelease policy while leaving install detection canonical', () => {
+    const classifyInstall = vi.fn(() => true);
+    expect(resolveManualUpdateContext(undefined, undefined, classifyInstall)).toEqual({
+      installMode: 'npm',
+      allowPrerelease: true,
+    });
+    expect(classifyInstall).toHaveBeenCalledWith(undefined);
   });
 });
 

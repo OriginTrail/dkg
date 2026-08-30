@@ -1413,6 +1413,34 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.version).toBe('10.0.0');
   });
 
+  it('preserves the exported legacy resolver arguments and stable-only result shape', async () => {
+    const { resolveLatestNpmVersion } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({
+      latest: '10.1.0-rc.1',
+      mainnet: '10.0.0',
+    });
+    const log = vi.fn();
+
+    await expect(resolveLatestNpmVersion(log, false, 'mainnet')).resolves.toEqual({
+      version: '10.0.0',
+    });
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('preserves the exported legacy resolver error shape and logging', async () => {
+    const { resolveLatestNpmVersion } = await import('../src/daemon.js');
+    fetchImpl = async () => ({ ok: false, status: 503 });
+    const log = vi.fn();
+
+    await expect(resolveLatestNpmVersion(log, false, 'mainnet')).resolves.toEqual({
+      version: null,
+      error: true,
+    });
+    expect(log).toHaveBeenCalledWith(
+      'Auto-update (npm): registry returned 503 for @origintrail-official/dkg',
+    );
+  });
+
   it('default path does NOT attempt an update to a non-semver latest', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({ latest: 'garbage' });

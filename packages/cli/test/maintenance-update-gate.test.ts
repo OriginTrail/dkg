@@ -11,19 +11,14 @@ import {
 import {
   fetchNpmDistTags,
   resolveExplicitNpmUpdateTarget,
-  resolveLatestNpmVersion,
+  resolveNpmVersionTarget,
   resolveNpmDistTag,
   type NpmDistTagResult,
   type NpmRegistryFetch,
 } from '../src/update/npm-registry.js';
 import { UPDATE_PREFLIGHT_CHECKS } from '../src/doctor/policy.js';
 import type { DoctorDeps, DoctorReport } from '../src/doctor/types.js';
-import {
-  loadProjectConfig,
-  resolveAutoUpdateConfig,
-  resolveAutoUpdateSource,
-  type DkgConfig,
-} from '../src/config.js';
+import { type DkgConfig } from '../src/config.js';
 
 describe('resolveExplicitNpmUpdateTarget', () => {
   const resolverReturning = (result: NpmDistTagResult) =>
@@ -171,7 +166,7 @@ describe('resolveNpmDistTag registry boundary', () => {
         tags: { latest: '10.0.1' },
       }));
 
-      await expect(resolveLatestNpmVersion(true, channel, {
+      await expect(resolveNpmVersionTarget(true, channel, {
         fetchNpmDistTags,
       })).resolves.toEqual({
         status: 'no-target',
@@ -259,12 +254,10 @@ describe('dkg update command stable-only wiring', () => {
       : { status: 'resolved', version: resolvedTag });
     const deps: MaintenanceUpdateWorkflowDeps = {
       loadConfig: vi.fn(async () => config),
-      loadNetworkConfig: vi.fn(async () => null),
-      loadResolvedNetworkConfig: vi.fn(async () => ({ name: 'testnet', network: null })),
-      loadProjectConfig,
-      resolveAutoUpdateConfig,
-      resolveAutoUpdateSource,
-      resolveStandaloneInstall: vi.fn(() => true),
+      loadManualUpdateContext: vi.fn(async () => ({
+        installMode: 'npm',
+        allowPrerelease: false,
+      })),
       resolveExplicitNpmUpdateTarget: (target, allowPrerelease) =>
         resolveExplicitNpmUpdateTarget(target, allowPrerelease, {
           resolveNpmDistTag: resolveTag,
@@ -403,24 +396,23 @@ describe('dkg update command stable-only wiring', () => {
     );
   });
 
-  it('routes fallback project configuration through the workflow boundary', async () => {
+  it('uses the resolved manual-update context as one workflow boundary', async () => {
     const harness = commandHarness();
-    const loadFallbackProject = vi.fn(() => ({
-      repo: 'example/dkg',
-      defaultBranch: 'release',
-      githubUrl: 'https://github.com/example/dkg',
-      projectName: 'dkg',
-      syslogAppName: 'dkg',
-      defaultNetwork: 'testnet',
+    harness.deps.loadManualUpdateContext = vi.fn(async () => ({
+      installMode: 'npm',
+      allowPrerelease: false,
+      channel: 'mainnet',
     }));
-    harness.deps.resolveAutoUpdateConfig = vi.fn(() => undefined);
-    harness.deps.loadProjectConfig = loadFallbackProject;
 
     const outcome = await runMaintenanceUpdateWorkflow({
-      versionOrRef: '10.0.1',
+      check: true,
     }, harness.deps);
 
     expect(outcome.exitCode).toBe(0);
-    expect(loadFallbackProject).toHaveBeenCalledOnce();
+    expect(harness.deps.checkForNpmVersionUpdate).toHaveBeenCalledWith(
+      expect.any(Function),
+      false,
+      'mainnet',
+    );
   });
 });

@@ -18,7 +18,7 @@ export type NpmRegistryFetch = (
 
 export type NpmRegistryDeps = { fetch?: NpmRegistryFetch };
 
-export type NpmVersionResult =
+export type NpmVersionResolution =
   | { status: 'resolved'; version: string }
   | { status: 'no-target'; reason: NpmVersionNoTargetReason }
   | { status: 'error'; failure: NpmRegistryFailure };
@@ -153,13 +153,13 @@ export async function resolveExplicitNpmUpdateTarget(
 }
 
 /** Select the version followed by automatic polling or an explicit channel pin. */
-export async function resolveLatestNpmVersion(
+export async function resolveNpmVersionTarget(
   allowPrerelease = true,
   channel?: string,
   deps: NpmRegistryDeps & {
     fetchNpmDistTags?: () => Promise<NpmDistTagsResult>;
   } = {},
-): Promise<NpmVersionResult> {
+): Promise<NpmVersionResolution> {
   const result = await (deps.fetchNpmDistTags ?? (() => fetchNpmDistTags(deps)))();
   if (result.status === 'error') {
     return { status: 'error', failure: result.failure };

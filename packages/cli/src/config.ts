@@ -1508,6 +1508,34 @@ export function resolveAutoUpdateSource(
   return config?.autoUpdate?.source ?? network?.autoUpdate?.source;
 }
 
+export type ManualUpdateContext = {
+  installMode: 'npm' | 'source';
+  allowPrerelease: boolean;
+  channel?: string;
+};
+
+/**
+ * Resolve the complete policy needed by an explicit `dkg update` without
+ * exposing the workflow to the broader automatic-update configuration.
+ * Manual updates intentionally keep these preferences when automatic polling
+ * is disabled.
+ */
+export function resolveManualUpdateContext(
+  config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
+  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
+  isNpmInstall: (source: AutoUpdateConfig['source']) => boolean,
+): ManualUpdateContext {
+  const cfg = config?.autoUpdate;
+  const net = network?.autoUpdate;
+  const source = cfg?.source ?? net?.source;
+  const channel = cfg?.channel ?? net?.channel;
+  return {
+    installMode: isNpmInstall(source) ? 'npm' : 'source',
+    allowPrerelease: cfg?.allowPrerelease ?? net?.allowPrerelease ?? true,
+    ...(channel ? { channel } : {}),
+  };
+}
+
 /**
  * True for a loopback / local-host RPC URL (localhost, 127.0.0.0/8, ::1,
  * 0.0.0.0). Such a primary is a LOCAL chain (Hardhat / devnet), so the
