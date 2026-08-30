@@ -147,6 +147,23 @@ describe('planManagedOxigraph', () => {
     expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
   });
 
+  it('recovers from the earlier Oxigraph HTTP timeout for long macOS deadlines', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { queryTimeoutS: 120 },
+        },
+      },
+      '/data',
+      'darwin',
+    );
+    expect(plan!.queryTimeoutS).toBeUndefined();
+    expect(plan!.clientTimeoutMs).toBe(125_000);
+    expect(plan!.serverTimeoutRecoveryAfterMs).toBe(55_000);
+    expect(plan!.storeConfigTemplate.options.serverTimeoutRecoveryAfterMs).toBe(55_000);
+  });
+
   it('retains an explicitly configured native timeout on unaffected platforms', () => {
     const plan = planManagedOxigraph(
       {
@@ -494,6 +511,34 @@ describe('startManagedOxigraph (real download + real server)', () => {
       const timeoutIndex = args.indexOf('--timeout-s');
       expect(timeoutIndex).toBeGreaterThanOrEqual(0);
       expect(args[timeoutIndex + 1]).toBe('35');
+    } finally {
+      await result?.handle.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('suppresses the native timeout through macOS startup', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const port = await freePort();
+
+    const result = await startManagedOxigraph({
+      config: {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { port, readyTimeoutMs: 5_000, queryTimeoutS: 35 },
+        },
+      },
+      dataDir,
+      platform: 'darwin',
+      // Force the system-PATH fallback so the suite's stand-in executable
+      // observes the real startup arguments while keeping Darwin planning.
+      arch: 'standin',
+      log: () => {},
+    });
+    try {
+      expect(result).not.toBeNull();
+      expect(result!.storeConfig.options.timeout).toBe(40_000);
+      expect(await fetchManagedArgs(port)).not.toContain('--timeout-s');
     } finally {
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });

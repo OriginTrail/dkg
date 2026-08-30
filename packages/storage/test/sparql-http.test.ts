@@ -505,6 +505,37 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('restarts managed Oxigraph when its earlier HTTP deadline wins', async () => {
+    const originalFetch = globalThis.fetch;
+    let now = 0;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async () => {
+      now = 60_000;
+      return new Response('request timed out', { status: 500 });
+    }) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedOxigraph: true,
+        timeout: 125_000,
+        serverTimeoutRecoveryAfterMs: 55_000,
+        slowQueryThresholdMs: 0,
+        now: () => now,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      });
+
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+        timeoutMs: 55_000,
+      });
+      expect(timedOutOperations).toEqual(['query']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('classifies a concurrent write and new work during query-triggered recovery', async () => {
     const originalFetch = globalThis.fetch;
     let recovery = { recovering: false, generation: 0 };

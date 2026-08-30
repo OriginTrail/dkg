@@ -212,6 +212,11 @@ export interface SparqlHttpStoreOptions {
   managedOxigraph?: boolean;
   /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
   onClientTimeout?: (operation: string) => void;
+  /**
+   * Runtime-only threshold for treating an earlier managed-server transport
+   * failure as its own HTTP timeout and requesting recovery.
+   */
+  serverTimeoutRecoveryAfterMs?: number;
   /** Runtime-only managed-server state used to classify restart collateral. */
   getRecoveryState?: () => SparqlHttpRecoveryState;
   /**
@@ -248,6 +253,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly managedByDkg: boolean;
   private readonly managedOxigraph: boolean;
   private readonly onClientTimeout?: (operation: string) => void;
+  private readonly serverTimeoutRecoveryAfterMs?: number;
   private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
   private readonly atomicUpdates: boolean;
   private readonly scheduler: StorePriorityScheduler;
@@ -276,6 +282,7 @@ export class SparqlHttpStore implements TripleStore {
     this.managedByDkg = options.managedByDkg === true;
     this.managedOxigraph = options.managedOxigraph === true || this.managedByDkg;
     this.onClientTimeout = options.onClientTimeout;
+    this.serverTimeoutRecoveryAfterMs = options.serverTimeoutRecoveryAfterMs;
     this.getRecoveryState = options.getRecoveryState;
     this.atomicUpdates = options.atomicUpdates === true || this.managedOxigraph;
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
@@ -391,6 +398,7 @@ export class SparqlHttpStore implements TripleStore {
     options: SparqlHttpQueryOptions | undefined,
     consume: (response: Response) => Promise<T>,
   ): Promise<T> {
+    const startedAt = this.now();
     const recoveryAtStart = this.readRecoveryState();
     if (recoveryAtStart?.recovering) {
       throw this.recoveryError(storeOperation, 'not_started');
@@ -434,6 +442,22 @@ export class SparqlHttpStore implements TripleStore {
           operation,
           storeOperation,
           timeoutMs: this.timeout,
+          cause: error,
+        });
+      }
+      if (
+        this.managedOxigraph
+        && this.serverTimeoutRecoveryAfterMs !== undefined
+        && this.now() - startedAt >= this.serverTimeoutRecoveryAfterMs
+      ) {
+        this.notifyClientTimeout(operation);
+        if (isStoreOperationTimeoutError(error)) throw error;
+        throw new StoreOperationTimeoutError({
+          backend: 'oxigraph-server',
+          operation,
+          storeOperation,
+          timeoutMs: this.serverTimeoutRecoveryAfterMs,
+          message: `Managed Oxigraph ended ${operation} at its server-side HTTP deadline`,
           cause: error,
         });
       }

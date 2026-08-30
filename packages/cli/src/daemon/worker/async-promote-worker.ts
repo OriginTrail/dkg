@@ -50,6 +50,7 @@ import {
   type PromoteJob,
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
+import { createClaimFailureBackoff } from './claim-failure-backoff.js';
 
 /**
  * Convenience type for the daemon's existing `emitMemoryGraphChanged`
@@ -93,6 +94,8 @@ export interface PromoteWorkerConfig {
   shutdownTimeoutMs?: number;
   /** Deterministic time source for tests. */
   now?: () => number;
+  /** Deterministic randomness source for claim-failure jitter tests. */
+  random?: () => number;
   /** Defaults to `console.warn`. The daemon passes its own logger. */
   log?: PromoteWorkerLogger;
   /** Retry interval for queue-only outcome bookkeeping (default 5s). */
@@ -150,10 +153,6 @@ export interface PromoteWorkerCounters {
   /** Set when shuttingDown was hit mid-job; ops can correlate with abandoned counts at next startup. */
   interruptedAtShutdown: number;
 }
-
-const CLAIM_FAILURE_BACKOFF_BASE_MS = 250;
-const CLAIM_FAILURE_BACKOFF_MAX_MS = 30_000;
-const CLAIM_FAILURE_BACKOFF_JITTER_RATIO = 0.2;
 
 export type ClassifiedPromoteError = {
   classification: PromoteFailureClassification;
@@ -697,30 +696,10 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   let wakeLoop: Promise<void> | null = null;
   let lifecycleAbortController: AbortController | null = null;
   let counters: PromoteWorkerCounters = freshCounters();
-  let consecutiveClaimFailures = 0;
-  let nextClaimAttemptAt = 0;
-
-  function resetClaimFailureBackoff(): void {
-    consecutiveClaimFailures = 0;
-    nextClaimAttemptAt = 0;
-  }
-
-  function recordClaimFailure(): number {
-    consecutiveClaimFailures += 1;
-    const exponent = Math.min(consecutiveClaimFailures - 1, 30);
-    const cappedDelay = Math.min(
-      CLAIM_FAILURE_BACKOFF_MAX_MS,
-      CLAIM_FAILURE_BACKOFF_BASE_MS * (2 ** exponent),
-    );
-    const jitter = 1 - CLAIM_FAILURE_BACKOFF_JITTER_RATIO
-      + Math.random() * CLAIM_FAILURE_BACKOFF_JITTER_RATIO * 2;
-    const delayMs = Math.min(
-      CLAIM_FAILURE_BACKOFF_MAX_MS,
-      Math.max(1, Math.round(cappedDelay * jitter)),
-    );
-    nextClaimAttemptAt = now() + delayMs;
-    return delayMs;
-  }
+  const claimFailureBackoff = createClaimFailureBackoff({
+    now,
+    random: config.random,
+  });
 
   function freshCounters(): PromoteWorkerCounters {
     return {
@@ -735,13 +714,13 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
 
   async function tickSlot(slot: WorkerSlot): Promise<boolean> {
     if (shuttingDown || slot.inFlight) return false;
-    if (now() < nextClaimAttemptAt) return false;
+    if (!claimFailureBackoff.isDue()) return false;
     let claimed: PromoteJob | null;
     try {
       claimed = await config.agent.promoteQueue.claimNext(slot.workerId);
-      resetClaimFailureBackoff();
+      claimFailureBackoff.reset();
     } catch (err: unknown) {
-      const delayMs = recordClaimFailure();
+      const delayMs = claimFailureBackoff.recordFailure();
       bestEffortLog(
         log,
         `claimNext error on ${slot.workerId}; retrying in ${delayMs}ms: `
@@ -907,7 +886,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       shuttingDown = false;
       lifecycleAbortController = new AbortController();
       counters = freshCounters();
-      resetClaimFailureBackoff();
+      claimFailureBackoff.reset();
       let recovering = true;
       try {
         const summary = await config.agent.promoteQueue.recoverOnStartup();

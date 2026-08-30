@@ -42,6 +42,11 @@ export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
 export const DEFAULT_OXIGRAPH_PORT = 7878;
 
 const MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS = 5_000;
+// Oxigraph 0.5.x closes HTTP requests at 60 seconds when --timeout-s is
+// omitted, without cancelling evaluation. Start recovery slightly below that
+// boundary so a response/transport failure at the server deadline cannot
+// leave a zombie query behind.
+const MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS = 55_000;
 // Node timers (and AbortSignal.timeout) coerce any delay above 2^31-1 ms to 1ms
 // with a TimeoutOverflowWarning — aborting the request almost immediately, the
 // opposite of a long timeout. Cap the derived client timeout so an absurd
@@ -86,6 +91,7 @@ function hasUnsafeNativeQueryTimeout(platform: NodeJS.Platform, version: string)
 interface ManagedOxigraphDeadlines {
   queryTimeoutS?: number;
   clientTimeoutMs: number;
+  serverTimeoutRecoveryAfterMs?: number;
 }
 
 /** Resolve the client deadline and an optional operator-requested native deadline. */
@@ -102,6 +108,10 @@ function resolveManagedOxigraphDeadlines(
     return {
       queryTimeoutS: undefined,
       clientTimeoutMs: configuredClientTimeoutMs,
+      serverTimeoutRecoveryAfterMs:
+        configuredClientTimeoutMs > MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS
+          ? MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS
+          : undefined,
     };
   }
   const queryTimeoutS = Math.min(
@@ -111,14 +121,19 @@ function resolveManagedOxigraphDeadlines(
   const minimumClientTimeoutMs = clampNodeTimerMs(
     queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS,
   );
-  return {
-    queryTimeoutS: hasUnsafeNativeQueryTimeout(platform, OXIGRAPH_VERSION)
-      ? undefined
-      : queryTimeoutS,
-    clientTimeoutMs: configuredQueryTimeoutS !== undefined
+  const nativeTimeoutUnsafe = hasUnsafeNativeQueryTimeout(platform, OXIGRAPH_VERSION);
+  const resolvedClientTimeoutMs = configuredQueryTimeoutS !== undefined
       && configuredQueryTimeoutS > MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S
       ? MAX_NODE_TIMER_MS
-      : Math.max(configuredClientTimeoutMs, minimumClientTimeoutMs),
+      : Math.max(configuredClientTimeoutMs, minimumClientTimeoutMs);
+  return {
+    queryTimeoutS: nativeTimeoutUnsafe ? undefined : queryTimeoutS,
+    clientTimeoutMs: resolvedClientTimeoutMs,
+    serverTimeoutRecoveryAfterMs:
+      nativeTimeoutUnsafe
+      && resolvedClientTimeoutMs > MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS
+        ? MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS
+        : undefined,
   };
 }
 
@@ -191,6 +206,8 @@ export interface ManagedOxigraphPlan {
   queryTimeoutS?: number;
   /** SPARQL HTTP client deadline; kept after Oxigraph's native timeout when both exist. */
   clientTimeoutMs: number;
+  /** Earlier unmanaged Oxigraph HTTP deadline that must trigger child recovery. */
+  serverTimeoutRecoveryAfterMs?: number;
   /** Finite limits applied to an isolated systemd user scope. */
   memoryLimits?: OxigraphMemoryLimits;
   /**
@@ -223,7 +240,11 @@ export function planManagedOxigraph(
   // before they expire. Keep the native deadline opt-in; the HTTP adapter's
   // client deadline remains mandatory and onClientTimeout below restarts the
   // managed server so a timed-out evaluation cannot remain as a zombie.
-  const { queryTimeoutS, clientTimeoutMs } = resolveManagedOxigraphDeadlines(options, platform);
+  const {
+    queryTimeoutS,
+    clientTimeoutMs,
+    serverTimeoutRecoveryAfterMs,
+  } = resolveManagedOxigraphDeadlines(options, platform);
   const memoryLimits = normalizeOxigraphMemoryLimits({
     highMiB: options.memoryHighMiB,
     maxMiB: options.memoryMaxMiB,
@@ -272,6 +293,9 @@ export function planManagedOxigraph(
       timeout: clientTimeoutMs,
     },
   };
+  if (serverTimeoutRecoveryAfterMs !== undefined) {
+    storeConfigTemplate.options.serverTimeoutRecoveryAfterMs = serverTimeoutRecoveryAfterMs;
+  }
   if (graphSetIndex !== undefined) {
     storeConfigTemplate.graphSetIndex = graphSetIndex;
   }
@@ -285,6 +309,7 @@ export function planManagedOxigraph(
     readyTimeoutMs,
     queryTimeoutS,
     clientTimeoutMs,
+    serverTimeoutRecoveryAfterMs,
     memoryLimits,
     sharedMemoryPublicSnapshotStorage,
   };
