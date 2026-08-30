@@ -3,6 +3,7 @@ import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
 import {
   allowAllNetworkAdmission,
+  createRfc64CoordinatorStub,
   createUnstartedAgent,
   emptyDetailedSync,
   flushTimers,
@@ -24,7 +25,9 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       ...rawPlan,
     };
     const authorize = vi.fn(() => authorized);
-    agent.rfc64SwmRecoveryCoordinatorV1 = { authorize };
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
+      authorize,
+    });
     const selectedRun = vi.spyOn(agent, 'runSelectedSwmRetryFromPeerOnConnect')
       .mockResolvedValue(undefined);
     const handleSyncError = vi.fn();
@@ -54,7 +57,9 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     const authorize = vi.fn(() => {
       throw new Error('catalog-authorized plan must not be authorized twice');
     });
-    agent.rfc64SwmRecoveryCoordinatorV1 = { authorize };
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
+      authorize,
+    });
     const selectedRun = vi.spyOn(agent, 'runSelectedSwmRetryFromPeerOnConnect')
       .mockResolvedValue(undefined);
     const handleSyncError = vi.fn();
@@ -93,7 +98,9 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       if (!catalogReady) throw staleAuthorization;
       return authorized;
     });
-    agent.rfc64SwmRecoveryCoordinatorV1 = { revalidate };
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
+      revalidate,
+    });
     const selectedSync = vi.fn(async () => {
       throw new Error('stale catalog work must not reach selected SWM');
     });
@@ -191,11 +198,11 @@ describe('RFC-64 sync-on-connect scheduling', () => {
         { contextGraphId: 'public-cg', lane: 'selected-public' as const },
       ],
     };
-    agent.rfc64SwmRecoveryCoordinatorV1 = {
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
       admitSelectedPublic: vi.fn(() => true),
       authorize: vi.fn(() => authorized),
       revalidate: vi.fn(() => authorized),
-    };
+    });
     const ordering: string[] = [];
     const selectedSync = vi.fn(async (
       _peerId: string,
@@ -365,9 +372,9 @@ describe('RFC-64 sync-on-connect scheduling', () => {
         { contextGraphId: 'selected-cg', lane: 'selected-public' as const },
       ],
     };
-    agent.rfc64SwmRecoveryCoordinatorV1 = {
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
       authorize: vi.fn(() => authorized),
-    };
+    });
     const ordering: string[] = [];
     vi.spyOn(agent, 'runSelectedSwmRetryFromPeerOnConnect')
       .mockImplementation(async () => {
@@ -433,10 +440,10 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       providerPeerId: PEER_A,
       targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
     };
-    agent.rfc64SwmRecoveryCoordinatorV1 = {
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
       authorize: vi.fn(() => authorized),
       revalidate: vi.fn(() => authorized),
-    };
+    });
     agent.syncSelectedSharedMemoryFromPeerDetailed = async (
       _peerId: string,
       _contextGraphIds: readonly string[],
@@ -502,9 +509,9 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       providerPeerId: PEER_A,
       targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
     };
-    agent.rfc64SwmRecoveryCoordinatorV1 = {
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
       authorize: vi.fn(() => authorized),
-    };
+    });
     let releaseExact!: () => void;
     const exactBlocked = new Promise<void>((resolve) => { releaseExact = resolve; });
     const ordering: string[] = [];
@@ -548,9 +555,9 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       }],
     };
     agent.selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
-    agent.rfc64SwmRecoveryCoordinatorV1 = {
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
       admitSelectedPublic: vi.fn(() => false),
-    };
+    });
     const queuedRun = vi.spyOn(agent, 'runSyncFromPeerOnConnect')
       .mockResolvedValue(undefined);
 
@@ -617,9 +624,9 @@ describe('RFC-64 sync-on-connect scheduling', () => {
         targets: [{ contextGraphId: 'selected-b', lane: 'selected-public' }],
       });
     agent.planSharedMemorySyncContextGraphs = planner;
-    agent.rfc64SwmRecoveryCoordinatorV1 = {
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
       admitSelectedPublic: vi.fn(() => true),
-    };
+    });
     const selectedSync = vi.fn(async (
       _peerId: string,
       _contextGraphIds: readonly string[],

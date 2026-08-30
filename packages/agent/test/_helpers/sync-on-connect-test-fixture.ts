@@ -7,10 +7,10 @@ import type { Rfc64AuthorizedSwmRecoveryPlanV1 } from '../../src/rfc64/swm-recov
 import type { SelectedSwmBootstrapAdmission } from '../../src/sync/selected-swm-bootstrap-admission.js';
 import type { SyncOnConnectPeerScheduler } from '../../src/sync/on-connect/peer-scheduler.js';
 
-type Rfc64CoordinatorTestPort = Partial<Pick<
+type Rfc64CoordinatorTestPort = Pick<
   Rfc64SwmRecoveryCoordinatorV1,
   'admitSelectedPublic' | 'authorize' | 'authorizeForCatalogPass' | 'revalidate'
->>;
+>;
 
 interface SyncOnConnectPrivateSeam {
   started: boolean;
@@ -50,6 +50,18 @@ export type SyncOnConnectTestAgent = Omit<
 /** The only cast boundary for private sync-on-connect lifecycle collaborators. */
 export function asSyncOnConnectTestAgent(agent: DKGAgent): SyncOnConnectTestAgent {
   return agent as unknown as SyncOnConnectTestAgent;
+}
+
+export function createRfc64CoordinatorStub(
+  overrides: Partial<Rfc64CoordinatorTestPort> = {},
+): Rfc64CoordinatorTestPort {
+  return {
+    admitSelectedPublic: () => false,
+    authorize: () => null,
+    authorizeForCatalogPass: () => null,
+    revalidate: (authorized) => authorized,
+    ...overrides,
+  };
 }
 
 export async function createUnstartedAgent(
