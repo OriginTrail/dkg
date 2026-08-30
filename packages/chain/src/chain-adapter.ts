@@ -578,6 +578,12 @@ export interface ContextGraphRegistryScanCursorKey {
 }
 
 export interface ContextGraphRegistryScanCursorStore {
+  /**
+   * Version 2 stores include `cursorKind` in their durable key. Stores that omit this marker are
+   * treated as legacy role-less stores: they remain the historical source, but are never shared
+   * with the independent tip cursor because doing so could alias both progress records.
+   */
+  readonly cursorKeyVersion?: 2;
   load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
 }

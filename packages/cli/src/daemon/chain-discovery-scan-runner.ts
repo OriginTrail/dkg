@@ -35,7 +35,7 @@ export function chainDiscoveryScanOptions(input: {
   fullScanEvery?: number;
   pageBudget?: number;
 }):
-  | { mode: 'incremental'; pageBudget: number }
+  | { mode: 'incremental'; throwOnChainScanFailure: true; pageBudget: number }
   | { mode: 'tip' }
   | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
   | { mode: 'seedFull'; throwOnChainScanFailure: true } {
@@ -64,7 +64,7 @@ export function chainDiscoveryScanOptions(input: {
   }
   if (input.startupPhase === 'cursorSeed') {
     return input.watermarkSeeded
-      ? { mode: 'incremental', pageBudget }
+      ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
       : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
   }
   if (input.startupPhase === 'startupFullRecovery') {
@@ -79,7 +79,7 @@ export function chainDiscoveryScanOptions(input: {
     return { mode: 'seedFull', throwOnChainScanFailure: true };
   }
   return input.watermarkSeeded
-    ? { mode: 'incremental', pageBudget }
+    ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
     : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
 }
 

@@ -61,6 +61,7 @@ const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab
 const REGISTRY = '0x3333333333333333333333333333333333333333';
 
 class MemoryRegistryScanCursorStore {
+  readonly cursorKeyVersion = 2 as const;
   readonly values = new Map<string, number>();
   readonly loads: string[] = [];
   readonly saves: Array<{ key: string; nextBlock: number }> = [];
@@ -79,6 +80,31 @@ class MemoryRegistryScanCursorStore {
 
   private key(key: { chainId: string; deploymentId: string; registryAddress: string; cursorKind: 'historical' | 'tip' }): string {
     return `${key.chainId}|${key.deploymentId}|${key.cursorKind}|${key.registryAddress.toLowerCase()}`;
+  }
+}
+
+class LegacyRolelessRegistryScanCursorStore {
+  readonly values = new Map<string, number>();
+  readonly loads: string[] = [];
+  readonly saves: Array<{ key: string; nextBlock: number }> = [];
+
+  async load(key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<number | undefined> {
+    const encoded = this.key(key);
+    this.loads.push(encoded);
+    return this.values.get(encoded);
+  }
+
+  async save(
+    key: { chainId: string; deploymentId: string; registryAddress: string },
+    nextBlock: number,
+  ): Promise<void> {
+    const encoded = this.key(key);
+    this.saves.push({ key: encoded, nextBlock });
+    this.values.set(encoded, nextBlock);
+  }
+
+  private key(key: { chainId: string; deploymentId: string; registryAddress: string }): string {
+    return `${key.chainId}|${key.deploymentId}|${key.registryAddress.toLowerCase()}`;
   }
 }
 
@@ -305,7 +331,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       [0, 1_999],
       [2_000, 3_999],
     ]);
-    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
+    expect((restartedAdapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
   });
 
   it('retains the first attempted tip range when its query fails before any acknowledgement', async () => {
@@ -346,9 +372,39 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(await restarted.hasContextGraphRegistryScanWatermark()).toBe(false);
   });
 
+  it('never aliases tip progress through a legacy role-less historical cursor store', async () => {
+    const store = new LegacyRolelessRegistryScanCursorStore();
+    await store.save({
+      chainId: 'evm:31337',
+      deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
+      registryAddress: REGISTRY,
+    }, 2_000);
+    store.loads.length = 0;
+    store.saves.length = 0;
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 10_000, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    await collectRegistryScan(adapter, { mode: 'tip' });
+
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [8_001, 10_000],
+    ]);
+    expect(store.loads).toEqual([]);
+    expect(store.saves).toEqual([]);
+    expect((adapter as any).contextGraphRegistryTipScanCursor.getCachedWatermark(REGISTRY)).toBe(10_001);
+
+    await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
+    expect([...store.values.values()]).toEqual([2_000]);
+  });
+
   it('retains the first tip lower bound in process when durable cursor persistence fails', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const store = {
+      cursorKeyVersion: 2 as const,
       load: vi.fn(async () => undefined),
       save: vi.fn(async () => {
         throw new Error('tip cursor save failed');

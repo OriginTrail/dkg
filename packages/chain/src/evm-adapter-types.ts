@@ -99,6 +99,11 @@ export interface EVMAdapterBaseConfig {
    */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /**
+   * Optional dedicated tip-progress store for compatibility with legacy role-less historical
+   * stores. When omitted, the historical store is shared only if it advertises cursor key v2.
+   */
+  contextGraphRegistryTipScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish
    * signer. Default `0n` (strictly-positive: a wallet at exactly zero gas is

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   CHAIN_DISCOVERY_SCAN_SCHEDULE,
   chainDiscoveryScanOptions,
@@ -36,7 +37,7 @@ describe('chainDiscoveryScanOptions', () => {
       startupPhase: 'complete',
       successfulScansInCycle: 1,
       fullScanEvery: 48,
-    })).toEqual({ mode: 'incremental', pageBudget: 30 });
+    })).toEqual({ mode: 'incremental', throwOnChainScanFailure: true, pageBudget: 30 });
   });
 
   it('keeps a periodic full-history recovery path after the watermark is seeded', () => {
@@ -67,7 +68,7 @@ describe('chainDiscoveryScanOptions', () => {
       startupPhase: 'complete',
       successfulScansInCycle: 47,
       fullScanEvery: 48,
-    })).toEqual({ mode: 'incremental', pageBudget: 30 });
+    })).toEqual({ mode: 'incremental', throwOnChainScanFailure: true, pageBudget: 30 });
   });
 
   it('ignores fractional full-scan cadence overrides below one', () => {
@@ -76,7 +77,7 @@ describe('chainDiscoveryScanOptions', () => {
       startupPhase: 'complete',
       successfulScansInCycle: 1,
       fullScanEvery: 0.5,
-    })).toEqual({ mode: 'incremental', pageBudget: 30 });
+    })).toEqual({ mode: 'incremental', throwOnChainScanFailure: true, pageBudget: 30 });
   });
 
   it('honors a valid custom page budget', () => {
@@ -85,7 +86,7 @@ describe('chainDiscoveryScanOptions', () => {
       startupPhase: 'complete',
       successfulScansInCycle: 1,
       pageBudget: 7.9,
-    })).toEqual({ mode: 'incremental', pageBudget: 7 });
+    })).toEqual({ mode: 'incremental', throwOnChainScanFailure: true, pageBudget: 7 });
   });
 
   it('derives the daily full-resync cadence from the same schedule as the interval', () => {
@@ -227,6 +228,7 @@ describe('chainDiscoveryScanOptions', () => {
     });
     expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
       mode: 'incremental',
+      throwOnChainScanFailure: true,
       pageBudget: 30,
     });
   });
@@ -282,6 +284,42 @@ describe('chainDiscoveryScanOptions', () => {
       'tip',
       'seedFull',
     ]);
+  });
+
+  it('uses real DKGAgent failure propagation to escape a persistently failing incremental scan', async () => {
+    const attemptedModes: string[] = [];
+    const chain = {
+      scanContextGraphRegistryPages(options: { mode: string }) {
+        attemptedModes.push(options.mode);
+        return (async function* () {
+          if (options.mode === 'incremental') {
+            throw new Error('archive range unavailable');
+          }
+          yield* [];
+        })();
+      },
+    };
+    const harness = {
+      chain,
+      subscribedContextGraphs: new Map(),
+      log: { info: vi.fn(), warn: vi.fn() },
+    };
+    const realDiscover = DKGAgent.prototype.discoverContextGraphsFromChain.bind(harness as never);
+    const runner = createChainDiscoveryScanRunner({
+      agent: {
+        hasContextGraphRegistryScanWatermark: async () => true,
+        discoverContextGraphsFromChain: realDiscover,
+      },
+      log: vi.fn(),
+    });
+
+    await runner();
+    await runner();
+    await runner();
+    await runner();
+
+    expect(attemptedModes).toEqual(['seedFull', 'incremental', 'incremental', 'tip']);
+    expect(harness.log.warn).toHaveBeenCalledTimes(1);
   });
 
   it('interleaves a tip probe after a failed periodic full resync', async () => {
@@ -366,6 +404,7 @@ describe('chainDiscoveryScanOptions', () => {
     expect(messages).toEqual(['Chain scan: discovered 3 new context graph(s)']);
     expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
       mode: 'incremental',
+      throwOnChainScanFailure: true,
       pageBudget: 30,
     });
   });

@@ -1317,17 +1317,27 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
+    const historicalRegistryCursorStore = config.contextGraphRegistryScanCursorStore;
+    const configuredTipRegistryCursorStore = config.contextGraphRegistryTipScanCursorStore;
+    const tipRegistryCursorStore = configuredTipRegistryCursorStore && (
+      configuredTipRegistryCursorStore !== historicalRegistryCursorStore ||
+      configuredTipRegistryCursorStore.cursorKeyVersion === 2
+    )
+      ? configuredTipRegistryCursorStore
+      : historicalRegistryCursorStore?.cursorKeyVersion === 2
+        ? historicalRegistryCursorStore
+        : undefined;
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
       cursorKind: 'historical',
-      store: config.contextGraphRegistryScanCursorStore,
+      store: historicalRegistryCursorStore,
     });
     this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
       cursorKind: 'tip',
-      store: config.contextGraphRegistryScanCursorStore,
+      store: tipRegistryCursorStore,
     });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
