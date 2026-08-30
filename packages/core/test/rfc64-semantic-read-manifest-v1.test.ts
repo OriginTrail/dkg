@@ -2,11 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
-  RFC64_SEMANTIC_READ_BACKENDS_V1,
   RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1,
   RFC64_SEMANTIC_READ_QUERY_IDS_V1,
   RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1,
-  compileRfc64SemanticReadOperationV1,
   compileRfc64SemanticReadOperationV2,
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
@@ -15,6 +13,7 @@ import {
   type EvmAddressV1,
   type NetworkIdV1,
   type Rfc64SemanticReadQueryIdV1,
+  Rfc64SemanticReadManifestErrorV1,
   type Rfc64SemanticAddressV1,
   type Rfc64SemanticRecordCoordinateV1,
   type SubGraphNameV1,
@@ -120,16 +119,6 @@ describe('RFC-64 semantic read manifest v1', () => {
       expect(operation.graphIri).toBe(fixture.expectedAddress.graphUri);
       expect(operation.subjectIri).toBe(fixture.expectedAddress.subject);
       expect('backend' in operation).toBe(false);
-
-      for (const backend of RFC64_SEMANTIC_READ_BACKENDS_V1) {
-        const legacy = compileRfc64SemanticReadOperationV1({
-          backend,
-          coordinate: fixture.coordinate,
-        });
-        const { backend: route, ...compiled } = legacy;
-        expect(route).toBe(backend);
-        expect(compiled).toEqual(operation);
-      }
     }
   });
 
@@ -138,53 +127,39 @@ describe('RFC-64 semantic read manifest v1', () => {
     expect(new Set(CASES.map(({ coordinate }) => coordinate.recordType))).toEqual(
       new Set(Object.keys(RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1)),
     );
-    const emittedIds = CASES.map(({ coordinate }) => compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
-      coordinate,
-    }).queryId);
+    const emittedIds = CASES.map(({ coordinate }) =>
+      compileRfc64SemanticReadOperationV2(coordinate).queryId);
     expect(new Set(emittedIds)).toEqual(new Set(RFC64_SEMANTIC_READ_QUERY_IDS_V1));
   });
 
-  it('renders byte-identical bounded queries for Oxigraph and Blazegraph', () => {
-    expect(RFC64_SEMANTIC_READ_BACKENDS_V1).toEqual(['oxigraph', 'blazegraph']);
+  it('renders one backend-neutral bounded query for compatible adapters', () => {
     for (const fixture of CASES) {
-      const oxigraph = compileRfc64SemanticReadOperationV1({
-        backend: 'oxigraph',
-        coordinate: fixture.coordinate,
-      });
-      const blazegraph = compileRfc64SemanticReadOperationV1({
-        backend: 'blazegraph',
-        coordinate: fixture.coordinate,
-      });
-      expect(blazegraph.sparql, fixture.coordinate.recordType).toBe(oxigraph.sparql);
-      expect(oxigraph.queryId).toBe(fixture.expectedQueryId);
-      expect(oxigraph.graphIri).toBe(fixture.expectedAddress.graphUri);
-      expect(oxigraph.subjectIri).toBe(fixture.expectedAddress.subject);
-      expect(oxigraph.expectedRowCount).toBe(
+      const operation = compileRfc64SemanticReadOperationV2(fixture.coordinate);
+      expect(operation.queryId).toBe(fixture.expectedQueryId);
+      expect(operation.graphIri).toBe(fixture.expectedAddress.graphUri);
+      expect(operation.subjectIri).toBe(fixture.expectedAddress.subject);
+      expect(operation.expectedRowCount).toBe(
         RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1[fixture.coordinate.recordType],
       );
-      expect(oxigraph.rowCeiling).toBe(oxigraph.expectedRowCount + 1);
-      expect(oxigraph.responseByteCeiling).toBe(
+      expect(operation.rowCeiling).toBe(operation.expectedRowCount + 1);
+      expect(operation.responseByteCeiling).toBe(
         MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
       );
-      expect(oxigraph.concurrencyClass).toBe(
+      expect(operation.concurrencyClass).toBe(
         RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1,
       );
-      expect(oxigraph.sparql).toContain(`GRAPH <${oxigraph.graphIri}>`);
-      expect(oxigraph.sparql).toContain(`<${oxigraph.subjectIri}> ?p ?o`);
-      expect(oxigraph.sparql).toMatch(new RegExp(`LIMIT ${oxigraph.rowCeiling}$`, 'u'));
-      expect(oxigraph.sparql).not.toMatch(
+      expect(operation.sparql).toContain(`GRAPH <${operation.graphIri}>`);
+      expect(operation.sparql).toContain(`<${operation.subjectIri}> ?p ?o`);
+      expect(operation.sparql).toMatch(new RegExp(`LIMIT ${operation.rowCeiling}$`, 'u'));
+      expect(operation.sparql).not.toMatch(
         /GRAPH\s+\?|ORDER\s+BY|OFFSET|VALUES|SERVICE|SELECT\s+DISTINCT/iu,
       );
-      expect(Object.isFrozen(oxigraph)).toBe(true);
+      expect(Object.isFrozen(operation)).toBe(true);
     }
   });
 
   it('freezes the exact current-author query vector', () => {
-    const operation = compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
-      coordinate: CASES[0].coordinate,
-    });
+    const operation = compileRfc64SemanticReadOperationV2(CASES[0].coordinate);
     expect(operation.sparql).toBe(
       'SELECT ?p ?o\n'
       + 'WHERE {\n'
@@ -202,34 +177,37 @@ describe('RFC-64 semantic read manifest v1', () => {
     );
   });
 
-  it('rejects uncertified backends and input adornment', () => {
-    expect(() => compileRfc64SemanticReadOperationV1({
-      backend: 'sparql-http',
-      coordinate: CASES[0].coordinate,
-    })).toThrow(/backend is not certified/u);
-    expect(() => compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
-      queryId: 'SYNC_RAW_QUERY_V1',
-      coordinate: CASES[0].coordinate,
-    })).toThrow(/invalid field set/u);
-    expect(() => compileRfc64SemanticReadOperationV1({
-      backend: 'oxigraph',
-      coordinate: CASES[0].coordinate,
-      sparql: 'SELECT * WHERE { ?s ?p ?o }',
-    })).toThrow(/invalid field set/u);
+  it('normalizes every malformed coordinate through the manifest error contract', () => {
+    for (const coordinate of [
+      { ...CASES[0].coordinate, extra: true },
+      { ...CASES[0].coordinate, recordType: 'UnknownRecordV1' },
+      { ...CASES[0].coordinate, networkId: 'invalid network' },
+    ]) {
+      let failure: unknown;
+      try {
+        compileRfc64SemanticReadOperationV2(coordinate);
+      } catch (cause) {
+        failure = cause;
+      }
+      expect(failure).toBeInstanceOf(Rfc64SemanticReadManifestErrorV1);
+      expect((failure as Rfc64SemanticReadManifestErrorV1).code)
+        .toBe('rfc64-semantic-read-schema');
+      expect((failure as Error & { cause?: unknown }).cause).toBeDefined();
+    }
   });
 
-  it('rejects accessor-bearing input fields without invoking the accessor', () => {
+  it('rejects accessor-bearing coordinate fields without invoking the accessor', () => {
     let invoked = false;
-    const input: Record<string, unknown> = { backend: 'oxigraph' };
-    Object.defineProperty(input, 'coordinate', {
+    const coordinate: Record<string, unknown> = { ...CASES[6].coordinate };
+    Object.defineProperty(coordinate, 'networkId', {
       enumerable: true,
       get() {
         invoked = true;
-        return CASES[6].coordinate;
+        return NETWORK;
       },
     });
-    expect(() => compileRfc64SemanticReadOperationV1(input)).toThrow(/invalid field set/u);
+    expect(() => compileRfc64SemanticReadOperationV2(coordinate))
+      .toThrow(Rfc64SemanticReadManifestErrorV1);
     expect(invoked).toBe(false);
   });
 });

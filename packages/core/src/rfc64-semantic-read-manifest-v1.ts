@@ -7,15 +7,6 @@ import {
   type Rfc64SemanticRecordTypeV1,
 } from './rfc64-semantic-records-v1.js';
 import { type Rfc64SemanticAddressV1 } from './rfc64-semantic-addresses-v1.js';
-import { isPlainRecord, snapshotExactDataRecord } from './sync-wire-objects.js';
-
-export const RFC64_SEMANTIC_READ_BACKENDS_V1 = Object.freeze([
-  'oxigraph',
-  'blazegraph',
-] as const);
-
-export type Rfc64SemanticReadBackendV1 =
-  (typeof RFC64_SEMANTIC_READ_BACKENDS_V1)[number];
 
 export const RFC64_SEMANTIC_READ_QUERY_ID_BY_RECORD_TYPE_V1 = Object.freeze({
   CurrentAuthorCatalogRefV1: 'SYNC_HEAD_REF_GET_V1',
@@ -37,11 +28,6 @@ export const RFC64_SEMANTIC_READ_QUERY_IDS_V1 = Object.freeze([
 export const RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1 =
   'rfc64-semantic-control-v1' as const;
 
-export interface Rfc64SemanticReadTemplateInputV1 {
-  readonly backend: Rfc64SemanticReadBackendV1;
-  readonly coordinate: Rfc64SemanticRecordCoordinateV1;
-}
-
 /** Backend-neutral semantic read operation used by new consumers. */
 export interface Rfc64SemanticReadOperationV2 {
   readonly queryId: Rfc64SemanticReadQueryIdV1;
@@ -58,14 +44,6 @@ export interface Rfc64SemanticReadOperationV2 {
   readonly sparql: string;
 }
 
-/**
- * Compatibility shape for the original public V1 compiler. The backend label
- * is routing metadata only; it never changes the compiled operation.
- */
-export interface Rfc64SemanticReadOperationV1 extends Rfc64SemanticReadOperationV2 {
-  readonly backend: Rfc64SemanticReadBackendV1;
-}
-
 export type Rfc64SemanticReadManifestErrorCodeV1 =
   | 'rfc64-semantic-read-schema';
 
@@ -80,8 +58,6 @@ export class Rfc64SemanticReadManifestErrorV1 extends Error {
   }
 }
 
-const BACKENDS = new Set<string>(RFC64_SEMANTIC_READ_BACKENDS_V1);
-
 /**
  * Compile one closed, exact-subject RFC-64 semantic read operation.
  *
@@ -92,7 +68,12 @@ const BACKENDS = new Set<string>(RFC64_SEMANTIC_READ_BACKENDS_V1);
 export function compileRfc64SemanticReadOperationV2(
   input: unknown,
 ): Rfc64SemanticReadOperationV2 {
-  const coordinate = snapshotRfc64SemanticRecordCoordinateV1(input);
+  let coordinate: Rfc64SemanticRecordCoordinateV1;
+  try {
+    coordinate = snapshotRfc64SemanticRecordCoordinateV1(input);
+  } catch (cause) {
+    fail('semantic read coordinate is invalid', cause);
+  }
   const queryId = queryIdForRecordType(coordinate.recordType);
   const address = deriveRfc64SemanticRecordAddressFromCoordinateV1(coordinate);
   const expectedRowCount = RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1[coordinate.recordType];
@@ -110,45 +91,6 @@ export function compileRfc64SemanticReadOperationV2(
     responseByteCeiling: MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
     concurrencyClass: RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1,
     sparql: renderExactSubjectRead(address, rowCeiling),
-  });
-}
-
-/**
- * Compile the original V1 operation shape without changing existing callers.
- * @deprecated New code should route the store separately and compile through
- * {@link compileRfc64SemanticReadOperationV2}.
- */
-export function compileRfc64SemanticReadOperationV1(
-  input: unknown,
-): Rfc64SemanticReadOperationV1 {
-  const request = snapshotInput(input);
-  const operation = compileRfc64SemanticReadOperationV2(request.coordinate);
-  return Object.freeze({ backend: request.backend, ...operation });
-}
-
-function snapshotInput(input: unknown): {
-  readonly backend: Rfc64SemanticReadBackendV1;
-  readonly coordinate: unknown;
-} {
-  if (!isPlainRecord(input)) {
-    fail('semantic read input must be a plain object');
-  }
-  let request: Readonly<Record<string, unknown>>;
-  try {
-    request = snapshotExactDataRecord(
-      input,
-      ['backend', 'coordinate'],
-      'RFC-64 semantic read input',
-    );
-  } catch (cause) {
-    fail('semantic read input has an invalid field set', cause);
-  }
-  if (typeof request.backend !== 'string' || !BACKENDS.has(request.backend)) {
-    fail('semantic read backend is not certified');
-  }
-  return Object.freeze({
-    backend: request.backend as Rfc64SemanticReadBackendV1,
-    coordinate: request.coordinate,
   });
 }
 
