@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
+import { SyncOnConnectPostSyncError } from
+  '../src/sync/on-connect/sync-on-connect.js';
 import {
   allowAllNetworkAdmission,
   createRfc64CoordinatorStub,
@@ -151,6 +153,48 @@ describe('RFC-64 peer-job accounting and order', () => {
       expect.any(Object),
     );
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+  });
+
+  it('does not let selected progress mask an unaccounted ordinary failure', async () => {
+    const agent = await createUnstartedAgent('Rfc64OrdinaryPostSyncFailure');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.trySelectedSwmRetryFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: false,
+        progress: true,
+      });
+      return 'synced';
+    };
+    const ordinaryFailure = new SyncOnConnectPostSyncError(
+      PEER_A,
+      new Error('ordinary discovery failed'),
+      { backoffEligible: false },
+    );
+    agent.trySyncFromPeer = async () => { throw ordinaryFailure; };
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runSelected();
+    await expect(runner.runAutomaticSelectedThenOrdinary())
+      .rejects.toBe(ordinaryFailure);
+    runner.finish();
+
+    expect(applyJobAccounting).not.toHaveBeenCalled();
+    expect(agent.lastSyncProgressAt.has(PEER_A)).toBe(false);
+    expect(agent.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect(agent.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+
+    const nextOrdinary = vi.fn(async () => undefined);
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary: nextOrdinary });
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0))
+      .toBe(true);
+    await vi.waitFor(() => expect(nextOrdinary).toHaveBeenCalledOnce());
   });
 
   it('retains both automatic selected and ordinary failures and commits once', async () => {

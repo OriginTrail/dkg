@@ -218,7 +218,6 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
   it('preserves the retryable 503 contract for a committed exact SWM replacement timeout', async () => {
     await startWithPromoteImpl(async () => {
       throw new PromoteReplaySafeError(
-        'atomic-exact-swm-graph-replacement',
         new StoreOperationTimeoutError({
           backend: 'managed-oxigraph',
           operation: 'replaceGraph',

@@ -26,7 +26,7 @@
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
-import { isPromoteReplaySafeError } from "@origintrail-official/dkg-publisher";
+import { unwrapPromoteReplaySafeError } from "@origintrail-official/dkg-publisher";
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -95,7 +95,7 @@ import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 const PREFIX = "/api/knowledge-assets";
 
 function promoteStoreFailure(error: unknown): unknown {
-  return isPromoteReplaySafeError(error) ? error.cause : error;
+  return unwrapPromoteReplaySafeError(error);
 }
 
 function classifyPromoteStoreUnavailable(error: unknown) {

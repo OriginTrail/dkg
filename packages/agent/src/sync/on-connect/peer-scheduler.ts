@@ -3,6 +3,10 @@
 import type { SyncReconcilerAttemptOutcome } from './attempt-accounting.js';
 
 export type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
+export type SyncOnConnectSchedulerInternalStage =
+  | 'lane-error-handler'
+  | 'runner-finalizer'
+  | 'scheduler-drain';
 
 interface OrdinaryLane {
   readonly kind: 'ordinary';
@@ -43,6 +47,12 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
   readonly createJob: (
     remotePeer: string,
   ) => SyncOnConnectPeerJobRunner<SelectedPlan>;
+  /** Observe contained scheduler/consumer failures without breaking cleanup. */
+  readonly onInternalError: (
+    remotePeer: string,
+    error: unknown,
+    stage: SyncOnConnectSchedulerInternalStage,
+  ) => void;
 }
 
 /**
@@ -128,10 +138,11 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     this.jobs.set(remotePeer, job);
     job.timer = setTimeout(() => {
       job.timer = null;
-      // Lane failures are routed inside drain. This terminal catch prevents a
-      // throwing consumer error handler or runner finalizer from becoming an
-      // unhandled rejection after the timer relinquishes ownership.
-      void this.drain(remotePeer, job).catch(() => undefined);
+      // Lane and finalizer failures are routed inside drain. Keep an observable
+      // terminal boundary for genuinely unexpected scheduler defects.
+      void this.drain(remotePeer, job).catch((error: unknown) => {
+        this.reportInternalError(remotePeer, error, 'scheduler-drain');
+      });
     }, delayMs);
   }
 
@@ -158,9 +169,14 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
         for (const failedLane of failedLanes) {
           try {
             failedLane.handleSyncError(remotePeer, error);
-          } catch {
+          } catch (consumerError: unknown) {
             // Consumer failures are terminally contained by scheduler ownership;
             // continue notifying the remaining accepted lanes.
+            this.reportInternalError(
+              remotePeer,
+              consumerError,
+              'lane-error-handler',
+            );
           }
         }
         return;
@@ -176,7 +192,15 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
           // Error ownership belongs to the lane that actually failed. A later
           // enqueue may replace a pending selected lane, but it must never
           // redirect an already-running lane's rejection to the newer caller.
-          lane.handleSyncError(remotePeer, error);
+          try {
+            lane.handleSyncError(remotePeer, error);
+          } catch (consumerError: unknown) {
+            this.reportInternalError(
+              remotePeer,
+              consumerError,
+              'lane-error-handler',
+            );
+          }
         } finally {
           if (this.jobs.get(remotePeer) === job) job.currentLane = null;
         }
@@ -185,10 +209,26 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       }
     } finally {
       try {
-        runner?.finish();
+        try {
+          runner?.finish();
+        } catch (error: unknown) {
+          this.reportInternalError(remotePeer, error, 'runner-finalizer');
+        }
       } finally {
         if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
       }
+    }
+  }
+
+  private reportInternalError(
+    remotePeer: string,
+    error: unknown,
+    stage: SyncOnConnectSchedulerInternalStage,
+  ): void {
+    try {
+      this.callbacks.onInternalError(remotePeer, error, stage);
+    } catch {
+      // The diagnostic sink is advisory and must not break scheduler cleanup.
     }
   }
 

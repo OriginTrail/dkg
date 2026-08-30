@@ -4645,6 +4645,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): SyncOnConnectPeerScheduler<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
     this.syncOnConnectPeerScheduler ??= new SyncOnConnectPeerScheduler({
       createJob: (remotePeer) => this.createSyncOnConnectPeerJobRunner(remotePeer),
+      onInternalError: (remotePeer, error, stage) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.log.error(
+          createOperationContext('sync'),
+          `Sync-on-connect scheduler ${stage} failure for ${remotePeer.slice(-8)}: ${detail}`,
+        );
+      },
     });
     return this.syncOnConnectPeerScheduler;
   }

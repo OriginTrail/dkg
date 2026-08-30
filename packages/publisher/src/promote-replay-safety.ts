@@ -1,11 +1,13 @@
 import { isStoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 
 export const PROMOTE_REPLAY_SAFE_ERROR_CODE = 'PROMOTE_REPLAY_SAFE_FAILURE';
+const EXACT_SWM_GRAPH_REPLACEMENT_STAGE =
+  'atomic-exact-swm-graph-replacement' as const;
 
 export interface PromoteReplaySafeErrorLike {
   readonly code: typeof PROMOTE_REPLAY_SAFE_ERROR_CODE;
-  readonly stage: 'atomic-exact-swm-graph-replacement';
-  readonly cause?: unknown;
+  readonly stage: typeof EXACT_SWM_GRAPH_REPLACEMENT_STAGE;
+  readonly cause: unknown;
 }
 
 /**
@@ -15,13 +17,16 @@ export interface PromoteReplaySafeErrorLike {
 export class PromoteReplaySafeError extends Error {
   override readonly name = 'PromoteReplaySafeError';
   readonly code = PROMOTE_REPLAY_SAFE_ERROR_CODE;
+  readonly stage = EXACT_SWM_GRAPH_REPLACEMENT_STAGE;
+  override readonly cause: unknown;
 
-  constructor(
-    readonly stage: 'atomic-exact-swm-graph-replacement',
-    cause: unknown,
-  ) {
+  constructor(cause: unknown) {
     const detail = cause instanceof Error ? cause.message : String(cause);
-    super(`Promote may be retried after ${stage}: ${detail}`, { cause });
+    super(
+      `Promote may be retried after ${EXACT_SWM_GRAPH_REPLACEMENT_STAGE}: ${detail}`,
+      { cause },
+    );
+    this.cause = cause;
   }
 }
 
@@ -32,7 +37,13 @@ export function isPromoteReplaySafeError(
   if (!error || typeof error !== 'object') return false;
   const shaped = error as Partial<PromoteReplaySafeErrorLike>;
   return shaped.code === PROMOTE_REPLAY_SAFE_ERROR_CODE
-    && shaped.stage === 'atomic-exact-swm-graph-replacement';
+    && shaped.stage === EXACT_SWM_GRAPH_REPLACEMENT_STAGE
+    && shaped.cause !== undefined;
+}
+
+/** Unwrap producer-certified replay safety at a package/worker boundary. */
+export function unwrapPromoteReplaySafeError(error: unknown): unknown {
+  return isPromoteReplaySafeError(error) ? error.cause : error;
 }
 
 /**
@@ -43,6 +54,6 @@ export function classifyExactSwmGraphReplaceFailure(error: unknown): unknown {
   return isStoreOperationTimeoutError(error)
     && error.outcome === 'indeterminate'
     && error.storeOperation === 'replaceGraph'
-    ? new PromoteReplaySafeError('atomic-exact-swm-graph-replacement', error)
+    ? new PromoteReplaySafeError(error)
     : error;
 }

@@ -374,6 +374,7 @@ export {
   PROMOTE_REPLAY_SAFE_ERROR_CODE,
   PromoteReplaySafeError,
   isPromoteReplaySafeError,
+  unwrapPromoteReplaySafeError,
   type PromoteReplaySafeErrorLike,
 } from './promote-replay-safety.js';
 export {

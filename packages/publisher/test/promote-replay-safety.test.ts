@@ -6,6 +6,7 @@ import {
   isPromoteReplaySafeError,
   PROMOTE_REPLAY_SAFE_ERROR_CODE,
   PromoteReplaySafeError,
+  unwrapPromoteReplaySafeError,
 } from '../src/promote-replay-safety.js';
 
 describe('promote replay safety', () => {
@@ -44,10 +45,16 @@ describe('promote replay safety', () => {
 
     expect(crossRealmShape).not.toBeInstanceOf(PromoteReplaySafeError);
     expect(isPromoteReplaySafeError(crossRealmShape)).toBe(true);
+    expect(unwrapPromoteReplaySafeError(crossRealmShape))
+      .toBe(crossRealmShape.cause);
   });
 
   it.each([
     ['missing stage', { code: PROMOTE_REPLAY_SAFE_ERROR_CODE }],
+    ['missing cause', {
+      code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
+      stage: 'atomic-exact-swm-graph-replacement',
+    }],
     ['unknown stage', {
       code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
       stage: 'other',

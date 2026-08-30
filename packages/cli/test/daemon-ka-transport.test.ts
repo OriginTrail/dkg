@@ -319,10 +319,7 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
           authorAddress: '0x0000000000000000000000000000000000000001',
         }),
         promote: async () => {
-          throw new PromoteReplaySafeError(
-            'atomic-exact-swm-graph-replacement',
-            timeout,
-          );
+          throw new PromoteReplaySafeError(timeout);
         },
       },
     });
