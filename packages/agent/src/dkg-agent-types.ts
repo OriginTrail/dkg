@@ -580,7 +580,7 @@ export interface PeerDiagnostics {
  * Per-peer sync-reconciler backoff state. `failures` is the count of
  * consecutive reconciler attempts that did NOT produce a successful sync;
  * `nextRetryAt` is the epoch-ms before which the reconciler skips this peer.
- * Reset on a successful sync (`onPeerSynced`) and on `connection:close`.
+ * Reset on a successful sync (`onSyncAccounting`) and on `connection:close`.
  * See `SYNC_BACKOFF_BASE_MS`.
  */
 export type SyncReconcilerBackoff = {

@@ -1622,7 +1622,7 @@ export class DKGAgentBase {
   protected readonly skippedNoSyncPeers = new Set<string>();
   /**
    * Per-peer timestamp of the most recent successful run of sync-on-connect.
-   * Driven by `runSyncOnConnect.onPeerSynced`. Used by the periodic
+   * Driven by `runSyncOnConnect.onSyncAccounting`. Used by the periodic
    * reconciler to skip peers that have already synced recently — the
    * staleness threshold is intentionally larger than the reconciler
    * interval so a single missed tick doesn't immediately retry every
@@ -1645,7 +1645,7 @@ export class DKGAgentBase {
    * consecutive reconciler attempts that did NOT produce a successful
    * sync; `nextRetryAt` is the epoch-ms before which the reconciler
    * skips this peer. Reset on useful progress or a clean denial-only response
-   * (`onPeerSynced`) and pruned after stale disconnects. See
+   * (`onSyncAccounting`) and pruned after stale disconnects. See
    * `SYNC_BACKOFF_BASE_MS`.
    */
   protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();

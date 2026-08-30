@@ -178,7 +178,7 @@ describe('runSyncOnConnect callbacks', () => {
         return 0;
       },
       logInfo: noopLog,
-      onPeerSynced: (_peerId, accounting) => {
+      onSyncAccounting: (_peerId, accounting) => {
         if (accounting) synced.push(accounting);
       },
     });
@@ -209,13 +209,17 @@ describe('runSyncOnConnect callbacks', () => {
       discoverContextGraphsFromStore: async () => 0,
       syncSharedMemoryFromPeer: async () => 0,
       logInfo: noopLog,
-      onPeerSynced: (_peerId, accounting) => {
+      onSyncAccounting: (_peerId, accounting) => {
         if (accounting) synced.push(accounting);
       },
     });
 
     expect(outcome).toBe('deferred-backpressure');
-    expect(synced).toEqual([{ fresh: false, progress: true }]);
+    expect(synced).toEqual([{
+      reconcilerDisposition: 'defer',
+      fresh: false,
+      progress: true,
+    }]);
   });
 
   it('accepts omitted knownCorePeerIdsV2 for backwards-compatible call sites', async () => {
@@ -300,7 +304,7 @@ describe('runSyncOnConnect callbacks', () => {
       onPeerSkippedNoSync: (peerId, protocols) => {
         skipped.push({ peerId, protocols: [...protocols] });
       },
-      onPeerSynced: (peerId) => {
+      onSyncAccounting: (peerId) => {
         synced.push(peerId);
       },
     });
@@ -311,7 +315,7 @@ describe('runSyncOnConnect callbacks', () => {
     expect(syncFromPeer.calls).toEqual([]);
   });
 
-  it('fires onPeerSynced after a successful sync', async () => {
+  it('fires onSyncAccounting after a successful sync', async () => {
     const remotePeer = freshPeerIdString();
     const skipped: string[] = [];
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
@@ -328,7 +332,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncSharedMemoryFromPeer: async () => 0,
       logInfo: noopLog,
       onPeerSkippedNoSync: (peerId) => skipped.push(peerId),
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
@@ -336,7 +340,7 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([{ peerId: remotePeer, fresh: true }]);
   });
 
-  it('does not fire onPeerSynced when detailed sync summaries only time out', async () => {
+  it('returns retry accounting when detailed sync summaries only time out', async () => {
     const remotePeer = freshPeerIdString();
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
@@ -362,11 +366,11 @@ describe('runSyncOnConnect callbacks', () => {
         checkpointAdvances: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
-    expect(synced).toEqual([]);
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
   });
 
   it('does not classify integrity-rejected durable summaries as clean progress', async () => {
@@ -403,18 +407,18 @@ describe('runSyncOnConnect callbacks', () => {
           deniedPhases: 0,
         }),
         logInfo: noopLog,
-        onPeerSynced: (peerId, peerOutcome) => synced.push({
+        onSyncAccounting: (peerId, peerOutcome) => synced.push({
           peerId,
           fresh: peerOutcome?.fresh,
         }),
       });
 
       expect(outcome).toBe('synced');
-      expect(synced).toEqual([]);
+      expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
     }
   });
 
-  it('fires onPeerSynced when detailed sync summaries are clean but empty', async () => {
+  it('fires onSyncAccounting when detailed sync summaries are clean but empty', async () => {
     const remotePeer = freshPeerIdString();
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
@@ -439,14 +443,14 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
     expect(synced).toEqual([{ peerId: remotePeer, fresh: true }]);
   });
 
-  it('does not fire onPeerSynced when clean empty accounting later times out', async () => {
+  it('returns retry accounting when clean empty accounting later times out', async () => {
     const remotePeer = freshPeerIdString();
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
@@ -473,11 +477,11 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
-    expect(synced).toEqual([]);
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
   });
 
   it('marks denial-only sync as backoff-clearing but not fresh or progress', async () => {
@@ -509,14 +513,14 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh, progress: outcome?.progress }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh, progress: outcome?.progress }),
     });
 
     expect(outcome).toBe('synced');
     expect(synced).toEqual([{ peerId: remotePeer, fresh: false, progress: false }]);
   });
 
-  it('does not fire onPeerSynced when denial-only accounting also has a timeout', async () => {
+  it('returns retry accounting when denial-only accounting also has a timeout', async () => {
     const remotePeer = freshPeerIdString();
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
@@ -545,14 +549,14 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
-    expect(synced).toEqual([]);
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
   });
 
-  it('fires onPeerSynced when a detailed sync summary advances a checkpoint', async () => {
+  it('fires onSyncAccounting when a detailed sync summary advances a checkpoint', async () => {
     const remotePeer = freshPeerIdString();
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
@@ -575,7 +579,7 @@ describe('runSyncOnConnect callbacks', () => {
         checkpointAdvances: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
@@ -611,7 +615,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
@@ -643,7 +647,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh, progress: outcome?.progress }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh, progress: outcome?.progress }),
     });
 
     expect(outcome).toBe('synced');
@@ -688,7 +692,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({
+      onSyncAccounting: (peerId, outcome) => synced.push({
         peerId,
         fresh: outcome?.fresh,
         progress: outcome?.progress,
@@ -737,7 +741,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, syncOutcome) => synced.push({
+      onSyncAccounting: (peerId, syncOutcome) => synced.push({
         peerId,
         fresh: syncOutcome?.fresh,
         progress: syncOutcome?.progress,
@@ -787,7 +791,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, syncOutcome) => synced.push({
+      onSyncAccounting: (peerId, syncOutcome) => synced.push({
         peerId,
         fresh: syncOutcome?.fresh,
         progress: syncOutcome?.progress,
@@ -842,7 +846,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, syncOutcome) => synced.push({
+      onSyncAccounting: (peerId, syncOutcome) => synced.push({
         peerId,
         fresh: syncOutcome?.fresh,
         progress: syncOutcome?.progress,
@@ -899,7 +903,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, syncOutcome) => synced.push({
+      onSyncAccounting: (peerId, syncOutcome) => synced.push({
         peerId,
         fresh: syncOutcome?.fresh,
         progress: syncOutcome?.progress,
@@ -907,7 +911,7 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(outcome).toBe('synced');
-    expect(synced).toEqual([]);
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false, progress: false }]);
   });
 
   it('does not let clean shared-memory accounting make durable metadata-only sync fresh', async () => {
@@ -938,7 +942,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
@@ -972,7 +976,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
@@ -1008,7 +1012,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
@@ -1036,7 +1040,7 @@ describe('runSyncOnConnect callbacks', () => {
         },
         syncSharedMemoryFromPeer: async () => 0,
         logInfo: noopLog,
-        onPeerSynced: (peerId) => synced.push(peerId),
+        onSyncAccounting: (peerId) => synced.push(peerId),
       });
     } catch (err) {
       caught = err;
@@ -1108,7 +1112,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncSharedMemoryFromPeer,
       syncSharedMemoryOnConnect: false,
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
     });
 
     expect(outcome).toBe('synced');
@@ -1213,12 +1217,16 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       (agent as any).trySyncFromPeer = async (
         _peerId: string,
         onSyncAccounting?: (outcome: {
-          fresh: boolean;
-          progress?: boolean;
-          retryBackoff?: boolean;
+          reconcilerDisposition: 'clear' | 'retry' | 'defer';
+          fresh: false;
+          progress: boolean;
         }) => void,
       ) => {
-        onSyncAccounting?.({ fresh: false, progress: true, retryBackoff: true });
+        onSyncAccounting?.({
+          reconcilerDisposition: 'retry',
+          fresh: false,
+          progress: true,
+        });
         return 'synced';
       };
 
