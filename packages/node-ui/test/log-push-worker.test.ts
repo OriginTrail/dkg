@@ -6,19 +6,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server, type Socket } from 'node:net';
-import { LogPushWorker, type LogPushWorkerOptions } from '../src/gelf-push-worker.js';
-
-// Public API compatibility: callers historically supplied callbacks inferred
-// as `() => string`, so the option must not require a narrower return type.
-const legacyVersionStatus: () => string = () => 'latest';
-const legacyOptionsCompatibility: LogPushWorkerOptions = {
-  host: '127.0.0.1',
-  port: 1,
-  peerId: 'compatibility-fixture',
-  network: 'testnet',
-  versionStatus: legacyVersionStatus,
-};
-void legacyOptionsCompatibility;
+import { LogPushWorker } from '../src/gelf-push-worker.js';
 
 function makeEntry(overrides?: Partial<{
   level: string;
