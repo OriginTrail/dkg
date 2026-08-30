@@ -47,25 +47,7 @@ export interface Gate1SeedVmSourceSwmResult {
   readonly tripleCount: number;
 }
 
-export interface Gate1AuthorStoreProbeQuad {
-  readonly subject: string;
-  readonly predicate: string;
-  readonly object: string;
-}
-
-export interface Gate1AuthorStoreProbeResult {
-  readonly graphUri: string;
-  readonly tripleCount: number;
-}
-
 export interface Gate1RolloutCommandMap {
-  readonly writeAuthorStoreProbe: {
-    readonly input: {
-      readonly graphUri: string;
-      readonly quads: readonly Gate1AuthorStoreProbeQuad[];
-    };
-    readonly output: Gate1AuthorStoreProbeResult;
-  };
   readonly rolloutStatus: {
     readonly input: {
       readonly contextGraphId: string;
@@ -98,7 +80,6 @@ export type Gate1RolloutCommandOutput<K extends Gate1RolloutCommand> =
 
 type Gate1RolloutCommandDefinitionMap = {
   readonly [K in Gate1RolloutCommand]: Readonly<{
-    role: 'author' | 'receiver';
     parseInput(value: unknown): Gate1RolloutCommandInput<K>;
     parseOutput(value: unknown): Gate1RolloutCommandOutput<K>;
   }>;
@@ -106,28 +87,19 @@ type Gate1RolloutCommandDefinitionMap = {
 
 const GATE1_ROLLOUT_COMMAND_DEFINITIONS: Gate1RolloutCommandDefinitionMap =
   Object.freeze({
-    writeAuthorStoreProbe: Object.freeze({
-      role: 'author',
-      parseInput: parseAuthorStoreProbeInput,
-      parseOutput: parseAuthorStoreProbeOutput,
-    }),
     rolloutStatus: Object.freeze({
-      role: 'receiver',
       parseInput: parseRolloutStatusInput,
       parseOutput: parseRolloutStatusOutput,
     }),
     vmReconcile: Object.freeze({
-      role: 'receiver',
       parseInput: parseContextGraphInput,
       parseOutput: parseVmReconcileOutput,
     }),
     seedVmSourceSwm: Object.freeze({
-      role: 'receiver',
       parseInput: parseContextGraphInput,
       parseOutput: parseSeedVmSourceSwmOutput,
     }),
     stagedHeadReadback: Object.freeze({
-      role: 'receiver',
       parseInput: parseStagedHeadReadbackInput,
       parseOutput: parseStagedHeadReadbackOutput,
     }),
@@ -139,12 +111,6 @@ export const GATE1_ROLLOUT_COMMANDS = Object.freeze(
 
 export function isGate1RolloutCommand(value: string): value is Gate1RolloutCommand {
   return Object.hasOwn(GATE1_ROLLOUT_COMMAND_DEFINITIONS, value);
-}
-
-export function gate1RolloutCommandRole(
-  command: Gate1RolloutCommand,
-): 'author' | 'receiver' {
-  return GATE1_ROLLOUT_COMMAND_DEFINITIONS[command].role;
 }
 
 /** Parse the JSON process boundary once; client and adapter share this registry. */
@@ -160,42 +126,6 @@ export function parseGate1RolloutCommandOutput<K extends Gate1RolloutCommand>(
   value: unknown,
 ): Gate1RolloutCommandOutput<K> {
   return GATE1_ROLLOUT_COMMAND_DEFINITIONS[command].parseOutput(value);
-}
-
-function parseAuthorStoreProbeInput(
-  value: unknown,
-): Gate1RolloutCommandInput<'writeAuthorStoreProbe'> {
-  const input = plainRecord(value, 'writeAuthorStoreProbe input');
-  if (!Array.isArray(input.quads) || input.quads.length === 0 || input.quads.length > 10_000) {
-    throw new TypeError('writeAuthorStoreProbe.quads must be a bounded non-empty array');
-  }
-  return Object.freeze({
-    graphUri: requiredString(input.graphUri, 'writeAuthorStoreProbe.graphUri'),
-    quads: Object.freeze(input.quads.map((value, index) => {
-      const quad = plainRecord(value, `writeAuthorStoreProbe.quads[${index}]`);
-      return Object.freeze({
-        subject: requiredString(quad.subject, `writeAuthorStoreProbe.quads[${index}].subject`),
-        predicate: requiredString(
-          quad.predicate,
-          `writeAuthorStoreProbe.quads[${index}].predicate`,
-        ),
-        object: requiredString(quad.object, `writeAuthorStoreProbe.quads[${index}].object`),
-      });
-    })),
-  });
-}
-
-function parseAuthorStoreProbeOutput(
-  value: unknown,
-): Gate1RolloutCommandOutput<'writeAuthorStoreProbe'> {
-  const output = plainRecord(value, 'writeAuthorStoreProbe output');
-  return Object.freeze({
-    graphUri: requiredString(output.graphUri, 'writeAuthorStoreProbe.graphUri'),
-    tripleCount: requiredNonNegativeInteger(
-      output.tripleCount,
-      'writeAuthorStoreProbe.tripleCount',
-    ),
-  });
 }
 
 function parseRolloutStatusInput(

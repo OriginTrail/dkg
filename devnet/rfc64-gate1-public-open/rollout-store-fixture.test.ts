@@ -69,13 +69,11 @@ test('cleans an attempted namespace when creation commits but its response is lo
 });
 
 test('bounds cleanup when Blazegraph accepts namespaces but never deletes them', async () => {
-  let calls = 0;
   const fetchImpl = (async (
     input: string | URL | Request,
     init?: RequestInit,
   ): Promise<Response> => {
-    calls += 1;
-    if (calls <= 2) return new Response('', { status: 201 });
+    if (init?.method === 'POST') return new Response('', { status: 201 });
     return hangingFetch(input, init);
   }) as typeof fetch;
   const fixture = await createRolloutStoreFixture({
