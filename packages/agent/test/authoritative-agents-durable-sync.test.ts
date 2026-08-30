@@ -30,6 +30,7 @@ const peerIdPredicate = 'https://dkg.network/ontology#peerId';
 const lastSeenPredicate = 'https://dkg.network/ontology#lastSeen';
 const multiaddrPredicate = 'https://dkg.network/ontology#multiaddr';
 const peerIdProofPredicate = 'https://dkg.network/ontology#peerIdProof';
+const peerBindingVersionPredicate = 'https://dkg.network/ontology#peerBindingVersion';
 const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, false, 'data');
 
 function quad(subject: string, predicate: string, object: string): Quad {
@@ -258,6 +259,121 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
     expect(checkpoints.get(checkpointKey)).toBeUndefined();
   });
 
+  it('bounds repeated partial continuations per checkpoint and discards the paired cursor', async () => {
+    const checkpoints = new MemorySyncCheckpointStore();
+    const materializer = new AuthoritativeGraphSnapshotMaterializer(checkpoints, {
+      maxQuadsPerCheckpoint: 2,
+      maxBytesPerCheckpoint: 1_000_000,
+      maxQuadsTotal: 4,
+      maxBytesTotal: 2_000_000,
+    });
+    const stagedQuads = [
+      quad(ownedRoot, peerIdPredicate, `"${remotePeerId}"`),
+      quad(ownedRoot, lastSeenPredicate, '"2026-08-30T00:00:00.000Z"'),
+      quad(ownedRoot, multiaddrPredicate, '"/ip4/over-limit"'),
+    ];
+    const stage = async (index: number) => {
+      const result = page({
+        quads: [stagedQuads[index]!],
+        resumedFromOffset: index,
+        nextOffset: index + 1,
+        completed: false,
+        timedOut: true,
+      });
+      checkpoints.setResponderSession(
+        checkpointKey,
+        'bounded-session',
+        Date.now() + 60_000,
+        Date.now(),
+        undefined,
+        undefined,
+        index + 1,
+      );
+      return materializer.materialize({
+        page: result,
+        verifiedQuads: result.quads,
+        retainablePrefix: true,
+        completeSnapshot: false,
+        commit: vi.fn(),
+        transitionCheckpoint: (decision) => {
+          if (decision === 'advance') {
+            checkpoints.set(checkpointKey, index + 1, Date.now(), index + 1);
+          }
+        },
+      });
+    };
+
+    await expect(stage(0)).resolves.toMatchObject({ kind: 'retained', retainedTriples: 1 });
+    await expect(stage(1)).resolves.toMatchObject({ kind: 'retained', retainedTriples: 2 });
+    expect(materializer.retainedUsage()).toMatchObject({ checkpoints: 1, quads: 2 });
+    await expect(stage(2)).rejects.toMatchObject({
+      code: 'AUTHORITATIVE_SNAPSHOT_RETENTION_LIMIT',
+    });
+    expect(materializer.retainedUsage()).toEqual({ checkpoints: 0, quads: 0, bytes: 0 });
+    expect(checkpoints.get(checkpointKey)).toBeUndefined();
+  });
+
+  it('enforces the aggregate byte budget across concurrent retained snapshots', async () => {
+    const checkpoints = new MemorySyncCheckpointStore();
+    const retainedQuad = quad(ownedRoot, peerIdPredicate, `"${remotePeerId}"`);
+    const oneQuadBytes = Buffer.byteLength(retainedQuad.subject, 'utf8')
+      + Buffer.byteLength(retainedQuad.predicate, 'utf8')
+      + Buffer.byteLength(retainedQuad.object, 'utf8')
+      + Buffer.byteLength(retainedQuad.graph ?? '', 'utf8')
+      + 4;
+    const materializer = new AuthoritativeGraphSnapshotMaterializer(checkpoints, {
+      maxQuadsPerCheckpoint: 2,
+      maxBytesPerCheckpoint: oneQuadBytes * 2,
+      maxQuadsTotal: 4,
+      maxBytesTotal: oneQuadBytes,
+    });
+    const stage = async (key: string, session: string) => {
+      const result = {
+        ...page({
+          quads: [retainedQuad],
+          resumedFromOffset: 0,
+          nextOffset: 1,
+          completed: false,
+          timedOut: true,
+        }),
+        checkpointKey: key,
+      };
+      checkpoints.setResponderSession(
+        key,
+        session,
+        Date.now() + 60_000,
+        Date.now(),
+        undefined,
+        undefined,
+        1,
+      );
+      return materializer.materialize({
+        page: result,
+        verifiedQuads: result.quads,
+        retainablePrefix: true,
+        completeSnapshot: false,
+        commit: vi.fn(),
+        transitionCheckpoint: (decision) => {
+          if (decision === 'advance') checkpoints.set(key, 1, Date.now(), 1);
+        },
+      });
+    };
+
+    await expect(stage('agents:first', 'session-first')).resolves.toMatchObject({
+      kind: 'retained',
+    });
+    await expect(stage('agents:second', 'session-second')).rejects.toMatchObject({
+      code: 'AUTHORITATIVE_SNAPSHOT_RETENTION_LIMIT',
+    });
+    expect(materializer.retainedUsage()).toEqual({
+      checkpoints: 1,
+      quads: 1,
+      bytes: oneQuadBytes,
+    });
+    expect(checkpoints.get('agents:first')).toBeDefined();
+    expect(checkpoints.get('agents:second')).toBeUndefined();
+  });
+
   it('replaces only the authenticated responder profile and invalidates removed policies', async () => {
     const oldOwned = profile(ownedRoot, remotePeerId, '2026-08-29T00:00:00.000Z', '/ip4/old');
     const oldCapability = quad(
@@ -310,14 +426,65 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
     const live = await harness.live();
 
     expect(result.complete).toBe(true);
-    expect(result.insertedTriples).toBe(freshOwned.length + firstSeen.length);
+    expect(result.insertedTriples).toBe(freshOwned.length);
     expect(harness.replaceSubjectPrefix).toHaveBeenCalledTimes(1);
     expect(harness.markAllDirty).toHaveBeenCalledTimes(1);
-    expect(live).toEqual(expect.arrayContaining([...freshOwned, ...retainedOther, ...firstSeen]));
+    expect(live).toEqual(expect.arrayContaining([...freshOwned, ...retainedOther]));
+    expect(live).not.toEqual(expect.arrayContaining(firstSeen));
     expect(live).not.toContainEqual(oldOwned[2]);
     expect(live).not.toContainEqual(oldCapability);
     expect(live).not.toContainEqual(oldKey);
     expect(live).not.toContainEqual(conflictingOther[2]);
+  });
+
+  it('does not transfer legacy peer-DID authority through an attacker snapshot', async () => {
+    const store = new OxigraphStore();
+    const victimPeerId = '12D3KooWVictimLegacyPeer';
+    const victimLegacyRoot = `did:dkg:agent:${victimPeerId}`;
+    const forwardedPoison = profile(
+      victimLegacyRoot,
+      victimPeerId,
+      '2099-01-01T00:00:00.000Z',
+      '/ip4/attacker',
+    );
+    const insertForwarded = (quads: Quad[]) => store.insert(quads);
+
+    expect(await reconcileAgentRegistrySnapshot({
+      store,
+      graphUri: graph,
+      remotePeerId,
+      quads: forwardedPoison,
+      insertForwarded,
+      invalidate: vi.fn(),
+    })).toBe(0);
+    expect(await graphQuads(store)).toEqual([]);
+
+    const victimWallet = new ethers.Wallet(`0x${'88'.repeat(32)}`);
+    const victimWalletRoot = `did:dkg:agent:${victimWallet.address.toLowerCase()}`;
+    const authenticatedVictim = profile(
+      victimWalletRoot,
+      victimPeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/victim',
+    );
+    authenticatedVictim.push(
+      quad(victimWalletRoot, peerBindingVersionPredicate, '"1"'),
+      quad(
+        victimWalletRoot,
+        peerIdProofPredicate,
+        `"${signAgentPeerIdBinding(victimWallet.address, victimPeerId, victimWallet.privateKey)}"`,
+      ),
+    );
+
+    await expect(reconcileAgentRegistrySnapshot({
+      store,
+      graphUri: graph,
+      remotePeerId: victimPeerId,
+      quads: authenticatedVictim,
+      insertForwarded,
+      invalidate: vi.fn(),
+    })).resolves.toBe(authenticatedVictim.length);
+    expect(await graphQuads(store)).toEqual(expect.arrayContaining(authenticatedVictim));
   });
 
   it('classifies a peer-id-omitting agent tree and cannot append into an established profile', async () => {
@@ -401,6 +568,146 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
     expect(live).toEqual(expect.arrayContaining(authenticated));
     expect(live).not.toContainEqual(poisonedExisting[2]);
     expect(live).not.toEqual(expect.arrayContaining(walletSquat));
+  });
+
+  it('admits one directly authenticated pre-upgrade wallet profile only as a first-seen hint', async () => {
+    const wallet = new ethers.Wallet(`0x${'33'.repeat(32)}`);
+    const walletRoot = `did:dkg:agent:${wallet.address.toLowerCase()}`;
+    const legacyDirect = profile(
+      walletRoot,
+      remotePeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/legacy-direct',
+    );
+    const harness = await createHarness([page({
+      quads: legacyDirect,
+      resumedFromOffset: 0,
+      nextOffset: legacyDirect.length,
+      completed: true,
+      timedOut: false,
+    })]);
+
+    const result = await harness.run();
+
+    expect(result.insertedTriples).toBe(legacyDirect.length);
+    expect(await harness.live()).toEqual(expect.arrayContaining(legacyDirect));
+    expect(harness.replaceSubjectPrefix).not.toHaveBeenCalled();
+  });
+
+  it('never replaces or transitively learns a proofless wallet profile', async () => {
+    const directWallet = new ethers.Wallet(`0x${'44'.repeat(32)}`);
+    const directRoot = `did:dkg:agent:${directWallet.address.toLowerCase()}`;
+    const existing = profile(
+      directRoot,
+      remotePeerId,
+      '2026-08-29T00:00:00.000Z',
+      '/ip4/existing',
+    );
+    const attemptedReplacement = profile(
+      directRoot,
+      remotePeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/attempted-replacement',
+    );
+    const transitiveWallet = new ethers.Wallet(`0x${'55'.repeat(32)}`);
+    const transitiveRoot = `did:dkg:agent:${transitiveWallet.address.toLowerCase()}`;
+    const transitive = profile(
+      transitiveRoot,
+      otherPeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/transitive',
+    );
+    const incoming = [...attemptedReplacement, ...transitive];
+    const harness = await createHarness([page({
+      quads: incoming,
+      resumedFromOffset: 0,
+      nextOffset: incoming.length,
+      completed: true,
+      timedOut: false,
+    })], existing);
+
+    const result = await harness.run();
+    const live = await harness.live();
+
+    expect(result.insertedTriples).toBe(0);
+    expect(live).toEqual(expect.arrayContaining(existing));
+    expect(live).not.toContainEqual(attemptedReplacement[2]);
+    expect(live).not.toEqual(expect.arrayContaining(transitive));
+    expect(harness.replaceSubjectPrefix).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a profile advertises v1 binding support without a valid proof', async () => {
+    const wallet = new ethers.Wallet(`0x${'66'.repeat(32)}`);
+    const walletRoot = `did:dkg:agent:${wallet.address.toLowerCase()}`;
+    const malformed = profile(
+      walletRoot,
+      remotePeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/malformed-v1',
+    );
+    malformed.push(quad(walletRoot, peerBindingVersionPredicate, '"1"'));
+    const harness = await createHarness([page({
+      quads: malformed,
+      resumedFromOffset: 0,
+      nextOffset: malformed.length,
+      completed: true,
+      timedOut: false,
+    })]);
+
+    expect((await harness.run()).insertedTriples).toBe(0);
+    expect(await harness.live()).toEqual([]);
+  });
+
+  it('does not downgrade malformed binding metadata to the pre-upgrade fallback', async () => {
+    const wallet = new ethers.Wallet(`0x${'68'.repeat(32)}`);
+    const walletRoot = `did:dkg:agent:${wallet.address.toLowerCase()}`;
+    const malformed = profile(
+      walletRoot,
+      remotePeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/malformed-binding-shape',
+    );
+    malformed.push(quad(walletRoot, peerIdProofPredicate, 'urn:not-a-literal-proof'));
+    const harness = await createHarness([page({
+      quads: malformed,
+      resumedFromOffset: 0,
+      nextOffset: malformed.length,
+      completed: true,
+      timedOut: false,
+    })]);
+
+    expect((await harness.run()).insertedTriples).toBe(0);
+    expect(await harness.live()).toEqual([]);
+  });
+
+  it('discovers a fresh self-sovereign wallet profile with its peer-binding proof', async () => {
+    const wallet = new ethers.Wallet(`0x${'77'.repeat(32)}`);
+    const walletRoot = `did:dkg:agent:${wallet.address.toLowerCase()}`;
+    const selfSovereign = profile(
+      walletRoot,
+      remotePeerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/self-sovereign',
+    );
+    selfSovereign.push(
+      quad(walletRoot, peerBindingVersionPredicate, '"1"'),
+      quad(
+        walletRoot,
+        peerIdProofPredicate,
+        `"${signAgentPeerIdBinding(wallet.address, remotePeerId, wallet.privateKey)}"`,
+      ),
+    );
+    const harness = await createHarness([page({
+      quads: selfSovereign,
+      resumedFromOffset: 0,
+      nextOffset: selfSovereign.length,
+      completed: true,
+      timedOut: false,
+    })]);
+
+    expect((await harness.run()).insertedTriples).toBe(selfSovereign.length);
+    expect(await harness.live()).toEqual(expect.arrayContaining(selfSovereign));
+    expect(harness.replaceSubjectPrefix).toHaveBeenCalledOnce();
   });
 
   it('applies forwarded hints and owned replacement in one atomic mutation', async () => {
@@ -584,5 +891,10 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
     expect(await harness.live()).toEqual(expect.arrayContaining([...first, ...second]));
     expect(await harness.live()).not.toContainEqual(current[2]);
     expect(harness.authoritativeAgentSnapshots.retainedTriples(checkpointKey)).toBe(0);
+    expect(harness.authoritativeAgentSnapshots.retainedUsage()).toEqual({
+      checkpoints: 0,
+      quads: 0,
+      bytes: 0,
+    });
   });
 });

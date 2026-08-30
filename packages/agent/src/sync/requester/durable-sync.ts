@@ -227,22 +227,37 @@ export interface DurableDataMaterializationRequest {
   readonly completeSnapshot: boolean;
   readonly snapshot?: VerifiedFullSnapshot;
   readonly signal?: AbortSignal;
-  /** Strategy-owned synchronous transition paired with retained DATA state. */
-  readonly transitionCheckpoint?: (decision: 'advance' | 'discard') => void;
 }
 
-export interface DurableDataMaterializer {
-  /** True when this strategy owns the full-snapshot callback boundary. */
-  readonly handlesFullSnapshotBoundary: boolean;
-  /** Reconcile strategy-owned state with requester state before DATA fetch. */
-  prepareFetch(contextGraphId: string, graphUri: string): void;
-  materialize(
-    request: DurableDataMaterializationRequest,
-  ): Promise<{
-    readonly committedTriples: number;
-    readonly committed: boolean;
-  }>;
+export interface DurableStagedSnapshotMaterializationRequest
+  extends DurableDataMaterializationRequest {
+  /** Strategy-owned synchronous transition paired with retained DATA state. */
+  readonly transitionCheckpoint: (decision: 'advance' | 'discard') => void;
 }
+
+export type DurableDataMaterializationOutcome =
+  | { readonly kind: 'appended'; readonly committedTriples: number }
+  | { readonly kind: 'retained'; readonly committedTriples: number }
+  | { readonly kind: 'discarded'; readonly committedTriples: number }
+  | { readonly kind: 'committed-snapshot'; readonly committedTriples: number };
+
+export type DurableDataMaterializer =
+  | {
+      readonly mode: 'append';
+      /** Reconcile strategy-owned state with requester state before DATA fetch. */
+      prepareFetch(contextGraphId: string, graphUri: string): void;
+      materialize(
+        request: DurableDataMaterializationRequest,
+      ): Promise<Extract<DurableDataMaterializationOutcome, { kind: 'appended' }>>;
+    }
+  | {
+      readonly mode: 'staged-snapshot';
+      /** Reconcile strategy-owned state with requester state before DATA fetch. */
+      prepareFetch(contextGraphId: string, graphUri: string): void;
+      materialize(
+        request: DurableStagedSnapshotMaterializationRequest,
+      ): Promise<Exclude<DurableDataMaterializationOutcome, { kind: 'appended' }>>;
+    };
 
 export interface DurableSyncChallengePinnedAuthenticationRequest
   extends DurableSyncGraphScopedStoreRequest {
@@ -681,14 +696,14 @@ async function runDurableSyncWithBudget(
   // has one page-consumption operation for empty, partial, and complete DATA;
   // it never branches between direct inserts and a special snapshot mode.
   const dataMaterializer: DurableDataMaterializer = configuredDataMaterializer ?? {
-    handlesFullSnapshotBoundary: false,
+    mode: 'append',
     prepareFetch: () => {},
     materialize: async ({ verifiedQuads, signal: operationSignal }) => {
       if (verifiedQuads.length === 0) {
-        return { committedTriples: 0, committed: false };
+        return { kind: 'appended', committedTriples: 0 };
       }
       await storeInsert({ quads: [...verifiedQuads], signal: operationSignal });
-      return { committedTriples: verifiedQuads.length, committed: true };
+      return { kind: 'appended', committedTriples: verifiedQuads.length };
     },
   };
 
@@ -1271,12 +1286,6 @@ async function runDurableSyncWithBudget(
           metaFetched: !skipAgentsMeta,
         };
       };
-      const notifyVerifiedFullSnapshot = async (): Promise<void> => {
-        if (!onVerifiedFullSnapshot || dataMaterializer.handlesFullSnapshotBoundary) return;
-        const snapshot = verifiedFullSnapshot(false);
-        if (snapshot) await onVerifiedFullSnapshot(snapshot);
-      };
-
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
       // The worker reports, as ONE reason-agnostic count, how many fetched meta
       // rows the verifier deliberately consumed but did NOT persist — unverified
@@ -1316,11 +1325,13 @@ async function runDurableSyncWithBudget(
         && !effectiveDataResult.timedOut;
       const materializeVerifiedData = async (
         verifiedQuads: readonly Quad[],
-      ): Promise<void> => {
-        const snapshot = dataMaterializer.handlesFullSnapshotBoundary
-          ? verifiedFullSnapshot(true)
-          : verifiedFullSnapshot(false);
-        const materialized = await dataMaterializer.materialize({
+      ): Promise<{
+        readonly outcome: DurableDataMaterializationOutcome;
+        readonly snapshotToNotify?: VerifiedFullSnapshot;
+      }> => {
+        const stagedSnapshot = dataMaterializer.mode === 'staged-snapshot';
+        const snapshot = verifiedFullSnapshot(stagedSnapshot);
+        const baseRequest: DurableDataMaterializationRequest = {
           contextGraphId: pid,
           graphUri: dataGraph,
           verifiedQuads,
@@ -1329,38 +1340,50 @@ async function runDurableSyncWithBudget(
           completeSnapshot: snapshot !== undefined,
           ...(snapshot ? { snapshot } : {}),
           signal,
-          transitionCheckpoint: dataMaterializer.handlesFullSnapshotBoundary
-            ? (decision) => {
+        };
+        const materialized: DurableDataMaterializationOutcome = stagedSnapshot
+          ? await dataMaterializer.materialize({
+              ...baseRequest,
+              transitionCheckpoint: (decision) => {
                 if (decision === 'discard') {
                   deleteCheckpoint(effectiveDataResult.checkpointKey);
-                } else {
-                  recordPhaseOutcome(effectiveDataResult, {
-                    updateCheckpoint: updateDataCheckpoint,
-                    emptyPhase: processed.emptyResponses > 0,
-                    manifestPlan: graphScopedManifest ?? undefined,
-                    terminal: reachedContextGraphTerminalBoundary,
-                  });
+                  return;
                 }
-                dataCheckpointRecordedByMaterializer = true;
-              }
-            : undefined,
-        });
+                recordPhaseOutcome(effectiveDataResult, {
+                  updateCheckpoint: updateDataCheckpoint,
+                  emptyPhase: processed.emptyResponses > 0,
+                  manifestPlan: graphScopedManifest ?? undefined,
+                  terminal: reachedContextGraphTerminalBoundary,
+                });
+              },
+            })
+          : await dataMaterializer.materialize(baseRequest);
         if (materialized.committedTriples > 0) {
           recordDurableSyncDiagnostics(accumulator, {
             insertedTriples: materialized.committedTriples,
             insertedDataTriples: materialized.committedTriples,
           });
         }
-        if (
-          dataMaterializer.handlesFullSnapshotBoundary
-          && materialized.committed
-          && snapshot
-          && onVerifiedFullSnapshot
-        ) {
-          await onVerifiedFullSnapshot(snapshot);
+        return {
+          outcome: materialized,
+          ...(
+            snapshot
+            && (materialized.kind === 'appended' || materialized.kind === 'committed-snapshot')
+              ? { snapshotToNotify: snapshot }
+              : {}
+          ),
+        };
+      };
+      const notifyMaterializedSnapshot = async (materialized: {
+        readonly snapshotToNotify?: VerifiedFullSnapshot;
+      }): Promise<void> => {
+        if (materialized.snapshotToNotify && onVerifiedFullSnapshot) {
+          await onVerifiedFullSnapshot(materialized.snapshotToNotify);
         }
       };
-      let dataCheckpointRecordedByMaterializer = false;
+      const materializerRecordedDataCheckpoint = (
+        outcome: DurableDataMaterializationOutcome,
+      ): boolean => outcome.kind !== 'appended';
       const settledExactDisposition = (): ExactDurableFetchDisposition => (
         classifyExactDurableFetch({
           requestedAssetCount: exactAssetUals?.length ?? 0,
@@ -1380,9 +1403,9 @@ async function runDurableSyncWithBudget(
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
         startPhase('store');
-        await materializeVerifiedData(processed.verifiedData);
+        const dataMaterialization = await materializeVerifiedData(processed.verifiedData);
         endPhase();
-        await notifyVerifiedFullSnapshot();
+        await notifyMaterializedSnapshot(dataMaterialization);
         throwIfOperationAborted();
         // The verifier reports an empty batch only when both fetched phase
         // payloads are empty. Record each phase independently: a completed
@@ -1394,7 +1417,7 @@ async function runDurableSyncWithBudget(
           countProgress: !metadataOnlyResponse,
           emptyPhase,
         });
-        if (!dataCheckpointRecordedByMaterializer) {
+        if (!materializerRecordedDataCheckpoint(dataMaterialization.outcome)) {
           recordPhaseOutcome(effectiveDataResult, {
             updateCheckpoint: updateDataCheckpoint,
             emptyPhase,
@@ -1530,7 +1553,7 @@ async function runDurableSyncWithBudget(
         break;
       }
       throwIfOperationAborted();
-      await materializeVerifiedData(partitioned.remainingData);
+      const dataMaterialization = await materializeVerifiedData(partitioned.remainingData);
       if (partitioned.remainingMeta.length > 0) {
         throwIfOperationAborted();
         await storeInsert({
@@ -1542,14 +1565,13 @@ async function runDurableSyncWithBudget(
           insertedMetaTriples: partitioned.remainingMeta.length,
         });
       }
+      await notifyMaterializedSnapshot(dataMaterialization);
       // An already-started atomic write is awaited, counted, and manifest-
       // checkpointed truthfully. An expired operation may not enter another
       // commit boundary or claim the whole page terminal.
       throwIfOperationAborted();
-      await notifyVerifiedFullSnapshot();
-      throwIfOperationAborted();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-      if (!dataCheckpointRecordedByMaterializer) {
+      if (!materializerRecordedDataCheckpoint(dataMaterialization.outcome)) {
         recordPhaseOutcome(effectiveDataResult, {
           updateCheckpoint: updateDataCheckpoint,
           checkpointAdvanceAlreadyRecorded: incrementalCheckpointAdvanceRecorded,

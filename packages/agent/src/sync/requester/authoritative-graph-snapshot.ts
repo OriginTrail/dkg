@@ -12,17 +12,36 @@ import {
   type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
-import { verifyAgentPeerIdBinding } from '../../profile.js';
+import {
+  AGENT_PEER_BINDING_VERSION,
+  verifyAgentPeerIdBinding,
+} from '../../profile.js';
 import type { SyncCheckpointStore } from '../checkpoint/state.js';
 import { deleteSyncPageCheckpoint, type SyncPageResult } from './page-fetch.js';
 
 interface RetainedAuthoritativeSnapshot {
   readonly responderSessionId: string;
-  readonly expiresAtMs: number;
-  readonly nextOffset: number;
-  readonly rawNextOffset: number;
-  readonly quads: readonly Quad[];
+  expiresAtMs: number;
+  nextOffset: number;
+  rawNextOffset: number;
+  readonly quads: Quad[];
+  byteSize: number;
 }
+
+export interface AuthoritativeSnapshotRetentionLimits {
+  readonly maxQuadsPerCheckpoint: number;
+  readonly maxBytesPerCheckpoint: number;
+  readonly maxQuadsTotal: number;
+  readonly maxBytesTotal: number;
+}
+
+export const DEFAULT_AUTHORITATIVE_SNAPSHOT_RETENTION_LIMITS:
+AuthoritativeSnapshotRetentionLimits = Object.freeze({
+  maxQuadsPerCheckpoint: 250_000,
+  maxBytesPerCheckpoint: 128 * 1024 * 1024,
+  maxQuadsTotal: 500_000,
+  maxBytesTotal: 256 * 1024 * 1024,
+});
 
 export interface AuthoritativeSnapshotPage {
   readonly checkpointKey: string;
@@ -43,15 +62,25 @@ export interface AuthoritativeSnapshotMaterializationRequest {
   readonly completeSnapshot: boolean;
   readonly commit: (completeSnapshot: readonly Quad[]) => Promise<number>;
   /** Synchronous requester checkpoint transition paired with retained state. */
-  readonly transitionCheckpoint?: (decision: 'advance' | 'discard') => void;
+  readonly transitionCheckpoint: (decision: 'advance' | 'discard') => void;
 }
 
-export interface AuthoritativeSnapshotMaterializationResult {
-  /** Rows made visible by this call; staged rows deliberately report zero. */
-  readonly committedTriples: number;
-  readonly retainedTriples: number;
-  readonly committed: boolean;
-}
+export type AuthoritativeSnapshotMaterializationResult =
+  | {
+      readonly kind: 'retained';
+      readonly retainedTriples: number;
+      readonly committedTriples: 0;
+    }
+  | {
+      readonly kind: 'discarded';
+      readonly retainedTriples: 0;
+      readonly committedTriples: 0;
+    }
+  | {
+      readonly kind: 'committed-snapshot';
+      readonly retainedTriples: 0;
+      readonly committedTriples: number;
+    };
 
 interface ExistingAgentProfile {
   readonly quads: Quad[];
@@ -83,8 +112,17 @@ export interface AgentRegistrySnapshotReconcileRequest {
  * over that peer ID. Co-located fields whose signatures do not cover the peer
  * ID are independently replayable and do not grant authority.
  *
- * Other self-authenticating peer-DID profiles are useful transitive discovery
- * hints and are inserted only while their root is absent locally. Every
+ * During the v1 binding rollout, exactly one directly authenticated wallet
+ * profile that has neither a binding version nor a proof may be admitted as a
+ * first-seen discovery hint. It is never authoritative, never replaces a local
+ * profile, never advances authenticated freshness, and is never accepted
+ * transitively. A malformed/unsupported version or invalid proof fails closed
+ * instead of downgrading to this compatibility path.
+ *
+ * Cryptographically proven wallet profiles are useful transitive discovery
+ * hints and are inserted only while their root is absent locally. A legacy
+ * peer-DID is self-authenticating only on a connection from that same peer; it
+ * is never transferable evidence through a third-party responder. Every
  * agent-rooted subject is classified even when its peer-id row is omitted, so
  * an attacker cannot target an established profile through an "unscoped"
  * append. Unscoped non-agent legacy facts remain append-only for compatibility.
@@ -106,8 +144,17 @@ export async function reconcileAgentRegistrySnapshot(
     incomingProfiles.set(root, profile);
   }
 
-  const ownedRoots = [...incomingProfiles]
-    .filter(([root, quads]) => authenticatedPeerForProfile(root, quads) === request.remotePeerId)
+  const profileAuthentication = new Map(
+    [...incomingProfiles].map(([root, quads]) => [
+      root,
+      authenticateProfile(root, quads, request.remotePeerId),
+    ]),
+  );
+  const ownedRoots = [...profileAuthentication]
+    .filter(([, authentication]) => (
+      authentication?.kind === 'proven'
+      && authentication.peerId === request.remotePeerId
+    ))
     .map(([root]) => root);
   if (ownedRoots.length > 1) {
     throw Object.assign(
@@ -116,6 +163,16 @@ export async function reconcileAgentRegistrySnapshot(
     );
   }
   const ownedRoot = ownedRoots[0];
+  const legacyDirectRoots = ownedRoot
+    ? []
+    : [...profileAuthentication]
+        .filter(([, authentication]) => authentication?.kind === 'legacy-direct')
+        .map(([root]) => root);
+  // An old responder had one default wallet profile. Multiple unproven wallet
+  // roots claiming the transport identity are ambiguous and get no fallback.
+  const legacyDirectRoot = legacyDirectRoots.length === 1
+    ? legacyDirectRoots[0]
+    : undefined;
   const rootEntries = [...incomingProfiles.keys()];
 
   const existingProfiles = await loadExistingProfiles(
@@ -148,11 +205,16 @@ export async function reconcileAgentRegistrySnapshot(
   const forwardedQuads = [...unscopedQuads];
   for (const [root, quads] of incomingProfiles) {
     if (root === ownedRoot) continue;
-    // Only a structurally self-authenticating peer DID or a wallet root with a
-    // valid peer-binding signature can safely enter the shared registry path.
+    const authentication = profileAuthentication.get(root);
+    // Proven transitive hints are safe to append while absent. The single
+    // proofless legacy-direct root gets the same first-seen treatment only for
+    // rolling-upgrade discovery; it never reaches the replacement path above.
     if (
       !existingProfiles.has(root)
-      && authenticatedPeerForProfile(root, quads) !== undefined
+      && (
+        (authentication?.kind === 'proven' && authentication.forwardable)
+        || root === legacyDirectRoot
+      )
     ) {
       forwardedQuads.push(...quads);
     }
@@ -233,39 +295,81 @@ function agentRootForSubject(subject: string): string | undefined {
 }
 
 /**
- * Return the peer whose identity is proven by this profile shape. At present
- * peer-ID-rooted legacy profiles are self-authenticating. Address-rooted
- * profiles must carry a wallet signature over their peer ID; other co-located
- * wallet/key proofs are not sufficient because they can be replayed with an
- * attacker-controlled peer-id row.
+ * Classify the authentication supplied by a profile. Peer-ID-rooted legacy
+ * profiles are self-authenticating. Address-rooted profiles normally require a
+ * v1 wallet signature over their peer ID; other co-located wallet/key proofs
+ * are not sufficient because they can be replayed with an attacker-controlled
+ * peer-id row.
+ *
+ * The only compatibility result is `legacy-direct`: an address root with one
+ * peer ID equal to the authenticated transport peer and no binding metadata at
+ * all. Callers must keep it append-only and non-transitive.
  */
-function authenticatedPeerForProfile(
+type AgentProfileAuthentication =
+  | {
+      readonly kind: 'proven';
+      readonly peerId: string;
+      readonly forwardable: boolean;
+    }
+  | { readonly kind: 'legacy-direct'; readonly peerId: string };
+
+function authenticateProfile(
   root: string,
   quads: readonly Quad[],
-): string | undefined {
+  remotePeerId: string,
+): AgentProfileAuthentication | undefined {
+  const peerIdQuads = quads.filter(
+    (quad) => quad.subject === root && quad.predicate === DKG_ONTOLOGY.DKG_PEER_ID,
+  );
   const peerIds = new Set(
-    quads
-      .filter((quad) => quad.subject === root && quad.predicate === DKG_ONTOLOGY.DKG_PEER_ID)
+    peerIdQuads
       .map((quad) => plainLiteral(quad.object))
       .filter((peerId): peerId is string => peerId !== undefined),
   );
-  if (peerIds.size !== 1) return undefined;
+  if (peerIds.size !== 1 || peerIds.size !== peerIdQuads.length) return undefined;
   const peerId = [...peerIds][0];
-  if (root === `${AGENT_DID_PREFIX}${peerId}`) return peerId;
+  if (root === `${AGENT_DID_PREFIX}${peerId}`) {
+    return peerId === remotePeerId
+      ? { kind: 'proven', peerId, forwardable: false }
+      : undefined;
+  }
   const agentAddress = root.slice(AGENT_DID_PREFIX.length);
   if (!/^0x[0-9a-fA-F]{40}$/.test(agentAddress)) return undefined;
+  const proofQuads = quads.filter((quad) => (
+    quad.subject === root
+    && quad.predicate === DKG_ONTOLOGY.DKG_PEER_ID_PROOF
+  ));
   const proofs = new Set(
-    quads
-      .filter((quad) => (
-        quad.subject === root
-        && quad.predicate === DKG_ONTOLOGY.DKG_PEER_ID_PROOF
-      ))
+    proofQuads
       .map((quad) => plainLiteral(quad.object))
       .filter((proof): proof is string => proof !== undefined),
   );
-  if (proofs.size !== 1) return undefined;
-  return verifyAgentPeerIdBinding(agentAddress, peerId, [...proofs][0])
-    ? peerId
+  const versionQuads = quads.filter((quad) => (
+    quad.subject === root
+    && quad.predicate === DKG_ONTOLOGY.DKG_PEER_BINDING_VERSION
+  ));
+  const versions = new Set(
+    versionQuads
+      .map((quad) => plainLiteral(quad.object))
+      .filter((version): version is string => version !== undefined),
+  );
+  // Binding metadata with an unsupported RDF shape is still metadata. It must
+  // fail closed rather than being mistaken for a proofless pre-upgrade row.
+  if (proofs.size !== proofQuads.length || versions.size !== versionQuads.length) {
+    return undefined;
+  }
+  if (proofs.size === 1) {
+    if (
+      versions.size > 1
+      || (versions.size === 1 && !versions.has(AGENT_PEER_BINDING_VERSION))
+    ) return undefined;
+    return verifyAgentPeerIdBinding(agentAddress, peerId, [...proofs][0])
+      ? { kind: 'proven', peerId, forwardable: true }
+      : undefined;
+  }
+  if (proofs.size > 0 || versions.size > 0) return undefined;
+  return peerId === remotePeerId
+    ? { kind: 'legacy-direct', peerId }
     : undefined;
 }
 
@@ -314,8 +418,16 @@ export class AuthoritativeGraphSnapshotMaterializer {
     string,
     { peerId: string; lastSeen?: number }
   >();
+  private readonly retentionLimits: AuthoritativeSnapshotRetentionLimits;
+  private retainedQuadCount = 0;
+  private retainedByteSize = 0;
 
-  constructor(private readonly checkpointStore: SyncCheckpointStore) {}
+  constructor(
+    private readonly checkpointStore: SyncCheckpointStore,
+    retentionLimits: Partial<AuthoritativeSnapshotRetentionLimits> = {},
+  ) {
+    this.retentionLimits = normalizeRetentionLimits(retentionLimits);
+  }
 
   readonly profileFreshness: AuthenticatedAgentProfileFreshness = {
     accepts: (root, peerId, incomingLastSeen) => {
@@ -377,15 +489,18 @@ export class AuthoritativeGraphSnapshotMaterializer {
 
     if (!retainablePrefix) {
       this.discard(page.checkpointKey);
-      transitionCheckpoint?.('discard');
-      return { committedTriples: 0, retainedTriples: 0, committed: false };
+      transitionCheckpoint('discard');
+      return { kind: 'discarded', committedTriples: 0, retainedTriples: 0 };
     }
 
-    let retainedQuads: readonly Quad[];
+    let retained: RetainedAuthoritativeSnapshot | undefined;
     if (page.resumedFromOffset === 0 && rawResumedFromOffset === 0) {
-      retainedQuads = [...verifiedQuads];
+      // A new zero-offset response supersedes any private prefix for the same
+      // key, while preserving the current responder checkpoint established by
+      // the fetch that just completed.
+      this.removeRetained(page.checkpointKey);
     } else {
-      const retained = this.retainedByCheckpoint.get(page.checkpointKey);
+      retained = this.retainedByCheckpoint.get(page.checkpointKey);
       if (
         !retained
         || responderSessionId === undefined
@@ -394,22 +509,59 @@ export class AuthoritativeGraphSnapshotMaterializer {
         || retained.rawNextOffset !== rawResumedFromOffset
       ) {
         this.discard(page.checkpointKey);
+        transitionCheckpoint('discard');
         throw Object.assign(
           new Error('Authoritative snapshot continuation does not match its retained responder session'),
           { code: 'AUTHORITATIVE_SNAPSHOT_CONTINUATION_MISMATCH' },
         );
       }
-      retainedQuads = [...retained.quads, ...verifiedQuads];
+    }
+
+    const addedByteSize = retainedQuadByteSize(verifiedQuads);
+    const candidateQuadCount = (retained?.quads.length ?? 0) + verifiedQuads.length;
+    const candidateByteSize = (retained?.byteSize ?? 0) + addedByteSize;
+    const candidateGlobalQuadCount = this.retainedQuadCount + verifiedQuads.length;
+    const candidateGlobalByteSize = this.retainedByteSize + addedByteSize;
+    if (!this.withinRetentionLimits(candidateQuadCount, candidateByteSize, verifiedQuads.length, addedByteSize)) {
+      this.discard(page.checkpointKey);
+      transitionCheckpoint('discard');
+      throw Object.assign(
+        new Error(
+          `Authoritative snapshot retention limit exceeded for ${page.checkpointKey} `
+          + `(checkpoint=${candidateQuadCount} quads/${candidateByteSize} bytes, `
+          + `global=${candidateGlobalQuadCount} quads/${candidateGlobalByteSize} bytes)`,
+        ),
+        { code: 'AUTHORITATIVE_SNAPSHOT_RETENTION_LIMIT' },
+      );
+    }
+
+    const candidate = retained?.quads ?? [...verifiedQuads];
+    const previousLength = candidate.length;
+    if (retained) {
+      // Extend the one retained array in place. This avoids copying the entire
+      // verified prefix on every bounded continuation.
+      for (const quad of verifiedQuads) candidate.push(quad);
     }
 
     if (completeSnapshot && page.completed && !page.timedOut) {
-      const committedTriples = await commit(retainedQuads);
-      this.retainedByCheckpoint.delete(page.checkpointKey);
-      transitionCheckpoint?.('advance');
+      let committedTriples: number;
+      try {
+        committedTriples = await commit(candidate);
+      } catch (error) {
+        // A failed final commit leaves the prior retained prefix paired with
+        // its prior requester coordinate for a safe retry.
+        if (retained) candidate.length = previousLength;
+        throw error;
+      }
+      // The final suffix was only a transient extension: retained usage still
+      // accounts for the prior prefix, which is the state being removed.
+      if (retained) candidate.length = previousLength;
+      this.removeRetained(page.checkpointKey);
+      transitionCheckpoint('advance');
       return {
+        kind: 'committed-snapshot',
         committedTriples,
         retainedTriples: 0,
-        committed: true,
       };
     }
 
@@ -418,40 +570,60 @@ export class AuthoritativeGraphSnapshotMaterializer {
       // by the requester. A store that cannot retain responder identity is
       // likewise unable to prove a later suffix belongs to this prefix.
       this.discard(page.checkpointKey);
-      transitionCheckpoint?.('discard');
-      return { committedTriples: 0, retainedTriples: 0, committed: false };
+      transitionCheckpoint('discard');
+      return { kind: 'discarded', committedTriples: 0, retainedTriples: 0 };
     }
 
-    this.retainedByCheckpoint.set(page.checkpointKey, {
-      responderSessionId,
-      expiresAtMs: Math.min(
-        checkpoint.expiresAtMs,
-        checkpoint.responderSessionExpiresAtMs ?? checkpoint.expiresAtMs,
-      ),
-      nextOffset: page.nextOffset,
-      rawNextOffset,
-      quads: retainedQuads,
-    });
+    const expiresAtMs = Math.min(
+      checkpoint.expiresAtMs,
+      checkpoint.responderSessionExpiresAtMs ?? checkpoint.expiresAtMs,
+    );
+    if (retained) {
+      retained.expiresAtMs = expiresAtMs;
+      retained.nextOffset = page.nextOffset;
+      retained.rawNextOffset = rawNextOffset;
+      retained.byteSize = candidateByteSize;
+    } else {
+      retained = {
+        responderSessionId,
+        expiresAtMs,
+        nextOffset: page.nextOffset,
+        rawNextOffset,
+        quads: candidate,
+        byteSize: candidateByteSize,
+      };
+      this.retainedByCheckpoint.set(page.checkpointKey, retained);
+    }
+    this.retainedQuadCount += verifiedQuads.length;
+    this.retainedByteSize += addedByteSize;
     try {
-      transitionCheckpoint?.('advance');
+      transitionCheckpoint('advance');
     } catch (error) {
       this.discard(page.checkpointKey);
       throw error;
     }
     return {
+      kind: 'retained',
       committedTriples: 0,
-      retainedTriples: retainedQuads.length,
-      committed: false,
+      retainedTriples: candidate.length,
     };
   }
 
   discard(checkpointKey: string): void {
-    this.retainedByCheckpoint.delete(checkpointKey);
+    this.removeRetained(checkpointKey);
     deleteSyncPageCheckpoint(this.checkpointStore, checkpointKey);
   }
 
   retainedTriples(checkpointKey: string): number {
     return this.retainedByCheckpoint.get(checkpointKey)?.quads.length ?? 0;
+  }
+
+  retainedUsage(): { readonly checkpoints: number; readonly quads: number; readonly bytes: number } {
+    return {
+      checkpoints: this.retainedByCheckpoint.size,
+      quads: this.retainedQuadCount,
+      bytes: this.retainedByteSize,
+    };
   }
 
   pruneExpired(nowMs = Date.now()): number {
@@ -463,6 +635,53 @@ export class AuthoritativeGraphSnapshotMaterializer {
     }
     return pruned;
   }
+
+  private withinRetentionLimits(
+    checkpointQuads: number,
+    checkpointBytes: number,
+    addedQuads: number,
+    addedBytes: number,
+  ): boolean {
+    return checkpointQuads <= this.retentionLimits.maxQuadsPerCheckpoint
+      && checkpointBytes <= this.retentionLimits.maxBytesPerCheckpoint
+      && this.retainedQuadCount + addedQuads <= this.retentionLimits.maxQuadsTotal
+      && this.retainedByteSize + addedBytes <= this.retentionLimits.maxBytesTotal;
+  }
+
+  private removeRetained(checkpointKey: string): void {
+    const retained = this.retainedByCheckpoint.get(checkpointKey);
+    if (!retained) return;
+    this.retainedByCheckpoint.delete(checkpointKey);
+    this.retainedQuadCount -= retained.quads.length;
+    this.retainedByteSize -= retained.byteSize;
+  }
+}
+
+function normalizeRetentionLimits(
+  limits: Partial<AuthoritativeSnapshotRetentionLimits>,
+): AuthoritativeSnapshotRetentionLimits {
+  const normalized = {
+    ...DEFAULT_AUTHORITATIVE_SNAPSHOT_RETENTION_LIMITS,
+    ...limits,
+  };
+  for (const [name, value] of Object.entries(normalized)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`Authoritative snapshot retention limit ${name} must be a positive safe integer`);
+    }
+  }
+  return normalized;
+}
+
+function retainedQuadByteSize(quads: readonly Quad[]): number {
+  let bytes = 0;
+  for (const quad of quads) {
+    bytes += Buffer.byteLength(quad.subject, 'utf8')
+      + Buffer.byteLength(quad.predicate, 'utf8')
+      + Buffer.byteLength(quad.object, 'utf8')
+      + Buffer.byteLength(quad.graph ?? '', 'utf8')
+      + 4;
+  }
+  return bytes;
 }
 
 export function authoritativeSnapshotPage(result: SyncPageResult): AuthoritativeSnapshotPage {

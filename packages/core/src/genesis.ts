@@ -239,6 +239,7 @@ export const DKG_ONTOLOGY = {
   DKG_EDGE_NODE: `${DKG}EdgeNode`,
   DKG_PEER_ID: `${DKG}peerId`,
   DKG_PEER_ID_PROOF: `${DKG}peerIdProof`,
+  DKG_PEER_BINDING_VERSION: `${DKG}peerBindingVersion`,
   DKG_LAST_SEEN: `${DKG}lastSeen`,
   DKG_PUBLIC_KEY: `${DKG}publicKey`,
   DKG_NODE_ROLE: `${DKG}nodeRole`,

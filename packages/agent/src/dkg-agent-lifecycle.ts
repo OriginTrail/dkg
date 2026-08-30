@@ -289,13 +289,11 @@ import {
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
 import {
-  filterOversizedSyncQuads,
   insertWithOversizeGuard,
   type OversizeGuardHooks,
 } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
-  getSyncCheckpointKey,
   MemorySyncCheckpointStore,
   type DurableManifestDigest,
   type SelectedSwmMetaRetentionScope,
@@ -322,15 +320,11 @@ import {
   runDurableSync,
   runDurableSyncDetailed,
   type ChallengeExactAssetFetchContext,
-  type DurableDataMaterializationRequest,
   type DurableMetaContinuation,
   type DurableSyncContext,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
-import {
-  authoritativeSnapshotPage,
-  reconcileAgentRegistrySnapshot,
-} from './sync/requester/authoritative-graph-snapshot.js';
+import { createAgentRegistryDataMaterializer } from './sync/requester/agent-registry-data-materializer.js';
 import { createGraphScopedPhysicalOperationFence } from './sync/requester/graph-scoped-operation-fence.js';
 import {
   mergeExactDurableFetchDisposition,
@@ -355,7 +349,10 @@ import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
-import { createRequesterTransportPlan } from './sync/requester/transport-plan.js';
+import {
+  createRequesterTransportPlan,
+  createStrictChangelogTransportPlan,
+} from './sync/requester/transport-plan.js';
 import {
   recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
@@ -5932,37 +5929,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const plan = await createRequesterTransportPlan<DurableSyncAccumulator>({
       remotePeerId,
       contextGraphIds,
-      selectLane: async (contextGraphId) => (
-        isAgentRegistryContextGraph(contextGraphId)
-        || await this.isPrivateContextGraph(contextGraphId)
-          ? 'durable'
-          : 'changelog'
-      ),
-      runDurable: async (contextGraphId, remainingContextGraphs) => (
-        durableSyncAccumulatorFromResult(
-          await this.runLegacyDurableSyncForContextGraph(
+      selectWork: async (contextGraphId) => {
+        if (
+          isAgentRegistryContextGraph(contextGraphId)
+          || await this.isPrivateContextGraph(contextGraphId)
+        ) {
+          return {
+            lane: 'durable',
+            run: async (remainingContextGraphs: number) => durableSyncAccumulatorFromResult(
+              await this.runLegacyDurableSyncForContextGraph(
+                ctx,
+                remotePeerId,
+                contextGraphId,
+                remainingContextGraphs,
+                legacyOptions,
+              ),
+            ),
+          };
+        }
+        return {
+          lane: 'changelog',
+          run: () => runPlannedChangelogContextGraph(
+            this,
             ctx,
             remotePeerId,
             contextGraphId,
-            remainingContextGraphs,
-            legacyOptions,
+            onAccessDenied,
+            (failedContextGraphId, error) => {
+              this.log.warn(
+                ctx,
+                `Changelog sync failed for CG ${failedContextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`,
+              );
+              remainingLegacyCgs.push(failedContextGraphId);
+            },
           ),
-        )
-      ),
-      runChangelog: (contextGraphId) => runPlannedChangelogContextGraph(
-        this,
-        ctx,
-        remotePeerId,
-        contextGraphId,
-        onAccessDenied,
-        (failedContextGraphId, error) => {
-          this.log.warn(
-            ctx,
-            `Changelog sync failed for CG ${failedContextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`,
-          );
-          remainingLegacyCgs.push(failedContextGraphId);
-        },
-      ),
+        };
+      },
     });
 
     const result = await runPrioritizedSyncWork(
@@ -6394,95 +6396,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const proofCheckpointStore = exactAssetSelection?.kind === 'challenge-pinned'
       ? new MemorySyncCheckpointStore()
       : undefined;
-    // The public AGENTS phonebook is mutable shared state, not an append-only
-    // collection. Its dedicated materializer keeps verified DATA private until
-    // the immutable responder session reaches EOF, then installs the complete
-    // graph atomically. The retained prefix and requester checkpoint are one
-    // unit, so bounded retries resume while expired/superseded sessions restart.
     const authoritativeAgentSnapshot = exactAssetSelection === undefined
       && isAgentRegistryContextGraph(contextGraphId);
     const durableCheckpointStore = this.syncCheckpoints;
-    const agentDataGraph = contextGraphDataUri(contextGraphId);
     const dataMaterializer = authoritativeAgentSnapshot
-      ? {
-          handlesFullSnapshotBoundary: true,
-          prepareFetch: (_contextGraphId: string, graphUri: string): void => {
-            if (graphUri !== agentDataGraph) {
-              throw new Error(`Authoritative AGENTS materializer received graph ${graphUri}`);
-            }
-            this.authoritativeAgentSnapshots.prepareFetch(getSyncCheckpointKey(
-              remotePeerId,
-              contextGraphId,
-              false,
-              'data',
-            ));
-          },
-          materialize: async ({
-            graphUri,
-            verifiedQuads,
-            page,
-            retainablePrefix,
-            completeSnapshot,
-            transitionCheckpoint,
-            signal: operationSignal,
-          }: DurableDataMaterializationRequest) => {
-            if (graphUri !== agentDataGraph) {
-              throw new Error(`Authoritative AGENTS materializer received graph ${graphUri}`);
-            }
-            const agentQuads: Quad[] = [];
-            const otherQuads: Quad[] = [];
-            for (const quad of verifiedQuads) {
-              (quad.graph === agentDataGraph ? agentQuads : otherQuads).push(quad);
-            }
-            if (otherQuads.length > 0) {
-              await this.insertSyncedQuadsAndInvalidateListCache(otherQuads, {
-                priority: 'background',
-                source: 'agent.durableSync.storeInsert',
-                signal: operationSignal,
-              });
-            }
-            const materialized = await this.authoritativeAgentSnapshots.materialize({
-              page: authoritativeSnapshotPage(page),
-              verifiedQuads: agentQuads,
-              retainablePrefix,
-              completeSnapshot,
-              transitionCheckpoint,
-              commit: async (completeSnapshotQuads) => {
-                const filtered = filterOversizedSyncQuads([...completeSnapshotQuads]);
-                if (filtered.dropped.length > 0) {
-                  this.oversizeTombstoneLog.record(
-                    filtered.dropped,
-                    'durable-sync:authoritative-agents',
-                  );
-                }
-                return reconcileAgentRegistrySnapshot({
-                  store: this.store,
-                  graphUri: agentDataGraph,
-                  remotePeerId,
-                  quads: filtered.kept,
-                  insertForwarded: (quads, insertOptions) => this.store.insert(quads, insertOptions),
-                  authenticatedFreshness: this.authoritativeAgentSnapshots.profileFreshness,
-                  options: {
-                    priority: 'background',
-                    source: 'agent.durableSync.agentRegistryReconcile',
-                    signal: operationSignal,
-                  },
-                  invalidate: () => {
-                    this.invalidateListContextGraphsCache();
-                    // Reconciliation can remove policy rows from the responder's
-                    // own rooted profile tree. Dirtying only replacement quads
-                    // misses cached projections affected solely by removals.
-                    this.contextGraphMetaProjection.markAllDirty();
-                  },
-                });
-              },
-            });
-            return {
-              committedTriples: materialized.committedTriples + otherQuads.length,
-              committed: materialized.committed,
-            };
-          },
-        }
+      ? createAgentRegistryDataMaterializer({
+          contextGraphId,
+          remotePeerId,
+          store: this.store,
+          snapshots: this.authoritativeAgentSnapshots,
+          insertNonRegistryQuads: (quads, operationSignal) =>
+            this.insertSyncedQuadsAndInvalidateListCache([...quads], {
+              priority: 'background',
+              source: 'agent.durableSync.storeInsert',
+              signal: operationSignal,
+            }),
+          recordOversizeDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+          invalidateContextGraphList: () => this.invalidateListContextGraphsCache(),
+          // Reconciliation can remove policy rows from the responder's own
+          // rooted profile tree, so additions alone are not a sufficient key.
+          invalidateContextGraphMetaProjection: () => this.contextGraphMetaProjection.markAllDirty(),
+        })
       : undefined;
     const runGraphScopedOperation = createGraphScopedPhysicalOperationFence({
       isClosed: () => this.graphScopedStoreClosed,
@@ -6806,31 +6740,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return { remainingLegacyCgs: contextGraphIds };
     }
     const legacyCgs: string[] = [];
-    const plan = await createRequesterTransportPlan<DurableSyncAccumulator>({
+    const plan = await createStrictChangelogTransportPlan<DurableSyncAccumulator>({
       remotePeerId,
       contextGraphIds,
       // A direct caller gets strict changelog behavior and an explicit legacy
       // remainder for every graph whose lane belongs to the mixed coordinator.
-      selectLane: async (contextGraphId) => (
-        isAgentRegistryContextGraph(contextGraphId)
-        || await this.isPrivateContextGraph(contextGraphId)
-          ? 'deferred'
-          : 'changelog'
-      ),
-      runDurable: async () => {
-        throw new Error('Strict changelog plans cannot contain durable work');
+      selectWork: async (contextGraphId) => {
+        if (
+          isAgentRegistryContextGraph(contextGraphId)
+          || await this.isPrivateContextGraph(contextGraphId)
+        ) return { lane: 'deferred' };
+        return {
+          lane: 'changelog',
+          run: () => runPlannedChangelogContextGraph(
+            this,
+            ctx,
+            remotePeerId,
+            contextGraphId,
+            onAccessDenied,
+            (failedContextGraphId, error) => {
+              this.log.warn(ctx, `Changelog sync failed for CG ${failedContextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
+              legacyCgs.push(failedContextGraphId);
+            },
+          ),
+        };
       },
-      runChangelog: (contextGraphId) => runPlannedChangelogContextGraph(
-        this,
-        ctx,
-        remotePeerId,
-        contextGraphId,
-        onAccessDenied,
-        (failedContextGraphId, error) => {
-          this.log.warn(ctx, `Changelog sync failed for CG ${failedContextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
-          legacyCgs.push(failedContextGraphId);
-        },
-      ),
     });
     legacyCgs.push(...plan.deferredContextGraphIds);
     const result = await runPrioritizedSyncWork(

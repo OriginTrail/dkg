@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from 'vitest';
-import { createRequesterTransportPlan } from '../src/sync/requester/transport-plan.js';
+import {
+  createRequesterTransportPlan,
+  createStrictChangelogTransportPlan,
+} from '../src/sync/requester/transport-plan.js';
 
 describe('requester transport planning', () => {
   it('constructs durable and changelog work while retaining deferred graphs', async () => {
@@ -9,18 +12,24 @@ describe('requester transport planning', () => {
       `${contextGraphId}:${remaining}`
     ));
     const runChangelog = vi.fn(async (contextGraphId: string) => contextGraphId);
-    const lanes = new Map([
-      ['agents', 'durable' as const],
-      ['public', 'changelog' as const],
-      ['private', 'deferred' as const],
-    ]);
-
     const plan = await createRequesterTransportPlan({
       remotePeerId: '12D3KooWPlannerPeer',
       contextGraphIds: ['agents', 'public', 'private'],
-      selectLane: (contextGraphId) => lanes.get(contextGraphId)!,
-      runDurable,
-      runChangelog,
+      selectWork: (contextGraphId) => {
+        if (contextGraphId === 'agents') {
+          return {
+            lane: 'durable',
+            run: (remaining: number) => runDurable(contextGraphId, remaining),
+          };
+        }
+        if (contextGraphId === 'public') {
+          return {
+            lane: 'changelog',
+            run: () => runChangelog(contextGraphId),
+          };
+        }
+        return { lane: 'deferred' };
+      },
     });
 
     expect(plan.work.map(({ contextGraphId, lane, operationId }) => ({
@@ -44,5 +53,21 @@ describe('requester transport planning', () => {
     await expect(plan.work[1]!.run(2)).resolves.toBe('public');
     expect(runDurable).toHaveBeenCalledWith('agents', 3);
     expect(runChangelog).toHaveBeenCalledWith('public');
+  });
+
+  it('builds strict changelog work without an impossible durable runner', async () => {
+    const run = vi.fn(async () => 'public');
+    const plan = await createStrictChangelogTransportPlan({
+      remotePeerId: '12D3KooWStrictPlannerPeer',
+      contextGraphIds: ['public', 'private'],
+      selectWork: (contextGraphId) => contextGraphId === 'public'
+        ? { lane: 'changelog', run }
+        : { lane: 'deferred' },
+    });
+
+    expect(plan.work).toHaveLength(1);
+    expect(plan.work[0]!.lane).toBe('changelog');
+    await expect(plan.work[0]!.run(1)).resolves.toBe('public');
+    expect(plan.deferredContextGraphIds).toEqual(['private']);
   });
 });

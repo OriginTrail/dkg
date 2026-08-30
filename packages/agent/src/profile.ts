@@ -61,6 +61,9 @@ const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
 const PROV = 'http://www.w3.org/ns/prov#';
 const SKILL = 'https://dkg.origintrail.io/skill#';
 
+/** Current wallet-to-libp2p binding format emitted in agent profiles. */
+export const AGENT_PEER_BINDING_VERSION = '1';
+
 export const AGENT_REGISTRY_CONTEXT_GRAPH = SYSTEM_CONTEXT_GRAPHS.AGENTS;
 export const AGENT_REGISTRY_GRAPH = `did:dkg:context-graph:${AGENT_REGISTRY_CONTEXT_GRAPH}`;
 
@@ -176,6 +179,7 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   // DKG P2P properties
   q(entity, `${DKG}peerId`, `"${config.peerId}"`);
   if (config.peerIdProof) {
+    q(entity, DKG_ONTOLOGY.DKG_PEER_BINDING_VERSION, `"${AGENT_PEER_BINDING_VERSION}"`);
     q(entity, DKG_ONTOLOGY.DKG_PEER_ID_PROOF, `"${config.peerIdProof}"`);
   }
   q(entity, `${DKG}nodeRole`, `"${role}"`);
