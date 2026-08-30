@@ -256,7 +256,7 @@ describe('GH#2270 failed-job retry disposition', () => {
     expect(isTargetedClearableLiftJob(held(PEER), override(PEER.toLowerCase()))).toBe(false);
   });
 
-  it('fails closed for unknown and malformed runtime clear-authority variants', () => {
+  it('accepts the exact legacy owner shape but fails closed for non-owner and malformed variants', () => {
     const heldJob = {
       status: 'failed',
       failure: { resolution: 'retry_recovery' },
@@ -269,6 +269,9 @@ describe('GH#2270 failed-job retry disposition', () => {
 
     expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
       requestedBy: '0xAbCdEf0000000000000000000000000000001234',
+    }))).toBe(true);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      requestedBy: '0x0000000000000000000000000000000000000001',
     }))).toBe(false);
     expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
       kind: 'legacyOwner',
