@@ -4334,6 +4334,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       errorCode: 'catalog-native-receiver-activation',
       causeCode: 'finalized-vm-composition-incomplete',
     });
+    await authorizedCold.closeRfc64PublicCatalogServiceV1();
+    expect(authorizedCold.readRfc64FinalizedSwmRetirementLifecycleReceiptsV1(
+      successor.headObjectDigest,
+    )).toEqual([]);
   }, 90_000);
 
   it('leaves the applied head null for finalized-chain policy in the dormant SWM-only lane', async () => {
