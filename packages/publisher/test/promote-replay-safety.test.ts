@@ -3,6 +3,8 @@ import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 
 import {
   classifyExactSwmGraphReplaceFailure,
+  isPromoteReplaySafeError,
+  PROMOTE_REPLAY_SAFE_ERROR_CODE,
   PromoteReplaySafeError,
 } from '../src/promote-replay-safety.js';
 
@@ -31,5 +33,16 @@ describe('promote replay safety', () => {
     });
 
     expect(classifyExactSwmGraphReplaceFailure(failure)).toBe(failure);
+  });
+
+  it('recognizes replay-safe certification without prototype identity', () => {
+    const crossRealmShape = Object.freeze({
+      code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
+      stage: 'atomic-exact-swm-graph-replacement' as const,
+      cause: new Error('indeterminate replacement'),
+    });
+
+    expect(crossRealmShape).not.toBeInstanceOf(PromoteReplaySafeError);
+    expect(isPromoteReplaySafeError(crossRealmShape)).toBe(true);
   });
 });

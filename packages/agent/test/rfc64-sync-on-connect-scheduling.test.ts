@@ -479,7 +479,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     );
   });
 
-  it('freezes one selected SWM plan across admission and transfer', async () => {
+  it('freezes one unrestricted SWM plan while separating pinned and ordinary public graphs', async () => {
     const agent = await createUnstartedAgent('Rfc64FrozenSelectedSwmPlan');
     allowAllNetworkAdmission(agent);
     (agent as any).started = true;
@@ -493,14 +493,14 @@ describe('RFC-64 sync-on-connect scheduling', () => {
         completeSwmProviders: [PEER_A],
       }],
     };
-    (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => [
-      'selected-a',
-      'selected-b',
-    ];
+    (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-a'];
     (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
     const planner = vi.fn()
       .mockResolvedValueOnce({
-        targets: [{ contextGraphId: 'selected-a', lane: 'selected-public' }],
+        targets: [
+          { contextGraphId: 'selected-a', lane: 'selected-public' },
+          { contextGraphId: 'selected-b', lane: 'selected-public' },
+        ],
       })
       .mockResolvedValue({
         targets: [{ contextGraphId: 'selected-b', lane: 'selected-public' }],
@@ -524,9 +524,10 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       },
     }));
     (agent as any).syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
-    (agent as any).syncSharedMemoryFromPeerDetailed = vi.fn(
+    const ordinarySharedSync = vi.fn(
       async () => emptyDetailedSync({ completedPhases: 1 }),
     );
+    (agent as any).syncSharedMemoryFromPeerDetailed = ordinarySharedSync;
     (agent as any).syncFromPeerDetailed = vi.fn(
       async () => emptyDetailedSync({ completedPhases: 1 }),
     );
@@ -544,6 +545,17 @@ describe('RFC-64 sync-on-connect scheduling', () => {
         requestedScope: {
           kind: 'selected-public',
           targets: [{ contextGraphId: 'selected-a', lane: 'selected-public' }],
+        },
+      }),
+    );
+    expect(ordinarySharedSync).toHaveBeenCalledWith(
+      PEER_A,
+      ['selected-b'],
+      expect.objectContaining({
+        sharedMemorySyncPlan: {
+          targets: [
+            { contextGraphId: 'selected-b', lane: 'selected-public' },
+          ],
         },
       }),
     );

@@ -1629,7 +1629,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
     const coordinator = (receiver as any).rfc64SwmRecoveryCoordinatorV1;
     const authorizeForCatalogPass = vi.spyOn(coordinator, 'authorizeForCatalogPass');
-    const authorize = vi.spyOn(coordinator, 'authorize');
     const authorizedPlans: unknown[] = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
       .mockImplementation((authorizedPlan) => {
@@ -1648,7 +1647,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       60_000,
     );
     expect(authorizedPlans[0]).toBe(authorizeForCatalogPass.mock.results[0]?.value);
-    expect(authorize).not.toHaveBeenCalled();
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(true);
 
@@ -1705,7 +1703,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
     const coordinator = (receiver as any).rfc64SwmRecoveryCoordinatorV1;
     const authorizeForCatalogPass = vi.spyOn(coordinator, 'authorizeForCatalogPass');
-    const authorize = vi.spyOn(coordinator, 'authorize');
     const authorizedPlans: unknown[] = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
       .mockImplementation((authorizedPlan) => {
@@ -1724,7 +1721,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       60_000,
     );
     expect(authorizedPlans[0]).toBe(authorizeForCatalogPass.mock.results[0]?.value);
-    expect(authorize).not.toHaveBeenCalled();
     const completeOwner = (receiver as any).selectedSwmBootstrapAdmission.beginTransfer(
       providerPeerId,
       [CONTEXT_GRAPH_ID],

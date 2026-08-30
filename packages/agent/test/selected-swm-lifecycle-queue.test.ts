@@ -373,19 +373,21 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       getDurableSyncContextGraphs: () => [],
       getSharedMemorySyncContextGraphs: () => [contextGraphId],
       selectedSharedMemoryLane: {
-        admitPlan: () => ({ contextGraphIds: [contextGraphId] }),
-        syncFromPeer: async () => ({
-          kind: 'selected-shared-memory',
-          requestedScope: {
-            kind: 'selected-public',
-            targets: [{ contextGraphId, lane: 'selected-public' }],
-          },
-          shared,
-          scopeComplete: true,
-          targetDiagnostics: {
-            selectedPublic: { completed: 1, total: 1 },
-            ordinaryPrivate: { completed: 0, total: 0 },
-          },
+        admitWork: () => ({
+          contextGraphIds: [contextGraphId],
+          syncFromPeer: async () => ({
+            kind: 'selected-shared-memory',
+            requestedScope: {
+              kind: 'selected-public',
+              targets: [{ contextGraphId, lane: 'selected-public' }],
+            },
+            shared,
+            scopeComplete: true,
+            targetDiagnostics: {
+              selectedPublic: { completed: 1, total: 1 },
+              ordinaryPrivate: { completed: 0, total: 0 },
+            },
+          }),
         }),
       },
       syncFromPeer: async () => 0,

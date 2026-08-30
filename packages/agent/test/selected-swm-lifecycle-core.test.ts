@@ -83,8 +83,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           syncingPeers: new Set(),
           getPeerProtocols: async () => [PROTOCOL_SYNC],
           selectedSharedMemoryLane: {
-            admitPlan: () => ({ contextGraphIds: [privateCg] }),
-            syncFromPeer: async () => recovery,
+            admitWork: () => ({
+              contextGraphIds: [privateCg],
+              syncFromPeer: async () => recovery,
+            }),
           },
           onSyncAccounting: (_peerId, outcome) => {
             if (outcome) onSyncAccounting(outcome);
@@ -588,8 +590,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         getDurableSyncContextGraphs: () => [],
         getSharedMemorySyncContextGraphs: () => [publicCg],
         selectedSharedMemoryLane: {
-          admitPlan: () => ({ contextGraphIds: [publicCg] }),
-          syncFromPeer: async () => selected,
+          admitWork: () => ({
+            contextGraphIds: [publicCg],
+            syncFromPeer: async () => selected,
+          }),
         },
         syncFromPeer: async () => 0,
         refreshMetaSyncedFlags: async () => undefined,

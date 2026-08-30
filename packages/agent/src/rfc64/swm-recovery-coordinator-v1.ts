@@ -53,14 +53,6 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       );
   }
 
-  authorize(
-    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
-  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
-    if (!this.deps.admission.isCatalogReady(recoveryPlan.providerPeerId)) return null;
-    const eligible = this.eligibleTargets(recoveryPlan);
-    return eligible === null ? null : this.authorizeEligible(recoveryPlan.providerPeerId, eligible);
-  }
-
   /**
    * One catalog-pass operation owns stale terminal refresh and authorization.
    * Ordinary-private targets survive when a selected-public refresh is still
@@ -104,18 +96,6 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       )
     ));
     return eligible.length === 0 ? null : eligible;
-  }
-
-  private authorizeEligible(
-    providerPeerId: string,
-    eligible: readonly Rfc64SwmRecoveryTargetV1[],
-  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
-    const requestedPublic = eligible
-      .filter(({ lane }) => lane === 'selected-public')
-      .map(({ contextGraphId }) => contextGraphId);
-    const publicAccepted = requestedPublic.length > 0
-      && this.admitSelectedPublic(providerPeerId, requestedPublic);
-    return this.authorizedPlan(providerPeerId, eligible, publicAccepted);
   }
 
   private authorizedPlan(

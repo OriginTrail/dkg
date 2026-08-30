@@ -453,19 +453,21 @@ describe('sync-on-connect churn gates', () => {
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       selectedSharedMemoryLane: {
-        admitPlan: () => ({ contextGraphIds: ['selected-cg'] }),
-        syncFromPeer: async () => ({
-          kind: 'selected-shared-memory',
-          requestedScope: {
-            kind: 'selected-public',
-            targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
-          },
-          shared: emptyDetailedSync(),
-          scopeComplete: false,
-          targetDiagnostics: {
-            selectedPublic: { completed: 0, total: 1 },
-            ordinaryPrivate: { completed: 0, total: 0 },
-          },
+        admitWork: () => ({
+          contextGraphIds: ['selected-cg'],
+          syncFromPeer: async () => ({
+            kind: 'selected-shared-memory',
+            requestedScope: {
+              kind: 'selected-public',
+              targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
+            },
+            shared: emptyDetailedSync(),
+            scopeComplete: false,
+            targetDiagnostics: {
+              selectedPublic: { completed: 0, total: 1 },
+              ordinaryPrivate: { completed: 0, total: 0 },
+            },
+          }),
         }),
       },
       onSyncAccounting: (_peerId, outcome) => {

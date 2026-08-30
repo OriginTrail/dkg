@@ -199,6 +199,11 @@ describe('classifyPromoteError', () => {
       'atomic-exact-swm-graph-replacement',
       rawReplaceFailure,
     ))).toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError({
+      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+      stage: 'atomic-exact-swm-graph-replacement',
+      cause: rawReplaceFailure,
+    })).toEqual({ classification: 'transient', retryable: true });
 
     for (const message of [
       'insert timed out',

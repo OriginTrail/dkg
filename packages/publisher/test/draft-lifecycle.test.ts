@@ -33,7 +33,6 @@ import {
 } from '../src/index.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
-import { classifyPromoteError } from '../../cli/src/daemon/worker/async-promote-worker.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
 const CG_ID = 'test-assertion-cg';
@@ -546,10 +545,6 @@ describe('Working Memory Assertion Lifecycle', () => {
       expect(rejection).toMatchObject({
         stage: 'atomic-exact-swm-graph-replacement',
         cause: failure,
-      });
-      expect(classifyPromoteError(rejection)).toEqual({
-        classification: 'transient',
-        retryable: true,
       });
       expect(injected).toBe(true);
     } finally {

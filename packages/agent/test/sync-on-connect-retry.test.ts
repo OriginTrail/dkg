@@ -110,27 +110,29 @@ describe('runSyncOnConnect callbacks', () => {
       getSyncContextGraphs: () => ['selected', 'ordinary'],
       getDurableSyncContextGraphs: () => ['ordinary'],
       selectedSharedMemoryLane: {
-        admitPlan: async () => ({ contextGraphIds: ['selected'] }),
-        syncFromPeer: async (_peerId, plan) => {
-          order.push(`shared:${plan.contextGraphIds.join(',')}:selected`);
-          return {
-            kind: 'selected-shared-memory',
-            requestedScope: {
-              kind: 'selected-public',
-              targets: [{ contextGraphId: 'selected', lane: 'selected-public' }],
-            },
-            shared: {
-              insertedTriples: 0,
-              completedPhases: 1,
-              checkpointAdvances: 0,
-            },
-            scopeComplete: true,
-            targetDiagnostics: {
-              selectedPublic: { completed: 1, total: 1 },
-              ordinaryPrivate: { completed: 0, total: 0 },
-            },
-          };
-        },
+        admitWork: async () => ({
+          contextGraphIds: ['selected'],
+          syncFromPeer: async () => {
+            order.push('shared:selected:selected');
+            return {
+              kind: 'selected-shared-memory',
+              requestedScope: {
+                kind: 'selected-public',
+                targets: [{ contextGraphId: 'selected', lane: 'selected-public' }],
+              },
+              shared: {
+                insertedTriples: 0,
+                completedPhases: 1,
+                checkpointAdvances: 0,
+              },
+              scopeComplete: true,
+              targetDiagnostics: {
+                selectedPublic: { completed: 1, total: 1 },
+                ordinaryPrivate: { completed: 0, total: 0 },
+              },
+            };
+          },
+        }),
       },
       getSharedMemorySyncContextGraphs: async () => ['selected', 'ordinary'],
       syncFromPeer: async (_peerId, contextGraphIds) => {

@@ -53,20 +53,17 @@ export const ORDINARY_SYNC_ON_CONNECT_POLICY = Object.freeze({
   }) as OrdinarySyncOnConnectPolicy,
 });
 
-export interface AdmittedSelectedSharedMemoryPlan {
+export interface AdmittedSelectedSharedMemoryWorkItem {
   readonly contextGraphIds: readonly string[];
+  /** Execute exactly the scope captured by admission. */
+  readonly syncFromPeer: (peerId: string) => Promise<SelectedSharedMemorySyncResult>;
 }
 
-interface SelectedSharedMemorySyncLane<
-Plan extends AdmittedSelectedSharedMemoryPlan = AdmittedSelectedSharedMemoryPlan,
-> {
-  /** Explicitly admit and freeze the graph-complete scope before any transfer starts. */
-  admitPlan: (remotePeerId: string) => Plan | null | Promise<Plan | null>;
-  /** Produce the lane-owned terminal evidence for exactly that admitted plan. */
-  syncFromPeer: (
-    peerId: string,
-    plan: Plan,
-  ) => Promise<SelectedSharedMemorySyncResult>;
+interface SelectedSharedMemorySyncLane {
+  /** Admit one cohesive, frozen unit of selected-lane work. */
+  admitWork: (
+    remotePeerId: string,
+  ) => AdmittedSelectedSharedMemoryWorkItem | null | Promise<AdmittedSelectedSharedMemoryWorkItem | null>;
 }
 
 type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
@@ -83,9 +80,7 @@ export type SyncOnConnectPeerOutcome =
       progress: boolean;
     };
 
-interface SyncOnConnectContext<
-Plan extends AdmittedSelectedSharedMemoryPlan = AdmittedSelectedSharedMemoryPlan,
-> {
+interface SyncOnConnectContext {
   remotePeer: string;
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
@@ -96,7 +91,7 @@ Plan extends AdmittedSelectedSharedMemoryPlan = AdmittedSelectedSharedMemoryPlan
   getDurableSyncContextGraphs?: () => string[];
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
   /** Cohesive selected lane; its scope resolver and typed producer cannot be mis-wired separately. */
-  selectedSharedMemoryLane?: SelectedSharedMemorySyncLane<Plan>;
+  selectedSharedMemoryLane?: SelectedSharedMemorySyncLane;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<DurableSyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
@@ -135,13 +130,11 @@ Plan extends AdmittedSelectedSharedMemoryPlan = AdmittedSelectedSharedMemoryPlan
  * a selected retry cannot fall through when the broad on-connect workflow is
  * changed later.
  */
-interface SelectedSharedMemoryRetryContext<
-Plan extends AdmittedSelectedSharedMemoryPlan = AdmittedSelectedSharedMemoryPlan,
-> {
+interface SelectedSharedMemoryRetryContext {
   remotePeer: string;
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
-  selectedSharedMemoryLane: SelectedSharedMemorySyncLane<Plan>;
+  selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
   logInfo: (ctx: OperationContext, message: string) => void;
   onPeerSkippedNoSync?: (peerId: string, protocols: string[]) => void;
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
@@ -233,10 +226,8 @@ function classifySyncResult(
  * but resumptions created by the catalog bootstrap use this dedicated entry
  * point so disabling broad sync does not disable selected recovery.
  */
-export async function runSelectedSharedMemoryRetry<
-Plan extends AdmittedSelectedSharedMemoryPlan,
->(
-  context: SelectedSharedMemoryRetryContext<Plan>,
+export async function runSelectedSharedMemoryRetry(
+  context: SelectedSharedMemoryRetryContext,
 ): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
@@ -270,16 +261,16 @@ Plan extends AdmittedSelectedSharedMemoryPlan,
       return 'skipped-no-sync';
     }
 
-    const admittedPlan = await runNonTransportStep(() => Promise.resolve(
-      selectedSharedMemoryLane.admitPlan(remotePeer),
+    const admittedWork = await runNonTransportStep(() => Promise.resolve(
+      selectedSharedMemoryLane.admitWork(remotePeer),
     ));
-    if (admittedPlan === null || admittedPlan.contextGraphIds.length === 0) return 'synced';
+    if (admittedWork === null || admittedWork.contextGraphIds.length === 0) return 'synced';
 
     logInfo(
       ctx,
-      `Retrying ${admittedPlan.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
+      `Retrying ${admittedWork.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
     );
-    const selected = await selectedSharedMemoryLane.syncFromPeer(remotePeer, admittedPlan);
+    const selected = await admittedWork.syncFromPeer(remotePeer);
     const accounting = classifySyncResult(
       selected.shared,
       'shared',
@@ -322,9 +313,9 @@ Plan extends AdmittedSelectedSharedMemoryPlan,
   }
 }
 
-export async function runSyncOnConnect<
-Plan extends AdmittedSelectedSharedMemoryPlan = AdmittedSelectedSharedMemoryPlan,
->(context: SyncOnConnectContext<Plan>): Promise<SyncOnConnectOutcome> {
+export async function runSyncOnConnect(
+  context: SyncOnConnectContext,
+): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
     syncingPeers,
@@ -473,25 +464,21 @@ Plan extends AdmittedSelectedSharedMemoryPlan = AdmittedSelectedSharedMemoryPlan
       return 'skipped-no-sync';
     }
 
-    const admittedPrioritySharedMemoryPlan = syncSharedMemoryOnConnect
+    const admittedPrioritySharedMemoryWork = syncSharedMemoryOnConnect
       && selectedSharedMemoryLane
         ? await runNonTransportStep(() => Promise.resolve(
-          selectedSharedMemoryLane.admitPlan(remotePeer),
+          selectedSharedMemoryLane.admitWork(remotePeer),
         ))
         : null;
     if (
-      admittedPrioritySharedMemoryPlan !== null
-      && admittedPrioritySharedMemoryPlan.contextGraphIds.length > 0
-      && selectedSharedMemoryLane
+      admittedPrioritySharedMemoryWork !== null
+      && admittedPrioritySharedMemoryWork.contextGraphIds.length > 0
     ) {
       logInfo(
         ctx,
-        `Prioritizing ${admittedPrioritySharedMemoryPlan.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
+        `Prioritizing ${admittedPrioritySharedMemoryWork.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
       );
-      const priorityWsSynced = await selectedSharedMemoryLane.syncFromPeer(
-        remotePeer,
-        admittedPrioritySharedMemoryPlan,
-      );
+      const priorityWsSynced = await admittedPrioritySharedMemoryWork.syncFromPeer(remotePeer);
       const prioritySharedAccounting = recordSyncAccounting(priorityWsSynced, 'shared');
       logInfo(
         ctx,
@@ -576,7 +563,7 @@ Plan extends AdmittedSelectedSharedMemoryPlan = AdmittedSelectedSharedMemoryPlan
       ? await runNonTransportStep(() => Promise.resolve(getSharedMemorySyncContextGraphs(remotePeer)))
       : getSyncContextGraphs() ?? [];
     const prioritySharedMemoryContextGraphIdSet = new Set(
-      admittedPrioritySharedMemoryPlan?.contextGraphIds ?? [],
+      admittedPrioritySharedMemoryWork?.contextGraphIds ?? [],
     );
     const wsContextGraphIds = allWsContextGraphIds.filter(
       (contextGraphId) => !prioritySharedMemoryContextGraphIdSet.has(contextGraphId),
