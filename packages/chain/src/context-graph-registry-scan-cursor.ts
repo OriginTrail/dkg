@@ -3,7 +3,13 @@
 import type {
   ContextGraphRegistryScanCursorKey,
   ContextGraphRegistryScanCursorStore,
+  ContextGraphRegistryRoleAwareScanCursorKey,
+  ContextGraphRegistryRoleAwareScanCursorStore,
 } from './chain-adapter.js';
+
+export type ContextGraphRegistryScanCursorStoreBinding =
+  | { kind: 'legacy'; store: ContextGraphRegistryScanCursorStore }
+  | { kind: 'roleAware'; store: ContextGraphRegistryRoleAwareScanCursorStore };
 
 /**
  * Durable cursor policy for ContextGraphNameRegistry scans.
@@ -19,8 +25,8 @@ export class ContextGraphRegistryScanCursor {
     private readonly input: {
       chainId: string;
       deploymentId: string;
-      cursorKind: ContextGraphRegistryScanCursorKey['cursorKind'];
-      store?: ContextGraphRegistryScanCursorStore;
+      cursorKind: ContextGraphRegistryRoleAwareScanCursorKey['cursorKind'];
+      store?: ContextGraphRegistryScanCursorStoreBinding;
     },
   ) {}
 
@@ -39,7 +45,9 @@ export class ContextGraphRegistryScanCursor {
 
     if (!this.input.store) return undefined;
     try {
-      const persisted = await this.input.store.load(this.cursorKey(cacheKey));
+      const persisted = this.input.store.kind === 'roleAware'
+        ? await this.input.store.store.load(this.roleAwareCursorKey(cacheKey))
+        : await this.input.store.store.load(this.legacyCursorKey(cacheKey));
       const normalized = this.normalize(persisted);
       if (normalized != null) {
         this.watermarks.set(cacheKey, normalized);
@@ -64,7 +72,11 @@ export class ContextGraphRegistryScanCursor {
     this.watermarks.set(cacheKey, normalized);
     if (!this.input.store) return;
     try {
-      await this.input.store.save(this.cursorKey(cacheKey), normalized);
+      if (this.input.store.kind === 'roleAware') {
+        await this.input.store.store.save(this.roleAwareCursorKey(cacheKey), normalized);
+      } else {
+        await this.input.store.store.save(this.legacyCursorKey(cacheKey), normalized);
+      }
     } catch (err) {
       console.warn(
         `[chain] ContextGraphNameRegistry scan cursor save failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -76,11 +88,17 @@ export class ContextGraphRegistryScanCursor {
     return registryAddress.toLowerCase();
   }
 
-  private cursorKey(registryAddress: string): ContextGraphRegistryScanCursorKey {
+  private legacyCursorKey(registryAddress: string): ContextGraphRegistryScanCursorKey {
     return {
       chainId: this.input.chainId,
       deploymentId: this.input.deploymentId,
       registryAddress,
+    };
+  }
+
+  private roleAwareCursorKey(registryAddress: string): ContextGraphRegistryRoleAwareScanCursorKey {
+    return {
+      ...this.legacyCursorKey(registryAddress),
       cursorKind: this.input.cursorKind,
     };
   }

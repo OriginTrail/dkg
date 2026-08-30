@@ -51,7 +51,12 @@ import type {
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
-import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
+import type {
+  ApprovalPolicy,
+  ChainAdapter,
+  ContextGraphRegistryScanCursorPersistence,
+  ContextGraphRegistryScanCursorStore,
+} from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -1851,8 +1856,8 @@ export interface DKGAgentConfig {
   chainEventCursorStore?: ChainEventCursorPersistence;
   /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
-  /** Dedicated tip cursor store when the historical store uses the legacy role-less key contract. */
-  contextGraphRegistryTipScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /** Explicit role-aware or split legacy persistence for historical and tip registry progress. */
+  contextGraphRegistryScanCursorPersistence?: ContextGraphRegistryScanCursorPersistence;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.

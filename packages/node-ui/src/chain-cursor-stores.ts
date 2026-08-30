@@ -89,7 +89,6 @@ export class SqliteChainEventCursorStore {
  * fallbacks for role-less runtime rows and the original settings representation.
  */
 export class SqliteContextGraphRegistryScanCursorStore {
-  readonly cursorKeyVersion = 2 as const;
   private readonly cursors: RuntimePositiveIntegerCursorStore;
   private readonly legacyCursors: SettingsPositiveIntegerCursorStore;
 

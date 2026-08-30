@@ -6,7 +6,11 @@
  * evm-adapter.ts. Bodies are a 1:1 move from the original module.
  */
 import { Contract } from 'ethers';
-import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
+import type {
+  ApprovalPolicy,
+  ContextGraphRegistryScanCursorPersistence,
+  ContextGraphRegistryScanCursorStore,
+} from './chain-adapter.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
@@ -99,10 +103,10 @@ export interface EVMAdapterBaseConfig {
    */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /**
-   * Optional dedicated tip-progress store for compatibility with legacy role-less historical
-   * stores. When omitted, the historical store is shared only if it advertises cursor key v2.
+   * Explicit role-aware or split legacy persistence. When supplied, this takes precedence over
+   * contextGraphRegistryScanCursorStore and defines both historical and tip ownership.
    */
-  contextGraphRegistryTipScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  contextGraphRegistryScanCursorPersistence?: ContextGraphRegistryScanCursorPersistence;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

@@ -1317,15 +1317,18 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
-    const historicalRegistryCursorStore = config.contextGraphRegistryScanCursorStore;
-    const configuredTipRegistryCursorStore = config.contextGraphRegistryTipScanCursorStore;
-    const tipRegistryCursorStore = configuredTipRegistryCursorStore && (
-      configuredTipRegistryCursorStore !== historicalRegistryCursorStore ||
-      configuredTipRegistryCursorStore.cursorKeyVersion === 2
-    )
-      ? configuredTipRegistryCursorStore
-      : historicalRegistryCursorStore?.cursorKeyVersion === 2
-        ? historicalRegistryCursorStore
+    const registryCursorPersistence = config.contextGraphRegistryScanCursorPersistence;
+    const historicalRegistryCursorStore = registryCursorPersistence?.kind === 'roleAware'
+      ? { kind: 'roleAware' as const, store: registryCursorPersistence.store }
+      : registryCursorPersistence?.kind === 'legacy'
+        ? { kind: 'legacy' as const, store: registryCursorPersistence.historical }
+        : config.contextGraphRegistryScanCursorStore
+          ? { kind: 'legacy' as const, store: config.contextGraphRegistryScanCursorStore }
+          : undefined;
+    const tipRegistryCursorStore = registryCursorPersistence?.kind === 'roleAware'
+      ? { kind: 'roleAware' as const, store: registryCursorPersistence.store }
+      : registryCursorPersistence?.kind === 'legacy' && registryCursorPersistence.tip
+        ? { kind: 'legacy' as const, store: registryCursorPersistence.tip }
         : undefined;
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,

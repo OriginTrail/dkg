@@ -1852,7 +1852,10 @@ async function runDaemonInnerWithStartupOwnership(
     syncCheckpointStore,
     changelogCursorStore,
     chainEventCursorStore,
-    contextGraphRegistryScanCursorStore,
+    contextGraphRegistryScanCursorPersistence: {
+      kind: 'roleAware',
+      store: contextGraphRegistryScanCursorStore,
+    },
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

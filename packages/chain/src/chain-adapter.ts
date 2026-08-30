@@ -570,23 +570,41 @@ export function buildEvmDeploymentId(input: { chainId: string; hubAddress: strin
   return `${input.chainId}:hub=${input.hubAddress.toLowerCase()}`;
 }
 
+/** Original role-less cursor key retained for existing historical stores. */
 export interface ContextGraphRegistryScanCursorKey {
   chainId: string;
   deploymentId: string;
   registryAddress: string;
+}
+
+/** Role-aware cursor key used only by explicitly configured role-aware persistence. */
+export interface ContextGraphRegistryRoleAwareScanCursorKey extends ContextGraphRegistryScanCursorKey {
   cursorKind: 'historical' | 'tip';
 }
 
+/** Pre-role persistence contract. It receives the exact original three-field key. */
 export interface ContextGraphRegistryScanCursorStore {
-  /**
-   * Version 2 stores include `cursorKind` in their durable key. Stores that omit this marker are
-   * treated as legacy role-less stores: they remain the historical source, but are never shared
-   * with the independent tip cursor because doing so could alias both progress records.
-   */
-  readonly cursorKeyVersion?: 2;
   load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
 }
+
+/** Store whose durable identity includes the cursor role. */
+export interface ContextGraphRegistryRoleAwareScanCursorStore {
+  load(key: ContextGraphRegistryRoleAwareScanCursorKey): Promise<number | undefined>;
+  save(key: ContextGraphRegistryRoleAwareScanCursorKey, nextBlock: number): Promise<void>;
+}
+
+/** Explicit compatibility boundary for historical and independent tip progress. */
+export type ContextGraphRegistryScanCursorPersistence =
+  | {
+      kind: 'legacy';
+      historical: ContextGraphRegistryScanCursorStore;
+      tip?: ContextGraphRegistryScanCursorStore;
+    }
+  | {
+      kind: 'roleAware';
+      store: ContextGraphRegistryRoleAwareScanCursorStore;
+    };
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
