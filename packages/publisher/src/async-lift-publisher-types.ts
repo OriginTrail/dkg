@@ -291,13 +291,20 @@ export interface AsyncLiftRetryOutcome {
   readonly skipped: number;
 }
 
+/** Selection contract shared by bulk and exact failed-job retry callers. */
+export interface AsyncLiftRetryFilter {
+  readonly status?: 'failed';
+  /** When present, inspect and transition only this exact persisted job. */
+  readonly jobId?: string;
+}
+
 /**
  * GH#2270 — the reporting counterpart of `retry()`. Segregated off the base contract (like the
  * #1828/#1829/#1837 capabilities): the wire-stable count stays on `AsyncLiftPublisher`, and the
  * paths that report to an operator read the full disposition here.
  */
 export interface AsyncLiftDetailedRetrier {
-  retryDetailed(filter?: { status?: 'failed' }): Promise<AsyncLiftRetryOutcome>;
+  retryDetailed(filter?: AsyncLiftRetryFilter): Promise<AsyncLiftRetryOutcome>;
 }
 
 /**

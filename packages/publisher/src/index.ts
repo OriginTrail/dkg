@@ -308,6 +308,7 @@ export {
   type ActiveLiftJobClaimSession,
   type AsyncLiftAdministrativeMutations,
   type AsyncLiftDetailedRetrier,
+  type AsyncLiftRetryFilter,
   type AsyncLiftPublisher,
   type ClaimSessionAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
@@ -342,6 +343,7 @@ export {
 export {
   SAFE_JOB_ID_PATTERN,
   SAFE_JOB_ID_MAX_LENGTH,
+  SAFE_JOB_ID_ERROR,
   isSafeJobId,
 } from './job-id.js';
 export {
