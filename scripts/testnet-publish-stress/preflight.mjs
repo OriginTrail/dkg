@@ -26,6 +26,14 @@ const CG_DESCRIPTION =
   'Hosts a stream of Wikidata-music KCs published from Miles\' edge node ' +
   'against Base Sepolia (84532) to stress-test V10 publishing + give the ' +
   'on-chain RandomSampling prover something to sample.';
+const TESTNET_CONFIG_URL = new URL('../../network/testnet.json', import.meta.url);
+const TESTNET_NETWORK_ID = JSON.parse(
+  await readFile(TESTNET_CONFIG_URL, 'utf8'),
+).networkId;
+
+if (typeof TESTNET_NETWORK_ID !== 'string' || TESTNET_NETWORK_ID.length === 0) {
+  throw new Error(`Missing networkId in ${TESTNET_CONFIG_URL.pathname}`);
+}
 
 const TOKEN = (await readFile(TOKEN_FILE, 'utf8'))
   .split('\n')
@@ -59,8 +67,8 @@ bar('1. Daemon status');
   }
   const s = r.json;
   console.error(`name=${s.name} version=${s.version} role=${s.nodeRole} network=${s.networkName} identity=${s.identityId} (has=${s.hasIdentity}) peers=${s.connectedPeers}`);
-  if (s.networkId !== '7449c543ff04a550') {
-    console.error(`WARN: networkId=${s.networkId} expected 7449c543ff04a550 (DKG V10 Testnet). Aborting.`);
+  if (s.networkId !== TESTNET_NETWORK_ID) {
+    console.error(`WARN: networkId=${s.networkId} expected ${TESTNET_NETWORK_ID} (DKG V10 Testnet). Aborting.`);
     process.exit(2);
   }
 }
