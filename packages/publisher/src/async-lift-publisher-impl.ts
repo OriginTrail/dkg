@@ -92,9 +92,11 @@ import {
   isHeldForChainProof,
   selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
-  type TargetedLiftJobClearOptions,
 } from './async-lift-retry-disposition.js';
-import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
+import {
+  type TargetedLiftJobClearOptions,
+  type TerminalJobClearOutcome,
+} from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {

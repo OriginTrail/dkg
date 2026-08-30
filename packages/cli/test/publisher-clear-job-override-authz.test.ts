@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { Readable } from 'node:stream';
 import type { ServerResponse } from 'node:http';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
-import type { RequestContext } from '../src/daemon/handle-request.js';
+import { resolveRequestPrincipal } from '../src/daemon/handle-request.js';
+import type { RequestContext } from '../src/daemon/routes/context.js';
+import type {
+  PendingTransactionClearOverride,
+  TargetedLiftJobClearOptions,
+} from '@origintrail-official/dkg-publisher';
 
 /**
  * GH#2270 follow-up (🔴 3823952704) — who may force-clear a job whose transaction may still land.
@@ -28,8 +33,7 @@ describe('clear-job pending-transaction override authorization', () => {
   }) {
     const calls: Array<{
       jobId: string;
-      requestedBy?: string;
-      requestedByNodeOperator?: true;
+      authority?: PendingTransactionClearOverride;
     }> = [];
     const path = '/api/publisher/clear-job';
     const req = Readable.from([]);
@@ -49,18 +53,11 @@ describe('clear-job pending-transaction override authorization', () => {
       getStatus: async () => { throw new Error('route must not query the job'); },
       clearTerminalJob: async (
         jobId: string,
-        options?: {
-          pendingTransactionOverride?: {
-            requestedBy?: string;
-            requestedByNodeOperator?: true;
-          };
-        },
+        options?: TargetedLiftJobClearOptions,
       ) => {
         calls.push({
           jobId,
-          requestedBy: options?.pendingTransactionOverride?.requestedBy,
-          requestedByNodeOperator:
-            options?.pendingTransactionOverride?.requestedByNodeOperator,
+          authority: options?.pendingTransactionOverride,
         });
         return { outcome: 'cleared' as const };
       },
@@ -72,6 +69,14 @@ describe('clear-job pending-transaction override authorization', () => {
         token === requestToken ? caller.tokenAgentAddress : undefined
       ),
     } as unknown as RequestContext['agent'];
+    const validTokens = new Set(requestToken ? [requestToken] : []);
+    const authEnabled = caller.authEnabled ?? true;
+    const requestPrincipal = resolveRequestPrincipal({
+      authEnabled,
+      requestToken,
+      validTokens,
+      resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+    });
 
     const ctx = {
       req: req as RequestContext['req'],
@@ -80,9 +85,10 @@ describe('clear-job pending-transaction override authorization', () => {
       path,
       requestToken,
       requestAgentAddress: caller.requestAgentAddress,
+      requestPrincipal,
       agent,
-      config: { auth: { enabled: caller.authEnabled ?? true } },
-      validTokens: new Set(requestToken ? [requestToken] : []),
+      config: { auth: { enabled: authEnabled } },
+      validTokens,
       publisherControl,
     } as unknown as RequestContext;
 
@@ -104,8 +110,7 @@ describe('clear-job pending-transaction override authorization', () => {
     // about to delete. What matters here is that the caller's identity is not lost on the way.
     expect(calls).toEqual([{
       jobId: 'job-1',
-      requestedBy: OTHER,
-      requestedByNodeOperator: undefined,
+      authority: { kind: 'agent', requestedBy: OTHER },
     }]);
   });
 
@@ -122,8 +127,7 @@ describe('clear-job pending-transaction override authorization', () => {
     await run();
     expect(calls).toEqual([{
       jobId: 'job-1',
-      requestedBy: OWNER,
-      requestedByNodeOperator: undefined,
+      authority: { kind: 'agent', requestedBy: OWNER },
     }]);
   });
 
@@ -135,8 +139,7 @@ describe('clear-job pending-transaction override authorization', () => {
     await run();
     expect(calls).toEqual([{
       jobId: 'job-1',
-      requestedBy: undefined,
-      requestedByNodeOperator: true,
+      authority: { kind: 'nodeOperator' },
     }]);
   });
 
@@ -148,8 +151,7 @@ describe('clear-job pending-transaction override authorization', () => {
     await run();
     expect(calls).toEqual([{
       jobId: 'legacy-job',
-      requestedBy: undefined,
-      requestedByNodeOperator: true,
+      authority: { kind: 'nodeOperator' },
     }]);
   });
 
@@ -167,9 +169,52 @@ describe('clear-job pending-transaction override authorization', () => {
     // No override asked for: the value is absent entirely, not a false flag beside an identity.
     expect(calls).toEqual([{
       jobId: 'job-1',
-      requestedBy: undefined,
-      requestedByNodeOperator: undefined,
+      authority: undefined,
     }]);
+  });
+});
+
+describe('shared request-principal boundary', () => {
+  const AGENT_TOKEN = 'dkg_at_owner';
+  const NODE_TOKEN = 'node-admin-token';
+  const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
+  const validTokens = new Set([AGENT_TOKEN, NODE_TOKEN]);
+  const resolveAgentByToken = (token: string) => token === AGENT_TOKEN ? OWNER : undefined;
+
+  it('classifies a registered agent token as its agent principal', () => {
+    expect(resolveRequestPrincipal({
+      authEnabled: true,
+      requestToken: AGENT_TOKEN,
+      validTokens,
+      resolveAgentByToken,
+    })).toEqual({ kind: 'agent', agentAddress: OWNER });
+  });
+
+  it('classifies a valid non-agent token as the node operator', () => {
+    expect(resolveRequestPrincipal({
+      authEnabled: true,
+      requestToken: NODE_TOKEN,
+      validTokens,
+      resolveAgentByToken,
+    })).toEqual({ kind: 'nodeOperator' });
+  });
+
+  it('classifies a tokenless auth-disabled request as the node operator', () => {
+    expect(resolveRequestPrincipal({
+      authEnabled: false,
+      requestToken: undefined,
+      validTokens,
+      resolveAgentByToken,
+    })).toEqual({ kind: 'nodeOperator' });
+  });
+
+  it('fails closed for a request that has no authenticated principal', () => {
+    expect(resolveRequestPrincipal({
+      authEnabled: true,
+      requestToken: undefined,
+      validTokens,
+      resolveAgentByToken,
+    })).toEqual({ kind: 'anonymous' });
   });
 });
 

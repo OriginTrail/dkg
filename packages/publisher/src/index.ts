@@ -302,7 +302,7 @@ export {
 export {
   type PendingTransactionClearOverride,
   type TargetedLiftJobClearOptions,
-} from './async-lift-retry-disposition.js';
+} from './terminal-job-clear.js';
 export {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,

@@ -61,6 +61,12 @@ export interface NotificationSseEvent {
   type: string;
 }
 
+/** Authenticated request identity derived once before route dispatch. */
+export type RequestPrincipal =
+  | { readonly kind: 'agent'; readonly agentAddress: string }
+  | { readonly kind: 'nodeOperator' }
+  | { readonly kind: 'anonymous' };
+
 export interface RequestContext {
   req: IncomingMessage;
   res: ServerResponse;
@@ -110,6 +116,7 @@ export interface RequestContext {
   path: string;
   requestToken: string | undefined;
   requestAgentAddress: string;
+  requestPrincipal: RequestPrincipal;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */
   emitNotification?: (event: NotificationSseEvent) => void;

@@ -65,7 +65,12 @@ import {
   isSkolemizedUri,
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
-import type { AsyncPreparedPublishPayload, LiftJobRetryProjection, PersistedLiftJob } from '@origintrail-official/dkg-publisher';
+import type {
+  AsyncPreparedPublishPayload,
+  LiftJobRetryProjection,
+  PendingTransactionClearOverride,
+  PersistedLiftJob,
+} from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -504,6 +509,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     path,
     requestToken,
     requestAgentAddress,
+    requestPrincipal,
   } = ctx;
 
 
@@ -674,21 +680,32 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // query before `clearTerminalJob`'s safe-id guard ran, and decided ownership outside the claim
     // lock the clear then takes. Validation, the ownership decision and the delete now happen on
     // one record behind one boundary.
-    const isNodeOperatorCaller = config.auth?.enabled === false
-      || (
-        !!requestToken
-        && validTokens.has(requestToken)
-        && !agent.resolveAgentByToken(requestToken)
-      );
+    let pendingTransactionOverride: PendingTransactionClearOverride | undefined;
+    if (parsed.allowPendingTransaction === true) {
+      switch (requestPrincipal.kind) {
+        case 'agent':
+          pendingTransactionOverride = {
+            kind: 'agent',
+            requestedBy: requestPrincipal.agentAddress,
+          };
+          break;
+        case 'nodeOperator':
+          pendingTransactionOverride = { kind: 'nodeOperator' };
+          break;
+        case 'anonymous':
+          break;
+        default: {
+          const unhandledPrincipal: never = requestPrincipal;
+          return unhandledPrincipal;
+        }
+      }
+    }
     return respondTerminalClearOutcome(
       res,
-      await publisherControl.clearTerminalJob(jobId, parsed.allowPendingTransaction === true
-        ? {
-          pendingTransactionOverride: isNodeOperatorCaller
-            ? { requestedByNodeOperator: true }
-            : { requestedBy: requestAgentAddress },
-        }
-        : {}),
+      await publisherControl.clearTerminalJob(
+        jobId,
+        pendingTransactionOverride ? { pendingTransactionOverride } : {},
+      ),
       jobId,
     );
   }

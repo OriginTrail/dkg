@@ -10,6 +10,7 @@ import type {
   LiftJobLegacyEvidenceFreeBroadcast,
   LiftJobPersistedFailure,
   PersistedLiftJob,
+  PendingTransactionClearOverride,
   TripleStoreAsyncLiftPublisher,
 } from '../../src/index.js';
 import type { LiftJobTransaction } from '../../src/async-lift-claim-session.js';
@@ -23,6 +24,24 @@ declare const publisher: TripleStoreAsyncLiftPublisher;
 declare const accepted: LiftJobAccepted;
 declare const legacyClaimedWithoutFence: LiftJobClaimed;
 declare const activeClaim: ActiveLiftJobClaim;
+
+const agentClearAuthority: PendingTransactionClearOverride = {
+  kind: 'agent',
+  requestedBy: 'did:dkg:agent:owner',
+};
+const nodeOperatorClearAuthority: PendingTransactionClearOverride = { kind: 'nodeOperator' };
+void agentClearAuthority;
+void nodeOperatorClearAuthority;
+// @ts-expect-error A pending-transaction override must name an authority variant.
+const emptyClearAuthority: PendingTransactionClearOverride = {};
+const contradictoryClearAuthority: PendingTransactionClearOverride = {
+  kind: 'agent',
+  requestedBy: 'did:dkg:agent:owner',
+  // @ts-expect-error Agent and node-operator authority cannot coexist in one request.
+  requestedByNodeOperator: true,
+};
+void emptyClearAuthority;
+void contradictoryClearAuthority;
 
 const concreteCapability: ClaimSessionAsyncLiftPublisher = publisher;
 void concreteCapability;

@@ -17,7 +17,6 @@ import type {
 } from './lift-job.js';
 import type {
   LiftJobRetryProjection,
-  TargetedLiftJobClearOptions,
 } from './async-lift-retry-disposition.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
@@ -25,7 +24,7 @@ import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.j
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import type { PublishTransactionObservation } from '@origintrail-official/dkg-chain';
-import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
+import type { TargetedLiftJobClearOptions, TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
   readonly code = 'ASYNC_LIFT_JOB_CONFLICT';

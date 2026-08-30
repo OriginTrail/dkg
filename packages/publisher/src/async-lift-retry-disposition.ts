@@ -31,6 +31,7 @@ import {
 import { knowledgeAssetAgentAddressesEqual } from '@origintrail-official/dkg-core';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
 import type { LiftJobFailureCode, PersistedLiftJob } from './lift-job.js';
+import type { TargetedLiftJobClearOptions } from './terminal-job-clear.js';
 // Type-only, and erased at emit — the reverse edge (types importing `LiftJobRetryProjection`
 // from here) is type-only too, so nothing circular survives into the JavaScript. The verdict
 // vocabulary stays defined once, beside the resolver contract that produces it.
@@ -266,23 +267,6 @@ export function isClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
 }
 
 /**
- * Authenticated authority accompanying an explicit pending-transaction clear request.
- *
- * `requestedBy` preserves the agent-scoped, owner-only lane. The node-operator bit is set only
- * by the daemon after it distinguishes the node token from an agent token; it deliberately does
- * not impersonate the default agent, because an operator may clear any job on the node (including
- * records created before admission ownership was persisted).
- */
-export interface PendingTransactionClearOverride {
-  readonly requestedBy?: string;
-  readonly requestedByNodeOperator?: true;
-}
-
-export interface TargetedLiftJobClearOptions {
-  readonly pendingTransactionOverride?: PendingTransactionClearOverride;
-}
-
-/**
  * Can THIS node settle a held job itself — the CAPABILITY half of "does an automatic exit exist"?
  *
  * {@link hasAutomaticRecoveryExit} answers from the record alone (is there a question the chain
@@ -418,10 +402,17 @@ export function isTargetedClearableLiftJob(
   // Authority and state eligibility are decided together, under the same job lock. An agent may
   // accept risk only for the lane it admitted; a node operator owns the queue and may accept it
   // for any job, including an unstamped pre-upgrade record.
-  if (
-    override.requestedByNodeOperator !== true
-    && !ownsLiftJobAdmissionLane(job, override.requestedBy)
-  ) return false;
+  switch (override.kind) {
+    case 'agent':
+      if (!ownsLiftJobAdmissionLane(job, override.requestedBy)) return false;
+      break;
+    case 'nodeOperator':
+      break;
+    default: {
+      const unhandledAuthority: never = override;
+      return unhandledAuthority;
+    }
+  }
   if (job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') return true;
   return isTerminalLiftJobState(job.status)
     && isFailedJob(job)

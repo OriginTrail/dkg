@@ -13,3 +13,17 @@ export type TerminalJobClearOutcome =
   | { readonly outcome: 'cleared' }
   | { readonly outcome: 'already_absent' }
   | { readonly outcome: 'rejected'; readonly reason: 'nonterminal' | 'unknown' | 'malformed' };
+
+/**
+ * Authenticated authority for the destructive, exact-job pending-transaction override.
+ *
+ * The variants are deliberately mutually exclusive: an agent accepts risk only for its own
+ * admission lane, while the node operator owns the queue and needs no agent identity.
+ */
+export type PendingTransactionClearOverride =
+  | { readonly kind: 'agent'; readonly requestedBy: string }
+  | { readonly kind: 'nodeOperator' };
+
+export interface TargetedLiftJobClearOptions {
+  readonly pendingTransactionOverride?: PendingTransactionClearOverride;
+}
