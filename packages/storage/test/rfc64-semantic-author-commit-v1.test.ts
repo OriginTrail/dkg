@@ -1,6 +1,10 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  ASSERTION_SEAL_PREDICATES,
   MemoryLayer,
   contextGraphLayerUri,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
@@ -20,6 +24,7 @@ import {
 
 import {
   OxigraphStore,
+  OxigraphWorkerStore,
   Rfc64SemanticAuthorCommitErrorV1,
   SyncSemanticStoreV1,
   compileRfc64SemanticAuthorCommitV1,
@@ -276,6 +281,12 @@ describe('RFC-64 typed semantic author commit v1', () => {
     expect(() => compileRfc64SemanticAuthorCommitV1(commitInput({
       nextCurrentHead: record('CurrentAuthorCatalogRefV1', {
         ...NEXT_HEAD.value,
+        catalogHeadDigest: EXPECTED_HEAD.value.catalogHeadDigest,
+      }),
+    }))).toThrow(/exactly one version/u);
+    expect(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      nextCurrentHead: record('CurrentAuthorCatalogRefV1', {
+        ...NEXT_HEAD.value,
         catalogVersion: '6',
       }),
     }))).toThrow(/exactly one version/u);
@@ -364,8 +375,140 @@ describe('RFC-64 typed semantic author commit v1', () => {
         generation: '10',
       }),
     })), 'rfc64-semantic-author-commit-generation');
+
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      nextCurrentHead: {
+        ...NEXT_HEAD,
+        value: {
+          ...NEXT_HEAD.value,
+          catalogVersion: 5,
+        },
+      } as unknown as CurrentHeadRecordForTest,
+    })), 'rfc64-semantic-author-commit-schema');
+  });
+
+  it('rejects a same-digest predecessor whose stored version differs', async () => {
+    const store = new OxigraphStore();
+    try {
+      const unexpectedHead = record('CurrentAuthorCatalogRefV1', {
+        ...EXPECTED_HEAD.value,
+        catalogVersion: '3',
+      });
+      await store.insert([
+        ...semanticQuads(unexpectedHead),
+        ...semanticQuads(EXPECTED_SUBGRAPH_MUTATION),
+        ...semanticQuads(EXPECTED_CG_MUTATION),
+        ...semanticQuads(EXPECTED_APPLIED_SET),
+      ]);
+      const compiled = compileRfc64SemanticAuthorCommitV1(commitInput());
+      await expect(store.rfc64AuthorCommitCasV1!(compiled)).resolves.toBe('conflict');
+      const gateway = new SyncSemanticStoreV1(store);
+      const current = await gateway.read({ coordinate: coordinateOf(unexpectedHead) }, {
+        timeoutMs: 1_000,
+      });
+      expect(current.kind).toBe('record');
+      if (current.kind === 'record') expect(current.decoded.record).toEqual(unexpectedHead);
+      expect(await store.countQuads(PROJECTION_GRAPH)).toBe(0);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('rejects different-author, incomplete, and altered canonical author seals', () => {
+    const otherAuthor = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
+    const otherCoordinate = Object.freeze({
+      ...SEAL_COORDINATE,
+      authorAddress: otherAuthor,
+    }) as CanonicalGraphScopedAuthorSealCoordinateV1;
+    const otherSeal = Object.freeze({
+      ...AUTHOR_SEAL,
+      authorAddress: otherAuthor,
+      kaUal: `did:dkg:${NETWORK}/${otherAuthor}/${KA_NUMBER}`,
+      reservedKaId: ((BigInt(otherAuthor) << 96n) | BigInt(KA_NUMBER)).toString(),
+    }) as CanonicalGraphScopedAuthorSealV1;
+    const otherPlacement = deriveCanonicalGraphScopedAuthorSealPlacementV1(otherCoordinate);
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      authorSealGraph: otherPlacement.metaGraph,
+      authorSealSubject: otherPlacement.subject,
+      authorSealQuads: projectCanonicalGraphScopedAuthorSealRowsV1(otherSeal, otherCoordinate),
+    })), 'rfc64-semantic-author-commit-scope');
+
+    const canonicalRows = [...commitInput().authorSealQuads];
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      authorSealQuads: canonicalRows.slice(1),
+    })), 'rfc64-semantic-author-commit-schema');
+    expectErrorCode(() => compileRfc64SemanticAuthorCommitV1(commitInput({
+      authorSealQuads: canonicalRows.map((row) => row.predicate
+        === ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT
+        ? { ...row, object: `"${'f'.repeat(64)}"` }
+        : row),
+    })), 'rfc64-semantic-author-commit-schema');
+  });
+
+  it('persists exactly one complete semantic winner across competing worker commits and reopen', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rfc64-semantic-author-worker-'));
+    const path = join(dir, 'store.nq');
+    const competingHead = record('CurrentAuthorCatalogRefV1', {
+      ...NEXT_HEAD.value,
+      catalogHeadDigest: DIGEST_C,
+    });
+    const competingAppliedSet = record('AppliedSubgraphSetRefV1', {
+      ...NEXT_APPLIED_SET.value,
+      appliedDirectoryRootDigest: DIGEST_A,
+    });
+    const winnerA = compileRfc64SemanticAuthorCommitV1(commitInput({
+      sharedProjectionQuads: [quad('urn:test:winner', 'urn:test:value', '"a"', PROJECTION_GRAPH)],
+    }));
+    const winnerB = compileRfc64SemanticAuthorCommitV1(commitInput({
+      sharedProjectionQuads: [quad('urn:test:winner', 'urn:test:value', '"b"', PROJECTION_GRAPH)],
+      nextCurrentHead: competingHead,
+      nextAppliedSet: competingAppliedSet,
+    }));
+    let store: OxigraphWorkerStore | null = new OxigraphWorkerStore(path);
+    try {
+      await store.insert([
+        ...semanticQuads(EXPECTED_HEAD),
+        ...semanticQuads(EXPECTED_SUBGRAPH_MUTATION),
+        ...semanticQuads(EXPECTED_CG_MUTATION),
+        ...semanticQuads(EXPECTED_APPLIED_SET),
+      ]);
+      const outcomes = await Promise.all([
+        store.rfc64AuthorCommitCasV1!(winnerA),
+        store.rfc64AuthorCommitCasV1!(winnerB),
+      ]);
+      expect([...outcomes].sort()).toEqual(['committed', 'conflict']);
+      const winnerIndex = outcomes[0] === 'committed' ? 0 : 1;
+      const expectedRecords = winnerIndex === 0
+        ? [NEXT_HEAD, NEXT_SUBGRAPH_MUTATION, NEXT_CG_MUTATION, NEXT_APPLIED_SET]
+        : [competingHead, NEXT_SUBGRAPH_MUTATION, NEXT_CG_MUTATION, competingAppliedSet];
+      await store.close();
+      store = new OxigraphWorkerStore(path);
+      const gateway = new SyncSemanticStoreV1(store);
+      for (const expected of expectedRecords) {
+        const result = await gateway.read({ coordinate: coordinateOf(expected) }, {
+          timeoutMs: 2_000,
+        });
+        expect(result.kind, expected.recordType).toBe('record');
+        if (result.kind === 'record') expect(result.decoded.record).toEqual(expected);
+      }
+      const projection = await store.query(
+        `SELECT ?o WHERE { GRAPH <${PROJECTION_GRAPH}> { <urn:test:winner> <urn:test:value> ?o } }`,
+      );
+      expect(projection.type).toBe('bindings');
+      if (projection.type === 'bindings') {
+        expect(projection.bindings).toEqual([{ o: winnerIndex === 0 ? '"a"' : '"b"' }]);
+      }
+    } finally {
+      await store?.close().catch(() => {});
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
+
+type CurrentHeadRecordForTest = Extract<
+  Rfc64SemanticRecordV1,
+  { readonly recordType: 'CurrentAuthorCatalogRefV1' }
+>;
 
 function commitInput(
   overrides: Partial<Rfc64SemanticAuthorCommitInputV1> = {},

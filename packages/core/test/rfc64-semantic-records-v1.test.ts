@@ -127,6 +127,10 @@ describe('RFC-64 semantic record RDF codec v1', () => {
       kind: 'named-node',
       value: 'urn:test:node',
     });
+    expect(parseRenderedRdfStoreObjectV1('<urn:test:node>')).toEqual({
+      kind: 'named-node',
+      value: 'urn:test:node',
+    });
     expect(parseRenderedRdfStoreObjectV1('"plain"')).toEqual({
       kind: 'literal',
       value: 'plain',

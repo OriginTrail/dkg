@@ -92,6 +92,10 @@ export function parseRenderedRdfStoreObjectV1(input: unknown): TypedRdfStoreObje
     );
   }
   if (isSafeIri(input)) return typedRdfNamedNodeV1(input);
+  if (input.startsWith('<') && input.endsWith('>')) {
+    const iri = input.slice(1, -1);
+    if (isSafeIri(iri)) return typedRdfNamedNodeV1(iri);
+  }
   throw new TypedRdfStoreRowErrorV1('row-term', 'rendered RDF object is not an exact RDF term');
 }
 

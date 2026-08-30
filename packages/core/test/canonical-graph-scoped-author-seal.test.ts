@@ -13,6 +13,7 @@ import {
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   parseCanonicalGraphScopedAuthorSealV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
@@ -260,6 +261,17 @@ describe('CanonicalGraphScopedAuthorSealV1 typed store inverse', () => {
       ...base,
       object: { kind: 'literal', value: AUTHOR, datatypeIri: `${XSD}string` },
     }).object).toBe(`"${AUTHOR}"`);
+  });
+
+  it('owns rendered storage-row parsing and exact seal projection in core', () => {
+    const rendered = projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE);
+    const decoded = decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(rendered, COORDINATE);
+    expect(decoded.payload).toEqual(PAYLOAD);
+    expect(decoded.rows).toEqual(rendered);
+    expect(() => decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      rendered.slice(1),
+      COORDINATE,
+    )).toThrow(/canonical-seal-row-cardinality/u);
   });
 
   it('rejects missing, duplicate, unknown, legacy, misplaced, and noncanonical rows', () => {
@@ -544,6 +556,7 @@ describe('CanonicalGraphScopedAuthorSealV1 public package barrel', () => {
     expect(typeof coreBarrel.computeCanonicalGraphScopedAuthorSealDigestV1).toBe('function');
     expect(typeof coreBarrel.projectCanonicalGraphScopedAuthorSealRowsV1).toBe('function');
     expect(typeof coreBarrel.decodeCanonicalGraphScopedAuthorSealRowsV1).toBe('function');
+    expect(typeof coreBarrel.decodeCanonicalGraphScopedAuthorSealRenderedRowsV1).toBe('function');
     expect(typeof coreBarrel.CanonicalGraphScopedAuthorSealError).toBe('function');
     expect(coreBarrel.MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1)
       .toBe(MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1);

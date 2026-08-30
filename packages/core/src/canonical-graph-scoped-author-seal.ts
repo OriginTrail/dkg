@@ -54,6 +54,7 @@ import {
 } from './xsd-date-time.js';
 import {
   TypedRdfStoreRowErrorV1,
+  parseRenderedRdfStoreObjectV1,
   renderTypedRdfStoreRowV1,
   snapshotDenseTypedRdfStoreRowsV1,
   typedRdfLiteralV1,
@@ -746,6 +747,45 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
     placement,
     rows: projectedRows,
   };
+}
+
+/**
+ * Decode the flattened RDF rows returned by storage adapters through the same
+ * strict typed-row boundary as transferred catalog seals. This keeps RDF-term
+ * parsing, canonical projection, coordinate binding, and exact row-set checks
+ * in the protocol codec instead of duplicating them in storage callers.
+ */
+export function decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+  rows: readonly CanonicalGraphScopedAuthorSealRowV1[],
+  coordinate: CanonicalGraphScopedAuthorSealCoordinateV1,
+): DecodedCanonicalGraphScopedAuthorSealRowsV1 {
+  if (!Array.isArray(rows)) {
+    fail('canonical-seal-row-schema', 'rendered author-seal rows must be an array');
+  }
+  let typedRows: readonly CanonicalAuthorSealStoreRowV1[];
+  try {
+    typedRows = Object.freeze(rows.map((row, index) => {
+      const current = snapshotExactDataRecord(
+        row,
+        ['graph', 'object', 'predicate', 'subject'],
+        `rendered author-seal row ${index}`,
+      );
+      return Object.freeze({
+        graphIri: current.graph,
+        object: parseRenderedRdfStoreObjectV1(current.object),
+        predicateIri: current.predicate,
+        subjectIri: current.subject,
+      }) as CanonicalAuthorSealStoreRowV1;
+    }));
+  } catch (cause) {
+    if (cause instanceof CanonicalGraphScopedAuthorSealError) throw cause;
+    const translated = translateTypedAuthorSealRowFailure(
+      cause,
+      'invalid rendered canonical author-seal row collection',
+    );
+    fail(translated.code, translated.message, cause);
+  }
+  return decodeCanonicalGraphScopedAuthorSealRowsV1(typedRows, coordinate);
 }
 
 function translateTypedAuthorSealRowFailure(

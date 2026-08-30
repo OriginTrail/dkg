@@ -47,6 +47,7 @@ function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasSemanticInputV1 {
     subject: `urn:test:changelog:rfc64:${role}`,
     predicate: 'urn:test:changelog:rfc64:value',
     expectedObject: null,
+    expectedQuads: null,
     quads: [q(`urn:test:changelog:rfc64:${role}`, stateGraph, `"${role}"`)],
   });
   return {
@@ -67,6 +68,7 @@ function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasSemanticInputV1 {
       subject: 'urn:test:changelog:rfc64:author',
       predicate: 'urn:test:changelog:rfc64:current-head',
       expectedObject: null,
+      expectedQuads: null,
       quads: [{
         subject: 'urn:test:changelog:rfc64:author',
         predicate: 'urn:test:changelog:rfc64:current-head',
