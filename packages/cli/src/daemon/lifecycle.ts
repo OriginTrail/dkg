@@ -753,21 +753,35 @@ export function createChainDiscoveryScanRunner(input: {
   return async () => {
     if (inFlight) return;
     inFlight = true;
+    let scanMode: ReturnType<typeof chainDiscoveryScanOptions>['mode'] | undefined;
     try {
-      const run = runs++;
+      const options = chainDiscoveryScanOptions({
+        run: runs,
+        watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
+        pageBudget: input.pageBudget,
+        fullScanEvery: input.fullScanEvery,
+      });
+      scanMode = options.mode;
       const found = await input.agent.discoverContextGraphsFromChain(
-        chainDiscoveryScanOptions({
-          run,
-          watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
-          pageBudget: input.pageBudget,
-          fullScanEvery: input.fullScanEvery,
-        }),
+        options,
       );
+      // A run number describes a settled scan, not an invocation. In particular, do not
+      // consume run 0 when the startup recovery scan (or its watermark probe) fails: the
+      // next scheduled invocation must retry seedFull instead of going incremental for ~24h.
+      runs += 1;
       if (found > 0) {
         input.log(`Chain scan: discovered ${found} new context graph(s)`);
       }
-    } catch {
-      /* non-critical */
+    } catch (error) {
+      // Discovery remains non-critical to daemon availability, but a failed full scan is
+      // operationally significant. Name the stage/mode so the retry is visible rather than
+      // leaving an unexplained discovery gap.
+      const stage = scanMode ? `${scanMode} scan` : 'watermark probe';
+      try {
+        input.log(`Chain scan: ${stage} failed: ${error instanceof Error ? error.message : String(error)}`);
+      } catch {
+        /* logging must not turn a non-critical scan failure into a daemon failure */
+      }
     } finally {
       inFlight = false;
     }

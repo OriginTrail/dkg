@@ -109,7 +109,7 @@ describe('chainDiscoveryScanOptions', () => {
 
     await expect(runner()).resolves.toBeUndefined();
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
-    expect(log).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('Chain scan: seedFull scan failed: chain RPC unavailable');
 
     await runner();
 
@@ -121,22 +121,16 @@ describe('chainDiscoveryScanOptions', () => {
     // counts alone passes identically whether the retry recovers the missed
     // work or silently degrades (PR #2132 review).
     //
-    // `const run = runs++` sits at lifecycle.ts:740, BEFORE either await, so a
-    // rejection still consumes the run slot. Call 1 is run 0 with the
-    // watermark seeded => the `seedFull` startup-recovery scan. Call 2 is
-    // run 1, and 1 % CHAIN_FULL_SCAN_EVERY (48) !== 0, so it is `incremental`:
-    // the failed full-history scan is NOT re-attempted. The next `seedFull` is
-    // run 48, roughly 24h out at the 30-minute cadence.
-    //
-    // This documents current behaviour rather than endorsing it — whether the
-    // consumed run slot is a defect or intended backoff is tracked separately.
+    // A rejected scan does not consume run 0. The next scheduled invocation
+    // retries the startup-recovery seedFull instead of silently downgrading to
+    // incremental until the next full-scan cadence roughly 24 hours later.
     expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(1, {
       mode: 'seedFull',
       throwOnChainScanFailure: true,
     });
     expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
-      mode: 'incremental',
-      pageBudget: 30,
+      mode: 'seedFull',
+      throwOnChainScanFailure: true,
     });
   });
 
@@ -154,22 +148,23 @@ describe('chainDiscoveryScanOptions', () => {
           async () => 0,
         ),
     };
-    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+    const log = vi.fn();
+    const runner = createChainDiscoveryScanRunner({ agent, log });
 
     await expect(runner()).resolves.toBeUndefined();
     expect(agent.discoverContextGraphsFromChain).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('Chain scan: watermark probe failed: watermark read failed');
 
     await runner();
 
     expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
 
-    // The probe rejection also consumed run 0, so the one scan that does reach
-    // the agent is run 1 => `incremental`, not the `seedFull` a fresh startup
-    // would have issued. Same run-slot accounting as the test above.
+    // The probe rejection does not consume run 0, so the first scan that reaches
+    // the agent still performs startup recovery.
     expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(1, {
-      mode: 'incremental',
-      pageBudget: 30,
+      mode: 'seedFull',
+      throwOnChainScanFailure: true,
     });
   });
 });
