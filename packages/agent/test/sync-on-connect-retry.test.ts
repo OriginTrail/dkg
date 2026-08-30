@@ -1194,6 +1194,55 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
     }
   });
 
+  it('records mixed progress-and-failure backoff on the peer:update retry path', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PeerUpdateMixedBackoff',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      const remotePeer = freshPeerIdString();
+      allowAllNetworkAdmission(agent);
+      (agent as any).skippedNoSyncPeers.add(remotePeer);
+      (agent as any).isPeerConnectedForSyncBackoff = () => true;
+      (agent as any).getSyncReconcilerProbe = async () => ({
+        protocolsKey: PROTOCOL_SYNC,
+        connectionKey: 'peer-update-test',
+      });
+      (agent as any).trySyncFromPeer = async (
+        _peerId: string,
+        onSyncAccounting?: (outcome: {
+          fresh: boolean;
+          progress?: boolean;
+          retryBackoff?: boolean;
+        }) => void,
+      ) => {
+        onSyncAccounting?.({ fresh: false, progress: true, retryBackoff: true });
+        return 'synced';
+      };
+
+      agent.node.libp2p.dispatchEvent(new CustomEvent('peer:update', {
+        detail: {
+          peer: {
+            id: { toString: () => remotePeer },
+            protocols: [PROTOCOL_SYNC],
+          },
+        },
+      } as any));
+
+      for (let i = 0; i < 50 && !(agent as any).syncReconcilerBackoff.has(remotePeer); i++) {
+        await new Promise(r => setTimeout(r, 10));
+      }
+
+      const backoff = (agent as any).syncReconcilerBackoff.get(remotePeer);
+      expect(backoff?.failures).toBe(1);
+      expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not retry when the updated protocol list still lacks PROTOCOL_SYNC', async () => {
     const agent = await DKGAgent.create({
       name: 'PeerUpdateNoRetry',

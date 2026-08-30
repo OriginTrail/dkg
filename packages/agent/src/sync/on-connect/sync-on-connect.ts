@@ -370,7 +370,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
           && !sawExplicitIncompleteSharedResult
           && cleanDurableRound,
         progress: madeProgress,
-        retryBackoff: sawBackoffWorthyFailure,
+        ...(sawBackoffWorthyFailure ? { retryBackoff: true } : {}),
       });
     }
     return 'synced';

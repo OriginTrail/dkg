@@ -5388,7 +5388,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.skippedNoSyncPeers.delete(peerId);
       this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
       setTimeout(() => {
-        this.trySyncFromPeer(peerId).catch((err: unknown) => {
+        void (async () => {
+          const probe = await this.getSyncReconcilerProbe(peerId);
+          await this.attemptSyncFromPeerWithReconcilerAccounting(
+            peerId,
+            probe,
+            'on-connect',
+          );
+        })().catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
         });

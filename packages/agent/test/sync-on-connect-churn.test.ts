@@ -973,13 +973,19 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({ targets: [] });
+    (agent as any).syncReconcilerBackoff.set(PEER_A, {
+      failures: 2,
+      nextRetryAt: Date.now() - 1,
+      protocolsKey: null,
+      connectionKey: null,
+    });
 
     await (agent as any).runSyncFromPeerOnConnect(PEER_A, () => undefined);
 
     expect((agent as any).lastSyncProgressAt.get(PEER_A)).toBeGreaterThan(0);
     expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
     const backoff = (agent as any).syncReconcilerBackoff.get(PEER_A);
-    expect(backoff?.failures).toBe(1);
+    expect(backoff?.failures).toBe(3);
     expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
 
     (agent as any).catchupOnConnectAt.set(
