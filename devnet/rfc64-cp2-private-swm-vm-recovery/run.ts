@@ -298,19 +298,27 @@ async function execute(): Promise<void> {
     exact(synchronization.activatedTripleCount, ASSET_COUNT * 2, 'private SWM triple count');
     exact(synchronization.appliedHeadStatus, 'applied', 'private applied head status');
 
-    let swmRecovered = 0;
+    let swmActivated = 0;
+    let swmRetired = 0;
     let vmRecovered = 0;
     const recoveredChainOrdinals = new Set<number>();
     for (const [index, value] of rows.entries()) {
       const row = record(value, `private row ${index}`);
+      exact(row.activatedTripleCount, 2, `private SWM ${index} activated triple count`);
+      swmActivated += 1;
       const semantic = output(await receiver.request(
         'semanticGraphReadback',
         `private-semantic-${index}`,
         'operation-completed',
         { swmGraph: requiredString(row.swmGraph, `private row ${index} graph`) },
       ), `private semantic ${index}`);
-      exact(semantic.projectionNQuads, PROJECTION_NQUADS, `private SWM ${index}`);
-      swmRecovered += 1;
+      // The catalog activation evidence above proves the exact SWM payload was
+      // authenticated and materialized. Because this same asset is finalized
+      // on chain, the receiver then deliberately retires the duplicate SWM
+      // twin after committing the exact VM graph.
+      exact(semantic.activatedQuadCount, 0, `private SWM ${index} retired triple count`);
+      exact(semantic.projectionNQuads, '\n', `private SWM ${index} retired projection`);
+      swmRetired += 1;
 
       const kaId = requiredString(row.kaId, `private row ${index} KA ID`);
       const kaNumber = BigInt(kaId) & ((1n << 96n) - 1n);
@@ -382,7 +390,12 @@ async function execute(): Promise<void> {
         finalInventoryRowCount: ASSET_COUNT,
       },
       chainExpectedAssets: ASSET_COUNT,
-      swm: { expected: ASSET_COUNT, recovered: swmRecovered },
+      swm: {
+        expectedActivated: ASSET_COUNT,
+        activated: swmActivated,
+        expectedRetiredAfterVm: ASSET_COUNT,
+        retiredAfterVm: swmRetired,
+      },
       vm: { expected: ASSET_COUNT, recovered: vmRecovered },
       processBoundary: {
         authorExitCode: authorStopped.exit.code,
@@ -391,7 +404,7 @@ async function execute(): Promise<void> {
       policyDigest: POLICY_DIGEST,
       repository: { testedHeadCommit, trackedSourceClean: true },
       runtimeManifestDigest: launch.manifest.manifestDigest,
-      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v1',
+      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v2',
       status: 'PASS',
     });
     const receipt = atomicWriteExactBytes(
@@ -399,8 +412,9 @@ async function execute(): Promise<void> {
       new TextEncoder().encode(canonicalDocument(artifact as unknown as CanonicalValue)),
     );
     process.stdout.write(
-      `[rfc64-private-cp2] PASS swm=${swmRecovered}/${ASSET_COUNT} `
-      + `vm=${vmRecovered}/${ASSET_COUNT} artifact=${ARTIFACT} sha256=${receipt.sha256}\n`,
+      `[rfc64-private-cp2] PASS swm-activated=${swmActivated}/${ASSET_COUNT} `
+      + `swm-retired=${swmRetired}/${ASSET_COUNT} vm=${vmRecovered}/${ASSET_COUNT} `
+      + `artifact=${ARTIFACT} sha256=${receipt.sha256}\n`,
     );
     operationFailed = false;
   } catch (error) {
