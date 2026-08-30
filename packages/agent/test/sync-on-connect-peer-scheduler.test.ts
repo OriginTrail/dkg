@@ -47,6 +47,45 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(finish).toHaveBeenCalledOnce();
   });
 
+  it('does not allocate a peer-job runner when cleared before the timer drains', () => {
+    const finish = vi.fn();
+    const createJob = vi.fn(() => ({
+      runOrdinary: async () => undefined,
+      runSelected: async () => undefined,
+      finish,
+    }));
+    const scheduler = new SyncOnConnectPeerScheduler<string>({ createJob });
+
+    expect(scheduler.enqueueOrdinary(PEER, () => undefined, 60_000)).toBe(true);
+    scheduler.clear(PEER);
+
+    expect(scheduler.size).toBe(0);
+    expect(createJob).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
+  });
+
+  it('finalizes an active peer job once when it is cleared during a phase', async () => {
+    const ordinary = deferred();
+    const ordinaryStarted = deferred();
+    const finish = vi.fn();
+    const scheduler = createScheduler({
+      runOrdinary: async () => {
+        ordinaryStarted.resolve();
+        await ordinary.promise;
+      },
+      runSelected: async () => undefined,
+      finish,
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
+    await ordinaryStarted.promise;
+    scheduler.clear(PEER);
+    ordinary.resolve();
+
+    await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
+    expect(scheduler.size).toBe(0);
+  });
+
   it('retains an exact upgrade during ordinary work without reopening ordinary work', async () => {
     const ordinary = deferred();
     const selected = deferred();

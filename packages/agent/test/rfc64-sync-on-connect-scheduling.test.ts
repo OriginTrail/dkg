@@ -492,6 +492,83 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(true);
   });
 
+  it('inherits peer freshness from a successful ordinary phase after selected recovery', async () => {
+    const agent = await createUnstartedAgent('Rfc64SelectedThenOrdinaryFreshness');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.trySelectedSwmRetryFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: false,
+        progress: true,
+      });
+      return 'synced';
+    };
+    agent.tryOrdinarySyncFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: false,
+      });
+      return 'synced';
+    };
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runSelected();
+    await runner.runOrdinary();
+    runner.finish();
+
+    expect(agent.lastSuccessfulSyncAt.get(PEER_A)).toBeGreaterThan(0);
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
+  });
+
+  it('starts a fresh backoff generation when a late selected retry follows ordinary clear', async () => {
+    const agent = await createUnstartedAgent('Rfc64OrdinaryClearThenSelectedRetry');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.syncReconcilerBackoff.set(PEER_A, {
+      failures: 4,
+      nextRetryAt: Date.now() - 1,
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.trySyncFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: false,
+      });
+      return 'synced';
+    };
+    agent.trySelectedSwmRetryFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'retry',
+        fresh: false,
+        progress: false,
+      });
+      return 'synced';
+    };
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runOrdinary();
+    await runner.runSelected();
+    runner.finish();
+
+    expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+  });
+
   it('adds owed ordinary work to the same job while exact recovery is running', async () => {
     const agent = await createUnstartedAgent('Rfc64OrdinaryUpgradeDuringExact');
     allowAllNetworkAdmission(agent);

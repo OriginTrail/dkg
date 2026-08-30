@@ -20,7 +20,7 @@ interface PeerJob<SelectedPlan> {
   pendingSelected: SelectedLane<SelectedPlan> | null;
   pendingOrdinary: OrdinaryLane | null;
   ordinaryStarted: boolean;
-  readonly runner: SyncOnConnectPeerJobRunner<SelectedPlan>;
+  runner: SyncOnConnectPeerJobRunner<SelectedPlan> | null;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -114,7 +114,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       pendingSelected: lane.kind === 'selected' ? lane : null,
       pendingOrdinary: lane.kind === 'ordinary' ? lane : null,
       ordinaryStarted: false,
-      runner: this.callbacks.createJob(remotePeer),
+      runner: null,
       timer: null,
     };
     this.jobs.set(remotePeer, job);
@@ -125,15 +125,16 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
   }
 
   private async drain(remotePeer: string, job: PeerJob<SelectedPlan>): Promise<void> {
+    const runner = job.runner ??= this.callbacks.createJob(remotePeer);
     try {
       while (this.jobs.get(remotePeer) === job) {
         const lane = this.claimNext(job);
         if (lane === null) return;
         try {
           if (lane.kind === 'selected') {
-            await job.runner.runSelected(lane.recoveryPlan);
+            await runner.runSelected(lane.recoveryPlan);
           } else {
-            await job.runner.runOrdinary();
+            await runner.runOrdinary();
           }
         } catch (error: unknown) {
           // Error ownership belongs to the lane that actually failed. A later
@@ -146,7 +147,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       }
     } finally {
       try {
-        job.runner.finish();
+        runner.finish();
       } finally {
         if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
       }

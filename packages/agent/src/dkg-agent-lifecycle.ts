@@ -1434,7 +1434,7 @@ function combineSyncOnConnectPeerJobAccounting(
   if (outcomes.length === 0) return null;
   let disposition: SyncOnConnectPeerOutcome['reconcilerDisposition'] | undefined;
   let progress = false;
-  let allFresh = true;
+  let anyFresh = false;
   let effectiveClearBeforeRetry = false;
   let resetBackoffBeforeRetry = false;
   // Reduce in phase order. A retry/defer owner cannot be erased by a later
@@ -1442,7 +1442,7 @@ function combineSyncOnConnectPeerJobAccounting(
   // new backoff generation instead of inheriting stale failures.
   for (const outcome of outcomes) {
     progress ||= outcome.progress;
-    allFresh &&= outcome.fresh;
+    anyFresh ||= outcome.fresh;
     if (outcome.reconcilerDisposition === 'retry') {
       resetBackoffBeforeRetry ||= effectiveClearBeforeRetry;
       disposition = 'retry';
@@ -1461,7 +1461,7 @@ function combineSyncOnConnectPeerJobAccounting(
     return {
       outcome: {
         reconcilerDisposition: 'clear',
-        fresh: allFresh,
+        fresh: anyFresh,
         progress,
       },
       resetBackoffBeforeRetry: false,
