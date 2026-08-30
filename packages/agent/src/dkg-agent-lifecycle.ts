@@ -4889,13 +4889,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
     ) => Promise<SyncOnConnectOutcome | 'not-started'>,
   ): Promise<SyncReconcilerAttemptOutcome> {
-    const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
-    const lastProgress = this.lastSyncProgressAt.get(remotePeer);
     return executeSyncOnConnectAttempt(attempt, {
-      hasExternalAccountingEvidence: () => (
-        this.lastSuccessfulSyncAt.get(remotePeer) !== lastOk
-        || this.lastSyncProgressAt.get(remotePeer) !== lastProgress
-      ),
       recordAccounting: (outcome) => {
         this.applySyncOnConnectAccounting(remotePeer, outcome, probe);
       },

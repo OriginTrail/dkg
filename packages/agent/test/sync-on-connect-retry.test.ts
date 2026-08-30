@@ -2164,11 +2164,16 @@ describe('DKGAgent sync state lifecycle', () => {
       );
 
       const calls: string[] = [];
-      (agent as any).trySyncFromPeer = async (peerId: string) => {
+      (agent as any).trySyncFromPeer = async (
+        peerId: string,
+        onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
+      ) => {
         calls.push(peerId);
-        const progressAt = Math.max(Date.now(), ((agent as any).lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        (agent as any).lastSyncProgressAt.set(peerId, progressAt);
-        (agent as any).syncReconcilerBackoff.delete(peerId);
+        onSyncAccounting({
+          reconcilerDisposition: 'clear',
+          fresh: false,
+          progress: true,
+        });
         return 'synced';
       };
 

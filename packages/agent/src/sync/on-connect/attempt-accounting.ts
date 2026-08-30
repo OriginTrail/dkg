@@ -52,17 +52,12 @@ export async function classifySyncOnConnectAttempt(
   attempt: (
     onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
   ) => Promise<SyncOnConnectOutcome | 'not-started'>,
-  options: Readonly<{
-    /** Compatibility guard for attempts that applied accounting themselves. */
-    hasExternalAccountingEvidence?: () => boolean;
-  }> = {},
 ): Promise<ClassifiedSyncOnConnectAttempt> {
   let accounting: SyncOnConnectPeerOutcome | undefined;
   try {
     const outcome = await attempt((next) => { accounting = next; });
     const synthesizedAccounting = accounting === undefined
       && outcomeNeedsRetryAccounting(outcome)
-      && options.hasExternalAccountingEvidence?.() !== true
       ? RETRY_ACCOUNTING
       : undefined;
     return {
@@ -100,15 +95,10 @@ export async function executeSyncOnConnectAttempt(
   attempt: Parameters<typeof classifySyncOnConnectAttempt>[0],
   options: Readonly<{
     recordAccounting: (accounting: SyncOnConnectPeerOutcome) => void;
-    hasExternalAccountingEvidence?: () => boolean;
     onBackpressure: (detail?: string) => void;
   }>,
 ): Promise<SyncReconcilerAttemptOutcome> {
-  const classified = options.hasExternalAccountingEvidence === undefined
-    ? await classifySyncOnConnectAttempt(attempt)
-    : await classifySyncOnConnectAttempt(attempt, {
-        hasExternalAccountingEvidence: options.hasExternalAccountingEvidence,
-      });
+  const classified = await classifySyncOnConnectAttempt(attempt);
   if (classified.accounting !== undefined) {
     options.recordAccounting(classified.accounting);
   }
