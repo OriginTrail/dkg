@@ -232,6 +232,7 @@ export interface AnnounceRfc64PublicCatalogHeadInputV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   /** Unique peer IDs; at most RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1. */
   readonly peers: readonly string[];
+  readonly signal?: AbortSignal;
 }
 
 export interface AnnounceRfc64PublicCatalogHeadResultV1 {
@@ -653,7 +654,7 @@ export class Rfc64PublicCatalogServiceV1 {
       peers,
       this.#nativeTransport?.privateScopeBoundReadsConfigured === true,
     );
-    return this.#announceCatalogHeadSnapshot(announcement, peers);
+    return this.#announceCatalogHeadSnapshot(announcement, peers, input.signal);
   }
 
   /**
@@ -874,12 +875,18 @@ export class Rfc64PublicCatalogServiceV1 {
   async #announceCatalogHeadSnapshot(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     peers: readonly string[],
+    signal?: AbortSignal,
   ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
     const announcedPeers: string[] = [];
     const failedPeers: Array<{ peerId: string; error: string }> = [];
     for (const peerId of peers) {
+      if (signal?.aborted) break;
       try {
-        await this.#transport.announceCatalogHead(peerId, announcement, this.#sendOptions());
+        await this.#transport.announceCatalogHead(
+          peerId,
+          announcement,
+          this.#sendOptions(signal),
+        );
         announcedPeers.push(peerId);
       } catch (error) {
         failedPeers.push({

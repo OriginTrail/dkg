@@ -64,6 +64,8 @@ export interface Rfc64PublicCatalogBootstrapTargetStatusV1 {
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
   | 'pending'
+  | 'inactive'
+  | 'unavailable'
   | 'reconciled'
   | 'no-inventory'
   | 'failed';
@@ -249,7 +251,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       ({ completeSwmProviders = [] }) => completeSwmProviders.length > 0,
     );
     const authorRepairs = this.planRfc64LocalPublicCatalogAuthorRepairsV1(
-      partition.track2Policies,
       partition.track2Targets,
     );
     if (
@@ -376,7 +377,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         MAX_CONCURRENT_TARGETS_V1,
         async (repair) => {
           if (state.closed || abortController.signal.aborted) return;
-          await this.reconcileRfc64LocalPublicCatalogAuthorV1(repair);
+          await this.reconcileRfc64LocalPublicCatalogAuthorV1(
+            repair,
+            abortController.signal,
+          );
         },
       );
       const completeSwmProviders = [...new Set(
@@ -442,34 +446,17 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
    */
   private planRfc64LocalPublicCatalogAuthorRepairsV1(
     this: DKGAgent,
-    policies: readonly Rfc64CatalogBootstrapPolicyV1[],
     targets: readonly Rfc64CatalogBootstrapTargetPlanV1[],
   ): MutableAuthorRepairStatusV1[] {
-    const autoPublish = this.config.rfc64PublicCatalogAutoPublishPolicy;
-    if (autoPublish === undefined) return [];
-    const contextGraphIds = new Set(policies
-      .filter(({ policyEnvelope }) => {
-        const { contextGraphId, accessPolicy } = policyEnvelope.payload;
-        if (accessPolicy !== 0) return false;
-        if (!resolveRfc64CatalogAuthorityDecisionV1(
-          this.config.rfc64CatalogRollout,
-          contextGraphId,
-        ).authoringAllowed) return false;
-        return autoPublish.mode === 'all-accepted-public'
-          || autoPublish.selectedContextGraphs.includes(contextGraphId);
-      })
-      .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId as ContextGraphIdV1));
-    const localAuthorAddresses = new Set(this.listLocalAgents()
-      .map(({ agentAddress }) => agentAddress.toLowerCase()));
-    return targets
-      .filter(({ mode, scope }) => (
-        mode === 'catalog'
-        && contextGraphIds.has(scope.contextGraphId as ContextGraphIdV1)
-        && localAuthorAddresses.has(scope.authorAddress.toLowerCase())
-      ))
-      .map(({ scope }): MutableAuthorRepairStatusV1 => ({
-        contextGraphId: scope.contextGraphId as ContextGraphIdV1,
-        authorAddress: scope.authorAddress.toLowerCase() as EvmAddressV1,
+    return targets.flatMap(({ mode, scope }): MutableAuthorRepairStatusV1[] => {
+      const candidate = this.resolveRfc64LocalPublicCatalogAuthorRepairCandidateV1({
+        mode,
+        contextGraphId: scope.contextGraphId,
+        authorAddress: scope.authorAddress,
+      });
+      return candidate === null ? [] : [{
+        contextGraphId: candidate.contextGraphId,
+        authorAddress: candidate.authorAddress,
         outcome: 'pending',
         attempts: 0,
         inventoryHeadObjectDigest: null,
@@ -477,22 +464,28 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         inventoryRowCount: null,
         lastError: null,
         updatedAtMs: null,
-      }));
+      }];
+    });
   }
 
   private async reconcileRfc64LocalPublicCatalogAuthorV1(
     this: DKGAgent,
     repair: MutableAuthorRepairStatusV1,
+    signal: AbortSignal,
   ): Promise<void> {
     repair.attempts += 1;
     try {
-      const reconciled = await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
-        contextGraphId: repair.contextGraphId,
-        authorAddress: repair.authorAddress,
+      const result = await this.repairRfc64LocalPublicCatalogAuthorV1({
+        candidate: {
+          contextGraphId: repair.contextGraphId,
+          authorAddress: repair.authorAddress,
+        },
+        signal,
       });
-      if (reconciled === null) {
+      if (signal.aborted) return;
+      if (result.outcome === 'inactive' || result.outcome === 'no-inventory') {
         Object.assign(repair, {
-          outcome: 'no-inventory',
+          outcome: result.outcome,
           inventoryHeadObjectDigest: null,
           catalogVersion: null,
           inventoryRowCount: null,
@@ -501,6 +494,18 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         });
         return;
       }
+      if (result.outcome === 'unavailable') {
+        Object.assign(repair, {
+          outcome: 'unavailable',
+          inventoryHeadObjectDigest: null,
+          catalogVersion: null,
+          inventoryRowCount: null,
+          lastError: boundedErrorV1(result.error),
+          updatedAtMs: Date.now(),
+        });
+        return;
+      }
+      const reconciled = result.reconciliation;
       Object.assign(repair, {
         outcome: 'reconciled',
         inventoryHeadObjectDigest: reconciled.inventoryHeadObjectDigest,
@@ -511,6 +516,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         updatedAtMs: Date.now(),
       });
     } catch (error) {
+      if (signal.aborted) return;
       Object.assign(repair, {
         outcome: 'failed',
         inventoryHeadObjectDigest: null,

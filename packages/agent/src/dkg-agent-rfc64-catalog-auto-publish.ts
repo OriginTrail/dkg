@@ -72,6 +72,10 @@ import {
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { resolveRfc64CatalogAuthorityDecisionV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
+import {
+  raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
+  throwIfRfc64AbortedV1 as throwIfAbortedV1,
+} from './rfc64/abort-v1.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -171,12 +175,27 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
 export interface ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
   readonly authorAddress: EvmAddressV1;
+  readonly signal?: AbortSignal;
 }
 
 export interface ReconcileRfc64PublicCatalogFromSwmInventoryResultV1
   extends ReconcileRfc64PublicRootCatalogExactSetResultV1 {
   readonly inventoryHeadObjectDigest: Digest32V1;
 }
+
+export interface Rfc64LocalPublicCatalogAuthorRepairCandidateV1 {
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly authorAddress: EvmAddressV1;
+}
+
+export type Rfc64LocalPublicCatalogAuthorRepairResultV1 =
+  | Readonly<{ readonly outcome: 'inactive' }>
+  | Readonly<{ readonly outcome: 'unavailable'; readonly error: string }>
+  | Readonly<{ readonly outcome: 'no-inventory' }>
+  | Readonly<{
+    readonly outcome: 'reconciled';
+    readonly reconciliation: ReconcileRfc64PublicCatalogFromSwmInventoryResultV1;
+  }>;
 
 interface ResolvedRfc64AcceptedPublicRootLaneV1 {
   readonly networkId: NetworkIdV1;
@@ -185,6 +204,14 @@ interface ResolvedRfc64AcceptedPublicRootLaneV1 {
   /** Domain-neutral accepted public-root lane shared by catalog and SWM builders. */
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
 }
+
+type Rfc64AcceptedPublicRootLaneDecisionV1 =
+  | Readonly<{ readonly status: 'inactive' }>
+  | Readonly<{ readonly status: 'unavailable'; readonly error: Error }>
+  | Readonly<{
+    readonly status: 'active';
+    readonly lane: ResolvedRfc64AcceptedPublicRootLaneV1;
+  }>;
 
 export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   /**
@@ -352,8 +379,82 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<ReconcileRfc64PublicCatalogFromSwmInventoryResultV1 | null> {
     assertContextGraphIdV1(params.contextGraphId, 'SWM catalog reconcile contextGraphId');
     assertCanonicalEvmAddress(params.authorAddress, 'SWM catalog reconcile authorAddress');
+    throwIfAbortedV1(params.signal);
     const lane = this.resolveRfc64AcceptedPublicRootLaneV1(params.contextGraphId, null);
     if (lane === null) return null;
+    return this.reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(lane, params);
+  }
+
+  /**
+   * Canonical restart-repair admission. Bootstrap supplies only a bounded
+   * manifest tuple; this owner applies rollout, policy, selection, root-lane,
+   * and local-author rules as one capability boundary.
+   */
+  resolveRfc64LocalPublicCatalogAuthorRepairCandidateV1(
+    this: DKGAgent,
+    params: Readonly<{
+      contextGraphId: string;
+      authorAddress: string;
+      mode: 'shadow' | 'catalog';
+    }>,
+  ): Rfc64LocalPublicCatalogAuthorRepairCandidateV1 | null {
+    if (params.mode !== 'catalog') return null;
+    assertContextGraphIdV1(params.contextGraphId, 'SWM catalog repair contextGraphId');
+    const authorAddress = params.authorAddress.toLowerCase() as EvmAddressV1;
+    assertCanonicalEvmAddress(authorAddress, 'SWM catalog repair authorAddress');
+    if (!this.listLocalAgents().some(
+      ({ agentAddress }) => agentAddress.toLowerCase() === authorAddress,
+    )) return null;
+    if (this.resolveRfc64AcceptedPublicRootLaneDecisionV1(
+      params.contextGraphId,
+      null,
+    ).status === 'inactive') return null;
+    return Object.freeze({
+      contextGraphId: params.contextGraphId as ContextGraphIdV1,
+      authorAddress,
+    });
+  }
+
+  /** One typed restart-repair operation with unambiguous observable outcomes. */
+  async repairRfc64LocalPublicCatalogAuthorV1(
+    this: DKGAgent,
+    params: Readonly<{
+      candidate: Rfc64LocalPublicCatalogAuthorRepairCandidateV1;
+      signal?: AbortSignal;
+    }>,
+  ): Promise<Rfc64LocalPublicCatalogAuthorRepairResultV1> {
+    throwIfAbortedV1(params.signal);
+    const candidate = this.resolveRfc64LocalPublicCatalogAuthorRepairCandidateV1({
+      ...params.candidate,
+      mode: 'catalog',
+    });
+    if (candidate === null) return Object.freeze({ outcome: 'inactive' });
+    const laneDecision = this.resolveRfc64AcceptedPublicRootLaneDecisionV1(
+      candidate.contextGraphId,
+      null,
+    );
+    if (laneDecision.status === 'inactive') return Object.freeze({ outcome: 'inactive' });
+    if (laneDecision.status === 'unavailable') {
+      return Object.freeze({
+        outcome: 'unavailable',
+        error: laneDecision.error.message,
+      });
+    }
+    const reconciliation = await this.reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(
+      laneDecision.lane,
+      { ...candidate, signal: params.signal },
+    );
+    return reconciliation === null
+      ? Object.freeze({ outcome: 'no-inventory' })
+      : Object.freeze({ outcome: 'reconciled', reconciliation });
+  }
+
+  private async reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(
+    this: DKGAgent,
+    lane: ResolvedRfc64AcceptedPublicRootLaneV1,
+    params: ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
+  ): Promise<ReconcileRfc64PublicCatalogFromSwmInventoryResultV1 | null> {
+    throwIfAbortedV1(params.signal);
     const inventoryScope = Object.freeze({
       ...lane.scopeBase,
       authorAddress: params.authorAddress,
@@ -369,32 +470,46 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           params.authorAddress,
         );
         if (snapshot === null) return null;
-        const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
-          snapshot,
-          resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
-            params.contextGraphId,
-            params.authorAddress,
-            row,
-          ),
-        });
+        throwIfAbortedV1(params.signal);
+        const prepared = await raceAgainstAbortV1(
+          prepareRfc64SwmInventoryCatalogTargetV1({
+            snapshot,
+            resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
+              params.contextGraphId,
+              params.authorAddress,
+              row,
+              params.signal,
+            ),
+          }),
+          params.signal,
+        );
+        throwIfAbortedV1(params.signal);
         lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
         const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
           scope: prepared.catalogScope,
-          author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
+          author: this.createRfc64CatalogAuthorSignerV1(
+            params.authorAddress,
+            params.signal,
+          ),
           assets: prepared.assets,
-          deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
+          deployment: await raceAgainstAbortV1(
+            this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
+            params.signal,
+          ),
           peers: lane.autoPublishConfig.peers,
           catalogIssuerDelegationEffectiveAt:
             lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
             ?? ('0' as TimestampMsV1),
           catalogIssuerDelegationExpiresAt:
             lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
+          signal: params.signal,
         });
         return Object.freeze({
           ...reconciled,
           inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
         });
       },
+      params.signal,
     );
   }
 
@@ -705,11 +820,25 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     contextGraphId: string,
     subGraphName: string | null | undefined,
   ): ResolvedRfc64AcceptedPublicRootLaneV1 | null {
+    const decision = this.resolveRfc64AcceptedPublicRootLaneDecisionV1(
+      contextGraphId,
+      subGraphName,
+    );
+    if (decision.status === 'inactive') return null;
+    if (decision.status === 'unavailable') throw decision.error;
+    return decision.lane;
+  }
+
+  private resolveRfc64AcceptedPublicRootLaneDecisionV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    subGraphName: string | null | undefined,
+  ): Rfc64AcceptedPublicRootLaneDecisionV1 {
     const rollout = this.config.rfc64CatalogRollout;
     if (!resolveRfc64CatalogAuthorityDecisionV1(
       rollout,
       contextGraphId,
-    ).authoringAllowed) return null;
+    ).authoringAllowed) return Object.freeze({ status: 'inactive' });
     const policy = this.config.rfc64PublicCatalogAutoPublishPolicy;
     if (
       policy === undefined
@@ -718,35 +847,50 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         policy.mode === 'selected-public'
         && !policy.selectedContextGraphs.includes(contextGraphId)
       )
-    ) return null;
+    ) return Object.freeze({ status: 'inactive' });
     assertContextGraphIdV1(contextGraphId, 'RFC-64 public-root contextGraphId');
     const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.chain.chainId) as NetworkIdV1;
     if (networkId === 'none') {
-      throw new Error('RFC-64 public-root activation requires a trusted deployment network');
+      return Object.freeze({
+        status: 'unavailable',
+        error: new Error('RFC-64 public-root activation requires a trusted deployment network'),
+      });
     }
     const service = this.rfc64PublicCatalogServiceV1;
     if (service === undefined) {
-      throw new Error('RFC-64 public catalog service is unavailable');
+      return Object.freeze({
+        status: 'unavailable',
+        error: new Error('RFC-64 public catalog service is unavailable'),
+      });
     }
     const acceptedPolicy = service.acceptedPolicySnapshot(networkId, contextGraphId);
-    if (acceptedPolicy === null || acceptedPolicy.policy.accessPolicy !== 0) {
-      throw new Error(
-        'RFC-64 public-root activation requires an independently accepted current public policy',
-      );
+    if (acceptedPolicy === null) {
+      return Object.freeze({
+        status: 'unavailable',
+        error: new Error(
+          'RFC-64 public-root activation requires an independently accepted current public policy',
+        ),
+      });
+    }
+    if (acceptedPolicy.policy.accessPolicy !== 0) {
+      return Object.freeze({ status: 'inactive' });
     }
     return Object.freeze({
-      networkId,
-      service,
-      autoPublishConfig: policy.config,
-      scopeBase: Object.freeze({
+      status: 'active',
+      lane: Object.freeze({
         networkId,
-        contextGraphId,
-        governanceChainId: acceptedPolicy.policy.governanceChainId,
-        governanceContractAddress: acceptedPolicy.policy.governanceContractAddress,
-        ownershipTransitionDigest: acceptedPolicy.policy.ownershipTransitionDigest,
-        subGraphName: null,
-        era: acceptedPolicy.policy.era,
+        service,
+        autoPublishConfig: policy.config,
+        scopeBase: Object.freeze({
+          networkId,
+          contextGraphId,
+          governanceChainId: acceptedPolicy.policy.governanceChainId,
+          governanceContractAddress: acceptedPolicy.policy.governanceContractAddress,
+          ownershipTransitionDigest: acceptedPolicy.policy.ownershipTransitionDigest,
+          subGraphName: null,
+          era: acceptedPolicy.policy.era,
+        }),
       }),
     });
   }
@@ -769,7 +913,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     contextGraphId: ContextGraphIdV1,
     authorAddress: EvmAddressV1,
     row: Readonly<SwmAuthorInventoryRowV1>,
+    signal?: AbortSignal,
   ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
+    throwIfAbortedV1(signal);
     const assertionUri = contextGraphAssertionUri(
       contextGraphId,
       authorAddress,
@@ -778,7 +924,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const sealResult = await this.store.query(
       `CONSTRUCT { <${assertSafeIri(assertionUri)}> ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(assertionUri)}> ?p ?o } }`,
-      { source: 'agent.rfc64.swmInventory.catalogReconcile.seal' },
+      { source: 'agent.rfc64.swmInventory.catalogReconcile.seal', signal },
     );
     const candidate = parseGraphScopedAssertionSealCandidate(
       sealResult.type === 'quads' ? sealResult.quads : [],
@@ -796,12 +942,15 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
     const graphManager = new GraphManager(this.store);
-    const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
-      store: this.store,
-      graphManager,
-      contextGraphId,
-      kaUal: row.kaUal,
-    });
+    const head = await raceAgainstAbortV1(
+      resolvePublishedKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager,
+        contextGraphId,
+        kaUal: row.kaUal,
+      }),
+      signal,
+    );
     if (
       head === undefined
       || head.shareOperationId !== row.shareOperationId
@@ -812,15 +961,18 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     ) {
       throw new Error(`durable SWM head differs from signed inventory row ${row.kaUal}`);
     }
-    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
-      store: this.store,
-      graphManager,
-      contextGraphId,
-      shareOperationId: row.shareOperationId,
-      kaUal: row.kaUal,
-      assertionVersion: row.assertionVersion,
-      publicSnapshotStore: this.publicSnapshotStore,
-    });
+    const snapshot = await raceAgainstAbortV1(
+      resolveKnowledgeAssetOperationPublicQuads({
+        store: this.store,
+        graphManager,
+        contextGraphId,
+        shareOperationId: row.shareOperationId,
+        kaUal: row.kaUal,
+        assertionVersion: row.assertionVersion,
+        publicSnapshotStore: this.publicSnapshotStore,
+      }),
+      signal,
+    );
     return Object.freeze({
       assertionCoordinate: row.assertionCoordinate,
       projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads),
@@ -842,6 +994,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   private createRfc64CatalogAuthorSignerV1(
     this: DKGAgent,
     authorAddress: EvmAddressV1,
+    signal?: AbortSignal,
   ): Rfc64CatalogAuthorSignerV1 {
     const custodialKey = this.getCustodialAgentPrivateKey(authorAddress);
     if (custodialKey !== undefined) {
@@ -853,7 +1006,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       }
       return Object.freeze({
         address: authorAddress,
-        signMessage: (message: Uint8Array) => wallet.signMessage(message),
+        signMessage: (message: Uint8Array) => raceAgainstAbortV1(
+          wallet.signMessage(message),
+          signal,
+        ),
       });
     }
     const signMessageAs = this.chain.signMessageAs?.bind(this.chain);
@@ -861,11 +1017,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     return Object.freeze({
       address: authorAddress,
       signMessage: async (message: Uint8Array) => {
-        const compact = signMessageAs !== undefined
-          ? await signMessageAs(authorAddress, message)
-          : signMessage !== undefined
-            ? await signMessage(message)
-            : (() => { throw new Error('RFC-64 configured chain has no message signer'); })();
+        const compact = await raceAgainstAbortV1(
+          signMessageAs !== undefined
+            ? signMessageAs(authorAddress, message)
+            : signMessage !== undefined
+              ? signMessage(message)
+              : Promise.reject(new Error('RFC-64 configured chain has no message signer')),
+          signal,
+        );
         const signature = ethers.Signature.from({
           r: ethers.hexlify(compact.r),
           yParityAndS: ethers.hexlify(compact.vs),

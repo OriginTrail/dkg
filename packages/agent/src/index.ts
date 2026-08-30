@@ -168,6 +168,8 @@ export type {
 export type {
   ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
   ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
+  Rfc64LocalPublicCatalogAuthorRepairCandidateV1,
+  Rfc64LocalPublicCatalogAuthorRepairResultV1,
 } from './dkg-agent-rfc64-catalog-auto-publish.js';
 export type {
   Rfc64PublicCatalogAuthorRepairOutcomeV1,

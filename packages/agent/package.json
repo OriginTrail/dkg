@@ -31,6 +31,8 @@
     "./dist/rfc64/public-catalog-activation-config-v1.js": "./dist/rfc64/public-catalog-activation-config-v1.js",
     "./dist/rfc64/swm-author-inventory-producer-v1.js": "./dist/rfc64/swm-author-inventory-producer-v1.js",
     "./dist/rfc64/swm-inventory-catalog-reconciler-v1.js": null,
+    "./dist/rfc64/abort-v1.js": null,
+    "./dist/rfc64/serialized-scope-runtime-v1.js": null,
     "./dist/rfc64/control-envelope-signer-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,
