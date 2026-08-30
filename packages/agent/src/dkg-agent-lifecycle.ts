@@ -9,7 +9,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { isLegacySyncGraphAdmittedV1 } from './sync/legacy-sync-graph-admission.js';
+import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -6636,7 +6636,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // admits only public payload plus top-level durable meta, never RFC-64
     // control records, WM/SWM, private data, or another context graph.
     const isGraphAdmitted = (graph: string): boolean =>
-      isLegacySyncGraphAdmittedV1(graph, contextGraphId, 'changelog');
+      isLegacySyncGraphCandidateV1(graph, contextGraphId, 'changelog');
     const worker = this.getOrCreateSyncVerifyWorker();
 
     const outcome = await runChangelogSync({

@@ -4,6 +4,10 @@ import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { SyncSharedProjectionStoreV1 } from '../src/rfc64-shared-projection-stream-gateway.js';
 import { runRfc64HttpProjectionCapabilityConformance } from './helpers/rfc64-http-projection-capability-conformance.js';
 import { createRfc64SharedProjectionTestFixture } from './helpers/rfc64-shared-projection-fixture.js';
+import {
+  collectProjectionBytes as collect,
+  projectionByteStream as byteStream,
+} from './helpers/rfc64-projection-stream-test-io.js';
 
 const ORIGINAL_FETCH = globalThis.fetch;
 const LINE_A = '<urn:a> <urn:p> "alpha" .\n';
@@ -93,29 +97,3 @@ runRfc64HttpProjectionCapabilityConformance({
     { scheduler, timeout },
   ),
 });
-
-function byteStream(chunks: readonly string[]): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
-      controller.close();
-    },
-  });
-}
-
-async function collect(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for await (const value of source) {
-    chunks.push(value);
-    length += value.byteLength;
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}

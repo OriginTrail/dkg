@@ -2,7 +2,7 @@ import {
   isSafeIri,
   type CanonicalAuthorSealStoreRowV1,
   type Rfc64AuthorSealReadOperationV1,
-  type Rfc64SemanticReadOperationV1,
+  type Rfc64SemanticReadOperationV2,
   type Rfc64SemanticStoreObjectV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -13,15 +13,17 @@ import {
 import type { QueryOptions, QueryResult, TripleStore } from './triple-store.js';
 import { SparqlJsonResultsShapeError } from './adapters/sparql-json-results.js';
 
-const certifiedRfc64ExactBindingsReadStoresV1 = new WeakSet<object>();
+export const RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1 =
+  'RFC64_EXACT_BINDINGS_RESULT_V1' as const;
 
 export type Rfc64ExactBindingsReadOperationV1 =
-  | Rfc64SemanticReadOperationV1
+  | Rfc64SemanticReadOperationV2
   | Rfc64AuthorSealReadOperationV1;
 
 export type Rfc64ExactBindingsStoreRowV1 = CanonicalAuthorSealStoreRowV1;
 
 export interface Rfc64ExactBindingsReadCapabilityV1 {
+  readonly rfc64ExactBindingsReadCertifiedV1: true;
   rfc64ExactBindingsReadV1(
     operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
@@ -30,6 +32,8 @@ export interface Rfc64ExactBindingsReadCapabilityV1 {
 
 /** @deprecated Use {@link Rfc64ExactBindingsReadResultErrorV1}. */
 export class Rfc64SemanticReadCapabilityResultErrorV1 extends Error {
+  readonly code: string = RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1;
+
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, options);
     this.name = 'Rfc64SemanticReadCapabilityResultErrorV1';
@@ -38,6 +42,8 @@ export class Rfc64SemanticReadCapabilityResultErrorV1 extends Error {
 
 export class Rfc64ExactBindingsReadResultErrorV1
   extends Rfc64SemanticReadCapabilityResultErrorV1 {
+  override readonly code = RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1;
+
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, options);
     this.name = 'Rfc64ExactBindingsReadResultErrorV1';
@@ -77,91 +83,91 @@ export async function executeRfc64ExactBindingsReadCapabilityV1(
 /** @deprecated Use {@link executeRfc64ExactBindingsReadCapabilityV1}. */
 export function executeRfc64SemanticReadCapabilityV1(
   store: Pick<TripleStore, 'query'>,
-  operation: Rfc64SemanticReadOperationV1,
+  operation: Rfc64SemanticReadOperationV2,
   options: Pick<QueryOptions, 'signal'> = {},
 ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
   return executeRfc64ExactBindingsReadCapabilityV1(store, operation, options);
 }
 
-/**
- * Declarative opt-in used only by adapters whose closed-read conformance is
- * covered by the storage certification suite.
- */
-export function certifyRfc64ExactBindingsReadStoreV1(
-  store: TripleStore,
-  execute: Rfc64ExactBindingsReadCapabilityV1['rfc64ExactBindingsReadV1'] =
-    (operation, options) => executeRfc64ExactBindingsReadCapabilityV1(
-      store,
-      operation,
-      options,
-    ),
-): void {
-  if (certifiedRfc64ExactBindingsReadStoresV1.has(store)) return;
-  Object.defineProperty(store, 'rfc64ExactBindingsReadV1', {
-    configurable: false,
-    enumerable: false,
-    writable: false,
-    value: execute,
-  });
-  Object.defineProperty(store, 'rfc64SemanticReadV1', {
-    configurable: false,
-    enumerable: false,
-    writable: false,
-    value: (
-      operation: Rfc64SemanticReadOperationV1,
-      options?: Pick<QueryOptions, 'signal'>,
-    ) => execute(operation, options),
-  });
-  certifiedRfc64ExactBindingsReadStoresV1.add(store);
-}
-
-/** @deprecated Use {@link certifyRfc64ExactBindingsReadStoreV1}. */
-export function certifyRfc64SemanticReadStoreV1(store: TripleStore): void {
-  certifyRfc64ExactBindingsReadStoreV1(store);
-}
-
 export function isRfc64ExactBindingsReadCapabilityV1(
   candidate: unknown,
 ): candidate is Rfc64ExactBindingsReadCapabilityV1 {
-  return candidate !== null
-    && typeof candidate === 'object'
-    && certifiedRfc64ExactBindingsReadStoresV1.has(candidate)
-    && typeof Object.getOwnPropertyDescriptor(candidate, 'rfc64ExactBindingsReadV1')?.value
-      === 'function';
+  return hasDataValue(candidate, 'rfc64ExactBindingsReadCertifiedV1', true)
+    && hasDataMethod(candidate, 'rfc64ExactBindingsReadV1');
 }
 
 /** Legacy semantic-only capability retained for the compatibility window. */
 export interface Rfc64SemanticReadCapabilityV1 {
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV1,
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]>;
+}
+
+export interface ResolvedRfc64SemanticReadCapabilityV1 {
+  read(
+    operation: Rfc64SemanticReadOperationV2,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]>;
 }
 
 /**
- * Compatibility discovery does not invoke accessors. Certified exact stores
- * expose an immutable own data method; pre-generalization custom adapters may
- * expose the legacy method as a data method on their prototype.
+ * Normalize exact and compatibility adapters once at discovery. Gateways use
+ * this one dispatch shape and do not install or shadow methods on store
+ * instances.
  */
+export function resolveRfc64SemanticReadCapabilityV1(
+  candidate: unknown,
+): ResolvedRfc64SemanticReadCapabilityV1 | null {
+  if (isRfc64ExactBindingsReadCapabilityV1(candidate)) {
+    return Object.freeze({
+      read: candidate.rfc64ExactBindingsReadV1.bind(candidate),
+    });
+  }
+  if (isRfc64SemanticReadCapabilityV1(candidate)) {
+    return Object.freeze({
+      read: candidate.rfc64SemanticReadV1.bind(candidate),
+    });
+  }
+  return null;
+}
+
+export function isRfc64SemanticReadCapabilitySourceV1(
+  candidate: unknown,
+): candidate is Rfc64ExactBindingsReadCapabilityV1 | Rfc64SemanticReadCapabilityV1 {
+  return isRfc64ExactBindingsReadCapabilityV1(candidate)
+    || isRfc64SemanticReadCapabilityV1(candidate);
+}
+
 export function isRfc64SemanticReadCapabilityV1(
   candidate: unknown,
 ): candidate is Rfc64SemanticReadCapabilityV1 {
-  return isRfc64ExactBindingsReadCapabilityV1(candidate)
-    || hasDataMethod(candidate, 'rfc64SemanticReadV1');
+  return hasDataMethod(candidate, 'rfc64SemanticReadV1');
+}
+
+function hasDataValue(candidate: unknown, key: string, expected: unknown): boolean {
+  const descriptor = findDataDescriptor(candidate, key);
+  return descriptor !== null && descriptor.value === expected;
 }
 
 function hasDataMethod(candidate: unknown, key: string): boolean {
-  if (candidate === null || typeof candidate !== 'object') return false;
+  const descriptor = findDataDescriptor(candidate, key);
+  return descriptor !== null && typeof descriptor.value === 'function';
+}
+
+function findDataDescriptor(candidate: unknown, key: string): PropertyDescriptor | null {
+  if (candidate === null || typeof candidate !== 'object') return null;
   let current: object | null = candidate;
   while (current !== null) {
     const descriptor = Object.getOwnPropertyDescriptor(current, key);
     if (descriptor) {
       return Object.prototype.hasOwnProperty.call(descriptor, 'value')
-        && typeof descriptor.value === 'function';
+        ? descriptor
+        : null;
     }
     current = Object.getPrototypeOf(current) as object | null;
   }
-  return false;
+  return null;
 }
 
 function normalizeRfc64ExactBindingsReadResultV1(
@@ -171,6 +177,7 @@ function normalizeRfc64ExactBindingsReadResultV1(
   if (ownDataValue(result, 'type') !== 'bindings') {
     invalid('exact-bindings read did not return bindings');
   }
+  assertProjectionIfPresent(result, operation.resultVariables);
   const bindings = ownDataValue(result, 'bindings');
   if (!Array.isArray(bindings) || Object.getPrototypeOf(bindings) !== Array.prototype) {
     invalid('exact-bindings read bindings must be an ordinary Array');
@@ -211,6 +218,37 @@ function normalizeRfc64ExactBindingsReadResultV1(
   return Object.freeze(rows);
 }
 
+function assertProjectionIfPresent(
+  result: QueryResult,
+  expected: readonly string[],
+): void {
+  const descriptor = Object.getOwnPropertyDescriptor(result, 'variables');
+  if (!descriptor) return;
+  if (!descriptor.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+    invalid('exact-bindings read projection must be a data property');
+  }
+  const variables = descriptor.value;
+  if (!Array.isArray(variables) || Object.getPrototypeOf(variables) !== Array.prototype) {
+    invalid('exact-bindings read projection must be an ordinary Array');
+  }
+  const keys = Reflect.ownKeys(variables);
+  if (
+    keys.some((key) => typeof key !== 'string')
+    || keys.length !== variables.length + 1
+    || !keys.includes('length')
+    || variables.length !== expected.length
+  ) {
+    invalid('exact-bindings read returned the wrong result projection');
+  }
+  for (let index = 0; index < expected.length; index += 1) {
+    const value = Object.getOwnPropertyDescriptor(variables, String(index));
+    if (!value?.enumerable || !Object.prototype.hasOwnProperty.call(value, 'value')
+      || value.value !== expected[index]) {
+      invalid('exact-bindings read returned the wrong result projection');
+    }
+  }
+}
+
 function parseStoreObject(input: string): Rfc64SemanticStoreObjectV1 {
   const literal = parseRdfLiteralTerm(input);
   if (literal?.kind === 'plain') {
@@ -230,8 +268,11 @@ function parseStoreObject(input: string): Rfc64SemanticStoreObjectV1 {
   if (literal?.kind === 'language') {
     invalid('exact-bindings record literals cannot carry a language tag');
   }
-  if (isSafeIri(input)) {
-    return Object.freeze({ kind: 'named-node', value: input });
+  const namedNode = input.startsWith('<') && input.endsWith('>')
+    ? input.slice(1, -1)
+    : input;
+  if (isSafeIri(namedNode)) {
+    return Object.freeze({ kind: 'named-node', value: namedNode });
   }
   invalid('exact-bindings record object is not an exact RDF term');
 }

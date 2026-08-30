@@ -111,6 +111,7 @@ export default defineConfig({
       "test/selected-swm-lifecycle-queue.test.ts",
       "test/selected-swm-meta-transfer-coordinator.test.ts",
       "test/selected-swm-meta-budget.test.ts",
+      "test/legacy-sync-graph-candidate.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
       "test/sync-checkpoint-key.test.ts",
       "test/map-with-concurrency.test.ts",
