@@ -78,7 +78,7 @@ export class OxigraphStore implements TripleStore {
     operation: Rfc64SemanticReadOperationV2,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ) {
-    return executeRfc64SemanticReadCapabilityV1(this, operation, options, 'manifest');
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   /**

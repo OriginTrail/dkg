@@ -323,7 +323,7 @@ export class SparqlHttpStore implements TripleStore {
     if (!this.rfc64SemanticReadCertifiedV1) {
       throw new Error('RFC-64 semantic reads require a DKG-managed Oxigraph endpoint');
     }
-    return executeRfc64SemanticReadCapabilityV1(this, operation, options, 'response');
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   private runStoreWork<T>(

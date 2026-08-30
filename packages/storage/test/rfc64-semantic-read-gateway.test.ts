@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
+  Rfc64SemanticRecordErrorV1,
   Rfc64SemanticReadManifestErrorV1,
   compileRfc64SemanticReadOperationV2,
   projectRfc64SemanticRecordStoreRowsV1,
@@ -461,6 +462,32 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it('maps incomplete, duplicate, and noncanonical records to the gateway result contract', async () => {
+    const current = FIXTURES[3];
+    const rendered = projectRfc64SemanticRecordStoreRowsV1(current.record)
+      .map(renderRfc64SemanticStoreRowV1);
+    const bindings = rendered.map((row) => ({ p: row.predicate, o: row.object }));
+    const networkIndex = rendered.findIndex((row) => row.predicate.endsWith('networkId'));
+    expect(networkIndex).toBeGreaterThanOrEqual(0);
+    const noncanonical = bindings.map((row, index) => index === networkIndex
+      ? { ...row, o: '"otp network"' }
+      : row);
+    for (const rows of [
+      bindings.slice(0, 1),
+      [bindings[0]!, ...bindings],
+      noncanonical,
+    ]) {
+      const gateway = new SyncSemanticStoreV1(certifiedStore(async () => ({
+        type: 'bindings',
+        bindings: rows,
+      })));
+      const error = await rejected(gateway.read(requestOf(current), { timeoutMs: 1_000 }));
+      expectGatewayResultError(error);
+      expect((error as Error & { cause: unknown }).cause)
+        .toBeInstanceOf(Rfc64SemanticRecordErrorV1);
+    }
+  });
+
   it('rejects accessor-backed, sparse, adorned, and nonordinary capability results', async () => {
     const cases: Array<{ result: QueryResult; getterInvoked?: () => boolean }> = [];
     let resultGetterInvoked = false;
@@ -563,7 +590,7 @@ function certifiedStore(
     query,
     rfc64SemanticReadCertifiedV1: true as const,
     rfc64SemanticReadV1(operation, options) {
-      return executeRfc64SemanticReadCapabilityV1(store, operation, options, 'manifest');
+      return executeRfc64SemanticReadCapabilityV1(store, operation, options);
     },
   } satisfies Pick<TripleStore, 'query' | 'rfc64SemanticReadCertifiedV1' | 'rfc64SemanticReadV1'>;
   return store as unknown as TripleStore;

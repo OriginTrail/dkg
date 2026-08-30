@@ -133,7 +133,6 @@ export interface TripleStore {
     operation: Rfc64SemanticReadOperationV2,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<Readonly<{
-    variables: readonly string[];
     rows: readonly Rfc64SemanticStoreRowV1[];
   }>>;
 
