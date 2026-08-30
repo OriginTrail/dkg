@@ -1,4 +1,4 @@
-import { createServer, get, type Server } from 'node:http';
+import { createServer, get, type Server, type ServerResponse } from 'node:http';
 import { describe, expect, it } from 'vitest';
 
 import { raceShutdownWithTimeout } from '../src/daemon/shutdown.js';
@@ -31,10 +31,15 @@ function requestBody(port: number): Promise<string> {
   });
 }
 
-function shutdownCleanup(server: Server, stopDependencies: () => void): Promise<void> {
+function shutdownCleanup(
+  server: Server,
+  stopDependencies: () => void,
+  longLivedResponses?: Set<ServerResponse>,
+): Promise<void> {
   const noop = async () => undefined;
   return runProducerQuiescentTeardown(buildProducerQuiescentTeardownSteps({
     server,
+    longLivedResponses,
     closeLocalLlm: noop,
     drainCatchupJobs: async () => undefined,
     flushTelemetry: noop,
@@ -48,6 +53,54 @@ function shutdownCleanup(server: Server, stopDependencies: () => void): Promise<
 }
 
 describe('HTTP callback draining during bounded shutdown', () => {
+  it('ends tracked SSE streams before draining and reaches dependency cleanup', async () => {
+    const sseClients = new Set<ServerResponse>();
+    let markConnected!: () => void;
+    const connected = new Promise<void>((resolve) => { markConnected = resolve; });
+    const downstreamSteps: string[] = [];
+    const server = createServer((request, response) => {
+      response.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        Connection: 'keep-alive',
+      });
+      sseClients.add(response);
+      request.on('close', () => sseClients.delete(response));
+      response.write('event: connected\ndata: {}\n\n');
+      markConnected();
+    });
+    const port = await listen(server);
+    let markClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { markClosed = resolve; });
+    const request = get({ host: '127.0.0.1', port, path: '/api/events', agent: false }, (response) => {
+      response.resume();
+      response.once('end', markClosed);
+    });
+    request.once('error', markClosed);
+    await connected;
+    expect(sseClients.size).toBe(1);
+
+    const noop = async () => undefined;
+    const cleanup = runProducerQuiescentTeardown(buildProducerQuiescentTeardownSteps({
+      server,
+      longLivedResponses: sseClients,
+      closeLocalLlm: noop,
+      drainCatchupJobs: async () => undefined,
+      flushTelemetry: noop,
+      stopPublisherRuntime: noop,
+      stopPromoteWorker: noop,
+      closeCatchupRunner: noop,
+      stopAgent: async () => { downstreamSteps.push('agent'); },
+      stopTelemetry: async () => { downstreamSteps.push('telemetry'); },
+      log: () => undefined,
+    })).then(() => undefined);
+
+    await expect(raceShutdownWithTimeout(cleanup, 250, () => undefined))
+      .resolves.toEqual({ forced: false });
+    await closed;
+    expect(sseClients.size).toBe(0);
+    expect(downstreamSteps).toEqual(['agent', 'telemetry']);
+  });
+
   it('lets an in-flight callback complete within a longer budget before dependencies stop', async () => {
     let dependenciesStopped = false;
     let markStarted!: () => void;

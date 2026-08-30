@@ -10,7 +10,6 @@ import {
 } from './daemon/supervisor-liveness.js';
 import {
   resolveShutdownPolicy,
-  type ShutdownPolicy,
 } from './daemon/shutdown-policy.js';
 import {
   sleep, withSelectedDkgHome, selectedDkgHomeForEnv, probeHostForApiHost,
@@ -27,31 +26,17 @@ function supervisorWarn(message: string): void {
   void appendSupervisorLog(message).catch(() => {});
 }
 
-export interface SupervisorLivenessConfig {
+interface SupervisorLivenessConfig {
   enabled: boolean;
-  shutdownPolicy: ShutdownPolicy;
+  shutdownGraceMs: number;
 }
-
-export interface SupervisorLivenessDependencies {
-  readApiPort: () => Promise<number | null>;
-  loadApiHost: () => Promise<string | undefined>;
-  sleep: (ms: number) => Promise<void>;
-  startWatcher: typeof startLivenessWatcher;
-  apiPortExists: () => boolean;
-}
-
-const supervisorLivenessDependencies: SupervisorLivenessDependencies = {
-  readApiPort: () => readApiPort(),
-  loadApiHost: async () => (await loadConfig()).apiHost,
-  sleep,
-  startWatcher: startLivenessWatcher,
-  apiPortExists: () => existsSync(apiPortPath()),
-};
 
 function resolveSupervisorLivenessConfig(env: NodeJS.ProcessEnv): SupervisorLivenessConfig {
   return {
     enabled: isLivenessProbeEnabled(env.DKG_SUPERVISOR_LIVENESS_PROBE),
-    shutdownPolicy: resolveShutdownPolicy(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS),
+    shutdownGraceMs: resolveShutdownPolicy(
+      env.DKG_SHUTDOWN_HARD_TIMEOUT_MS,
+    ).supervisorGraceMs,
   };
 }
 
@@ -70,7 +55,6 @@ function resolveSupervisorLivenessConfig(env: NodeJS.ProcessEnv): SupervisorLive
 async function maybeStartSupervisorLivenessWatcher(
   child: { kill(signal: 'SIGKILL'): boolean },
   config: SupervisorLivenessConfig = resolveSupervisorLivenessConfig(process.env),
-  deps: SupervisorLivenessDependencies = supervisorLivenessDependencies,
 ): Promise<() => void> {
   if (!config.enabled) {
     return () => {};
@@ -83,12 +67,12 @@ async function maybeStartSupervisorLivenessWatcher(
   let watcher: { stop(): void } | null = null;
   void (async () => {
     while (!cancelled) {
-      const port = await deps.readApiPort().catch(() => null);
+      const port = await readApiPort().catch(() => null);
       if (port) {
         if (cancelled) return;
-        const apiHost = await deps.loadApiHost().catch(() => undefined);
+        const apiHost = await loadConfig().then((loaded) => loaded.apiHost).catch(() => undefined);
         if (cancelled) return;
-        watcher = deps.startWatcher({
+        watcher = startLivenessWatcher({
           port,
           host: probeHostForApiHost(apiHost),
           // Graceful-shutdown disarm: the worker's `shutdown()` removes
@@ -96,8 +80,8 @@ async function maybeStartSupervisorLivenessWatcher(
           // `dashDb.close()`, …), so its absence is the unambiguous "I'm
           // intentionally shutting down" signal. Without this the watcher
           // would race a slow teardown and SIGKILL mid-cleanup.
-          isShuttingDown: () => !deps.apiPortExists(),
-          shutdownGraceMs: config.shutdownPolicy.supervisorGraceMs,
+          isShuttingDown: () => !existsSync(apiPortPath()),
+          shutdownGraceMs: config.shutdownGraceMs,
           onUnresponsive: () => {
             supervisorWarn(
               `[supervisor] worker unresponsive after ${LIVENESS_CONSECUTIVE_FAILURES_TO_KILL} consecutive liveness probes; SIGKILL + respawn.`,
@@ -114,7 +98,7 @@ async function maybeStartSupervisorLivenessWatcher(
         });
         return;
       }
-      await deps.sleep(500);
+      await sleep(500);
     }
   })();
 
@@ -181,7 +165,10 @@ async function runDaemonSupervisor(): Promise<void> {
   }
 }
 
-async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env): Promise<void> {
+async function runForegroundSupervisor(
+  childEnv: NodeJS.ProcessEnv = process.env,
+  startWorkerLiveness: typeof maybeStartSupervisorLivenessWatcher = maybeStartSupervisorLivenessWatcher,
+): Promise<void> {
   const livenessConfig = resolveSupervisorLivenessConfig(childEnv);
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
@@ -195,56 +182,61 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
 
-  while (true) {
-    if (signalled) process.exit(0);
-
-    await removeApiPort().catch((err: any) => {
-      supervisorWarn(
-        `[supervisor] could not clear stale api.port before foreground spawn: ${err?.message ?? String(err)}`,
-      );
-    });
-
-    const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
-    currentChild = spawn(
-      daemonCommand.executable,
-      daemonCommand.args,
-      {
-        stdio: 'inherit',
-        env: childEnv,
-      },
-    );
-
-    const stopWatcher = await maybeStartSupervisorLivenessWatcher(currentChild, livenessConfig);
-
-    const rawExitCode = await new Promise<number | null>((resolve) => {
-      currentChild!.once('exit', (code) => resolve(code));
-      currentChild!.once('error', () => resolve(1));
-    });
-    stopWatcher();
-    currentChild = null;
-    const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
-    if (forced) {
-      console.warn(
-        `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
-          `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
-      );
-    }
-
-    if (signalled) process.exit(originalExitCode ?? 0);
-
-    if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
-      crashRestartCount = 0;
-      await sleep(250);
+  try {
+    while (true) {
       if (signalled) process.exit(0);
-      continue;
+
+      await removeApiPort().catch((err: any) => {
+        supervisorWarn(
+          `[supervisor] could not clear stale api.port before foreground spawn: ${err?.message ?? String(err)}`,
+        );
+      });
+
+      const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
+      currentChild = spawn(
+        daemonCommand.executable,
+        daemonCommand.args,
+        {
+          stdio: 'inherit',
+          env: childEnv,
+        },
+      );
+
+      const stopWatcher = await startWorkerLiveness(currentChild, livenessConfig);
+
+      const rawExitCode = await new Promise<number | null>((resolve) => {
+        currentChild!.once('exit', (code) => resolve(code));
+        currentChild!.once('error', () => resolve(1));
+      });
+      stopWatcher();
+      currentChild = null;
+      const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
+      if (forced) {
+        console.warn(
+          `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
+            `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
+        );
+      }
+
+      if (signalled) process.exit(originalExitCode ?? 0);
+
+      if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
+        crashRestartCount = 0;
+        await sleep(250);
+        if (signalled) process.exit(0);
+        continue;
+      }
+
+      if (originalExitCode === 0) process.exit(0);
+
+      crashRestartCount += 1;
+      if (crashRestartCount >= maxCrashRestarts) process.exit(originalExitCode ?? 1);
+      await sleep(1000);
+      if (signalled) process.exit(0);
     }
-
-    if (originalExitCode === 0) process.exit(0);
-
-    crashRestartCount += 1;
-    if (crashRestartCount >= maxCrashRestarts) process.exit(originalExitCode ?? 1);
-    await sleep(1000);
-    if (signalled) process.exit(0);
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
   }
 }
 

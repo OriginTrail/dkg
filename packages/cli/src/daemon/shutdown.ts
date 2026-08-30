@@ -28,7 +28,6 @@ import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
 import {
   DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
   SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
-  type ShutdownPolicy,
 } from './shutdown-policy.js';
 
 export {
@@ -41,14 +40,6 @@ export {
 /** Backward-compatible name for the unchanged fleet default. */
 export const SHUTDOWN_HARD_TIMEOUT_MS = DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
 
-/**
- * Per-callsite budget for the best-effort forced-cleanup hook (state-file
- * unlinks, etc.) that runs after the hard timeout fires. Bounded separately
- * from {@link SHUTDOWN_HARD_TIMEOUT_MS} so a stalled filesystem op cannot
- * recreate the same zombie shape we're trying to prevent: if THIS deadlines
- * too, we abandon the work and exit. 1s is generous for `unlink()` calls and
- * still keeps total wall-clock < 16s in the worst case.
- */
 /**
  * Forced-shutdown exit codes are derived from the shutdown callsites that
  * exist today:
@@ -186,24 +177,4 @@ export async function raceShutdownWithTimeout(
     if (timer) clearTimeout(timer);
   }
   return { forced };
-}
-
-/**
- * Bind the startup-resolved policy to the runtime race. The injected race is
- * a narrow test seam; production always uses raceShutdownWithTimeout.
- */
-export function createBoundedShutdownRace(
-  policy: ShutdownPolicy,
-  race: typeof raceShutdownWithTimeout = raceShutdownWithTimeout,
-): (
-  cleanup: Promise<void>,
-  log: (message: string) => void,
-  onForcedTimeout?: () => void | Promise<void>,
-) => Promise<{ forced: boolean }> {
-  return (cleanup, log, onForcedTimeout) => race(
-    cleanup,
-    policy.hardTimeoutMs,
-    log,
-    onForcedTimeout,
-  );
 }

@@ -56,7 +56,6 @@ export {
 /** Default tick — 30s. Picked to be longer than typical request handling but short enough that a 5-failure quorum triggers within ~2.5 min. */
 export const LIVENESS_PROBE_INTERVAL_MS = 30_000;
 
-/** Default per-probe TCP-connect timeout — 5s. Production daemons handle most requests in <100ms; 5s is many SDs above the long-tail. */
 /** Default trigger threshold — 5 consecutive failures. With 30s tick → ~2.5 min unresponsive before SIGKILL. */
 export const LIVENESS_CONSECUTIVE_FAILURES_TO_KILL = 5;
 

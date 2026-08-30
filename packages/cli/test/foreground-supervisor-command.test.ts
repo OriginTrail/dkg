@@ -7,33 +7,55 @@ import { promisify } from 'node:util';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { maybeStartSupervisorLivenessWatcher } from '../src/cli-supervisor.js';
-import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import { runForegroundSupervisor } from '../src/cli-supervisor.js';
 
 const execFileAsync = promisify(execFile);
 
 describe('foreground supervisor restart command', () => {
   it('passes the startup-captured shutdown policy to the real watcher boundary', async () => {
-    const env: NodeJS.ProcessEnv = { DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000' };
-    const shutdownPolicy = resolveShutdownPolicy(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
+    const root = await mkdtemp(join(tmpdir(), 'dkg-foreground-shutdown-policy-'));
+    const savedDkgHome = process.env.DKG_HOME;
     const observedGrace: number[] = [];
-    const stop = await maybeStartSupervisorLivenessWatcher(
-      { kill: () => true },
-      { enabled: true, shutdownPolicy },
-      {
-        readApiPort: async () => 9200,
-        loadApiHost: async () => '127.0.0.1',
-        sleep: async () => undefined,
-        apiPortExists: () => true,
-        startWatcher: (options) => {
-          observedGrace.push(options.shutdownGraceMs!);
-          return { stop: () => undefined };
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code ?? 0})`);
+    });
+    try {
+      const dkgHome = join(root, 'home');
+      const slotEntry = join(
+        dkgHome,
+        'releases',
+        'a',
+        'packages',
+        'cli',
+        'dist',
+        'cli.js',
+      );
+      await mkdir(dirname(slotEntry), { recursive: true });
+      await writeFile(join(dkgHome, 'config.json'), JSON.stringify({ nodeRole: 'core' }));
+      await writeFile(slotEntry, 'process.exit(0);\n');
+      await symlink('a', join(dkgHome, 'releases', 'current'));
+      process.env.DKG_HOME = dkgHome;
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        DKG_HOME: dkgHome,
+        DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000',
+      };
+
+      await expect(runForegroundSupervisor(
+        env,
+        async (_child, config) => {
+          observedGrace.push(config.shutdownGraceMs);
+          env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
+          return () => undefined;
         },
-      },
-    );
-    env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
-    await vi.waitFor(() => expect(observedGrace).toEqual([66_000]));
-    stop();
+      )).rejects.toThrow('process.exit(0)');
+      expect(observedGrace).toEqual([66_000]);
+    } finally {
+      exitSpy.mockRestore();
+      if (savedDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = savedDkgHome;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects an invalid shutdown budget at `dkg start` before detached startup polling', async () => {

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
   SHUTDOWN_FORCED_OFFSET,
@@ -6,7 +7,6 @@ import {
   DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
   MIN_SHUTDOWN_HARD_TIMEOUT_MS,
   MAX_SHUTDOWN_HARD_TIMEOUT_MS,
-  createBoundedShutdownRace,
   decodeForcedExitCode,
   encodeForcedShutdownExitCode,
   isForcedShutdownExitCode,
@@ -67,20 +67,18 @@ describe('resolveShutdownPolicy', () => {
     );
   });
 
-  it('binds the startup deadline used by the runtime race despite later environment mutation', async () => {
-    const env: NodeJS.ProcessEnv = { DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000' };
-    const policy = resolveShutdownPolicy(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
-    const observedTimeouts: number[] = [];
-    const runShutdownRace = createBoundedShutdownRace(
-      policy,
-      async (_cleanup, hardTimeoutMs) => {
-        observedTimeouts.push(hardTimeoutMs);
-        return { forced: false };
-      },
+  it('forwards the startup-resolved scalar at the production lifecycle race join', () => {
+    const lifecycleSource = readFileSync(
+      new URL('../src/daemon/lifecycle.ts', import.meta.url),
+      'utf8',
     );
-    env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
-    await runShutdownRace(Promise.resolve(), () => undefined);
-    expect(observedTimeouts).toEqual([60_000]);
+    expect(lifecycleSource).toMatch(
+      /const shutdownHardTimeoutMs = resolveShutdownPolicy\([\s\S]*?\)\.hardTimeoutMs;/u,
+    );
+    expect(lifecycleSource).toMatch(
+      /raceShutdownWithTimeout\(\s*cleanup,\s*shutdownHardTimeoutMs,\s*log,/u,
+    );
+    expect(resolveShutdownPolicy('60000').hardTimeoutMs).toBe(60_000);
   });
 });
 

@@ -303,6 +303,8 @@ export async function closeDaemonBackingStoresAfterTeardown(
  */
 export interface ProducerQuiescentTeardownDeps {
   server: { close: (callback: (error?: Error) => void) => unknown };
+  /** Known permanent HTTP responses (currently `/api/events`) to end before server drain. */
+  longLivedResponses?: Set<{ end(): unknown }>;
   closeLocalLlm: () => Promise<void>;
   drainCatchupJobs: (budgetMs: number, log: (message: string) => void) => Promise<unknown>;
   flushTelemetry: (options: { log: (message: string) => void }) => Promise<void>;
@@ -320,16 +322,34 @@ export interface ProducerQuiescentTeardownDeps {
   drainBudgetMs?: number;
 }
 
+/** End daemon-owned permanent responses so `server.close()` waits only for finite requests. */
+export function closeTrackedLongLivedResponses(
+  responses: Set<{ end(): unknown }> | undefined,
+): void {
+  if (!responses) return;
+  for (const response of responses) {
+    try {
+      response.end();
+    } catch {
+      // A broken stream must not prevent the listener from draining the rest.
+    }
+  }
+  responses.clear();
+}
+
 export function buildProducerQuiescentTeardownSteps(
   deps: ProducerQuiescentTeardownDeps,
 ): ProducerQuiescentTeardownSteps {
   return {
-    closeServer: () => new Promise<void>((resolve, reject) => {
-      deps.server.close((error?: Error) => {
-        if (error) reject(error);
-        else resolve();
+    closeServer: () => {
+      closeTrackedLongLivedResponses(deps.longLivedResponses);
+      return new Promise<void>((resolve, reject) => {
+        deps.server.close((error?: Error) => {
+          if (error) reject(error);
+          else resolve();
+        });
       });
-    }),
+    },
     closeLocalLlm: () => deps.closeLocalLlm(),
     drainCatchupJobs: async () => {
       await deps.drainCatchupJobs(

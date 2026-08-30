@@ -277,8 +277,8 @@ import {
   carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
 import {
-  createBoundedShutdownRace,
   encodeForcedShutdownExitCode,
+  raceShutdownWithTimeout,
 } from './shutdown.js';
 import { resolveShutdownPolicy } from './shutdown-policy.js';
 import {
@@ -1168,8 +1168,9 @@ async function runDaemonInnerWithStartupOwnership(
   startedAt: number,
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
 ): Promise<void> {
-  const shutdownPolicy = resolveShutdownPolicy(process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
-  const runShutdownRace = createBoundedShutdownRace(shutdownPolicy);
+  const shutdownHardTimeoutMs = resolveShutdownPolicy(
+    process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS,
+  ).hardTimeoutMs;
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -3814,6 +3815,7 @@ async function runDaemonInnerWithStartupOwnership(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             server,
+            longLivedResponses: sseClients,
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,
@@ -3872,8 +3874,9 @@ async function runDaemonInnerWithStartupOwnership(
       detachDaemonLogTee();
       await daemonLogFileWriter.shutdown();
     });
-    const { forced } = await runShutdownRace(
+    const { forced } = await raceShutdownWithTimeout(
       cleanup,
+      shutdownHardTimeoutMs,
       log,
       cleanupStateFiles,
     );
