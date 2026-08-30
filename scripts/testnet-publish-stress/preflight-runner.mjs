@@ -1,5 +1,3 @@
-const DEFAULT_RUN_ID = '26may';
-
 function bar(log, label) {
   log(`\n=== ${label} ===`);
 }
@@ -10,14 +8,14 @@ function bar(log, label) {
  * @param {object} options
  * @param {(method: string, path: string, body?: unknown) => Promise<{ok: boolean, status: number, json: any}>} options.apiCall
  * @param {string} options.expectedNetworkId
- * @param {string} [options.runId]
+ * @param {string} options.runId Fully resolved by the entry point.
  * @param {(message: string) => void} [options.log]
  * @returns {Promise<{exitCode: number, reason: string, resolvedCgId?: string | null, onChainId?: string | null}>}
  */
 export async function runPreflight({
   apiCall,
   expectedNetworkId,
-  runId = DEFAULT_RUN_ID,
+  runId,
   log = console.error,
 }) {
   const cgShortId = `miles-publish-stress-${runId}`;
