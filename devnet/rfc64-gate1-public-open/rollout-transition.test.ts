@@ -62,6 +62,10 @@ after(async () => {
 test('routes every registered rollout command through its own output decoder', () => {
   const digest = `0x${'ab'.repeat(32)}`;
   const outputs: Readonly<Record<Gate1RolloutCommand, unknown>> = Object.freeze({
+    writeAuthorStoreProbe: Object.freeze({
+      graphUri: AUTHOR_STORE_PROBE_GRAPH,
+      tripleCount: PROJECTION_QUADS.length,
+    }),
     rolloutStatus: Object.freeze({
       bootstrapStarted: true,
       catalogServiceStarted: true,
@@ -119,12 +123,18 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   let authorReady = await author.waitFor('ready');
   assertReady(authorReady, 'catalog', false);
   await acceptPolicy(author, 'author-policy');
-  const authorStoreProbe = output(await author.request(
+  const authorStoreProbe = await author.requestRollout(
     'writeAuthorStoreProbe',
     'author-store-probe',
-    'operation-completed',
-    { graphUri: AUTHOR_STORE_PROBE_GRAPH },
-  ));
+    {
+      graphUri: AUTHOR_STORE_PROBE_GRAPH,
+      quads: PROJECTION_QUADS.map(({ subject, predicate, object }) => ({
+        subject,
+        predicate,
+        object,
+      })),
+    },
+  );
   assert.equal(authorStoreProbe.graphUri, AUTHOR_STORE_PROBE_GRAPH);
   assert.equal(authorStoreProbe.tripleCount, PROJECTION_QUADS.length);
   await author.stop('stop-author-store-probe');
@@ -224,13 +234,13 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assert.equal(await stagedHead(shadow.child, headDigest, signatureVariantDigest, 'shadow'), headDigest);
   assert.equal(await appliedHead(shadow.child, catalogScopeDigest, 'shadow'), null);
   assertSemanticExact(await semanticGraph(shadow.child, swmGraph, 'shadow'), swmGraph);
+  await shadow.child.stop('stop-shadow');
   await requireStoreFixture().assertGraphExact(
     'receiver',
     receiverDataDir,
     swmGraph,
     PROJECTION_QUADS,
   );
-  await shadow.child.stop('stop-shadow');
 
   const catalog = await startReceiver('catalog', false, receiverDataDir, author, authorReady);
   assert.deepEqual(await rolloutStatus(
@@ -255,13 +265,13 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertSemanticExact(catalogVmGraph, vmGraph);
   assertAppliedExact(await appliedHead(catalog.child, catalogScopeDigest, 'catalog'), headDigest);
   assertSemanticExact(await semanticGraph(catalog.child, swmGraph, 'catalog'), swmGraph);
+  await catalog.child.stop('stop-catalog');
   await requireStoreFixture().assertGraphExact(
     'receiver',
     receiverDataDir,
     swmGraph,
     PROJECTION_QUADS,
   );
-  await catalog.child.stop('stop-catalog');
 
   const killed = await startReceiver('catalog', true, receiverDataDir, author, authorReady, false);
   assert.deepEqual(await rolloutStatus(

@@ -1,11 +1,13 @@
 import { access, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 
+import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
+  BlazegraphNamespaceManager,
   createTripleStore,
   quadsToNQuads,
   readExactGraphPaged,
+  type BlazegraphNamespaceLease,
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import blazegraphRuntimeContract from
@@ -98,7 +100,7 @@ class OxigraphRolloutStoreFixture implements RolloutStoreFixture {
     expectedQuads: readonly Quad[],
   ): Promise<void> {
     const persisted = await readFile(join(dataDir, 'store.nq'), 'utf8');
-    const graphTerm = `<${assertSafeIri(graphUri, 'graph URI')}>`;
+    const graphTerm = `<${assertSafeIri(graphUri)}>`;
     const actualLines = persisted.split('\n')
       .map((line) => line.trim())
       .filter((line) => line.endsWith(` ${graphTerm} .`))
@@ -122,8 +124,8 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
 
   private constructor(
     private readonly endpointByStore: ReadonlyMap<string, string>,
-    private readonly namespaceUrls: readonly string[],
-    private readonly fetchImpl: typeof fetch,
+    private readonly namespaceManager: BlazegraphNamespaceManager,
+    private readonly namespaceLeases: readonly BlazegraphNamespaceLease[],
     private readonly requestTimeoutMs: number,
   ) {}
 
@@ -134,48 +136,34 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
     signal?: AbortSignal;
     storeDataDirs: Readonly<Record<RolloutStoreRole, readonly string[]>>;
   }>): Promise<BlazegraphRolloutStoreFixture> {
-    const namespaceApiUrl = blazegraphNamespaceApiUrl(input.configuredUrl);
     const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const attemptedNamespaceUrls: string[] = [];
+    const namespaceManager = new BlazegraphNamespaceManager({
+      serviceUrl: input.configuredUrl,
+      fetchImpl: input.fetchImpl,
+      renderNamespaceXml: renderBlazegraphNamespaceXml,
+      requestTimeoutMs: input.requestTimeoutMs,
+    });
+    const plan: Array<Readonly<{ key: string; namespace: string }>> = [];
+    for (const role of ['author', 'receiver'] as const) {
+      for (const [index, dataDir] of input.storeDataDirs[role].entries()) {
+        plan.push(Object.freeze({
+          key: roleDataDirKey(role, dataDir),
+          namespace: `rfc64-rollout-${nonce}-${role}-${index}`,
+        }));
+      }
+    }
+    const leases = await namespaceManager.acquireMany(
+      plan.map((entry) => entry.namespace),
+      input.signal,
+    );
     const endpointByStore = new Map<string, string>();
-    try {
-      for (const role of ['author', 'receiver'] as const) {
-        for (const [index, dataDir] of input.storeDataDirs[role].entries()) {
-          const namespace = `rfc64-rollout-${nonce}-${role}-${index}`;
-          const namespaceUrl = `${namespaceApiUrl}/${encodeURIComponent(namespace)}`;
-          // A rejected POST is indeterminate: Blazegraph may have committed the
-          // namespace before its response was lost. Register before issuing it.
-          attemptedNamespaceUrls.push(namespaceUrl);
-          endpointByStore.set(roleDataDirKey(role, dataDir), `${namespaceUrl}/sparql`);
-          await createBlazegraphNamespace({
-            namespaceApiUrl,
-            namespace,
-            fetchImpl: input.fetchImpl,
-            requestTimeoutMs: input.requestTimeoutMs,
-            signal: input.signal,
-          });
-        }
-      }
-    } catch (error) {
-      try {
-        await cleanupBlazegraphNamespaces(
-          attemptedNamespaceUrls,
-          input.fetchImpl,
-          input.requestTimeoutMs,
-          3,
-        );
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          'Blazegraph namespace setup failed and cleanup could not be proven',
-        );
-      }
-      throw error;
+    for (const [index, entry] of plan.entries()) {
+      endpointByStore.set(entry.key, leases[index].sparqlUrl);
     }
     return new BlazegraphRolloutStoreFixture(
       endpointByStore,
-      Object.freeze(attemptedNamespaceUrls),
-      input.fetchImpl,
+      namespaceManager,
+      leases,
       input.requestTimeoutMs,
     );
   }
@@ -218,7 +206,7 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       const actualLines = quadsToNQuads(actual).split('\n').filter(Boolean).sort();
       const expectedLines = quadsToNQuads(expectedQuads.map((quad) => ({
         ...quad,
-        graph: assertSafeIri(graphUri, 'graph URI'),
+        graph: assertSafeIri(graphUri),
       }))).split('\n').filter(Boolean).sort();
       if (JSON.stringify(actualLines) !== JSON.stringify(expectedLines)) {
         throw new Error(
@@ -231,11 +219,7 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
   }
 
   async dispose(): Promise<void> {
-    await cleanupBlazegraphNamespaces(
-      this.namespaceUrls,
-      this.fetchImpl,
-      this.requestTimeoutMs,
-    );
+    await this.namespaceManager.disposeAll(this.namespaceLeases);
   }
 }
 
@@ -262,104 +246,6 @@ function normalizeStoreDataDirs(
 
 function roleDataDirKey(role: RolloutStoreRole, dataDir: string): string {
   return `${role}\u0000${dataDir}`;
-}
-
-function blazegraphNamespaceApiUrl(configuredUrl: string): string {
-  const parsed = new URL(configuredUrl);
-  const match = /^(.*)\/namespace\/[^/]+\/sparql\/?$/u.exec(parsed.pathname);
-  if (match === null || match[1].length === 0) {
-    throw new Error(
-      'BLAZEGRAPH_TEST_URL must end with /namespace/<name>/sparql for isolated certification',
-    );
-  }
-  parsed.pathname = `${match[1]}/namespace`;
-  parsed.search = '';
-  parsed.hash = '';
-  return parsed.toString().replace(/\/$/u, '');
-}
-
-async function createBlazegraphNamespace(input: Readonly<{
-  namespaceApiUrl: string;
-  namespace: string;
-  fetchImpl: typeof fetch;
-  requestTimeoutMs: number;
-  signal?: AbortSignal;
-}>): Promise<void> {
-  const response = await boundedFetch(input.fetchImpl, input.namespaceApiUrl, {
-    method: 'POST',
-    headers: { 'content-type': 'application/xml' },
-    body: renderBlazegraphNamespaceXml(input.namespace),
-  }, input.requestTimeoutMs, input.signal);
-  if (!response.ok) {
-    throw new Error(
-      `could not create isolated Blazegraph namespace ${input.namespace}: HTTP ${response.status}`,
-    );
-  }
-}
-
-async function cleanupBlazegraphNamespaces(
-  namespaceUrls: readonly string[],
-  fetchImpl: typeof fetch,
-  requestTimeoutMs: number,
-  reconcileAttempts = 1,
-): Promise<void> {
-  const failures: string[] = [];
-  const attempts = Math.max(1, Math.min(reconcileAttempts, requestTimeoutMs));
-  const retryDelayMs = attempts === 1
-    ? 0
-    : Math.max(1, Math.min(100, Math.floor(requestTimeoutMs / (attempts * 4))));
-  const perAttemptTimeoutMs = Math.max(
-    1,
-    Math.floor((requestTimeoutMs - retryDelayMs * (attempts - 1)) / attempts),
-  );
-  for (const url of namespaceUrls) {
-    let failure: string | null = null;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      try {
-        const response = await boundedFetch(
-          fetchImpl,
-          url,
-          { method: 'DELETE' },
-          perAttemptTimeoutMs,
-        );
-        failure = !response.ok && response.status !== 404
-          ? `${url}: HTTP ${response.status}`
-          : null;
-      } catch (error) {
-        failure = `${url}: ${error instanceof Error ? error.message : String(error)}`;
-      }
-      if (attempt + 1 < attempts) await delay(retryDelayMs);
-    }
-    if (failure !== null) failures.push(failure);
-  }
-  if (failures.length > 0) {
-    throw new Error(`could not clean isolated Blazegraph namespaces: ${failures.join('; ')}`);
-  }
-}
-
-async function boundedFetch(
-  fetchImpl: typeof fetch,
-  input: string,
-  init: RequestInit,
-  timeoutMs: number,
-  callerSignal?: AbortSignal,
-): Promise<Response> {
-  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
-    throw new Error('rollout store fixture request timeout must be a positive integer');
-  }
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const signal = callerSignal === undefined
-    ? timeout
-    : AbortSignal.any([callerSignal, timeout]);
-  return fetchImpl(input, { ...init, signal });
-}
-
-function assertSafeIri(value: string, label: string): string {
-  const hasControlOrSpace = [...value].some((character) => character.codePointAt(0)! <= 0x20);
-  if (hasControlOrSpace || /[<>"{}|\\^`]/u.test(value)) {
-    throw new Error(`${label} cannot be represented safely in the fixture SPARQL query`);
-  }
-  return value;
 }
 
 async function assertPathMissing(path: string, message: string): Promise<void> {

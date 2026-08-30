@@ -1,4 +1,11 @@
 export {
+  BlazegraphNamespaceLease,
+  BlazegraphNamespaceManager,
+  type BlazegraphNamespaceDisposeOptions,
+  type BlazegraphNamespaceEnsureResult,
+  type BlazegraphNamespaceManagerOptions,
+} from './blazegraph-namespace-manager.js';
+export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,

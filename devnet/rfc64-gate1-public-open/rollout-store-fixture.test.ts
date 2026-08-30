@@ -57,10 +57,15 @@ test('cleans an attempted namespace when creation commits but its response is lo
       fetchImpl,
       requestTimeoutMs: 60,
     }),
-    /namespace committed but response was lost/u,
+    (error: unknown) => error instanceof AggregateError
+      && error.errors.length === 2
+      && error.errors.every((entry) => (
+        entry instanceof Error && /namespace committed but response was lost/u.test(entry.message)
+      )),
   );
-  assert.equal(deleted.length, 3, 'indeterminate creation must receive reconciliation deletes');
-  assert.ok(deleted.every((url) => /\/namespace\/rfc64-rollout-.*-author-0$/u.test(url)));
+  assert.equal(deleted.length, 2, 'every indeterminate creation must receive a reconciliation delete');
+  assert.ok(deleted.some((url) => /\/namespace\/rfc64-rollout-.*-author-0$/u.test(url)));
+  assert.ok(deleted.some((url) => /\/namespace\/rfc64-rollout-.*-receiver-0$/u.test(url)));
 });
 
 test('bounds cleanup when Blazegraph accepts namespaces but never deletes them', async () => {
@@ -83,7 +88,9 @@ test('bounds cleanup when Blazegraph accepts namespaces but never deletes them',
   const startedAt = Date.now();
   await assert.rejects(
     fixture.dispose(),
-    /could not clean isolated Blazegraph namespaces/u,
+    (error: unknown) => error instanceof AggregateError
+      && error.message === 'Blazegraph namespace cleanup failed'
+      && error.errors.length === 2,
   );
   assert(Date.now() - startedAt < 500, 'namespace cleanup did not settle within its deadline');
 });

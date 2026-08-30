@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  assertSafeIri,
   assertCanonicalEvmAddress,
   assertCanonicalDigest,
   assertContextGraphIdV1,
@@ -24,6 +25,7 @@ import {
 import {
   GraphManager,
   tryReplaceGraphAtomically,
+  type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
@@ -178,6 +180,15 @@ export class Gate1RolloutAdapterFixture {
       ...(vmChain === undefined ? {} : { chainAdapter: vmChain }),
     });
     this.#handlers = Object.freeze({
+      writeAuthorStoreProbe: async (currentAgent, input) => {
+        const graphUri = assertSafeIri(input.graphUri);
+        const quads: Quad[] = input.quads.map((quad) => ({ ...quad, graph: graphUri }));
+        const replaced = await tryReplaceGraphAtomically(currentAgent.store, graphUri, quads);
+        if (!replaced) {
+          throw new Error('author store lacks atomic graph replacement for backend certification');
+        }
+        return Object.freeze({ graphUri, tripleCount: quads.length });
+      },
       rolloutStatus: async (currentAgent, input) => {
         const manualSwmPlan = await currentAgent.planSharedMemorySyncContextGraphs(
           input.completeProviderPeerId,

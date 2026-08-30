@@ -92,6 +92,7 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
       'project.json',
       'blazegraph-image.json',
       'blazegraph-image-metadata.cjs',
+      'blazegraph-runtime-contract.d.cts',
       ...overlays.map((file) => `network/${file}`),
     ],
   };

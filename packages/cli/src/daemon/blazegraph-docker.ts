@@ -31,12 +31,16 @@
  */
 import { spawn } from 'node:child_process';
 import * as net from 'node:net';
+import blazegraphRuntimeContract from
+  '@origintrail-official/dkg/blazegraph-runtime-contract';
+import { BlazegraphNamespaceManager } from '@origintrail-official/dkg-storage';
 import { runtimeAssetPaths } from '../runtime-assets.js';
-import {
-  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE as NAMESPACE_XML_TEMPLATE,
+
+const {
+  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: NAMESPACE_XML_TEMPLATE,
   readBlazegraphImageMetadata,
-  type BlazegraphImageMetadata,
-} from '../blazegraph-runtime-contract.js';
+} = blazegraphRuntimeContract;
+type BlazegraphImageMetadata = ReturnType<typeof readBlazegraphImageMetadata>;
 
 /**
  * Pinned multi-architecture image index — matches the deployed mainnet fleet.
@@ -446,62 +450,24 @@ async function waitForBlazegraphReady(opts: {
   );
 }
 
-async function namespaceExists(opts: {
-  url: string;
-  namespace: string;
-  fetch: typeof globalThis.fetch;
-}): Promise<boolean> {
-  // Blazegraph exposes per-namespace metadata at
-  // `/bigdata/namespace/<ns>/sparql/properties`. A 200 means present.
-  try {
-    const r = await opts.fetch(
-      `${opts.url}/bigdata/namespace/${encodeURIComponent(opts.namespace)}/sparql/properties`,
-      { method: 'GET' },
-    );
-    return r.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function createNamespace(opts: {
-  url: string;
-  namespace: string;
-  fetch: typeof globalThis.fetch;
-  log: (msg: string) => void;
-}): Promise<void> {
-  const body = BLAZEGRAPH_NAMESPACE_XML_TEMPLATE.replace(
-    '{namespace}',
-    opts.namespace,
-  );
-  const r = await opts.fetch(`${opts.url}/bigdata/namespace`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/xml' },
-    body,
-  });
-  if (!r.ok) {
-    let detail = '';
-    try { detail = (await r.text()).slice(0, 200); } catch { /* ignore */ }
-    throw new Error(
-      `Failed to create Blazegraph namespace "${opts.namespace}" — HTTP ${r.status}${detail ? `: ${detail}` : ''}`,
-    );
-  }
-  opts.log(`  Created Blazegraph namespace "${opts.namespace}".`);
-}
-
 async function reconcileNamespace(opts: {
   url: string;
   namespace: string;
   fetch: typeof globalThis.fetch;
   log: (msg: string) => void;
 }): Promise<boolean> {
-  const created = !(await namespaceExists(opts));
-  if (created) {
-    await createNamespace(opts);
+  const manager = new BlazegraphNamespaceManager({
+    serviceUrl: opts.url,
+    fetchImpl: opts.fetch,
+    renderNamespaceXml: blazegraphRuntimeContract.renderBlazegraphNamespaceXml,
+  });
+  const result = await manager.ensure(opts.namespace);
+  if (result.created) {
+    opts.log(`  Created Blazegraph namespace "${opts.namespace}".`);
   } else {
     opts.log(`  Namespace "${opts.namespace}" already exists.`);
   }
-  return created;
+  return result.created;
 }
 
 async function finaliseReusedContainer(opts: {

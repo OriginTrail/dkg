@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 import {
   buildInfoPayload,
@@ -19,6 +20,7 @@ import { cliRuntimeAssetManifest, copyCliRuntimeAssets } from '../../copy-cli-ru
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const COPY_SCRIPT = path.join(REPO_ROOT, 'scripts', 'copy-cli-runtime-assets.mjs');
 const BLAZEGRAPH_METADATA_PARSER = path.join(REPO_ROOT, 'packages', 'cli', 'blazegraph-image-metadata.cjs');
+const BLAZEGRAPH_RUNTIME_TYPES = path.join(REPO_ROOT, 'packages', 'cli', 'blazegraph-runtime-contract.d.cts');
 const VALID_BLAZEGRAPH_METADATA = `${JSON.stringify({
   image: 'example/blazegraph@sha256:test',
   containerPort: 80,
@@ -32,6 +34,7 @@ const NPM_AVAILABLE = (() => {
     return false;
   }
 })();
+const TAR_AVAILABLE = spawnSync('tar', ['--version'], { encoding: 'utf8' }).status === 0;
 
 const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../release-packages.mjs');
 
@@ -236,6 +239,7 @@ test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', ()
     [
       'blazegraph-image-metadata.cjs',
       'blazegraph-image.json',
+      'blazegraph-runtime-contract.d.cts',
       'build-info.json',
       'network/mainnet-base.json',
       'network/testnet.json',
@@ -251,6 +255,7 @@ test('passes when the cli tarball includes every required runtime asset', () => 
     { path: 'project.json' },
     { path: 'blazegraph-image.json' },
     { path: 'blazegraph-image-metadata.cjs' },
+    { path: 'blazegraph-runtime-contract.d.cts' },
     { path: 'build-info.json' },
     { path: 'network\\testnet.json' },
     { path: 'network/mainnet-base.json' },
@@ -309,6 +314,7 @@ test('the manifest distinguishes copied assets from complete pack requirements',
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
+    'blazegraph-runtime-contract.d.cts',
     'network/mainnet-base.json',
     'network/testnet.json',
   ]);
@@ -351,11 +357,85 @@ test('packages/cli ships the runtime assets in its published files list', () => 
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
+    'blazegraph-runtime-contract.d.cts',
     'build-info.json',
   ]) {
     assert.ok((cliPkg.files ?? []).includes(entry), `packages/cli#files must ship ${entry}`);
   }
 });
+
+test('the packed CLI resolves the typed Blazegraph runtime subpath for a consumer', {
+  skip: NPM_AVAILABLE && TAR_AVAILABLE ? false : 'npm and tar are required',
+}, () => withFixture((root) => {
+  const packDir = path.join(root, 'pack');
+  const extractedDir = path.join(root, 'extracted');
+  const consumerDir = path.join(root, 'consumer');
+  const installedPackageDir = path.join(
+    consumerDir,
+    'node_modules',
+    '@origintrail-official',
+    'dkg',
+  );
+  fs.mkdirSync(packDir, { recursive: true });
+  fs.mkdirSync(extractedDir, { recursive: true });
+  fs.mkdirSync(path.dirname(installedPackageDir), { recursive: true });
+  const packed = spawnSync('npm', [
+    'pack',
+    path.join(REPO_ROOT, 'packages', 'cli'),
+    '--pack-destination',
+    packDir,
+    '--json',
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+  assert.equal(packed.status, 0, `npm pack failed: ${packed.stderr}`);
+  const report = JSON.parse(packed.stdout);
+  const filename = (Array.isArray(report) ? report[0] : report)?.filename;
+  assert.equal(typeof filename, 'string', 'npm pack did not report a tarball filename');
+  const extracted = spawnSync('tar', [
+    '-xzf',
+    path.join(packDir, filename),
+    '-C',
+    extractedDir,
+  ], { encoding: 'utf8' });
+  assert.equal(extracted.status, 0, `tar extraction failed: ${extracted.stderr}`);
+  fs.renameSync(path.join(extractedDir, 'package'), installedPackageDir);
+
+  const consumerPath = path.join(consumerDir, 'consumer.mts');
+  fs.writeFileSync(consumerPath, [
+    "import contract from '@origintrail-official/dkg/blazegraph-runtime-contract';",
+    "const xml: string = contract.renderBlazegraphNamespaceXml('consumer');",
+    'const metadata: ReturnType<typeof contract.readBlazegraphImageMetadata> = {',
+    "  image: 'example/blazegraph@sha256:test',",
+    '  containerPort: 80,',
+    "  dataPath: '/data',",
+    '};',
+    'void xml;',
+    'void metadata;',
+    '',
+  ].join('\n'));
+  const program = ts.createProgram([consumerPath], {
+    esModuleInterop: true,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    noEmit: true,
+    skipLibCheck: false,
+    strict: true,
+    target: ts.ScriptTarget.ES2022,
+  });
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.equal(
+    diagnostics.length,
+    0,
+    ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+      getCanonicalFileName: (file) => file,
+      getCurrentDirectory: () => consumerDir,
+      getNewLine: () => '\n',
+    }),
+  );
+}));
 
 test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd)', () => withFixture((root) => {
   writeCliPackFixture(root);
@@ -386,6 +466,7 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
   const cliDir = path.join(root, 'packages', 'cli');
   fs.mkdirSync(cliDir, { recursive: true });
   fs.copyFileSync(BLAZEGRAPH_METADATA_PARSER, path.join(cliDir, 'blazegraph-image-metadata.cjs'));
+  fs.copyFileSync(BLAZEGRAPH_RUNTIME_TYPES, path.join(cliDir, 'blazegraph-runtime-contract.d.cts'));
   fs.writeFileSync(path.join(cliDir, 'build-info.json'), '{}\n'); // generated by release:build-info
   fs.writeFileSync(path.join(cliDir, 'package.json'), `${JSON.stringify({
     name: '@origintrail-official/dkg', version: '0.0.0-fixture', private: true,
@@ -394,6 +475,7 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
       'project.json',
       'blazegraph-image.json',
       'blazegraph-image-metadata.cjs',
+      'blazegraph-runtime-contract.d.cts',
       'build-info.json',
     ],
     scripts: { prepack: 'node ../../scripts/copy-cli-runtime-assets.mjs' },
@@ -414,6 +496,7 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
+    'blazegraph-runtime-contract.d.cts',
     'build-info.json',
     'network/testnet.json',
     'network/mainnet-base.json',

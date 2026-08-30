@@ -21,7 +21,6 @@ import {
 import {
   createTripleStore,
   quadsToNQuads,
-  tryReplaceGraphAtomically,
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
@@ -38,12 +37,12 @@ import {
 } from './product-capabilities.js';
 import {
   GATE1_DEPLOYMENT,
-  GATE1_PROJECTION_QUADS,
 } from './fixture.js';
 import {
   Gate1RolloutAdapterFixture,
   parseGate1RolloutAdapterConfig,
 } from './rollout-adapter-fixture.js';
+import { gate1RolloutCommandRole } from './rollout-process-protocol.js';
 import {
   buildGate1RolloutStoreConfig,
   ROLLOUT_BLAZEGRAPH_URL_ENV,
@@ -173,7 +172,7 @@ async function handle(command: Command): Promise<void> {
   }
   const currentAgent = requireAgent();
   if (rolloutFixture?.supportsCommand(command.command) === true) {
-    requireRole('receiver');
+    requireRole(gate1RolloutCommandRole(command.command));
     emitOperationResult(command, await rolloutFixture.dispatch(
       currentAgent,
       command.command,
@@ -203,24 +202,6 @@ async function handle(command: Command): Promise<void> {
         operation: command.command,
         output: accepted,
         requestId: command.requestId,
-      });
-      return;
-    }
-    case 'writeAuthorStoreProbe': {
-      requireRole('author');
-      const input = plainRecord(command.input, 'writeAuthorStoreProbe input');
-      const graphUri = assertSafeIri(
-        requiredString(input.graphUri, 'writeAuthorStoreProbe.graphUri'),
-        'writeAuthorStoreProbe.graphUri',
-      );
-      const quads = GATE1_PROJECTION_QUADS.map((quad) => ({ ...quad, graph: graphUri }));
-      const replaced = await tryReplaceGraphAtomically(currentAgent.store, graphUri, quads);
-      if (!replaced) {
-        throw new Error('author store lacks atomic graph replacement for backend certification');
-      }
-      emitOperationResult(command, {
-        graphUri,
-        tripleCount: quads.length,
       });
       return;
     }
@@ -599,14 +580,6 @@ function plainRecord(value: unknown, label: string): Record<string, unknown> {
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 4096) {
     throw new TypeError(`${label} must be a bounded non-empty string`);
-  }
-  return value;
-}
-
-function assertSafeIri(value: string, label: string): string {
-  const hasControlOrSpace = [...value].some((character) => character.codePointAt(0)! <= 0x20);
-  if (hasControlOrSpace || /[<>"{}|\\^`]/u.test(value)) {
-    throw new TypeError(`${label} cannot be represented safely as a graph IRI`);
   }
   return value;
 }
