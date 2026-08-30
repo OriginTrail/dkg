@@ -312,8 +312,10 @@ import type {
   MemoryGraphChangedEvent,
   NotificationSseEvent,
   RequestContext,
+  RequestContextInputFields,
 } from './routes/context.js';
-import { authenticatedAgentAddress } from '../auth.js';
+import { createRequestActor } from './routes/context.js';
+import type { AllowedHttpAuthentication } from '../auth.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
@@ -338,28 +340,44 @@ import type { RoutePlugin } from './plugin-api.js';
 
 
 export type HandleRequestInput = Omit<
-  RequestContext,
+  RequestContextInputFields,
   | 'url'
   | 'path'
+  | 'actor'
+  | 'authentication'
   | 'requestAgentAddress'
->;
+> & { readonly authentication: AllowedHttpAuthentication };
 
 export async function handleRequest(input: HandleRequestInput): Promise<void> {
-  const { req, res, agent } = input;
+  const { req, res, agent, authentication, ...contextInput } = input;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // Routing derives compatibility identity only from the accepted authentication. A raw invalid
-  // bearer is observable as presentedToken but can never participate in identity resolution.
-  const requestAgentAddress = authenticatedAgentAddress(input.authentication)
-    ?? agent.resolveAgentAddress(input.authentication.acceptedToken);
-
-  const ctx: RequestContext = {
-    ...input,
+  // Build one actor from the accepted authentication decision. Compatibility properties are
+  // read-only getters over this value, never independently stored request state.
+  const actor = createRequestActor(
+    authentication,
+    (acceptedToken) => agent.resolveAgentAddress(acceptedToken),
+  );
+  const ctxBase = {
+    ...contextInput,
+    req,
+    res,
+    agent,
     url,
     path,
-    requestAgentAddress,
+    actor,
   };
+  const ctx = Object.defineProperties(ctxBase, {
+    authentication: {
+      enumerable: true,
+      get: () => actor.authentication,
+    },
+    requestAgentAddress: {
+      enumerable: true,
+      get: () => actor.effectiveAgentAddress,
+    },
+  }) as RequestContext;
 
   await handleStatusRoutes(ctx);
   if (res.writableEnded) return;

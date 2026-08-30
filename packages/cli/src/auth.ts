@@ -47,13 +47,33 @@ type HttpCredentialDecision =
     readonly acceptedToken: string;
   };
 
+type AcceptedHttpIdentity =
+  | {
+    readonly acceptedToken: string;
+    readonly principal: Extract<RequestPrincipal, { kind: 'agent' }>;
+  }
+  | {
+    readonly acceptedToken: string;
+    readonly principal: Extract<RequestPrincipal, { kind: 'nodeOperator' }>;
+  };
+
+type AnonymousHttpIdentity = {
+  readonly acceptedToken: undefined;
+  readonly principal: Extract<RequestPrincipal, { kind: 'anonymous' }>;
+};
+
+/**
+ * One correlated allow decision. Authenticated mode always carries an accepted credential, while
+ * an absent credential can only be anonymous. Public/disabled requests may still carry a valid
+ * optional bearer, but that bearer is classified at the same boundary before this value exists.
+ */
 export type AllowedHttpAuthentication = {
   readonly allowed: true;
-  readonly mode: 'disabled' | 'public' | 'authenticated';
   readonly presentedToken: string | undefined;
-  readonly acceptedToken: string | undefined;
-  readonly principal: RequestPrincipal;
-};
+} & (
+  | ({ readonly mode: 'authenticated' } & AcceptedHttpIdentity)
+  | ({ readonly mode: 'disabled' | 'public' } & (AcceptedHttpIdentity | AnonymousHttpIdentity))
+);
 
 export type HttpAuthenticationResult =
   | { readonly allowed: false }
@@ -64,31 +84,69 @@ export type HttpAuthenticationResult =
  * Tests use the same factory so impossible principal/capability combinations cannot be assembled
  * by independently mutating fixture fields.
  */
-export function createAllowedHttpAuthentication(input: {
-  readonly mode: AllowedHttpAuthentication['mode'];
-  readonly presentedToken?: string;
-  readonly acceptedToken?: string;
-  readonly resolveAgentByToken?: (token: string) => string | undefined;
-}): AllowedHttpAuthentication {
-  if (input.mode === 'authenticated' && !input.acceptedToken) {
-    throw new Error('Authenticated HTTP requests require an accepted token');
+type CreateAllowedHttpAuthenticationInput =
+  | {
+    readonly mode: 'disabled' | 'public';
+    readonly presentedToken?: string;
+    readonly acceptedToken?: undefined;
+    readonly resolveAgentByToken?: never;
   }
-  const agentAddress = input.acceptedToken
-    ? input.resolveAgentByToken?.(input.acceptedToken)
-    : undefined;
-  const principal: RequestPrincipal = agentAddress
-    ? { kind: 'agent', agentAddress }
-    : input.acceptedToken
-      ? { kind: 'nodeOperator' }
-      : { kind: 'anonymous' };
+  | {
+    readonly mode: AllowedHttpAuthentication['mode'];
+    readonly presentedToken?: string;
+    readonly acceptedToken: string;
+    readonly resolveAgentByToken: (token: string) => string | undefined;
+  };
+
+export function createAllowedHttpAuthentication(
+  input: CreateAllowedHttpAuthenticationInput,
+): AllowedHttpAuthentication {
+  if (input.acceptedToken !== undefined) {
+    const agentAddress = input.resolveAgentByToken(input.acceptedToken);
+    const identity: AcceptedHttpIdentity = agentAddress
+      ? { acceptedToken: input.acceptedToken, principal: { kind: 'agent', agentAddress } }
+      : { acceptedToken: input.acceptedToken, principal: { kind: 'nodeOperator' } };
+    return input.mode === 'authenticated'
+      ? {
+        allowed: true,
+        mode: 'authenticated',
+        presentedToken: input.presentedToken,
+        ...identity,
+      }
+      : {
+        allowed: true,
+        mode: input.mode,
+        presentedToken: input.presentedToken,
+        ...identity,
+      };
+  }
   return {
     allowed: true,
     mode: input.mode,
     presentedToken: input.presentedToken,
-    acceptedToken: input.acceptedToken,
-    principal,
+    acceptedToken: undefined,
+    principal: { kind: 'anonymous' },
   };
 }
+
+// Compile-time-only invariant assertions; deliberately never called.
+function assertAllowedHttpAuthenticationTypeInvariants(): void {
+  // @ts-expect-error authenticated mode cannot be anonymous or omit an accepted credential
+  const anonymousAuthenticated: AllowedHttpAuthentication = {
+    allowed: true, mode: 'authenticated', presentedToken: undefined,
+    acceptedToken: undefined, principal: { kind: 'anonymous' },
+  };
+  // @ts-expect-error an accepted credential cannot carry an anonymous principal
+  const acceptedAnonymous: AllowedHttpAuthentication = {
+    allowed: true, mode: 'public', presentedToken: 'token',
+    acceptedToken: 'token', principal: { kind: 'anonymous' },
+  };
+  // @ts-expect-error accepted credentials must be classified by a resolver
+  createAllowedHttpAuthentication({ mode: 'public', acceptedToken: 'token' });
+  void anonymousAuthenticated;
+  void acceptedAnonymous;
+}
+void assertAllowedHttpAuthenticationTypeInvariants;
 
 /** Node administration is a projection of the correlated authentication decision, never state. */
 export function canAdministerNode(authentication: AllowedHttpAuthentication): boolean {
@@ -1257,12 +1315,25 @@ export async function authenticateHttpRequest(input: {
   );
   if (!credential.allowed) return credential;
 
-  return createAllowedHttpAuthentication({
-    mode: credential.mode,
-    presentedToken: credential.presentedToken,
-    acceptedToken: credential.acceptedToken,
-    resolveAgentByToken: input.resolveAgentByToken,
-  });
+  if (credential.mode === 'authenticated') {
+    return createAllowedHttpAuthentication({
+      mode: credential.mode,
+      presentedToken: credential.presentedToken,
+      acceptedToken: credential.acceptedToken,
+      resolveAgentByToken: input.resolveAgentByToken,
+    });
+  }
+  return credential.acceptedToken === undefined
+    ? createAllowedHttpAuthentication({
+      mode: credential.mode,
+      presentedToken: credential.presentedToken,
+    })
+    : createAllowedHttpAuthentication({
+      mode: credential.mode,
+      presentedToken: credential.presentedToken,
+      acceptedToken: credential.acceptedToken,
+      resolveAgentByToken: input.resolveAgentByToken,
+    });
 }
 
 /**

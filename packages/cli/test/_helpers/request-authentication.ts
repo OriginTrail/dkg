@@ -36,8 +36,8 @@ export function requestAuthentication(input: FixtureAuthentication): AllowedHttp
     mode: input.mode ?? 'authenticated',
     presentedToken: token,
     acceptedToken: token,
-    ...(input.kind === 'agent'
-      ? { resolveAgentByToken: () => input.agentAddress }
-      : {}),
+    resolveAgentByToken: input.kind === 'agent'
+      ? () => input.agentAddress
+      : () => undefined,
   });
 }

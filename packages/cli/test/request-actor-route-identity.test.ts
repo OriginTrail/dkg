@@ -1,9 +1,10 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { createAllowedHttpAuthentication } from '../src/auth.js';
-import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
-import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import {
+  handleRequest,
+  type HandleRequestInput,
+} from '../src/daemon/handle-request.js';
 
 const TRUSTED_ADDRESS = '0x1111111111111111111111111111111111111111';
 const REVOKED_ADDRESS = '0x2222222222222222222222222222222222222222';
@@ -61,17 +62,15 @@ describe('canonical request actor route identity', () => {
       publisher: { getIdentityId: () => 7n },
     };
 
-    await handleAgentChatRoutes({
+    await handleRequest({
       req,
       res,
       agent,
-      path: '/api/agent/identity',
-      url: new URL('http://127.0.0.1/api/agent/identity'),
-      requestAgentAddress: TRUSTED_ADDRESS,
       authentication: authentication(),
-    } as unknown as RequestContext);
+    } as unknown as HandleRequestInput);
 
-    expect(resolveAgentAddress).not.toHaveBeenCalled();
+    expect(resolveAgentAddress).toHaveBeenCalledTimes(1);
+    expect(resolveAgentAddress).toHaveBeenCalledWith(undefined);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toMatchObject({
       agentAddress: TRUSTED_ADDRESS,
@@ -93,17 +92,15 @@ describe('canonical request actor route identity', () => {
     }));
     const agent = { resolveAgentAddress, signJoinRequest };
 
-    await handleContextGraphRoutes({
+    await handleRequest({
       req,
       res,
       agent,
-      path,
-      url: new URL(`http://127.0.0.1${path}`),
-      requestAgentAddress: TRUSTED_ADDRESS,
       authentication: authentication(),
-    } as unknown as RequestContext);
+    } as unknown as HandleRequestInput);
 
-    expect(resolveAgentAddress).not.toHaveBeenCalled();
+    expect(resolveAgentAddress).toHaveBeenCalledTimes(1);
+    expect(resolveAgentAddress).toHaveBeenCalledWith(undefined);
     expect(signJoinRequest).toHaveBeenCalledWith(contextGraphId, TRUSTED_ADDRESS);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).agentAddress).toBe(TRUSTED_ADDRESS);

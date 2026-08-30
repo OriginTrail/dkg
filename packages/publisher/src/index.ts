@@ -300,6 +300,7 @@ export {
 } from './async-lift-retry-disposition.js';
 // Public option types for the narrow terminal-job administrative capability.
 export {
+  type LegacyPendingTransactionClearOverride,
   type PendingTransactionClearOverride,
   type TargetedLiftJobClearOptions,
 } from './terminal-job-clear.js';

@@ -118,7 +118,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { authenticatedAgentAddress as agentAddressFromAuthentication, canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
+import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -333,6 +333,7 @@ import {
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
 import { classifyAgentConnectError } from './agent-connect-error.js';
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
 import { handleAgentsListRoute } from './agents-list.js';
 import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
@@ -441,10 +442,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    requestAgentAddress,
-    authentication,
   } = ctx;
-  const authenticatedAgentAddress = agentAddressFromAuthentication(authentication);
+  const actor = actorFromRequestContext(ctx);
+  const {
+    authentication,
+    authenticatedAgentAddress,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
 
 
   // POST /api/agent/register — register a new agent on this node

@@ -31,7 +31,10 @@ import {
 import { knowledgeAssetAgentAddressesEqual } from '@origintrail-official/dkg-core';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
 import type { LiftJobFailureCode, PersistedLiftJob } from './lift-job.js';
-import type { TargetedLiftJobClearOptions } from './terminal-job-clear.js';
+import type {
+  PendingTransactionClearOverride,
+  TargetedLiftJobClearOptions,
+} from './terminal-job-clear.js';
 // Type-only, and erased at emit — the reverse edge (types importing `LiftJobRetryProjection`
 // from here) is type-only too, so nothing circular survives into the JavaScript. The verdict
 // vocabulary stays defined once, beside the resolver contract that produces it.
@@ -397,14 +400,27 @@ export function isTargetedClearableLiftJob(
   options: TargetedLiftJobClearOptions = {},
 ): boolean {
   if (isClearableTerminalLiftJob(job)) return true;
-  const override = options.pendingTransactionOverride;
+  const rawOverride = options.pendingTransactionOverride;
+  if (!rawOverride || typeof rawOverride !== 'object') return false;
+  // Backward compatibility for the original public options shape. Legacy `requestedBy` is
+  // deliberately normalized to AGENT authority only: it can clear its own admission lane but
+  // can never acquire the node-wide capability introduced later.
+  const override: PendingTransactionClearOverride | null = 'requestedBy' in rawOverride
+    && !('kind' in rawOverride)
+    && typeof rawOverride.requestedBy === 'string'
+    && rawOverride.requestedBy.trim().length > 0
+    ? { kind: 'agent' as const, agentAddress: rawOverride.requestedBy }
+    : 'kind' in rawOverride
+      ? rawOverride
+      : null;
   if (!override) return false;
   // Authority and state eligibility are decided together, under the same job lock. An agent may
   // accept risk only for the lane it admitted; a node operator owns the queue and may accept it
   // for any job, including an unstamped pre-upgrade record.
   switch (override.kind) {
     case 'agent':
-      if (!ownsLiftJobAdmissionLane(job, override.agentAddress)) return false;
+      if (typeof override.agentAddress !== 'string'
+        || !ownsLiftJobAdmissionLane(job, override.agentAddress)) return false;
       break;
     case 'nodeOperator':
       break;

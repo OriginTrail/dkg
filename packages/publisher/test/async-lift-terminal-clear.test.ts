@@ -224,7 +224,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     }) as unknown as Parameters<typeof p.clearTerminalJob>[1];
 
     for (const malformedAuthority of [
-      { requestedBy: '0xCCcCCc00000000000000000000000000000000Cc' },
+      { requestedBy: 42 },
       { kind: 'legacyOwner', agentAddress: '0xCCcCCc00000000000000000000000000000000Cc' },
       { kind: 'agent' },
     ]) {
@@ -232,6 +232,26 @@ describe('#1837 lift publisher clearTerminalJob', () => {
         .toEqual({ outcome: 'rejected', reason: 'nonterminal' });
       expect((await p.getStatus(validated))?.status).toBe('validated');
     }
+  });
+
+  it('keeps the deprecated requestedBy override agent-scoped', async () => {
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const p = createPublisher();
+    const jobId = await driveToValidated(
+      p,
+      { name: 'legacy-shape' },
+      { admittedByAgentAddress: OWNER },
+    );
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OTHER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect(await p.getStatus(jobId)).not.toBeNull();
+
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OWNER },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
   });
 
   it('lets only the admission owner explicitly clear one pre-broadcast validated job', async () => {

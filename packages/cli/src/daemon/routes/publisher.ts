@@ -117,7 +117,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -331,6 +331,7 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
 
 
 interface PublisherLifecycleFacts {
@@ -507,9 +508,12 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    authentication,
-    requestAgentAddress,
   } = ctx;
+  const actor = actorFromRequestContext(ctx);
+  const {
+    authentication,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
 
 
   // GET /api/publisher/jobs?status=...

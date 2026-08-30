@@ -24,6 +24,16 @@ export type PendingTransactionClearOverride =
   | { readonly kind: 'agent'; readonly agentAddress: string }
   | { readonly kind: 'nodeOperator' };
 
+/**
+ * @deprecated Use `{ kind: 'agent', agentAddress }`. Kept as an agent-only compatibility shape
+ * for callers compiled against the original targeted-clear API; it never grants node authority.
+ */
+export interface LegacyPendingTransactionClearOverride {
+  readonly requestedBy: string;
+}
+
 export interface TargetedLiftJobClearOptions {
-  readonly pendingTransactionOverride?: PendingTransactionClearOverride;
+  readonly pendingTransactionOverride?:
+    | PendingTransactionClearOverride
+    | LegacyPendingTransactionClearOverride;
 }

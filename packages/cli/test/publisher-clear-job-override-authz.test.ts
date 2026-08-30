@@ -4,6 +4,7 @@ import type { ServerResponse } from 'node:http';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import { authenticateHttpRequest, canAdministerNode } from '../src/auth.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { createRequestActor } from '../src/daemon/routes/context.js';
 import type {
   PendingTransactionClearOverride,
   TargetedLiftJobClearOptions,
@@ -93,8 +94,7 @@ describe('clear-job pending-transaction override authorization', () => {
           res: res as unknown as ServerResponse,
           url: new URL(`http://127.0.0.1${path}`),
           path,
-          authentication,
-          requestAgentAddress: caller.requestAgentAddress,
+          actor: createRequestActor(authentication, () => caller.requestAgentAddress),
           agent,
           config: { auth: { enabled: authEnabled } },
           validTokens,

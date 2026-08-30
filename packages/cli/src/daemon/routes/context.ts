@@ -10,7 +10,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DKGAgent, OpWalletsConfig } from '@origintrail-official/dkg-agent';
 import type { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import type { AllowedHttpAuthentication } from '../../auth.js';
+import {
+  authenticatedAgentAddress,
+  type AllowedHttpAuthentication,
+} from '../../auth.js';
 import type {
   ChatMemoryManager,
   DashboardDB,
@@ -62,7 +65,51 @@ export interface NotificationSseEvent {
   type: string;
 }
 
+declare const REQUEST_ACTOR_BRAND: unique symbol;
+declare const REQUEST_CONTEXT_BRAND: unique symbol;
+
+/**
+ * The identity and authority used by one routed request. Constructed once by `handleRequest` so
+ * routes cannot combine authentication from one credential with an operational identity derived
+ * from another.
+ */
+export interface RequestActor {
+  readonly [REQUEST_ACTOR_BRAND]: true;
+  readonly authentication: AllowedHttpAuthentication;
+  readonly authenticatedAgentAddress: string | undefined;
+  readonly effectiveAgentAddress: string;
+}
+
+export function createRequestActor(
+  authentication: AllowedHttpAuthentication,
+  resolveEffectiveAgentAddress: (acceptedToken: string | undefined) => string,
+): RequestActor {
+  const agentAddress = authenticatedAgentAddress(authentication);
+  return Object.freeze({
+    authentication,
+    authenticatedAgentAddress: agentAddress,
+    effectiveAgentAddress: agentAddress
+      ?? resolveEffectiveAgentAddress(authentication.acceptedToken),
+  }) as RequestActor;
+}
+
+/**
+ * Compatibility boundary for isolated route-handler embedders created before `RequestActor`.
+ * Real daemon requests always take the first branch. In the fallback, credential identity still
+ * wins over the legacy effective-address projection, so contradictory agent authority cannot be
+ * assembled even by an untyped older caller.
+ */
+export function actorFromRequestContext(ctx: RequestContext): RequestActor {
+  const actor = (ctx as RequestContext & { actor?: RequestActor }).actor;
+  return actor ?? createRequestActor(
+    ctx.authentication,
+    () => ctx.requestAgentAddress,
+  );
+}
+
 export interface RequestContext {
+  /** Opaque: daemon request contexts are assembled only by the dispatch boundary. */
+  readonly [REQUEST_CONTEXT_BRAND]: true;
   req: IncomingMessage;
   res: ServerResponse;
   agent: DKGAgent;
@@ -108,10 +155,15 @@ export interface RequestContext {
   // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;
   path: string;
-  authentication: AllowedHttpAuthentication;
-  /** Compatibility operational identity derived once from the accepted authentication. */
-  requestAgentAddress: string;
+  actor: RequestActor;
+  /** @deprecated Built-in routes should use `actor.authentication`. Runtime getter only. */
+  readonly authentication: AllowedHttpAuthentication;
+  /** @deprecated Built-in routes should use `actor.effectiveAgentAddress`. Runtime getter only. */
+  readonly requestAgentAddress: string;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */
   emitNotification?: (event: NotificationSseEvent) => void;
 }
+
+/** Unbranded input fields accepted only by the daemon's request-context factory. */
+export type RequestContextInputFields = Omit<RequestContext, typeof REQUEST_CONTEXT_BRAND>;
