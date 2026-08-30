@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   asGraphWriteRevisionSource,
+  asSortedGraphSetSource,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
@@ -243,6 +244,7 @@ export function createResponderGraphListMemo(
   ttlMs = 10_000,
 ): GraphListMemo {
   const writeRevisionSource = asGraphWriteRevisionSource(store);
+  const sortedGraphSetSource = asSortedGraphSetSource(store);
   type Revision = GraphWriteRevision | string | undefined;
   const currentRevision = (refreshGeneration: string | undefined): Revision =>
     writeRevisionSource?.getWriteRevision('') ?? refreshGeneration;
@@ -311,15 +313,22 @@ export function createResponderGraphListMemo(
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
-      const load = store.listGraphs(syncResponderStoreOptions(undefined, 'sync.responder.listGraphs'))
+      const graphOptions = syncResponderStoreOptions(undefined, 'sync.responder.listGraphs');
+      const load = (sortedGraphSetSource
+        ? sortedGraphSetSource.listGraphsSorted(graphOptions)
+        : store.listGraphs(graphOptions))
         .then((graphs) => {
           // Content writes advance the store revision even when named-graph
           // membership is unchanged. Reuse the immutable index in that case:
           // enumeration stays freshness-safe, while sorting, Set construction,
           // and every downstream membership index remain stable.
-          const snapshot = lastSnapshot?.matches(graphs)
+          const snapshot = (
+            lastSnapshot?.graphs === graphs || lastSnapshot?.matches(graphs)
+          )
             ? lastSnapshot
-            : createGraphMembershipSnapshot(graphs);
+            : createGraphMembershipSnapshot(graphs, {
+              sortedUnique: sortedGraphSetSource !== null,
+            });
           lastSnapshot = snapshot;
           cached = {
             value: snapshot,

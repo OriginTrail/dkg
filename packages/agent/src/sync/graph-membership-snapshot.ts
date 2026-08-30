@@ -29,8 +29,11 @@ function lowerBound(graphs: readonly string[], target: string): number {
 
 export function createGraphMembershipSnapshot(
   sourceGraphs: readonly string[],
+  options: { sortedUnique?: boolean } = {},
 ): GraphMembershipSnapshot {
-  const graphs = Object.freeze([...new Set(sourceGraphs)].sort(compareCodePoint));
+  const graphs: readonly string[] = options.sortedUnique
+    ? (Object.isFrozen(sourceGraphs) ? sourceGraphs : Object.freeze([...sourceGraphs]))
+    : Object.freeze([...new Set(sourceGraphs)].sort(compareCodePoint));
   const membershipIndex = new Map<string, number>();
   for (let index = 0; index < graphs.length; index += 1) {
     membershipIndex.set(graphs[index]!, index);

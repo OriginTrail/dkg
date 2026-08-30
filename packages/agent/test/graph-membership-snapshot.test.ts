@@ -24,6 +24,16 @@ describe('graph membership snapshot', () => {
     expect(snapshot.has('urn:graph:missing')).toBe(false);
   });
 
+  it('accepts a proven sorted catalog without reordering it', () => {
+    const sorted = Object.freeze(['urn:graph:a', 'urn:graph:b', 'urn:graph:𐀀']);
+    const snapshot = createGraphMembershipSnapshot(sorted, { sortedUnique: true });
+
+    expect(snapshot.graphs).toEqual(sorted);
+    expect(snapshot.graphs).toBe(sorted);
+    expect(snapshot.matches([...sorted].reverse())).toBe(true);
+    expect(snapshot.equalOrUnder('urn:graph:a')).toEqual(['urn:graph:a']);
+  });
+
   it('selects only the exact graph and slash-delimited descendants', () => {
     const root = 'did:dkg:context-graph:alpha';
     const graphs = [

@@ -260,6 +260,28 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(1);
   });
 
+  it('maintains one immutable code-point-sorted catalog across batched mutations', async () => {
+    const prefix = 'did:dkg:context-graph:sorted/';
+    const bmp = `${prefix}\uF900`;
+    const astral = `${prefix}𐀀`;
+    const inner = new OxigraphStore();
+    await inner.insert([q(`${prefix}z`), q(astral), q(bmp), q(`${prefix}b`)]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100_000 });
+
+    const seeded = await store.listGraphsSorted();
+    expect(seeded).toEqual([`${prefix}b`, `${prefix}z`, bmp, astral]);
+    expect(Object.isFrozen(seeded)).toBe(true);
+    await expect(store.listGraphsSorted()).resolves.toBe(seeded);
+
+    await store.insert([q(`${prefix}a`), q(`${prefix}c`)]);
+    await store.delete([q(`${prefix}z`)]);
+    const updated = await store.listGraphsSorted();
+    expect(updated).toEqual([`${prefix}a`, `${prefix}b`, `${prefix}c`, bmp, astral]);
+    await expect(store.listGraphsByPrefix(`${prefix}c`)).resolves.toEqual([`${prefix}c`]);
+    expect(counting.listGraphsCalls).toBe(1);
+  });
+
   it('honors enabled false for direct callers by passing graph reads through', async () => {
     const inner = new OxigraphStore();
     const counting = new CountingStore(inner);
