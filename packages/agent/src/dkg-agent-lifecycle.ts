@@ -6593,6 +6593,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const legacyCgs: string[] = [];
     const work = [];
     for (const contextGraphId of contextGraphIds) {
+      // AGENTS is a continually growing phonebook graph. Changelog upserts are
+      // graph-atomic, so once the graph exceeds the frame cap every delta
+      // attempt transfers an oversized response before falling back anyway.
+      // Route it directly through the row-paged legacy lane.
+      if (contextGraphId === SYSTEM_CONTEXT_GRAPHS.AGENTS) {
+        legacyCgs.push(contextGraphId);
+        continue;
+      }
       if (await this.isPrivateContextGraph(contextGraphId)) {
         legacyCgs.push(contextGraphId);
         continue;
