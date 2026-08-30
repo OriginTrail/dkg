@@ -30,9 +30,13 @@
  * machine-readable repo-root `blazegraph-image.json` runtime asset.
  */
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import * as net from 'node:net';
 import { runtimeAssetPaths } from '../runtime-assets.js';
+import {
+  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE as NAMESPACE_XML_TEMPLATE,
+  readBlazegraphImageMetadata,
+  type BlazegraphImageMetadata,
+} from '../blazegraph-runtime-contract.js';
 
 /**
  * Pinned multi-architecture image index — matches the deployed mainnet fleet.
@@ -42,22 +46,6 @@ import { runtimeAssetPaths } from '../runtime-assets.js';
  * Keep the OCI-index digest immutable: CI reads the same metadata file and
  * requires both linux/amd64 and linux/arm64 manifests.
  */
-interface BlazegraphImageMetadata {
-  image: string;
-  containerPort: number;
-  dataPath: string;
-}
-
-interface BlazegraphRuntimeContract {
-  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: string;
-  readBlazegraphImageMetadata(path: string): BlazegraphImageMetadata;
-}
-
-const require = createRequire(import.meta.url);
-const { BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: NAMESPACE_XML_TEMPLATE, readBlazegraphImageMetadata } = require(
-  '../../blazegraph-image-metadata.cjs',
-) as BlazegraphRuntimeContract;
-
 /**
  * Shared XML template for a Blazegraph namespace tuned for DKG V10
  * (quads enabled, no truth maintenance, no text index, no statement
