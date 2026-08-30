@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AbortableStoreWorkLifecycle,
   composeAbortSignals,
+  raceStoreWorkAgainstAbort,
 } from '../src/abortable-store-work-lifecycle.js';
 
 function abortCalls(spy: ReturnType<typeof vi.spyOn>): number {
@@ -9,6 +10,19 @@ function abortCalls(spy: ReturnType<typeof vi.spyOn>): number {
 }
 
 describe('AbortableStoreWorkLifecycle signal ownership', () => {
+  it('races store work against abort and always removes its listener', async () => {
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    await expect(raceStoreWorkAgainstAbort(Promise.resolve('done'), controller.signal))
+      .resolves.toBe('done');
+    expect(abortCalls(remove)).toBe(1);
+
+    const reason = new Error('cancelled');
+    controller.abort(reason);
+    await expect(raceStoreWorkAgainstAbort(Promise.resolve('late'), controller.signal))
+      .rejects.toBe(reason);
+  });
+
   it('forwards the first abort reason and unlinks both source signals', () => {
     const caller = new AbortController();
     const generation = new AbortController();

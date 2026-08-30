@@ -1,5 +1,5 @@
 import {
-  compileRfc64SemanticReadOperationV1,
+  compileRfc64SemanticReadRequestV2,
   decodeRfc64SemanticRecordStoreRowsV1,
   Rfc64SemanticReadManifestErrorV1,
   type DecodedRfc64SemanticRecordV1,
@@ -8,7 +8,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
-import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
+import {
+  composeAbortSignals,
+  raceStoreWorkAgainstAbort,
+} from './abortable-store-work-lifecycle.js';
 import {
   findTripleStoreCapability,
   type TripleStore,
@@ -84,7 +87,7 @@ export class SyncSemanticStoreV1 {
   ): Promise<Rfc64SemanticReadResultV1> {
     let operation;
     try {
-      operation = compileRfc64SemanticReadOperationV1(input);
+      operation = compileRfc64SemanticReadRequestV2(input);
     } catch (cause) {
       if (cause instanceof Rfc64SemanticReadManifestErrorV1) {
         fail('rfc64-semantic-read-request', cause.message, cause);
@@ -94,9 +97,9 @@ export class SyncSemanticStoreV1 {
     const readOptions = snapshotOptions(options);
     const deadline = new Rfc64SemanticReadDeadlineScope(readOptions);
     try {
-      let rows: readonly Rfc64SemanticStoreRowV1[];
+      let capabilityResult;
       try {
-        rows = await deadline.waitFor(() => this.capability.rfc64SemanticReadV1(
+        capabilityResult = await deadline.waitFor(() => this.capability.rfc64SemanticReadV1(
           operation,
           { signal: deadline.signal },
         ));
@@ -106,6 +109,7 @@ export class SyncSemanticStoreV1 {
         }
         throw cause;
       }
+      const { rows } = snapshotCapabilityResult(capabilityResult, operation.resultVariables);
       if (rows.length === 0) {
         return Object.freeze({ kind: 'absent' });
       }
@@ -119,6 +123,44 @@ export class SyncSemanticStoreV1 {
       deadline.dispose();
     }
   }
+}
+
+function snapshotCapabilityResult(
+  input: unknown,
+  expectedVariables: readonly string[],
+): Readonly<{ readonly rows: readonly Rfc64SemanticStoreRowV1[] }> {
+  const result = snapshotExactRecord(
+    input,
+    ['rows', 'variables'],
+    'RFC-64 semantic read capability result',
+    'rfc64-semantic-read-result',
+  );
+  if (!Array.isArray(result.variables) || Object.getPrototypeOf(result.variables) !== Array.prototype) {
+    fail('rfc64-semantic-read-result', 'semantic read result projection must be an ordinary Array');
+  }
+  const variableKeys = Reflect.ownKeys(result.variables);
+  if (
+    variableKeys.some((key) => typeof key !== 'string')
+    || variableKeys.length !== result.variables.length + 1
+    || !variableKeys.includes('length')
+    || result.variables.length !== expectedVariables.length
+  ) {
+    fail('rfc64-semantic-read-result', 'semantic read returned the wrong result projection');
+  }
+  for (let index = 0; index < expectedVariables.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(result.variables, String(index));
+    if (
+      !descriptor?.enumerable
+      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      || descriptor.value !== expectedVariables[index]
+    ) {
+      fail('rfc64-semantic-read-result', 'semantic read returned the wrong result projection');
+    }
+  }
+  if (!Array.isArray(result.rows) || Object.getPrototypeOf(result.rows) !== Array.prototype) {
+    fail('rfc64-semantic-read-result', 'semantic read rows must be an ordinary Array');
+  }
+  return Object.freeze({ rows: result.rows as readonly Rfc64SemanticStoreRowV1[] });
 }
 
 function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
@@ -193,21 +235,13 @@ class Rfc64SemanticReadDeadlineScope {
   async waitFor<T>(start: () => Promise<T>): Promise<T> {
     this.check();
     const operation = start();
-    let onAbort: (() => void) | undefined;
-    const aborted = new Promise<never>((_resolve, reject) => {
-      onAbort = () => reject(this.signal.reason);
-      this.signal.addEventListener('abort', onAbort, { once: true });
-      if (this.signal.aborted) onAbort();
-    });
     try {
-      const result = await Promise.race([operation, aborted]);
+      const result = await raceStoreWorkAgainstAbort(operation, this.signal);
       this.check();
       return result;
     } catch (cause) {
       this.check();
       throw cause;
-    } finally {
-      if (onAbort) this.signal.removeEventListener('abort', onAbort);
     }
   }
 

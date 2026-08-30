@@ -14,7 +14,7 @@ import type {
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
 import {
-  formatSparqlJsonBindings,
+  parseSparqlJsonSelectResponse,
   type AdapterSparqlJsonSelectResponse,
 } from './sparql-json-results.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
@@ -23,8 +23,9 @@ import {
   assertQuadLiteralsMutf8Safe,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SemanticReadOperationV2,
 } from '@origintrail-official/dkg-core';
-import { certifyRfc64SemanticReadStoreV1 } from '../rfc64-semantic-read-capability.js';
+import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -223,6 +224,7 @@ function createStoreOperationDeadline(
  */
 export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
 
   private readonly url: string;
   private readonly operationTimeoutMs: number;
@@ -232,7 +234,13 @@ export class BlazegraphStore implements TripleStore {
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
-    certifyRfc64SemanticReadStoreV1(this);
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options, 'response');
   }
 
   private runStoreWork<T>(
@@ -550,8 +558,12 @@ export class BlazegraphStore implements TripleStore {
         return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
       }
 
-      const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
-      return { type: 'bindings', bindings } satisfies SelectResult;
+      const parsed = parseSparqlJsonSelectResponse(json as AdapterSparqlJsonSelectResponse);
+      return {
+        type: 'bindings',
+        bindings: parsed.bindings,
+        variables: parsed.variables,
+      } satisfies SelectResult;
       },
     );
   }

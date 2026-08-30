@@ -35,7 +35,7 @@ import type {
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
-  formatSparqlJsonBindings,
+  parseSparqlJsonSelectResponse,
   type AdapterSparqlJsonSelectResponse,
 } from './sparql-json-results.js';
 import {
@@ -66,6 +66,7 @@ import {
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SemanticReadOperationV2,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -77,6 +78,7 @@ import {
 } from '../store-operation-timeout.js';
 import { readSparqlResponseText } from './sparql-response-policy.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
+import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -263,6 +265,7 @@ export interface SparqlHttpStoreOptions {
 
 export class SparqlHttpStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  readonly rfc64SemanticReadCertifiedV1: boolean;
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
@@ -298,6 +301,7 @@ export class SparqlHttpStore implements TripleStore {
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
     this.managedOxigraph = options.managedOxigraph === true;
+    this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
     this.consistencyProfile = this.managedOxigraph
@@ -321,6 +325,16 @@ export class SparqlHttpStore implements TripleStore {
     if (options.auth) {
       this.headers['Authorization'] = options.auth;
     }
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    if (!this.rfc64SemanticReadCertifiedV1) {
+      throw new Error('RFC-64 semantic reads require a DKG-managed Oxigraph endpoint');
+    }
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options, 'response');
   }
 
   private runStoreWork<T>(
@@ -957,8 +971,12 @@ export class SparqlHttpStore implements TripleStore {
               } satisfies AskResult;
             }
 
-            const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
-            return { type: 'bindings', bindings } satisfies SelectResult;
+            const parsed = parseSparqlJsonSelectResponse(json as AdapterSparqlJsonSelectResponse);
+            return {
+              type: 'bindings',
+              bindings: parsed.bindings,
+              variables: parsed.variables,
+            } satisfies SelectResult;
           },
         );
       } finally {

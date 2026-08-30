@@ -11,6 +11,38 @@ export interface AbortSignalScope {
 
 const NOOP_DISPOSE = () => {};
 
+/** Race store work against cancellation while preserving the abort reason. */
+export function raceStoreWorkAgainstAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(normalizeAbortReason(signal.reason));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      action();
+    };
+    const onAbort = () => finish(() => reject(normalizeAbortReason(signal.reason)));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (cause) => finish(() => reject(cause)),
+    );
+  });
+}
+
+function normalizeAbortReason(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
 export function composeAbortSignals(
   primary: AbortSignal | undefined,
   secondary: AbortSignal | undefined,
