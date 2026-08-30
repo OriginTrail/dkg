@@ -5,7 +5,7 @@ import type { Digest32V1 } from '@origintrail-official/dkg-core';
 import type { FinalizedSwmTwinReconciliationOutcome } from
   '../sync/requester/finalized-swm-twin-reconciliation.js';
 import type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
-  './public-catalog-native-receiver-v1.js';
+  './public-catalog-native-committed-head-token-v1.js';
 
 /**
  * Explicit per-KA proof of the only safe finalized-twin lifecycle:

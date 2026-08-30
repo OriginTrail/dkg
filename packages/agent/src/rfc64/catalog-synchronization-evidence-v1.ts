@@ -2,7 +2,7 @@
 
 import type {
   Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
-} from './catalog-applied-head-evidence-v1.js';
+} from './finalized-swm-retirement-lifecycle-receipt-v1.js';
 import type {
   Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './public-catalog-native-receiver-v1.js';

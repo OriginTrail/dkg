@@ -85,6 +85,8 @@ import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-age
 import {
   createRfc64CatalogAppliedHeadCoordinatorV1,
 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import type { Rfc64FinalizedSwmRetirementLifecycleReceiptV1 } from
+  './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
 import {
   snapshotRfc64CatalogSynchronizationEvidenceV1,
   type Rfc64CatalogSynchronizationEvidenceV1,

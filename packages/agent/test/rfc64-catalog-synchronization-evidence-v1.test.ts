@@ -6,7 +6,7 @@ import type { Digest32V1 } from '@origintrail-official/dkg-core';
 import { snapshotRfc64CatalogSynchronizationEvidenceV1 } from
   '../src/rfc64/catalog-synchronization-evidence-v1.js';
 import type { Rfc64FinalizedSwmRetirementLifecycleReceiptV1 } from
-  '../src/rfc64/catalog-applied-head-evidence-v1.js';
+  '../src/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
 
 const digest = (byte: string): Digest32V1 => `0x${byte.repeat(32)}` as Digest32V1;
 

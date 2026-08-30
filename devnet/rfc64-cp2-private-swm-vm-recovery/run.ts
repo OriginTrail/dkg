@@ -45,6 +45,10 @@ import {
   spawnGate2HarnessAgentV1,
 } from '../rfc64-gate2-multi-asset-completeness/two-agent-harness.ts';
 import { planPrivateCatalogConstructionV1 } from './batch-plan.ts';
+import {
+  assertColdMaterializedVmReceiptV1,
+  decodeRetirementLifecycleReceiptsV1,
+} from './lifecycle-receipts.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ARTIFACT = process.env.DKG_RFC64_PRIVATE_CP2_ARTIFACT
@@ -303,73 +307,13 @@ async function execute(): Promise<void> {
       'operation-completed',
       { catalogHeadDigest: headDigest },
     ), 'private retirement lifecycle');
-    const lifecycleRows = array(lifecycle.receipts, 'private retirement lifecycle receipts');
-    exact(lifecycleRows.length, ASSET_COUNT, 'private retirement lifecycle receipt count');
-    const lifecycleByUal = new Map<string, Readonly<Record<string, unknown>>>();
-    const normalizedLifecycleReceipts: Readonly<Record<string, unknown>>[] = [];
-    for (const [index, value] of lifecycleRows.entries()) {
-      const receipt = record(value, `private retirement lifecycle receipt ${index}`);
-      const kaUal = requiredString(receipt.kaUal, `private lifecycle ${index} KA UAL`);
-      if (lifecycleByUal.has(kaUal)) {
-        throw new Error(`private retirement lifecycle duplicates ${kaUal}`);
-      }
-      const committedHead = record(
-        receipt.committedHead,
-        `private lifecycle ${index} committed head`,
-      );
-      const normalized = Object.freeze({
-        kind: requiredString(receipt.kind, `private lifecycle ${index} kind`),
-        catalogHeadDigest: requiredDigest(
-          receipt.catalogHeadDigest,
-          `private lifecycle ${index} catalog head`,
-        ),
-        inventoryDigest: requiredDigest(
-          receipt.inventoryDigest,
-          `private lifecycle ${index} inventory`,
-        ),
-        contextGraphId: requiredString(
-          receipt.contextGraphId,
-          `private lifecycle ${index} context graph`,
-        ),
-        kaUal,
-        assertionVersion: requiredString(
-          receipt.assertionVersion,
-          `private lifecycle ${index} assertion version`,
-        ),
-        vmGraphIri: requiredString(
-          receipt.vmGraphIri,
-          `private lifecycle ${index} VM graph`,
-        ),
-        vmPostReadDigest: requiredDigest(
-          receipt.vmPostReadDigest,
-          `private lifecycle ${index} VM post-read`,
-        ),
-        vmMaterializationStatus: requiredString(
-          receipt.vmMaterializationStatus,
-          `private lifecycle ${index} VM materialization status`,
-        ),
-        committedHead: Object.freeze({
-          kind: requiredString(
-            committedHead.kind,
-            `private lifecycle ${index} committed-head kind`,
-          ),
-          catalogHeadDigest: requiredDigest(
-            committedHead.catalogHeadDigest,
-            `private lifecycle ${index} committed-head digest`,
-          ),
-          inventoryDigest: requiredDigest(
-            committedHead.inventoryDigest,
-            `private lifecycle ${index} committed inventory`,
-          ),
-        }),
-        swmReconciliationOutcome: requiredString(
-          receipt.swmReconciliationOutcome,
-          `private lifecycle ${index} SWM reconciliation outcome`,
-        ),
-      });
-      lifecycleByUal.set(kaUal, normalized);
-      normalizedLifecycleReceipts.push(normalized);
-    }
+    const decodedLifecycle = decodeRetirementLifecycleReceiptsV1(lifecycle.receipts);
+    exact(
+      decodedLifecycle.receipts.length,
+      ASSET_COUNT,
+      'private retirement lifecycle receipt count',
+    );
+    const lifecycleByUal = decodedLifecycle.byUal;
 
     let swmActivated = 0;
     let swmRetired = 0;
@@ -425,10 +369,7 @@ async function execute(): Promise<void> {
         synchronization.inventoryDigest,
         `private lifecycle ${index} inventory`,
       );
-      const committedHead = record(
-        lifecycleReceipt.committedHead,
-        `private lifecycle ${index} committed head`,
-      );
+      const committedHead = lifecycleReceipt.committedHead;
       exact(
         committedHead.kind,
         'rfc64-public-catalog-native-committed-head-token-v1',
@@ -464,6 +405,10 @@ async function execute(): Promise<void> {
       ), `private VM ${index}`);
       exact(vm.tripleCount, 2, `private VM ${index} triple count`);
       exact(vm.projectionNQuads, PROJECTION_NQUADS, `private VM ${index} projection`);
+      assertColdMaterializedVmReceiptV1(
+        lifecycleReceipt,
+        requiredString(vm.projectionNQuads, `private VM ${index} projection`),
+      );
       const metadata = array(vm.metadataBindings, `private VM ${index} metadata`)
         .map((item, metadataIndex) => record(item, `private VM ${index} metadata ${metadataIndex}`));
       metadataObject(metadata, 'status', '"confirmed"');
@@ -515,9 +460,7 @@ async function execute(): Promise<void> {
         expectedRetiredAfterVm: ASSET_COUNT,
         retiredAfterVm: swmRetired,
         lifecycleReceipts: Object.freeze(
-          [...normalizedLifecycleReceipts].sort((left, right) => (
-            String(left.kaUal).localeCompare(String(right.kaUal))
-          )),
+          [...decodedLifecycle.receipts],
         ),
       },
       vm: { expected: ASSET_COUNT, recovered: vmRecovered },

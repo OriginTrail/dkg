@@ -9,34 +9,33 @@ import {
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 import { mapWithConcurrency } from '../map-with-concurrency.js';
+import {
+  reconcileFinalizedSwmTwinFromCatalogProjection,
+  type FinalizedSwmTwinRetirement,
+} from '../sync/requester/finalized-swm-twin-reconciliation.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
-  Rfc64PublicCatalogNativeCommittedHeadTokenV1,
   Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from './public-catalog-native-receiver-v1.js';
+import type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
+  './public-catalog-native-committed-head-token-v1.js';
+import type {
+  Rfc64CatalogAppliedHeadEvidenceV1,
+  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+} from
+  './finalized-swm-retirement-lifecycle-receipt-v1.js';
+export type { Rfc64FinalizedSwmRetirementLifecycleReceiptV1 } from
+  './finalized-swm-retirement-lifecycle-receipt-v1.js';
 import type {
   Rfc64FinalizedVmAgentPrecommitHandlerV1,
   Rfc64FinalizedVmAgentPrecommitTransactionV1,
 } from './finalized-vm-agent-precommit-v1.js';
-import type {
-  Rfc64CatalogAppliedHeadEvidenceV1,
-  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
-} from './catalog-applied-head-evidence-v1.js';
-import {
-  reconcileFinalizedSwmTwinFromCatalogProjection,
-  type FinalizedSwmTwinRetirement,
-} from '../sync/requester/finalized-swm-twin-reconciliation.js';
 
 const POST_HEAD_TWIN_RECONCILIATION_CONCURRENCY_V1 = 4;
-
-export type {
-  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
-} from './catalog-applied-head-evidence-v1.js';
-
 export interface Rfc64CatalogAppliedHeadCoordinatorOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
     (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;

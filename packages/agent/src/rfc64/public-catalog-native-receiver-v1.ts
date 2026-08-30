@@ -81,6 +81,10 @@ import { ethers } from 'ethers';
 
 import { parseNQuads } from '../dkg-agent-utils.js';
 import { unpackKnowledgeAssetId } from '../ka-identity.js';
+import type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
+  './public-catalog-native-committed-head-token-v1.js';
+export type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
+  './public-catalog-native-committed-head-token-v1.js';
 import { assertRfc64ExactIssuerSignatureProofV1 } from './catalog-transport-wire-v1-internal.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
@@ -208,20 +212,9 @@ export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
   rollback(cause?: unknown): Promise<void>;
 }
 
-/**
- * Exact durable-head evidence created by the receiver only after the target
- * head and inventory digest survive their post-commit read.
- */
-export interface Rfc64PublicCatalogNativeCommittedHeadTokenV1 {
-  readonly kind: 'rfc64-public-catalog-native-committed-head-token-v1';
-  readonly catalogHeadDigest: Digest32V1;
-  readonly inventoryDigest: Digest32V1;
-}
-
 /** Neutral operation-owned extension returned only after post-head work settles. */
 export type Rfc64PublicCatalogNativePostHeadExtensionV1 =
   Readonly<Record<string, unknown>>;
-
 /** A rollback-capable primary precommit, before any post-head coordination. */
 export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
   (

@@ -495,10 +495,11 @@ async function handle(command: Command): Promise<void> {
         input.catalogHeadDigest,
         'retirementLifecycleReadback.catalogHeadDigest',
       );
+      const evidence = currentAgent.readRfc64PublicCatalogSynchronizationEvidenceV1(
+        catalogHeadDigest,
+      );
       emitOperationResult(command, Object.freeze({
-        receipts: currentAgent.readRfc64FinalizedSwmRetirementLifecycleReceiptsV1(
-          catalogHeadDigest,
-        ),
+        receipts: evidence?.finalizedSwmRetirementLifecycleReceipts ?? [],
       }));
       return;
     }
@@ -1037,7 +1038,7 @@ function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string,
     exactInventoryReadback:
       typeof surface.readRfc64PublicCatalogSynchronizationEvidenceV1 === 'function',
     retirementLifecycleReadback:
-      typeof surface.readRfc64FinalizedSwmRetirementLifecycleReceiptsV1 === 'function',
+      typeof surface.readRfc64PublicCatalogSynchronizationEvidenceV1 === 'function',
     publishExactSetSuccessor:
       typeof surface.publishOpenAuthorCatalogExactSetSuccessorV1 === 'function',
     publishGenesis: typeof surface.publishOpenAuthorCatalogGenesisV1 === 'function',
