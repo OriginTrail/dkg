@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const MAX_BLOB_BATCH_BYTES = 32 * 1024 * 1024;
 
 // Every tracked file is inspected unless it is explicitly classified as an intentional binary.
 // Keep this policy beside the scanner so a future CI controller can pin both together; never read
@@ -20,24 +20,16 @@ export const TRACKED_BINARY_PATHS = Object.freeze({
   ]),
 });
 
-function nulSeparatedPathBuffers(buffer) {
-  const paths = [];
+function nulSeparatedBuffers(buffer) {
+  const values = [];
   let start = 0;
   for (let index = 0; index < buffer.length; index += 1) {
     if (buffer[index] !== 0) continue;
-    if (index > start) paths.push(buffer.subarray(start, index));
+    if (index > start) values.push(buffer.subarray(start, index));
     start = index + 1;
   }
-  if (start < buffer.length) paths.push(buffer.subarray(start));
-  return paths;
-}
-
-function absolutePathBuffer(repoRoot, relativePath) {
-  return Buffer.concat([
-    Buffer.from(path.resolve(repoRoot)),
-    Buffer.from(path.sep),
-    relativePath,
-  ]);
+  if (start < buffer.length) values.push(buffer.subarray(start));
+  return values;
 }
 
 function commandFailure(command, result) {
@@ -47,15 +39,100 @@ function commandFailure(command, result) {
   );
 }
 
-function runGit(spawnProcess, args, repoRoot) {
+function runGit(spawnProcess, args, repoRoot, input, maxBuffer = 64 * 1024 * 1024) {
   const result = spawnProcess('git', args, {
     cwd: repoRoot,
     encoding: null,
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer,
+    input,
   });
   if (result.error) throw result.error;
   if (result.signal) throw new Error(`git ${args[0]} terminated by ${result.signal}`);
   return result;
+}
+
+function attachBlobSizes(batchOutput, entries) {
+  const lines = batchOutput.toString('ascii').trimEnd().split('\n');
+  if (lines.length !== entries.length) {
+    throw new Error('git cat-file --batch-check returned an unexpected number of entries');
+  }
+  return entries.map((entry, index) => {
+    const [objectId, objectType, rawSize] = lines[index].split(' ');
+    const size = Number(rawSize);
+    if (
+      objectId !== entry.objectId
+      || objectType !== 'blob'
+      || !Number.isSafeInteger(size)
+      || size < 0
+    ) {
+      throw new Error(`git cat-file --batch-check returned invalid metadata for ${entry.objectId}`);
+    }
+    return { ...entry, size };
+  });
+}
+
+function blobBatches(entries) {
+  const batches = [];
+  let batch = [];
+  let batchBytes = 0;
+  for (const entry of entries) {
+    if (batch.length > 0 && batchBytes + entry.size > MAX_BLOB_BATCH_BYTES) {
+      batches.push(batch);
+      batch = [];
+      batchBytes = 0;
+    }
+    batch.push(entry);
+    batchBytes += entry.size;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+
+function parseIndexEntries(buffer) {
+  return nulSeparatedBuffers(buffer).map((record) => {
+    const tab = record.indexOf(0x09);
+    if (tab < 0) throw new Error('git ls-files --stage returned a malformed index entry');
+    const [mode, objectId, stage] = record.subarray(0, tab).toString('ascii').split(' ');
+    if (!mode || !/^[0-9a-f]+$/u.test(objectId ?? '') || !stage) {
+      throw new Error('git ls-files --stage returned malformed entry metadata');
+    }
+    return { mode, objectId, stage, filePath: record.subarray(tab + 1) };
+  });
+}
+
+function blobsContainingNul(batchOutput, entries) {
+  const offenders = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const headerEnd = batchOutput.indexOf(0x0a, offset);
+    if (headerEnd < 0) throw new Error('git cat-file --batch returned a truncated header');
+    const [objectId, objectType, rawSize] = batchOutput
+      .subarray(offset, headerEnd)
+      .toString('ascii')
+      .split(' ');
+    const size = Number(rawSize);
+    if (
+      objectId !== entry.objectId
+      || objectType !== 'blob'
+      || !Number.isSafeInteger(size)
+      || size < 0
+    ) {
+      throw new Error(`git cat-file --batch returned invalid metadata for ${entry.objectId}`);
+    }
+    const contentStart = headerEnd + 1;
+    const contentEnd = contentStart + size;
+    if (contentEnd >= batchOutput.length || batchOutput[contentEnd] !== 0x0a) {
+      throw new Error(`git cat-file --batch returned a truncated blob for ${entry.objectId}`);
+    }
+    if (batchOutput.subarray(contentStart, contentEnd).includes(0)) {
+      offenders.push(entry.filePath);
+    }
+    offset = contentEnd + 1;
+  }
+  if (offset !== batchOutput.length) {
+    throw new Error('git cat-file --batch returned unexpected trailing output');
+  }
+  return offenders;
 }
 
 function isExplicitBinaryPath(filePath) {
@@ -74,24 +151,35 @@ function isExplicitBinaryPath(filePath) {
 export function findTrackedFilesWithNul({
   repoRoot = REPO_ROOT,
   spawnProcess = spawnSync,
-  readFile = fs.readFileSync,
 } = {}) {
-  // Git emits raw NUL-delimited pathname bytes and Node inspects working-tree files as bytes. Do
-  // not decode a pathname before opening it: Git permits non-UTF-8 names and fs accepts Buffer
-  // paths. Invalid UTF-8 cannot match an explicit binary exception and therefore fails closed.
-  const listing = runGit(spawnProcess, ['ls-files', '-z'], repoRoot);
-  if (listing.status !== 0) throw commandFailure('git ls-files', listing);
+  // Read regular blobs from Git's object database, never candidate-controlled filesystem paths.
+  // Mode 120000 symlinks and 160000 gitlinks are deliberately skipped; neither is a text-file
+  // payload, and following either through the worktree would escape the trusted scan boundary.
+  const listing = runGit(spawnProcess, ['ls-files', '--stage', '-z'], repoRoot);
+  if (listing.status !== 0) throw commandFailure('git ls-files --stage', listing);
+  const entries = parseIndexEntries(listing.stdout).filter((entry) =>
+    entry.stage === '0'
+    && (entry.mode === '100644' || entry.mode === '100755')
+    && !isExplicitBinaryPath(entry.filePath));
+  if (entries.length === 0) return [];
+
+  const input = Buffer.from(`${entries.map((entry) => entry.objectId).join('\n')}\n`, 'ascii');
+  const metadata = runGit(spawnProcess, ['cat-file', '--batch-check'], repoRoot, input);
+  if (metadata.status !== 0) throw commandFailure('git cat-file --batch-check', metadata);
 
   const offenders = [];
-  for (const filePath of nulSeparatedPathBuffers(listing.stdout)) {
-    if (isExplicitBinaryPath(filePath)) continue;
-    try {
-      if (readFile(absolutePathBuffer(repoRoot, filePath)).includes(0)) offenders.push(filePath);
-    } catch (error) {
-      // A tracked file can be absent in a developer's unstaged deletion. Preserve that local
-      // workflow, but fail closed for every other read error; CI checkouts are complete.
-      if (error?.code !== 'ENOENT') throw error;
-    }
+  for (const batch of blobBatches(attachBlobSizes(metadata.stdout, entries))) {
+    const batchInput = Buffer.from(`${batch.map((entry) => entry.objectId).join('\n')}\n`, 'ascii');
+    const expectedOutputBytes = batch.reduce((sum, entry) => sum + entry.size + 128, 0);
+    const blobs = runGit(
+      spawnProcess,
+      ['cat-file', '--batch'],
+      repoRoot,
+      batchInput,
+      Math.max(1024, expectedOutputBytes),
+    );
+    if (blobs.status !== 0) throw commandFailure('git cat-file --batch', blobs);
+    offenders.push(...blobsContainingNul(blobs.stdout, batch));
   }
   return offenders;
 }
