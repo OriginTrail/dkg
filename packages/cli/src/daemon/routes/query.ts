@@ -57,7 +57,7 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { CclResourceNotFoundError, DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
@@ -412,17 +412,6 @@ function parseVerifyTimeoutMs(
   }
   return { value };
 }
-
-function respondIfCclResourceNotFound(res: ServerResponse, err: unknown): boolean {
-  if (!(err instanceof CclResourceNotFoundError)) return false;
-  jsonResponse(res, 404, {
-    error: err.message,
-    code: err.code,
-    resource: err.resource,
-  });
-  return true;
-}
-
 
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -1231,7 +1220,6 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 200, result);
     } catch (err: any) {
       const msg = err?.message ?? "";
-      if (respondIfCclResourceNotFound(res, err)) return;
       if (/Only the contextGraph owner can manage policies/.test(msg)) {
         return jsonResponse(res, 403, { error: msg });
       }
@@ -1258,7 +1246,6 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 200, result);
     } catch (err: any) {
       const msg = err?.message ?? "";
-      if (respondIfCclResourceNotFound(res, err)) return;
       if (/Only the contextGraph owner can manage policies/.test(msg)) {
         return jsonResponse(res, 403, { error: msg });
       }
@@ -1319,31 +1306,26 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         error: "facts must be an array when provided",
       });
     }
-    try {
-      const result = publishResult
-        ? await agent.evaluateAndPublishCclPolicy({
-            contextGraphId,
-            name,
-            facts,
-            contextType,
-            view,
-            snapshotId,
-            scopeUal,
-          })
-        : await agent.evaluateCclPolicy({
-            contextGraphId,
-            name,
-            facts,
-            contextType,
-            view,
-            snapshotId,
-            scopeUal,
-          });
-      return jsonResponse(res, 200, result);
-    } catch (err) {
-      if (respondIfCclResourceNotFound(res, err)) return;
-      throw err;
-    }
+    const result = publishResult
+      ? await agent.evaluateAndPublishCclPolicy({
+          contextGraphId,
+          name,
+          facts,
+          contextType,
+          view,
+          snapshotId,
+          scopeUal,
+        })
+      : await agent.evaluateCclPolicy({
+          contextGraphId,
+          name,
+          facts,
+          contextType,
+          view,
+          snapshotId,
+          scopeUal,
+        });
+    return jsonResponse(res, 200, result);
   }
 
   // GET /api/ccl/results?contextGraphId=&...

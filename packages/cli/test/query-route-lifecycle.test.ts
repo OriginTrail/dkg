@@ -14,7 +14,10 @@ import {
   normalizePublicApiQueryResult,
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
-import { respondIfStoreUnavailable } from '../src/daemon/http-utils.js';
+import {
+  respondIfStoreUnavailable,
+  respondWithDaemonError,
+} from '../src/daemon/http-utils.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
 class RequestStub extends EventEmitter {
@@ -119,7 +122,8 @@ describe('/api/query request lifecycle', () => {
     const agent = { [method]: vi.fn(async () => { throw error; }) };
     const { ctx, res } = cclRouteContext(path, body, agent);
 
-    await handleQueryRoutes(ctx);
+    await expect(handleQueryRoutes(ctx)).rejects.toBe(error);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
 
     expect(res.statusCode).toBe(404);
     expect(JSON.parse(res.body)).toEqual({
@@ -138,7 +142,22 @@ describe('/api/query request lifecycle', () => {
     );
 
     await expect(handleQueryRoutes(ctx)).rejects.toBe(error);
-    expect(res.writableEnded).toBe(false);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it('keeps an existing policy with a missing body on the integrity-error path', async () => {
+    const error = new Error('CCL policy body missing: did:dkg:policy:incomplete');
+    const { ctx, res } = cclRouteContext(
+      '/api/ccl/eval',
+      { contextGraphId: 'cg', name: 'incomplete' },
+      { evaluateCclPolicy: vi.fn(async () => { throw error; }) },
+    );
+
+    await expect(handleQueryRoutes(ctx)).rejects.toBe(error);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toEqual({ error: error.message });
   });
 
   it('normalizes prefixed SELECT, ASK, and graph results at the daemon boundary', () => {

@@ -18,7 +18,11 @@ import {
   createOperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
+import {
+  CclResourceNotFoundError,
+  type DKGAgent,
+  type ContextGraphWritePreflightProbe,
+} from '@origintrail-official/dkg-agent';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   StoreSchedulerBusyError,
@@ -171,6 +175,12 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.
     jsonResponse(res, 400, noFundedPublisherWalletBody(typeof err?.message === 'string' ? err.message : String(err)));
+  } else if (err instanceof CclResourceNotFoundError) {
+    jsonResponse(res, 404, {
+      error: err.message,
+      code: err.code,
+      resource: err.resource,
+    });
   } else if (respondIfStoreUnavailable(res, err)) {
     // Store admission pressure and adapter deadlines are transient. The typed
     // response preserves whether work never started or may have completed.

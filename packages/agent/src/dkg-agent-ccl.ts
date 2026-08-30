@@ -674,11 +674,14 @@ export class CclPolicyMethods extends DKGAgentBase {
       contextType: opts.contextType,
       includeBody: true,
     });
-    if (!policy?.body) {
+    if (!policy) {
       throw new CclResourceNotFoundError(
         'approved_policy',
         `No approved policy found for ${opts.contextGraphId}/${opts.name}${opts.contextType ? `/${opts.contextType}` : ''}`,
       );
+    }
+    if (!policy.body) {
+      throw new Error(`CCL policy body missing: ${policy.policyUri}`);
     }
 
     const parsed = parseCclPolicy(policy.body);
