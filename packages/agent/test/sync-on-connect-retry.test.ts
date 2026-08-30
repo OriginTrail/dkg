@@ -100,7 +100,7 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
-  it('runs selected-provider shared memory before unrelated durable and ordinary SWM history', async () => {
+  it('runs durable before ordinary SWM history', async () => {
     const remotePeer = freshPeerIdString();
     const order: string[] = [];
     const ordinarySync = vi.fn(async () => {
@@ -113,33 +113,8 @@ describe('runSyncOnConnect callbacks', () => {
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
-      getSyncContextGraphs: () => ['selected', 'ordinary'],
+      getSyncContextGraphs: () => ['ordinary'],
       getDurableSyncContextGraphs: () => ['ordinary'],
-      selectedSharedMemoryLane: {
-        admitWork: async () => ({
-          contextGraphIds: ['selected'],
-          syncFromPeer: async () => {
-            order.push('shared:selected:selected');
-            return {
-              kind: 'selected-shared-memory',
-              requestedScope: {
-                kind: 'selected-public',
-                targets: [{ contextGraphId: 'selected', lane: 'selected-public' }],
-              },
-              shared: {
-                insertedTriples: 0,
-                completedPhases: 1,
-                checkpointAdvances: 0,
-              },
-              scopeComplete: true,
-              targetDiagnostics: {
-                selectedPublic: { completed: 1, total: 1 },
-                ordinaryPrivate: { completed: 0, total: 0 },
-              },
-            };
-          },
-        }),
-      },
       ordinarySharedMemoryLane: {
         resolveWork: async () => ({
           contextGraphIds: ['ordinary'],
@@ -158,58 +133,9 @@ describe('runSyncOnConnect callbacks', () => {
     expect(outcome).toBe('synced');
     expect(ordinarySync).toHaveBeenCalledWith();
     expect(order).toEqual([
-      'shared:selected:selected',
       'durable:ordinary',
       'shared:ordinary:ordinary',
     ]);
-  });
-
-  it('rejects overlapping selected and ordinary work before ordinary execution', async () => {
-    const remotePeer = freshPeerIdString();
-    const ordinarySync = vi.fn(async () => 0);
-
-    await expect(runSyncOnConnect({
-      remotePeer,
-      syncingPeers: new Set(),
-      getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
-      getSyncContextGraphs: () => [],
-      getDurableSyncContextGraphs: () => [],
-      selectedSharedMemoryLane: {
-        admitWork: () => ({
-          contextGraphIds: ['cg-a'],
-          syncFromPeer: async () => ({
-            kind: 'selected-shared-memory',
-            requestedScope: {
-              kind: 'selected-public',
-              targets: [{ contextGraphId: 'cg-a', lane: 'selected-public' }],
-            },
-            shared: {
-              insertedTriples: 0,
-              completedPhases: 1,
-              checkpointAdvances: 0,
-            },
-            scopeComplete: true,
-            targetDiagnostics: {
-              selectedPublic: { completed: 1, total: 1 },
-              ordinaryPrivate: { completed: 0, total: 0 },
-            },
-          }),
-        }),
-      },
-      ordinarySharedMemoryLane: {
-        resolveWork: () => ({
-          contextGraphIds: ['cg-a'],
-          syncFromPeer: ordinarySync,
-        }),
-      },
-      syncFromPeer: async () => 0,
-      refreshMetaSyncedFlags: async () => undefined,
-      discoverContextGraphsFromStore: async () => 0,
-      logInfo: noopLog,
-    })).rejects.toThrow('Ordinary and selected shared-memory work scopes overlap');
-
-    expect(ordinarySync).not.toHaveBeenCalled();
   });
 
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {

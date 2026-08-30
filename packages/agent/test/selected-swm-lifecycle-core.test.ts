@@ -4,7 +4,6 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
   runSelectedSharedMemoryRetry,
-  runSyncOnConnect,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import {
   captureSyncOnConnectAttempt,
@@ -594,30 +593,23 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       ]);
 
       const onSyncAccounting = vi.fn();
-      const outcome = await runSyncOnConnect({
+      const outcome = await runSelectedSharedMemoryRetry({
         remotePeer: PEER,
         syncingPeers: new Set(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
-        knownCorePeerIds: new Set(),
-        knownCorePeerIdsV2: new Set(),
-        getSyncContextGraphs: () => [],
-        getDurableSyncContextGraphs: () => [],
         selectedSharedMemoryLane: {
           admitWork: () => ({
             contextGraphIds: [publicCg],
             syncFromPeer: async () => selected,
           }),
         },
-        syncFromPeer: async () => 0,
-        refreshMetaSyncedFlags: async () => undefined,
-        discoverContextGraphsFromStore: async () => 0,
         onSyncAccounting,
         logInfo: () => {},
       });
       expect(outcome).toBe('synced');
       expect(onSyncAccounting).toHaveBeenCalledWith(PEER, {
         reconcilerDisposition: 'clear',
-        fresh: true,
+        fresh: false,
         progress: false,
       });
     } finally {
@@ -777,7 +769,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.getSyncOnConnectPeerScheduler =
         LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;
       queueAgent.createSyncOnConnectPeerJobRunner = (peerId: string) => ({
-        runOrdinary: async () => undefined,
+        runAutomaticSelectedThenOrdinary: async () => undefined,
         runSelected: async () => { queuedPeers.push(peerId); },
         cancel: () => undefined,
         finish: () => undefined,

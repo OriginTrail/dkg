@@ -55,12 +55,53 @@ describe('RFC-64 peer-job accounting and order', () => {
     });
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
-    await runner.runOrdinary();
+    await runner.runAutomaticSelectedThenOrdinary();
     runner.finish();
 
     expect(order).toEqual(['selected', 'ordinary']);
     expect(agent.trySelectedSwmRetryFromPeer).toHaveBeenCalledOnce();
     expect(agent.trySyncFromPeer).toHaveBeenCalledOnce();
+  });
+
+  it('disables automatic selected SWM without blocking an explicit recovery plan', async () => {
+    const agent = await createUnstartedAgent('Rfc64AutomaticSelectedSwitch');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.config.syncSharedMemoryOnConnect = false;
+    agent.config.syncContextGraphs = ['selected-cg'];
+    agent.config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { contextGraphId: 'selected-cg', accessPolicy: 0 } },
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    const order: string[] = [];
+    agent.trySelectedSwmRetryFromPeer = vi.fn(async () => {
+      order.push('selected');
+      return 'synced';
+    });
+    agent.trySyncFromPeer = vi.fn(async () => {
+      order.push('ordinary');
+      return 'synced';
+    });
+
+    const automaticRunner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    await automaticRunner.runAutomaticSelectedThenOrdinary();
+    automaticRunner.finish();
+    expect(order).toEqual(['ordinary']);
+
+    const explicitRunner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    await explicitRunner.runSelected({
+      kind: 'rfc64-authorized-swm-recovery-v1',
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
+    });
+    explicitRunner.finish();
+    expect(order).toEqual(['ordinary', 'selected']);
   });
 
   it('continues ordinary work after automatic selected rejection and commits retry', async () => {
@@ -100,7 +141,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
-    await expect(runner.runOrdinary()).rejects.toBe(selectedFailure);
+    await expect(runner.runAutomaticSelectedThenOrdinary()).rejects.toBe(selectedFailure);
     expect(order).toEqual(['selected', 'ordinary']);
     runner.finish();
 
@@ -152,7 +193,7 @@ describe('RFC-64 peer-job accounting and order', () => {
 
     let rejection: unknown;
     try {
-      await runner.runOrdinary();
+      await runner.runAutomaticSelectedThenOrdinary();
     } catch (error: unknown) {
       rejection = error;
     }
@@ -381,7 +422,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
     await runner.runSelected();
-    await runner.runOrdinary();
+    await runner.runAutomaticSelectedThenOrdinary();
     runner.finish();
 
     expect(applyJobAccounting).toHaveBeenCalledOnce();
@@ -424,7 +465,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
     await runner.runSelected();
-    await runner.runOrdinary();
+    await runner.runAutomaticSelectedThenOrdinary();
     runner.finish();
 
     expect(agent.lastSuccessfulSyncAt.get(PEER_A)).toBeGreaterThan(0);
@@ -467,7 +508,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     };
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
-    await runner.runOrdinary();
+    await runner.runAutomaticSelectedThenOrdinary();
     await runner.runSelected();
     runner.finish();
 
@@ -590,7 +631,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     };
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
-    await runner.runOrdinary();
+    await runner.runAutomaticSelectedThenOrdinary();
     await runner.runSelected();
     runner.finish();
 
@@ -744,7 +785,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
     await runner.runSelected();
-    await expect(runner.runOrdinary()).rejects.toBe(ordinaryFailure);
+    await expect(runner.runAutomaticSelectedThenOrdinary()).rejects.toBe(ordinaryFailure);
     runner.finish();
 
     expect(agent.getSyncReconcilerProbe).toHaveBeenCalledTimes(2);
@@ -784,7 +825,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
     await expect(runner.runSelected()).rejects.toBe(selectedFailure);
-    await runner.runOrdinary();
+    await runner.runAutomaticSelectedThenOrdinary();
     runner.finish();
 
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
@@ -827,7 +868,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
 
     await runner.runSelected();
-    await runner.runOrdinary();
+    await runner.runAutomaticSelectedThenOrdinary();
     runner.finish();
 
     expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(false);
@@ -868,7 +909,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     runner.cancel();
 
     expect(applyJobAccounting).toHaveBeenCalledOnce();
-    await expect(runner.runOrdinary()).rejects.toThrow(
+    await expect(runner.runAutomaticSelectedThenOrdinary()).rejects.toThrow(
       'Sync-on-connect peer job is already finished',
     );
     expect(applyJobAccounting).toHaveBeenCalledOnce();

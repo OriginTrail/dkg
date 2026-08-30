@@ -4661,8 +4661,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     SyncReconcilerProbe
   > {
     const source = options.source ?? 'on-connect';
-    const automaticSelectedContextGraphIds =
-      this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer);
+    const automaticSelectedContextGraphIds = syncOnConnectEnabled(this.config)
+      && (this.config.syncSharedMemoryOnConnect ?? true)
+      ? this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer)
+      : [];
     return new ReconciledSyncOnConnectPeerJobRunner({
       acquireProbe: async () => {
         const backoff = this.syncReconcilerBackoff.get(remotePeer);
@@ -4811,7 +4813,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       source,
     });
     try {
-      return await runner.runOrdinary();
+      return await runner.runAutomaticSelectedThenOrdinary();
     } finally {
       runner.finish();
     }

@@ -13,7 +13,7 @@ function createScheduler(callbacks: Readonly<{
 }>): SyncOnConnectPeerScheduler<string> {
   return new SyncOnConnectPeerScheduler<string>({
     createJob: () => ({
-      runOrdinary: async () => callbacks.runOrdinary(),
+      runAutomaticSelectedThenOrdinary: async () => callbacks.runOrdinary(),
       runSelected: async (plan) => callbacks.runSelected(plan),
       cancel: callbacks.cancel ?? (() => undefined),
       finish: callbacks.finish ?? (() => undefined),
@@ -52,7 +52,7 @@ describe('sync-on-connect per-peer scheduler', () => {
   it('does not allocate a peer-job runner when cleared before the timer drains', () => {
     const finish = vi.fn();
     const createJob = vi.fn(() => ({
-      runOrdinary: async () => undefined,
+      runAutomaticSelectedThenOrdinary: async () => undefined,
       runSelected: async () => undefined,
       cancel: () => undefined,
       finish,
@@ -78,7 +78,7 @@ describe('sync-on-connect per-peer scheduler', () => {
         createAttempts += 1;
         if (createAttempts === 1) throw constructionFailure;
         return {
-          runOrdinary,
+          runAutomaticSelectedThenOrdinary: runOrdinary,
           runSelected: async () => undefined,
           cancel: () => undefined,
           finish: () => undefined,

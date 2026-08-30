@@ -355,7 +355,6 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
   });
 
   it('does not hide an unrelated shared-memory phase failure', async () => {
-    const contextGraphId = 'selected-with-unrelated-failure';
     const ordinaryContextGraphId = 'ordinary-with-failure';
     const onSyncAccounting = vi.fn();
     const shared = {
@@ -374,24 +373,6 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       knownCorePeerIdsV2: new Set(),
       getSyncContextGraphs: () => [],
       getDurableSyncContextGraphs: () => [],
-      selectedSharedMemoryLane: {
-        admitWork: () => ({
-          contextGraphIds: [contextGraphId],
-          syncFromPeer: async () => ({
-            kind: 'selected-shared-memory',
-            requestedScope: {
-              kind: 'selected-public',
-              targets: [{ contextGraphId, lane: 'selected-public' }],
-            },
-            shared: result(contextGraphId, 3, 3),
-            scopeComplete: true,
-            targetDiagnostics: {
-              selectedPublic: { completed: 1, total: 1 },
-              ordinaryPrivate: { completed: 0, total: 0 },
-            },
-          }),
-        }),
-      },
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,

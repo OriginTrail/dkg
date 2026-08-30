@@ -62,7 +62,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     return this.runSelectedPhase(() => this.dependencies.runSelected(recoveryPlan));
   }
 
-  async runOrdinary(): Promise<SyncReconcilerAttemptOutcome> {
+  async runAutomaticSelectedThenOrdinary(): Promise<SyncReconcilerAttemptOutcome> {
     this.assertActive();
     const automaticSelectedPhase = this.automaticSelectedPhase;
     this.automaticSelectedPhase = null;

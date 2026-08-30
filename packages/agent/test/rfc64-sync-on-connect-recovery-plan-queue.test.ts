@@ -169,7 +169,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       const runner = createPeerJob(remotePeer);
       return {
         runSelected: (recoveryPlan) => runner.runSelected(recoveryPlan),
-        runOrdinary: ordinaryRun,
+        runAutomaticSelectedThenOrdinary: ordinaryRun,
         cancel: () => { runner.cancel(); },
         finish: () => { runner.finish(); },
       };

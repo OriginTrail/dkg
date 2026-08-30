@@ -152,16 +152,24 @@ describe('RFC-64 SWM recovery authorization', () => {
     });
   });
 
-  it('drops a terminal public scope while retaining the same provider private lane', () => {
+  it('retains private work when raw-plan public admission is denied', () => {
+    const requestSelectedPublicAdmission = vi.fn(() => false);
+    const refreshSelectedPublicAdmission = vi.fn(() => {
+      throw new Error('raw-plan authorization must not refresh catalog admission');
+    });
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
-      refreshSelectedPublicAdmission: vi.fn(() => false),
+      requestSelectedPublicAdmission,
+      refreshSelectedPublicAdmission,
     }));
 
-    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toEqual({
+    expect(coordinator.authorize(mixedPlan())).toEqual({
       kind: 'rfc64-authorized-swm-recovery-v1',
       providerPeerId: PROVIDER,
       targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
     });
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledWith(PROVIDER, [PUBLIC]);
+    expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
   });
 
   it('rejects an unselected public plan without mutating public admission', () => {

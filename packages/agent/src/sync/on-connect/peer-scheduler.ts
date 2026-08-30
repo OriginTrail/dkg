@@ -27,7 +27,8 @@ interface PeerJob<SelectedPlan> {
 }
 
 export interface SyncOnConnectPeerJobRunner<SelectedPlan> {
-  readonly runOrdinary: () => Promise<SyncReconcilerAttemptOutcome>;
+  /** Execute the explicit automatic-selected-then-ordinary phase plan. */
+  readonly runAutomaticSelectedThenOrdinary: () => Promise<SyncReconcilerAttemptOutcome>;
   readonly runSelected: (
     recoveryPlan?: SelectedPlan,
   ) => Promise<SyncReconcilerAttemptOutcome>;
@@ -150,7 +151,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
           if (lane.kind === 'selected') {
             await runner.runSelected(lane.recoveryPlan);
           } else {
-            await runner.runOrdinary();
+            await runner.runAutomaticSelectedThenOrdinary();
           }
         } catch (error: unknown) {
           // Error ownership belongs to the lane that actually failed. A later

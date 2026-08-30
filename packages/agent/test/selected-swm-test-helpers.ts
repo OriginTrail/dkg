@@ -354,7 +354,7 @@ export async function callTrySyncFromPeer(
     remotePeer,
   );
   try {
-    return await runner.runOrdinary();
+    return await runner.runAutomaticSelectedThenOrdinary();
   } finally {
     runner.finish();
     agent.applySyncOnConnectAccounting = applyAccounting;
