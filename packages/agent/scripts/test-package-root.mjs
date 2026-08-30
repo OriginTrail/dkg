@@ -95,6 +95,8 @@ const requiredCatalogMethods = [
   'synchronizeRfc64PublicCatalogFromProviderV1',
   'readRfc64PublicCatalogBootstrapStatusV1',
   'whenRfc64PublicCatalogBootstrapIdleV1',
+  'resolveRfc64AcceptedPublicRootLaneV1',
+  'resolveRfc64CatalogAuthoringLaneV1',
 ];
 for (const method of requiredCatalogMethods) {
   if (

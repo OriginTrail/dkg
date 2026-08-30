@@ -832,6 +832,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         workspaceVisibility: 'public-only',
         announcementPeers: [publicAnnouncementPeerId],
       });
+    expect(author.resolveRfc64AcceptedPublicRootLaneV1(CONTEXT_GRAPH_ID, null)).toBeNull();
+    expect(author.resolveRfc64AcceptedPublicRootLaneV1(publicContextGraphId, null))
+      .toMatchObject({
+        autoPublishConfig: { peers: [publicAnnouncementPeerId] },
+      });
 
     const seal = assertionSealFromCanonical(await authorSeal(25n, PROJECTION_QUADS));
     await expect(author.recordRfc64PublicCatalogAssetV1({
@@ -891,6 +896,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         workspaceVisibility: 'restricted-only',
         announcementPeers: [providerPeerId],
       });
+    expect(author.resolveRfc64AcceptedPublicRootLaneV1(CONTEXT_GRAPH_ID, null)).toBeNull();
 
     const assertionCoordinate = 'ordinary-private-swm';
     const shareOperationId = 'ordinary-private-swm-operation';

@@ -168,6 +168,7 @@ export type {
 export type {
   ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
   ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
+  ResolvedRfc64CatalogAuthoringLaneV1,
 } from './dkg-agent-rfc64-swm-catalog-projection.js';
 export type {
   Rfc64PublicCatalogAuthorRepairOutcomeV1,

@@ -87,7 +87,19 @@ const authorityConfig: Pick<DKGAgentConfig, 'rfc64CatalogAccessPolicyAuthority'>
   rfc64CatalogAccessPolicyAuthority: authority,
 };
 
+// The policy-neutral resolver rename must not break existing package users.
+const legacyPublicLane = agent.resolveRfc64AcceptedPublicRootLaneV1(
+  'package-consumer-context-graph',
+  null,
+);
+const selectedCatalogLane = agent.resolveRfc64CatalogAuthoringLaneV1(
+  'package-consumer-context-graph',
+  null,
+);
+
 void accepted;
 void genesisResult;
 void successorResult;
 void authorityConfig;
+void legacyPublicLane;
+void selectedCatalogLane;

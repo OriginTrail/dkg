@@ -13,6 +13,7 @@ import { mapWithConcurrency } from '../map-with-concurrency.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
+  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
   Rfc64PublicCatalogNativeCommittedHeadTokenV1,
   Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
@@ -74,114 +75,147 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
 ): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
   return Object.freeze(async (plan, signal) => {
     const accepted = options.acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
-    let primaryTransaction: void | Rfc64PublicCatalogNativePrecommitTransactionV1;
-    let finalizedVmTransaction: Rfc64FinalizedVmAgentPrecommitTransactionV1 | null = null;
     if (
       accepted.policy.accessPolicy === 1
       && accepted.policy.source.kind === 'finalized-chain'
     ) {
-      finalizedVmTransaction = await options.finalizedVmPrecommit(plan, signal);
-      primaryTransaction = finalizedVmTransaction;
-    } else {
-      primaryTransaction = await options.finalizedPolicyPrecommit(plan, signal);
+      return createFinalizedVmAppliedHeadLifecycleV1(options, plan, signal);
     }
-    const retirementAuthorized = accepted.policy.accessPolicy === 1
-      && accepted.policy.source.kind === 'finalized-chain';
-    let catalogProjectionEvidence: readonly ReturnType<
-      typeof catalogProjectionEvidenceForRow
-    >[] = [];
-    let materializationReceipts: ReturnType<typeof exactMaterializationReceiptsByUal> =
-      new Map();
-    if (finalizedVmTransaction !== null) {
-      try {
-        catalogProjectionEvidence = plan.rows.map((row) =>
-          catalogProjectionEvidenceForRow(plan, row));
-        materializationReceipts = exactMaterializationReceiptsByUal(
-          finalizedVmTransaction,
-          plan,
-        );
-      } catch (cause) {
-        try {
-          await finalizedVmTransaction.rollback(cause);
-        } catch (rollbackCause) {
-          throw new AggregateError(
-            [cause, rollbackCause],
-            'finalized VM receipt validation and rollback both failed',
-          );
-        }
-        throw cause;
-      }
-    }
-    let vmTransactionCommitted = false;
-    let transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null =
-      primaryTransaction ?? null;
-    if (retirementAuthorized && primaryTransaction !== undefined) {
-      transaction = Object.freeze({
-        commit: async () => {
-          await primaryTransaction.commit();
-          vmTransactionCommitted = true;
-        },
-        rollback: (cause?: unknown) => primaryTransaction.rollback(cause),
-      });
-    }
+    const transaction = await options.finalizedPolicyPrecommit(plan, signal);
     return Object.freeze({
       kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
-      transaction,
-      afterAppliedHead: retirementAuthorized ? async (committedHead) => {
-        if (!vmTransactionCommitted) {
-          throw new Error(
-            'refusing finalized SWM retirement before the VM transaction commit',
-          );
-        }
-        assertExactCommittedHeadTokenV1(committedHead, plan);
-        const ctx = createOperationContext('sync');
-        const receipts = await mapWithConcurrency(
-          catalogProjectionEvidence,
-          POST_HEAD_TWIN_RECONCILIATION_CONCURRENCY_V1,
-          async (evidence) => {
-            const materialization = materializationReceipts.get(evidence.kaUal);
-            if (materialization === undefined) {
-              throw new Error(
-                `finalized VM materialization receipt is missing for ${evidence.kaUal}`,
-              );
-            }
-            const swmReconciliationOutcome = await reconcileFinalizedSwmTwinFromCatalogProjection({
-              store: options.store,
-              writeLocks: options.writeLocks,
-              evidence,
-              retire: (retirement) => options.retire(retirement, ctx),
-            });
-            const receipt = Object.freeze({
-              kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-              catalogHeadDigest: plan.catalogHeadDigest,
-              inventoryDigest: plan.inventoryDigest,
-              contextGraphId: plan.catalogScope.contextGraphId,
-              ...(plan.catalogScope.subGraphName === null
-                ? {}
-                : { subGraphName: plan.catalogScope.subGraphName }),
-              kaUal: evidence.kaUal,
-              assertionVersion: evidence.assertionVersion,
-              vmGraphIri: materialization.vmGraphIri,
-              vmPostReadDigest: materialization.postReadDigest,
-              vmMaterializationStatus: materialization.status,
-              committedHead: Object.freeze({ ...committedHead }),
-              swmReconciliationOutcome,
-            }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV1;
-            options.recordRetirementLifecycleReceipt?.(receipt);
-            return receipt;
-          },
-        );
-        const retired = receipts.filter(
-          ({ swmReconciliationOutcome }) => swmReconciliationOutcome === 'retired',
-        ).length;
-        if (retired > 0) {
-          options.logInfo?.(
-            ctx,
-            `Retired ${retired} byte-identical finalized SWM catalog twin(s) after applied-head commit`,
-          );
-        }
-      } : null,
+      transaction: transaction ?? null,
+      afterAppliedHead: null,
     } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
+  });
+}
+
+async function createFinalizedVmAppliedHeadLifecycleV1(
+  options: Rfc64CatalogAppliedHeadCoordinatorOptionsV1,
+  plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+  signal: AbortSignal,
+): Promise<Rfc64PublicCatalogNativeAppliedHeadLifecycleV1> {
+  const finalizedVmTransaction = await options.finalizedVmPrecommit(plan, signal);
+  let catalogProjectionEvidence: readonly ReturnType<
+    typeof catalogProjectionEvidenceForRow
+  >[];
+  let materializationReceipts: ReturnType<typeof exactMaterializationReceiptsByUal>;
+  try {
+    catalogProjectionEvidence = plan.rows.map((row) =>
+      catalogProjectionEvidenceForRow(plan, row));
+    materializationReceipts = exactMaterializationReceiptsByUal(
+      finalizedVmTransaction,
+      plan,
+    );
+  } catch (cause) {
+    try {
+      await finalizedVmTransaction.rollback(cause);
+    } catch (rollbackCause) {
+      throw new AggregateError(
+        [cause, rollbackCause],
+        'finalized VM receipt validation and rollback both failed',
+      );
+    }
+    throw cause;
+  }
+
+  let vmTransactionCommitted = false;
+  const transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 = Object.freeze({
+    commit: async () => {
+      await finalizedVmTransaction.commit();
+      vmTransactionCommitted = true;
+    },
+    rollback: (cause?: unknown) => finalizedVmTransaction.rollback(cause),
+  });
+  return Object.freeze({
+    kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
+    transaction,
+    afterAppliedHead: async (committedHead) => {
+      if (!vmTransactionCommitted) {
+        throw new Error(
+          'refusing finalized SWM retirement before the VM transaction commit',
+        );
+      }
+      assertExactCommittedHeadTokenV1(committedHead, plan);
+      const ctx = createOperationContext('sync');
+      const receipts = await mapWithConcurrencyAndDrainV1(
+        catalogProjectionEvidence,
+        POST_HEAD_TWIN_RECONCILIATION_CONCURRENCY_V1,
+        async (evidence) => {
+          const materialization = materializationReceipts.get(evidence.kaUal);
+          if (materialization === undefined) {
+            throw new Error(
+              `finalized VM materialization receipt is missing for ${evidence.kaUal}`,
+            );
+          }
+          const swmReconciliationOutcome = await reconcileFinalizedSwmTwinFromCatalogProjection({
+            store: options.store,
+            writeLocks: options.writeLocks,
+            evidence,
+            retire: (retirement) => options.retire(retirement, ctx),
+          });
+          return Object.freeze({
+            kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
+            catalogHeadDigest: plan.catalogHeadDigest,
+            inventoryDigest: plan.inventoryDigest,
+            contextGraphId: plan.catalogScope.contextGraphId,
+            ...(plan.catalogScope.subGraphName === null
+              ? {}
+              : { subGraphName: plan.catalogScope.subGraphName }),
+            kaUal: evidence.kaUal,
+            assertionVersion: evidence.assertionVersion,
+            vmGraphIri: materialization.vmGraphIri,
+            vmPostReadDigest: materialization.postReadDigest,
+            vmMaterializationStatus: materialization.status,
+            committedHead: Object.freeze({ ...committedHead }),
+            swmReconciliationOutcome,
+          }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV1;
+        },
+      );
+      for (const receipt of receipts) {
+        options.recordRetirementLifecycleReceipt?.(receipt);
+      }
+      const retired = receipts.filter(
+        ({ swmReconciliationOutcome }) => swmReconciliationOutcome === 'retired',
+      ).length;
+      if (retired > 0) {
+        options.logInfo?.(
+          ctx,
+          `Retired ${retired} byte-identical finalized SWM catalog twin(s) after applied-head commit`,
+        );
+      }
+    },
+  } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
+}
+
+async function mapWithConcurrencyAndDrainV1<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const settled = await mapWithConcurrency(items, limit, async (item, index) => {
+    try {
+      return Object.freeze({ status: 'fulfilled' as const, value: await fn(item, index) });
+    } catch (reason) {
+      return Object.freeze({ status: 'rejected' as const, reason });
+    }
+  });
+  const failures = settled.filter(
+    (outcome): outcome is Readonly<{ readonly status: 'rejected'; readonly reason: unknown }> =>
+      outcome.status === 'rejected',
+  );
+  if (failures.length === 1) throw failures[0]!.reason;
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures.map(({ reason }) => reason),
+      'multiple finalized SWM reconciliations failed',
+    );
+  }
+  return settled.map((outcome) => {
+    if (outcome.status !== 'fulfilled') {
+      throw new Error('unreachable rejected finalized SWM reconciliation');
+    }
+    return outcome.value;
   });
 }
 

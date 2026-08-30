@@ -35,6 +35,7 @@ import type {
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogSuccessorAssetInputV1,
 } from './dkg-agent-rfc64-catalog.js';
+import type { Rfc64PublicCatalogAutoPublishConfigV1 } from './dkg-agent-types.js';
 import type { ReconcileRfc64PublicRootCatalogExactSetResultV1 } from
   './dkg-agent-rfc64-catalog-upsert.js';
 import {
@@ -81,6 +82,14 @@ export type ResolvedRfc64CatalogAuthoringLaneV1 =
     readonly kind: 'private';
     readonly workspaceVisibility: 'restricted-only';
   }>;
+
+/** @deprecated Use ResolvedRfc64CatalogAuthoringLaneV1. */
+export interface ResolvedRfc64AcceptedPublicRootLaneV1 {
+  readonly networkId: NetworkIdV1;
+  readonly service: Rfc64PublicCatalogServiceV1;
+  readonly autoPublishConfig: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
+  readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
+}
 
 type Rfc64CatalogAuthoringLaneDecisionV1 =
   | Readonly<{ readonly status: 'inactive' }>
@@ -133,6 +142,29 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     if (decision.status === 'inactive') return null;
     if (decision.status === 'unavailable') throw decision.error;
     return decision.lane;
+  }
+
+  /**
+   * @deprecated Compatibility adapter for the former public-only DKGAgent API.
+   * Private selected-CG lanes remain invisible through this method.
+   */
+  resolveRfc64AcceptedPublicRootLaneV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    subGraphName: string | null | undefined,
+  ): ResolvedRfc64AcceptedPublicRootLaneV1 | null {
+    const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
+    if (lane === null || lane.kind !== 'public') return null;
+    return Object.freeze({
+      networkId: lane.networkId,
+      service: lane.service,
+      autoPublishConfig: Object.freeze({
+        peers: lane.announcementPeers,
+        catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
+        catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
+      }),
+      scopeBase: lane.scopeBase,
+    });
   }
 
   createRfc64CatalogAuthorSignerV1(

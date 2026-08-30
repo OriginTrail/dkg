@@ -483,6 +483,70 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     await store.close();
   });
 
+  it('drains every started twin before propagating failure and records no partial evidence', async () => {
+    const store = new OxigraphStore();
+    const gated = await seedExactStaleTwin(store, {
+      kaNumber: 1n,
+      marker: 'drained-gated-twin',
+    });
+    const rejected = await seedExactStaleTwin(store, {
+      kaNumber: 2n,
+      marker: 'drained-rejected-twin',
+    });
+    const combinedPlan = Object.freeze({
+      ...gated.plan,
+      rows: Object.freeze([...gated.plan.rows, ...rejected.plan.rows]),
+    });
+    const primary = finalizedTransaction(combinedPlan);
+    let signalGatedEntered!: () => void;
+    const gatedEntered = new Promise<void>((resolve) => { signalGatedEntered = resolve; });
+    let releaseGated!: () => void;
+    const gatedRelease = new Promise<void>((resolve) => { releaseGated = resolve; });
+    let signalRejectedEntered!: () => void;
+    const rejectedEntered = new Promise<void>((resolve) => { signalRejectedEntered = resolve; });
+    let gatedFinished = false;
+    const recorded: Rfc64FinalizedSwmRetirementLifecycleReceiptV1[] = [];
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(async () => primary),
+      finalizedVmPrecommit: vi.fn(async () => primary),
+      store,
+      writeLocks: new Map(),
+      retire: vi.fn(async ({ swmGraph }) => {
+        if (swmGraph === gated.swmGraph) {
+          signalGatedEntered();
+          await gatedRelease;
+          gatedFinished = true;
+          return;
+        }
+        signalRejectedEntered();
+        throw new Error('one finalized SWM retirement failed');
+      }),
+      recordRetirementLifecycleReceipt: (receipt) => recorded.push(receipt),
+    });
+    const lifecycle = await handler(combinedPlan, new AbortController().signal);
+    await lifecycle.transaction!.commit();
+    const afterAppliedHead = lifecycle.afterAppliedHead!(committedHeadToken(combinedPlan));
+    let settled = false;
+    void afterAppliedHead.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    await Promise.all([gatedEntered, rejectedEntered]);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(recorded).toEqual([]);
+    releaseGated();
+
+    await expect(afterAppliedHead).rejects.toThrow('one finalized SWM retirement failed');
+    expect(gatedFinished).toBe(true);
+    expect(recorded).toEqual([]);
+    await store.close();
+  });
+
   it('keeps an exact stale finalized SWM twin under owner-signed-unregistered authority', async () => {
     const store = new OxigraphStore();
     const staleTwin = await seedExactStaleTwin(store);
