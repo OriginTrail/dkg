@@ -184,7 +184,10 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
     const getKnowledgeAssetStorageAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
     const getKnowledgeAssetsLifecycleAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
-    const materialize = vi.fn();
+    const materialize = Object.assign(vi.fn(), {
+      commit: vi.fn(),
+      rollback: vi.fn(async () => {}),
+    });
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),

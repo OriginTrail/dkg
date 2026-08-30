@@ -18,7 +18,6 @@ import {
 import { createFinalizedVmRuntimeV1 } from './finalized-vm-runtime-v1.js';
 import type {
   FinalizedVmMaterializationReceiptV1,
-  FinalizedVmMaterializerV1,
   FinalizedVmTransactionalMaterializerV1,
 } from './finalized-vm-runtime-v1.js';
 import { FinalizedVmCompositionErrorV1 } from './finalized-vm-composer-v1.js';
@@ -34,8 +33,8 @@ export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
   readonly getKnowledgeAssetStorageAddress: () => Promise<string>;
   readonly getKnowledgeAssetsLifecycleAddress: () => Promise<string>;
   readonly store: TripleStore;
-  /** Test or embedding seam; production uses the durable store materializer. */
-  readonly materialize?: FinalizedVmMaterializerV1;
+  /** Test or embedding seam; this coordinator-facing path is transactional by construction. */
+  readonly materialize?: FinalizedVmTransactionalMaterializerV1;
 }
 
 /**
@@ -55,7 +54,7 @@ export interface Rfc64FinalizedVmAgentPrecommitHandlerV1 {
   (
     plan: Parameters<Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1>[0],
     signal: AbortSignal,
-  ): Promise<void | Rfc64FinalizedVmAgentPrecommitTransactionV1>;
+  ): Promise<Rfc64FinalizedVmAgentPrecommitTransactionV1>;
 }
 
 /**
@@ -69,7 +68,7 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
   return Object.freeze(async (
     plan,
     signal,
-  ): Promise<void | Rfc64FinalizedVmAgentPrecommitTransactionV1> => {
+  ): Promise<Rfc64FinalizedVmAgentPrecommitTransactionV1> => {
     const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
       options,
       plan,
@@ -86,7 +85,11 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
         }
       },
     );
-    if (resolved === null) return;
+    if (resolved === null) {
+      throw new Error(
+        'RFC-64 finalized VM precommit requires a finalized-chain policy',
+      );
+    }
     const [knowledgeAssetStorageAddress, knowledgeAssetsLifecycleAddress] = await Promise.all([
       options.getKnowledgeAssetStorageAddress(),
       options.getKnowledgeAssetsLifecycleAddress(),
@@ -119,9 +122,6 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
         store: options.store,
         isCurrent: currentAuthority,
       });
-    const transaction = isTransactionalMaterializerV1(materializer)
-      ? materializer
-      : null;
     const runtime = createFinalizedVmRuntimeV1({
       networkId: plan.catalogScope.networkId,
       chainId: resolved.chainId,
@@ -163,31 +163,21 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
         resolved.acceptedPolicy,
       );
     } catch (cause) {
-      if (transaction !== null) {
-        try {
-          await transaction.rollback(cause);
-        } catch (rollbackCause) {
-          throw new AggregateError(
-            [cause, rollbackCause],
-            'RFC-64 finalized VM precommit and exact rollback both failed',
-          );
-        }
+      try {
+        await materializer.rollback(cause);
+      } catch (rollbackCause) {
+        throw new AggregateError(
+          [cause, rollbackCause],
+          'RFC-64 finalized VM precommit and exact rollback both failed',
+        );
       }
       throw cause;
     }
-    if (transaction === null) return;
     return Object.freeze({
       kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
       materializationReceipts: result.receipts,
-      commit: () => transaction.commit(),
-      rollback: (cause?: unknown) => transaction.rollback(cause),
+      commit: () => materializer.commit(),
+      rollback: (cause?: unknown) => materializer.rollback(cause),
     }) satisfies Rfc64FinalizedVmAgentPrecommitTransactionV1;
   });
-}
-
-function isTransactionalMaterializerV1(
-  materializer: FinalizedVmMaterializerV1,
-): materializer is FinalizedVmTransactionalMaterializerV1 {
-  const candidate = materializer as Partial<FinalizedVmTransactionalMaterializerV1>;
-  return typeof candidate.commit === 'function' && typeof candidate.rollback === 'function';
 }

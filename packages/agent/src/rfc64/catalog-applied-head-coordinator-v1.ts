@@ -80,12 +80,7 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
       accepted.policy.accessPolicy === 1
       && accepted.policy.source.kind === 'finalized-chain'
     ) {
-      finalizedVmTransaction = await options.finalizedVmPrecommit(plan, signal) ?? null;
-      if (finalizedVmTransaction === null) {
-        throw new Error(
-          'finalized VM precommit did not provide transactional materialization receipts',
-        );
-      }
+      finalizedVmTransaction = await options.finalizedVmPrecommit(plan, signal);
       primaryTransaction = finalizedVmTransaction;
     } else {
       primaryTransaction = await options.finalizedPolicyPrecommit(plan, signal);

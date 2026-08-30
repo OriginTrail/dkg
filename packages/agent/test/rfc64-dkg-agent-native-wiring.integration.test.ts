@@ -793,7 +793,22 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       signatureEvidence: { kind: 'none' },
       signatureSuite: 'eip191-personal-sign-digest-v1',
     } as UnsignedMemberRosterEnvelopeV1;
-    const providerPeerId = '12D3KooPrivateCompleteProvider';
+    const providerPeerAddresses = new Map<string, EvmAddressV1>();
+    const provider = await startNativeAgentWithOptions({
+      name: 'selected-private-complete-provider',
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId) =>
+          providerPeerAddresses.get(peerId) ?? null,
+      },
+    });
+    provider.acceptRfc64CatalogAccessSnapshotV1({
+      policy,
+      policyDigest,
+      roster: rosterEnvelope.payload,
+    });
+    const providerPeerId = provider.peerId;
     const author = await startNativeAgentWithOptions({
       name: 'selected-private-author-lifecycle',
       catalogActivation: {
@@ -821,12 +836,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       },
     });
-    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1')
-      .mockImplementation(async ({ announcement, peers }) => ({
-        announcement,
-        announcedPeers: peers,
-        failedPeers: [],
-      }));
+    providerPeerAddresses.set(author.peerId, AUTHOR);
+    await connectBothWays(author, provider);
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
 
     expect((author as any).config.rfc64CatalogAutoPublishControls).toMatchObject({
       selectedCatalog: { selectedContextGraphs: [CONTEXT_GRAPH_ID] },
@@ -891,6 +903,18 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
     expect(announce).toHaveBeenCalledWith(expect.objectContaining({
       peers: [providerPeerId],
     }));
@@ -936,6 +960,18 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest,
+      catalogVersion: '2',
+      inventoryRowCount: '0',
+    });
     expect(announce).toHaveBeenCalledTimes(announcementCountBeforeVm + 1);
     expect(announce.mock.calls.at(-1)?.[0]).toMatchObject({
       peers: [providerPeerId],
