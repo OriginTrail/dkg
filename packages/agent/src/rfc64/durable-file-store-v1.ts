@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { link, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import {
@@ -47,7 +47,6 @@ type Rfc64DurableFilePublishBoundaryV1 =
   | 'temp-mode-secured'
   | 'temp-fsynced'
   | 'published-no-replace'
-  | 'published-replace'
   | 'temp-unlinked'
   | 'parent-fsynced'
   | 'existing-fsynced'
@@ -77,7 +76,6 @@ export interface Rfc64DirectoryPreparationObservationV1 {
 
 export interface Rfc64DurableFileStoreV1<TKind extends string> {
   putExactBytes(input: PutRfc64ExactBytesInputV1<TKind>): Promise<void>;
-  replaceExactBytes(input: PutRfc64ExactBytesInputV1<TKind>): Promise<void>;
   readOptionalBoundedBytes(
     input: ReadRfc64OptionalBoundedBytesInputV1,
   ): Promise<Uint8Array | null>;
@@ -148,13 +146,6 @@ export function createRfc64DurableFileStoreWithInstrumentationV1<TKind extends s
   return Object.freeze({
     putExactBytes: (input: PutRfc64ExactBytesInputV1<TKind>) =>
       putRfc64ExactBytesV1({
-        ...input,
-        containmentRoot,
-        lifecycle,
-        prepareDirectoryTree,
-      }),
-    replaceExactBytes: (input: PutRfc64ExactBytesInputV1<TKind>) =>
-      replaceRfc64ExactBytesV1({
         ...input,
         containmentRoot,
         lifecycle,
@@ -289,27 +280,6 @@ async function putRfc64ExactBytesV1<TKind extends string>(
   await publishRfc64NoReplaceV1(resolvedInput, tempPath);
 }
 
-async function replaceRfc64ExactBytesV1<TKind extends string>(
-  input: InternalPutRfc64ExactBytesInputV1<TKind>,
-): Promise<void> {
-  const { containmentRoot, relativePath, bytes, maxBytes, label, prepareDirectoryTree } = input;
-  const targetPath = resolveContainedFileTarget(containmentRoot, relativePath);
-  assertByteBounds(bytes, maxBytes, label);
-  await prepareDirectoryTree(dirname(targetPath), 'owner-only');
-  const resolvedInput = { ...input, targetPath };
-  const existing = await readRfc64OptionalBoundedBytesV1({
-    containmentRoot,
-    relativePath,
-    maxBytes,
-    label,
-  });
-  if (existing !== null && bytesEqual(existing, bytes)) {
-    await completeRfc64ExistingFileDurabilityV1(resolvedInput);
-    return;
-  }
-  const tempPath = await writeRfc64SecureTempFileV1(resolvedInput);
-  await publishRfc64ReplaceV1(resolvedInput, tempPath);
-}
 
 interface ResolvedPutRfc64ExactBytesInputV1<TKind extends string>
   extends InternalPutRfc64ExactBytesInputV1<TKind> {
@@ -409,34 +379,6 @@ async function publishRfc64NoReplaceV1<TKind extends string>(
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
     fail('durability', `failed to publish durable ${label} bytes`, cause);
-  } finally {
-    if (tempPresent) await unlink(tempPath).catch(() => undefined);
-  }
-}
-
-async function publishRfc64ReplaceV1<TKind extends string>(
-  input: ResolvedPutRfc64ExactBytesInputV1<TKind>,
-  tempPath: string,
-): Promise<void> {
-  const { targetPath, label, kind, lifecycle } = input;
-  let tempPresent = true;
-  try {
-    // The fully written and fsynced sibling becomes the complete mutable state
-    // in one filesystem namespace operation. The following parent barrier
-    // makes that directory entry survive a completed call across restart.
-    await rename(tempPath, targetPath);
-    tempPresent = false;
-    await lifecycle.boundary(`${kind}.published-replace`);
-    await fsyncDirectory(dirname(targetPath));
-    await lifecycle.boundary(`${kind}.parent-fsynced`);
-    await assertExistingRegularFile(
-      targetPath,
-      `${label} state file`,
-      { access: 'owner-only' },
-    );
-  } catch (cause) {
-    if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
-    fail('durability', `failed to replace durable ${label} bytes`, cause);
   } finally {
     if (tempPresent) await unlink(tempPath).catch(() => undefined);
   }

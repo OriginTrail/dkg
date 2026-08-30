@@ -1902,6 +1902,8 @@ export type ResolvedDKGAgentConfig =
       ResolvedRfc64CatalogActivationConfigV1,
       'enabled' | 'selectedContextGraphs' | 'rollout'
     >;
+    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
+      .Rfc64CatalogExecutionPlanV1;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };
