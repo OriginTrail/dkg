@@ -4,8 +4,21 @@ import { describe, expect, it } from 'vitest';
 
 import { Rfc64SerializedScopeRuntimeV1 } from
   '../src/rfc64/serialized-scope-runtime-v1.js';
+import { raceRfc64AgainstAbortV1 } from '../src/rfc64/abort-v1.js';
 
 describe('RFC-64 serialized scope runtime', () => {
+  it('does not start lazy work when cancellation already won', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('canceled before admission'));
+    let started = false;
+
+    await expect(raceRfc64AgainstAbortV1(async () => {
+      started = true;
+      throw new Error('work should not start');
+    }, controller.signal)).rejects.toThrow('canceled before admission');
+    expect(started).toBe(false);
+  });
+
   it('keeps an aborted queued slot behind its active predecessor', async () => {
     const runtime = new Rfc64SerializedScopeRuntimeV1('test scope aborted');
     let releaseFirst!: () => void;

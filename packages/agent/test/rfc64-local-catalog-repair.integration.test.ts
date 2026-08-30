@@ -653,6 +653,36 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       .toEqual([expect.objectContaining({ outcome: 'no-inventory', attempts: 1 })]);
   });
 
+  it('reports a rejected canonical reconciliation as a failed repair', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'failed-reconciliation-status',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    agent.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+      .mockRejectedValue(new Error('projection unavailable'));
+
+    expect(agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(true);
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
+      .toEqual([expect.objectContaining({
+        outcome: 'failed',
+        attempts: 1,
+        lastError: 'projection unavailable',
+      })]);
+  });
+
   it('reopens live-only inventory and projection admission on same-instance restart', async () => {
     const agent = await startRepairAgentV1({
       name: 'same-instance-restart',

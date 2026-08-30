@@ -38,7 +38,7 @@ export class Rfc64SerializedScopeRuntimeV1 {
     void tail.then(() => {
       if (this.#tails.get(key) === tail) this.#tails.delete(key);
     });
-    return raceRfc64AgainstAbortV1(work, signal, this.#abortMessage);
+    return raceRfc64AgainstAbortV1(() => work, signal, this.#abortMessage);
   }
 
   get activeScopeCount(): number {

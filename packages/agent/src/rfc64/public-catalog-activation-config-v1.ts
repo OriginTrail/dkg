@@ -147,6 +147,9 @@ export interface ResolvedRfc64CatalogActivationConfigV1 {
   }>;
   readonly autoPublish?: Readonly<Rfc64CatalogAutoPublishConfigV1>;
   readonly bootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
+  /** Exact pre-compatibility authoring provenance retained across resolved-input round trips. */
+  readonly selectedCatalogAuthoringControls:
+    readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[];
   readonly rollout: ResolvedRfc64CatalogRolloutConfigV1;
 }
 
@@ -464,6 +467,10 @@ export function resolveRfc64CatalogActivationConfigV1(
   const autoPublish = snapshotRfc64CatalogAutoPublishConfigV1(
     activation.autoPublish,
   );
+  const selectedCatalogAuthoringControls = resolveSelectedCatalogAuthoringControlsV1(
+    bootstrap,
+    autoPublish,
+  );
   validatePrivateActivationAuthorityV1(
     bootstrap,
     selectedPrivateContextGraphs,
@@ -487,6 +494,7 @@ export function resolveRfc64CatalogActivationConfigV1(
     accessPolicyAuthority,
     autoPublish,
     bootstrap,
+    selectedCatalogAuthoringControls,
     rollout,
   });
 }
@@ -512,6 +520,7 @@ export function resolveRfc64CatalogActivationInputV1(
         || resolvedInput.deploymentProfile !== undefined
         || resolvedInput.accessPolicyAuthority !== undefined
         || resolvedInput.autoPublish !== undefined
+        || (resolvedInput.selectedCatalogAuthoringControls?.length ?? 0) !== 0
         || rollout.killSwitch
         || Object.keys(rollout.contextGraphModes).length !== 0
       ) {
@@ -523,7 +532,6 @@ export function resolveRfc64CatalogActivationInputV1(
       enabled: resolvedInput.enabled,
       deploymentProfile: resolvedInput.deploymentProfile,
       accessPolicyAuthority: resolvedInput.accessPolicyAuthority,
-      autoPublish: resolvedInput.autoPublish,
       bootstrap: resolvedInput.bootstrap,
       rollout: resolvedInput.rollout,
     }, chainIdentity);
@@ -540,7 +548,20 @@ export function resolveRfc64CatalogActivationInputV1(
     ) {
       throw new TypeError('rfc64Catalog selected graphs differ from the bootstrap manifest');
     }
-    return resolved;
+    const autoPublish = snapshotRfc64CatalogAutoPublishConfigV1(
+      resolvedInput.autoPublish,
+    );
+    const selectedCatalogAuthoringControls =
+      snapshotResolvedCatalogAuthoringControlsV1(
+        resolvedInput.selectedCatalogAuthoringControls,
+        resolved.bootstrap,
+        autoPublish,
+      );
+    return Object.freeze({
+      ...resolved,
+      autoPublish,
+      selectedCatalogAuthoringControls,
+    });
   }
   return resolveRfc64CatalogActivationConfigV1(
     input as Rfc64CatalogActivationConfigV1 | undefined,
@@ -566,9 +587,7 @@ export function resolveRfc64CatalogActivationsV1(
     input.publicCatalog,
     chainIdentity,
   );
-  const selectedCatalogAuthoringControls = resolveSelectedCatalogAuthoringControlsV1(
-    catalog,
-  );
+  const selectedCatalogAuthoringControls = catalog.selectedCatalogAuthoringControls;
   if (!catalog.enabled && !publicCatalog.enabled) {
     return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
   }
@@ -642,6 +661,7 @@ export function resolveRfc64CatalogActivationsV1(
     accessPolicyAuthority: catalog.accessPolicyAuthority,
     autoPublish: catalog.autoPublish,
     bootstrap: mergedBootstrap,
+    selectedCatalogAuthoringControls,
     rollout,
   });
   return Object.freeze({
@@ -713,14 +733,10 @@ export function resolveRfc64CatalogAuthoringPolicyV1(input: Readonly<{
 }
 
 function resolveSelectedCatalogAuthoringControlsV1(
-  catalog: ResolvedRfc64CatalogActivationConfigV1,
+  bootstrap: Readonly<Rfc64CatalogBootstrapConfigV1>,
+  autoPublish: Readonly<Rfc64CatalogAutoPublishConfigV1> | undefined,
 ): readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[] {
-  const autoPublish = catalog.autoPublish;
   if (autoPublish === undefined) return Object.freeze([]);
-  const bootstrap = catalog.bootstrap;
-  if (bootstrap === undefined) {
-    throw new TypeError('rfc64Catalog autoPublish requires a bootstrap manifest');
-  }
   return Object.freeze(bootstrap.acceptedPolicies.map((accepted) => {
     const policy = accepted.policyEnvelope.payload;
     const announcementPeers = accepted.completeSwmProviders;
@@ -741,12 +757,76 @@ function resolveSelectedCatalogAuthoringControlsV1(
   }));
 }
 
+function snapshotResolvedCatalogAuthoringControlsV1(
+  input: readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[],
+  bootstrap: Readonly<Rfc64CatalogBootstrapConfigV1> | undefined,
+  autoPublish: Readonly<Rfc64CatalogAutoPublishConfigV1> | undefined,
+): readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[] {
+  if (!Array.isArray(input)) {
+    throw new TypeError('resolved rfc64Catalog selected authoring controls must be an array');
+  }
+  if (input.length > MAX_SELECTED_PUBLIC_CONTEXT_GRAPHS_V1) {
+    throw new RangeError('resolved rfc64Catalog has too many selected authoring controls');
+  }
+  if (input.length > 0 && (bootstrap === undefined || autoPublish === undefined)) {
+    throw new TypeError(
+      'resolved rfc64Catalog authoring controls require bootstrap and autoPublish',
+    );
+  }
+  const acceptedByGraph = new Map(
+    (bootstrap?.acceptedPolicies ?? []).map((accepted) => [
+      accepted.policyEnvelope.payload.contextGraphId,
+      accepted.policyEnvelope.payload,
+    ]),
+  );
+  const expectedEffectiveAt = autoPublish?.catalogIssuerDelegationEffectiveAt
+    ?? ('0' as TimestampMsV1);
+  const expectedExpiresAt = autoPublish?.catalogIssuerDelegationExpiresAt;
+  const seen = new Set<string>();
+  return Object.freeze(input.map((control) => {
+    if (control === null || typeof control !== 'object' || Array.isArray(control)) {
+      throw new TypeError('resolved rfc64Catalog authoring control must be an object');
+    }
+    const policy = acceptedByGraph.get(control.contextGraphId);
+    if (policy === undefined || seen.has(control.contextGraphId)) {
+      throw new TypeError(
+        `resolved rfc64Catalog authoring control is duplicated or unselected: ${control.contextGraphId}`,
+      );
+    }
+    seen.add(control.contextGraphId);
+    const expectedKind = policy.accessPolicy === 0 ? 'selected-public' : 'selected-private';
+    if (control.kind !== expectedKind) {
+      throw new TypeError(
+        `resolved rfc64Catalog authoring control policy kind differs for ${control.contextGraphId}`,
+      );
+    }
+    const announcementPeers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
+      control.announcementPeers,
+    );
+    if (announcementPeers.length === 0) {
+      throw new TypeError(
+        `resolved rfc64Catalog authoring control has no providers for ${control.contextGraphId}`,
+      );
+    }
+    if (
+      control.catalogIssuerDelegationEffectiveAt !== expectedEffectiveAt
+      || control.catalogIssuerDelegationExpiresAt !== expectedExpiresAt
+    ) {
+      throw new TypeError(
+        `resolved rfc64Catalog authoring control delegation differs for ${control.contextGraphId}`,
+      );
+    }
+    return Object.freeze({ ...control, announcementPeers });
+  }));
+}
+
 function disabledRfc64CatalogActivationV1(): ResolvedRfc64CatalogActivationConfigV1 {
   return Object.freeze({
     enabled: false,
     selectedContextGraphs: Object.freeze([]),
     selectedPublicContextGraphs: Object.freeze([]),
     selectedPrivateContextGraphs: Object.freeze([]),
+    selectedCatalogAuthoringControls: Object.freeze([]),
     rollout: resolveRfc64CatalogRolloutConfigV1(undefined, [], 'rfc64Catalog'),
   });
 }

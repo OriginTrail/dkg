@@ -142,10 +142,14 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       readonly authorAddress: EvmAddressV1;
       readonly assertionCoordinate: string;
       readonly assertionVersion: string;
+      readonly kaUal: string;
+      readonly sealDigest: Digest32V1;
     }>,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
-    if (lane === null || !rfc64CatalogLaneUsesFinalizedChainRecoveryV1(lane)) return null;
+    if (lane === null || !rfc64CatalogLaneUsesFinalizedChainRecoveryV1(lane)) {
+      throw new Error('RFC-64 finalized-private placement repair lane is inactive');
+    }
     const inventoryScope = Object.freeze({
       ...lane.scopeBase,
       authorAddress: params.authorAddress,
@@ -160,6 +164,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const row = snapshot?.rows.find((candidate) => (
       candidate.assertionCoordinate === params.assertionCoordinate
       && candidate.assertionVersion === params.assertionVersion
+      && candidate.kaUal === params.kaUal
+      && candidate.sealDigest === params.sealDigest
     ));
     if (row === undefined) return null;
     const asset = await this.resolveRfc64SwmInventoryCatalogAssetV1(
@@ -216,7 +222,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       return Object.freeze({
         address: authorAddress,
         signMessage: (message: Uint8Array) => raceAgainstAbortV1(
-          wallet.signMessage(message),
+          () => wallet.signMessage(message),
           signal,
         ),
       });
@@ -227,11 +233,13 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       address: authorAddress,
       signMessage: async (message: Uint8Array) => {
         const compact = await raceAgainstAbortV1(
-          signMessageAs !== undefined
-            ? signMessageAs(authorAddress, message)
-            : signMessage !== undefined
-              ? signMessage(message)
-              : Promise.reject(new Error('RFC-64 configured chain has no message signer')),
+          () => (
+            signMessageAs !== undefined
+              ? signMessageAs(authorAddress, message)
+              : signMessage !== undefined
+                ? signMessage(message)
+                : Promise.reject(new Error('RFC-64 configured chain has no message signer'))
+          ),
           signal,
         );
         const signature = ethers.Signature.from({

@@ -15,13 +15,14 @@ export function throwIfRfc64AbortedV1(
   if (signal?.aborted) throw abortErrorV1(signal, fallbackMessage);
 }
 
-export function raceRfc64AgainstAbortV1<T>(
-  work: Promise<T>,
+export async function raceRfc64AgainstAbortV1<T>(
+  startWork: () => Promise<T>,
   signal: AbortSignal | undefined,
   fallbackMessage = 'RFC-64 operation aborted',
 ): Promise<T> {
+  if (signal !== undefined) throwIfRfc64AbortedV1(signal, fallbackMessage);
+  const work = startWork();
   if (signal === undefined) return work;
-  throwIfRfc64AbortedV1(signal, fallbackMessage);
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => reject(abortErrorV1(signal, fallbackMessage));
     signal.addEventListener('abort', onAbort, { once: true });

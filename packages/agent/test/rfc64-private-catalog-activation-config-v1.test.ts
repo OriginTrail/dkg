@@ -304,7 +304,7 @@ describe('RFC-64 private catalog activation', () => {
       acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
       retryIntervalMs: 1_000,
     } as const;
-    expect(resolveRfc64CatalogActivationsV1({
+    const mixed = resolveRfc64CatalogActivationsV1({
       catalog: resolved,
       publicCatalog: {
         autoPublish: {
@@ -313,7 +313,8 @@ describe('RFC-64 private catalog activation', () => {
         },
         bootstrap: publicBootstrap,
       },
-    }, chainIdentity)).toMatchObject({
+    }, chainIdentity);
+    expect(mixed).toMatchObject({
       catalog: { autoPublish: resolved.autoPublish },
       publicCatalog: { autoPublish: { peers: ['12D3KooPublicHint'] } },
       selectedCatalogAuthoringControls: [{
@@ -322,6 +323,16 @@ describe('RFC-64 private catalog activation', () => {
         announcementPeers: [PROVIDER_PEER],
       }],
     });
+    const roundTripped = resolveRfc64CatalogActivationsV1({
+      catalog: mixed.catalog,
+      publicCatalog: mixed.publicCatalog,
+    }, chainIdentity);
+    expect(roundTripped.selectedCatalogAuthoringControls).toEqual(
+      mixed.selectedCatalogAuthoringControls,
+    );
+    expect(roundTripped.catalog.selectedCatalogAuthoringControls).toEqual(
+      mixed.selectedCatalogAuthoringControls,
+    );
   });
 
   it('rejects selected-CG authoring before startup when provider authority is missing', () => {

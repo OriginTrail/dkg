@@ -142,7 +142,9 @@ type Rfc64BoundedSuccessorTargetV1 =
     fetchedBucket: FetchedRfc64PublicCatalogObjectV1;
   }>;
 
-export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
+export interface Rfc64PublicCatalogNativeReceiverOptionsV1<
+  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
+> {
   /** Fetch-only capability; lifecycle ownership remains with the catalog service. */
   readonly headTransport: Pick<Rfc64PublicCatalogTransportV1, 'fetchCatalogHead'>;
   /** Fetch-only capability; lifecycle ownership remains with the catalog service. */
@@ -172,7 +174,8 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
    * head unapplied so a later synchronization can idempotently repair SWM and
    * any consumer-specific side effects performed by an earlier attempt.
    */
-  readonly beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1;
+  readonly beforeAppliedHeadCommit?:
+    Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1<TPostHeadExtension>;
   readonly transportTimeoutMs?: number;
 }
 
@@ -229,27 +232,33 @@ export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
  * the head, transaction, and durable post-read are final; a failure is
  * reported without predecessor rollback and an exact replay retries the hook.
  */
-export interface Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
+export interface Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<
+  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
+> {
   readonly kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1';
   readonly transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
   readonly afterAppliedHead: ((
     committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
   ) => void
-    | Rfc64PublicCatalogNativePostHeadExtensionV1
-    | Promise<void | Rfc64PublicCatalogNativePostHeadExtensionV1>) | null;
+    | TPostHeadExtension
+    | Promise<void | TPostHeadExtension>) | null;
 }
 
 /** Backward-compatible root receiver result plus the explicit post-head lifecycle. */
-export type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1 =
+export type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1<
+  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
+> =
   | void
   | Rfc64PublicCatalogNativePrecommitTransactionV1
-  | Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+  | Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<TPostHeadExtension>;
 
-export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
+export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1<
+  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
+> {
   (
     plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
     signal: AbortSignal,
-  ): Promise<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1>;
+  ): Promise<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1<TPostHeadExtension>>;
 }
 
 export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
@@ -316,10 +325,12 @@ export interface Rfc64PublicCatalogNativeGenesisEvidenceV1 {
   readonly appliedHeadStatus: 'applied' | 'existing';
 }
 
-export type Rfc64PublicCatalogNativeSynchronizationEvidenceV1 =
+export type Rfc64PublicCatalogNativeSynchronizationEvidenceV1<
+  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
+> =
   (Rfc64PublicCatalogNativeGenesisEvidenceV1 | Rfc64PublicCatalogNativeSuccessorEvidenceV1)
   & Readonly<{
-    readonly postAppliedHeadExtension?: Rfc64PublicCatalogNativePostHeadExtensionV1;
+    readonly postAppliedHeadExtension?: TPostHeadExtension;
   }>;
 
 export type Rfc64PublicCatalogNativeReceiverErrorCodeV1 =
@@ -344,7 +355,9 @@ export class Rfc64PublicCatalogNativeReceiverErrorV1 extends Error {
   }
 }
 
-export class Rfc64PublicCatalogNativeReceiverV1 {
+export class Rfc64PublicCatalogNativeReceiverV1<
+  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
+> {
   readonly #timeoutMs: number;
   readonly #verifyIssuerSignature: (
     envelope: SignedControlEnvelopeV1,
@@ -357,7 +370,9 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   #kaBundleCacheBytes = 0;
   #kaBundleNetworkBytes = 0;
 
-  constructor(private readonly options: Rfc64PublicCatalogNativeReceiverOptionsV1) {
+  constructor(
+    private readonly options: Rfc64PublicCatalogNativeReceiverOptionsV1<TPostHeadExtension>,
+  ) {
     if (
       typeof options?.headTransport?.fetchCatalogHead !== 'function'
       || typeof options?.contentTransport?.fetchCatalogObject !== 'function'
@@ -409,16 +424,16 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     afterAppliedHead: ((
       committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
     ) => void
-      | Rfc64PublicCatalogNativePostHeadExtensionV1
-      | Promise<void | Rfc64PublicCatalogNativePostHeadExtensionV1>) | null;
+      | TPostHeadExtension
+      | Promise<void | TPostHeadExtension>) | null;
   }>> {
     const precommitSignal = signal ?? new AbortController().signal;
     let transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null;
     let afterAppliedHead: ((
       committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
     ) => void
-      | Rfc64PublicCatalogNativePostHeadExtensionV1
-      | Promise<void | Rfc64PublicCatalogNativePostHeadExtensionV1>) | null = null;
+      | TPostHeadExtension
+      | Promise<void | TPostHeadExtension>) | null = null;
     try {
       throwIfAborted(precommitSignal);
       const returned = await this.options.beforeAppliedHeadCommit?.(
@@ -428,7 +443,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       if (returned !== undefined) {
         if (isPrecommitTransactionV1(returned)) {
           transaction = returned;
-        } else if (isAppliedHeadLifecycleV1(returned)) {
+        } else if (isAppliedHeadLifecycleV1<TPostHeadExtension>(returned)) {
           transaction = returned.transaction;
           afterAppliedHead = returned.afterAppliedHead;
         } else {
@@ -519,7 +534,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     trustedCatalogScope: AuthorCatalogScopeV1,
     deployment: CatalogSealDeploymentProfileV1,
     signal?: AbortSignal,
-  ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
+  ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1<TPostHeadExtension>> {
     const trustedScope = snapshotTrustedBoundedPublicRootScope(
       trustedCatalogScope,
       announcement,
@@ -577,7 +592,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     deployment: CatalogSealDeploymentProfileV1,
     expected: 'any' | 'genesis' | 'one-successor',
     signal: AbortSignal | undefined,
-  ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
+  ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1<TPostHeadExtension>> {
     throwIfAborted(signal);
     const fetchedHead = await this.fetchCatalogHeadWithCacheV1(
       remotePeerId,
@@ -2653,18 +2668,18 @@ function isPrecommitTransactionV1(
     && typeof (value as Rfc64PublicCatalogNativePrecommitTransactionV1).rollback === 'function';
 }
 
-function isAppliedHeadLifecycleV1(
+function isAppliedHeadLifecycleV1<TPostHeadExtension extends object>(
   value: unknown,
-): value is Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
+): value is Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<TPostHeadExtension> {
   if (
     value === null
     || typeof value !== 'object'
-    || (value as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1).kind
+    || (value as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<TPostHeadExtension>).kind
       !== 'rfc64-public-catalog-native-applied-head-lifecycle-v1'
   ) {
     return false;
   }
-  const lifecycle = value as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+  const lifecycle = value as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<TPostHeadExtension>;
   return (lifecycle.transaction === null || isPrecommitTransactionV1(lifecycle.transaction))
     && (lifecycle.afterAppliedHead === null || typeof lifecycle.afterAppliedHead === 'function');
 }
