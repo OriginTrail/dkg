@@ -210,13 +210,15 @@ describe('abortable recovery connection helpers', () => {
     } as any, peerId)).resolves.toBeUndefined();
   });
 
-  it('preserves a peer-store-only connection outcome with no resolved addresses', async () => {
+  it('deliberately discards the resolver outcome for best-effort callers', async () => {
     const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
     const outcome = { status: 'connected' as const, resolvedAddresses: [] };
+    const connect = recorder(async () => outcome);
 
     await expect(ensurePeerConnected({
-      connect: async () => outcome,
-    } as any, peerId)).resolves.toBe(outcome);
+      connect,
+    } as any, peerId)).resolves.toBeUndefined();
+    expect(connect.calls).toEqual([[peerId, {}]]);
   });
 
   it('interrupts the real protocol-readiness delay', async () => {

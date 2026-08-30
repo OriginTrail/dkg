@@ -85,7 +85,10 @@ export class LibP2PNetwork implements PeerConnectionNetwork {
     resolvedAddresses: readonly Address[],
     opts?: PeerConnectOpts,
   ): Promise<void> {
-    await connectLibp2pPeer(this.node.libp2p, peerId, resolvedAddresses, opts);
+    await connectLibp2pPeer(this.node.libp2p, peerId, resolvedAddresses, {
+      ...opts,
+      configuredRelayTargets: this.node.getConfiguredRelayTargets(),
+    });
   }
 
   async handle(protocolId: string, handler: ProtocolHandler): Promise<void> {

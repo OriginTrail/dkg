@@ -2119,7 +2119,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const peerResolver = new PeerResolver({
       network,
       registry: new StubNetworkStateRegistry(),
-      configuredRelayTargets: this.node.getConfiguredRelayTargets(),
       agentDirectory: {
         // Wraps DiscoveryClient.findAgentByPeerId in the resolver's
         // minimal AgentDirectoryLookup shape so packages/core doesn't

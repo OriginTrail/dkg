@@ -2,9 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 
 const TARGET = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-const RELAY = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const PRIVATE_TARGET = `/ip4/192.168.1.20/tcp/9090/p2p/${TARGET}`;
-const CIRCUIT = `${RELAY}/p2p-circuit/p2p/${TARGET}`;
 
 describe('production PeerResolver lifecycle wiring', () => {
   let agent: DKGAgent | undefined;
@@ -13,7 +11,7 @@ describe('production PeerResolver lifecycle wiring', () => {
     await agent?.stop().catch(() => undefined);
   });
 
-  it('carries configured relays through peer-id resolution into the transport boundary', async () => {
+  it('passes resolver output unchanged into the transport-owned connection policy', async () => {
     agent = await DKGAgent.create({
       name: 'ResolverWiring',
       framework: 'DKG',
@@ -21,10 +19,6 @@ describe('production PeerResolver lifecycle wiring', () => {
       listenHost: '127.0.0.1',
       skills: [],
     });
-    vi.spyOn(agent.node, 'getConfiguredRelayTargets').mockReturnValue([{
-      peerId: RELAY.split('/').at(-1)!,
-      addresses: [RELAY],
-    }]);
     await agent.start();
 
     // Exercise the real DKGAgent lifecycle-created resolver and the public
@@ -45,7 +39,7 @@ describe('production PeerResolver lifecycle wiring', () => {
     expect(connectPeer).toHaveBeenCalledOnce();
     expect(connectPeer).toHaveBeenCalledWith(
       TARGET,
-      [PRIVATE_TARGET, CIRCUIT],
+      [PRIVATE_TARGET],
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });

@@ -5,6 +5,7 @@ import { isPublicLikeAddress } from './address-policy.js';
 import type { Address, NodeIdentity, PeerConnectOpts } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import type { ConfiguredRelayTarget } from './relay-target.js';
 
 export interface Libp2pConnectHost {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -27,6 +28,12 @@ export class Libp2pConnectCandidateParseError extends Error {
 
 const DEFAULT_CANDIDATE_TIMEOUT_MS = 5_000;
 const CONNECTION_OBSERVATION_INTERVAL_MS = 100;
+const MAX_CONFIGURED_RELAY_FALLBACKS = 4;
+
+export interface Libp2pPeerConnectOpts extends PeerConnectOpts {
+  /** Canonical relay targets owned by the libp2p transport. */
+  configuredRelayTargets?: readonly ConfiguredRelayTarget[];
+}
 
 function targetPeerId(components: readonly Component[], start = 0): string | undefined {
   return components
@@ -76,6 +83,67 @@ function canonicalCandidatePeerId(rawTarget: string): CanonicalPeerId {
       rawTarget,
     );
   }
+}
+
+/**
+ * Apply libp2p-specific route policy at the transport boundary. Resolver
+ * addresses are treated as opaque until they reach this planner: malformed,
+ * wrong-target, and private direct candidates are dropped here. When no public
+ * direct route survives, append at most four circuits through the operator's
+ * configured relays while preserving the resolver and relay order.
+ */
+export function planLibp2pPeerConnectionAddresses(
+  peerId: NodeIdentity,
+  resolvedAddresses: readonly Address[],
+  configuredRelayTargets: readonly ConfiguredRelayTarget[] = [],
+): Address[] {
+  const canonicalPeerId = peerIdFromString(peerId).toString();
+  const planned: Address[] = [];
+  const seen = new Set<string>();
+  let hasPublicDirect = false;
+
+  const appendCandidate = (rawAddress: Address): Libp2pConnectCandidate | undefined => {
+    try {
+      const candidate = parseLibp2pConnectCandidate(rawAddress);
+      if (
+        candidate.targetPeerId !== undefined
+        && candidate.targetPeerId !== canonicalPeerId
+      ) return undefined;
+      if (candidate.kind === 'direct' && !isPublicLikeAddress(candidate.address)) {
+        return undefined;
+      }
+      if (!seen.has(candidate.address)) {
+        seen.add(candidate.address);
+        planned.push(candidate.address);
+      }
+      return candidate;
+    } catch {
+      return undefined;
+    }
+  };
+
+  for (const address of resolvedAddresses) {
+    const candidate = appendCandidate(address);
+    if (candidate?.kind === 'direct') hasPublicDirect = true;
+  }
+
+  if (hasPublicDirect) return planned;
+
+  let fallbackCount = 0;
+  for (const target of configuredRelayTargets) {
+    if (fallbackCount >= MAX_CONFIGURED_RELAY_FALLBACKS) break;
+    if (target.peerId === canonicalPeerId) continue;
+    const relay = target.addresses.find(
+      (address) => !address.includes('/p2p-circuit') && isPublicLikeAddress(address),
+    )?.replace(/\/+$/, '');
+    if (!relay) continue;
+    const circuit = `${relay}/p2p-circuit/p2p/${canonicalPeerId}`;
+    const before = planned.length;
+    const candidate = appendCandidate(circuit);
+    if (candidate?.kind === 'circuit' && planned.length > before) fallbackCount += 1;
+  }
+
+  return planned;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -171,7 +239,7 @@ export async function connectLibp2pPeer(
   host: Libp2pConnectHost,
   peerId: NodeIdentity,
   resolvedAddresses: readonly Address[],
-  options: PeerConnectOpts = {},
+  options: Libp2pPeerConnectOpts = {},
 ): Promise<void> {
   throwIfAborted(options.signal);
   const canonicalPeerId = peerIdFromString(peerId).toString();
@@ -183,21 +251,11 @@ export async function connectLibp2pPeer(
     return;
   }
 
-  const candidates: Libp2pConnectCandidate[] = [];
-  for (const address of resolvedAddresses) {
-    try {
-      const candidate = parseLibp2pConnectCandidate(address);
-      if (
-        candidate.targetPeerId !== undefined &&
-        candidate.targetPeerId !== canonicalPeerId
-      ) continue;
-      if (candidate.kind === 'direct' && !isPublicLikeAddress(candidate.address)) continue;
-      candidates.push(candidate);
-    } catch {
-      // Resolver output is best-effort. Continue with the remaining ordered
-      // candidates and the final peer-id fallback.
-    }
-  }
+  const candidates = planLibp2pPeerConnectionAddresses(
+    canonicalPeerId,
+    resolvedAddresses,
+    options.configuredRelayTargets,
+  ).map(parseLibp2pConnectCandidate);
 
   let lastCandidateError: unknown;
   for (const candidate of candidates) {

@@ -2,7 +2,6 @@ import type { DiscoveryClient } from '../discovery.js';
 import {
   connectLibp2pCandidate,
   type Libp2pConnectCandidate,
-  type PeerConnectionOutcome,
   type PeerResolver,
 } from '@origintrail-official/dkg-core';
 
@@ -48,12 +47,12 @@ export async function ensurePeerConnected(
   peerResolver: Pick<PeerResolver, 'connect'>,
   peerId: string,
   options: { signal?: AbortSignal } = {},
-): Promise<PeerConnectionOutcome | undefined> {
+): Promise<void> {
   if (options.signal?.aborted) {
     throw new DOMException('Peer connection aborted', 'AbortError');
   }
   try {
-    return await peerResolver.connect(peerId, options);
+    await peerResolver.connect(peerId, options);
   } catch (error) {
     if (options.signal?.aborted) throw error;
     // Non-fatal — peer may be unreachable.

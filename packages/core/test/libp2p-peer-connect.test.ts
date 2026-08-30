@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { connectLibp2pPeer } from '../src/network/libp2p-peer-connect.js';
+import {
+  connectLibp2pPeer,
+  planLibp2pPeerConnectionAddresses,
+} from '../src/network/libp2p-peer-connect.js';
 
 const TARGET = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 const RELAY_A = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -8,10 +11,81 @@ const CIRCUIT_A = `${RELAY_A}/p2p-circuit/p2p/${TARGET}`;
 const CIRCUIT_B = `${RELAY_B}/p2p-circuit/p2p/${TARGET}`;
 const TARGETLESS_DIRECT = '/ip4/178.105.87.39/tcp/9090';
 const WRONG_TARGET = '12D3KooWR5C8ajtPigVGnBwDGTZ4XAtCepRs2WCgfPuBPrgGqcNK';
+const RELAY_C_PEER = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const RELAY_D_PEER = '12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy';
+const RELAY_E_PEER = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+
+const CONFIGURED_RELAYS = [
+  { peerId: RELAY_A.split('/').at(-1)!, addresses: [RELAY_A] },
+  { peerId: RELAY_B.split('/').at(-1)!, addresses: [RELAY_B] },
+  {
+    peerId: RELAY_C_PEER,
+    addresses: [`/ip4/178.104.54.30/tcp/9090/p2p/${RELAY_C_PEER}`],
+  },
+  {
+    peerId: RELAY_D_PEER,
+    addresses: [`/ip4/178.104.54.31/tcp/9090/p2p/${RELAY_D_PEER}`],
+  },
+  {
+    peerId: RELAY_E_PEER,
+    addresses: [`/ip4/178.104.54.32/tcp/9090/p2p/${RELAY_E_PEER}`],
+  },
+];
 
 function targetString(target: unknown): string {
   return (target as { toString(): string }).toString();
 }
+
+describe('planLibp2pPeerConnectionAddresses', () => {
+  it('replaces private-only resolver output with configured relay circuits', () => {
+    expect(planLibp2pPeerConnectionAddresses(TARGET, [
+      `/ip4/127.0.0.1/tcp/9090/p2p/${TARGET}`,
+      `/ip4/192.168.0.20/tcp/9090/p2p/${TARGET}`,
+      `/ip4/100.105.212.110/tcp/9090/p2p/${TARGET}`,
+    ], [CONFIGURED_RELAYS[0]!])).toEqual([CIRCUIT_A]);
+  });
+
+  it('preserves configured relay order and caps fallback at four circuits', () => {
+    const planned = planLibp2pPeerConnectionAddresses(
+      TARGET,
+      [`/ip4/192.168.0.20/tcp/9090/p2p/${TARGET}`],
+      CONFIGURED_RELAYS,
+    );
+    const expected = CONFIGURED_RELAYS.slice(0, 4).map(
+      ({ addresses }) => `${addresses[0]}/p2p-circuit/p2p/${TARGET}`,
+    );
+
+    expect(planned).toEqual(expected);
+    expect(planned).not.toContain(
+      `${CONFIGURED_RELAYS[4]!.addresses[0]}/p2p-circuit/p2p/${TARGET}`,
+    );
+  });
+
+  it('treats the whole IPv6 fe80::/10 range as private', () => {
+    expect(planLibp2pPeerConnectionAddresses(
+      TARGET,
+      [`/ip6/fe90::1/tcp/9090/p2p/${TARGET}`],
+      [CONFIGURED_RELAYS[0]!],
+    )).toEqual([CIRCUIT_A]);
+  });
+
+  it('suppresses configured fallbacks when a public direct route exists', () => {
+    const publicDirect = `${TARGETLESS_DIRECT}/p2p/${TARGET}`;
+    expect(planLibp2pPeerConnectionAddresses(
+      TARGET,
+      [publicDirect],
+      CONFIGURED_RELAYS,
+    )).toEqual([publicDirect]);
+  });
+
+  it('keeps an existing circuit before configured fallbacks', () => {
+    expect(planLibp2pPeerConnectionAddresses(
+      TARGET,
+      [CIRCUIT_B],
+      [CONFIGURED_RELAYS[0]!],
+    )).toEqual([CIRCUIT_B, CIRCUIT_A]);
+  });
+});
 
 describe('connectLibp2pPeer', () => {
   it('skips a private direct candidate and walks the following explicit circuit', async () => {
