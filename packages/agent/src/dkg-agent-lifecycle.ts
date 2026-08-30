@@ -8076,48 +8076,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async syncContextGraphFromConnectedPeers(this: DKGAgent,
     contextGraphId: string,
     options?: ContextGraphCatchupOptions,
-  ): Promise<{
-    /** Ordered connected peers before optional maxPeers windowing. */
-    connectedPeers: number;
-    /** Ordered connected peers before optional maxPeers windowing. */
-    totalPeers: number;
-    /** Peers selected and evaluated after optional maxPeers windowing. */
-    selectedPeers: number;
-    syncCapablePeers: number;
-    peersTried: number;
-    /**
-     * Subset of `peersTried` whose sync-capable peer produced a non-transport-
-     * failed round. Denials, metadata-only rows, and timeout-after-response
-     * still count as responses; daemon status mapping uses this to avoid
-     * reporting reachable-but-failed peers as curator-offline.
-     */
-    peersResponded: number;
-    /**
-     * Subset of `peersTried` whose sync round finished without a transport
-     * failure, without an explicit ACL denial, and with either real progress
-     * or a clean non-metadata-only empty completion.
-     */
-    peersSucceeded: number;
-    /** Context Graph admissions deferred by local scheduler pressure. */
-    deferredBackpressure: number;
-    dataSynced: number;
-    sharedMemorySynced: number;
-    /** A selected peer completed a non-empty SWM snapshot without failure. */
-    sharedMemoryCompletedCleanly: boolean;
-    /**
-     * `true` iff at least one peer in this run explicitly denied the sync
-     * by emitting a denial sentinel (`syncDenied` marker raised from
-     * `sync/requester/page-fetch.ts`, rolled up via `deniedPhases`). Kept
-     * as a boolean for the subscribe job's terminal status mapping.
-     */
-    denied: boolean;
-    /**
-     * Number of peers that explicitly denied at least one durable/SWM phase
-     * during this context-graph catch-up run.
-     */
-    deniedPeers: number;
-    diagnostics: CatchupSyncDiagnostics;
-  }> {
+  ): Promise<ContextGraphCatchupResult> {
     const ctx = createOperationContext('sync');
     const includeSharedMemory = options?.includeSharedMemory ?? false;
     const mode = options?.mode ?? 'background';
@@ -8196,6 +8155,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       scope: 'context-graph',
       source: catchupAdmissionSource(mode, sourceOverride),
     });
+  }
+
+  /** Focused VM-recovery operation that returns clean per-peer miss evidence. */
+  async syncVmRecoveryFromConnectedPeers(
+    this: DKGAgent,
+    contextGraphId: string,
+    options?: ContextGraphCatchupOptions,
+  ): Promise<{ catchup: ContextGraphCatchupResult; cleanMissPeerIds: string[] }> {
+    const catchup = await this.syncContextGraphFromConnectedPeers(contextGraphId, options);
+    return {
+      catchup,
+      // Embedders may still override the catch-up method with the pre-evidence
+      // result shape. Treat that legacy shape as no proof; production results
+      // always carry the immutable field below.
+      cleanMissPeerIds: [...(catchup.cleanSharedMemoryPeerIds ?? [])],
+    };
   }
 
   selectCatchupPeerWindow(this: DKGAgent,
@@ -8307,6 +8282,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sharedMemorySynced: number;
     /** A selected peer completed a non-empty SWM snapshot without failure. */
     sharedMemoryCompletedCleanly: boolean;
+    /** Immutable evidence owned by this catch-up operation and its single-flight result. */
+    cleanSharedMemoryPeerIds: readonly string[];
     denied: boolean;
     deniedPeers: number;
     diagnostics: CatchupSyncDiagnostics;
@@ -8320,6 +8297,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let dataSynced = 0;
     let sharedMemorySynced = 0;
     let noProtocolPeers = 0;
+    const cleanSharedMemoryPeerIds = new Set<string>();
     const diagnostics: CatchupSyncDiagnostics = {
       noProtocolPeers: 0,
       durable: {
@@ -8514,6 +8492,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         complete: r.durable.complete,
       });
       const sharedProgress = r.shared ? classifyDurableProgress(r.shared) : null;
+      if (sharedProgress?.completedWithoutFailure) {
+        cleanSharedMemoryPeerIds.add(remotePeerId);
+      }
       if (r.shared) {
         passTracker.recordPeerRound(
           remotePeerId,
@@ -8659,6 +8640,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       shared: SharedMemorySyncResult,
     ): void => {
       const progress = classifyDurableProgress(shared);
+      if (progress.completedWithoutFailure) {
+        cleanSharedMemoryPeerIds.add(remotePeerId);
+      }
       passTracker.recordPeerRound(
         remotePeerId,
         shared.swmCoverage,
@@ -8829,6 +8813,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dataSynced,
       sharedMemorySynced,
       sharedMemoryCompletedCleanly,
+      cleanSharedMemoryPeerIds: Object.freeze([...cleanSharedMemoryPeerIds]),
       denied: accessDeniedPeers.size > 0,
       deniedPeers: accessDeniedPeers.size,
       diagnostics,

@@ -161,9 +161,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         }));
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
 
-        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+        const recovery = await agent.syncVmRecoveryFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
         });
+        const result = recovery.catchup;
 
         expect(peerStoreReads).toBe(3);
         // Background catch-up carries no admission priority override, but it
@@ -193,6 +194,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.peersTried).toBe(1);
         expect(result.dataSynced).toBe(5);
         expect(result.sharedMemorySynced).toBe(2);
+        expect(recovery.cleanMissPeerIds).toEqual([remotePeer.toString()]);
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
@@ -200,6 +202,145 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: true,
           sharedMemorySynced: true,
         });
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
+    it('records clean empty SWM completion as VM-recovery miss evidence', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeVmRecoveryCleanEmptyEvidence',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = agent.node.peerId;
+        (agent.node.libp2p as any).getConnections = () => [{ remotePeer } as any];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+
+        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(recovery.catchup.sharedMemorySynced).toBe(0);
+        expect(recovery.cleanMissPeerIds).toEqual([remotePeer.toString()]);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it.each([
+      ['timeout', { timedOutPhases: 1 }],
+      ['phase failure', { failedPhases: 1 }],
+      ['denial', { deniedPhases: 1 }],
+      ['backpressure deferral', { deferredBackpressure: 1 }],
+    ] as const)('does not record a failed-only SWM %s as VM-recovery miss evidence', async (
+      failureKind,
+      failure,
+    ) => {
+      const agent = await DKGAgent.create({
+        name: `RuntimeVmRecoveryNo${failureKind.replace(/\s/g, '')}Evidence`,
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = agent.node.peerId;
+        (agent.node.libp2p as any).getConnections = () => [{ remotePeer } as any];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+          ...failure,
+        });
+
+        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(recovery.cleanMissPeerIds).toEqual([]);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('attributes VM-recovery miss evidence only to the clean peer in a mixed fan-out', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeVmRecoveryMixedPeerEvidence',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const cleanPeer = { toString: () => 'peer-clean-miss' };
+        const timedOutPeer = { toString: () => 'peer-timed-out' };
+        (agent.node.libp2p as any).getConnections = () => [
+          { remotePeer: cleanPeer } as any,
+          { remotePeer: timedOutPeer } as any,
+        ];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        const syncSharedMemoryFromPeerDetailed = recorder(async (peerId: string) => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+          ...(peerId === timedOutPeer.toString() ? { timedOutPhases: 1 } : {}),
+        }));
+        (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
+
+        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(syncSharedMemoryFromPeerDetailed.calls.map(([peerId]) => peerId).sort()).toEqual([
+          cleanPeer.toString(),
+          timedOutPeer.toString(),
+        ]);
+        expect(recovery.cleanMissPeerIds).toEqual([cleanPeer.toString()]);
+        expect(recovery.catchup.diagnostics.sharedMemory.timedOutPhases).toBe(1);
       } finally {
         await agent.stop().catch(() => {});
       }

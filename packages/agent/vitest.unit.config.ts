@@ -71,6 +71,7 @@ export default defineConfig({
       "test/gossip-publish-handler.test.ts",
       "test/discovery-subscription-boundary.test.ts",
       "test/core-fills-gap.test.ts",
+      "test/vm-reconcile-peer-topology.test.ts",
       "test/swm-late-joiner-deferred-gossip.test.ts",
       "test/swm-plaintext-oracle-wiring.test.ts",
       "test/oversize-filter.test.ts",
