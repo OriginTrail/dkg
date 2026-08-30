@@ -300,44 +300,20 @@ export function snapshotRfc64PublicCatalogAutoPublishConfigV1(
   input: Rfc64PublicCatalogAutoPublishConfigV1 | undefined,
 ): Readonly<Rfc64PublicCatalogAutoPublishConfigV1> | undefined {
   if (input === undefined) return undefined;
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    throw new TypeError('rfc64PublicCatalogAutoPublish must be a plain object');
-  }
-  const prototype = Object.getPrototypeOf(input);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new TypeError('rfc64PublicCatalogAutoPublish must be a plain object');
-  }
-  const keys = Object.keys(input).sort();
-  const allowed = new Set([
-    'catalogIssuerDelegationEffectiveAt',
-    'catalogIssuerDelegationExpiresAt',
-    'peers',
-  ]);
-  if (
-    keys.some((key) => !allowed.has(key))
-    || !keys.includes('peers')
-    || !keys.includes('catalogIssuerDelegationExpiresAt')
-  ) {
-    throw new TypeError('rfc64PublicCatalogAutoPublish has unknown or missing fields');
-  }
+  assertPlainExactObject(
+    input,
+    'rfc64PublicCatalogAutoPublish',
+    ['catalogIssuerDelegationEffectiveAt', 'catalogIssuerDelegationExpiresAt', 'peers'],
+    ['catalogIssuerDelegationExpiresAt', 'peers'],
+  );
   const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
-  const effectiveAt = snapshotTimestamp(
-    input.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
-    'catalogIssuerDelegationEffectiveAt',
+  const delegation = snapshotRfc64CatalogDelegationWindowV1(
+    input,
+    'rfc64PublicCatalogAutoPublish',
   );
-  const expiresAt = snapshotTimestamp(
-    input.catalogIssuerDelegationExpiresAt,
-    'catalogIssuerDelegationExpiresAt',
-  );
-  if (BigInt(expiresAt) <= BigInt(effectiveAt)) {
-    throw new TypeError(
-      'rfc64PublicCatalogAutoPublish delegation expiry must be after its effective time',
-    );
-  }
   return Object.freeze({
     peers,
-    catalogIssuerDelegationEffectiveAt: effectiveAt,
-    catalogIssuerDelegationExpiresAt: expiresAt,
+    ...delegation,
   });
 }
 
@@ -346,41 +322,13 @@ export function snapshotRfc64CatalogAutoPublishConfigV1(
   input: Rfc64CatalogAutoPublishConfigV1 | undefined,
 ): Readonly<Rfc64CatalogAutoPublishConfigV1> | undefined {
   if (input === undefined) return undefined;
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    throw new TypeError('rfc64Catalog.autoPublish must be a plain object');
-  }
-  const prototype = Object.getPrototypeOf(input);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new TypeError('rfc64Catalog.autoPublish must be a plain object');
-  }
-  const keys = Object.keys(input).sort();
-  const allowed = new Set([
-    'catalogIssuerDelegationEffectiveAt',
-    'catalogIssuerDelegationExpiresAt',
-  ]);
-  if (
-    keys.some((key) => !allowed.has(key))
-    || !keys.includes('catalogIssuerDelegationExpiresAt')
-  ) {
-    throw new TypeError('rfc64Catalog.autoPublish has unknown or missing fields');
-  }
-  const effectiveAt = snapshotTimestamp(
-    input.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
-    'catalogIssuerDelegationEffectiveAt',
+  assertPlainExactObject(
+    input,
     'rfc64Catalog.autoPublish',
+    ['catalogIssuerDelegationEffectiveAt', 'catalogIssuerDelegationExpiresAt'],
+    ['catalogIssuerDelegationExpiresAt'],
   );
-  const expiresAt = snapshotTimestamp(
-    input.catalogIssuerDelegationExpiresAt,
-    'catalogIssuerDelegationExpiresAt',
-    'rfc64Catalog.autoPublish',
-  );
-  if (BigInt(expiresAt) <= BigInt(effectiveAt)) {
-    throw new TypeError('rfc64Catalog.autoPublish delegation expiry must be after its effective time');
-  }
-  return Object.freeze({
-    catalogIssuerDelegationEffectiveAt: effectiveAt,
-    catalogIssuerDelegationExpiresAt: expiresAt,
-  });
+  return snapshotRfc64CatalogDelegationWindowV1(input, 'rfc64Catalog.autoPublish');
 }
 
 /** Detach and validate the explicit public cold-start manifest. */
@@ -502,6 +450,37 @@ function snapshotTimestamp(
     throw new TypeError(`${rootLabel}.${label} exceeds uint64`);
   }
   return value as TimestampMsV1;
+}
+
+function snapshotRfc64CatalogDelegationWindowV1(
+  input: Readonly<{
+    readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+    readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+  }>,
+  rootLabel: 'rfc64PublicCatalogAutoPublish' | 'rfc64Catalog.autoPublish',
+): Readonly<{
+  readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}> {
+  const effectiveAt = snapshotTimestamp(
+    input.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
+    'catalogIssuerDelegationEffectiveAt',
+    rootLabel,
+  );
+  const expiresAt = snapshotTimestamp(
+    input.catalogIssuerDelegationExpiresAt,
+    'catalogIssuerDelegationExpiresAt',
+    rootLabel,
+  );
+  if (BigInt(expiresAt) <= BigInt(effectiveAt)) {
+    throw new TypeError(
+      `${rootLabel} delegation expiry must be after its effective time`,
+    );
+  }
+  return Object.freeze({
+    catalogIssuerDelegationEffectiveAt: effectiveAt,
+    catalogIssuerDelegationExpiresAt: expiresAt,
+  });
 }
 
 function snapshotBootstrapProviders(
