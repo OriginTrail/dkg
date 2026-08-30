@@ -313,24 +313,10 @@ async function execute(): Promise<void> {
       if (lifecycleByUal.has(kaUal)) {
         throw new Error(`private retirement lifecycle duplicates ${kaUal}`);
       }
-      const vmCommitSequence = requiredSequence(
-        receipt.vmCommitSequence,
-        `private lifecycle ${index} VM commit sequence`,
+      const committedHead = record(
+        receipt.committedHead,
+        `private lifecycle ${index} committed head`,
       );
-      const appliedHeadObservedSequence = requiredSequence(
-        receipt.appliedHeadObservedSequence,
-        `private lifecycle ${index} applied-head sequence`,
-      );
-      const swmReconciliationSequence = requiredSequence(
-        receipt.swmReconciliationSequence,
-        `private lifecycle ${index} SWM reconciliation sequence`,
-      );
-      if (
-        !(vmCommitSequence < appliedHeadObservedSequence
-          && appliedHeadObservedSequence < swmReconciliationSequence)
-      ) {
-        throw new Error(`private lifecycle ${index} does not prove VM -> head -> SWM order`);
-      }
       const normalized = Object.freeze({
         kind: requiredString(receipt.kind, `private lifecycle ${index} kind`),
         catalogHeadDigest: requiredDigest(
@@ -362,9 +348,20 @@ async function execute(): Promise<void> {
           receipt.vmMaterializationStatus,
           `private lifecycle ${index} VM materialization status`,
         ),
-        vmCommitSequence,
-        appliedHeadObservedSequence,
-        swmReconciliationSequence,
+        committedHead: Object.freeze({
+          kind: requiredString(
+            committedHead.kind,
+            `private lifecycle ${index} committed-head kind`,
+          ),
+          catalogHeadDigest: requiredDigest(
+            committedHead.catalogHeadDigest,
+            `private lifecycle ${index} committed-head digest`,
+          ),
+          inventoryDigest: requiredDigest(
+            committedHead.inventoryDigest,
+            `private lifecycle ${index} committed inventory`,
+          ),
+        }),
         swmReconciliationOutcome: requiredString(
           receipt.swmReconciliationOutcome,
           `private lifecycle ${index} SWM reconciliation outcome`,
@@ -415,7 +412,7 @@ async function execute(): Promise<void> {
       );
       const lifecycleReceipt = lifecycleByUal.get(ual);
       if (lifecycleReceipt === undefined) {
-        throw new Error(`private row ${index} has no ordered retirement lifecycle receipt`);
+        throw new Error(`private row ${index} has no exact retirement lifecycle receipt`);
       }
       exact(
         lifecycleReceipt.kind,
@@ -427,6 +424,25 @@ async function execute(): Promise<void> {
         lifecycleReceipt.inventoryDigest,
         synchronization.inventoryDigest,
         `private lifecycle ${index} inventory`,
+      );
+      const committedHead = record(
+        lifecycleReceipt.committedHead,
+        `private lifecycle ${index} committed head`,
+      );
+      exact(
+        committedHead.kind,
+        'rfc64-public-catalog-native-committed-head-token-v1',
+        `private lifecycle ${index} committed-head kind`,
+      );
+      exact(
+        committedHead.catalogHeadDigest,
+        headDigest,
+        `private lifecycle ${index} committed-head digest`,
+      );
+      exact(
+        committedHead.inventoryDigest,
+        synchronization.inventoryDigest,
+        `private lifecycle ${index} committed inventory`,
       );
       exact(
         lifecycleReceipt.contextGraphId,
@@ -512,7 +528,7 @@ async function execute(): Promise<void> {
       policyDigest: POLICY_DIGEST,
       repository: { testedHeadCommit, trackedSourceClean: true },
       runtimeManifestDigest: launch.manifest.manifestDigest,
-      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v3',
+      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v4',
       status: 'PASS',
     });
     const receipt = atomicWriteExactBytes(
@@ -759,13 +775,6 @@ function requiredString(value: unknown, label: string): string {
     throw new TypeError(`${label} is missing`);
   }
   return value;
-}
-
-function requiredSequence(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 1) {
-    throw new TypeError(`${label} must be a positive safe integer`);
-  }
-  return value as number;
 }
 
 function requiredDigest(value: unknown, label: string): Digest32V1 {

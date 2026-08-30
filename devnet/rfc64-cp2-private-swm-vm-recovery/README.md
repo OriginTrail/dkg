@@ -8,9 +8,11 @@ assets from the finalized chain ordinal set, and then retire exactly 32/32
 duplicate SWM twins. The durable synchronization evidence proves the catalog
 activation. For every KA, the receiver also exports a production-owned
 lifecycle receipt bound to the exact catalog head, inventory digest, VM graph,
-and VM post-read digest. The canary requires its monotonic order to be VM
-transaction commit, durable applied-head observation, then SWM reconciliation;
-an early retirement cannot pass merely because VM appears later. Exact empty
+and VM post-read digest. The canary requires the receiver-owned committed-head
+token, which exists only after the VM transaction commits and the exact durable
+head and inventory survive their post-read; the receipt is emitted only after
+SWM reconciliation. An early retirement therefore cannot pass merely because
+VM appears later. Exact empty
 SWM graph readback plus exact VM bytes and metadata independently prove the
 intentional post-finalization retirement rather than data loss.
 
