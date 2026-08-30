@@ -372,6 +372,7 @@ import {
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
+  type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
@@ -1066,7 +1067,13 @@ export class DKGAgentBase {
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<
     string,
-    Omit<VmReconcileNegativeRecord, 'cacheKey'>
+    Omit<
+      VmReconcileNegativeRecord,
+      'cacheKey' | 'peerTopologyKey' | 'peerTopology' | 'cleanMissPeerIds'
+    > & {
+      peerTopology: VmReconcilePeerTopology;
+      cleanMissPeerIds: string[];
+    }
   >();
   /** Bounded access-ordered keys already consulted in the durable store. */
   protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();

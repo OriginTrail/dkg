@@ -1,4 +1,7 @@
 import {
+  encodeLegacyVmReconcilePeerTopologyKey,
+  isVmReconcilePeerTopology,
+  parseLegacyVmReconcilePeerTopologyKey,
   parseVmReconcileCleanMissPeerIds,
   parseVmReconcilePeerTopology,
   type VmReconcileNegativeRecord,
@@ -19,10 +22,10 @@ export interface VmReconcileNegativePersistenceRow {
 
 const TOPOLOGY_VERSION = 2;
 
-type DecodedTopology = Pick<
-  VmReconcileNegativeRecord,
-  'peerTopology' | 'cleanMissPeerIds'
->;
+type DecodedTopology = {
+  peerTopology: VmReconcilePeerTopology;
+  cleanMissPeerIds: string[];
+};
 
 function decodeTopology(encoded: string): DecodedTopology | null {
   if (encoded === 'unreadable') {
@@ -40,21 +43,12 @@ function decodeTopology(encoded: string): DecodedTopology | null {
     ) return null;
 
     const isLegacy = raw.version === undefined;
-    const peers: unknown[] = [];
     if (isLegacy) {
-      for (const [rank, candidate] of raw.peers.entries()) {
-        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
-        const peer = candidate as Record<string, unknown>;
-        if (
-          peer.rank !== rank
-          || typeof peer.preferred !== 'boolean'
-          || peer.preferred !== (peer.peerId === raw.preferredPeerId)
-        ) return null;
-        peers.push({ peerId: peer.peerId, core: peer.core });
-      }
-    } else {
-      peers.push(...raw.peers);
+      const peerTopology = parseLegacyVmReconcilePeerTopologyKey(encoded);
+      return peerTopology ? { peerTopology, cleanMissPeerIds: [] } : null;
     }
+    const peers: unknown[] = [];
+    peers.push(...raw.peers);
 
     const peerTopology = parseVmReconcilePeerTopology({
       kind: 'readable',
@@ -63,9 +57,10 @@ function decodeTopology(encoded: string): DecodedTopology | null {
       peers,
     });
     if (!peerTopology) return null;
-    const cleanMissPeerIds = isLegacy
-      ? []
-      : parseVmReconcileCleanMissPeerIds(raw.cleanMissPeerIds, peerTopology);
+    const cleanMissPeerIds = parseVmReconcileCleanMissPeerIds(
+      raw.cleanMissPeerIds,
+      peerTopology,
+    );
     return cleanMissPeerIds === null ? null : { peerTopology, cleanMissPeerIds };
   } catch {
     return null;
@@ -112,6 +107,7 @@ export function decodeVmReconcileNegativeRow(
       nextRetryAt: row.next_retry_at,
       swmGen: row.swm_gen,
       candidateNamespaces: candidateNamespaces as Array<{ metaGraph: string; dataGraph: string }>,
+      peerTopologyKey: encodeLegacyVmReconcilePeerTopologyKey(topology.peerTopology),
       peerTopology: topology.peerTopology,
       cleanMissPeerIds: topology.cleanMissPeerIds,
     };
@@ -124,6 +120,15 @@ export function encodeVmReconcileNegativeRow(
   record: VmReconcileNegativeRecord,
   updatedAt: number,
 ): VmReconcileNegativePersistenceRow {
+  const peerTopology = isVmReconcilePeerTopology(record.peerTopology)
+    ? record.peerTopology
+    : parseLegacyVmReconcilePeerTopologyKey(record.peerTopologyKey);
+  if (!peerTopology) throw new TypeError('Invalid VM reconcile peer topology');
+  const cleanMissPeerIds = parseVmReconcileCleanMissPeerIds(
+    record.cleanMissPeerIds ?? [],
+    peerTopology,
+  );
+  if (!cleanMissPeerIds) throw new TypeError('Invalid VM reconcile clean-miss evidence');
   return {
     cache_key: record.cacheKey,
     context_graph_id: record.localCgId,
@@ -131,7 +136,7 @@ export function encodeVmReconcileNegativeRow(
     next_retry_at: record.nextRetryAt,
     swm_gen: record.swmGen,
     candidate_namespaces: JSON.stringify(record.candidateNamespaces),
-    peer_topology_key: encodeTopology(record.peerTopology, record.cleanMissPeerIds),
+    peer_topology_key: encodeTopology(peerTopology, cleanMissPeerIds),
     updated_at: updatedAt,
   };
 }

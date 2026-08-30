@@ -406,7 +406,9 @@ export { mapWithConcurrency } from './map-with-concurrency.js';
 export {
   createVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,
+  encodeLegacyVmReconcilePeerTopologyKey,
   isVmReconcilePeerTopology,
+  parseLegacyVmReconcilePeerTopologyKey,
   parseVmReconcileCleanMissPeerIds,
   parseVmReconcilePeerTopology,
 } from './vm-reconcile-peer-topology.js';

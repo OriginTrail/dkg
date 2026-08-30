@@ -850,9 +850,16 @@ export interface VmReconcileNegativeRecord {
   nextRetryAt: number;
   swmGen: string;
   candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-  peerTopology: VmReconcilePeerTopology;
-  /** Peers that completed a clean SWM round while this miss was recorded. */
-  cleanMissPeerIds: string[];
+  /**
+   * Legacy serialized topology contract. Required during the v1-to-v2
+   * migration so existing custom stores can keep reading and persisting the
+   * field they were compiled against.
+   */
+  peerTopologyKey: string;
+  /** Typed topology used by v2-aware stores; absent when loading a legacy row. */
+  peerTopology?: VmReconcilePeerTopology;
+  /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
+  cleanMissPeerIds?: string[];
 }
 
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */

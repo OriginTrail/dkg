@@ -993,13 +993,27 @@ describe('Phase D - VM reconcile damping', () => {
   });
 
   it('rehydrates a generation-gated miss after restart without repeating the scan', async () => {
-    const durable = new Map<string, VmReconcileNegativeRecord>();
+    type LegacyVmReconcileNegativeRecord = Omit<
+      VmReconcileNegativeRecord,
+      'peerTopology' | 'cleanMissPeerIds'
+    >;
+    const durable = new Map<string, LegacyVmReconcileNegativeRecord>();
     const subscriptionStore: ContextGraphSubscriptionStore = {
       loadAll: async () => [],
       save: async () => undefined,
       delete: async () => undefined,
       loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
-      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
+      saveVmReconcileNegative: async (record) => {
+        durable.set(record.cacheKey, {
+          cacheKey: record.cacheKey,
+          localCgId: record.localCgId,
+          failures: record.failures,
+          nextRetryAt: record.nextRetryAt,
+          swmGen: record.swmGen,
+          candidateNamespaces: record.candidateNamespaces,
+          peerTopologyKey: record.peerTopologyKey,
+        });
+      },
       deleteVmReconcileNegative: async (key) => { durable.delete(key); },
       deleteVmReconcileNegativesForContextGraph: async (cg) => {
         for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
@@ -1011,6 +1025,10 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
     await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
     expect(durable.size).toBe(1);
+    const savedLegacyRecord = [...durable.values()][0]!;
+    expect(savedLegacyRecord.peerTopologyKey).toEqual(expect.any(String));
+    expect('peerTopology' in savedLegacyRecord).toBe(false);
+    expect('cleanMissPeerIds' in savedLegacyRecord).toBe(false);
 
     await agent!.stop();
     agent = null;

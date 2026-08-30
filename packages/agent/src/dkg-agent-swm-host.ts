@@ -380,7 +380,9 @@ import {
   canReuseVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,
   createVmReconcilePeerTopology,
+  encodeLegacyVmReconcilePeerTopologyKey,
   isVmReconcilePeerTopology,
+  parseLegacyVmReconcilePeerTopologyKey,
   parseVmReconcileCleanMissPeerIds,
   UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
 } from './vm-reconcile-peer-topology.js';
@@ -4540,10 +4542,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       try {
         const durable = await this.config.contextGraphSubscriptionStore
           ?.loadVmReconcileNegative?.(cacheKey);
-        const durableCleanMissPeerIds = durable && isVmReconcilePeerTopology(durable.peerTopology)
+        const durablePeerTopology = durable
+          ? isVmReconcilePeerTopology(durable.peerTopology)
+            ? durable.peerTopology
+            : parseLegacyVmReconcilePeerTopologyKey(durable.peerTopologyKey)
+          : null;
+        const durableCleanMissPeerIds = durablePeerTopology
           ? parseVmReconcileCleanMissPeerIds(
-            durable.cleanMissPeerIds ?? [],
-            durable.peerTopology,
+            durable?.cleanMissPeerIds ?? [],
+            durablePeerTopology,
           )
           : null;
         if (
@@ -4556,7 +4563,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           Array.isArray(durable.candidateNamespaces) &&
           durable.candidateNamespaces.every((item) =>
             typeof item?.metaGraph === 'string' && typeof item?.dataGraph === 'string') &&
-          isVmReconcilePeerTopology(durable.peerTopology) &&
+          durablePeerTopology !== null &&
           durableCleanMissPeerIds !== null
         ) {
           if (!this.vmReconcileSwmGenSupportsDurableNegative(durable.swmGen)) {
@@ -4569,7 +4576,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               nextRetryAt: durable.nextRetryAt,
               swmGen: durable.swmGen,
               candidateNamespaces: durable.candidateNamespaces,
-              peerTopology: durable.peerTopology,
+              peerTopology: durablePeerTopology,
               cleanMissPeerIds: durableCleanMissPeerIds,
             };
             this.vmReconcileNegativeCache.set(cacheKey, cached);
@@ -4694,6 +4701,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         nextRetryAt: record.nextRetryAt,
         swmGen: record.swmGen,
         candidateNamespaces: record.candidateNamespaces,
+        peerTopologyKey: encodeLegacyVmReconcilePeerTopologyKey(record.peerTopology),
         peerTopology: record.peerTopology,
         cleanMissPeerIds: record.cleanMissPeerIds,
       }).catch(() => {

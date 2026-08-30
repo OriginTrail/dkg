@@ -3,7 +3,9 @@ import {
   canReuseVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,
   createVmReconcilePeerTopology,
+  encodeLegacyVmReconcilePeerTopologyKey,
   isVmReconcilePeerTopology,
+  parseLegacyVmReconcilePeerTopologyKey,
   parseVmReconcileCleanMissPeerIds,
   UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
 } from '../src/vm-reconcile-peer-topology.js';
@@ -56,6 +58,26 @@ describe('VM reconcile peer-topology compatibility', () => {
     expect(isVmReconcilePeerTopology(value)).toBe(true);
     expect(createVmReconcileCleanMissPeerIds(value, ['core', 'missing', 'core']))
       .toEqual(['core']);
+  });
+
+  it('round-trips the exact legacy topology-key representation', () => {
+    const value = topology(
+      [{ peerId: 'preferred', core: true }, { peerId: 'other' }],
+      'preferred',
+    );
+    const encoded = encodeLegacyVmReconcilePeerTopologyKey(value);
+
+    expect(JSON.parse(encoded)).toEqual({
+      preferredPeerId: 'preferred',
+      privateOnly: false,
+      peers: [
+        { rank: 0, peerId: 'preferred', preferred: true, core: true },
+        { rank: 1, peerId: 'other', preferred: false, core: false },
+      ],
+    });
+    expect(parseLegacyVmReconcilePeerTopologyKey(encoded)).toEqual(value);
+    expect(parseLegacyVmReconcilePeerTopologyKey('unreadable'))
+      .toEqual(UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY);
   });
 
   it('reuses exact topology and removal of peers with clean-miss evidence', () => {

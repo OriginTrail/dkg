@@ -61,6 +61,62 @@ export function isVmReconcilePeerTopology(value: unknown): value is VmReconcileP
   return parseVmReconcilePeerTopology(value) !== null;
 }
 
+/** Exact pre-v2 encoding retained for third-party subscription-store adapters. */
+export function encodeLegacyVmReconcilePeerTopologyKey(
+  topology: VmReconcilePeerTopology,
+): string {
+  if (topology.kind === 'unreadable') return 'unreadable';
+  return JSON.stringify({
+    preferredPeerId: topology.preferredPeerId,
+    privateOnly: topology.privateOnly,
+    peers: topology.peers.map((peer, rank) => ({
+      rank,
+      peerId: peer.peerId,
+      preferred: peer.peerId === topology.preferredPeerId,
+      core: peer.core,
+    })),
+  });
+}
+
+/** Decode the public store's pre-v2 peerTopologyKey representation. */
+export function parseLegacyVmReconcilePeerTopologyKey(
+  value: unknown,
+): VmReconcilePeerTopology | null {
+  if (value === 'unreadable') return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
+  if (typeof value !== 'string') return null;
+  try {
+    const decoded: unknown = JSON.parse(value);
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return null;
+    const raw = decoded as Record<string, unknown>;
+    if (
+      !(raw.preferredPeerId === null || typeof raw.preferredPeerId === 'string')
+      || typeof raw.privateOnly !== 'boolean'
+      || !Array.isArray(raw.peers)
+    ) return null;
+    const peers: unknown[] = [];
+    for (const [rank, candidate] of raw.peers.entries()) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+      const peer = candidate as Record<string, unknown>;
+      if (
+        peer.rank !== rank
+        || typeof peer.peerId !== 'string'
+        || typeof peer.preferred !== 'boolean'
+        || peer.preferred !== (peer.peerId === raw.preferredPeerId)
+        || typeof peer.core !== 'boolean'
+      ) return null;
+      peers.push({ peerId: peer.peerId, core: peer.core });
+    }
+    return parseVmReconcilePeerTopology({
+      kind: 'readable',
+      preferredPeerId: raw.preferredPeerId,
+      privateOnly: raw.privateOnly,
+      peers,
+    });
+  } catch {
+    return null;
+  }
+}
+
 export function parseVmReconcileCleanMissPeerIds(
   value: unknown,
   topology: VmReconcilePeerTopology,

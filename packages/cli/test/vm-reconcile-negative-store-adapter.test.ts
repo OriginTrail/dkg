@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createVmReconcilePeerTopology,
+  encodeLegacyVmReconcilePeerTopologyKey,
   type VmReconcileNegativeRecord,
 } from '@origintrail-official/dkg-agent';
 import {
@@ -9,6 +10,14 @@ import {
 } from '../src/daemon/vm-reconcile-negative-store-adapter.js';
 
 function record(): VmReconcileNegativeRecord {
+  const peerTopology = createVmReconcilePeerTopology({
+    preferredPeerId: 'peer-a',
+    privateOnly: false,
+    peers: [
+      { peerId: 'peer-a', core: true },
+      { peerId: 'peer-b', core: false },
+    ],
+  });
   return {
     cacheKey: 'cg\0ual#root',
     localCgId: 'cg',
@@ -16,14 +25,8 @@ function record(): VmReconcileNegativeRecord {
     nextRetryAt: 1234,
     swmGen: 'changelog:1:2',
     candidateNamespaces: [{ metaGraph: 'urn:meta', dataGraph: 'urn:data' }],
-    peerTopology: createVmReconcilePeerTopology({
-      preferredPeerId: 'peer-a',
-      privateOnly: false,
-      peers: [
-        { peerId: 'peer-a', core: true },
-        { peerId: 'peer-b', core: false },
-      ],
-    }),
+    peerTopologyKey: encodeLegacyVmReconcilePeerTopologyKey(peerTopology),
+    peerTopology,
     cleanMissPeerIds: ['peer-b'],
   };
 }
@@ -50,6 +53,7 @@ describe('VM reconcile negative SQLite adapter', () => {
   it('round-trips the unreadable topology sentinel without JSON encoding', () => {
     const value = record();
     value.peerTopology = { kind: 'unreadable' };
+    value.peerTopologyKey = 'unreadable';
     value.cleanMissPeerIds = [];
     const row = encodeVmReconcileNegativeRow(value, 999);
 
