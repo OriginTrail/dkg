@@ -18,41 +18,6 @@ type DurableSyncFromPeerResult = number | (SyncProgressSummary & {
   readonly complete?: boolean;
 });
 
-/**
- * One semantic policy for the two ordinary on-connect workflows. Keeping the
- * correlated choices in a discriminated object prevents callers from
- * constructing lane combinations that have no valid meaning.
- */
-export type OrdinarySyncOnConnectPolicy = Readonly<
-  | {
-    kind: 'ordinary';
-    bypassPeerBackoff: false;
-    includeSelectedPublicLane: true;
-    preserveSelectedRetryOwnership: false;
-  }
-  | {
-    kind: 'after-selected';
-    bypassPeerBackoff: true;
-    includeSelectedPublicLane: false;
-    preserveSelectedRetryOwnership: true;
-  }
->;
-
-export const ORDINARY_SYNC_ON_CONNECT_POLICY = Object.freeze({
-  ordinary: Object.freeze({
-    kind: 'ordinary',
-    bypassPeerBackoff: false,
-    includeSelectedPublicLane: true,
-    preserveSelectedRetryOwnership: false,
-  }) as OrdinarySyncOnConnectPolicy,
-  afterSelected: Object.freeze({
-    kind: 'after-selected',
-    bypassPeerBackoff: true,
-    includeSelectedPublicLane: false,
-    preserveSelectedRetryOwnership: true,
-  }) as OrdinarySyncOnConnectPolicy,
-});
-
 export interface AdmittedSelectedSharedMemoryWorkItem {
   readonly contextGraphIds: readonly string[];
   /** Execute exactly the scope captured by admission. */

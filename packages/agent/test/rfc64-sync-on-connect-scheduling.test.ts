@@ -127,7 +127,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(ordinaryRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
-      expect.objectContaining({ kind: 'after-selected' }),
+      'after-selected',
     );
     expect(ordering).toEqual(['exact', 'ordinary']);
     expect(selectedSync).toHaveBeenCalledWith(
@@ -286,7 +286,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(ordinaryRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
-      expect.objectContaining({ kind: 'after-selected' }),
+      'after-selected',
     );
     expect(ordinarySharedSync).toHaveBeenCalledOnce();
     expect(ordinarySharedSync).toHaveBeenCalledWith(
@@ -419,7 +419,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(ordinaryRun).toHaveBeenCalledWith(
       PEER_A,
       handleSyncError,
-      expect.objectContaining({ kind: 'after-selected' }),
+      'after-selected',
     );
     expect(ordering).toEqual(['exact-in-flight', 'ordinary']);
   });

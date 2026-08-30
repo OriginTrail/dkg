@@ -358,16 +358,15 @@ import {
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
 import {
-  ORDINARY_SYNC_ON_CONNECT_POLICY,
   runSelectedSharedMemoryRetry,
   runSyncOnConnect,
   SyncOnConnectPostSyncError,
-  type OrdinarySyncOnConnectPolicy,
   type SyncOnConnectOutcome,
   type SyncOnConnectPeerOutcome,
 } from './sync/on-connect/sync-on-connect.js';
 import {
   SyncOnConnectPeerScheduler,
+  type OrdinarySyncOnConnectTransition,
 } from './sync/on-connect/peer-scheduler.js';
 import type {
   SelectedPublicSharedMemoryTarget,
@@ -681,6 +680,26 @@ import {
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
+
+function ordinarySyncOnConnectSemantics(
+  transition: OrdinarySyncOnConnectTransition,
+): Readonly<{
+  bypassPeerBackoff: boolean;
+  includeSelectedPublicLane: boolean;
+  preserveSelectedRetryOwnership: boolean;
+}> {
+  return transition === 'after-selected'
+    ? {
+      bypassPeerBackoff: true,
+      includeSelectedPublicLane: false,
+      preserveSelectedRetryOwnership: true,
+    }
+    : {
+      bypassPeerBackoff: false,
+      includeSelectedPublicLane: true,
+      preserveSelectedRetryOwnership: false,
+    };
+}
 
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
@@ -4711,12 +4730,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
-    policy: OrdinarySyncOnConnectPolicy = ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
+    transition: OrdinarySyncOnConnectTransition = 'ordinary',
   ): Promise<void> {
     if (!syncOnConnectEnabled(this.config)) return;
     const now = Date.now();
     const backoff = this.syncReconcilerBackoff.get(remotePeer);
-    if (!policy.bypassPeerBackoff && backoff && now < backoff.nextRetryAt) return;
+    const semantics = ordinarySyncOnConnectSemantics(transition);
+    if (!semantics.bypassPeerBackoff && backoff && now < backoff.nextRetryAt) return;
 
     const probe = await this.getSyncReconcilerProbe(remotePeer);
     try {
@@ -4724,7 +4744,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         probe,
         'on-connect',
-        policy,
+        transition,
       );
     } catch (err: unknown) {
       handleSyncError(remotePeer, err);
@@ -4763,7 +4783,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
-    policy: OrdinarySyncOnConnectPolicy = ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
+    transition: OrdinarySyncOnConnectTransition = 'ordinary',
   ): Promise<SyncReconcilerAttemptOutcome> {
     if (!syncOnConnectEnabled(this.config)) return 'not-started';
     return this.accountSyncAttemptWithReconciler(
@@ -4773,7 +4793,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         onSyncAccounting,
         source,
-        policy,
+        transition,
       ),
     );
   }
@@ -4868,13 +4888,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
-    policy: OrdinarySyncOnConnectPolicy = ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
+    transition: OrdinarySyncOnConnectTransition = 'ordinary',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
+    const transitionSemantics = ordinarySyncOnConnectSemantics(transition);
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
     const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
@@ -4947,7 +4968,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       ...(automaticPeerSweep
         && remotePeerIsCompleteSwmProvider
-        && policy.includeSelectedPublicLane
+        && transitionSemantics.includeSelectedPublicLane
         ? {
           selectedSharedMemoryLane: {
             admitWork: async (peerId: string) => {
@@ -5055,7 +5076,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.skippedNoSyncPeers.add(peerId);
       },
       onSyncAccounting: (peerId, outcome) => {
-        const selectedRetryStillRequired = policy.preserveSelectedRetryOwnership
+        const selectedRetryStillRequired = transitionSemantics.preserveSelectedRetryOwnership
           && this.selectedSwmBootstrapAdmission.isRetryRequired(peerId);
         const effectiveOutcome: SyncOnConnectPeerOutcome =
           selectedRetryStillRequired && outcome.reconcilerDisposition === 'clear'

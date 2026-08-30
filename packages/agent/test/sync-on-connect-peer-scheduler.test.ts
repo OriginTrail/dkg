@@ -16,8 +16,8 @@ describe('sync-on-connect per-peer scheduler', () => {
     const ordering: string[] = [];
     const scheduler = new SyncOnConnectPeerScheduler<string>({
       runSelected: async (_peer, _onError, plan) => { ordering.push(`selected:${plan}`); },
-      runOrdinary: async (_peer, _onError, policy) => {
-        ordering.push(policy.kind === 'after-selected' ? 'ordinary-only' : 'ordinary');
+      runOrdinary: async (_peer, _onError, transition) => {
+        ordering.push(transition === 'after-selected' ? 'ordinary-only' : 'ordinary');
       },
     });
     const onError = () => undefined;
@@ -41,8 +41,8 @@ describe('sync-on-connect per-peer scheduler', () => {
         ordering.push('selected');
         await selected.promise;
       },
-      runOrdinary: async (_peer, _onError, policy) => {
-        ordering.push(policy.kind === 'after-selected' ? 'ordinary-only' : 'ordinary');
+      runOrdinary: async (_peer, _onError, transition) => {
+        ordering.push(transition === 'after-selected' ? 'ordinary-only' : 'ordinary');
         await ordinary.promise;
       },
     });
@@ -67,8 +67,8 @@ describe('sync-on-connect per-peer scheduler', () => {
         ordering.push('selected');
         await selected.promise;
       },
-      runOrdinary: async (_peer, _onError, policy) => {
-        ordering.push(policy.kind === 'after-selected' ? 'ordinary-only' : 'ordinary');
+      runOrdinary: async (_peer, _onError, transition) => {
+        ordering.push(transition === 'after-selected' ? 'ordinary-only' : 'ordinary');
       },
     });
     const onError = () => undefined;
@@ -90,8 +90,8 @@ describe('sync-on-connect per-peer scheduler', () => {
         ordering.push(`selected:${plan}`);
         if (plan === 'plan-a') await firstSelected.promise;
       },
-      runOrdinary: async (_peer, _onError, policy) => {
-        ordering.push(policy.kind === 'after-selected' ? 'ordinary-only' : 'ordinary');
+      runOrdinary: async (_peer, _onError, transition) => {
+        ordering.push(transition === 'after-selected' ? 'ordinary-only' : 'ordinary');
       },
     });
     const onError = () => undefined;

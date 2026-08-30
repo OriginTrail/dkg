@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  ORDINARY_SYNC_ON_CONNECT_POLICY,
-  type OrdinarySyncOnConnectPolicy,
-} from './sync-on-connect.js';
-
 export type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
+export type OrdinarySyncOnConnectTransition = 'ordinary' | 'after-selected';
 
 interface OrdinaryLane {
   readonly kind: 'ordinary';
   readonly handleSyncError: SyncOnConnectErrorHandler;
-  readonly policy: OrdinarySyncOnConnectPolicy;
+  readonly transition: OrdinarySyncOnConnectTransition;
 }
 
 interface SelectedLane<SelectedPlan> {
@@ -33,7 +29,7 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
   readonly runOrdinary: (
     remotePeer: string,
     handleSyncError: SyncOnConnectErrorHandler,
-    policy: OrdinarySyncOnConnectPolicy,
+    transition: OrdinarySyncOnConnectTransition,
   ) => Promise<void>;
   readonly runSelected: (
     remotePeer: string,
@@ -77,7 +73,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       this.schedule(remotePeer, {
         kind: 'ordinary',
         handleSyncError,
-        policy: ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
+        transition: 'ordinary',
       }, delayMs);
       return true;
     }
@@ -85,9 +81,9 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     existing.pendingOrdinary = {
       kind: 'ordinary',
       handleSyncError,
-      policy: existing.currentLane === 'selected' || existing.pendingSelected !== null
-        ? ORDINARY_SYNC_ON_CONNECT_POLICY.afterSelected
-        : ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
+      transition: existing.currentLane === 'selected' || existing.pendingSelected !== null
+        ? 'after-selected'
+        : 'ordinary',
     };
     return true;
   }
@@ -112,7 +108,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     if (existing.pendingOrdinary !== null) {
       existing.pendingOrdinary = {
         ...existing.pendingOrdinary,
-        policy: ORDINARY_SYNC_ON_CONNECT_POLICY.afterSelected,
+        transition: 'after-selected',
       };
     }
     return true;
@@ -154,7 +150,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
           await this.callbacks.runOrdinary(
             remotePeer,
             lane.handleSyncError,
-            lane.policy,
+            lane.transition,
           );
         }
       } catch (error: unknown) {
