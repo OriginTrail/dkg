@@ -17,13 +17,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
-  StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
   PromoteReplaySafeError,
   type AsyncPromoteQueue,
-  type PromoteJob,
   type PromoteRequest,
   type PromoteTerminalJobClearer,
 } from '@origintrail-official/dkg-publisher';
@@ -32,6 +30,12 @@ import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
 } from '../src/daemon/worker/async-promote-worker.js';
+import {
+  createAsyncPromoteWorkerFixture,
+  retryableBookkeepingFailure,
+  retryableSchedulerBusyFailure,
+  type AsyncPromoteWorkerFixture,
+} from './_helpers/async-promote-worker-fixture.js';
 
 function deferred<T = void>(): {
   promise: Promise<T>;
@@ -45,25 +49,6 @@ function deferred<T = void>(): {
     reject = rej;
   });
   return { promise, resolve, reject };
-}
-
-function retryableBookkeepingFailure(): StoreOperationTimeoutError {
-  return new StoreOperationTimeoutError({
-    backend: 'managed-oxigraph',
-    operation: 'replaceSubject',
-    storeOperation: 'replaceSubject',
-    outcome: 'not_started',
-    message: 'Managed Oxigraph is recovering; write was not started',
-  });
-}
-
-function retryableSchedulerBusyFailure(): StoreSchedulerBusyError {
-  return new StoreSchedulerBusyError(
-    'queue_wait_timeout',
-    'normal',
-    'publisher.asyncPromote.write',
-    { storeOperation: 'replaceSubject' },
-  );
 }
 
 const PROMOTE_FAILURE_LOG_PREFIX = '[async-promote-worker] ';
@@ -240,41 +225,16 @@ describe('classifyPromoteError', () => {
 });
 
 describe('runPromoteJob', () => {
-  let store: OxigraphStore;
+  let fixture: AsyncPromoteWorkerFixture;
   let queue: AsyncPromoteQueue;
-  let now: number;
-  let idCounter: number;
   let logs: string[];
+  let makeRequest: AsyncPromoteWorkerFixture['makeRequest'];
+  let enqueueAndClaim: AsyncPromoteWorkerFixture['enqueueAndClaim'];
 
   beforeEach(() => {
-    store = new OxigraphStore();
-    now = 1_700_000_000_000;
-    idCounter = 0;
-    logs = [];
-    queue = new TripleStoreAsyncPromoteQueue(store, {
-      now: () => now,
-      idGenerator: () => `job-${++idCounter}`,
-      backoff: () => 60_000,
-      maxRetries: 3,
-    });
+    fixture = createAsyncPromoteWorkerFixture();
+    ({ queue, logs, makeRequest, enqueueAndClaim } = fixture);
   });
-
-  function makeRequest(overrides: Partial<PromoteRequest> = {}): PromoteRequest {
-    return {
-      contextGraphId: 'graphify',
-      subGraphName: 'code',
-      assertionName: 'shard-1',
-      entities: 'all',
-      ...overrides,
-    };
-  }
-
-  async function enqueueAndClaim(req: PromoteRequest = makeRequest()): Promise<PromoteJob> {
-    await queue.enqueue(req);
-    const claimed = await queue.claimNext('worker-test');
-    if (!claimed) throw new Error('expected claimable job');
-    return claimed;
-  }
 
   it('on success, records the recovery commit marker and transitions to succeeded', async () => {
     const job = await enqueueAndClaim();
@@ -286,7 +246,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         return { promotedCount: 42 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (m) => logs.push(m),
     });
@@ -337,7 +297,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         return { promotedCount: 99 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (m) => logs.push(m),
     });
@@ -354,7 +314,7 @@ describe('runPromoteJob', () => {
     // The loud log line operators need to see.
     expect(logs.some((l) => l.includes('PARTIAL-PROMOTE-AMBIGUITY'))).toBe(true);
 
-    now += 16 * 60 * 1000;
+    fixture.clock.advance(16 * 60 * 1000);
     await queue.claimNext('worker-after-lease-expiry');
     const reconciled = await queue.getStatus(job.jobId);
     expect(reconciled?.state).toBe('failed');
@@ -373,7 +333,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         return { promotedCount: 7 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => {},
       emitMemoryGraphChanged: (e) => events.push(e),
@@ -400,7 +360,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         return { promotedCount: 0 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => {},
       emitMemoryGraphChanged: (e) => events.push(e),
@@ -418,7 +378,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw new Error('fetch failed');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (message) => logs.push(message),
     });
@@ -426,7 +386,7 @@ describe('runPromoteJob', () => {
     expect(result.error?.classification).toBe('transient');
     const final = await queue.getStatus(job.jobId);
     expect(final?.state).toBe('failed_retrying');
-    expect(final?.attempt.nextRetryAt).toBeGreaterThan(now);
+    expect(final?.attempt.nextRetryAt).toBeGreaterThan(fixture.clock.now());
     expect(promoteFailureDiagnostics(logs)).toEqual([
       expect.objectContaining({
         event: 'async_promote_attempt_failed',
@@ -451,7 +411,7 @@ describe('runPromoteJob', () => {
       runPromote: async () => {
         throw new Error('Promoted assertion too large for gossip (6000 KB, limit 4 MB)');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => {},
     });
@@ -470,7 +430,7 @@ describe('runPromoteJob', () => {
       runPromote: async () => {
         throw new Error('assertion not found: shard-1');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (message) => logs.push(message),
     });
@@ -512,7 +472,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw failure;
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (message) => {
         order.push('diagnostic');
@@ -567,7 +527,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw failure;
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (message) => logs.push(message),
     });
@@ -596,7 +556,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => {
         throw new Error('logger unavailable');
@@ -633,7 +593,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => pendingLog.promise,
     });
@@ -680,7 +640,7 @@ describe('runPromoteJob', () => {
           await markPromoteStarted();
           throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
         },
-        now: () => now,
+        now: fixture.clock.now,
         heartbeatIntervalMs: 0,
         log: async () => {
           throw new Error('async logger unavailable');
@@ -712,11 +672,11 @@ describe('runPromoteJob', () => {
         runPromote: async () => {
           throw new Error('fetch failed');
         },
-        now: () => now,
+        now: fixture.clock.now,
         heartbeatIntervalMs: 0,
         log: () => {},
       });
-      now += 120_000; // > backoff so next claimNext picks it up
+      fixture.clock.advance(120_000); // > backoff so next claimNext picks it up
     }
     const all = await queue.list({});
     const job = all[0];
@@ -733,7 +693,7 @@ describe('runPromoteJob', () => {
         queue,
         workerId: 'worker-test',
         runPromote: async () => ({ promotedCount: 0 }),
-        now: () => now,
+        now: fixture.clock.now,
         heartbeatIntervalMs: 0,
         log: () => {},
       }),

@@ -1,76 +1,28 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  OxigraphStore,
-  StoreOperationTimeoutError,
-  StoreSchedulerBusyError,
-} from '@origintrail-official/dkg-storage';
-import {
-  TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
-  type PromoteJob,
-  type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 
 import { runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
-
-function retryableBookkeepingFailure(): StoreOperationTimeoutError {
-  return new StoreOperationTimeoutError({
-    backend: 'managed-oxigraph',
-    operation: 'replaceSubject',
-    storeOperation: 'replaceSubject',
-    outcome: 'not_started',
-    message: 'Managed Oxigraph is recovering; write was not started',
-  });
-}
-
-function retryableSchedulerBusyFailure(): StoreSchedulerBusyError {
-  return new StoreSchedulerBusyError(
-    'queue_wait_timeout',
-    'normal',
-    'publisher.asyncPromote.write',
-    { storeOperation: 'replaceSubject' },
-  );
-}
+import {
+  createAsyncPromoteWorkerFixture,
+  retryableBookkeepingFailure,
+  retryableSchedulerBusyFailure,
+  type AsyncPromoteWorkerFixture,
+} from './_helpers/async-promote-worker-fixture.js';
 
 describe('async promote bookkeeping recovery', () => {
-  let store: OxigraphStore;
+  let fixture: AsyncPromoteWorkerFixture;
   let queue: AsyncPromoteQueue;
-  let now: number;
-  let idCounter: number;
   let logs: string[];
 
   beforeEach(() => {
-    store = new OxigraphStore();
-    now = 1_700_000_000_000;
-    idCounter = 0;
-    logs = [];
-    queue = new TripleStoreAsyncPromoteQueue(store, {
-      now: () => now,
-      idGenerator: () => `job-${++idCounter}`,
-      backoff: () => 60_000,
-      maxRetries: 3,
-    });
+    fixture = createAsyncPromoteWorkerFixture();
+    ({ queue, logs } = fixture);
   });
 
-  function makeRequest(overrides: Partial<PromoteRequest> = {}): PromoteRequest {
-    return {
-      contextGraphId: 'graphify',
-      subGraphName: 'code',
-      assertionName: 'shard-1',
-      entities: 'all',
-      ...overrides,
-    };
-  }
-
-  async function enqueueAndClaim(req: PromoteRequest = makeRequest()): Promise<PromoteJob> {
-    await queue.enqueue(req);
-    const claimed = await queue.claimNext('worker-test');
-    if (!claimed) throw new Error('expected claimable job');
-    return claimed;
-  }
-
   it('retries transient queue.fail bookkeeping without rerunning promote', async () => {
-    const job = await enqueueAndClaim();
+    const job = await fixture.enqueueAndClaim();
     const recoveringQueue = Object.create(queue) as AsyncPromoteQueue;
     const fail = queue.fail.bind(queue);
     let failCalls = 0;
@@ -92,13 +44,11 @@ describe('async promote bookkeeping recovery', () => {
         await markPromoteStarted();
         throw retryableBookkeepingFailure();
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       bookkeepingRetryIntervalMs: 5_000,
       bookkeepingRetryBudgetMs: 20_000,
-      sleep: async (ms) => {
-        now += ms;
-      },
+      sleep: fixture.clock.sleep,
       log: (message) => logs.push(message),
     });
 
@@ -113,7 +63,7 @@ describe('async promote bookkeeping recovery', () => {
   });
 
   it('retries transient post-promote bookkeeping without rerunning a successful promote', async () => {
-    const job = await enqueueAndClaim();
+    const job = await fixture.enqueueAndClaim();
     const recoveringQueue = Object.create(queue) as AsyncPromoteQueue;
     const recordCommitMarker = queue.recordCommitMarker.bind(queue);
     const succeed = queue.succeed.bind(queue);
@@ -146,13 +96,11 @@ describe('async promote bookkeeping recovery', () => {
         await markPromoteStarted();
         return { promotedCount: 99 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       bookkeepingRetryIntervalMs: 5_000,
       bookkeepingRetryBudgetMs: 20_000,
-      sleep: async (ms) => {
-        now += ms;
-      },
+      sleep: fixture.clock.sleep,
       log: (message) => logs.push(message),
     });
 
@@ -167,10 +115,10 @@ describe('async promote bookkeeping recovery', () => {
   });
 
   it('shares one recovery deadline across all post-promote bookkeeping writes', async () => {
-    const job = await enqueueAndClaim();
+    const job = await fixture.enqueueAndClaim();
     const recoveringQueue = Object.create(queue) as AsyncPromoteQueue;
     const recordCommitMarker = queue.recordCommitMarker.bind(queue);
-    const startedAt = now;
+    const startedAt = fixture.clock.now();
     let swmMarkerCalls = 0;
     let succeedCalls = 0;
     let promoteCalls = 0;
@@ -197,13 +145,11 @@ describe('async promote bookkeeping recovery', () => {
         await markPromoteStarted();
         return { promotedCount: 99 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       bookkeepingRetryIntervalMs: 5_000,
       bookkeepingRetryBudgetMs: 10_000,
-      sleep: async (ms) => {
-        now += ms;
-      },
+      sleep: fixture.clock.sleep,
       log: (message) => logs.push(message),
     });
 
@@ -211,18 +157,18 @@ describe('async promote bookkeeping recovery', () => {
     expect(promoteCalls).toBe(1);
     expect(swmMarkerCalls).toBe(3);
     expect(succeedCalls).toBe(1);
-    expect(now).toBe(startedAt + 10_000);
+    expect(fixture.clock.now()).toBe(startedAt + 10_000);
     const final = await queue.getStatus(job.jobId);
     expect(final?.state).toBe('running');
     expect(final?.commitMarker?.swmInserted).toBe(true);
   });
 
   it('stops persistent transient bookkeeping retries at the shared deadline', async () => {
-    const job = await enqueueAndClaim();
+    const job = await fixture.enqueueAndClaim();
     const recoveringQueue = Object.create(queue) as AsyncPromoteQueue;
     const recordCommitMarker = queue.recordCommitMarker.bind(queue);
     const succeed = queue.succeed.bind(queue);
-    const startedAt = now;
+    const startedAt = fixture.clock.now();
     let swmMarkerCalls = 0;
     let succeedCalls = 0;
     let promoteCalls = 0;
@@ -247,13 +193,11 @@ describe('async promote bookkeeping recovery', () => {
         await markPromoteStarted();
         return { promotedCount: 99 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       bookkeepingRetryIntervalMs: 5_000,
       bookkeepingRetryBudgetMs: 10_000,
-      sleep: async (ms) => {
-        now += ms;
-      },
+      sleep: fixture.clock.sleep,
       log: (message) => logs.push(message),
     });
 
@@ -261,7 +205,7 @@ describe('async promote bookkeeping recovery', () => {
     expect(promoteCalls).toBe(1);
     expect(swmMarkerCalls).toBe(3);
     expect(succeedCalls).toBe(0);
-    expect(now).toBe(startedAt + 10_000);
+    expect(fixture.clock.now()).toBe(startedAt + 10_000);
     const final = await queue.getStatus(job.jobId);
     expect(final?.state).toBe('running');
     expect(final?.commitMarker?.swmInserted).toBe(false);
