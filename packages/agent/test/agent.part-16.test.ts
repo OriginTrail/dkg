@@ -296,6 +296,56 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it('attributes VM-recovery miss evidence only to the clean peer in a mixed fan-out', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeVmRecoveryMixedPeerEvidence',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const cleanPeer = { toString: () => 'peer-clean-miss' };
+        const timedOutPeer = { toString: () => 'peer-timed-out' };
+        (agent.node.libp2p as any).getConnections = () => [
+          { remotePeer: cleanPeer } as any,
+          { remotePeer: timedOutPeer } as any,
+        ];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        const syncSharedMemoryFromPeerDetailed = recorder(async (peerId: string) => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+          ...(peerId === timedOutPeer.toString() ? { timedOutPhases: 1 } : {}),
+        }));
+        (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
+
+        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(syncSharedMemoryFromPeerDetailed.calls.map(([peerId]) => peerId).sort()).toEqual([
+          cleanPeer.toString(),
+          timedOutPeer.toString(),
+        ]);
+        expect(recovery.cleanMissPeerIds).toEqual([cleanPeer.toString()]);
+        expect(recovery.catchup.diagnostics.sharedMemory.timedOutPhases).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
 
     it('does not count timed-out catchup rounds as peer success', async () => {
       const agent = await DKGAgent.create({
