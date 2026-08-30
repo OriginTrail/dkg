@@ -30,10 +30,17 @@ interface SelectedSharedMemorySyncLane {
 
 type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
 
-export interface SyncOnConnectPeerOutcome {
-  fresh: boolean;
-  progress?: boolean;
-}
+export type SyncOnConnectPeerOutcome =
+  | {
+      reconcilerDisposition: 'clear';
+      fresh: boolean;
+      progress: boolean;
+    }
+  | {
+      reconcilerDisposition: 'retry' | 'defer';
+      fresh: false;
+      progress: boolean;
+    };
 
 interface SyncOnConnectContext {
   remotePeer: string;
@@ -76,7 +83,7 @@ interface SyncOnConnectContext {
    * marking the peer as cleanly fresh for reconnect suppression; `progress`
    * controls whether the periodic reconciler may write its long cooldown.
    */
-  onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
+  onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
 /**
@@ -92,7 +99,7 @@ interface SelectedSharedMemoryRetryContext {
   selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
   logInfo: (ctx: OperationContext, message: string) => void;
   onPeerSkippedNoSync?: (peerId: string, protocols: string[]) => void;
-  onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
+  onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
 export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing' | 'deferred-backpressure';
@@ -238,7 +245,11 @@ export async function runSelectedSharedMemoryRetry(
 
     if (accounting.deferredByBackpressure) {
       if (accounting.madeProgress) {
-        context.onPeerSynced?.(remotePeer, { fresh: false, progress: true });
+        context.onSyncAccounting?.(remotePeer, {
+          reconcilerDisposition: 'defer',
+          fresh: false,
+          progress: true,
+        });
       }
       return 'deferred-backpressure';
     }
@@ -252,7 +263,8 @@ export async function runSelectedSharedMemoryRetry(
       && !accounting.failed
       && !accounting.denied;
     if (accounting.madeProgress || accounting.denied || selectedRetryResolved) {
-      context.onPeerSynced?.(remotePeer, {
+      context.onSyncAccounting?.(remotePeer, {
+        reconcilerDisposition: selectedRetryResolved || accounting.denied ? 'clear' : 'retry',
         fresh: false,
         progress: accounting.madeProgress,
       });
@@ -348,24 +360,33 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       && !sawExplicitIncompleteDurableResult;
     if (sawBackpressureDeferral) {
       if (madeProgress) {
-        context.onPeerSynced?.(remotePeer, { fresh: false, progress: true });
+        context.onSyncAccounting?.(remotePeer, {
+          reconcilerDisposition: 'defer',
+          fresh: false,
+          progress: true,
+        });
       }
       return 'deferred-backpressure';
     }
-    const clearsPeerBackoff = madeProgress || (
-      !sawBackoffWorthyFailure
-      && !sawExplicitIncompleteSharedResult
-      && (cleanDurableRound || sawDeniedPhase)
-    );
-    if (clearsPeerBackoff) {
-      context.onPeerSynced?.(remotePeer, {
-        fresh: !sawBackoffWorthyFailure
-          && !sawDeniedPhase
-          && !sawFailedPhase
-          && !sawExplicitIncompleteSharedResult
-          && cleanDurableRound,
-        progress: madeProgress,
-      });
+    const retryRequired = sawBackoffWorthyFailure
+      || sawExplicitIncompleteSharedResult
+      || (sawFailedPhase && !madeProgress);
+    const recordsPeerAccounting = madeProgress || retryRequired || cleanDurableRound || sawDeniedPhase;
+    if (recordsPeerAccounting) {
+      context.onSyncAccounting?.(
+        remotePeer,
+        retryRequired
+          ? {
+              reconcilerDisposition: 'retry',
+              fresh: false,
+              progress: madeProgress,
+            }
+          : {
+              reconcilerDisposition: 'clear',
+              fresh: !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
+              progress: madeProgress,
+            },
+      );
     }
     return 'synced';
   };

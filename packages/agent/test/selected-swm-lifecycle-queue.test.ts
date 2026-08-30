@@ -355,7 +355,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
 
   it('does not hide an unrelated shared-memory phase failure', async () => {
     const contextGraphId = 'selected-with-unrelated-failure';
-    const onPeerSynced = vi.fn();
+    const onSyncAccounting = vi.fn();
     const shared = {
       ...result(contextGraphId, 3, 3),
       failedPhases: 2,
@@ -392,11 +392,12 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
       syncSharedMemoryFromPeer: async () => shared,
-      onPeerSynced,
+      onSyncAccounting,
       logInfo: () => {},
     });
 
-    expect(onPeerSynced).toHaveBeenCalledWith(PEER, {
+    expect(onSyncAccounting).toHaveBeenCalledWith(PEER, {
+      reconcilerDisposition: 'clear',
       fresh: false,
       progress: true,
     });

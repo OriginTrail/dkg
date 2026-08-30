@@ -4812,12 +4812,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
-    let syncAccountingClearedBackoff = false;
+    let syncAccounting: SyncOnConnectPeerOutcome | undefined;
     try {
-      const onSyncAccounting = () => {
-        syncAccountingClearedBackoff = true;
+      const onSyncAccounting = (outcome: SyncOnConnectPeerOutcome) => {
+        syncAccounting = outcome;
       };
       const outcome = await attempt(onSyncAccounting);
+      if (syncAccounting) {
+        this.applySyncOnConnectAccounting(remotePeer, syncAccounting, probe);
+      }
       if (outcome === 'deferred-backpressure') {
         this.log.info(
           createOperationContext('sync'),
@@ -4829,7 +4832,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         outcome !== 'skipped-no-sync' &&
         outcome !== 'already-syncing' &&
         outcome !== 'not-started' &&
-        !syncAccountingClearedBackoff &&
+        !syncAccounting &&
         this.lastSuccessfulSyncAt.get(remotePeer) === lastOk &&
         this.lastSyncProgressAt.get(remotePeer) === lastProgress
       ) {
@@ -5056,25 +5059,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);
       },
-      onPeerSynced: (peerId, outcome) => {
+      onSyncAccounting: (peerId, outcome) => {
         const selectedRetryStillRequired = mode === 'ordinary-after-selected'
           && this.selectedSwmBootstrapAdmission.isRetryRequired(peerId);
-        const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        if (outcome?.progress) {
-          this.lastSyncProgressAt.set(peerId, progressAt);
-        }
-        if ((outcome?.fresh ?? true) && !selectedRetryStillRequired) {
-          this.lastSuccessfulSyncAt.set(peerId, progressAt);
-        }
-        this.skippedNoSyncPeers.delete(peerId);
-        // An owed ordinary replay may succeed after selected recovery reported
-        // an incomplete scope. Preserve that selected lane's retry/backoff;
-        // ordinary freshness must not consume its recovery ownership.
-        if (!selectedRetryStillRequired) {
-          this.syncReconcilerBackoff.delete(peerId);
-        }
-        if (outcome) {
-          onSyncAccounting?.(outcome);
+        const effectiveOutcome: SyncOnConnectPeerOutcome =
+          selectedRetryStillRequired && outcome.reconcilerDisposition === 'clear'
+            ? {
+                reconcilerDisposition: 'defer',
+                fresh: false,
+                progress: outcome.progress,
+              }
+            : outcome;
+        if (onSyncAccounting) {
+          onSyncAccounting(effectiveOutcome);
+        } else {
+          this.applySyncOnConnectAccounting(peerId, effectiveOutcome);
         }
       },
     });
@@ -5151,16 +5150,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);
       },
-      onPeerSynced: (peerId, outcome) => {
-        const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        if (outcome?.progress) {
-          this.lastSyncProgressAt.set(peerId, progressAt);
+      onSyncAccounting: (peerId, outcome) => {
+        if (onSyncAccounting) {
+          onSyncAccounting(outcome);
+        } else {
+          this.applySyncOnConnectAccounting(peerId, outcome);
         }
-        // A selected-only retry never stamps the whole peer fresh; durable and
-        // unrelated CG lanes were deliberately outside this invocation.
-        this.skippedNoSyncPeers.delete(peerId);
-        this.syncReconcilerBackoff.delete(peerId);
-        if (outcome) onSyncAccounting?.(outcome);
       },
     });
   }
@@ -5386,7 +5381,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.skippedNoSyncPeers.delete(peerId);
       this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
       setTimeout(() => {
-        this.trySyncFromPeer(peerId).catch((err: unknown) => {
+        void (async () => {
+          const probe = await this.getSyncReconcilerProbe(peerId);
+          await this.attemptSyncFromPeerWithReconcilerAccounting(
+            peerId,
+            probe,
+            'on-connect',
+          );
+        })().catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
         });
@@ -5538,13 +5540,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return backoff.protocolsKey !== probe.protocolsKey || backoff.connectionKey !== probe.connectionKey;
   }
 
+  /** Apply one coherent sync result to freshness, progress, and retry state. */
+  applySyncOnConnectAccounting(
+    this: DKGAgent,
+    peerId: string,
+    outcome: SyncOnConnectPeerOutcome,
+    probe?: SyncReconcilerProbe,
+  ): void {
+    const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
+    if (outcome.progress) {
+      this.lastSyncProgressAt.set(peerId, progressAt);
+    }
+    if (outcome.fresh) {
+      this.lastSuccessfulSyncAt.set(peerId, progressAt);
+    }
+    this.skippedNoSyncPeers.delete(peerId);
+
+    if (outcome.reconcilerDisposition === 'clear') {
+      this.syncReconcilerBackoff.delete(peerId);
+    } else if (outcome.reconcilerDisposition === 'retry' && probe) {
+      this.recordSyncReconcilerFailure(peerId, probe);
+    }
+  }
+
   /**
    * Grow the per-peer sync-reconciler backoff after an attempt that did
    * not produce a successful sync. `nextRetryAt` advances by
    * `SYNC_BACKOFF_BASE_MS * 2^(failures-1)` (capped at
    * `SYNC_BACKOFF_MAX_MS`) with ±`SYNC_BACKOFF_JITTER` randomisation to
    * de-correlate retries across peers. Reset to absent on successful
-   * progress / denial-only clean response (`onPeerSynced`). Disconnect
+   * progress / denial-only clean response (`reconcilerDisposition: clear`). Disconnect
    * no longer clears this immediately; stale disconnected entries are
    * pruned by `pruneSyncReconcilerState`.
    */
