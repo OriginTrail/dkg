@@ -8,6 +8,7 @@ import {
   type ChainIdV1,
   type EvmAddressV1,
   type NetworkIdV1,
+  type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 
 import type {
@@ -154,11 +155,9 @@ export interface ResolvedRfc64CatalogActivationsV1 {
   readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
   /** Compatibility projection used by the existing public status/producer path. */
   readonly publicCatalog: ResolvedRfc64PublicCatalogActivationConfigV1;
-  /** Exact unified-selection authoring scope before compatibility manifests are unioned. */
-  readonly selectedCatalogAutoPublish?: Readonly<{
-    readonly config: Readonly<Rfc64CatalogAutoPublishConfigV1>;
-    readonly selectedContextGraphs: readonly string[];
-  }>;
+  /** Fully resolved unified-selection controls before compatibility manifests are unioned. */
+  readonly selectedCatalogAuthoringControls:
+    readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[];
 }
 
 /**
@@ -198,13 +197,24 @@ export type ResolvedRfc64PublicCatalogAutoPublishPolicyV1 =
     selectedContextGraphs: readonly string[];
   }>;
 
-/** Independent authoring controls; public compatibility can never select private CGs. */
-export interface ResolvedRfc64CatalogAutoPublishControlsV1 {
-  readonly selectedCatalog?: Readonly<{
-    readonly config: Readonly<Rfc64CatalogAutoPublishConfigV1>;
-    readonly selectedContextGraphs: readonly string[];
-  }>;
-  readonly publicCatalog?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+export type ResolvedRfc64SelectedCatalogAuthoringControlV1 = Readonly<{
+  readonly kind: 'selected-public' | 'selected-private';
+  readonly contextGraphId: string;
+  readonly announcementPeers: readonly string[];
+  readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}>;
+
+/**
+ * One immutable authoring lookup. Unified selected-CG controls own an exact
+ * graph entry and always win; the compatibility public lane is an explicit
+ * fallback and can never admit a private policy.
+ */
+export interface ResolvedRfc64CatalogAuthoringPolicyV1 {
+  readonly selectedByContextGraph: Readonly<
+    Record<string, ResolvedRfc64SelectedCatalogAuthoringControlV1>
+  >;
+  readonly legacyPublicFallback?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
 }
 
 export interface Rfc64PublicCatalogControlInputsV1 {
@@ -547,14 +557,11 @@ export function resolveRfc64CatalogActivationsV1(
     input.publicCatalog,
     chainIdentity,
   );
-  const selectedCatalogAutoPublish = catalog.autoPublish === undefined
-    ? undefined
-    : Object.freeze({
-      config: catalog.autoPublish,
-      selectedContextGraphs: catalog.selectedContextGraphs,
-    });
+  const selectedCatalogAuthoringControls = resolveSelectedCatalogAuthoringControlsV1(
+    catalog,
+  );
   if (!catalog.enabled && !publicCatalog.enabled) {
-    return Object.freeze({ catalog, publicCatalog, selectedCatalogAutoPublish });
+    return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
   }
 
   const byGraph = new Map<string, Rfc64CatalogBootstrapConfigV1['acceptedPolicies'][number]>();
@@ -628,7 +635,73 @@ export function resolveRfc64CatalogActivationsV1(
     bootstrap: mergedBootstrap,
     rollout,
   });
-  return Object.freeze({ catalog: mergedCatalog, publicCatalog, selectedCatalogAutoPublish });
+  return Object.freeze({
+    catalog: mergedCatalog,
+    publicCatalog,
+    selectedCatalogAuthoringControls,
+  });
+}
+
+/** Join source precedence once at the configuration boundary. */
+export function resolveRfc64CatalogAuthoringPolicyV1(input: Readonly<{
+  readonly selectedCatalogAuthoringControls:
+    readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[];
+  readonly legacyPublicFallback?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+}>): ResolvedRfc64CatalogAuthoringPolicyV1 | undefined {
+  if (
+    input.selectedCatalogAuthoringControls.length === 0
+    && input.legacyPublicFallback === undefined
+  ) return undefined;
+  const selectedByContextGraph: Record<
+    string,
+    ResolvedRfc64SelectedCatalogAuthoringControlV1
+  > = Object.create(null) as Record<
+    string,
+    ResolvedRfc64SelectedCatalogAuthoringControlV1
+  >;
+  for (const control of input.selectedCatalogAuthoringControls) {
+    if (selectedByContextGraph[control.contextGraphId] !== undefined) {
+      throw new TypeError(
+        `rfc64Catalog has duplicate authoring control for ${control.contextGraphId}`,
+      );
+    }
+    selectedByContextGraph[control.contextGraphId] = control;
+  }
+  return Object.freeze({
+    selectedByContextGraph: Object.freeze(selectedByContextGraph),
+    ...(input.legacyPublicFallback === undefined
+      ? {}
+      : { legacyPublicFallback: input.legacyPublicFallback }),
+  });
+}
+
+function resolveSelectedCatalogAuthoringControlsV1(
+  catalog: ResolvedRfc64CatalogActivationConfigV1,
+): readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[] {
+  const autoPublish = catalog.autoPublish;
+  if (autoPublish === undefined) return Object.freeze([]);
+  const bootstrap = catalog.bootstrap;
+  if (bootstrap === undefined) {
+    throw new TypeError('rfc64Catalog autoPublish requires a bootstrap manifest');
+  }
+  return Object.freeze(bootstrap.acceptedPolicies.map((accepted) => {
+    const policy = accepted.policyEnvelope.payload;
+    const announcementPeers = accepted.completeSwmProviders;
+    if (announcementPeers === undefined || announcementPeers.length === 0) {
+      throw new TypeError(
+        `rfc64Catalog autoPublish requires completeSwmProviders for ${policy.contextGraphId}`,
+      );
+    }
+    return Object.freeze({
+      kind: policy.accessPolicy === 0 ? 'selected-public' : 'selected-private',
+      contextGraphId: policy.contextGraphId,
+      announcementPeers,
+      catalogIssuerDelegationEffectiveAt:
+        autoPublish.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
+      catalogIssuerDelegationExpiresAt:
+        autoPublish.catalogIssuerDelegationExpiresAt,
+    });
+  }));
 }
 
 function disabledRfc64CatalogActivationV1(): ResolvedRfc64CatalogActivationConfigV1 {

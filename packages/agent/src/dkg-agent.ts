@@ -435,6 +435,7 @@ import {
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64CatalogActivationsV1,
+  resolveRfc64CatalogAuthoringPolicyV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -1005,19 +1006,10 @@ export class DKGAgent extends DKGAgentBase {
             activationPeerAgentBindings!.get(remotePeerId) ?? null
           ),
         }));
-    const rfc64CatalogAutoPublishControls = (
-      activations.selectedCatalogAutoPublish === undefined
-      && rfc64PublicCatalogControls.autoPublishPolicy === undefined
-    )
-      ? undefined
-      : Object.freeze({
-        ...(activations.selectedCatalogAutoPublish === undefined
-          ? {}
-          : { selectedCatalog: activations.selectedCatalogAutoPublish }),
-        ...(rfc64PublicCatalogControls.autoPublishPolicy === undefined
-          ? {}
-          : { publicCatalog: rfc64PublicCatalogControls.autoPublishPolicy }),
-      });
+    const rfc64CatalogAuthoringPolicy = resolveRfc64CatalogAuthoringPolicyV1({
+      selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
+      legacyPublicFallback: rfc64PublicCatalogControls.autoPublishPolicy,
+    });
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
       catalogActivation.bootstrap,
@@ -1112,7 +1104,7 @@ export class DKGAgent extends DKGAgentBase {
         selectedContextGraphs: catalogActivation.selectedContextGraphs,
         rollout: catalogActivation.rollout,
       }),
-      rfc64CatalogAutoPublishControls,
+      rfc64CatalogAuthoringPolicy,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       syncReconcilerTiming: resolveSyncReconcilerTiming(config),

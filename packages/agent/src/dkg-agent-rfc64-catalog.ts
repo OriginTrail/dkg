@@ -79,7 +79,6 @@ import {
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
   Rfc64PublicCatalogNativeReceiverV1,
-  type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
@@ -87,6 +86,10 @@ import {
   createRfc64CatalogAppliedHeadCoordinatorV1,
   type Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import {
+  snapshotRfc64CatalogSynchronizationEvidenceV1,
+  type Rfc64CatalogSynchronizationEvidenceV1,
+} from './rfc64/catalog-synchronization-evidence-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
@@ -381,7 +384,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
       } finally {
         this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-        this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.clear();
         this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       }
     }
@@ -766,22 +768,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   readRfc64PublicCatalogSynchronizationEvidenceV1(
     this: DKGAgent,
     catalogHeadDigest: Digest32V1,
-  ): Rfc64PublicCatalogNativeSynchronizationEvidenceV1 | null {
+  ): Rfc64CatalogSynchronizationEvidenceV1 | null {
     const evidence = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
       catalogHeadDigest,
     );
-    return evidence === undefined ? null : Object.freeze({ ...evidence });
-  }
-
-  /**
-   * Read exact process-local proof that one finalized catalog transition
-   * committed VM before observing its applied head and reconciling SWM.
-   */
-  readRfc64FinalizedSwmRetirementLifecycleReceiptsV1(
-    this: DKGAgent,
-    catalogHeadDigest: Digest32V1,
-  ): readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[] {
-    return this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.read(catalogHeadDigest);
+    return evidence === undefined
+      ? null
+      : snapshotRfc64CatalogSynchronizationEvidenceV1(
+        evidence,
+        evidence.finalizedSwmRetirementLifecycleReceipts,
+      );
   }
 
   /**
@@ -849,7 +845,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return undefined;
     }
     this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-    this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.clear();
+    const pendingRetirementReceiptsByHead = new Map<
+      Digest32V1,
+      Rfc64FinalizedSwmRetirementLifecycleReceiptV1[]
+    >();
     const resolveDeployment: Rfc64BoundedPublicRootCatalogDeploymentResolverV1 =
       (announcement, signal) => this.resolveRfc64CatalogDeploymentProfileV1(
         announcement.networkId,
@@ -931,7 +930,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             retirement.kaUal,
           ),
           recordRetirementLifecycleReceipt: (receipt) => {
-            this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.record(receipt);
+            const pending = pendingRetirementReceiptsByHead.get(receipt.catalogHeadDigest) ?? [];
+            pending.push(receipt);
+            pendingRetirementReceiptsByHead.set(receipt.catalogHeadDigest, pending);
           },
           logInfo: (ctx, message) => this.log.info(ctx, message),
         });
@@ -950,12 +951,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
           nativeReceiver: Object.freeze({
             synchronizeBoundedPublicRootCatalog: async (...args) => {
-              const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(...args);
-              this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
-                evidence.catalogHeadDigest,
-                evidence,
-              );
-              return evidence;
+              const announcedHead = args[1].catalogHeadObjectDigest;
+              try {
+                const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(...args);
+                const observed = snapshotRfc64CatalogSynchronizationEvidenceV1(
+                  evidence,
+                  pendingRetirementReceiptsByHead.get(evidence.catalogHeadDigest) ?? [],
+                );
+                this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
+                  evidence.catalogHeadDigest,
+                  observed,
+                );
+                return evidence;
+              } finally {
+                pendingRetirementReceiptsByHead.delete(announcedHead);
+              }
             },
           }),
           inventory: persistence.inventory,

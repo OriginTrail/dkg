@@ -63,7 +63,7 @@ import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
-  ResolvedRfc64CatalogAutoPublishControlsV1,
+  ResolvedRfc64CatalogAuthoringPolicyV1,
   ResolvedRfc64CatalogActivationConfigV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
@@ -1911,6 +1911,6 @@ export type ResolvedDKGAgentConfig =
       ResolvedRfc64CatalogActivationConfigV1,
       'enabled' | 'selectedContextGraphs' | 'rollout'
     >;
-    rfc64CatalogAutoPublishControls?: ResolvedRfc64CatalogAutoPublishControlsV1;
+    rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

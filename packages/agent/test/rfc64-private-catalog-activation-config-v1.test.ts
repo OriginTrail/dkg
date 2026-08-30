@@ -313,8 +313,30 @@ describe('RFC-64 private catalog activation', () => {
     }, chainIdentity)).toMatchObject({
       catalog: { autoPublish: resolved.autoPublish },
       publicCatalog: { autoPublish: { peers: ['12D3KooPublicHint'] } },
-      selectedCatalogAutoPublish: { selectedContextGraphs: [PRIVATE_CG] },
+      selectedCatalogAuthoringControls: [{
+        kind: 'selected-private',
+        contextGraphId: PRIVATE_CG,
+        announcementPeers: [PROVIDER_PEER],
+      }],
     });
+  });
+
+  it('rejects selected-CG authoring before startup when provider authority is missing', () => {
+    expect(() => resolveRfc64CatalogActivationsV1({
+      catalog: {
+        autoPublish: {
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope: policyEnvelope(policy(PUBLIC_CG, 0)),
+            targets: [],
+          }],
+        },
+      },
+    }, chainIdentity)).toThrow(
+      new RegExp(`autoPublish requires completeSwmProviders for ${PUBLIC_CG}`, 'u'),
+    );
   });
 
   it('resolves restart-stable per-CG rollout modes without changing omitted compatibility', () => {

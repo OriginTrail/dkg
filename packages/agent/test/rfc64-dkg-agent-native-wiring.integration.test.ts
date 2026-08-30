@@ -41,6 +41,7 @@ import {
 import {
   GraphManager,
   OxigraphStore,
+  quadsToNQuads,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
   type Quad,
@@ -135,6 +136,10 @@ const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
     graph: '',
   }),
 ]);
+const FINALIZED_VM_POST_READ_DIGEST = ethers.keccak256(ethers.concat([
+  ethers.toUtf8Bytes('OT-RFC-64:finalized-vm-post-read:v1\0'),
+  ethers.toUtf8Bytes(quadsToNQuads(PROJECTION_QUADS)),
+])).toLowerCase() as Digest32V1;
 const NATIVE_DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: '20430',
@@ -814,11 +819,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         failedPeers: [],
       }));
 
-    expect((author as any).config.rfc64CatalogAutoPublishControls).toMatchObject({
-      publicCatalog: { mode: 'all-accepted-public' },
+    expect((author as any).config.rfc64CatalogAuthoringPolicy).toMatchObject({
+      legacyPublicFallback: { mode: 'all-accepted-public' },
     });
-    expect((author as any).config.rfc64CatalogAutoPublishControls.selectedCatalog)
-      .toBeUndefined();
+    expect(Object.keys(
+      (author as any).config.rfc64CatalogAuthoringPolicy.selectedByContextGraph,
+    )).toEqual([]);
     expect(author.resolveRfc64CatalogAuthoringLaneV1(CONTEXT_GRAPH_ID, null)).toBeNull();
     expect(author.resolveRfc64CatalogAuthoringLaneV1(publicContextGraphId, null))
       .toMatchObject({
@@ -870,9 +876,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await connectBothWays(author, provider);
     const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
 
-    expect((author as any).config.rfc64CatalogAutoPublishControls).toMatchObject({
-      selectedCatalog: { selectedContextGraphs: [CONTEXT_GRAPH_ID] },
-    });
+    expect((author as any).config.rfc64CatalogAuthoringPolicy)
+      .toMatchObject({
+        selectedByContextGraph: {
+          [CONTEXT_GRAPH_ID]: {
+            kind: 'selected-private',
+            announcementPeers: [providerPeerId],
+          },
+        },
+      });
     expect(author.resolveRfc64CatalogAuthoringLaneV1(CONTEXT_GRAPH_ID, null))
       .toMatchObject({
         kind: 'private',
@@ -1844,7 +1856,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
     expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
     expect((agent as any).config.rfc64PublicCatalogBootstrap).toBeUndefined();
-    expect((agent as any).config.rfc64CatalogAutoPublishControls).toBeUndefined();
+    expect((agent as any).config.rfc64CatalogAuthoringPolicy).toBeUndefined();
   });
 
   it('snapshots a bounded public-root bootstrap manifest', () => {
@@ -4387,9 +4399,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     });
     expect(appliedFinalizedHead).not.toBeNull();
-    expect(authorizedCold.readRfc64FinalizedSwmRetirementLifecycleReceiptsV1(
+    expect(authorizedCold.readRfc64PublicCatalogSynchronizationEvidenceV1(
       successor.headObjectDigest,
-    )).toMatchObject([{
+    )?.finalizedSwmRetirementLifecycleReceipts).toMatchObject([{
       kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
       catalogHeadDigest: successor.headObjectDigest,
       inventoryDigest: appliedFinalizedHead!.appliedInventoryDigest,
@@ -4397,6 +4409,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       kaUal: finalizedSeal.kaUal,
       assertionVersion: finalizedSeal.assertionVersion,
       vmGraphIri: preexistingTwin.vmGraph,
+      vmPostReadDigest: FINALIZED_VM_POST_READ_DIGEST,
       vmMaterializationStatus: 'existing',
       committedHead: {
         kind: 'rfc64-public-catalog-native-committed-head-token-v1',
@@ -4492,9 +4505,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       causeCode: 'finalized-vm-composition-incomplete',
     });
     await authorizedCold.closeRfc64PublicCatalogServiceV1();
-    expect(authorizedCold.readRfc64FinalizedSwmRetirementLifecycleReceiptsV1(
+    expect(authorizedCold.readRfc64PublicCatalogSynchronizationEvidenceV1(
       successor.headObjectDigest,
-    )).toEqual([]);
+    )).toBeNull();
   }, 90_000);
 
   it('leaves the applied head null for finalized-chain policy in the dormant SWM-only lane', async () => {

@@ -6,6 +6,7 @@ import {
   knowledgeAssetLayerGraphUri,
   readVerifiedCatalogSealBindingV1,
   type ContextGraphPolicyV1,
+  type Digest32V1,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
@@ -159,7 +160,7 @@ function finalizedTransaction(
         status: 'materialized' as const,
         vmGraphIri: `urn:rfc64:test:vm:${index}`,
         tripleCount: binding.seal.publicTripleCount,
-        postReadDigest: binding.seal.assertionMerkleRoot,
+        postReadDigest: `0x${String(index + 1).padStart(64, '0')}` as Digest32V1,
       });
     })),
     commit: primary.commit,
@@ -471,8 +472,12 @@ describe('RFC-64 catalog applied-head coordinator', () => {
         row.sealBinding,
       ).seal.kaUal).sort(),
     );
+    const expectedPostReadByUal = new Map(primary.materializationReceipts.map(
+      ({ ual, postReadDigest }) => [ual, postReadDigest],
+    ));
     for (const receipt of recorded) {
       expect(receipt.committedHead).toEqual(committedHeadToken(combinedPlan));
+      expect(receipt.vmPostReadDigest).toBe(expectedPostReadByUal.get(receipt.kaUal));
       expect(receipt.swmReconciliationOutcome).toBe('retired');
     }
     await store.close();

@@ -307,17 +307,17 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       rollout,
       contextGraphId,
     ).authoringAllowed) return Object.freeze({ status: 'inactive' });
-    const controls = this.config.rfc64CatalogAutoPublishControls;
-    const selectedCatalog = controls?.selectedCatalog;
-    const publicCatalog = controls?.publicCatalog;
-    const selectedByCatalog = selectedCatalog?.selectedContextGraphs.includes(contextGraphId)
-      ?? false;
-    const selectedByPublic = publicCatalog !== undefined && (
-      publicCatalog.mode === 'all-accepted-public'
-      || publicCatalog.selectedContextGraphs.includes(contextGraphId)
+    const authoringPolicy = this.config.rfc64CatalogAuthoringPolicy;
+    const selectedControl = authoringPolicy?.selectedByContextGraph[contextGraphId];
+    const legacyPublicFallback = selectedControl === undefined
+      ? authoringPolicy?.legacyPublicFallback
+      : undefined;
+    const selectedByLegacyPublic = legacyPublicFallback !== undefined && (
+      legacyPublicFallback.mode === 'all-accepted-public'
+      || legacyPublicFallback.selectedContextGraphs.includes(contextGraphId)
     );
     if (
-      (!selectedByCatalog && !selectedByPublic)
+      (selectedControl === undefined && !selectedByLegacyPublic)
       || (subGraphName !== undefined && subGraphName !== null)
     ) return Object.freeze({ status: 'inactive' });
     assertContextGraphIdV1(contextGraphId, 'RFC-64 catalog authoring contextGraphId');
@@ -345,44 +345,49 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         ),
       });
     }
-    if (acceptedPolicy.policy.accessPolicy === 1 && !selectedByCatalog) {
+    if (acceptedPolicy.policy.accessPolicy === 1 && selectedControl === undefined) {
       // Compatibility and legacy public controls are incapable of selecting a
       // private CG, even when its accepted policy is present in the union.
       return Object.freeze({ status: 'inactive' });
     }
-    const selectedAccepted = this.config.rfc64CatalogBootstrap?.acceptedPolicies.find(
-      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
-    );
-    const selectedCompleteProviders = selectedAccepted?.completeSwmProviders;
+    if (
+      selectedControl !== undefined
+      && (
+        (acceptedPolicy.policy.accessPolicy === 0 && selectedControl.kind !== 'selected-public')
+        || (acceptedPolicy.policy.accessPolicy === 1
+          && selectedControl.kind !== 'selected-private')
+      )
+    ) {
+      return Object.freeze({
+        status: 'unavailable',
+        error: new Error('RFC-64 selected-CG authoring policy changed after activation'),
+      });
+    }
     let announcementPeers: readonly string[];
-    let delegationConfig: Readonly<{
-      readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
-      readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
-    }>;
-    if (selectedByCatalog) {
-      if (selectedCompleteProviders === undefined || selectedCompleteProviders.length === 0) {
-        return Object.freeze({
-          status: 'unavailable',
-          error: new Error(
-            'RFC-64 selected-CG authoring requires graph-complete provider authority',
-          ),
-        });
-      }
-      // Unified selected-CG authoring always uses the policy-bound complete
-      // provider set. It never inherits a global public hint list.
-      announcementPeers = selectedCompleteProviders;
-      delegationConfig = selectedCatalog!.config;
+    let catalogIssuerDelegationEffectiveAt: TimestampMsV1;
+    let catalogIssuerDelegationExpiresAt: TimestampMsV1;
+    if (selectedControl !== undefined) {
+      announcementPeers = selectedControl.announcementPeers;
+      catalogIssuerDelegationEffectiveAt =
+        selectedControl.catalogIssuerDelegationEffectiveAt;
+      catalogIssuerDelegationExpiresAt =
+        selectedControl.catalogIssuerDelegationExpiresAt;
+    } else if (legacyPublicFallback !== undefined) {
+      announcementPeers = legacyPublicFallback.config.peers;
+      catalogIssuerDelegationEffectiveAt =
+        legacyPublicFallback.config.catalogIssuerDelegationEffectiveAt
+          ?? ('0' as TimestampMsV1);
+      catalogIssuerDelegationExpiresAt =
+        legacyPublicFallback.config.catalogIssuerDelegationExpiresAt;
     } else {
-      announcementPeers = publicCatalog!.config.peers;
-      delegationConfig = publicCatalog!.config;
+      return Object.freeze({ status: 'inactive' });
     }
     const commonLane = Object.freeze({
       networkId,
       service,
       announcementPeers,
-      catalogIssuerDelegationEffectiveAt:
-        delegationConfig.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
-      catalogIssuerDelegationExpiresAt: delegationConfig.catalogIssuerDelegationExpiresAt,
+      catalogIssuerDelegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt,
       scopeBase: Object.freeze({
         networkId,
         contextGraphId,
