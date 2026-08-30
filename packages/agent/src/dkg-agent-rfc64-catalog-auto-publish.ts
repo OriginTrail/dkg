@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Opt-in RFC-64 SWM inventory and explicit public-catalog authoring support.
- * Finalized VM remains inventoried by the chain and never advances this lane.
+ * Selected-CG RFC-64 SWM inventory and public-catalog authoring support.
+ * Finalized VM remains inventoried by the chain; confirmation retracts the
+ * corresponding SWM-only catalog row.
  */
 
 import {
@@ -166,7 +167,7 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
   readonly publicationLabel: 'publish' | 'queued publish';
 }
 
-/** Explicit dormant R1.1 bridge; ordinary SHARE does not call this method. */
+/** Explicit reconciliation API also used by the selected-CG lifecycle hook. */
 export interface ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
   readonly authorAddress: EvmAddressV1;
@@ -209,17 +210,29 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /** Background observer body; failures are contained and logged. */
+  /**
+   * Background observer body; failures are contained and logged. A durable
+   * inventory mutation for a selected public CG immediately drives the exact
+   * signed catalog target. Retrying an already-present row also retries a
+   * catalog reconciliation that may have failed after the prior inventory
+   * commit.
+   */
   async observeRfc64DurableSwmPromotionV1(
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
     try {
-      await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+      const result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+      if (result.status === 'applied' || result.status === 'existing') {
+        await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+          contextGraphId: params.contextGraphId as ContextGraphIdV1,
+          authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
+        });
+      }
     } catch (cause) {
       this.log.warn(
         params.ctx,
-        `RFC-64 SWM inventory shadow escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
   }
@@ -251,8 +264,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * Canonical post-confirmation observer for exact SWM-inventory removal.
-   * Finalized VM is already inventoried by the chain and therefore MUST NOT
-   * advance an RFC-64 catalog head.
+   * Finalized VM is already inventoried by the chain. Remove its SWM row and
+   * reconcile the selected public catalog so RFC-64 no longer advertises the
+   * asset as SWM-only.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
@@ -291,11 +305,17 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       await shadowRuntime.runExclusive(
         assetKey,
         async () => {
-          await this.removeRfc64SwmAuthorInventoryShadowV1({
+          const result = await this.removeRfc64SwmAuthorInventoryShadowV1({
             contextGraphId,
             subGraphName,
             seal: params.seal,
           });
+          if (result.status === 'applied' || result.status === 'absent') {
+            await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+              contextGraphId: contextGraphId as ContextGraphIdV1,
+              authorAddress: confirmedSeal.authorAddress,
+            });
+          }
         },
       );
     } catch (cause) {
@@ -322,9 +342,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   /**
    * Authenticate the author's complete signed SWM inventory, resolve every
    * named durable public projection, and advance the matching catalog through
-   * deterministic one-KA successors. This stays explicit/dormant in R1.1;
-   * the later activation slice owns scheduling it after an atomic inventory
-   * commit.
+   * deterministic one-KA successors. Selected public CG lifecycle hooks
+   * schedule this after the signed inventory commit; the explicit method
+   * remains useful for repair, restart, and controlled drains.
    */
   async reconcileRfc64PublicCatalogFromSwmInventoryV1(
     this: DKGAgent,

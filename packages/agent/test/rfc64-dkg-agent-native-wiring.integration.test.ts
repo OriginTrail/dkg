@@ -765,23 +765,18 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         expiresAt: null,
       }],
     });
-    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+    await author.afterDurableSwmPromotionV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
       lifecycleAgentAddress: AUTHOR,
       shareOperationId,
-    })).resolves.toMatchObject({ status: 'existing', attempts: 1 });
-    const firstCatalogReconcile = await author
-      .reconcileRfc64PublicCatalogFromSwmInventoryV1({
-        contextGraphId: CONTEXT_GRAPH_ID,
-        authorAddress: AUTHOR,
-      });
-    expect(firstCatalogReconcile).toMatchObject({
-      status: 'advanced',
-      successorsApplied: 1,
-      targetAssetCount: 1,
-      appliedHead: { catalogVersion: '1', inventoryRowCount: '1' },
+      ctx: createOperationContext('share'),
     });
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
     await expect(author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       authorAddress: AUTHOR,
@@ -849,10 +844,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
     })?.rows).toHaveLength(1);
-    await expect(restarted.removeRfc64SwmAuthorInventoryShadowV1({
+    await restarted.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
       seal,
-    })).resolves.toMatchObject({ status: 'applied', action: 'remove', attempts: 1 });
+      assertionUri,
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
     expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
@@ -860,15 +859,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       head: { payload: { version: '1', totalRows: '0' } },
       rows: [],
     });
-    await expect(restarted.reconcileRfc64PublicCatalogFromSwmInventoryV1({
-      contextGraphId: CONTEXT_GRAPH_ID,
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).resolves.toMatchObject({
-      status: 'advanced',
-      successorsApplied: 1,
-      targetAssetCount: 0,
-      appliedHead: { catalogVersion: '2', inventoryRowCount: '0' },
-    });
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
     await expect(restarted.removeRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       seal,
