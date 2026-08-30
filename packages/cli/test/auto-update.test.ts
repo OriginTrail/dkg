@@ -1290,6 +1290,33 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.status).toBe('error');
   });
 
+  it('normalizes only own string dist-tags at the registry gateway', async () => {
+    const { fetchNpmDistTags } = await import('../src/daemon.js');
+    fetchImpl = async () => ({
+      ok: true,
+      json: async () => ({
+        'dist-tags': { latest: 9_100_000, beta: '9.0.0-beta.4' },
+      }),
+    });
+
+    await expect(fetchNpmDistTags(() => undefined)).resolves.toEqual({
+      tags: { beta: '9.0.0-beta.4' },
+    });
+  });
+
+  it('rejects a malformed dist-tags container at the registry gateway', async () => {
+    const { fetchNpmDistTags } = await import('../src/daemon.js');
+    fetchImpl = async () => ({
+      ok: true,
+      json: async () => ({ 'dist-tags': ['9.1.0'] }),
+    });
+
+    await expect(fetchNpmDistTags(() => undefined)).resolves.toEqual({
+      tags: null,
+      error: true,
+    });
+  });
+
   it('returns up-to-date when current version matches latest', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({

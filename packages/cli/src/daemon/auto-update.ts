@@ -297,6 +297,17 @@ export type NpmDistTagsResult =
   | { tags: Record<string, string>; error?: false }
   | { tags: null; error: true };
 
+/** Validate and normalize the untrusted npm registry response once at ingress. */
+export function decodeNpmDistTags(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const distTags = (value as Record<string, unknown>)['dist-tags'];
+  if (!distTags || typeof distTags !== 'object' || Array.isArray(distTags)) return null;
+  return Object.fromEntries(
+    Object.entries(distTags).filter((entry): entry is [string, string] =>
+      typeof entry[1] === 'string'),
+  );
+}
+
 /** True when `v` is a valid semver string. */
 export function isValidSemver(v: string): boolean {
   const candidate = v.trim();
@@ -334,10 +345,8 @@ export async function fetchNpmDistTags(
       );
       return { tags: null, error: true };
     }
-    const data = (await response.json()) as { "dist-tags"?: Record<string, string> };
-    return data["dist-tags"]
-      ? { tags: data["dist-tags"] }
-      : { tags: null, error: true };
+    const tags = decodeNpmDistTags(await response.json());
+    return tags ? { tags } : { tags: null, error: true };
   } catch (err: any) {
     log(
       `Auto-update (npm): registry check failed (${err?.message ?? String(err)})`,

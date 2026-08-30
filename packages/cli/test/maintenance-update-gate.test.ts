@@ -1,15 +1,20 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Command } from 'commander';
+import { describe, expect, it, vi } from 'vitest';
 import {
-  registerUpdateCommand,
-  type MaintenanceUpdateCommandDeps,
+  runMaintenanceUpdateWorkflow,
+  type MaintenanceUpdatePreflightResult,
+  type MaintenanceUpdateWorkflowDeps,
 } from '../src/commands/maintenance.js';
 import {
   resolveExplicitNpmUpdateTarget,
   resolveNpmDistTag,
   type NpmVersionResult,
 } from '../src/daemon/auto-update.js';
-import type { DkgConfig } from '../src/config.js';
+import {
+  loadProjectConfig,
+  resolveAutoUpdateConfig,
+  resolveAutoUpdateSource,
+  type DkgConfig,
+} from '../src/config.js';
 
 describe('resolveExplicitNpmUpdateTarget', () => {
   const log = () => {};
@@ -117,13 +122,11 @@ describe('resolveNpmDistTag registry boundary', () => {
 });
 
 describe('dkg update command stable-only wiring', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   function commandHarness(
     resolvedTag: string | null = null,
-    runPreflight = vi.fn(async () => undefined),
+    runPreflight = vi.fn(async (): Promise<MaintenanceUpdatePreflightResult> => ({
+      status: 'ok',
+    })),
   ) {
     const config: DkgConfig = {
       name: 'update-test',
@@ -138,12 +141,13 @@ describe('dkg update command stable-only wiring', () => {
       version: resolvedTag,
       error: false,
     }));
-    const program = new Command();
-    program.exitOverride();
-    const deps: MaintenanceUpdateCommandDeps = {
+    const deps: MaintenanceUpdateWorkflowDeps = {
       loadConfig: vi.fn(async () => config),
       loadNetworkConfig: vi.fn(async () => null),
       loadResolvedNetworkConfig: vi.fn(async () => ({ name: 'testnet', network: null })),
+      loadProjectConfig,
+      resolveAutoUpdateConfig,
+      resolveAutoUpdateSource,
       resolveStandaloneInstall: vi.fn(() => true),
       resolveExplicitNpmUpdateTarget: (target, allowPrerelease, log) =>
         resolveExplicitNpmUpdateTarget(target, allowPrerelease, log, {
@@ -156,36 +160,38 @@ describe('dkg update command stable-only wiring', () => {
       stopDaemonIfRunning: vi.fn(async () => true),
       runPreflight,
     };
-    registerUpdateCommand(program, deps);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      throw new Error(`process.exit:${code}`);
-    }) as never);
-    return { config, deps, program, performNpmUpdate, performNpmUpdateEdge, runPreflight };
+    return { config, deps, performNpmUpdate, performNpmUpdateEdge, runPreflight };
   }
 
   it('refuses an explicit prerelease before dispatching either installer', async () => {
     const harness = commandHarness();
-    await expect(harness.program.parseAsync([
-      'node', 'dkg', 'update', '10.1.0-rc.1',
-    ])).rejects.toThrow('process.exit:1');
+    const outcome = await runMaintenanceUpdateWorkflow({
+      versionOrRef: '10.1.0-rc.1',
+    }, harness.deps);
+    expect(outcome.exitCode).toBe(1);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
   });
 
   it('refuses a dist-tag resolving to a prerelease before installer dispatch', async () => {
     const harness = commandHarness('10.1.0-rc.1');
-    await expect(harness.program.parseAsync([
-      'node', 'dkg', 'update', 'latest',
-    ])).rejects.toThrow('process.exit:1');
+    const outcome = await runMaintenanceUpdateWorkflow({
+      versionOrRef: 'latest',
+    }, harness.deps);
+    expect(outcome.exitCode).toBe(1);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
   });
 
   it('installs the concrete stable version resolved from a mutable dist-tag', async () => {
     const harness = commandHarness('10.0.1');
-    await harness.program.parseAsync(['node', 'dkg', 'update', 'latest']);
+    const outcome = await runMaintenanceUpdateWorkflow({
+      versionOrRef: 'latest',
+    }, harness.deps);
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stdout).toContain(
+      'Update applied. Run "dkg start" to start with the new version.',
+    );
     expect(harness.runPreflight).toHaveBeenCalledWith(harness.config);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).toHaveBeenCalledWith(
@@ -197,16 +203,18 @@ describe('dkg update command stable-only wiring', () => {
       .toBeLessThan(harness.performNpmUpdateEdge.mock.invocationCallOrder[0]);
   });
 
-  it('blocks installer dispatch when update preflight does not complete', async () => {
-    const sentinel = new Error('preflight-blocked');
-    const runPreflight = vi.fn(async () => {
-      throw sentinel;
-    });
+  it('returns the preflight exit code and blocks installer dispatch', async () => {
+    const runPreflight = vi.fn(async (): Promise<MaintenanceUpdatePreflightResult> => ({
+      status: 'blocked',
+      findings: [{ check: 'install-layout', message: 'layout mismatch' }],
+    }));
     const harness = commandHarness(null, runPreflight);
 
-    await expect(harness.program.parseAsync([
-      'node', 'dkg', 'update', '10.0.1',
-    ])).rejects.toBe(sentinel);
+    const outcome = await runMaintenanceUpdateWorkflow({
+      versionOrRef: '10.0.1',
+    }, harness.deps);
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain('  • [install-layout] layout mismatch');
     expect(runPreflight).toHaveBeenCalledWith(harness.config);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
@@ -214,13 +222,36 @@ describe('dkg update command stable-only wiring', () => {
 
   it('lets --allow-prerelease override stable-only config through installer dispatch', async () => {
     const harness = commandHarness();
-    await harness.program.parseAsync([
-      'node', 'dkg', 'update', '10.1.0-rc.1', '--allow-prerelease',
-    ]);
+    const outcome = await runMaintenanceUpdateWorkflow({
+      versionOrRef: '10.1.0-rc.1',
+      allowPrerelease: true,
+    }, harness.deps);
+    expect(outcome.exitCode).toBe(0);
     expect(harness.performNpmUpdateEdge).toHaveBeenCalledWith(
       '10.1.0-rc.1',
       '10.0.0',
       expect.any(Function),
     );
+  });
+
+  it('routes fallback project configuration through the workflow boundary', async () => {
+    const harness = commandHarness();
+    const loadFallbackProject = vi.fn(() => ({
+      repo: 'example/dkg',
+      defaultBranch: 'release',
+      githubUrl: 'https://github.com/example/dkg',
+      projectName: 'dkg',
+      syslogAppName: 'dkg',
+      defaultNetwork: 'testnet',
+    }));
+    harness.deps.resolveAutoUpdateConfig = vi.fn(() => undefined);
+    harness.deps.loadProjectConfig = loadFallbackProject;
+
+    const outcome = await runMaintenanceUpdateWorkflow({
+      versionOrRef: '10.0.1',
+    }, harness.deps);
+
+    expect(outcome.exitCode).toBe(0);
+    expect(loadFallbackProject).toHaveBeenCalledOnce();
   });
 });
