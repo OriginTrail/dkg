@@ -59,7 +59,7 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import { findReservedSubjectPrefix, isSafeJobId, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import type { AsyncPreparedPublishPayload, LiftJobRetryProjection, PersistedLiftJob } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -612,7 +612,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
         error: "Only status=failed is supported",
       });
     const jobId = parsed.jobId;
-    if (jobId !== undefined && (typeof jobId !== "string" || jobId.length === 0)) {
+    if (jobId !== undefined && (typeof jobId !== "string" || !isSafeJobId(jobId))) {
       return jsonResponse(res, 400, {
         error: "jobId must be a non-empty string when supplied",
       });
@@ -621,11 +621,10 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // operator script reading it is unaffected; the two additive counts explain the jobs
     // left failed instead of leaving them invisible: `blockedPendingRecovery` may carry an
     // on-chain transaction and needs chain proof, `skipped` has nothing left to reaccept.
-    const retryFilter: { status: "failed"; jobId?: string } = {
+    const outcome = await publisherControl.retryDetailed({
       status: "failed",
       ...(typeof jobId === "string" ? { jobId } : {}),
-    };
-    const outcome = await publisherControl.retryDetailed(retryFilter);
+    });
     return jsonResponse(res, 200, {
       retried: outcome.retried,
       blockedPendingRecovery: outcome.blockedPendingRecovery,

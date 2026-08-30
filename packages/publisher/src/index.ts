@@ -308,6 +308,7 @@ export {
   type ActiveLiftJobClaimSession,
   type AsyncLiftAdministrativeMutations,
   type AsyncLiftDetailedRetrier,
+  type AsyncLiftRetryFilter,
   type AsyncLiftPublisher,
   type ClaimSessionAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
