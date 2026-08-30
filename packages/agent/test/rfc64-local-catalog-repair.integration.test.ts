@@ -113,6 +113,11 @@ async function startRepairAgentV1(options: StartRepairAgentOptionsV1): Promise<D
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
+    syncContextGraphs: options.activation !== undefined && options.activation.enabled !== false
+      ? options.activation.bootstrap?.acceptedPublicPolicies.map(
+        ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+      ) ?? []
+      : [],
     ...(options.activation === undefined ? {} : {
       networkIdentity: {
         networkId: await computeNetworkId(),

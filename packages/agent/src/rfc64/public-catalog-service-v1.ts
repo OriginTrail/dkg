@@ -148,6 +148,10 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly resolveContextGraphAuthority?: (
     contextGraphId: ContextGraphIdV1,
   ) => Rfc64CatalogAuthorityPolicyV1;
+  /** Provider/author authority; defaults to the receiver resolver for compatibility. */
+  readonly resolveContextGraphServingAuthority?: (
+    contextGraphId: ContextGraphIdV1,
+  ) => Rfc64CatalogAuthorityPolicyV1;
   /** Share one mutation boundary with local catalog authoring for this scope. */
   readonly runCatalogMutationExclusive?: <T>(
     scope: Readonly<AuthorCatalogScopeV1>,
@@ -312,6 +316,9 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #resolveContextGraphAuthority: (
     contextGraphId: ContextGraphIdV1,
   ) => Rfc64CatalogAuthorityPolicyV1;
+  readonly #resolveContextGraphServingAuthority: (
+    contextGraphId: ContextGraphIdV1,
+  ) => Rfc64CatalogAuthorityPolicyV1;
   #started = false;
   #closed = false;
 
@@ -333,14 +340,20 @@ export class Rfc64PublicCatalogServiceV1 {
         authoringAllowed: true,
         reconciliationLane: 'catalog-apply',
       }));
+    this.#resolveContextGraphServingAuthority = options.resolveContextGraphServingAuthority
+      ?? this.#resolveContextGraphAuthority;
 
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
-      authorizeCatalogOperation: async (input) => (
-        !this.#resolveContextGraphAuthority(input.contextGraphId).track2Enabled
+      authorizeCatalogOperation: async (input) => {
+        const authority = input.operation === 'announce-outbound'
+          || input.operation === 'fetch-inbound'
+          ? this.#resolveContextGraphServingAuthority(input.contextGraphId)
+          : this.#resolveContextGraphAuthority(input.contextGraphId);
+        return !authority.track2Enabled
           ? null
-          : this.#policies.authorize(input)
-      ),
+          : this.#policies.authorize(input);
+      },
       verifyIssuerSignature: this.#verifyIssuerSignature,
       // Non-blocking: schedule() enqueues synchronously so the transport's ACK
       // path (which awaits this callback) is never stalled on a fetch.
@@ -366,11 +379,14 @@ export class Rfc64PublicCatalogServiceV1 {
         readCatalogObjectByDigest: options.native.readCatalogObjectByDigest,
         readKaBundleByDigest: options.native.readKaBundleByDigest,
         resolveScopedReadCapability: options.native.resolveScopedReadCapability,
-        authorizeCatalogOperation: async (input) => (
-          !this.#resolveContextGraphAuthority(input.contextGraphId).track2Enabled
+        authorizeCatalogOperation: async (input) => {
+          const authority = input.operation.endsWith('-inbound')
+            ? this.#resolveContextGraphServingAuthority(input.contextGraphId)
+            : this.#resolveContextGraphAuthority(input.contextGraphId);
+          return !authority.track2Enabled
             ? null
-            : this.#policies.authorize(input)
-        ),
+            : this.#policies.authorize(input);
+        },
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
     const stagingReconciler = {
@@ -576,7 +592,7 @@ export class Rfc64PublicCatalogServiceV1 {
   ): Promise<PublishAuthorCatalogGenesisResultV1> {
     this.#requireStarted();
     const scope = snapshotCatalogScope(input.scope);
-    if (!this.#resolveContextGraphAuthority(scope.contextGraphId).authoringAllowed) {
+    if (!this.#resolveContextGraphServingAuthority(scope.contextGraphId).authoringAllowed) {
       throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
     }
     const signer = Object.freeze({
@@ -952,7 +968,10 @@ export class Rfc64PublicCatalogServiceV1 {
   async #authorizeCurrentHeadDiscovery(
     input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
   ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
-    if (!this.#resolveContextGraphAuthority(input.contextGraphId).track2Enabled) return null;
+    const authority = input.operation === 'current-head-discovery-inbound'
+      ? this.#resolveContextGraphServingAuthority(input.contextGraphId)
+      : this.#resolveContextGraphAuthority(input.contextGraphId);
+    if (!authority.track2Enabled) return null;
     let trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
     try {
       trustedCatalogScope = this.#resolveTrustedCurrentHeadScope(input);

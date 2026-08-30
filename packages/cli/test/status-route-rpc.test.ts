@@ -677,6 +677,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64PublicCatalog).toEqual({
       enabled: false,
       selectedContextGraphs: [],
+      runtimeSelection: { subscriptionDriven: false, selectedContextGraphs: [] },
       rollout: { killSwitch: false, contextGraphModes: {} },
       autoPublishEnabled: false,
       completeSwmProviders: [],
@@ -735,6 +736,10 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64PublicCatalog).toEqual({
       enabled: true,
       selectedContextGraphs: ['selected-public-cg'],
+      runtimeSelection: {
+        subscriptionDriven: false,
+        selectedContextGraphs: ['selected-public-cg'],
+      },
       rollout: {
         killSwitch: true,
         contextGraphModes: { 'selected-public-cg': 'shadow' },

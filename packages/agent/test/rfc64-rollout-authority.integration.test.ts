@@ -74,6 +74,54 @@ afterEach(async () => {
 });
 
 describe('RFC-64 rollout authority integration', () => {
+  it('keeps an eligible edge CG dormant until subscribe and deactivates it on unsubscribe', async () => {
+    const edge = await startAgent(
+      'subscription-owned-selection',
+      activation('catalog'),
+      undefined,
+      undefined,
+      undefined,
+      { syncContextGraphs: [] },
+    );
+    const selection = (edge as any).config.rfc64CatalogRollout.runtimeSelection;
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    const initialPass = edge.readRfc64PublicCatalogBootstrapStatusV1()?.pass ?? 0;
+
+    expect(edge.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(selection.snapshot()).toEqual([]);
+    expect(edge.rfc64PublicCatalogStatsV1()).toMatchObject({
+      started: true,
+      acceptedPolicies: 1,
+    });
+
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(selection.snapshot()).toEqual([CONTEXT_GRAPH_ID]);
+    expect(edge.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(true);
+    expect((edge as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(edge.readRfc64PublicCatalogBootstrapStatusV1()?.pass).toBeGreaterThan(initialPass);
+
+    edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(selection.snapshot()).toEqual([]);
+  });
+
+  it('retains manifest-wide RFC-64 selection on core nodes', async () => {
+    const core = await startAgent(
+      'core-manifest-selection',
+      activation('catalog'),
+      undefined,
+      undefined,
+      undefined,
+      { nodeRole: 'core', syncContextGraphs: [] },
+    );
+    expect(core.readRfc64CatalogRuntimeSelectionV1()).toEqual({
+      subscriptionDriven: false,
+      eligibleContextGraphs: [CONTEXT_GRAPH_ID],
+      selectedContextGraphs: [CONTEXT_GRAPH_ID],
+    });
+  });
+
   it('enforces legacy, shadow, catalog, and kill-switch authority at startup', async () => {
     const legacy = await startAgent('legacy', activation('legacy'));
     expect(legacy.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
@@ -95,7 +143,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
   });
 
-  it('leaves a persisted member row dormant under exclusive catalog authority', async () => {
+  it('rehydrates persisted edge intent through exclusive catalog authority', async () => {
     const persisted = new Map<string, any>([[CONTEXT_GRAPH_ID, {
       id: CONTEXT_GRAPH_ID,
       name: 'persisted-before-rfc64',
@@ -120,13 +168,13 @@ describe('RFC-64 rollout authority integration', () => {
         },
       },
     );
-    expect(catalog.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(catalog.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(true);
     expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect((catalog as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
     expect(catalog.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
-      activated: 0,
-      dormant: 1,
-      dormantIds: [CONTEXT_GRAPH_ID],
+      activated: 1,
+      dormant: 0,
+      dormantIds: [],
     });
     expect(persisted.get(CONTEXT_GRAPH_ID)).toMatchObject({ subscribed: true });
   });
@@ -385,6 +433,9 @@ async function startAgent(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
+    syncContextGraphs: activationInput?.bootstrap?.acceptedPublicPolicies.map(
+      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+    ) ?? [],
     networkIdentity: {
       networkId: await computeNetworkId(),
       chainId: NETWORK_ID,

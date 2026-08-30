@@ -1,8 +1,8 @@
 # RFC-64 selected-public catalog activation
 
-RFC-64 public catalog synchronization is selected and fail-closed. A valid
-`rfc64PublicCatalog.bootstrap.acceptedPublicPolicies` manifest activates the
-exact CGs it names; no second enable switch is required. A node with no
+RFC-64 catalog synchronization is selected and fail-closed. A valid
+`rfc64PublicCatalog.bootstrap.acceptedPublicPolicies` manifest makes the exact
+CGs it names eligible for RFC-64; no second enable switch is required. A node with no
 `rfc64PublicCatalog` block, or with explicit `enabled: false`, accepts no catalog
 policy, starts no bootstrap pulls, and does not advance catalogs after ordinary
 KA publication.
@@ -11,16 +11,22 @@ This activation is intentionally selective. The operator supplies a bounded
 manifest of independently verified, finalized public-CG policy envelopes. The
 CG IDs in that manifest are the single source for:
 
-- per-CG legacy, shadow, or catalog authority selection;
+- per-CG legacy, shadow, or catalog authority eligibility;
 - explicit signed-catalog targets; and
 - optional graph-complete-provider native SWM recovery.
 
-There is no `sync all public CGs` mode in this release. Existing `contextGraphs`
-selection continues to work normally. A foreground subscription that requests
-SWM now uses RFC-64 selected scheduling and bounded continuation by default for
-its explicit public CG, including across multiple candidate peers. This changes
-how the requested work is scheduled; it does not turn those peers into catalog
-authorities and does not select any additional CG.
+There is no `sync all public CGs` mode in this release. On an edge node, the
+manifest is not a subscription list. Existing `contextGraphs`, foreground
+subscriptions, and their persisted restart state decide which eligible CGs the
+edge follows. Subscribing to an eligible CG immediately makes RFC-64 its SWM
+rail; unsubscribing stops its catalog pulls without deleting already verified
+data. Other eligible public or private CGs remain inactive. The rehydration cap
+still bounds how many persisted user subscriptions are activated at boot.
+
+Core nodes retain their configured manifest-wide behavior for the corpus they
+are configured to host. This edge/core distinction changes runtime work selection only;
+it does not turn discovered peers into catalog authorities or weaken the
+configured policy, roster, or peer-identity trust roots.
 
 Signed-catalog activation remains the stronger, separate control plane described
 below. Only an operator-pinned `completeSwmProviders` peer may prove the whole
@@ -250,8 +256,11 @@ Restart the daemon and inspect `GET /api/status`:
 The public compatibility block lists public targets only. Private provider
 identities stay out of status. The `rfc64Catalog.privateRecovery` array gives
 local aggregate counts, the effective mode, whether VM is required, and safe
-completion reasons. Both RFC-64 status blocks expose the effective per-CG mode
-map and the kill-switch state resolved at startup.
+completion reasons. Both RFC-64 status blocks expose the configured per-CG mode
+map, the kill-switch state, and `runtimeSelection`. On edges,
+`runtimeSelection.selectedContextGraphs` is the current subscribed intersection
+of the eligible manifest. Bootstrap targets for eligible but unsubscribed CGs
+report `inactive`.
 
 ```json
 {

@@ -25,6 +25,8 @@ import { Rfc64CatalogSynchronizationErrorV1 } from
 import { resolveRfc64PeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
+  resolveRfc64CatalogConfiguredAuthorityDecisionV1,
+  rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64CatalogAuthorityDecisionV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -35,6 +37,7 @@ const COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1 = 10_000;
 const UTF8 = new TextEncoder();
 
 export type Rfc64PublicCatalogBootstrapOutcomeV1 =
+  | 'inactive'
   | 'pending'
   | 'applied'
   | 'shadow-staged'
@@ -159,6 +162,7 @@ interface BootstrapStateV1 {
   timer: ReturnType<typeof setTimeout> | null;
   abortController: AbortController | null;
   run: Promise<void> | null;
+  rerunRequested: boolean;
 }
 
 const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
@@ -173,12 +177,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    if (
-      !resolveRfc64CatalogAuthorityDecisionV1(
-        this.config.rfc64CatalogRollout,
-        contextGraphId,
-      ).legacySyncAllowed
-    ) return Object.freeze([]);
+    if (!rfc64LegacySyncAuthorityActiveForContextGraphV1(
+      this.config.rfc64CatalogRollout,
+      contextGraphId,
+    )) return Object.freeze([]);
     const config = this.config.rfc64CatalogBootstrap
       ?? this.config.rfc64PublicCatalogBootstrap;
     if (config === undefined) return Object.freeze([]);
@@ -243,6 +245,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       timer: null,
       abortController: null,
       run: null,
+      rerunRequested: false,
     };
     STATES.set(this, state);
     this.launchRfc64PublicCatalogBootstrapPassV1(state);
@@ -264,7 +267,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     });
   }
 
-  /** Wait for the currently running startup/refresh pass only. */
+  /** Wait through the current pass and any subscription-triggered follow-up. */
   async whenRfc64PublicCatalogBootstrapIdleV1(this: DKGAgent): Promise<void> {
     const state = STATES.get(this);
     if (state !== undefined) {
@@ -290,6 +293,21 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     STATES.delete(this);
   }
 
+  /** Re-evaluate targets immediately after an edge subscription changes. */
+  requestRfc64PublicCatalogBootstrapPassV1(this: DKGAgent): void {
+    const state = STATES.get(this);
+    if (state === undefined || state.closed) return;
+    if (state.timer !== null) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    if (state.run !== null) {
+      state.rerunRequested = true;
+      return;
+    }
+    this.launchRfc64PublicCatalogBootstrapPassV1(state);
+  }
+
   private launchRfc64PublicCatalogBootstrapPassV1(
     this: DKGAgent,
     state: BootstrapStateV1,
@@ -304,6 +322,11 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       })
       .finally(() => {
         if (state.run === run) state.run = null;
+        if (!state.closed && state.rerunRequested) {
+          state.rerunRequested = false;
+          this.launchRfc64PublicCatalogBootstrapPassV1(state);
+          return;
+        }
         const retryIntervalMs = state.retryIntervalMs ?? 0;
         if (!state.closed && retryIntervalMs > 0) {
           state.timer = setTimeout(() => {
@@ -326,11 +349,19 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const abortController = new AbortController();
     state.abortController = abortController;
     try {
-      const completeSwmProviders = [...new Set(
-        state.legacyRecoveryConfig.acceptedPolicies.flatMap(
-          ({ completeSwmProviders: providers = [] }) => providers,
+      const activeLegacyPolicies = state.legacyRecoveryConfig.acceptedPolicies.filter(
+        ({ policyEnvelope }) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
+          this.config.rfc64CatalogRollout,
+          policyEnvelope.payload.contextGraphId,
         ),
-      )];
+      );
+      const activeLegacyRecoveryConfig = Object.freeze({
+        ...state.legacyRecoveryConfig,
+        acceptedPolicies: Object.freeze(activeLegacyPolicies),
+      });
+      const completeSwmProviders = [...new Set(activeLegacyPolicies.flatMap(
+        ({ completeSwmProviders: providers = [] }) => providers,
+      ))];
       await mapWithConcurrency(
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
@@ -345,7 +376,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             // including mixed public/private providers.
             this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
               resolveRfc64PeerSwmRecoveryPlanV1(
-                state.legacyRecoveryConfig,
+                activeLegacyRecoveryConfig,
                 providerPeerId,
               ),
               (_peerId, error) => {
@@ -387,6 +418,25 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target: MutableTargetStatusV1,
     signal: AbortSignal,
   ): Promise<void> {
+    const authority = resolveRfc64CatalogAuthorityDecisionV1(
+      this.config.rfc64CatalogRollout,
+      target.scope.contextGraphId,
+    );
+    if (!authority.track2Enabled) {
+      Object.assign(target, {
+        outcome: 'inactive' as const,
+        completionReason: null,
+        attempts: 0,
+        providerPeerId: null,
+        appliedHeadDigest: null,
+        stagedHeadDigest: null,
+        catalogVersion: null,
+        inventoryRowCount: null,
+        lastError: null,
+        updatedAtMs: Date.now(),
+      });
+      return;
+    }
     // `state.running` exposes that a refresh is in progress. Keep the target's
     // last completed snapshot intact until this attempt itself completes so a
     // healthy, durably applied catalog does not transiently regress to pending
@@ -502,16 +552,21 @@ export function partitionRfc64CatalogBootstrapV1(
   const legacyPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
   for (const accepted of config.acceptedPolicies) {
     const { policyEnvelope, targets, completeSwmProviders = [] } = accepted;
-    const authority = resolveRfc64CatalogAuthorityDecisionV1(
+    const authority = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
       activation,
       policyEnvelope.payload.contextGraphId,
     );
+    const mode = authority.mode;
+    if (activation.rollout.killSwitch && mode !== 'legacy') {
+      if (authority.legacySyncAllowed) legacyPolicies.push(accepted);
+      continue;
+    }
     if (authority.legacySyncAllowed) legacyPolicies.push(accepted);
     if (!authority.track2Enabled) continue;
     track2Policies.push(accepted);
     for (const target of targets) {
       track2Targets.push(Object.freeze({
-        mode: authority.mode as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
+        mode: mode as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
         scope: Object.freeze({
           networkId: policyEnvelope.payload.networkId,
           contextGraphId: policyEnvelope.payload.contextGraphId,

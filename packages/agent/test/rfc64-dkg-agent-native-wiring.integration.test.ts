@@ -284,6 +284,15 @@ async function startNativeAgentWithOptions(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
+    syncContextGraphs: catalogActivation !== undefined && catalogActivation.enabled !== false
+      ? catalogActivation.bootstrap?.acceptedPolicies.map(
+        ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+      ) ?? []
+      : activation !== undefined && activation.enabled !== false
+        ? activation.bootstrap?.acceptedPublicPolicies.map(
+          ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+        ) ?? []
+        : [],
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
     ...(networkIdentityChainId === undefined ? {} : {
       networkIdentity: {
@@ -2077,6 +2086,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       .mockReturnValue(true);
 
     await receiver.start();
+    expect(receiver.trackSyncContextGraph(policy.contextGraphId)).toBe(true);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });

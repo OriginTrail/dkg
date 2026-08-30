@@ -108,8 +108,10 @@ import {
 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
 import {
+  rfc64CatalogConfiguredRolloutModeForContextGraphV1,
   rfc64CatalogKillSwitchActiveV1,
   resolveRfc64CatalogAuthorityDecisionV1,
+  resolveRfc64CatalogConfiguredAuthorityDecisionV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -289,7 +291,28 @@ export type PublishOpenAuthorCatalogSuccessorAssetResultV1 =
 export type PublishOpenAuthorCatalogExactSetSuccessorResultV1 =
   PublishAuthorCatalogExactSetSuccessorResultV1;
 
+export interface Rfc64CatalogRuntimeSelectionStatusV1 {
+  readonly subscriptionDriven: boolean;
+  readonly eligibleContextGraphs: readonly string[];
+  readonly selectedContextGraphs: readonly string[];
+}
+
 export class Rfc64CatalogMethods extends DKGAgentBase {
+  /** Safe runtime selection projection for daemon status and release harnesses. */
+  readRfc64CatalogRuntimeSelectionV1(
+    this: DKGAgent,
+  ): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
+    const eligibleContextGraphs = Object.freeze([
+      ...this.config.rfc64CatalogRollout.selectedContextGraphs,
+    ].sort());
+    const runtimeSelection = this.config.rfc64CatalogRollout.runtimeSelection;
+    return Object.freeze({
+      subscriptionDriven: runtimeSelection !== undefined,
+      eligibleContextGraphs,
+      selectedContextGraphs: runtimeSelection?.snapshot() ?? eligibleContextGraphs,
+    });
+  }
+
   /**
    * Construct + start the public catalog service on the production router.
    * No-op when RFC-64 persistence is dormant (no `dataDir`) or already started.
@@ -305,10 +328,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (
       selectedContextGraphs.length > 0
       && selectedContextGraphs.every((contextGraphId) => (
-        !resolveRfc64CatalogAuthorityDecisionV1(
+        rfc64CatalogConfiguredRolloutModeForContextGraphV1(
           this.config.rfc64CatalogRollout,
           contextGraphId,
-        ).track2Enabled
+        ) === 'legacy'
       ))
     ) {
       this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
@@ -325,6 +348,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       verifyIssuerSignature,
       resolveContextGraphAuthority: (contextGraphId) =>
         resolveRfc64CatalogAuthorityDecisionV1(
+          this.config.rfc64CatalogRollout,
+          contextGraphId,
+        ),
+      resolveContextGraphServingAuthority: (contextGraphId) =>
+        resolveRfc64CatalogConfiguredAuthorityDecisionV1(
           this.config.rfc64CatalogRollout,
           contextGraphId,
         ),
@@ -583,7 +611,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     if (
       contextGraphId !== undefined
-      && !resolveRfc64CatalogAuthorityDecisionV1(
+      && !resolveRfc64CatalogConfiguredAuthorityDecisionV1(
         this.config.rfc64CatalogRollout,
         contextGraphId,
       ).authoringAllowed

@@ -65,6 +65,7 @@ import type {
   Rfc64PublicCatalogActivationInputV1,
   ResolvedRfc64CatalogAuthoringPolicyV1,
   ResolvedRfc64CatalogActivationConfigV1,
+  Rfc64CatalogRuntimeSelectionV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
   SyncAdmissionConfig,
@@ -1910,7 +1911,7 @@ export type ResolvedDKGAgentConfig =
     rfc64CatalogRollout: Pick<
       ResolvedRfc64CatalogActivationConfigV1,
       'enabled' | 'selectedContextGraphs' | 'rollout'
-    >;
+    > & { readonly runtimeSelection?: Rfc64CatalogRuntimeSelectionV1 };
     rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

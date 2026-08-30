@@ -20,6 +20,7 @@ import {
   rfc64CatalogRolloutModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64CatalogAuthorityDecisionV1,
+  resolveRfc64CatalogConfiguredAuthorityDecisionV1,
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
@@ -27,6 +28,8 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { createRfc64CatalogRuntimeSelectionV1 } from
+  '../src/rfc64/catalog-rollout-authority-v1.js';
 import {
   snapshotRfc64CatalogBootstrapConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
@@ -358,6 +361,53 @@ describe('RFC-64 private catalog activation', () => {
       chainIdentity,
     );
     expect(rfc64CatalogRolloutModeForContextGraphV1(omitted, PRIVATE_CG)).toBe('catalog');
+  });
+
+  it('activates eligible public and private catalog rails only for explicit edge selections', () => {
+    const runtimeSelection = createRfc64CatalogRuntimeSelectionV1({
+      eligibleContextGraphs: [PUBLIC_CG, PRIVATE_CG],
+    });
+    const activation = Object.freeze({
+      enabled: true,
+      selectedContextGraphs: Object.freeze([PUBLIC_CG, PRIVATE_CG]),
+      rollout: Object.freeze({
+        killSwitch: false,
+        contextGraphModes: Object.freeze({
+          [PUBLIC_CG]: 'catalog' as const,
+          [PRIVATE_CG]: 'catalog' as const,
+        }),
+      }),
+      runtimeSelection,
+    });
+
+    expect(resolveRfc64CatalogAuthorityDecisionV1(activation, PUBLIC_CG)).toMatchObject({
+      selected: false,
+      reconciliationLane: 'legacy',
+      track2Enabled: false,
+    });
+    expect(resolveRfc64CatalogConfiguredAuthorityDecisionV1(
+      activation,
+      PUBLIC_CG,
+    )).toMatchObject({
+      selected: true,
+      reconciliationLane: 'catalog-apply',
+      track2Enabled: true,
+      authoringAllowed: true,
+    });
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(activation, PUBLIC_CG)).toBe(false);
+    expect(runtimeSelection.select(PRIVATE_CG)).toBe(true);
+    expect(resolveRfc64CatalogAuthorityDecisionV1(activation, PRIVATE_CG)).toMatchObject({
+      selected: true,
+      reconciliationLane: 'catalog-apply',
+      track2Enabled: true,
+      legacySyncAllowed: false,
+    });
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(activation, PRIVATE_CG)).toBe(false);
+    expect(resolveRfc64CatalogAuthorityDecisionV1(activation, PUBLIC_CG).selected).toBe(false);
+    expect(runtimeSelection.select('not-eligible')).toBe(false);
+    expect(runtimeSelection.snapshot()).toEqual([PRIVATE_CG]);
+    expect(runtimeSelection.deselect(PRIVATE_CG)).toBe(true);
+    expect(runtimeSelection.snapshot()).toEqual([]);
   });
 
   it('preserves pre-activation Track-2 authoring while keeping ordinary sync legacy', () => {

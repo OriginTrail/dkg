@@ -675,7 +675,6 @@ import {
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 import {
-  resolveRfc64CatalogAuthorityDecisionV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
 } from
   './rfc64/public-catalog-activation-config-v1.js';
@@ -10022,30 +10021,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // operator diagnostics identify the same IDs across restarts.
       const byId = (a: ContextGraphSubscriptionRecord, b: ContextGraphSubscriptionRecord): number =>
         a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-      const partitionedRows = rows.map((row) => Object.freeze({
-        row,
-        authority: resolveRfc64CatalogAuthorityDecisionV1(
-          this.config.rfc64CatalogRollout,
-          row.id,
-        ),
-      }));
-      const legacyRows = partitionedRows
-        .filter(({ authority }) => authority.legacySyncAllowed)
-        .map(({ row }) => row);
-      const catalogRows = partitionedRows
-        .filter(({ authority }) => !authority.legacySyncAllowed)
-        .map(({ row }) => row)
-        .sort(byId);
-      const hostedRows = legacyRows.filter((r) => r.coreHosted).sort(byId);
-      const userRows = [...legacyRows.filter((r) => !r.coreHosted)].sort(
+      const hostedRows = rows.filter((r) => r.coreHosted).sort(byId);
+      const userRows = [...rows.filter((r) => !r.coreHosted)].sort(
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
       const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
       const toActivate = [...hostedRows, ...cappedUserRows];
-      const dormantRows = [
-        ...catalogRows,
-        ...(cap > 0 ? userRows.slice(cap) : []),
-      ].sort(byId);
+      const dormantRows = (cap > 0 ? userRows.slice(cap) : []).sort(byId);
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
         const approvedAgentAddress = row.subscribed
@@ -10138,16 +10120,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ctx,
           `Rehydrated ${toActivate.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
             (skipped > 0
-              ? ` (${skipped} left dormant by the activation cap or RFC-64 catalog authority; ` +
-                `${hostedRows.length} legacy-authoritative hosted restored)`
+              ? ` (${skipped} left dormant by the activation cap; ` +
+                `${hostedRows.length} hosted restored)`
               : ''),
         );
       }
       if (skipped > 0) {
         this.log.warn(
           ctx,
-          `${skipped} context-graph subscription(s) left dormant by the activation cap or ` +
-            `exclusive RFC-64 catalog authority. ` +
+          `${skipped} context-graph subscription(s) left dormant by the activation cap. ` +
             `Prune stale ones via 'DELETE /api/context-graph/subscriptions', or raise ` +
             `maxRehydratedContextGraphSubscriptions. Inspect ` +
             `'GET /api/context-graph/subscriptions' for dormant ids.`,
