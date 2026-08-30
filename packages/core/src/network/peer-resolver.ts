@@ -46,7 +46,12 @@
  *
  * See also: `dkgv10-spec/production_mainnet/07_IN_PROCESS_PEER_RESOLVER.md`.
  */
-import type { Network, NodeIdentity, Address } from './network.js';
+import type {
+  Network,
+  PeerConnectionNetwork,
+  NodeIdentity,
+  Address,
+} from './network.js';
 import type { NetworkStateRegistry } from './network-state-registry.js';
 import { isPublicLikeAddress } from './address-policy.js';
 import type { ConfiguredRelayTarget } from './relay-target.js';
@@ -216,6 +221,10 @@ const AGENT_DIRECTORY_CLOCK_SKEW_ALLOWANCE_MS = 5 * 60 * 1000;
 const SILENT_LOGGER: PeerResolverLogger = {
   warn: () => undefined,
 };
+
+function supportsPeerConnection(network: Network): network is PeerConnectionNetwork {
+  return typeof (network as { connectPeer?: unknown }).connectPeer === 'function';
+}
 
 export class PeerResolver {
   private readonly network: Network;
@@ -518,6 +527,9 @@ export class PeerResolver {
       throw new DOMException('Peer connection aborted', 'AbortError');
     }
     try {
+      if (!supportsPeerConnection(this.network)) {
+        throw new Error('Network transport does not implement the peer-connection capability');
+      }
       await this.network.connectPeer(peerId, addresses, {
         signal: opts.signal,
         candidateTimeoutMs: opts.candidateTimeoutMs,

@@ -88,7 +88,7 @@ describe('connectToMultiaddr', () => {
     expect(dial.calls).toHaveLength(2);
     expect(dial.calls[0]?.[0]?.toString()).toBe(`/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}`);
     expect(dial.calls[1]?.[0]?.toString()).toBe(
-      parseMultiaddrConnectTarget(multiaddress).multiaddress,
+      parseMultiaddrConnectTarget(multiaddress).address,
     );
     expect(merge.calls).toHaveLength(1);
     expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);

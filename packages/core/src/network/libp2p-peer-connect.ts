@@ -3,6 +3,7 @@ import type { PeerId } from '@libp2p/interface';
 import { multiaddr, type Component, type Multiaddr } from '@multiformats/multiaddr';
 import { isPublicLikeAddress } from './address-policy.js';
 import type { Address, NodeIdentity, PeerConnectOpts } from './network.js';
+import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface Libp2pConnectHost {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -13,8 +14,8 @@ export interface Libp2pConnectHost {
 }
 
 export type Libp2pConnectCandidate =
-  | { kind: 'direct'; address: string; targetPeerId?: string }
-  | { kind: 'circuit'; address: string; relayAddress: string; targetPeerId: string };
+  | { kind: 'direct'; address: string; targetPeerId?: CanonicalPeerId }
+  | { kind: 'circuit'; address: string; relayAddress: string; targetPeerId: CanonicalPeerId };
 
 export class Libp2pConnectCandidateParseError extends Error {
   constructor(message: string, readonly rawTarget?: string) {
@@ -65,9 +66,9 @@ export function parseLibp2pConnectCandidate(raw: string): Libp2pConnectCandidate
   };
 }
 
-function canonicalCandidatePeerId(rawTarget: string): string {
+function canonicalCandidatePeerId(rawTarget: string): CanonicalPeerId {
   try {
-    return peerIdFromString(rawTarget).toString();
+    return canonicalPeerIdString(rawTarget);
   } catch (error) {
     throw new Libp2pConnectCandidateParseError(
       error instanceof Error ? error.message : String(error),
@@ -161,7 +162,7 @@ export async function connectLibp2pCandidate(
 }
 
 /**
- * Canonical libp2p implementation of Network.connectPeer(). Resolver output is
+ * Canonical libp2p implementation of PeerConnectionNetwork.connectPeer(). Resolver output is
  * attempted in order, with private direct addresses ignored, before one final
  * peer-id fallback. Candidate-local timeouts never masquerade as caller aborts.
  */

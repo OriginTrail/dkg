@@ -13,7 +13,7 @@ import type { Stream, Connection } from '@libp2p/interface';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
 import type {
-  Network,
+  PeerConnectionNetwork,
   NodeIdentity,
   Address,
   DialOpts,
@@ -26,7 +26,7 @@ import type { DKGNode } from '../node.js';
 const DEFAULT_DIAL_TIMEOUT_MS = 10_000;
 const DEFAULT_FIND_PEER_TIMEOUT_MS = 5_000;
 
-export class LibP2PNetwork implements Network {
+export class LibP2PNetwork implements PeerConnectionNetwork {
   private readonly node: DKGNode;
 
   constructor(node: DKGNode) {

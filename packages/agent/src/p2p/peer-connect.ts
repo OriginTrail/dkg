@@ -1,11 +1,10 @@
 import type { DiscoveryClient } from '../discovery.js';
 import {
   connectLibp2pCandidate,
-  parseLibp2pConnectCandidate,
+  type Libp2pConnectCandidate,
   type PeerConnectionOutcome,
   type PeerResolver,
 } from '@origintrail-official/dkg-core';
-import type { MultiaddrConnectTarget } from './multiaddr-peer-target.js';
 
 interface Libp2pLike {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -20,14 +19,13 @@ const DEBUG_SYNC_TRACE = process.env.DKG_DEBUG_SYNC_PROGRESS === '1' || process.
 
 export async function connectToMultiaddr(
   libp2p: Libp2pLike,
-  connectTarget: MultiaddrConnectTarget,
+  connectTarget: Libp2pConnectCandidate,
   log?: (message: string) => void,
   options?: { signal?: AbortSignal },
 ): Promise<void> {
   const debugLog = DEBUG_SYNC_TRACE ? log : undefined;
-  const candidate = parseLibp2pConnectCandidate(connectTarget.multiaddress);
   try {
-    await connectLibp2pCandidate(libp2p, candidate, {
+    await connectLibp2pCandidate(libp2p, connectTarget, {
       expectedPeerId: connectTarget.targetPeerId,
       signal: options?.signal,
       timeoutMs: CONNECT_WAIT_TIMEOUT_MS,

@@ -87,7 +87,7 @@ describe('explicit connect network admission', () => {
       expect.anything(),
       expect.objectContaining({
         kind: 'direct',
-        multiaddress: DIRECT_MULTIADDR,
+        address: DIRECT_MULTIADDR,
         targetPeerId: PEER_ID,
       }),
       expect.any(Function),

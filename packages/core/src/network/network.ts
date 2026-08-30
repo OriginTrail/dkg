@@ -87,17 +87,6 @@ export interface Network {
   dialProtocol(peerId: NodeIdentity, protocolId: string, opts?: DialOpts): Promise<Stream>;
 
   /**
-   * Establish a connection using an ordered resolver result. Implementations
-   * own address filtering, transport-specific relay setup, candidate timeout,
-   * and the final identity-only fallback.
-   */
-  connectPeer(
-    peerId: NodeIdentity,
-    resolvedAddresses: readonly Address[],
-    opts?: PeerConnectOpts,
-  ): Promise<void>;
-
-  /**
    * Register `handler` for inbound streams on `protocolId`. Idempotent
    * with libp2p semantics: registering twice for the same protocol is
    * a runtime error (libp2p throws DuplicateProtocolHandlerError); call
@@ -151,4 +140,23 @@ export interface Network {
    */
   start(): Promise<void>;
   stop(): Promise<void>;
+}
+
+/**
+ * Optional transport capability used by {@link PeerResolver.connect}. Kept
+ * separate from {@link Network} so existing third-party Network
+ * implementations remain source-compatible when they only resolve addresses
+ * and open protocol streams.
+ */
+export interface PeerConnectionNetwork extends Network {
+  /**
+   * Establish a connection using an ordered resolver result. Implementations
+   * own address filtering, transport-specific relay setup, candidate timeout,
+   * and the final identity-only fallback.
+   */
+  connectPeer(
+    peerId: NodeIdentity,
+    resolvedAddresses: readonly Address[],
+    opts?: PeerConnectOpts,
+  ): Promise<void>;
 }

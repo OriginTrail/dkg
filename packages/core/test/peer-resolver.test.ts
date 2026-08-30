@@ -3,6 +3,7 @@ import {
   PeerResolver,
   StubNetworkStateRegistry,
   type Network,
+  type PeerConnectionNetwork,
   type NetworkStateRegistry,
   type AgentDirectoryLookup,
   type Address,
@@ -32,7 +33,7 @@ type FindPeerImpl = (
   opts?: { signal?: AbortSignal; timeoutMs?: number },
 ) => Promise<Address[]>;
 
-interface MockNetwork extends Network {
+interface MockNetwork extends PeerConnectionNetwork {
   __conns: Map<NodeIdentity, Array<{ remoteAddr: { toString(): string } }>>;
   __addedAddresses: Array<{ peerId: NodeIdentity; addrs: Address[] }>;
   __findPeerImpl: FindPeerImpl | null;
@@ -95,6 +96,32 @@ describe('PeerResolver', () => {
   beforeEach(() => {
     net = makeNetwork();
     registry = new StubNetworkStateRegistry();
+  });
+
+  it('keeps the base Network interface implementable without connection capability', async () => {
+    const legacyNetwork: Network = {
+      localId: PEER_A,
+      localAddresses: [],
+      isStarted: true,
+      start: async () => undefined,
+      stop: async () => undefined,
+      dialProtocol: async () => { throw new Error('not used'); },
+      handle: async () => undefined,
+      unhandle: async () => undefined,
+      getConnections: () => [],
+      addKnownAddresses: async () => undefined,
+    };
+
+    expect('connectPeer' in legacyNetwork).toBe(false);
+    const resolver = new PeerResolver({
+      network: legacyNetwork,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+    await expect(resolver.connect(PEER_B)).resolves.toEqual({
+      status: 'unresolved',
+      resolvedAddresses: [],
+    });
   });
 
   it('step 1: returns live-conn remoteAddr and stops', async () => {
@@ -295,6 +322,38 @@ describe('PeerResolver', () => {
       peerId: PEER_B,
       addrs: [`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`],
     });
+  });
+
+  it('step 5: keeps configured relay order and caps fallback at four circuits', async () => {
+    const privateDirect = `/ip4/192.168.0.20/tcp/9090/p2p/${PEER_B}`;
+    net.__findPeerImpl = async () => [privateDirect];
+    const relayPeerIds = [
+      '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M',
+      '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh',
+      '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb',
+      '12D3KooWR5C8ajtPigVGnBwDGTZ4XAtCepRs2WCgfPuBPrgGqcNK',
+      '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
+    ];
+    const configuredRelayTargets = relayPeerIds.map((peerId, index) => ({
+      peerId,
+      addresses: [`/ip4/178.104.54.${index + 10}/tcp/9090/p2p/${peerId}`],
+    }));
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(async () => null),
+      configuredRelayTargets,
+    });
+
+    const out = await resolver.resolve(PEER_B);
+    const expectedCircuits = configuredRelayTargets.slice(0, 4).map(
+      ({ addresses }) => `${addresses[0]}/p2p-circuit/p2p/${PEER_B}`,
+    );
+
+    expect(out).toEqual([privateDirect, ...expectedCircuits]);
+    expect(out).not.toContain(
+      `${configuredRelayTargets[4]!.addresses[0]}/p2p-circuit/p2p/${PEER_B}`,
+    );
   });
 
   it('step 5: treats the whole IPv6 fe80::/10 range as private and adds a relay circuit', async () => {

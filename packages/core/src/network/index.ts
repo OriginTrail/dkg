@@ -1,5 +1,6 @@
 export type {
   Network,
+  PeerConnectionNetwork,
   NodeIdentity,
   Address,
   DialOpts,
