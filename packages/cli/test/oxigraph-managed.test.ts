@@ -198,6 +198,36 @@ describe('planManagedOxigraph', () => {
     expect(plan!.storeConfigTemplate.options.timeout).toBe(55_000);
   });
 
+  it('drops both 0.5.x compatibility restrictions for a future unaffected runtime', () => {
+    const unboundedClientPlan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { clientTimeoutMs: 180_000 },
+        },
+      },
+      '/data',
+      'darwin',
+      '0.6.0',
+    );
+    expect(unboundedClientPlan!.queryTimeoutS).toBeUndefined();
+    expect(unboundedClientPlan!.clientTimeoutMs).toBe(180_000);
+
+    const nativeTimeoutPlan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { queryTimeoutS: 35 },
+        },
+      },
+      '/data',
+      'darwin',
+      '0.6.0',
+    );
+    expect(nativeTimeoutPlan!.queryTimeoutS).toBe(35);
+    expect(nativeTimeoutPlan!.clientTimeoutMs).toBe(40_000);
+  });
+
   it('lets an explicit HTTP client timeout override the native-timeout-derived deadline', () => {
     const plan = planManagedOxigraph(
       {

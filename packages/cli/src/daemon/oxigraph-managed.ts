@@ -42,11 +42,7 @@ export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
 export const DEFAULT_OXIGRAPH_PORT = 7878;
 
 const MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS = 5_000;
-// Oxigraph 0.5.x closes HTTP requests at 60 seconds when --timeout-s is
-// omitted, without cancelling evaluation. Make the existing HTTP-client
-// deadline authoritative just before that boundary so the adapter uses its
-// normal typed timeout/restart path instead of guessing from a late error.
-const MANAGED_OXIGRAPH_IMPLICIT_HTTP_DEADLINE_GUARD_MS = 55_000;
+const OXIGRAPH_0_5_IMPLICIT_HTTP_DEADLINE_MS = 60_000;
 // Node timers (and AbortSignal.timeout) coerce any delay above 2^31-1 ms to 1ms
 // with a TimeoutOverflowWarning — aborting the request almost immediately, the
 // opposite of a long timeout. Cap the derived client timeout so an absurd
@@ -80,12 +76,27 @@ function clampNodeTimerMs(value: number): number {
   return Math.min(value, MAX_NODE_TIMER_MS);
 }
 
-function hasUnsafeNativeQueryTimeout(platform: NodeJS.Platform, version: string): boolean {
-  // Oxigraph 0.5.x on macOS retains one sleeping OS thread per completed
-  // query until --timeout-s expires. The single managed HTTP client deadline
-  // remains active and restarts the child when it fires, so omitting the native
-  // flag is the safe equivalent until the bundled implementation changes.
-  return platform === 'darwin' && version.startsWith('0.5.');
+interface ManagedOxigraphTimeoutCapabilities {
+  nativeTimeoutSafe: boolean;
+  implicitHttpDeadlineMs?: number;
+}
+
+/** One version/platform compatibility boundary for the bundled Oxigraph runtime. */
+function resolveManagedOxigraphTimeoutCapabilities(
+  platform: NodeJS.Platform,
+  version: string,
+): ManagedOxigraphTimeoutCapabilities {
+  const isVersion0_5 = version.startsWith('0.5.');
+  return {
+    // Oxigraph 0.5.x on macOS retains one sleeping OS thread per completed
+    // query until --timeout-s expires.
+    nativeTimeoutSafe: !(platform === 'darwin' && isVersion0_5),
+    // Oxigraph 0.5.x closes HTTP requests at 60 seconds when --timeout-s is
+    // omitted, without cancelling evaluation.
+    ...(isVersion0_5
+      ? { implicitHttpDeadlineMs: OXIGRAPH_0_5_IMPLICIT_HTTP_DEADLINE_MS }
+      : {}),
+  };
 }
 
 interface ManagedOxigraphDeadlines {
@@ -96,7 +107,7 @@ interface ManagedOxigraphDeadlines {
 /** Resolve the client deadline and an optional operator-requested native deadline. */
 function resolveManagedOxigraphDeadlines(
   options: Record<string, unknown> | undefined,
-  platform: NodeJS.Platform,
+  capabilities: ManagedOxigraphTimeoutCapabilities,
 ): ManagedOxigraphDeadlines {
   const configuredClientTimeoutMs = clampNodeTimerMs(
     resolvePositiveIntegerOption(options, 'clientTimeoutMs')
@@ -106,10 +117,12 @@ function resolveManagedOxigraphDeadlines(
   if (configuredQueryTimeoutS === undefined) {
     return {
       queryTimeoutS: undefined,
-      clientTimeoutMs: Math.min(
-        configuredClientTimeoutMs,
-        MANAGED_OXIGRAPH_IMPLICIT_HTTP_DEADLINE_GUARD_MS,
-      ),
+      clientTimeoutMs: capabilities.implicitHttpDeadlineMs === undefined
+        ? configuredClientTimeoutMs
+        : Math.min(
+            configuredClientTimeoutMs,
+            capabilities.implicitHttpDeadlineMs - MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS,
+          ),
     };
   }
   const queryTimeoutS = Math.min(
@@ -119,18 +132,19 @@ function resolveManagedOxigraphDeadlines(
   const minimumClientTimeoutMs = clampNodeTimerMs(
     queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS,
   );
-  const nativeTimeoutUnsafe = hasUnsafeNativeQueryTimeout(platform, OXIGRAPH_VERSION);
   const resolvedClientTimeoutMs = configuredQueryTimeoutS !== undefined
       && configuredQueryTimeoutS > MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S
       ? MAX_NODE_TIMER_MS
       : Math.max(configuredClientTimeoutMs, minimumClientTimeoutMs);
-  if (nativeTimeoutUnsafe) {
+  if (!capabilities.nativeTimeoutSafe) {
     return {
       queryTimeoutS: undefined,
-      clientTimeoutMs: Math.min(
-        resolvedClientTimeoutMs,
-        MANAGED_OXIGRAPH_IMPLICIT_HTTP_DEADLINE_GUARD_MS,
-      ),
+      clientTimeoutMs: capabilities.implicitHttpDeadlineMs === undefined
+        ? resolvedClientTimeoutMs
+        : Math.min(
+            resolvedClientTimeoutMs,
+            capabilities.implicitHttpDeadlineMs - MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS,
+          ),
     };
   }
   return { queryTimeoutS, clientTimeoutMs: resolvedClientTimeoutMs };
@@ -226,6 +240,7 @@ export function planManagedOxigraph(
   config: ConfigLike,
   dataDir: string,
   platform: NodeJS.Platform = process.platform,
+  oxigraphVersion: string = OXIGRAPH_VERSION,
 ): ManagedOxigraphPlan | null {
   if (config.store?.backend !== MANAGED_OXIGRAPH_BACKEND) return null;
 
@@ -240,7 +255,10 @@ export function planManagedOxigraph(
   const {
     queryTimeoutS,
     clientTimeoutMs,
-  } = resolveManagedOxigraphDeadlines(options, platform);
+  } = resolveManagedOxigraphDeadlines(
+    options,
+    resolveManagedOxigraphTimeoutCapabilities(platform, oxigraphVersion),
+  );
   const memoryLimits = normalizeOxigraphMemoryLimits({
     highMiB: options.memoryHighMiB,
     maxMiB: options.memoryMaxMiB,
