@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
@@ -101,6 +101,10 @@ describe('runSyncOnConnect callbacks', () => {
   it('runs selected-provider shared memory before unrelated durable and ordinary SWM history', async () => {
     const remotePeer = freshPeerIdString();
     const order: string[] = [];
+    const ordinarySync = vi.fn(async () => {
+      order.push('shared:ordinary:ordinary');
+      return 0;
+    });
 
     const outcome = await runSyncOnConnect({
       remotePeer,
@@ -134,21 +138,23 @@ describe('runSyncOnConnect callbacks', () => {
           },
         }),
       },
-      getSharedMemorySyncContextGraphs: async () => ['selected', 'ordinary'],
+      ordinarySharedMemoryLane: {
+        resolveWork: async () => ({
+          contextGraphIds: ['ordinary'],
+          syncFromPeer: ordinarySync,
+        }),
+      },
       syncFromPeer: async (_peerId, contextGraphIds) => {
         order.push(`durable:${contextGraphIds?.join(',') ?? 'all'}`);
         return 0;
       },
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds) => {
-        order.push(`shared:${contextGraphIds.join(',')}:ordinary`);
-        return 0;
-      },
       logInfo: noopLog,
     });
 
     expect(outcome).toBe('synced');
+    expect(ordinarySync).toHaveBeenCalledWith();
     expect(order).toEqual([
       'shared:selected:selected',
       'durable:ordinary',

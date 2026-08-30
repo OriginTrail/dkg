@@ -1366,9 +1366,7 @@ type SharedMemorySyncContextGraphPlanPartition = Readonly<{
   readonly selectedPlan: Readonly<{
     readonly targets: readonly SelectedPublicSharedMemoryTarget[];
   }>;
-  readonly selectedContextGraphIds: readonly string[];
   readonly ordinaryPlan: SharedMemorySyncContextGraphPlan;
-  readonly ordinaryContextGraphIds: readonly string[];
 }>;
 
 function isSelectedPublicSharedMemoryTarget(
@@ -1397,13 +1395,7 @@ function partitionSharedMemorySyncContextGraphPlan(
   const frozenOrdinaryTargets = Object.freeze([...ordinaryTargets]);
   return Object.freeze({
     selectedPlan: Object.freeze({ targets: frozenSelectedTargets }),
-    selectedContextGraphIds: Object.freeze(
-      frozenSelectedTargets.map(({ contextGraphId }) => contextGraphId),
-    ),
     ordinaryPlan: Object.freeze({ targets: frozenOrdinaryTargets }),
-    ordinaryContextGraphIds: Object.freeze(
-      frozenOrdinaryTargets.map(({ contextGraphId }) => contextGraphId),
-    ),
   });
 }
 
@@ -5173,10 +5165,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // unrelated Edge peers should do neither plane in the automatic sweep.
         return completeSwmProviders.length === 0 || this.knownCorePeerIds.has(remotePeer);
       }),
-      getSharedMemorySyncContextGraphs: async (peerId) => {
-        const partition = await getSharedMemorySyncPlanPartition(peerId);
-        return [...partition.ordinaryContextGraphIds];
-      },
       ...(automaticPeerSweep
         && remotePeerIsCompleteSwmProvider
         && selectedLaneAdmission === 'admit'
@@ -5185,15 +5173,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             admitWork: async (peerId: string) => {
               const partition = await getSharedMemorySyncPlanPartition(peerId);
               const targets = partition.selectedPlan.targets;
-              const contextGraphIds = [...partition.selectedContextGraphIds];
+              const contextGraphIds = sharedMemoryPlanContextGraphIds(
+                partition.selectedPlan,
+              );
               return this.rfc64SwmRecoveryCoordinatorV1.admitSelectedPublic(
                 peerId,
                 contextGraphIds,
               ) ? Object.freeze({
                   contextGraphIds: Object.freeze([...contextGraphIds]),
-                  syncFromPeer: (selectedPeerId: string) => (
+                  syncFromPeer: () => (
                     this.syncSelectedSharedMemoryFromPeerDetailed(
-                      selectedPeerId,
+                      peerId,
                       [...contextGraphIds],
                       {
                         stopOnBackoffWorthyFailure: true,
@@ -5264,17 +5254,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
-      syncSharedMemoryFromPeer: async (peerId) => {
-        const partition = await getSharedMemorySyncPlanPartition(peerId);
-        return this.syncSharedMemoryFromPeerDetailed(
-          peerId,
-          [...partition.ordinaryContextGraphIds],
-          {
-            stopOnBackoffWorthyFailure: true,
-            source,
-            sharedMemorySyncPlan: partition.ordinaryPlan,
-          },
-        );
+      ordinarySharedMemoryLane: {
+        resolveWork: async (peerId) => {
+          const partition = await getSharedMemorySyncPlanPartition(peerId);
+          const contextGraphIds = sharedMemoryPlanContextGraphIds(
+            partition.ordinaryPlan,
+          );
+          return Object.freeze({
+            contextGraphIds: Object.freeze([...contextGraphIds]),
+            syncFromPeer: () => this.syncSharedMemoryFromPeerDetailed(
+              peerId,
+              [...contextGraphIds],
+              {
+                stopOnBackoffWorthyFailure: true,
+                source,
+                sharedMemorySyncPlan: partition.ordinaryPlan,
+              },
+            ),
+          });
+        },
       },
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config)
         && (this.config.syncSharedMemoryOnConnect ?? true),
@@ -5346,9 +5344,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       selectedSharedMemoryLane: {
         admitWork: () => Object.freeze({
           contextGraphIds: Object.freeze([...requestedContextGraphIds]),
-          syncFromPeer: (peerId: string) => (
+          syncFromPeer: () => (
             this.syncSelectedSharedMemoryFromPeerDetailed(
-              peerId,
+              remotePeer,
               [...requestedContextGraphIds],
               {
                 stopOnBackoffWorthyFailure: true,

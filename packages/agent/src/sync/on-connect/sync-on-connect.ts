@@ -21,7 +21,7 @@ type DurableSyncFromPeerResult = number | (SyncProgressSummary & {
 export interface AdmittedSelectedSharedMemoryWorkItem {
   readonly contextGraphIds: readonly string[];
   /** Execute exactly the scope captured by admission. */
-  readonly syncFromPeer: (peerId: string) => Promise<SelectedSharedMemorySyncResult>;
+  readonly syncFromPeer: () => Promise<SelectedSharedMemorySyncResult>;
 }
 
 interface SelectedSharedMemorySyncLane {
@@ -29,6 +29,18 @@ interface SelectedSharedMemorySyncLane {
   admitWork: (
     remotePeerId: string,
   ) => AdmittedSelectedSharedMemoryWorkItem | null | Promise<AdmittedSelectedSharedMemoryWorkItem | null>;
+}
+
+export interface OrdinarySharedMemoryWorkItem {
+  readonly contextGraphIds: readonly string[];
+  /** Execute exactly the immutable ordinary scope exposed to orchestration. */
+  readonly syncFromPeer: () => Promise<SyncFromPeerResult>;
+}
+
+interface OrdinarySharedMemorySyncLane {
+  resolveWork: (
+    remotePeerId: string,
+  ) => OrdinarySharedMemoryWorkItem | Promise<OrdinarySharedMemoryWorkItem>;
 }
 
 type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
@@ -54,13 +66,17 @@ interface SyncOnConnectContext {
   getSyncContextGraphs: () => string[];
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
+  /** @deprecated Prefer ordinarySharedMemoryLane for one cohesive scope/executor. */
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
   /** Cohesive selected lane; its scope resolver and typed producer cannot be mis-wired separately. */
   selectedSharedMemoryLane?: SelectedSharedMemorySyncLane;
+  /** Cohesive ordinary lane; orchestration and execution share one immutable work item. */
+  ordinarySharedMemoryLane?: OrdinarySharedMemorySyncLane;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<DurableSyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
-  syncSharedMemoryFromPeer: (
+  /** @deprecated Prefer ordinarySharedMemoryLane for one cohesive scope/executor. */
+  syncSharedMemoryFromPeer?: (
     peerId: string,
     contextGraphIds: string[],
   ) => Promise<SyncFromPeerResult>;
@@ -235,7 +251,7 @@ export async function runSelectedSharedMemoryRetry(
       ctx,
       `Retrying ${admittedWork.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
     );
-    const selected = await admittedWork.syncFromPeer(remotePeer);
+    const selected = await admittedWork.syncFromPeer();
     const accounting = classifySyncResult(
       selected.shared,
       'shared',
@@ -291,6 +307,7 @@ export async function runSyncOnConnect(
     getDurableSyncContextGraphs,
     getSharedMemorySyncContextGraphs,
     selectedSharedMemoryLane,
+    ordinarySharedMemoryLane,
     syncFromPeer,
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
@@ -443,7 +460,7 @@ export async function runSyncOnConnect(
         ctx,
         `Prioritizing ${admittedPrioritySharedMemoryWork.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
       );
-      const priorityWsSynced = await admittedPrioritySharedMemoryWork.syncFromPeer(remotePeer);
+      const priorityWsSynced = await admittedPrioritySharedMemoryWork.syncFromPeer();
       const prioritySharedAccounting = recordSyncAccounting(priorityWsSynced, 'shared');
       logInfo(
         ctx,
@@ -524,17 +541,36 @@ export async function runSyncOnConnect(
     }
 
     durableSyncCompleted = true;
-    const allWsContextGraphIds = getSharedMemorySyncContextGraphs
-      ? await runNonTransportStep(() => Promise.resolve(getSharedMemorySyncContextGraphs(remotePeer)))
-      : getSyncContextGraphs() ?? [];
+    const ordinarySharedMemoryWork = ordinarySharedMemoryLane
+      ? await runNonTransportStep(() => Promise.resolve(
+        ordinarySharedMemoryLane.resolveWork(remotePeer),
+      ))
+      : null;
+    const allWsContextGraphIds = ordinarySharedMemoryWork?.contextGraphIds
+      ?? (getSharedMemorySyncContextGraphs
+        ? await runNonTransportStep(() => Promise.resolve(
+          getSharedMemorySyncContextGraphs(remotePeer),
+        ))
+        : getSyncContextGraphs() ?? []);
     const prioritySharedMemoryContextGraphIdSet = new Set(
       admittedPrioritySharedMemoryWork?.contextGraphIds ?? [],
     );
     const wsContextGraphIds = allWsContextGraphIds.filter(
       (contextGraphId) => !prioritySharedMemoryContextGraphIdSet.has(contextGraphId),
     );
+    if (
+      ordinarySharedMemoryWork !== null
+      && wsContextGraphIds.length !== allWsContextGraphIds.length
+    ) {
+      throw new TypeError('Ordinary and selected shared-memory work scopes overlap');
+    }
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
-      const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
+      if (ordinarySharedMemoryWork === null && syncSharedMemoryFromPeer === undefined) {
+        throw new TypeError('Missing ordinary shared-memory sync executor');
+      }
+      const wsSynced = ordinarySharedMemoryWork !== null
+        ? await ordinarySharedMemoryWork.syncFromPeer()
+        : await syncSharedMemoryFromPeer!(remotePeer, wsContextGraphIds);
       const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
       logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
       if (sharedAccounting.deferredByBackpressure) {
