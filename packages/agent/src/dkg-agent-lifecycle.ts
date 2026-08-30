@@ -288,7 +288,11 @@ import {
   type ExactAssetCommitment,
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
-import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
+import {
+  filterOversizedSyncQuads,
+  insertWithOversizeGuard,
+  type OversizeGuardHooks,
+} from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
   getSyncCheckpointKey,
@@ -5827,6 +5831,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           onAccessDenied,
           options?.priority,
           normalizeSyncAdmissionSource(options?.source),
+          onPhase,
+          sinceBatchIdFor,
+          options,
         );
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
@@ -6267,6 +6274,82 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const proofCheckpointStore = exactAssetSelection?.kind === 'challenge-pinned'
       ? new MemorySyncCheckpointStore()
       : undefined;
+    // The public AGENTS phonebook is mutable shared state, not an append-only
+    // collection. A row-paged legacy fetch must therefore become visible only
+    // as one complete replacement: inserting each verified prefix would retain
+    // profile rows that the authoritative snapshot removed. The page fetcher
+    // already accumulates one phase across bounded wire pages; hold that
+    // verified data payload until its full-snapshot callback, then use the
+    // store's atomic graph-replacement capability. An interrupted fetch drops
+    // this invocation-local buffer and leaves the previous live graph intact.
+    const authoritativeAgentSnapshot = exactAssetSelection === undefined
+      && isAgentRegistryContextGraph(contextGraphId);
+    const authoritativeAgentCheckpointStore = authoritativeAgentSnapshot
+      ? new MemorySyncCheckpointStore()
+      : undefined;
+    const durableCheckpointStore = authoritativeAgentCheckpointStore ?? this.syncCheckpoints;
+    const agentDataGraph = contextGraphDataUri(contextGraphId);
+    let pendingAgentSnapshotQuads: Quad[] = [];
+    let agentSnapshotCommitted = false;
+    const storeVerifiedQuads = async (
+      quads: Quad[],
+      operationSignal?: AbortSignal,
+    ): Promise<void> => {
+      if (!authoritativeAgentSnapshot) {
+        await this.insertSyncedQuadsAndInvalidateListCache(quads, {
+          priority: 'background',
+          source: 'agent.durableSync.storeInsert',
+          signal: operationSignal,
+        });
+        return;
+      }
+      const agentQuads: Quad[] = [];
+      const otherQuads: Quad[] = [];
+      for (const quad of quads) {
+        (quad.graph === agentDataGraph ? agentQuads : otherQuads).push(quad);
+      }
+      pendingAgentSnapshotQuads.push(...agentQuads);
+      if (otherQuads.length > 0) {
+        await this.insertSyncedQuadsAndInvalidateListCache(otherQuads, {
+          priority: 'background',
+          source: 'agent.durableSync.storeInsert',
+          signal: operationSignal,
+        });
+      }
+    };
+    const effectiveOnVerifiedFullSnapshot = authoritativeAgentSnapshot
+      ? async (snapshot: VerifiedFullSnapshot): Promise<void> => {
+          const filtered = filterOversizedSyncQuads(pendingAgentSnapshotQuads);
+          if (filtered.dropped.length > 0) {
+            this.oversizeTombstoneLog.record(
+              filtered.dropped,
+              'durable-sync:authoritative-agents',
+            );
+          }
+          const replaced = await tryReplaceGraphAtomically(
+            this.store,
+            agentDataGraph,
+            filtered.kept,
+            {
+              priority: 'background',
+              source: 'agent.durableSync.authoritativeAgentsReplace',
+              signal,
+            },
+          );
+          if (!replaced) {
+            throw Object.assign(
+              new Error('Authoritative AGENTS sync requires atomic TripleStore.replaceGraph() support'),
+              { code: 'AGENTS_ATOMIC_REPLACE_UNSUPPORTED' },
+            );
+          }
+          agentSnapshotCommitted = true;
+          this.invalidateListContextGraphsCache();
+          if (filtered.kept.length > 0) {
+            this.contextGraphMetaProjection.markDirtyFromQuads(filtered.kept);
+          }
+          await onVerifiedFullSnapshot?.(snapshot);
+        }
+      : onVerifiedFullSnapshot;
     const runGraphScopedOperation = createGraphScopedPhysicalOperationFence({
       isClosed: () => this.graphScopedStoreClosed,
       captureSubscription: (operationContextGraphId) =>
@@ -6333,7 +6416,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             sinceBatchId,
             signal: fetchContext.signal,
             forceFreshSession: forceFreshSession
-              || onVerifiedFullSnapshot !== undefined,
+              || effectiveOnVerifiedFullSnapshot !== undefined,
             manifestDigest,
             manifestPrefixDigestAtOffset,
             shouldStopAfterPage,
@@ -6342,27 +6425,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               : exactAssetUalsForSelection(exactAssetSelection),
             returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope,
-            checkpointStore: ephemeralRequesterState
-              ? proofCheckpointStore
-              : undefined,
+            checkpointStore: authoritativeAgentCheckpointStore
+              ?? (ephemeralRequesterState ? proofCheckpointStore : undefined),
             ephemeralRequesterState,
           },
         );
       },
-      sinceBatchIdFor,
+      sinceBatchIdFor: authoritativeAgentSnapshot ? undefined : sinceBatchIdFor,
       exactAssetSelectionFor: exactAssetSelection?.kind === 'ual-only'
         ? () => exactAssetSelection
         : undefined,
       durableMetaContinuation,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: ({ quads, signal: operationSignal }) => {
-        return this.insertSyncedQuadsAndInvalidateListCache(quads, {
-          priority: 'background',
-          source: 'agent.durableSync.storeInsert',
-          signal: operationSignal,
-        });
-      },
+      storeInsert: ({ quads, signal: operationSignal }) =>
+        storeVerifiedQuads(quads, operationSignal),
       ...(exactAssetSelection?.kind === 'challenge-pinned'
         ? {
             authenticateChallengePinnedAsset: ({
@@ -6516,11 +6593,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return outcome;
         },
       }),
-      onVerifiedFullSnapshot,
-      deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
+      onVerifiedFullSnapshot: effectiveOnVerifiedFullSnapshot,
+      deleteCheckpoint: (key) => deleteSyncPageCheckpoint(durableCheckpointStore, key),
       setCheckpoint: (key, checkpoint) => {
         if (checkpoint.binding) {
-          this.syncCheckpoints.setManifestBoundOffset(
+          durableCheckpointStore.setManifestBoundOffset(
             key,
             checkpoint.offset,
             checkpoint.binding.manifestDigest,
@@ -6530,7 +6607,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             checkpoint.responderSessionOffset,
           );
         } else {
-          this.syncCheckpoints.set(
+          durableCheckpointStore.set(
             key,
             checkpoint.offset,
             Date.now(),
@@ -6568,7 +6645,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (exactAssetSelection !== undefined) {
       return runDurableSyncDetailed(durableContext);
     }
-    return { result: await runDurableSync(durableContext) };
+    const result = await runDurableSync(durableContext);
+    if (!authoritativeAgentSnapshot || agentSnapshotCommitted) return { result };
+    // The generic runner counts verified rows handed to storeInsert. For an
+    // incomplete authoritative snapshot those rows remained invocation-local,
+    // so expose only mutations that actually reached the live store.
+    const stagedTriples = pendingAgentSnapshotQuads.length;
+    return {
+      result: {
+        ...result,
+        insertedTriples: Math.max(0, result.insertedTriples - stagedTriples),
+        insertedDataTriples: Math.max(0, result.insertedDataTriples - stagedTriples),
+      },
+    };
   }
 
   /**
@@ -6585,21 +6674,47 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     onAccessDenied?: (contextGraphId: string) => void,
     priority?: number,
     source?: SyncAdmissionSource,
+    onPhase?: PhaseCallback,
+    sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
+    options?: DurableSyncOptions,
   ): Promise<{ result?: DurableSyncResult; remainingLegacyCgs: string[] }> {
     const peerProtocols = await this.getPeerProtocols(remotePeerId);
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
       return { remainingLegacyCgs: contextGraphIds };
     }
     const legacyCgs: string[] = [];
-    const work = [];
+    const work: ContextGraphSyncWork<DurableSyncAccumulator>[] = [];
     for (const contextGraphId of contextGraphIds) {
       // The agents phonebook already falls back to the legacy lane after an
       // oversized graph-atomic changelog upsert. Divert it before that known
-      // failed transfer; this changes only lane selection, and deliberately
-      // retains the existing legacy merge semantics until the authenticated
-      // agent-record replay lane can make removals authoritative.
+      // failed transfer. Keep it in this mixed work list so its configured
+      // priority is compared with every changelog graph before admission.
       if (isAgentRegistryContextGraph(contextGraphId)) {
-        legacyCgs.push(contextGraphId);
+        work.push({
+          contextGraphId,
+          lane: 'durable' as const,
+          operationId: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
+          run: async (remainingContextGraphs): Promise<DurableSyncAccumulator> => {
+            const result = await this.runLegacyDurableSyncForContextGraph(
+              ctx,
+              remotePeerId,
+              contextGraphId,
+              remainingContextGraphs,
+              {
+                onPhase,
+                onAtomicCommitStarted: options?.onAtomicCommitStarted,
+                onAccessDenied,
+                sinceBatchIdFor,
+                stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
+                exactAssetSelection: options?.exactAssetSelection,
+                settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
+                isCurrent: options?.isCurrent,
+                durableMetaContinuation: options?.durableMetaContinuation,
+              },
+            );
+            return durableSyncAccumulatorFromResult(result);
+          },
+        });
         continue;
       }
       if (await this.isPrivateContextGraph(contextGraphId)) {
@@ -6628,14 +6743,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       work,
       priorities: this.config.syncContextGraphPriorities,
       emptyResult: createDurableSyncAccumulator,
-      runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
-        ctx,
-        item.contextGraphId,
-        item.lane,
-        item.operationId,
-        run,
-        { priorityOverride: priority, source },
-      ),
+      runWithAdmission: (item, run) => {
+        const admit = () => this.runContextGraphSyncWithBackpressure(
+          ctx,
+          item.contextGraphId,
+          item.lane,
+          item.operationId,
+          run,
+          { priorityOverride: priority, source },
+        );
+        return item.lane === 'durable'
+          ? runSerializedDurableContextGraphSync(
+              this,
+              remotePeerId,
+              item.contextGraphId,
+              admit,
+            )
+          : admit();
+      },
       merge: mergeDurableSyncAccumulatorInto,
       markDeferred: (summary) => {
         recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });

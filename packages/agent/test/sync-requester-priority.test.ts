@@ -216,6 +216,7 @@ describe('requester per-CG priority admission', () => {
   it('routes the growing agents phonebook directly to row-paged legacy sync', async () => {
     const admissions: string[] = [];
     const changelogRuns: string[] = [];
+    const legacyRuns: string[] = [];
     const emptyResult = {
       ...createIncompleteDurableSyncResult(),
       completedPhases: 1,
@@ -242,6 +243,14 @@ describe('requester per-CG priority admission', () => {
         changelogRuns.push(contextGraphId);
         return emptyResult;
       },
+      runLegacyDurableSyncForContextGraph: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+      ) => {
+        legacyRuns.push(contextGraphId);
+        return { ...emptyResult, complete: true };
+      },
       log: { info: noop, warn: noop },
     };
 
@@ -252,9 +261,71 @@ describe('requester per-CG priority admission', () => {
       [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'public-cg'],
     );
 
-    expect(admissions).toEqual(['public-cg', SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]);
+    expect(admissions).toEqual([
+      'public-cg', SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+    ]);
     expect(changelogRuns).toEqual(['public-cg', SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]);
-    expect(lane.remainingLegacyCgs).toEqual([SYSTEM_CONTEXT_GRAPHS.AGENTS]);
+    expect(legacyRuns).toEqual([SYSTEM_CONTEXT_GRAPHS.AGENTS]);
+    expect(lane.remainingLegacyCgs).toEqual([]);
+  });
+
+  it('runs an elevated agents legacy sync before lower-priority changelog backpressure', async () => {
+    const admissions: string[] = [];
+    const legacyRuns: string[] = [];
+    const agent = {
+      config: {
+        syncContextGraphPriorities: {
+          [SYSTEM_CONTEXT_GRAPHS.AGENTS]: 100,
+          bulk: -10,
+        },
+      },
+      getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
+      isPrivateContextGraph: async () => false,
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        contextGraphId: string,
+        _lane: string,
+        _label: string,
+        work: () => Promise<unknown>,
+      ) => {
+        admissions.push(contextGraphId);
+        if (contextGraphId === 'bulk') throw new SyncBackpressureBusyError('queue full');
+        return work();
+      },
+      runLegacyDurableSyncForContextGraph: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+      ) => {
+        legacyRuns.push(contextGraphId);
+        return {
+          ...createIncompleteDurableSyncResult(),
+          insertedTriples: 2,
+          insertedDataTriples: 2,
+          completedPhases: 2,
+          complete: true,
+        };
+      },
+      runChangelogSyncForCg: async () => ({
+        ...createIncompleteDurableSyncResult(),
+        completedPhases: 1,
+        complete: true,
+      }),
+      log: { info: noop, warn: noop },
+    };
+
+    const lane = await (LifecycleSyncMethods.prototype.runChangelogLane as any).call(
+      agent,
+      ctx,
+      'peer',
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, 'bulk'],
+    );
+
+    expect(admissions).toEqual([SYSTEM_CONTEXT_GRAPHS.AGENTS, 'bulk']);
+    expect(legacyRuns).toEqual([SYSTEM_CONTEXT_GRAPHS.AGENTS]);
+    expect(lane.result.insertedTriples).toBe(2);
+    expect(lane.result.deferredBackpressure).toBe(1);
+    expect(lane.remainingLegacyCgs).toEqual([]);
   });
 
   it('preserves completed shared-memory progress when a later admission is deferred', async () => {

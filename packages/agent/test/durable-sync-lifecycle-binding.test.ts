@@ -65,8 +65,15 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
   };
 });
 
-import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
-import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
+import {
+  contextGraphDataUri,
+  PROTOCOL_SYNC_CHANGELOG,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
+import {
+  createDurableSyncAccumulator,
+  createIncompleteDurableSyncResult,
+} from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   durableSyncRequestPageSize,
@@ -564,6 +571,122 @@ describe('durable sync lifecycle chain binding', () => {
       priorityOverride: 2_000,
       source: 'catchup-foreground',
     });
+  });
+
+  it('atomically replaces the completed AGENTS snapshot and removes obsolete rows', async () => {
+    const graph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const obsolete = {
+      subject: 'did:dkg:agent:old',
+      predicate: `${DKG}peerId`,
+      object: '"peer-old"',
+      graph,
+    };
+    const fresh = {
+      subject: 'did:dkg:agent:new',
+      predicate: `${DKG}peerId`,
+      object: '"peer-new"',
+      graph,
+    };
+    let live = [obsolete];
+    const replaceGraph = vi.fn(async (_graph: string, quads: typeof live) => {
+      live = [...quads];
+    });
+    const insertSyncedQuadsAndInvalidateListCache = vi.fn(async () => {});
+    const agentLike: any = {
+      config: {},
+      store: { replaceGraph },
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache,
+      oversizeTombstoneLog: { record: vi.fn() },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    mockedRunDurableSync.mockImplementationOnce(async (syncContext) => {
+      await syncContext.storeInsert({ quads: [fresh] });
+      await syncContext.onVerifiedFullSnapshot?.({
+        contextGraphId: SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        verifiedDataGraphs: new Set([graph]),
+        verifiedMetaGraphs: new Set(),
+        metaFetched: false,
+      });
+      return {
+        ...createIncompleteDurableSyncResult(),
+        insertedTriples: 1,
+        insertedDataTriples: 1,
+        completedPhases: 2,
+        complete: true,
+      };
+    });
+
+    const result = await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike,
+      ctx,
+      'peer-agents',
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      1,
+    );
+
+    expect(result.complete).toBe(true);
+    expect(replaceGraph).toHaveBeenCalledWith(
+      graph,
+      [fresh],
+      expect.objectContaining({ source: 'agent.durableSync.authoritativeAgentsReplace' }),
+    );
+    expect(insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
+    expect(live).toEqual([fresh]);
+    expect(live).not.toContainEqual(obsolete);
+  });
+
+  it('keeps the previous AGENTS snapshot intact when row-paged sync is interrupted', async () => {
+    const graph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const obsolete = {
+      subject: 'did:dkg:agent:old',
+      predicate: `${DKG}peerId`,
+      object: '"peer-old"',
+      graph,
+    };
+    const fresh = {
+      subject: 'did:dkg:agent:new',
+      predicate: `${DKG}peerId`,
+      object: '"peer-new"',
+      graph,
+    };
+    let live = [obsolete];
+    const replaceGraph = vi.fn(async (_graph: string, quads: typeof live) => {
+      live = [...quads];
+    });
+    const agentLike: any = {
+      config: {},
+      store: { replaceGraph },
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache: vi.fn(async () => {}),
+      oversizeTombstoneLog: { record: vi.fn() },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    mockedRunDurableSync.mockImplementationOnce(async (syncContext) => {
+      await syncContext.storeInsert({ quads: [fresh] });
+      return {
+        ...createIncompleteDurableSyncResult(),
+        insertedTriples: 1,
+        insertedDataTriples: 1,
+      };
+    });
+
+    const result = await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike,
+      ctx,
+      'peer-agents',
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      1,
+    );
+
+    expect(result.complete).toBe(false);
+    expect(result.insertedTriples).toBe(0);
+    expect(replaceGraph).not.toHaveBeenCalled();
+    expect(live).toEqual([obsolete]);
   });
 
   it('labels standalone SWM recovery admissions at the call site', async () => {
