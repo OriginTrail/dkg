@@ -8,6 +8,7 @@
 import { Contract } from 'ethers';
 import type {
   ApprovalPolicy,
+  ContextGraphRegistryRoleAwareScanCursorStore,
   ContextGraphRegistryScanCursorStore,
 } from './chain-adapter.js';
 
@@ -95,12 +96,12 @@ export interface EVMAdapterBaseConfig {
    */
   cgRegistryScanPageSize?: number;
   /**
-   * Original durable historical cursor for daemon ContextGraphNameRegistry discovery scans.
-   * The exact three-field key contract remains unchanged.
+   * Original durable historical cursor retained for compatibility. Prefer the
+   * role-aware store below for independently durable historical and tip scans.
    */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
-  /** Independent durable tip cursor. Omit to keep tip progress process-local. */
-  contextGraphRegistryTipScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /** Canonical durable store whose keys encode independent historical and tip roles. */
+  contextGraphRegistryRoleAwareScanCursorStore?: ContextGraphRegistryRoleAwareScanCursorStore;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

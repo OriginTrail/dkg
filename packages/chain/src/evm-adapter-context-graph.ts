@@ -113,7 +113,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return false;
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    return (await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)) != null;
+    return (
+      await this.contextGraphRegistryScanCursor.loadBestEffortWatermark(registryAddress)
+    ) != null;
   }
 
   async listContextGraphsFromChain(

@@ -583,6 +583,34 @@ export interface ContextGraphRegistryScanCursorStore {
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
 }
 
+export type ContextGraphRegistryScanCursorRole = 'historical' | 'tip';
+
+/** Canonical key for independently persisted historical and tip progress. */
+export interface ContextGraphRegistryRoleAwareScanCursorKey
+  extends ContextGraphRegistryScanCursorKey {
+  cursorKind: ContextGraphRegistryScanCursorRole;
+}
+
+/** Canonical persistence contract. Cursor independence is encoded in every operation. */
+export interface ContextGraphRegistryRoleAwareScanCursorStore {
+  load(key: ContextGraphRegistryRoleAwareScanCursorKey): Promise<number | undefined>;
+  save(
+    key: ContextGraphRegistryRoleAwareScanCursorKey,
+    nextBlock: number,
+  ): Promise<void>;
+}
+
+/** Bind a canonical role-aware backing store to one scanner-owned cursor role. */
+export function contextGraphRegistryScanCursorStoreForRole(
+  store: ContextGraphRegistryRoleAwareScanCursorStore,
+  cursorKind: ContextGraphRegistryScanCursorRole,
+): ContextGraphRegistryScanCursorStore {
+  return {
+    load: (key) => store.load({ ...key, cursorKind }),
+    save: (key, nextBlock) => store.save({ ...key, cursorKind }, nextBlock),
+  };
+}
+
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
 /**

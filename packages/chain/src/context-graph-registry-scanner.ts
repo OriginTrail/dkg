@@ -271,7 +271,7 @@ export class ContextGraphRegistryScanner {
       };
     };
     const resolveHistoricalCursor = async (): Promise<ScanRange> => {
-      const watermark = await this.input.historicalCursor.loadWatermark(
+      const watermark = await this.input.historicalCursor.loadBestEffortWatermark(
         this.input.registryAddress,
       );
       if (watermark !== undefined) {
@@ -317,7 +317,7 @@ export class ContextGraphRegistryScanner {
       case 'historicalSeed': {
         if (scanPlan.start === 'deployment') {
           // Preserve monotonic store behavior while a full recovery replays old pages.
-          await this.input.historicalCursor.loadWatermark(this.input.registryAddress);
+          await this.input.historicalCursor.loadBestEffortWatermark(this.input.registryAddress);
         }
         const range = await (scanPlan.start === 'cursor'
           ? resolveHistoricalCursor()
@@ -331,17 +331,9 @@ export class ContextGraphRegistryScanner {
       }
       case 'tip': {
         const tip = await this.input.resolveHead();
-        const loaded = await this.input.tipCursor.loadWatermarkResult(
+        const watermark = await this.input.tipCursor.loadStrictWatermark(
           this.input.registryAddress,
         );
-        if (loaded.status === 'failed') {
-          throw new Error(
-            'listContextGraphsFromChain: tip cursor load failed; refusing to initialize from ' +
-              'the current head because persisted progress may exist',
-            { cause: loaded.error },
-          );
-        }
-        const watermark = loaded.watermark;
         const start = watermark === undefined
           ? Math.max(0, tip.head - this.input.pageSize + 1)
           : Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS);

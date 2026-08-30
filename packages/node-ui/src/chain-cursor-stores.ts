@@ -5,6 +5,8 @@ type RegistryScanCursorKey = {
   chainId: string;
   deploymentId: string;
   registryAddress: string;
+  /** Missing only for the original historical-store compatibility surface. */
+  cursorKind?: 'historical' | 'tip';
 };
 
 function parsePositiveSafeInteger(value: number | string | undefined): number | undefined {
@@ -97,20 +99,15 @@ export class SqliteChainEventCursorStore {
 export class SqliteContextGraphRegistryScanCursorStore {
   private readonly cursors: RuntimePositiveIntegerCursorStore;
   private readonly legacyCursors: SettingsPositiveIntegerCursorStore;
-  private readonly cursorKind: 'historical' | 'tip';
 
-  constructor(
-    dashboard: DashboardDB,
-    options: { cursorKind?: 'historical' | 'tip' } = {},
-  ) {
+  constructor(dashboard: DashboardDB) {
     this.cursors = new RuntimePositiveIntegerCursorStore(dashboard.db, 'contextGraphRegistryScan.cursor');
     this.legacyCursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
-    this.cursorKind = options.cursorKind ?? 'historical';
   }
 
   async load(key: RegistryScanCursorKey): Promise<number | undefined> {
     const current = this.cursors.load(this.scope(key), this.registryKey(key));
-    if (current !== undefined || this.cursorKind === 'tip') return current;
+    if (current !== undefined || this.cursorKind(key) === 'tip') return current;
     return this.cursors.load(this.scope(key), this.legacyRegistryKey(key))
       ?? this.legacyCursors.load(this.legacyKey(key));
   }
@@ -123,8 +120,12 @@ export class SqliteContextGraphRegistryScanCursorStore {
     return `${key.chainId}:${key.deploymentId}`;
   }
 
-  private registryKey(key: { registryAddress: string }): string {
-    return `${this.cursorKind}:${key.registryAddress.toLowerCase()}`;
+  private registryKey(key: RegistryScanCursorKey): string {
+    return `${this.cursorKind(key)}:${key.registryAddress.toLowerCase()}`;
+  }
+
+  private cursorKind(key: RegistryScanCursorKey): 'historical' | 'tip' {
+    return key.cursorKind ?? 'historical';
   }
 
   private legacyRegistryKey(key: { registryAddress: string }): string {

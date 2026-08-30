@@ -37,7 +37,7 @@ const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
     createArg?.chainEventCursorStore?.cursors?.db ??
-    createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
+    createArg?.contextGraphRegistryRoleAwareScanCursorStore?.cursors?.db;
   db?.close?.();
 }
 
@@ -242,11 +242,7 @@ describe('daemon startup network validation', () => {
         loadLane: expect.any(Function),
         saveLane: expect.any(Function),
       },
-      contextGraphRegistryScanCursorStore: {
-        load: expect.any(Function),
-        save: expect.any(Function),
-      },
-      contextGraphRegistryTipScanCursorStore: {
+      contextGraphRegistryRoleAwareScanCursorStore: {
         load: expect.any(Function),
         save: expect.any(Function),
       },
@@ -259,11 +255,12 @@ describe('daemon startup network validation', () => {
       }),
       registryAddress: '0x3333333333333333333333333333333333333333',
     };
-    await createArg.contextGraphRegistryScanCursorStore.save(registryCursorKey, 111);
-    await createArg.contextGraphRegistryTipScanCursorStore.save(registryCursorKey, 222);
-    await expect(createArg.contextGraphRegistryScanCursorStore.load(registryCursorKey))
+    const cursorStore = createArg.contextGraphRegistryRoleAwareScanCursorStore;
+    await cursorStore.save({ ...registryCursorKey, cursorKind: 'historical' }, 111);
+    await cursorStore.save({ ...registryCursorKey, cursorKind: 'tip' }, 222);
+    await expect(cursorStore.load({ ...registryCursorKey, cursorKind: 'historical' }))
       .resolves.toBe(111);
-    await expect(createArg.contextGraphRegistryTipScanCursorStore.load(registryCursorKey))
+    await expect(cursorStore.load({ ...registryCursorKey, cursorKind: 'tip' }))
       .resolves.toBe(222);
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
       chainId: 'gnosis:100',

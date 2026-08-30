@@ -5,10 +5,6 @@ import type {
   ContextGraphRegistryScanCursorStore,
 } from './chain-adapter.js';
 
-export type ContextGraphRegistryScanCursorLoadResult =
-  | { status: 'loaded'; watermark?: number }
-  | { status: 'failed'; error: unknown };
-
 type CursorInput = {
   chainId: string;
   deploymentId: string;
@@ -26,32 +22,18 @@ abstract class ContextGraphRegistryScanCursorBase {
       ?? this.pendingWatermark(cacheKey);
   }
 
-  async loadWatermark(registryAddress: string): Promise<number | undefined> {
-    const result = await this.loadWatermarkResult(registryAddress);
-    return result.status === 'loaded' ? result.watermark : undefined;
-  }
-
-  async loadWatermarkResult(
-    registryAddress: string,
-  ): Promise<ContextGraphRegistryScanCursorLoadResult> {
+  protected async loadStoredWatermark(registryAddress: string): Promise<number | undefined> {
     const cacheKey = this.cacheKey(registryAddress);
     const cached = this.normalize(this.watermarks.get(cacheKey));
-    if (cached != null) return { status: 'loaded', watermark: cached };
+    if (cached != null) return cached;
     const pending = this.pendingWatermark(cacheKey);
-    if (pending != null) return { status: 'loaded', watermark: pending };
+    if (pending != null) return pending;
 
-    if (!this.input.store) return { status: 'loaded' };
-    try {
-      const persisted = await this.input.store.load(this.cursorKey(cacheKey));
-      const normalized = this.normalize(persisted);
-      if (normalized != null) this.watermarks.set(cacheKey, normalized);
-      return { status: 'loaded', watermark: normalized };
-    } catch (err) {
-      console.warn(
-        `[chain] ContextGraphNameRegistry scan cursor load failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return { status: 'failed', error: err };
-    }
+    if (!this.input.store) return undefined;
+    const persisted = await this.input.store.load(this.cursorKey(cacheKey));
+    const normalized = this.normalize(persisted);
+    if (normalized != null) this.watermarks.set(cacheKey, normalized);
+    return normalized;
   }
 
   protected clearCachedWatermarks(): void {
@@ -92,6 +74,17 @@ abstract class ContextGraphRegistryScanCursorBase {
 /** Historical scan cursor with an explicit best-effort persistence contract. */
 export class ContextGraphRegistryHistoricalScanCursor
   extends ContextGraphRegistryScanCursorBase {
+  async loadBestEffortWatermark(registryAddress: string): Promise<number | undefined> {
+    try {
+      return await this.loadStoredWatermark(registryAddress);
+    } catch (err) {
+      console.warn(
+        `[chain] ContextGraphNameRegistry scan cursor load failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return undefined;
+    }
+  }
+
   clearMemoryCache(): void {
     this.clearCachedWatermarks();
   }
@@ -123,6 +116,21 @@ export class ContextGraphRegistryTipScanCursor extends ContextGraphRegistryScanC
 
   protected override pendingWatermark(cacheKey: string): number | undefined {
     return this.normalize(this.pendingStrictWatermarks.get(cacheKey));
+  }
+
+  async loadStrictWatermark(registryAddress: string): Promise<number | undefined> {
+    try {
+      return await this.loadStoredWatermark(registryAddress);
+    } catch (err) {
+      console.warn(
+        `[chain] ContextGraphNameRegistry tip cursor load failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new Error(
+        'listContextGraphsFromChain: tip cursor load failed; refusing to initialize from ' +
+          'the current head because persisted progress may exist',
+        { cause: err },
+      );
+    }
   }
 
   async saveStrictWatermark(registryAddress: string, nextBlock: number): Promise<void> {

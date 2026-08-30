@@ -74,7 +74,7 @@ function createFakeServer() {
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
     createArg?.chainEventCursorStore?.cursors?.db ??
-    createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
+    createArg?.contextGraphRegistryRoleAwareScanCursorStore?.cursors?.db;
   db?.close?.();
 }
 

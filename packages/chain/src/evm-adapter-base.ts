@@ -14,7 +14,11 @@
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
-import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
+import {
+  DEFAULT_APPROVAL_POLICY,
+  buildEvmDeploymentId,
+  contextGraphRegistryScanCursorStoreForRole,
+} from './chain-adapter.js';
 import type {
   ApprovalPolicy,
   ChainReadOptions,
@@ -1320,15 +1324,20 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
+    const roleAwareCursorStore = config.contextGraphRegistryRoleAwareScanCursorStore;
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryHistoricalScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
-      store: config.contextGraphRegistryScanCursorStore,
+      store: roleAwareCursorStore
+        ? contextGraphRegistryScanCursorStoreForRole(roleAwareCursorStore, 'historical')
+        : config.contextGraphRegistryScanCursorStore,
     });
     this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryTipScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
-      store: config.contextGraphRegistryTipScanCursorStore,
+      store: roleAwareCursorStore
+        ? contextGraphRegistryScanCursorStoreForRole(roleAwareCursorStore, 'tip')
+        : undefined,
     });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;

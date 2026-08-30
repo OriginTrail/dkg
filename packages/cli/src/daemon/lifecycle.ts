@@ -1722,11 +1722,8 @@ async function runDaemonInnerWithStartupOwnership(
   // rotates the era and forces peers to full-resync instead of silently skipping.
   const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
-  const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
-  const contextGraphRegistryTipScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(
-    dashDb,
-    { cursorKind: 'tip' },
-  );
+  const contextGraphRegistryRoleAwareScanCursorStore =
+    new SqliteContextGraphRegistryScanCursorStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1856,8 +1853,7 @@ async function runDaemonInnerWithStartupOwnership(
     syncCheckpointStore,
     changelogCursorStore,
     chainEventCursorStore,
-    contextGraphRegistryScanCursorStore,
-    contextGraphRegistryTipScanCursorStore,
+    contextGraphRegistryRoleAwareScanCursorStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

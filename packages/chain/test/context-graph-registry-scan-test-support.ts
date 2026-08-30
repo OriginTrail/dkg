@@ -1,7 +1,8 @@
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import type {
   ContextGraphOnChain,
-  ContextGraphRegistryScanCursorKey,
+  ContextGraphRegistryRoleAwareScanCursorKey,
+  ContextGraphRegistryRoleAwareScanCursorStore,
   ContextGraphRegistryScanOptions,
 } from '../src/chain-adapter.js';
 
@@ -51,47 +52,38 @@ const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
 export const REGISTRY = '0x3333333333333333333333333333333333333333';
 
-type RoleAwareTestCursorKey = ContextGraphRegistryScanCursorKey & {
-  cursorKind: 'historical' | 'tip';
-};
-
-export class MemoryRegistryScanCursorStore {
+export class MemoryRegistryScanCursorStore
+  implements ContextGraphRegistryRoleAwareScanCursorStore {
   readonly values = new Map<string, number>();
   readonly loads: string[] = [];
   readonly saves: Array<{ key: string; nextBlock: number }> = [];
 
-  async load(key: RoleAwareTestCursorKey): Promise<number | undefined> {
+  async load(key: ContextGraphRegistryRoleAwareScanCursorKey): Promise<number | undefined> {
     const encoded = this.key(key);
     this.loads.push(encoded);
     return this.values.get(encoded);
   }
 
-  async save(key: RoleAwareTestCursorKey, nextBlock: number): Promise<void> {
+  async save(
+    key: ContextGraphRegistryRoleAwareScanCursorKey,
+    nextBlock: number,
+  ): Promise<void> {
     const encoded = this.key(key);
     this.saves.push({ key: encoded, nextBlock });
     this.values.set(encoded, nextBlock);
   }
 
-  private key(key: RoleAwareTestCursorKey): string {
+  private key(key: ContextGraphRegistryRoleAwareScanCursorKey): string {
     return `${key.chainId}|${key.deploymentId}|${key.cursorKind}|${key.registryAddress.toLowerCase()}`;
   }
 }
 
 export function registryCursorStores(store: {
-  load(key: RoleAwareTestCursorKey): Promise<number | undefined>;
-  save(key: RoleAwareTestCursorKey, nextBlock: number): Promise<void>;
+  load(key: ContextGraphRegistryRoleAwareScanCursorKey): Promise<number | undefined>;
+  save(key: ContextGraphRegistryRoleAwareScanCursorKey, nextBlock: number): Promise<void>;
 }) {
   return {
-    contextGraphRegistryScanCursorStore: {
-      load: (key: ContextGraphRegistryScanCursorKey) => store.load({ ...key, cursorKind: 'historical' }),
-      save: (key: ContextGraphRegistryScanCursorKey, nextBlock: number) =>
-        store.save({ ...key, cursorKind: 'historical' }, nextBlock),
-    },
-    contextGraphRegistryTipScanCursorStore: {
-      load: (key: ContextGraphRegistryScanCursorKey) => store.load({ ...key, cursorKind: 'tip' }),
-      save: (key: ContextGraphRegistryScanCursorKey, nextBlock: number) =>
-        store.save({ ...key, cursorKind: 'tip' }, nextBlock),
-    },
+    contextGraphRegistryRoleAwareScanCursorStore: store,
   };
 }
 

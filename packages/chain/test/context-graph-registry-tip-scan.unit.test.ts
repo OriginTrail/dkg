@@ -46,6 +46,19 @@ class KindedJsonLegacyRegistryScanCursorStore extends JsonLegacyRegistryScanCurs
 }
 
 describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
+  it('exposes only the load policy owned by each cursor role', () => {
+    const { adapter } = makeAdapter(makeRegistry(), 10_000);
+    const historical = (adapter as any).contextGraphRegistryScanCursor;
+    const tip = (adapter as any).contextGraphRegistryTipScanCursor;
+
+    expect(historical.loadBestEffortWatermark).toEqual(expect.any(Function));
+    expect(historical.loadStrictWatermark).toBeUndefined();
+    expect(tip.loadStrictWatermark).toEqual(expect.any(Function));
+    expect(tip.loadBestEffortWatermark).toBeUndefined();
+    expect(historical.loadWatermark).toBeUndefined();
+    expect(tip.loadWatermarkResult).toBeUndefined();
+  });
+
   it('probes the current tip independently while a middle historical page remains unavailable', async () => {
     let head = 4_999;
     const store = new MemoryRegistryScanCursorStore();
@@ -243,14 +256,10 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       ]);
   });
 
-  it('persists independent tip progress across restart with split legacy stores', async () => {
-    const historical = new JsonLegacyRegistryScanCursorStore();
-    const tip = new JsonLegacyRegistryScanCursorStore();
-    historical.seed(LEGACY_KEY, 2_000);
-    const cursorStores = {
-      contextGraphRegistryScanCursorStore: historical,
-      contextGraphRegistryTipScanCursorStore: tip,
-    };
+  it('persists independent historical and tip progress through one role-aware store', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    await store.save({ ...LEGACY_KEY, cursorKind: 'historical' }, 2_000);
+    const cursorStores = registryCursorStores(store);
     const eventBlock = 10_001;
     let head = 10_000;
     const registry = makeRegistry({
@@ -266,9 +275,10 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
 
     await collectRegistryScan(adapter, { mode: 'tip' });
 
-    expect(historical.values.get(JSON.stringify(LEGACY_KEY))).toBe(2_000);
-    expect(tip.values.get(JSON.stringify(LEGACY_KEY))).toBe(10_001);
-    expect(historical.loads).toEqual([]);
+    expect(store.values.get(`${LEGACY_KEY.chainId}|${LEGACY_KEY.deploymentId}|historical|${REGISTRY}`))
+      .toBe(2_000);
+    expect(store.values.get(`${LEGACY_KEY.chainId}|${LEGACY_KEY.deploymentId}|tip|${REGISTRY}`))
+      .toBe(10_001);
 
     head = 13_200;
     registry.queryFilter.clear();
@@ -283,10 +293,11 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       [9_951, 11_950],
       [11_951, 13_200],
     ]);
-    expect(historical.values.get(JSON.stringify(LEGACY_KEY))).toBe(2_000);
-    expect(tip.values.get(JSON.stringify(LEGACY_KEY))).toBe(13_201);
-    expect(tip.loads).toHaveLength(2);
-    expect(tip.loads.every((key) => !('cursorKind' in key))).toBe(true);
+    expect(store.values.get(`${LEGACY_KEY.chainId}|${LEGACY_KEY.deploymentId}|historical|${REGISTRY}`))
+      .toBe(2_000);
+    expect(store.values.get(`${LEGACY_KEY.chainId}|${LEGACY_KEY.deploymentId}|tip|${REGISTRY}`))
+      .toBe(13_201);
+    expect(store.loads.filter((key) => key.includes('|tip|'))).toHaveLength(2);
   });
 
   it('fails closed on marker and acknowledgement saves without skipping the attempted tip range', async () => {

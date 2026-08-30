@@ -54,6 +54,7 @@ import type {
 import type {
   ApprovalPolicy,
   ChainAdapter,
+  ContextGraphRegistryRoleAwareScanCursorStore,
   ContextGraphRegistryScanCursorStore,
 } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
@@ -1853,10 +1854,10 @@ export interface DKGAgentConfig {
   changelogCursorStore?: ChangelogCursorStore;
   /** Durable lane cursor store for the chain event poller. Defaults to in-memory. */
   chainEventCursorStore?: ChainEventCursorPersistence;
-  /** Original three-field-key historical registry cursor store. */
+  /** Original three-field-key historical registry cursor store retained for compatibility. */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
-  /** Independent three-field-key tip registry cursor store. */
-  contextGraphRegistryTipScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /** Canonical role-aware historical and tip registry cursor store. */
+  contextGraphRegistryRoleAwareScanCursorStore?: ContextGraphRegistryRoleAwareScanCursorStore;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.

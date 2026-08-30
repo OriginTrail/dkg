@@ -14,11 +14,7 @@ describe('DKGAgent chain cursor wiring', () => {
   });
 
   it('passes EVM chainConfig fields into the constructed adapter', async () => {
-    const historicalRegistryCursorStore = {
-      load: vi.fn(async () => undefined),
-      save: vi.fn(async () => {}),
-    };
-    const tipRegistryCursorStore = {
+    const registryCursorStore = {
       load: vi.fn(async () => undefined),
       save: vi.fn(async () => {}),
     };
@@ -35,14 +31,26 @@ describe('DKGAgent chain cursor wiring', () => {
         minPublisherNativeWei: 123n,
         minPublisherTracWei: 456n,
       },
-      contextGraphRegistryScanCursorStore: historicalRegistryCursorStore,
-      contextGraphRegistryTipScanCursorStore: tipRegistryCursorStore,
+      contextGraphRegistryRoleAwareScanCursorStore: registryCursorStore,
     });
 
-    expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store)
-      .toBe(historicalRegistryCursorStore);
-    expect((agent as any).chain.contextGraphRegistryTipScanCursor?.input?.store)
-      .toBe(tipRegistryCursorStore);
+    const cursorKey = {
+      chainId: 'evm:31337',
+      deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
+      registryAddress: '0x3333333333333333333333333333333333333333',
+    };
+    await (agent as any).chain.contextGraphRegistryScanCursor.input.store.save(cursorKey, 111);
+    await (agent as any).chain.contextGraphRegistryTipScanCursor.input.store.save(cursorKey, 222);
+    expect(registryCursorStore.save).toHaveBeenNthCalledWith(
+      1,
+      { ...cursorKey, cursorKind: 'historical' },
+      111,
+    );
+    expect(registryCursorStore.save).toHaveBeenNthCalledWith(
+      2,
+      { ...cursorKey, cursorKind: 'tip' },
+      222,
+    );
     expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);
