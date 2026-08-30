@@ -105,14 +105,38 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   finish(): void {
     if (this.terminalState !== 'active') return;
     this.terminalState = 'finished';
+    let entries: readonly SyncOnConnectPeerAccountingEntry<Probe>[] =
+      this.accountingEntries;
     if (this.ordinaryFailedWithoutAccounting) {
       // A later ordinary post-sync failure must not let an earlier selected
       // result establish peer freshness/progress and suppress the next retry.
-      // The selected transfer owns its own persisted terminal state.
-      this.accountingEntries.length = 0;
-      return;
+      // Preserve a selected retry as bounded peer backoff, but normalize away
+      // its peer-level progress: the selected transfer owns that persisted
+      // terminal state and ordinary work still needs a prompt retry.
+      let selectedRetry: SyncOnConnectPeerAccountingEntry<Probe> | undefined;
+      for (let i = this.accountingEntries.length - 1; i >= 0; i -= 1) {
+        const entry = this.accountingEntries[i]!;
+        if (
+          entry.lane === 'selected'
+          && entry.outcome.reconcilerDisposition === 'retry'
+        ) {
+          selectedRetry = entry;
+          break;
+        }
+      }
+      entries = selectedRetry === undefined
+        ? []
+        : [{
+          lane: 'selected',
+          probe: selectedRetry.probe,
+          outcome: {
+            reconcilerDisposition: 'retry',
+            fresh: false,
+            progress: false,
+          },
+        }];
     }
-    const combined = combineSyncOnConnectPeerAccounting(this.accountingEntries);
+    const combined = combineSyncOnConnectPeerAccounting(entries);
     this.accountingEntries.length = 0;
     if (combined === null) return;
     const outcome: SyncOnConnectPeerOutcome = this.selectedPhaseExecuted
