@@ -224,13 +224,6 @@ test('documentation-only PRs select no test lane or shared build', () => {
   assert.equal(plan.runNode, false);
   assert.deepEqual(selectedLanes(plan), []);
   assert.deepEqual(plan.evmScopes, []);
-
-  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
-  assert.doesNotMatch(
-    workflowJobBlock(workflow, 'changes'),
-    /candidate\/scripts\/ci\/check-tracked-text-nul\.mjs/,
-    'an untrusted candidate must never supply its own security gate',
-  );
 });
 
 test('markdown test fixtures are code inputs, not documentation-only changes', () => {
@@ -499,6 +492,11 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     workflowJobBlock(primaryWorkflow, 'changes'),
     /^      abi_freshness: \$\{\{ steps\.plan\.outputs\.abi_freshness \}\}$/m,
     'the trusted planner output must be exposed to the ABI freshness job',
+  );
+  assert.doesNotMatch(
+    workflowJobBlock(primaryWorkflow, 'changes'),
+    /candidate\/scripts\/ci\/check-tracked-text-nul\.mjs/,
+    'an untrusted candidate must never supply its own security gate',
   );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
