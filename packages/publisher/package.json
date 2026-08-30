@@ -11,8 +11,11 @@
       "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
-    "./dist/promote-replay-safety.js": null,
-    "./dist/*": "./dist/*"
+    "./dist/workspace-resolution.js": {
+      "types": "./dist/workspace-resolution.d.ts",
+      "import": "./dist/workspace-resolution.js",
+      "default": "./dist/workspace-resolution.js"
+    }
   },
   "scripts": {
     "build": "tsc && pnpm run test:helper-types && pnpm run test:package-exports",

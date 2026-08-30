@@ -23,6 +23,8 @@ type ReplaySafeCodeStaysInternal = AssertFalse<
 >;
 // @ts-expect-error Producer certification must not be importable as a package subpath.
 type ReplaySafetyDeepModuleStaysClosed = typeof import('@origintrail-official/dkg-publisher/dist/promote-replay-safety.js');
+// @ts-expect-error Unlisted implementation modules remain private by default.
+type ArbitraryPublisherImplementationStaysClosed = typeof import('@origintrail-official/dkg-publisher/dist/dkg-publisher.js');
 type LegacyWorkspaceResolutionSubpathRemainsAvailable =
   typeof import('@origintrail-official/dkg-publisher/dist/workspace-resolution.js');
 
@@ -34,5 +36,6 @@ export type {
   ReplaySafeConstructorStaysInternal,
   ReplaySafeCodeStaysInternal,
   ReplaySafetyDeepModuleStaysClosed,
+  ArbitraryPublisherImplementationStaysClosed,
   LegacyWorkspaceResolutionSubpathRemainsAvailable,
 };
