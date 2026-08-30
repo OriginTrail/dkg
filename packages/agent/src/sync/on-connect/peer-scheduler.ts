@@ -211,6 +211,10 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
         if (lane === null) return;
       }
     } finally {
+      // No lane remains claimable by this drain. Detach before awaiting an
+      // asynchronous finalizer so a concurrent enqueue creates a replacement
+      // job instead of adding work to this terminal job.
+      if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
       try {
         try {
           await runner?.finish();
@@ -218,6 +222,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
           await this.reportInternalError(remotePeer, error, 'runner-finalizer');
         }
       } finally {
+        // Preserve a replacement job installed while this runner finalized.
         if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
       }
     }

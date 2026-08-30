@@ -224,6 +224,50 @@ describe('sync-on-connect per-peer scheduler', () => {
     }
   });
 
+  it('runs work accepted while an earlier job is finalizing', async () => {
+    const firstFinishStarted = deferred();
+    const releaseFirstFinish = deferred();
+    const selectedPlans: string[] = [];
+    let jobCount = 0;
+    const scheduler = new SyncOnConnectPeerScheduler<string>({
+      createJob: () => {
+        jobCount += 1;
+        const currentJob = jobCount;
+        return {
+          runAutomaticSelectedThenOrdinary: async () => 'synced',
+          runSelected: async (plan) => {
+            if (plan !== undefined) selectedPlans.push(plan);
+            return 'synced';
+          },
+          cancel: () => undefined,
+          finish: currentJob === 1
+            ? async () => {
+              firstFinishStarted.resolve();
+              await releaseFirstFinish.promise;
+            }
+            : () => undefined,
+        };
+      },
+      onInternalError: () => undefined,
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
+    await firstFinishStarted.promise;
+
+    expect(scheduler.has(PEER)).toBe(false);
+    expect(scheduler.enqueueSelected(
+      PEER,
+      () => undefined,
+      0,
+      'during-finalize',
+    )).toBe(true);
+    await vi.waitFor(() => expect(selectedPlans).toEqual(['during-finalize']));
+
+    releaseFirstFinish.resolve();
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(jobCount).toBe(2);
+  });
+
   it('finalizes an active peer job once when it is cleared during a phase', async () => {
     const ordinary = deferred();
     const ordinaryStarted = deferred();
