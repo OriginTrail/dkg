@@ -6,14 +6,14 @@ import {
   DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
   MIN_SHUTDOWN_HARD_TIMEOUT_MS,
   MAX_SHUTDOWN_HARD_TIMEOUT_MS,
-  resolveShutdownHardTimeoutMs,
+  createBoundedShutdownRace,
   decodeForcedExitCode,
   encodeForcedShutdownExitCode,
   isForcedShutdownExitCode,
   raceShutdownWithTimeout,
 } from '../src/daemon/shutdown.js';
 import { DAEMON_EXIT_CODE_RESTART } from '../src/daemon/manifest.js';
-import { resolveDaemonShutdownHardTimeoutMs } from '../src/daemon/lifecycle.js';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 describe('shutdown constants', () => {
   it('declares SHUTDOWN_FORCED_OFFSET = 100 so 0+offset and 75+offset both fit in an 8-bit exit code', () => {
@@ -34,12 +34,21 @@ describe('shutdown constants', () => {
   });
 });
 
-describe('resolveShutdownHardTimeoutMs', () => {
-  it('preserves the 15 second default and accepts both inclusive bounds', () => {
-    expect(resolveShutdownHardTimeoutMs(undefined)).toBe(15_000);
-    expect(resolveShutdownHardTimeoutMs(String(MIN_SHUTDOWN_HARD_TIMEOUT_MS))).toBe(5_000);
-    expect(resolveShutdownHardTimeoutMs(String(MAX_SHUTDOWN_HARD_TIMEOUT_MS))).toBe(300_000);
-    expect(resolveShutdownHardTimeoutMs('60000')).toBe(60_000);
+describe('resolveShutdownPolicy', () => {
+  it('preserves defaults and derives a supervisor grace that cannot preempt the worker', () => {
+    expect(resolveShutdownPolicy(undefined)).toEqual({
+      hardTimeoutMs: 15_000,
+      supervisorGraceMs: 30_000,
+    });
+    expect(resolveShutdownPolicy(String(MIN_SHUTDOWN_HARD_TIMEOUT_MS)).hardTimeoutMs).toBe(5_000);
+    expect(resolveShutdownPolicy(String(MAX_SHUTDOWN_HARD_TIMEOUT_MS))).toEqual({
+      hardTimeoutMs: 300_000,
+      supervisorGraceMs: 306_000,
+    });
+    expect(resolveShutdownPolicy('60000')).toEqual({
+      hardTimeoutMs: 60_000,
+      supervisorGraceMs: 66_000,
+    });
   });
 
   it.each([
@@ -53,17 +62,25 @@ describe('resolveShutdownHardTimeoutMs', () => {
     String(Number.MAX_SAFE_INTEGER + 1),
     'Infinity',
   ])('rejects malformed or unsafe override %j', (value) => {
-    expect(() => resolveShutdownHardTimeoutMs(value)).toThrow(
+    expect(() => resolveShutdownPolicy(value)).toThrow(
       /DKG_SHUTDOWN_HARD_TIMEOUT_MS must be an integer/u,
     );
   });
 
-  it('captures startup input so later environment mutation cannot change it', () => {
+  it('binds the startup deadline used by the runtime race despite later environment mutation', async () => {
     const env: NodeJS.ProcessEnv = { DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000' };
-    const captured = resolveDaemonShutdownHardTimeoutMs(env);
+    const policy = resolveShutdownPolicy(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
+    const observedTimeouts: number[] = [];
+    const runShutdownRace = createBoundedShutdownRace(
+      policy,
+      async (_cleanup, hardTimeoutMs) => {
+        observedTimeouts.push(hardTimeoutMs);
+        return { forced: false };
+      },
+    );
     env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
-    expect(captured).toBe(60_000);
-    expect(resolveDaemonShutdownHardTimeoutMs(env)).toBe(5_000);
+    await runShutdownRace(Promise.resolve(), () => undefined);
+    expect(observedTimeouts).toEqual([60_000]);
   });
 });
 

@@ -97,6 +97,7 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
+import { resolveShutdownPolicy } from '../daemon/shutdown-policy.js';
 
 export function registerLifecycleCommands(program: Command): void {
 // ─── dkg start ───────────────────────────────────────────────────────
@@ -144,6 +145,11 @@ program
       process.exit(1);
     }
 
+    const daemonEnv: NodeJS.ProcessEnv = withSelectedDkgHome(process.env);
+    // Validate at the user-facing boundary before migrations or a detached
+    // child can hide the actionable configuration error.
+    resolveShutdownPolicy(daemonEnv.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
+
     // OT-RFC-41 §4.1 / Bundle B1a: blue-green slot initialization is
     // a Core-only concern under rc.12+. Edge nodes run directly from
     // the npm-global install. Pre-rc.12 Edge users may still have
@@ -173,7 +179,6 @@ program
     // declaration order first.
     const relayPreferredOpt = Array.isArray(opts.relayPreferred) ? (opts.relayPreferred as string[]) : [];
     const cleanedRelayPreferred = relayPreferredOpt.map((s) => s.trim()).filter((s) => s.length > 0);
-    const daemonEnv: NodeJS.ProcessEnv = withSelectedDkgHome(process.env);
     if (cleanedRelayPreferred.length > 0) {
       daemonEnv.DKG_RELAY_PREFERRED = cleanedRelayPreferred.join(',');
       console.log(

@@ -32,8 +32,8 @@ import {
   LIVENESS_PROBE_INTERVAL_MS,
   LIVENESS_PROBE_TIMEOUT_MS,
   DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
-  shutdownGraceMsForHardTimeout,
 } from '../src/daemon/supervisor-liveness.js';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 // Plain DI recorder (no vitest mock API): captures every call's args and
 // delegates to a real implementation. Used for the watcher's injected
@@ -79,9 +79,9 @@ describe('module constants', () => {
   });
 
   it('never lets supervisor shutdown grace preempt the worker hard timeout', () => {
-    expect(shutdownGraceMsForHardTimeout(15_000)).toBe(30_000);
-    expect(shutdownGraceMsForHardTimeout(60_000)).toBe(66_000);
-    expect(shutdownGraceMsForHardTimeout(300_000)).toBe(306_000);
+    expect(resolveShutdownPolicy(undefined).supervisorGraceMs).toBe(30_000);
+    expect(resolveShutdownPolicy('60000').supervisorGraceMs).toBe(66_000);
+    expect(resolveShutdownPolicy('300000').supervisorGraceMs).toBe(306_000);
   });
 });
 

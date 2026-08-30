@@ -43,33 +43,22 @@
 
 import { connect, type Socket } from 'node:net';
 
-import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
+import {
+  DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
+  LIVENESS_PROBE_TIMEOUT_MS,
+} from './shutdown-policy.js';
+
+export {
+  DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
+  LIVENESS_PROBE_TIMEOUT_MS,
+} from './shutdown-policy.js';
 
 /** Default tick — 30s. Picked to be longer than typical request handling but short enough that a 5-failure quorum triggers within ~2.5 min. */
 export const LIVENESS_PROBE_INTERVAL_MS = 30_000;
 
 /** Default per-probe TCP-connect timeout — 5s. Production daemons handle most requests in <100ms; 5s is many SDs above the long-tail. */
-export const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
-
 /** Default trigger threshold — 5 consecutive failures. With 30s tick → ~2.5 min unresponsive before SIGKILL. */
 export const LIVENESS_CONSECUTIVE_FAILURES_TO_KILL = 5;
-
-/** Preserve the existing fleet default while allowing longer worker budgets. */
-export const DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS = 30_000;
-
-/**
- * Give the worker its full hard timeout, forced-cleanup budget, and one
- * in-flight probe timeout before the supervisor can begin counting failures.
- */
-export function shutdownGraceMsForHardTimeout(hardTimeoutMs: number): number {
-  if (!Number.isSafeInteger(hardTimeoutMs) || hardTimeoutMs < 1) {
-    throw new TypeError('shutdown hard timeout must be a positive integer');
-  }
-  return Math.max(
-    DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
-    hardTimeoutMs + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS + LIVENESS_PROBE_TIMEOUT_MS,
-  );
-}
 
 /**
  * One-shot probe: connect to `host:port`, return `true` on success, `false`

@@ -5,21 +5,68 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { resolveSupervisorShutdownGraceMs } from '../src/cli-supervisor.js';
+import { maybeStartSupervisorLivenessWatcher } from '../src/cli-supervisor.js';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 const execFileAsync = promisify(execFile);
 
 describe('foreground supervisor restart command', () => {
-  it('derives watcher grace from the exact child environment', () => {
-    expect(resolveSupervisorShutdownGraceMs({})).toBe(30_000);
-    expect(resolveSupervisorShutdownGraceMs({
-      DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000',
-    })).toBe(66_000);
-    expect(() => resolveSupervisorShutdownGraceMs({
-      DKG_SHUTDOWN_HARD_TIMEOUT_MS: 'invalid',
-    })).toThrow(/DKG_SHUTDOWN_HARD_TIMEOUT_MS/u);
+  it('passes the startup-captured shutdown policy to the real watcher boundary', async () => {
+    const env: NodeJS.ProcessEnv = { DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000' };
+    const shutdownPolicy = resolveShutdownPolicy(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
+    const observedGrace: number[] = [];
+    const stop = await maybeStartSupervisorLivenessWatcher(
+      { kill: () => true },
+      { enabled: true, shutdownPolicy },
+      {
+        readApiPort: async () => 9200,
+        loadApiHost: async () => '127.0.0.1',
+        sleep: async () => undefined,
+        apiPortExists: () => true,
+        startWatcher: (options) => {
+          observedGrace.push(options.shutdownGraceMs!);
+          return { stop: () => undefined };
+        },
+      },
+    );
+    env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
+    await vi.waitFor(() => expect(observedGrace).toEqual([66_000]));
+    stop();
+  });
+
+  it('rejects an invalid shutdown budget at `dkg start` before detached startup polling', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dkg-start-shutdown-policy-'));
+    try {
+      await writeFile(join(root, 'config.json'), '{}');
+      const cliPath = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+      const startedAt = Date.now();
+      let failure: unknown;
+      try {
+        await execFileAsync(process.execPath, ['--import', 'tsx', cliPath, 'start'], {
+          cwd: fileURLToPath(new URL('..', import.meta.url)),
+          env: {
+            ...process.env,
+            DKG_HOME: root,
+            DKG_NO_BLUE_GREEN: '1',
+            DKG_SHUTDOWN_HARD_TIMEOUT_MS: 'invalid',
+          },
+          timeout: 5_000,
+        });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error & { code?: number }).code).not.toBe(0);
+      expect((failure as Error & { stderr?: string }).stderr).toMatch(
+        /DKG_SHUTDOWN_HARD_TIMEOUT_MS must be an integer/u,
+      );
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('spawns the active entrypoint with Node exec argv and the foreground worker argument', async () => {

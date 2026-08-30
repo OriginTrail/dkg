@@ -986,7 +986,7 @@ describe('A24 — producer-quiescent teardown order', () => {
 
     await runProducerQuiescentTeardown({
       ...steps,
-      closeServer: () => events.push('closeServer'),
+      closeServer: async () => { events.push('closeServer'); },
       closeLocalLlm: async () => { events.push('closeLocalLlm'); },
       drainCatchupJobs: async () => { await sleep(1); events.push('drainCatchupJobs'); },
       flushTelemetry: async () => { await sleep(1); events.push('flushTelemetry'); },
@@ -1188,7 +1188,12 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
       drainArgs,
       log,
       deps: {
-        server: { close: () => calls.push('server.close') },
+        server: {
+          close: (callback: (error?: Error) => void) => {
+            calls.push('server.close');
+            callback();
+          },
+        },
         closeLocalLlm: async () => {
           calls.push('closeLocalLlm');
         },

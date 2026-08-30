@@ -7,9 +7,11 @@ import {
 import { DAEMON_EXIT_CODE_RESTART, decodeForcedExitCode } from './daemon.js';
 import {
   isLivenessProbeEnabled, startLivenessWatcher, LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
-  shutdownGraceMsForHardTimeout,
 } from './daemon/supervisor-liveness.js';
-import { resolveShutdownHardTimeoutMs } from './daemon/shutdown.js';
+import {
+  resolveShutdownPolicy,
+  type ShutdownPolicy,
+} from './daemon/shutdown-policy.js';
 import {
   sleep, withSelectedDkgHome, selectedDkgHomeForEnv, probeHostForApiHost,
 } from './cli-helpers.js';
@@ -23,6 +25,34 @@ async function appendSupervisorLog(message: string): Promise<void> {
 function supervisorWarn(message: string): void {
   console.warn(message);
   void appendSupervisorLog(message).catch(() => {});
+}
+
+export interface SupervisorLivenessConfig {
+  enabled: boolean;
+  shutdownPolicy: ShutdownPolicy;
+}
+
+export interface SupervisorLivenessDependencies {
+  readApiPort: () => Promise<number | null>;
+  loadApiHost: () => Promise<string | undefined>;
+  sleep: (ms: number) => Promise<void>;
+  startWatcher: typeof startLivenessWatcher;
+  apiPortExists: () => boolean;
+}
+
+const supervisorLivenessDependencies: SupervisorLivenessDependencies = {
+  readApiPort: () => readApiPort(),
+  loadApiHost: async () => (await loadConfig()).apiHost,
+  sleep,
+  startWatcher: startLivenessWatcher,
+  apiPortExists: () => existsSync(apiPortPath()),
+};
+
+function resolveSupervisorLivenessConfig(env: NodeJS.ProcessEnv): SupervisorLivenessConfig {
+  return {
+    enabled: isLivenessProbeEnabled(env.DKG_SUPERVISOR_LIVENESS_PROBE),
+    shutdownPolicy: resolveShutdownPolicy(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS),
+  };
 }
 
 /**
@@ -39,10 +69,10 @@ function supervisorWarn(message: string): void {
  */
 async function maybeStartSupervisorLivenessWatcher(
   child: { kill(signal: 'SIGKILL'): boolean },
-  childEnv: NodeJS.ProcessEnv = process.env,
-  shutdownGraceMs = resolveSupervisorShutdownGraceMs(childEnv),
+  config: SupervisorLivenessConfig = resolveSupervisorLivenessConfig(process.env),
+  deps: SupervisorLivenessDependencies = supervisorLivenessDependencies,
 ): Promise<() => void> {
-  if (!isLivenessProbeEnabled(childEnv.DKG_SUPERVISOR_LIVENESS_PROBE)) {
+  if (!config.enabled) {
     return () => {};
   }
 
@@ -53,21 +83,21 @@ async function maybeStartSupervisorLivenessWatcher(
   let watcher: { stop(): void } | null = null;
   void (async () => {
     while (!cancelled) {
-      const port = await readApiPort().catch(() => null);
+      const port = await deps.readApiPort().catch(() => null);
       if (port) {
         if (cancelled) return;
-        const config = await loadConfig().catch(() => ({ apiHost: undefined }));
+        const apiHost = await deps.loadApiHost().catch(() => undefined);
         if (cancelled) return;
-        watcher = startLivenessWatcher({
+        watcher = deps.startWatcher({
           port,
-          host: probeHostForApiHost(config.apiHost),
+          host: probeHostForApiHost(apiHost),
           // Graceful-shutdown disarm: the worker's `shutdown()` removes
           // `api.port` BEFORE the slow cleanup tail (`agent.stop()`,
           // `dashDb.close()`, …), so its absence is the unambiguous "I'm
           // intentionally shutting down" signal. Without this the watcher
           // would race a slow teardown and SIGKILL mid-cleanup.
-          isShuttingDown: () => !existsSync(apiPortPath()),
-          shutdownGraceMs,
+          isShuttingDown: () => !deps.apiPortExists(),
+          shutdownGraceMs: config.shutdownPolicy.supervisorGraceMs,
           onUnresponsive: () => {
             supervisorWarn(
               `[supervisor] worker unresponsive after ${LIVENESS_CONSECUTIVE_FAILURES_TO_KILL} consecutive liveness probes; SIGKILL + respawn.`,
@@ -84,7 +114,7 @@ async function maybeStartSupervisorLivenessWatcher(
         });
         return;
       }
-      await sleep(500);
+      await deps.sleep(500);
     }
   })();
 
@@ -94,16 +124,10 @@ async function maybeStartSupervisorLivenessWatcher(
   };
 }
 
-function resolveSupervisorShutdownGraceMs(env: NodeJS.ProcessEnv): number {
-  return shutdownGraceMsForHardTimeout(
-    resolveShutdownHardTimeoutMs(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS),
-  );
-}
-
 async function runDaemonSupervisor(): Promise<void> {
   process.env.DKG_HOME = selectedDkgHomeForEnv(process.env);
   const childEnv = withSelectedDkgHome(process.env);
-  const shutdownGraceMs = resolveSupervisorShutdownGraceMs(childEnv);
+  const livenessConfig = resolveSupervisorLivenessConfig(childEnv);
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
 
@@ -129,11 +153,7 @@ async function runDaemonSupervisor(): Promise<void> {
     // takes it from there. Gated by DKG_SUPERVISOR_LIVENESS_PROBE so
     // tests + headless-worker scenarios can opt out. See
     // packages/cli/src/daemon/supervisor-liveness.ts for the full rationale.
-    const stopWatcher = await maybeStartSupervisorLivenessWatcher(
-      child,
-      childEnv,
-      shutdownGraceMs,
-    );
+    const stopWatcher = await maybeStartSupervisorLivenessWatcher(child, livenessConfig);
 
     const rawExitCode = await new Promise<number | null>((resolve) => {
       child.once('exit', (code) => resolve(code));
@@ -162,7 +182,7 @@ async function runDaemonSupervisor(): Promise<void> {
 }
 
 async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const shutdownGraceMs = resolveSupervisorShutdownGraceMs(childEnv);
+  const livenessConfig = resolveSupervisorLivenessConfig(childEnv);
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
   let currentChild: ReturnType<typeof spawn> | null = null;
@@ -194,11 +214,7 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
       },
     );
 
-    const stopWatcher = await maybeStartSupervisorLivenessWatcher(
-      currentChild,
-      childEnv,
-      shutdownGraceMs,
-    );
+    const stopWatcher = await maybeStartSupervisorLivenessWatcher(currentChild, livenessConfig);
 
     const rawExitCode = await new Promise<number | null>((resolve) => {
       currentChild!.once('exit', (code) => resolve(code));
@@ -236,7 +252,6 @@ export {
   appendSupervisorLog,
   supervisorWarn,
   maybeStartSupervisorLivenessWatcher,
-  resolveSupervisorShutdownGraceMs,
   runDaemonSupervisor,
   runForegroundSupervisor,
 };

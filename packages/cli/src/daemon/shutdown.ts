@@ -25,34 +25,18 @@
  */
 
 import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
+import {
+  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
+  SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
+  type ShutdownPolicy,
+} from './shutdown-policy.js';
 
-/** Default and permitted bounds for graceful shutdown before hard exit. */
-export const DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS = 15_000;
-export const MIN_SHUTDOWN_HARD_TIMEOUT_MS = 5_000;
-export const MAX_SHUTDOWN_HARD_TIMEOUT_MS = 300_000;
-
-/**
- * Resolve the hard-stop guard without weakening the default fleet behavior.
- * This function is intentionally explicit-input only: callers capture the
- * environment once at their startup boundary, so later mutation and module
- * import order cannot change a running worker's deadline.
- */
-export function resolveShutdownHardTimeoutMs(value: string | undefined): number {
-  if (value === undefined) return DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
-  const parsed = Number(value);
-  if (
-    value.trim() === ''
-    || !Number.isSafeInteger(parsed)
-    || parsed < MIN_SHUTDOWN_HARD_TIMEOUT_MS
-    || parsed > MAX_SHUTDOWN_HARD_TIMEOUT_MS
-  ) {
-    throw new TypeError(
-      `DKG_SHUTDOWN_HARD_TIMEOUT_MS must be an integer from `
-        + `${MIN_SHUTDOWN_HARD_TIMEOUT_MS} to ${MAX_SHUTDOWN_HARD_TIMEOUT_MS}`,
-    );
-  }
-  return parsed;
-}
+export {
+  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
+  MIN_SHUTDOWN_HARD_TIMEOUT_MS,
+  MAX_SHUTDOWN_HARD_TIMEOUT_MS,
+  SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
+} from './shutdown-policy.js';
 
 /** Backward-compatible name for the unchanged fleet default. */
 export const SHUTDOWN_HARD_TIMEOUT_MS = DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
@@ -65,8 +49,6 @@ export const SHUTDOWN_HARD_TIMEOUT_MS = DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
  * too, we abandon the work and exit. 1s is generous for `unlink()` calls and
  * still keeps total wall-clock < 16s in the worst case.
  */
-export const SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS = 1_000;
-
 /**
  * Forced-shutdown exit codes are derived from the shutdown callsites that
  * exist today:
@@ -204,4 +186,24 @@ export async function raceShutdownWithTimeout(
     if (timer) clearTimeout(timer);
   }
   return { forced };
+}
+
+/**
+ * Bind the startup-resolved policy to the runtime race. The injected race is
+ * a narrow test seam; production always uses raceShutdownWithTimeout.
+ */
+export function createBoundedShutdownRace(
+  policy: ShutdownPolicy,
+  race: typeof raceShutdownWithTimeout = raceShutdownWithTimeout,
+): (
+  cleanup: Promise<void>,
+  log: (message: string) => void,
+  onForcedTimeout?: () => void | Promise<void>,
+) => Promise<{ forced: boolean }> {
+  return (cleanup, log, onForcedTimeout) => race(
+    cleanup,
+    policy.hardTimeoutMs,
+    log,
+    onForcedTimeout,
+  );
 }

@@ -84,9 +84,9 @@ export async function beginGracefulShutdown(deps: {
 }
 
 export interface ProducerQuiescentTeardownSteps {
-  /** Stop accepting new connections. Initiated, not awaited — in-flight
-   *  requests keep their sockets and everything below is still alive. */
-  closeServer: () => void;
+  /** Stop accepting new connections and drain in-flight callbacks while their
+   * dependencies are still alive. The outer shutdown deadline bounds this. */
+  closeServer: () => Promise<void>;
   /** Close the daemon-owned MCP child before the DKG agent/store retires. */
   closeLocalLlm: () => Promise<void>;
   /** Grace period for retained catch-up jobs, WHILE THE WORKER IS ALIVE,
@@ -302,7 +302,7 @@ export async function closeDaemonBackingStoresAfterTeardown(
  * function and into tested surface: the drain budget and the log threading.
  */
 export interface ProducerQuiescentTeardownDeps {
-  server: { close: () => void };
+  server: { close: (callback: (error?: Error) => void) => unknown };
   closeLocalLlm: () => Promise<void>;
   drainCatchupJobs: (budgetMs: number, log: (message: string) => void) => Promise<unknown>;
   flushTelemetry: (options: { log: (message: string) => void }) => Promise<void>;
@@ -324,7 +324,12 @@ export function buildProducerQuiescentTeardownSteps(
   deps: ProducerQuiescentTeardownDeps,
 ): ProducerQuiescentTeardownSteps {
   return {
-    closeServer: () => deps.server.close(),
+    closeServer: () => new Promise<void>((resolve, reject) => {
+      deps.server.close((error?: Error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    }),
     closeLocalLlm: () => deps.closeLocalLlm(),
     drainCatchupJobs: async () => {
       await deps.drainCatchupJobs(
