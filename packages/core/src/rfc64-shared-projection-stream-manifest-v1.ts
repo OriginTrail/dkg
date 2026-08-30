@@ -6,12 +6,9 @@ import {
   CG_SHARED_PRIVATE_COMMITMENT_SUFFIX_V1,
 } from './cg-shared-projection.js';
 import {
-  buildCatalogAssertionScopeV1,
-  type CatalogLaneV1,
-} from './author-catalog-codec.js';
-import {
   assertCanonicalDeterministicUalV1,
 } from './ka-content-scope.js';
+import { deriveRfc64SharedProjectionGraphIriV1 } from './rfc64-shared-projection-address-v1.js';
 import {
   MAX_KA_TRANSFER_BYTES_V1,
 } from './ka-transfer-descriptor.js';
@@ -62,28 +59,6 @@ export class Rfc64SharedProjectionStreamManifestErrorV1 extends Error {
   }
 }
 
-/**
- * Prefix-free physical graph for one RFC-64 shared projection.
- *
- * The legacy `{contextGraphId}[/{subGraphName}]` path is not injective when a
- * context-graph ID itself contains `/`. Reuse the catalog-v1 root/subgraph
- * discriminator and escaped context component so two authenticated lanes can
- * never resolve to the same graph.
- */
-export function deriveRfc64SharedProjectionGraphIriV1(
-  lane: CatalogLaneV1,
-  kaUal: unknown,
-): string {
-  let ual: ReturnType<typeof assertCanonicalDeterministicUalV1>;
-  try {
-    ual = assertCanonicalDeterministicUalV1(kaUal);
-  } catch (cause) {
-    fail('shared-projection graph requires a canonical deterministic KA UAL', cause);
-  }
-  return `did:dkg:context-graph:${buildCatalogAssertionScopeV1(lane)}`
-    + `/_shared_memory/${ual.agentAddress}/${ual.kaNumber}`;
-}
-
 /** Compile the sole exact-graph RFC-64 shared-projection stream. */
 export function compileRfc64SharedProjectionStreamOperationV1(
   input: unknown,
@@ -96,9 +71,6 @@ export function compileRfc64SharedProjectionStreamOperationV1(
     fail('sealBinding was not minted by the catalog seal verifier', cause);
   }
 
-  const catalogScope = sealBinding.catalogScope;
-  const catalogRow = sealBinding.catalogRow;
-
   let ual: ReturnType<typeof assertCanonicalDeterministicUalV1>;
   try {
     ual = assertCanonicalDeterministicUalV1(sealBinding.seal.kaUal);
@@ -106,13 +78,13 @@ export function compileRfc64SharedProjectionStreamOperationV1(
     fail('verified author seal does not carry a canonical deterministic KA UAL', cause);
   }
   if (
-    ual.chainId !== catalogScope.networkId
-    || ual.agentAddress !== catalogScope.authorAddress
+    ual.chainId !== sealBinding.networkId
+    || ual.agentAddress !== sealBinding.authorAddress
   ) {
     fail('verified seal UAL does not belong to the catalog author lane');
   }
 
-  const signedByteCeiling = Number(BigInt(catalogRow.transfer.byteLength));
+  const signedByteCeiling = Number(BigInt(sealBinding.signedTransferByteLength));
   if (
     !Number.isSafeInteger(signedByteCeiling)
     || signedByteCeiling < 1
@@ -121,7 +93,10 @@ export function compileRfc64SharedProjectionStreamOperationV1(
     fail('signed transfer byte ceiling is outside the protocol hard cap');
   }
 
-  const graphIri = deriveRfc64SharedProjectionGraphIriV1(catalogScope, ual.ual);
+  const graphIri = deriveRfc64SharedProjectionGraphIriV1({
+    contextGraphId: sealBinding.contextGraphId,
+    subGraphName: sealBinding.subGraphName,
+  }, ual);
   const commitmentSubject =
     `${ual.ual}${CG_SHARED_PRIVATE_COMMITMENT_SUFFIX_V1}`;
 
@@ -129,7 +104,7 @@ export function compileRfc64SharedProjectionStreamOperationV1(
     queryId: RFC64_SHARED_PROJECTION_STREAM_QUERY_ID_V1,
     graphIri,
     commitmentSubject,
-    projectionDigest: catalogRow.projectionDigest,
+    projectionDigest: sealBinding.projectionDigest,
     publicTripleCount: sealBinding.seal.publicTripleCount,
     signedByteCeiling,
     protocolByteCeiling: RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,

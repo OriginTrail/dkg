@@ -20,9 +20,12 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
+  MAX_RFC64_SHARED_PROJECTION_STREAM_TIMEOUT_MS_V1,
   Rfc64SharedProjectionStreamGatewayErrorV1,
   SyncSharedProjectionStoreV1,
-} from '../src/rfc64-shared-projection-stream-gateway.js';
+  isRfc64SharedProjectionStreamCapabilityV1,
+  type Rfc64SharedProjectionStreamCapabilityV1,
+} from '../src/index.js';
 import type { Quad, TripleStore } from '../src/triple-store.js';
 
 const AUTHOR = '0x3333333333333333333333333333333333333333';
@@ -98,6 +101,16 @@ const REQUEST = Object.freeze({
 });
 
 describe('SyncSharedProjectionStoreV1', () => {
+  it('exports the gateway and capability contract from the package root', () => {
+    const capability: Rfc64SharedProjectionStreamCapabilityV1 = {
+      rfc64SharedProjectionStreamV1: async () => streamQuads(QUADS),
+    };
+    expect(isRfc64SharedProjectionStreamCapabilityV1(capability)).toBe(true);
+    expect(MAX_RFC64_SHARED_PROJECTION_STREAM_TIMEOUT_MS_V1).toBe(600_000);
+    expect(() => new SyncSharedProjectionStoreV1(capability as unknown as TripleStore))
+      .not.toThrow();
+  });
+
   it('streams canonical bytes and proves count, order, ceiling, and digest at completion', async () => {
     let captured: Rfc64SharedProjectionStreamOperationV1 | undefined;
     let capturedByteCeiling: number | undefined;

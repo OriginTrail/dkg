@@ -24,6 +24,7 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     expect(lateCleanup).toHaveBeenCalledWith('late');
 
     const registrationRace = new AbortController();
+    const registrationRemove = vi.spyOn(registrationRace.signal, 'removeEventListener');
     const add = registrationRace.signal.addEventListener.bind(registrationRace.signal);
     vi.spyOn(registrationRace.signal, 'addEventListener').mockImplementation((...args) => {
       add(...args);
@@ -33,17 +34,29 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
       new Promise<string>(() => {}),
       registrationRace.signal,
     )).rejects.toThrow('registration race');
+    expect(abortCalls(registrationRemove)).toBe(1);
 
     const normal = new AbortController();
+    const normalRemove = vi.spyOn(normal.signal, 'removeEventListener');
+    await expect(raceStoreWorkAgainstAbort(
+      Promise.resolve('done'),
+      normal.signal,
+    )).resolves.toBe('done');
+    expect(abortCalls(normalRemove)).toBe(1);
+
+    const rejected = new AbortController();
+    const rejectedRemove = vi.spyOn(rejected.signal, 'removeEventListener');
     const failure = new Error('backend failed');
     await expect(raceStoreWorkAgainstAbort(
       Promise.reject(failure),
-      normal.signal,
+      rejected.signal,
     )).rejects.toBe(failure);
+    expect(abortCalls(rejectedRemove)).toBe(1);
 
     let resolveLate!: (value: string) => void;
     const lateWork = new Promise<string>((resolve) => { resolveLate = resolve; });
     const cancelled = new AbortController();
+    const cancelledRemove = vi.spyOn(cancelled.signal, 'removeEventListener');
     const cleanup = vi.fn();
     const raced = raceStoreWorkAgainstAbort(lateWork, cancelled.signal, cleanup);
     cancelled.abort(new Error('cancelled'));
@@ -51,6 +64,7 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     resolveLate('owned-resource');
     await Promise.resolve();
     expect(cleanup).toHaveBeenCalledWith('owned-resource');
+    expect(abortCalls(cancelledRemove)).toBe(1);
   });
 
   it('forwards the first abort reason and unlinks both source signals', () => {
