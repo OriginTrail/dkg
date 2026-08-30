@@ -88,6 +88,7 @@ export interface CombinedSyncOnConnectPeerAccounting<Probe> {
 }
 
 export interface SyncOnConnectPeerAccountingEntry<Probe> {
+  readonly lane: 'selected' | 'ordinary';
   readonly outcome: SyncOnConnectPeerOutcome;
   readonly probe: Probe;
 }

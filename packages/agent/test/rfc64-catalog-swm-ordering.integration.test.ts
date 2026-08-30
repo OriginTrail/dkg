@@ -172,7 +172,7 @@ describe('RFC-64 catalog and SWM ordering', () => {
         ]);
         return null;
       });
-    vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+    vi.spyOn(receiver, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
       .mockReturnValue(true);
     harness.installPlanning([
       { contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' },

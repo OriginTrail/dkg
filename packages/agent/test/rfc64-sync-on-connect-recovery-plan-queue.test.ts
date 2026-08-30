@@ -63,7 +63,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
     const handleSyncError = vi.fn();
 
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
@@ -105,7 +105,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     agent.syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
     const handleSyncError = vi.fn();
 
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
@@ -180,7 +180,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     // The connection event schedules the canonical owner first. Bootstrap then
     // upgrades that pending run instead of creating a second timer/ledger.
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
@@ -227,7 +227,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     );
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledOnce());
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
@@ -239,7 +239,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
 
     // A periodic exact plan inside its own cooldown must not use the ordinary
     // owner's one-time post-catalog bypass again.
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
@@ -262,14 +262,14 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
     )).toBe(true);
     await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledTimes(3));
     await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,

@@ -39,7 +39,7 @@ describe('RFC-64 SWM lane partition and admission', () => {
     });
     const handleSyncError = () => undefined;
 
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,

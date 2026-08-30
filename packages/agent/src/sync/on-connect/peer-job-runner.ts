@@ -79,7 +79,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     }
     let ordinaryOutcome: SyncReconcilerAttemptOutcome;
     try {
-      ordinaryOutcome = await this.attemptPhase(this.dependencies.runOrdinary);
+      ordinaryOutcome = await this.attemptPhase('ordinary', this.dependencies.runOrdinary);
     } catch (ordinaryError: unknown) {
       if (selectedError !== undefined) {
         throw new AggregateError(
@@ -139,16 +139,29 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
 
   private async runSelectedPhase(attempt: SyncAttempt): Promise<SyncReconcilerAttemptOutcome> {
     this.selectedPhaseExecuted = true;
-    return this.attemptPhase(attempt);
+    return this.attemptPhase('selected', attempt);
   }
 
-  private async attemptPhase(attempt: SyncAttempt): Promise<SyncReconcilerAttemptOutcome> {
+  private async attemptPhase(
+    lane: SyncOnConnectPeerAccountingEntry<Probe>['lane'],
+    attempt: SyncAttempt,
+  ): Promise<SyncReconcilerAttemptOutcome> {
     const probe = await this.acquirePhaseProbe();
     if (probe === null || this.terminalState !== 'active') return 'not-started';
     return executeSyncOnConnectAttempt(attempt, {
       recordAccounting: (outcome) => {
         if (this.terminalState === 'active') {
-          this.accountingEntries.push({ outcome, probe });
+          // A later selected generation supersedes the earlier selected
+          // disposition for the same admission. Ordinary outcomes are kept:
+          // a selected clear must never erase an unrelated ordinary retry.
+          if (lane === 'selected') {
+            for (let i = this.accountingEntries.length - 1; i >= 0; i -= 1) {
+              if (this.accountingEntries[i]!.lane === 'selected') {
+                this.accountingEntries.splice(i, 1);
+              }
+            }
+          }
+          this.accountingEntries.push({ lane, outcome, probe });
         }
       },
       onBackpressure: this.dependencies.logBackpressure,

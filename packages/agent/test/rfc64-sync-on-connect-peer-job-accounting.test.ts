@@ -246,7 +246,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     const handleSyncError = (_peerId: string, error: unknown) => { errors.push(error); };
 
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
@@ -317,7 +317,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       handleSyncError,
       0,
     )).toBe(true);
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
@@ -474,6 +474,129 @@ describe('RFC-64 peer-job accounting and order', () => {
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
   });
 
+  it('clears an earlier selected retry when a late selected generation completes', async () => {
+    const agent = await createUnstartedAgent('Rfc64LateSelectedGenerationCompletes');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.config.syncContextGraphs = ['selected-cg'];
+    agent.config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { contextGraphId: 'selected-cg', accessPolicy: 0 } },
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    let selectedRetryRequired = true;
+    vi.spyOn(agent.selectedSwmBootstrapAdmission, 'isRetryRequired')
+      .mockImplementation(() => selectedRetryRequired);
+    const selectedRun = vi.fn(async (
+      _peerId,
+      onSyncAccounting,
+      _source,
+      recoveryPlan,
+    ) => {
+      if (recoveryPlan === undefined) {
+        onSyncAccounting?.({
+          reconcilerDisposition: 'retry',
+          fresh: false,
+          progress: true,
+        });
+      } else {
+        selectedRetryRequired = false;
+        onSyncAccounting?.({
+          reconcilerDisposition: 'clear',
+          fresh: false,
+          progress: true,
+        });
+      }
+      return 'synced' as const;
+    });
+    agent.trySelectedSwmRetryFromPeer = selectedRun;
+    let markOrdinaryStarted!: () => void;
+    let releaseOrdinary!: () => void;
+    const ordinaryStarted = new Promise<void>((resolve) => { markOrdinaryStarted = resolve; });
+    const ordinaryBlocked = new Promise<void>((resolve) => { releaseOrdinary = resolve; });
+    agent.trySyncFromPeer = async (_peerId, onSyncAccounting) => {
+      markOrdinaryStarted();
+      await ordinaryBlocked;
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      });
+      return 'synced';
+    };
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
+
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
+    await ordinaryStarted;
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      () => undefined,
+      0,
+    )).toBe(true);
+    releaseOrdinary();
+
+    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    expect(selectedRun).toHaveBeenCalledTimes(2);
+    expect(applyJobAccounting).toHaveBeenCalledOnce();
+    expect(applyJobAccounting).toHaveBeenCalledWith(
+      PEER_A,
+      {
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      },
+      expect.any(Object),
+    );
+    expect(agent.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+  });
+
+  it('retains an ordinary retry after a later selected generation clears', async () => {
+    const agent = await createUnstartedAgent('Rfc64OrdinaryRetrySurvivesSelectedClear');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.trySelectedSwmRetryFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: false,
+        progress: true,
+      });
+      return 'synced';
+    };
+    agent.trySyncFromPeer = async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'retry',
+        fresh: false,
+        progress: false,
+      });
+      return 'synced';
+    };
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runOrdinary();
+    await runner.runSelected();
+    runner.finish();
+
+    expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+  });
+
   it('omits retry accounting when a peer-job phase throws local backpressure', async () => {
     const agent = await createUnstartedAgent('Rfc64PeerJobBackpressureAccounting');
     allowAllNetworkAdmission(agent);
@@ -573,7 +696,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       (_peerId, error) => ordinaryErrors.push(error),
       0,
     )).toBe(true);
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       (_peerId, error) => selectedErrors.push(error),
       0,
@@ -795,7 +918,7 @@ describe('RFC-64 peer-job accounting and order', () => {
 
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
     await ordinaryStarted;
-    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       () => undefined,
       0,

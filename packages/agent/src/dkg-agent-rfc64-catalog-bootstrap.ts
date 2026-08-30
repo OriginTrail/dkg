@@ -385,7 +385,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         // A pre-existing connection has no new connection:open event. One
         // immutable provider plan owns admission for every selected graph,
         // including mixed public/private providers.
-        this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+        this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
           authorizedPlan,
           (_peerId, error) => {
             this.log.warn(

@@ -4563,29 +4563,40 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
-  /** Production trigger shared with the RFC-64 bootstrap mixin. */
+  /** Compatibility boundary for callers that still hold an untrusted raw plan. */
   queueRfc64SwmRecoveryPlanFromPeerOnConnect(
     this: DKGAgent,
-    recoveryPlan: Readonly<
-      Rfc64PeerSwmRecoveryPlanV1 | Rfc64AuthorizedSwmRecoveryPlanV1
-    >,
+    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
   ): boolean {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(recoveryPlan.providerPeerId)) {
       return false;
     }
-    const authorized = 'kind' in recoveryPlan
-      ? recoveryPlan.kind === 'rfc64-authorized-swm-recovery-v1'
-        ? recoveryPlan
-        : null
-      : this.rfc64SwmRecoveryCoordinatorV1.authorize(recoveryPlan);
+    const authorized = this.rfc64SwmRecoveryCoordinatorV1.authorize(recoveryPlan);
     if (authorized === null) return false;
+    return this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      handleSyncError,
+      delayMs,
+    );
+  }
+
+  /** Canonical execution boundary for a coordinator-authorized immutable plan. */
+  queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+    this: DKGAgent,
+    recoveryPlan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
+    handleSyncError: (remotePeer: string, err: unknown) => void,
+    delayMs = 3000,
+  ): boolean {
+    if (!this.networkAdmissionCoordinator.isAcceptedPeer(recoveryPlan.providerPeerId)) {
+      return false;
+    }
     return this.queueSyncFromPeerOnConnect(
       recoveryPlan.providerPeerId,
       handleSyncError,
       delayMs,
-      { selectedSwmRetry: true, rfc64RecoveryPlan: authorized },
+      { selectedSwmRetry: true, rfc64RecoveryPlan: recoveryPlan },
     );
   }
 
