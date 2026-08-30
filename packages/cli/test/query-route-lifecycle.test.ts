@@ -14,6 +14,7 @@ import {
   normalizePublicApiQueryResult,
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
+import { handleCclRoutes } from '../src/daemon/routes/ccl.js';
 import {
   respondIfStoreUnavailable,
   respondWithDaemonError,
@@ -122,8 +123,7 @@ describe('/api/query request lifecycle', () => {
     const agent = { [method]: vi.fn(async () => { throw error; }) };
     const { ctx, res } = cclRouteContext(path, body, agent);
 
-    await expect(handleQueryRoutes(ctx)).rejects.toBe(error);
-    respondWithDaemonError(res as unknown as ServerResponse, error);
+    await handleCclRoutes(ctx);
 
     expect(res.statusCode).toBe(404);
     expect(JSON.parse(res.body)).toEqual({
@@ -141,7 +141,7 @@ describe('/api/query request lifecycle', () => {
       { approveCclPolicy: vi.fn(async () => { throw error; }) },
     );
 
-    await expect(handleQueryRoutes(ctx)).rejects.toBe(error);
+    await expect(handleCclRoutes(ctx)).rejects.toBe(error);
     respondWithDaemonError(res as unknown as ServerResponse, error);
     expect(res.statusCode).toBe(500);
   });
@@ -154,7 +154,7 @@ describe('/api/query request lifecycle', () => {
       { evaluateCclPolicy: vi.fn(async () => { throw error; }) },
     );
 
-    await expect(handleQueryRoutes(ctx)).rejects.toBe(error);
+    await expect(handleCclRoutes(ctx)).rejects.toBe(error);
     respondWithDaemonError(res as unknown as ServerResponse, error);
     expect(res.statusCode).toBe(500);
     expect(JSON.parse(res.body)).toEqual({ error: error.message });
