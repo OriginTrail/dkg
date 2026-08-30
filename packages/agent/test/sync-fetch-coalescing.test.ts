@@ -1447,6 +1447,103 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('keeps clean-peer evidence scoped to overlapping catch-up windows', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const peerA = { toString: () => PEER_A };
+    const peerB = { toString: () => PEER_B };
+
+    try {
+      await agent.start();
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent.node.libp2p as any).getConnections = () => [
+        { remotePeer: peerA },
+        { remotePeer: peerB },
+      ];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).selectCatchupPeerWindow = (
+        peers: Array<{ toString(): string }>,
+        options: { peerRotationKey?: string },
+      ) => options.peerRotationKey === 'window-a' ? [peers[0]] : [peers[1]];
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () =>
+        cleanSharedMemorySyncResult();
+
+      const [windowA, windowB] = await Promise.all([
+        agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+          includeSharedMemory: true,
+          maxPeers: 1,
+          peerRotationKey: 'window-a',
+        }),
+        agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+          includeSharedMemory: true,
+          maxPeers: 1,
+          peerRotationKey: 'window-b',
+        }),
+      ]);
+
+      expect(windowA.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(windowB.cleanMissPeerIds).toEqual([PEER_B]);
+      expect(windowA.catchup.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
+      expect(windowB.catchup.cleanSharedMemoryPeerIds).toEqual([PEER_B]);
+      expect(Object.isFrozen(windowA.catchup.cleanSharedMemoryPeerIds)).toBe(true);
+      expect(Object.isFrozen(windowB.catchup.cleanSharedMemoryPeerIds)).toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('replays completed clean-peer evidence to a late single-flight joiner', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+    const refreshEntered = deferred<void>();
+    const releaseRefresh = deferred<void>();
+    let sharedSyncs = 0;
+
+    try {
+      await agent.start();
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => {
+        sharedSyncs += 1;
+        return cleanSharedMemorySyncResult();
+      };
+      (agent as any).refreshMetaSyncedFlags = async () => {
+        refreshEntered.resolve();
+        await releaseRefresh.promise;
+      };
+
+      const first = agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+        includeSharedMemory: true,
+      });
+      await refreshEntered.promise;
+      const lateJoiner = agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+        includeSharedMemory: true,
+      });
+      await flushMicrotasks();
+      releaseRefresh.resolve();
+
+      const [firstResult, lateResult] = await Promise.all([first, lateJoiner]);
+      expect(sharedSyncs).toBe(1);
+      expect(firstResult.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(lateResult.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(lateResult.catchup).toBe(firstResult.catchup);
+    } finally {
+      releaseRefresh.resolve();
+      await agent.stop().catch(() => {});
+    }
+  });
+
   // #2050. The IN-AGENT catch-up walk (`runCatchupOverPeers`) has to publish the
   // same SWM diagnostics the worker-backed CLI runner does, or a job that happens
   // to take the inline path reports a shortfall it cannot name while an identical
@@ -1705,7 +1802,6 @@ describe('DKGAgent sync fetch coalescing', () => {
   ) => {
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     const remotePeer = { toString: () => PEER_A };
-    const cleanMissPeerIds = new Set<string>();
     let sharedCalls = 0;
     const incompleteCoverage: SwmSnapshotCoverage = {
       contextGraphId: 'coalesced-cg',
@@ -1739,14 +1835,13 @@ describe('DKGAgent sync fetch coalescing', () => {
         true,
         [remotePeer],
         {
-          recordSharedMemoryCleanPeer: (peerId: string) => cleanMissPeerIds.add(peerId),
           swmCatchupPassConfig: { budgetMs: 60_000, maxPasses: 2 },
         },
       );
 
       expect(sharedCalls).toBe(2);
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
-      expect([...cleanMissPeerIds]).toEqual([]);
+      expect(result.cleanSharedMemoryPeerIds).toEqual([]);
     } finally {
       await agent.stop().catch(() => {});
     }
