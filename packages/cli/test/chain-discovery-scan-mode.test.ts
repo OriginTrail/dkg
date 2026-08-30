@@ -167,4 +167,77 @@ describe('chainDiscoveryScanOptions', () => {
       throwOnChainScanFailure: true,
     });
   });
+
+  it('resumes a partially persisted cursor seed without reclassifying it as seedFull', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi
+        .fn<() => Promise<boolean>>()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockRejectedValueOnce(new Error('page 2 failed after page 1 persisted'))
+        .mockResolvedValueOnce(0),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    await runner();
+    await runner();
+
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(1, {
+      mode: 'seedFromCursor',
+      throwOnChainScanFailure: true,
+      pageBudget: 30,
+    });
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
+      mode: 'incremental',
+      pageBudget: 30,
+    });
+  });
+
+  it('does not misclassify a successful scan when its progress log throws', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockResolvedValueOnce(3)
+        .mockResolvedValueOnce(0),
+    };
+    const messages: string[] = [];
+    const log = vi.fn((message: string) => {
+      messages.push(message);
+      if (message.includes('discovered')) throw new Error('log sink unavailable');
+    });
+    const runner = createChainDiscoveryScanRunner({ agent, log });
+
+    await expect(runner()).resolves.toBeUndefined();
+    await expect(runner()).resolves.toBeUndefined();
+
+    expect(messages).toEqual(['Chain scan: discovered 3 new context graph(s)']);
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(2, {
+      mode: 'incremental',
+      pageBudget: 30,
+    });
+  });
+
+  it('swallows a scan failure even when its failure logger throws', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockRejectedValueOnce(new Error('chain RPC unavailable'))
+        .mockResolvedValueOnce(0),
+    };
+    const runner = createChainDiscoveryScanRunner({
+      agent,
+      log: vi.fn(() => {
+        throw new Error('log sink unavailable');
+      }),
+    });
+
+    await expect(runner()).resolves.toBeUndefined();
+    await expect(runner()).resolves.toBeUndefined();
+
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
+  });
 });
