@@ -49,13 +49,16 @@ import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
 import {
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  CHAIN_DISCOVERY_SCAN_SCHEDULE,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan-runner.js';
 export {
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  CHAIN_DISCOVERY_SCAN_SCHEDULE,
   CHAIN_FULL_SCAN_EVERY,
   chainDiscoveryScanOptions,
   createChainDiscoveryScanRunner,
+  deriveChainFullScanEvery,
 } from './chain-discovery-scan-runner.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
@@ -2426,14 +2429,17 @@ async function runDaemonInnerWithStartupOwnership(
 
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
-  const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   const runChainDiscoveryScan = createChainDiscoveryScanRunner({
     agent,
     log,
     pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+    fullScanEvery: CHAIN_DISCOVERY_SCAN_SCHEDULE.fullScanEvery,
   });
   setTimeout(runChainDiscoveryScan, 15_000);
-  const chainScanTimer = setInterval(runChainDiscoveryScan, CHAIN_SCAN_INTERVAL_MS);
+  const chainScanTimer = setInterval(
+    runChainDiscoveryScan,
+    CHAIN_DISCOVERY_SCAN_SCHEDULE.intervalMs,
+  );
   if (chainScanTimer.unref) chainScanTimer.unref();
 
   // Periodic peer health ping (every 2 minutes)

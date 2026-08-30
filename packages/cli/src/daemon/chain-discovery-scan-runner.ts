@@ -1,9 +1,37 @@
-export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
+export const CHAIN_DISCOVERY_SCAN_INTERVAL_MS = 30 * 60 * 1000;
+export const CHAIN_DISCOVERY_FULL_RESYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+export function deriveChainFullScanEvery(input: {
+  intervalMs: number;
+  fullResyncIntervalMs: number;
+}): number {
+  return Math.max(1, Math.round(input.fullResyncIntervalMs / input.intervalMs));
+}
+
+export const CHAIN_DISCOVERY_SCAN_SCHEDULE = Object.freeze({
+  intervalMs: CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
+  fullResyncIntervalMs: CHAIN_DISCOVERY_FULL_RESYNC_INTERVAL_MS,
+  fullScanEvery: deriveChainFullScanEvery({
+    intervalMs: CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
+    fullResyncIntervalMs: CHAIN_DISCOVERY_FULL_RESYNC_INTERVAL_MS,
+  }),
+});
+
+export const CHAIN_FULL_SCAN_EVERY = CHAIN_DISCOVERY_SCAN_SCHEDULE.fullScanEvery;
 export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
+
+export type ChainDiscoveryStartupPhase =
+  | 'undetermined'
+  | 'cursorSeed'
+  | 'startupFullRecovery'
+  | 'complete';
 
 export function chainDiscoveryScanOptions(input: {
   watermarkSeeded: boolean;
-  run?: number;
+  startupPhase: ChainDiscoveryStartupPhase;
+  successfulScansInCycle: number;
+  fullRecoveryPending?: boolean;
+  fullRecoveryRetryReady?: boolean;
   fullScanEvery?: number;
   pageBudget?: number;
 }):
@@ -11,7 +39,7 @@ export function chainDiscoveryScanOptions(input: {
   | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
   | { mode: 'seedFull'; throwOnChainScanFailure: true } {
   const configuredFullScanEvery = input.fullScanEvery;
-  let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
+  let fullScanEvery = CHAIN_DISCOVERY_SCAN_SCHEDULE.fullScanEvery;
   if (
     typeof configuredFullScanEvery === 'number' &&
     Number.isFinite(configuredFullScanEvery) &&
@@ -27,13 +55,29 @@ export function chainDiscoveryScanOptions(input: {
   )
     ? Math.floor(configuredPageBudget)
     : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
-  const run = input.run ?? 0;
-  const startupRecoveryScan = input.watermarkSeeded && run === 0;
-  const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
-  if (startupRecoveryScan || periodicFullResync) {
+
+  if (input.startupPhase === 'undetermined') {
+    return input.watermarkSeeded
+      ? { mode: 'seedFull', throwOnChainScanFailure: true }
+      : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+  }
+  if (input.startupPhase === 'cursorSeed') {
+    return input.watermarkSeeded
+      ? { mode: 'incremental', pageBudget }
+      : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+  }
+  if (input.startupPhase === 'startupFullRecovery') {
     return { mode: 'seedFull', throwOnChainScanFailure: true };
   }
-  return input.watermarkSeeded && !periodicFullResync
+  if (input.fullRecoveryPending) {
+    return input.fullRecoveryRetryReady
+      ? { mode: 'seedFull', throwOnChainScanFailure: true }
+      : { mode: 'incremental', pageBudget };
+  }
+  if (input.watermarkSeeded && input.successfulScansInCycle >= fullScanEvery) {
+    return { mode: 'seedFull', throwOnChainScanFailure: true };
+  }
+  return input.watermarkSeeded
     ? { mode: 'incremental', pageBudget }
     : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
 }
@@ -57,8 +101,11 @@ export function createChainDiscoveryScanRunner(input: {
   pageBudget?: number;
   fullScanEvery?: number;
 }): () => Promise<void> {
-  let successfulRuns = 0;
-  let startupPath: 'undetermined' | 'seedFromCursor' | 'seedFull' = 'undetermined';
+  let startupPhase: ChainDiscoveryStartupPhase = 'undetermined';
+  let startupFullFailures = 0;
+  let successfulScansInCycle = 0;
+  let fullRecoveryPending = false;
+  let fullRecoveryRetryReady = false;
   let inFlight = false;
 
   return async () => {
@@ -77,19 +124,16 @@ export function createChainDiscoveryScanRunner(input: {
         return;
       }
 
-      if (startupPath === 'undetermined') {
-        startupPath = watermarkSeeded ? 'seedFull' : 'seedFromCursor';
+      if (startupPhase === 'undetermined') {
+        startupPhase = watermarkSeeded ? 'startupFullRecovery' : 'cursorSeed';
       }
 
-      // A failed initial cursor seed can still persist a watermark after applying a page.
-      // Once that bounded path has begun, a newly visible watermark must resume through the
-      // incremental cursor path rather than reclassifying the retry as run-0 seedFull.
-      const optionRun = successfulRuns === 0 && startupPath === 'seedFromCursor'
-        ? 1
-        : successfulRuns;
       const options = chainDiscoveryScanOptions({
-        run: optionRun,
         watermarkSeeded,
+        startupPhase,
+        successfulScansInCycle,
+        fullRecoveryPending,
+        fullRecoveryRetryReady,
         pageBudget: input.pageBudget,
         fullScanEvery: input.fullScanEvery,
       });
@@ -102,10 +146,41 @@ export function createChainDiscoveryScanRunner(input: {
           input.log,
           `Chain scan: ${options.mode} scan failed: ${error instanceof Error ? error.message : String(error)}`,
         );
+
+        if (startupPhase === 'startupFullRecovery') {
+          startupFullFailures += 1;
+          // Retry startup recovery once immediately. If the historical range remains unavailable,
+          // enter steady state and interleave tip discovery before each later full retry.
+          if (startupFullFailures >= 2) {
+            startupPhase = 'complete';
+            fullRecoveryPending = true;
+            fullRecoveryRetryReady = false;
+          }
+        } else if (options.mode === 'seedFull') {
+          fullRecoveryPending = true;
+          fullRecoveryRetryReady = false;
+        } else if (fullRecoveryPending && options.mode === 'incremental') {
+          // One tip-discovery attempt, successful or not, prevents an unavailable historical range
+          // from monopolizing the scheduler. The next invocation may retry full recovery.
+          fullRecoveryRetryReady = true;
+        }
         return;
       }
 
-      successfulRuns += 1;
+      if (options.mode === 'seedFull') {
+        startupPhase = 'complete';
+        startupFullFailures = 0;
+        successfulScansInCycle = 1;
+        fullRecoveryPending = false;
+        fullRecoveryRetryReady = false;
+      } else {
+        if (startupPhase === 'cursorSeed') startupPhase = 'complete';
+        successfulScansInCycle += 1;
+        if (fullRecoveryPending && options.mode === 'incremental') {
+          fullRecoveryRetryReady = true;
+        }
+      }
+
       if (found > 0) {
         safeLog(input.log, `Chain scan: discovered ${found} new context graph(s)`);
       }
