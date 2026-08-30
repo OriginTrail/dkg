@@ -193,6 +193,24 @@ describe('classifyPromoteError', () => {
       stage: 'atomic-exact-swm-graph-replacement',
       cause: rawReplaceFailure,
     })).toEqual({ classification: 'transient', retryable: true });
+    for (const malformed of [
+      { code: 'PROMOTE_REPLAY_SAFE_FAILURE', cause: rawReplaceFailure },
+      {
+        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+        stage: 'other',
+        cause: rawReplaceFailure,
+      },
+      {
+        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+        stage: 'atomic-exact-swm-graph-replacment',
+        cause: rawReplaceFailure,
+      },
+    ]) {
+      expect(classifyPromoteError(malformed)).toEqual({
+        classification: 'fatal',
+        retryable: false,
+      });
+    }
 
     for (const message of [
       'insert timed out',

@@ -45,4 +45,18 @@ describe('promote replay safety', () => {
     expect(crossRealmShape).not.toBeInstanceOf(PromoteReplaySafeError);
     expect(isPromoteReplaySafeError(crossRealmShape)).toBe(true);
   });
+
+  it.each([
+    ['missing stage', { code: PROMOTE_REPLAY_SAFE_ERROR_CODE }],
+    ['unknown stage', {
+      code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
+      stage: 'other',
+    }],
+    ['misspelled stage', {
+      code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
+      stage: 'atomic-exact-swm-graph-replacment',
+    }],
+  ])('fails closed for a cross-realm shape with %s', (_label, malformed) => {
+    expect(isPromoteReplaySafeError(malformed)).toBe(false);
+  });
 });
