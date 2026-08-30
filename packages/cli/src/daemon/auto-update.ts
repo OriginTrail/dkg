@@ -29,6 +29,11 @@ import { join, resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import {
+  compare as compareCanonicalSemver,
+  prerelease as canonicalPrerelease,
+  valid as validCanonicalSemver,
+} from 'semver';
 
 import {
   dkgDir,
@@ -288,16 +293,10 @@ export type NpmVersionResult =
   | { version: null; error: true }
   | { version: null; error: false };
 
-// Official semver.org grammar (anchored). Rejects malformed values that a
-// loose shape check would accept (e.g. `10.0.0-alpha..1` — empty prerelease
-// identifier) before they reach `compareSemver` (a non-numeric part makes it
-// return NaN, which is not `<= 0` and would slip the forward-only gate).
-const SEMVER_RE =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
-
 /** True when `v` is a valid semver string. */
 export function isValidSemver(v: string): boolean {
-  return SEMVER_RE.test(v.trim());
+  const candidate = v.trim();
+  return !candidate.startsWith('v') && validCanonicalSemver(candidate) !== null;
 }
 
 /**
@@ -306,7 +305,61 @@ export function isValidSemver(v: string): boolean {
  * even though it contains a hyphen. Used for the `allowPrerelease` gate.
  */
 export function isPrerelease(v: string): boolean {
-  return v.trim().split("+")[0].includes("-");
+  return canonicalPrerelease(v.trim()) !== null;
+}
+
+export type ExplicitNpmUpdateTargetDecision =
+  | { status: 'allowed'; version: string }
+  | { status: 'rejected'; reason: string }
+  | { status: 'registry-error'; reason: string };
+
+/**
+ * Classify an explicit `dkg update <target>` against the npm update policy.
+ * Exact versions stay exact; dist-tags are resolved once and returned as the
+ * concrete version that the installer must use. Ranges, aliases, unknown tags,
+ * and registry failures never fall through to npm as unvalidated input.
+ */
+export async function resolveExplicitNpmUpdateTarget(
+  target: string,
+  allowPrerelease: boolean,
+  log: (message: string) => void,
+  deps: {
+    resolveLatestNpmVersion?: typeof resolveLatestNpmVersion;
+  } = {},
+): Promise<ExplicitNpmUpdateTargetDecision> {
+  const normalizedTarget = target.trim().replace(/^v/, '');
+  const exactVersion = validCanonicalSemver(normalizedTarget);
+  if (exactVersion !== null) {
+    if (!allowPrerelease && canonicalPrerelease(normalizedTarget) !== null) {
+      return {
+        status: 'rejected',
+        reason: `target "${normalizedTarget}" is a pre-release and this node has allowPrerelease=false — re-run with --allow-prerelease to override`,
+      };
+    }
+    return { status: 'allowed', version: normalizedTarget };
+  }
+
+  const resolveTarget = deps.resolveLatestNpmVersion ?? resolveLatestNpmVersion;
+  const resolved = await resolveTarget(log, true, normalizedTarget);
+  if (resolved.error) {
+    return {
+      status: 'registry-error',
+      reason: `could not resolve dist-tag "${normalizedTarget}" against the npm registry — retry or pass an explicit version`,
+    };
+  }
+  if (!resolved.version || !isValidSemver(resolved.version)) {
+    return {
+      status: 'rejected',
+      reason: `target "${normalizedTarget}" is not an exact semantic version or a published npm dist-tag`,
+    };
+  }
+  if (!allowPrerelease && isPrerelease(resolved.version)) {
+    return {
+      status: 'rejected',
+      reason: `dist-tag "${normalizedTarget}" resolves to pre-release "${resolved.version}" and this node has allowPrerelease=false — re-run with --allow-prerelease to override`,
+    };
+  }
+  return { status: 'allowed', version: resolved.version };
 }
 
 export async function resolveLatestNpmVersion(
@@ -359,7 +412,7 @@ export async function resolveLatestNpmVersion(
 
     const stable = tags.latest ?? null;
     if (!allowPrerelease) {
-      if (stable && !isPrerelease(stable)) return { version: stable };
+      if (stable && isValidSemver(stable) && !isPrerelease(stable)) return { version: stable };
       log(
         "Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping",
       );
@@ -386,25 +439,10 @@ export async function resolveLatestNpmVersion(
 }
 
 export function compareSemver(a: string, b: string): number {
-  // Build metadata (everything from `+`) is ignored for precedence (semver §10),
-  // so strip it FIRST. Detecting the prerelease via the raw string's `-` is
-  // wrong: `10.0.0+mainnet-build.1` is a STABLE version whose hyphen lives in
-  // build metadata — treating it as a prerelease made it sort BELOW
-  // `10.0.0-rc.19` and read as "not newer".
-  const core = (v: string) => v.replace(/^v/, "").split("+")[0];
-  const ca = core(a);
-  const cb = core(b);
-  const pa = ca.split("-")[0].split(".").map(Number);
-  const pb = cb.split("-")[0].split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
-  }
-  const prerelease = (v: string) => (v.includes("-") ? v.slice(v.indexOf("-") + 1) : "");
-  const preA = prerelease(ca);
-  const preB = prerelease(cb);
-  if (!preA && preB) return 1; // stable outranks its own prerelease
-  if (preA && !preB) return -1;
-  return preA.localeCompare(preB, undefined, { numeric: true });
+  const validA = validCanonicalSemver(a.trim());
+  const validB = validCanonicalSemver(b.trim());
+  if (validA === null || validB === null) return Number.NaN;
+  return compareCanonicalSemver(validA, validB);
 }
 
 export function getCurrentCliVersion(): string {

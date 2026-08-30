@@ -37,9 +37,7 @@ import { batchEntityQuads } from '../batching.js';
 import {
   runDaemon,
   checkForNpmVersionUpdate,
-  resolveLatestNpmVersion,
-  isValidSemver,
-  isPrerelease,
+  resolveExplicitNpmUpdateTarget,
   performNpmUpdate,
   performNpmUpdateEdge,
   getCurrentCliVersion,
@@ -101,52 +99,61 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 
-/**
- * Decide whether an EXPLICIT `dkg update <target>` is allowed under the node's
- * stable-only policy. Resolves a dist-tag to its concrete version first, then:
- *   - allowPre (config or --allow-prerelease) → always ok
- *   - prerelease target under stable-only → refuse
- *   - dist-tag that can't be resolved (registry error) → refuse (fail CLOSED,
- *     matching the no-arg path; otherwise a transient blip could let a
- *     stable-only node install an RC that `latest` happens to point at)
- * Extracted + dep-injected so it is unit-testable. Returns ok, or a reason.
- */
-export async function resolveExplicitUpdateTarget(
-  target: string,
-  allowPre: boolean,
-  deps: {
-    resolveLatestNpmVersion: (
-      log: (m: string) => void,
-      allowPrerelease: boolean,
-      channel?: string,
-    ) => Promise<{ version: string | null; error?: boolean }>;
-    log: (m: string) => void;
-  },
-): Promise<{ ok: true } | { ok: false; reason: string }> {
-  if (allowPre) return { ok: true };
-  let resolved = target;
-  if (!isValidSemver(resolved)) {
-    // Non-semver target → treat as a dist-tag and resolve it (allowPrerelease=true
-    // so a prerelease target is visible to be rejected).
-    const r = await deps.resolveLatestNpmVersion(deps.log, true, resolved);
-    if (r.error) {
-      return {
-        ok: false,
-        reason: `could not resolve dist-tag "${target}" against the npm registry (transient error). On a stable-only node a dist-tag must be confirmed non-prerelease before install — retry, pass an explicit version, or use --allow-prerelease`,
-      };
+type MaintenanceUpdateCommandDeps = {
+  loadConfig: typeof loadConfig;
+  loadNetworkConfig: typeof loadNetworkConfig;
+  loadResolvedNetworkConfig: typeof loadResolvedNetworkConfig;
+  resolveStandaloneInstall: typeof resolveStandaloneInstall;
+  resolveExplicitNpmUpdateTarget: typeof resolveExplicitNpmUpdateTarget;
+  checkForNpmVersionUpdate: typeof checkForNpmVersionUpdate;
+  performNpmUpdate: typeof performNpmUpdate;
+  performNpmUpdateEdge: typeof performNpmUpdateEdge;
+  getCurrentCliVersion: typeof getCurrentCliVersion;
+  stopDaemonIfRunning: typeof stopDaemonIfRunning;
+  runPreflight: (config: Awaited<ReturnType<typeof loadConfig>>) => Promise<void>;
+};
+
+async function runDefaultUpdatePreflight(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+): Promise<void> {
+  try {
+    const { createProductionDeps, runDoctor, UPDATE_PREFLIGHT_CHECKS } =
+      await import('../doctor/index.js');
+    const preflightDeps = createProductionDeps({ apiPort: config.apiPort ?? 9200 });
+    const preflight = await runDoctor(preflightDeps, { checks: UPDATE_PREFLIGHT_CHECKS });
+    if (preflight.exitCode === 2) {
+      const errors = preflight.findings.filter((finding) => finding.severity === 'error');
+      console.error('\n[dkg update] Pre-flight checks failed; refusing to apply update.\n');
+      for (const finding of errors) {
+        console.error(`  • [${finding.check}] ${finding.message}`);
+        if (finding.advisory) console.error(`      → ${finding.advisory}`);
+      }
+      console.error('\nRun `dkg doctor --json` for the full diagnostic report.\n');
+      process.exit(2);
     }
-    if (r.version) resolved = r.version;
+  } catch (err: any) {
+    process.stderr.write(`[dkg update] WARNING: pre-flight doctor check crashed (${err?.message ?? err}); continuing without it.\n`);
   }
-  if (isValidSemver(resolved) && isPrerelease(resolved)) {
-    return {
-      ok: false,
-      reason: `target "${resolved}" is a pre-release and this node has allowPrerelease=false — re-run with --allow-prerelease to override`,
-    };
-  }
-  return { ok: true };
 }
 
-export function registerMaintenanceCommands(program: Command): void {
+export function registerMaintenanceCommands(
+  program: Command,
+  overrides: Partial<MaintenanceUpdateCommandDeps> = {},
+): void {
+  const updateDeps: MaintenanceUpdateCommandDeps = {
+    loadConfig,
+    loadNetworkConfig,
+    loadResolvedNetworkConfig,
+    resolveStandaloneInstall,
+    resolveExplicitNpmUpdateTarget,
+    checkForNpmVersionUpdate,
+    performNpmUpdate,
+    performNpmUpdateEdge,
+    getCurrentCliVersion,
+    stopDaemonIfRunning,
+    runPreflight: runDefaultUpdatePreflight,
+    ...overrides,
+  };
 // ─── dkg update ──────────────────────────────────────────────────────
 //
 // OT-RFC-41 §4.5 / §5 PR 6: `dkg migrate-to-npm` was removed.
@@ -164,8 +171,11 @@ program
   .option('--allow-prerelease', 'Allow pre-release target versions')
   .option('--no-verify-tag', 'Skip signed-tag verification for version/tag updates')
   .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
-    const config = await loadConfig();
-    const { network: net } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
+    const config = await updateDeps.loadConfig();
+    const { network: net } = await updateDeps.loadResolvedNetworkConfig(
+      config,
+      updateDeps.loadNetworkConfig,
+    );
     // Resolve field-by-field across local/network/project so defaults flow
     // through even when the local config omits repo/branch.
     const au = resolveAutoUpdateConfig(config, net) ?? (() => {
@@ -187,7 +197,9 @@ program
     // operator with `source: "npm"` configured goes through the npm install
     // path even if .git is still present in the working tree. See
     // `AutoUpdateConfig.source` (config.ts) for the rationale.
-    const standalone = resolveStandaloneInstall(au.source ?? resolveAutoUpdateSource(config, net));
+    const standalone = updateDeps.resolveStandaloneInstall(
+      au.source ?? resolveAutoUpdateSource(config, net),
+    );
     const allowPre = opts.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
 
     if (standalone) {
@@ -195,7 +207,7 @@ program
 
       if (opts.check) {
         console.log('Checking NPM registry for updates...');
-        const check = await checkForNpmVersionUpdate(logFn, allowPre, au.channel);
+        const check = await updateDeps.checkForNpmVersionUpdate(logFn, allowPre, au.channel);
         if (check.status === 'available' && check.version) {
           console.log(`Update available: ${check.version}`);
         } else if (check.status === 'no-target') {
@@ -213,27 +225,7 @@ program
       // `dkg update` MUST run the install-layout + version-skew doctor
       // checks. If either reports an `error`, abort with a pointer at
       // `dkg doctor --json` for full context. Warnings do not block.
-      try {
-        const { createProductionDeps, runDoctor, UPDATE_PREFLIGHT_CHECKS } =
-          await import('../doctor/index.js');
-        const preflightDeps = createProductionDeps({ apiPort: config.apiPort ?? 9200 });
-        const preflight = await runDoctor(preflightDeps, { checks: UPDATE_PREFLIGHT_CHECKS });
-        if (preflight.exitCode === 2) {
-          const errors = preflight.findings.filter((f) => f.severity === 'error');
-          console.error('\n[dkg update] Pre-flight checks failed; refusing to apply update.\n');
-          for (const f of errors) {
-            console.error(`  • [${f.check}] ${f.message}`);
-            if (f.advisory) console.error(`      → ${f.advisory}`);
-          }
-          console.error('\nRun `dkg doctor --json` for the full diagnostic report.\n');
-          process.exit(2);
-        }
-      } catch (err: any) {
-        // Pre-flight crashing should not block updates — fall through
-        // and let the real update path do its thing. Warn loudly so a
-        // recurring failure is visible.
-        process.stderr.write(`[dkg update] WARNING: pre-flight doctor check crashed (${err?.message ?? err}); continuing without it.\n`);
-      }
+      await updateDeps.runPreflight(config);
 
       let version = versionOrRef ?? null;
       if (version) {
@@ -243,18 +235,18 @@ program
       // stable-only policy: `dkg update 10.1.0-rc.1` or `dkg update latest`
       // (when latest points at an RC) must NOT bypass allowPrerelease:false.
       if (version) {
-        const gate = await resolveExplicitUpdateTarget(version, allowPre, {
-          resolveLatestNpmVersion,
-          log: logFn,
-        });
-        if (!gate.ok) {
+        const gate = await updateDeps.resolveExplicitNpmUpdateTarget(version, allowPre, logFn);
+        if (gate.status !== 'allowed') {
           console.error(`[dkg update] Refusing to update: ${gate.reason}.`);
           process.exit(1);
         }
+        // Dist-tags are mutable. Install the exact version that passed policy
+        // rather than resolving one artifact and asking npm for the tag again.
+        version = gate.version;
       }
       if (!version) {
         console.log('Checking NPM registry for updates...');
-        const check = await checkForNpmVersionUpdate(logFn, allowPre, au.channel);
+        const check = await updateDeps.checkForNpmVersionUpdate(logFn, allowPre, au.channel);
         if (check.status === 'available' && check.version) {
           version = check.version;
         } else if (check.status === 'no-target') {
@@ -278,10 +270,10 @@ program
           `(${npmUpdateRole === 'edge' ? 'global npm install' : 'blue-green slot'})...`,
       );
       const updateStatus = npmUpdateRole === 'edge'
-        ? await performNpmUpdateEdge(version!, getCurrentCliVersion(), logFn)
-        : await performNpmUpdate(version!, logFn);
+        ? await updateDeps.performNpmUpdateEdge(version!, updateDeps.getCurrentCliVersion(), logFn)
+        : await updateDeps.performNpmUpdate(version!, logFn);
       if (updateStatus === 'updated') {
-        const stopped = await stopDaemonIfRunning();
+        const stopped = await updateDeps.stopDaemonIfRunning();
         if (!stopped) {
           console.error('Update applied but old daemon is still running. Stop it manually and run "dkg start".');
           process.exit(1);
