@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Readable } from 'node:stream';
 import type { ServerResponse } from 'node:http';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
-import { authenticateHttpRequest } from '../src/auth.js';
+import { authenticateHttpRequest, canAdministerNode } from '../src/auth.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import type {
   PendingTransactionClearOverride,
@@ -93,10 +93,8 @@ describe('clear-job pending-transaction override authorization', () => {
           res: res as unknown as ServerResponse,
           url: new URL(`http://127.0.0.1${path}`),
           path,
-          requestToken: authentication.requestToken,
-          requestAuthorization: authentication.requestAuthorization,
+          authentication,
           requestAgentAddress: caller.requestAgentAddress,
-          requestPrincipal: authentication.requestPrincipal,
           agent,
           config: { auth: { enabled: authEnabled } },
           validTokens,
@@ -185,9 +183,10 @@ describe('clear-job pending-transaction override authorization', () => {
     expect(authentication).toMatchObject({
       allowed: true,
       mode: 'disabled',
-      requestPrincipal: { kind: 'agent', agentAddress: OWNER },
-      requestAuthorization: { nodeOperator: true },
+      acceptedToken: 'dkg_at_owner',
+      principal: { kind: 'agent', agentAddress: OWNER },
     });
+    expect(authentication.allowed && canAdministerNode(authentication)).toBe(true);
     expect(calls).toEqual([{
       jobId: 'legacy-agent-job',
       authority: { kind: 'nodeOperator' },
@@ -209,9 +208,11 @@ describe('clear-job pending-transaction override authorization', () => {
     expect(authentication).toMatchObject({
       allowed: true,
       mode: 'disabled',
-      requestPrincipal: { kind: 'anonymous' },
-      requestAuthorization: { nodeOperator: true },
+      presentedToken: 'junk-token',
+      acceptedToken: undefined,
+      principal: { kind: 'anonymous' },
     });
+    expect(authentication.allowed && canAdministerNode(authentication)).toBe(true);
     expect(calls[0]?.authority).toEqual({ kind: 'nodeOperator' });
   });
 
@@ -229,9 +230,10 @@ describe('clear-job pending-transaction override authorization', () => {
     expect(authentication).toMatchObject({
       allowed: true,
       mode: 'disabled',
-      requestPrincipal: { kind: 'nodeOperator' },
-      requestAuthorization: { nodeOperator: true },
+      acceptedToken: 'node-admin-token',
+      principal: { kind: 'nodeOperator' },
     });
+    expect(authentication.allowed && canAdministerNode(authentication)).toBe(true);
     expect(calls[0]?.authority).toEqual({ kind: 'nodeOperator' });
   });
 

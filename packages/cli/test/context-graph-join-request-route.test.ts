@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 async function startRouteServer(agent: Record<string, unknown>): Promise<Server> {
   const server = createServer(async (req, res) => {
@@ -34,10 +35,8 @@ async function startRouteServer(agent: Record<string, unknown>): Promise<Server>
       routePlugins: [],
       url,
       path: url.pathname,
-      requestToken: undefined,
       requestAgentAddress: undefined,
-      requestPrincipal: { kind: 'nodeOperator' },
-      requestAuthorization: { nodeOperator: true },
+      authentication: requestAuthentication({ kind: 'nodeOperator' }),
     } as any);
     if (!res.writableEnded) {
       res.writeHead(404, { 'content-type': 'application/json' });
@@ -124,10 +123,8 @@ describe('POST /api/context-graph/{id}/request-join', () => {
         routePlugins: [],
         url,
         path: url.pathname,
-        requestToken: undefined,
         requestAgentAddress: undefined,
-        requestPrincipal: { kind: 'nodeOperator' },
-        requestAuthorization: { nodeOperator: true },
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
       } as any);
       if (!res.writableEnded) {
         res.writeHead(404, { 'content-type': 'application/json' });

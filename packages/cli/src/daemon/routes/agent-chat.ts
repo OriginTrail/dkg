@@ -118,7 +118,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress as agentAddressFromAuthentication, canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -442,12 +442,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     url,
     path,
     requestAgentAddress,
-    requestAuthorization,
-    requestPrincipal,
+    authentication,
   } = ctx;
-  const authenticatedAgentAddress = requestPrincipal.kind === 'agent'
-    ? requestPrincipal.agentAddress
-    : undefined;
+  const authenticatedAgentAddress = agentAddressFromAuthentication(authentication);
 
 
   // POST /api/agent/register — register a new agent on this node
@@ -604,7 +601,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // agent's; gating to admin avoids a non-default-agent token tricking
   // the daemon into republishing on demand for spam.
   if (req.method === "POST" && path === "/api/agent/publish-profile") {
-    if (!requestAuthorization.nodeOperator) {
+    if (!canAdministerNode(authentication)) {
       return jsonResponse(res, 403, {
         error: 'POST /api/agent/publish-profile requires a node-level admin token; agent-scoped tokens cannot trigger a profile republish.',
       });

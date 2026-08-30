@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} as Record<string, string>, writableEnded: false };
@@ -58,10 +59,8 @@ function buildTurnCtx(body: unknown, agent: Record<string, any>, requestAgentAdd
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: 'agent-token',
     requestAgentAddress,
-    requestPrincipal: { kind: 'agent', agentAddress: requestAgentAddress },
-    requestAuthorization: { nodeOperator: false },
+    authentication: requestAuthentication({ kind: 'agent', agentAddress: requestAgentAddress, token: 'agent-token' }),
     emitMemoryGraphChanged: vi.fn(),
     emitNotification: vi.fn(),
   } as unknown as RequestContext;

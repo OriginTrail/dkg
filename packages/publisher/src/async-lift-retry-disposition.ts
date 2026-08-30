@@ -408,10 +408,10 @@ export function isTargetedClearableLiftJob(
       break;
     case 'nodeOperator':
       break;
-    default: {
-      const unhandledAuthority: never = override;
-      return unhandledAuthority;
-    }
+    default:
+      // Persisted/API inputs exist at runtime independently of this TypeScript union. Unknown
+      // legacy or malformed authority variants must never become a truthy destructive override.
+      return false;
   }
   if (job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') return true;
   return isTerminalLiftJobState(job.status)

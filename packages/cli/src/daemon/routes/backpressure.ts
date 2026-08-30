@@ -1,6 +1,7 @@
 import { backpressureRegistry } from '@origintrail-official/dkg-core';
 import { jsonResponse } from '../http-utils.js';
 import type { RequestContext } from './context.js';
+import { canAdministerNode } from '../../auth.js';
 
 /**
  * Node-admin diagnostics for every registered scheduler/backlog source.
@@ -14,12 +15,12 @@ export async function handleBackpressureRoutes(ctx: RequestContext): Promise<voi
     req,
     res,
     path,
-    requestAuthorization,
+    authentication,
   } = ctx;
 
   if (req.method !== 'GET' || path !== '/api/diagnostics/backpressure') return;
 
-  const isNodeAdminCaller = requestAuthorization.nodeOperator;
+  const isNodeAdminCaller = canAdministerNode(authentication);
   if (!isNodeAdminCaller) {
     return jsonResponse(res, 403, {
       error:

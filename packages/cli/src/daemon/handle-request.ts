@@ -313,6 +313,7 @@ import type {
   NotificationSseEvent,
   RequestContext,
 } from './routes/context.js';
+import { authenticatedAgentAddress } from '../auth.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
@@ -348,11 +349,10 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // Authentication already established both the accepted credential and its principal. Routing
-  // only derives the compatibility address projection; it never re-authenticates the header.
-  const requestAgentAddress = input.requestPrincipal.kind === 'agent'
-    ? input.requestPrincipal.agentAddress
-    : agent.resolveAgentAddress(input.requestToken);
+  // Routing derives compatibility identity only from the accepted authentication. A raw invalid
+  // bearer is observable as presentedToken but can never participate in identity resolution.
+  const requestAgentAddress = authenticatedAgentAddress(input.authentication)
+    ?? agent.resolveAgentAddress(input.authentication.acceptedToken);
 
   const ctx: RequestContext = {
     ...input,

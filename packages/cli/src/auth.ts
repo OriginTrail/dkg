@@ -30,37 +30,79 @@ export type RequestPrincipal =
   | { readonly kind: 'nodeOperator' }
   | { readonly kind: 'anonymous' };
 
-/** Capabilities are independent from identity (notably when authentication is disabled). */
-export interface RequestAuthorization {
-  readonly nodeOperator: boolean;
-}
-
 type HttpCredentialDecision =
   | { readonly allowed: false }
   | {
     readonly allowed: true;
     readonly mode: 'disabled' | 'public';
-    readonly requestToken: string | undefined;
+    /** Raw bearer header, whether accepted or not. Never use this as an authenticated credential. */
+    readonly presentedToken: string | undefined;
     readonly acceptedToken: string | undefined;
   }
   | {
     readonly allowed: true;
     readonly mode: 'authenticated';
-    readonly requestToken: string;
+    /** Raw bearer header; SSE query authentication may leave this undefined. */
+    readonly presentedToken: string | undefined;
     readonly acceptedToken: string;
   };
 
 export type AllowedHttpAuthentication = {
   readonly allowed: true;
   readonly mode: 'disabled' | 'public' | 'authenticated';
-  readonly requestToken: string | undefined;
-  readonly requestPrincipal: RequestPrincipal;
-  readonly requestAuthorization: RequestAuthorization;
+  readonly presentedToken: string | undefined;
+  readonly acceptedToken: string | undefined;
+  readonly principal: RequestPrincipal;
 };
 
 export type HttpAuthenticationResult =
   | { readonly allowed: false }
   | AllowedHttpAuthentication;
+
+/**
+ * Build the one correlated authentication value carried by request context.
+ * Tests use the same factory so impossible principal/capability combinations cannot be assembled
+ * by independently mutating fixture fields.
+ */
+export function createAllowedHttpAuthentication(input: {
+  readonly mode: AllowedHttpAuthentication['mode'];
+  readonly presentedToken?: string;
+  readonly acceptedToken?: string;
+  readonly resolveAgentByToken?: (token: string) => string | undefined;
+}): AllowedHttpAuthentication {
+  if (input.mode === 'authenticated' && !input.acceptedToken) {
+    throw new Error('Authenticated HTTP requests require an accepted token');
+  }
+  const agentAddress = input.acceptedToken
+    ? input.resolveAgentByToken?.(input.acceptedToken)
+    : undefined;
+  const principal: RequestPrincipal = agentAddress
+    ? { kind: 'agent', agentAddress }
+    : input.acceptedToken
+      ? { kind: 'nodeOperator' }
+      : { kind: 'anonymous' };
+  return {
+    allowed: true,
+    mode: input.mode,
+    presentedToken: input.presentedToken,
+    acceptedToken: input.acceptedToken,
+    principal,
+  };
+}
+
+/** Node administration is a projection of the correlated authentication decision, never state. */
+export function canAdministerNode(authentication: AllowedHttpAuthentication): boolean {
+  return authentication.mode === 'disabled' || authentication.principal.kind === 'nodeOperator';
+}
+
+/** Authenticated agent identity projection shared by every route. */
+export function authenticatedAgentAddress(
+  authentication: AllowedHttpAuthentication,
+): string | undefined {
+  return authentication.principal.kind === 'agent'
+    ? authentication.principal.agentAddress
+    : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Token file management
@@ -871,13 +913,13 @@ function evaluateHttpCredential(
     const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
     return {
       allowed: true,
-      mode: 'disabled', requestToken: headerToken, acceptedToken,
+      mode: 'disabled', presentedToken: headerToken, acceptedToken,
     };
   }
   if (req.method === 'OPTIONS') {
     return {
       allowed: true,
-      mode: 'public', requestToken: headerToken, acceptedToken: undefined,
+      mode: 'public', presentedToken: headerToken, acceptedToken: undefined,
     };
   }
 
@@ -886,7 +928,7 @@ function evaluateHttpCredential(
     const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
     return {
       allowed: true,
-      mode: 'public', requestToken: headerToken, acceptedToken,
+      mode: 'public', presentedToken: headerToken, acceptedToken,
     };
   }
 
@@ -907,7 +949,7 @@ function evaluateHttpCredential(
   if (acceptedToken) {
     const accepted: HttpCredentialDecision = {
       allowed: true,
-      mode: 'authenticated', requestToken: acceptedToken, acceptedToken,
+      mode: 'authenticated', presentedToken: headerToken, acceptedToken,
     };
     const now = Date.now();
 
@@ -1215,23 +1257,12 @@ export async function authenticateHttpRequest(input: {
   );
   if (!credential.allowed) return credential;
 
-  const agentAddress = credential.acceptedToken
-    ? input.resolveAgentByToken(credential.acceptedToken)
-    : undefined;
-  const requestPrincipal: RequestPrincipal = agentAddress
-    ? { kind: 'agent', agentAddress }
-    : credential.acceptedToken
-      ? { kind: 'nodeOperator' }
-      : { kind: 'anonymous' };
-  return {
-    allowed: true,
+  return createAllowedHttpAuthentication({
     mode: credential.mode,
-    requestToken: credential.requestToken,
-    requestPrincipal,
-    requestAuthorization: {
-      nodeOperator: credential.mode === 'disabled' || requestPrincipal.kind === 'nodeOperator',
-    },
-  };
+    presentedToken: credential.presentedToken,
+    acceptedToken: credential.acceptedToken,
+    resolveAgentByToken: input.resolveAgentByToken,
+  });
 }
 
 /**

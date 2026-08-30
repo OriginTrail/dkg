@@ -3661,9 +3661,7 @@ async function runDaemonInnerWithStartupOwnership(
       await handleRequest({
         req,
         res,
-        requestToken: authentication.requestToken,
-        requestAuthorization: authentication.requestAuthorization,
-        requestPrincipal: authentication.requestPrincipal,
+        authentication,
         agent,
         publisherControl,
         publisherState,

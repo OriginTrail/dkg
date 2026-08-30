@@ -123,7 +123,7 @@ import {
   type DurableCatchupLegState,
   type DurableLegDiagnostics,
 } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard } from '../../auth.js';
+import { authenticatedAgentAddress, loadTokens, httpAuthGuard } from '../../auth.js';
 import { recordAssertionActivity } from '../activity-notification.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -510,13 +510,11 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     url,
     path,
     requestAgentAddress,
-    requestPrincipal,
+    authentication,
     emitMemoryGraphChanged,
     emitNotification,
   } = ctx;
-  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
-    ? requestPrincipal.agentAddress
-    : undefined;
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,

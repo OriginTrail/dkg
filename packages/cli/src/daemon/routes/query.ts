@@ -117,7 +117,7 @@ export {
 export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -442,8 +442,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     url,
     path,
     requestAgentAddress,
-    requestAuthorization,
-    requestPrincipal,
+    authentication,
     emitMemoryGraphChanged,
   } = ctx;
 
@@ -550,16 +549,14 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // in the body). `resolveAgentByToken` returns `undefined` for
       // node-level tokens, so only genuine agent-scoped identities
       // ever reach the A-1 guard.
-      const callerAgentAddress = requestPrincipal.kind === 'agent'
-        ? requestPrincipal.agentAddress
-        : undefined;
+      const callerAgentAddress = authenticatedAgentAddress(authentication);
       // The authentication boundary distinguishes agent, node-operator, and anonymous callers.
       // Node operators retain the cross-agent OpenClaw use case; authenticated agents flow into
       // DKGAgent.query's isolation check; only anonymous working-memory requests need this local
       // self-alias fallback gate.
       const isAdminToken =
-        requestAuthorization.nodeOperator
-        && requestPrincipal.kind === 'nodeOperator';
+        canAdministerNode(authentication)
+        && authentication.principal.kind === 'nodeOperator';
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
       if (
         !hasRecognisedIdentity &&

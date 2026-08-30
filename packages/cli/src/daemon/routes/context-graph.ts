@@ -123,7 +123,7 @@ import {
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -625,18 +625,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     apiPortRef,
     url,
     path,
-    requestToken,
+    authentication,
     requestAgentAddress,
-    requestAuthorization,
-    requestPrincipal,
     emitMemoryGraphChanged,
   } = ctx;
   // Node-wide gates consume the principal established by authentication; route code must not
   // reinterpret token storage or agent-token resolution.
-  const isNodeAdminCaller = (): boolean => requestAuthorization.nodeOperator;
-  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
-    ? requestPrincipal.agentAddress
-    : undefined;
+  const isNodeAdminCaller = (): boolean => canAdministerNode(authentication);
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
+  const requestToken = authentication.acceptedToken;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,

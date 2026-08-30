@@ -43,6 +43,7 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { daemonState } from '../src/daemon/state.js';
 import {
   createPromoteWorkerSupervisor,
@@ -217,12 +218,10 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken,
           requestAgentAddress: 'did:dkg:agent:test',
-          requestPrincipal: tokenAgentAddress
-            ? { kind: 'agent', agentAddress: tokenAgentAddress }
-            : { kind: 'anonymous' },
-          requestAuthorization: { nodeOperator: false },
+          authentication: tokenAgentAddress
+            ? requestAuthentication({ kind: 'agent', agentAddress: tokenAgentAddress, token: requestToken })
+            : requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

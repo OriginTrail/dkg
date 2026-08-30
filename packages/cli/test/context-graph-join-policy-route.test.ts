@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CONTEXT_GRAPH_ID = '0x1234567890123456789012345678901234567890/private-graph';
 const OWNER_ADDRESS = '0x1111111111111111111111111111111111111111';
@@ -101,12 +102,10 @@ describe('GET/PUT /api/context-graph/{id}/join-policy', () => {
         routePlugins: [],
         url,
         path: url.pathname,
-        requestToken,
         requestAgentAddress: agent.resolveAgentAddress(requestToken),
-        requestPrincipal: agent.resolveAgentByToken(requestToken)
-          ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken)! }
-          : { kind: 'nodeOperator' },
-        requestAuthorization: { nodeOperator: !agent.resolveAgentByToken(requestToken) },
+        authentication: agent.resolveAgentByToken(requestToken)
+          ? requestAuthentication({ kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken)!, token: requestToken })
+          : requestAuthentication({ kind: 'nodeOperator', token: requestToken }),
       } as any);
       if (!res.writableEnded) {
         res.writeHead(404, { 'content-type': 'application/json' });

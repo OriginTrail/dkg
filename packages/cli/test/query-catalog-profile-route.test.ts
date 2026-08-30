@@ -8,6 +8,7 @@ import {
 import { StoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CONTEXT_GRAPH_ID = 'kamstrup-testnet';
 const PROFILE_NS = 'http://dkg.io/ontology/profile/';
@@ -119,10 +120,8 @@ function requestContext(
       agent,
       url,
       path: url.pathname,
-      requestToken: undefined,
       requestAgentAddress: '',
-      requestPrincipal: { kind: 'nodeOperator' },
-      requestAuthorization: { nodeOperator: true },
+      authentication: requestAuthentication({ kind: 'nodeOperator' }),
       validTokens: new Set<string>(),
     } as unknown as RequestContext,
     response,
@@ -196,13 +195,12 @@ describe('/api/profile/query-catalog/read', () => {
     agent.resolveAgentByToken.mockReturnValue('0x1111111111111111111111111111111111111111');
     agent.canReadContextGraph.mockResolvedValue(false);
     const { context, response } = readContext(agent);
-    context.requestToken = 'agent-token';
     context.requestAgentAddress = '0x1111111111111111111111111111111111111111';
-    context.requestPrincipal = {
+    context.authentication = requestAuthentication({
       kind: 'agent',
       agentAddress: '0x1111111111111111111111111111111111111111',
-    };
-    context.requestAuthorization = { nodeOperator: false };
+      token: 'agent-token',
+    });
     context.validTokens = new Set(['agent-token']);
 
     await handleMemoryRoutes(context);
@@ -219,9 +217,7 @@ describe('/api/profile/query-catalog/read', () => {
     const agent = fakeCatalogAgent();
     agent.canReadContextGraph.mockResolvedValue(false);
     const { context, response } = readContext(agent);
-    context.requestToken = 'node-admin-token';
-    context.requestPrincipal = { kind: 'nodeOperator' };
-    context.requestAuthorization = { nodeOperator: true };
+    context.authentication = requestAuthentication({ kind: 'nodeOperator', token: 'node-admin-token' });
     context.validTokens = new Set(['node-admin-token']);
 
     await handleMemoryRoutes(context);

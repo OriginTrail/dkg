@@ -71,7 +71,7 @@ import {
   getExtractionStatusRecord,
   setExtractionStatusRecord,
 } from "../../extraction-status.js";
-import { SignedRequestRejectedError } from "../../auth.js";
+import { authenticatedAgentAddress, SignedRequestRejectedError } from "../../auth.js";
 
 type AssertionArtifactKind = 'source' | 'markdown' | 'original';
 
@@ -590,15 +590,13 @@ export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Prom
     res,
     agent,
     requestAgentAddress,
-    requestPrincipal,
+    authentication,
     emitMemoryGraphChanged,
   } = ctx;
   // Mirror the legacy assertion-route preflight: resolve the caller agent
   // from the bearer token so `resolveRequiredWriteContextGraphId` validates
   // the write CG against the caller's known graphs before any mutation.
-  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
-    ? requestPrincipal.agentAddress
-    : undefined;
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
@@ -717,15 +715,13 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
     extractionStatus,
     assertionImportLocks,
     requestAgentAddress,
-    requestPrincipal,
+    authentication,
     emitMemoryGraphChanged,
   } = ctx;
   // Mirror the legacy assertion-route preflight: resolve the caller agent from
   // the bearer token so `resolveRequiredWriteContextGraphId` validates the write
   // CG against the caller's known graphs before any mutation.
-  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
-    ? requestPrincipal.agentAddress
-    : undefined;
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,

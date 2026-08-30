@@ -256,6 +256,27 @@ describe('GH#2270 failed-job retry disposition', () => {
     expect(isTargetedClearableLiftJob(held(PEER), override(PEER.toLowerCase()))).toBe(false);
   });
 
+  it('fails closed for unknown and malformed runtime clear-authority variants', () => {
+    const heldJob = {
+      status: 'failed',
+      failure: { resolution: 'retry_recovery' },
+      admission: { byAgentAddress: '0xAbCdEf0000000000000000000000000000001234' },
+      request: { jobType: 'lift', lift: {} },
+    } as unknown as LiftJob;
+    const runtimeOptions = (pendingTransactionOverride: unknown) => ({
+      pendingTransactionOverride,
+    }) as unknown as Parameters<typeof isTargetedClearableLiftJob>[1];
+
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      requestedBy: '0xAbCdEf0000000000000000000000000000001234',
+    }))).toBe(false);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      kind: 'legacyOwner',
+      agentAddress: '0xAbCdEf0000000000000000000000000000001234',
+    }))).toBe(false);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({ kind: 'agent' }))).toBe(false);
+  });
+
   it('names the two settlement ROLES explicitly, without inferring either from wiring [3825614002]', () => {
     // 3825614002 — the role used to be re-derived inside the decision method from which
     // collaborators happened to be installed, so the same oracle meant different things depending

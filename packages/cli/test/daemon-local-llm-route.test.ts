@@ -2,6 +2,7 @@ import { createServer, request as httpRequest, type Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleLocalLlmRoutes } from '../src/daemon/routes/local-llm.js';
 import { DaemonLocalLlmError } from '../src/daemon/local-llm-service.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 describe('daemon local LLM routes', () => {
   let server: Server | undefined;
@@ -33,19 +34,16 @@ describe('daemon local LLM routes', () => {
         localLlm: service,
         config: { auth: { enabled: auth.enabled ?? false } },
         validTokens: new Set(auth.validTokens ?? []),
-        requestToken: auth.requestToken,
-        requestPrincipal: auth.enabled === false
-          ? (auth.requestToken && auth.agentTokens?.[auth.requestToken]
-            ? { kind: 'agent', agentAddress: auth.agentTokens[auth.requestToken] }
-            : { kind: 'anonymous' })
-          : (auth.requestToken && auth.agentTokens?.[auth.requestToken]
-            ? { kind: 'agent', agentAddress: auth.agentTokens[auth.requestToken] }
-            : { kind: 'nodeOperator' }),
-        requestAuthorization: {
-          nodeOperator: auth.enabled === false
-            || !auth.requestToken
-            || !auth.agentTokens?.[auth.requestToken],
-        },
+        authentication: auth.requestToken && auth.agentTokens?.[auth.requestToken]
+          ? requestAuthentication({
+              kind: 'agent',
+              agentAddress: auth.agentTokens[auth.requestToken],
+              token: auth.requestToken,
+              mode: auth.enabled === true ? 'authenticated' : 'disabled',
+            })
+          : auth.enabled === true
+            ? requestAuthentication({ kind: 'nodeOperator', token: auth.requestToken })
+            : requestAuthentication({ kind: 'anonymous', mode: 'disabled', presentedToken: auth.requestToken }),
         agent: {
           resolveAgentByToken: (token: string) => auth.agentTokens?.[token],
         },
@@ -162,9 +160,7 @@ describe('daemon local LLM routes', () => {
         localLlm: fake,
         config: { auth: { enabled: false } },
         validTokens: new Set(),
-        requestToken: undefined,
-        requestPrincipal: { kind: 'nodeOperator' },
-        requestAuthorization: { nodeOperator: true },
+        authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
         agent: { resolveAgentByToken: () => undefined },
       } as any);
     });

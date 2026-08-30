@@ -68,9 +68,7 @@ describe('backpressure diagnostics route', () => {
         validTokens,
         url,
         path: url.pathname,
-        requestToken: authentication.requestToken,
-        requestAuthorization: authentication.requestAuthorization,
-        requestPrincipal: authentication.requestPrincipal,
+        authentication,
       } as any);
       if (!res.writableEnded) {
         res.statusCode = 404;

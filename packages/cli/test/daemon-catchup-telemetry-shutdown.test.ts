@@ -14,6 +14,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -281,9 +282,8 @@ async function createHarness(opts: HarnessOptions = {}) {
       assertionImportLocks: new Map(), vectorStore: {}, embeddingProvider: null,
       validTokens: new Set(), apiHost: '127.0.0.1', apiPortRef: { value: 0 },
       routePlugins: [], url, path: url.pathname,
-      requestToken: undefined, requestAgentAddress: undefined,
-      requestPrincipal: { kind: 'nodeOperator' },
-      requestAuthorization: { nodeOperator: true },
+      requestAgentAddress: undefined,
+      authentication: requestAuthentication({ kind: 'nodeOperator' }),
     } as any;
     await handleContextGraphRoutes(routeContext);
     if (!res.writableEnded) await handleQueryRoutes(routeContext);

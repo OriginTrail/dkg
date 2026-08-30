@@ -18,6 +18,7 @@ import {
   type PromoteListFilter,
 } from '@origintrail-official/dkg-publisher';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { daemonState, startPromoteWorkerDaemonLifecycle, type PromoteWorkerDaemonLifecycle } from '../src/daemon.js';
 
 describe('promote-async daemon lifecycle wiring', () => {
@@ -154,10 +155,8 @@ describe('promote-async daemon lifecycle wiring', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
-          requestPrincipal: { kind: 'anonymous' },
-          requestAuthorization: { nodeOperator: false },
+          authentication: requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

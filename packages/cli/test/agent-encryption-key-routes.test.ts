@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '' };
@@ -48,12 +49,10 @@ function runCtx(
     agent,
     path: url.pathname,
     url,
-    requestToken,
     requestAgentAddress,
-    requestPrincipal: tokenAgentAddress
-      ? { kind: 'agent', agentAddress: tokenAgentAddress }
-      : { kind: 'nodeOperator' },
-    requestAuthorization: { nodeOperator: !tokenAgentAddress },
+    authentication: tokenAgentAddress
+      ? requestAuthentication({ kind: 'agent', agentAddress: tokenAgentAddress, token: requestToken })
+      : requestAuthentication({ kind: 'nodeOperator', token: requestToken }),
     validTokens: new Set<string>(),
   } as unknown as RequestContext;
   return { res, done: handleAgentChatRoutes(ctx) };

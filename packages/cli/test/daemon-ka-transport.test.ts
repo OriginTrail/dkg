@@ -14,6 +14,7 @@ import {
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} };
@@ -44,10 +45,9 @@ function runKaCtx(
     agent,
     path: url.pathname,
     url,
-    requestPrincipal: tokenAgentAddress
-      ? { kind: 'agent', agentAddress: tokenAgentAddress }
-      : { kind: 'anonymous' },
-    requestAuthorization: { nodeOperator: false },
+    authentication: tokenAgentAddress
+      ? requestAuthentication({ kind: 'agent', agentAddress: tokenAgentAddress })
+      : requestAuthentication({ kind: 'anonymous' }),
     ...ctxOverrides,
   } as unknown as RequestContext;
   return { res, done: handleKnowledgeAssetsRoutes(ctx) };
@@ -60,8 +60,7 @@ function runMemoryCtx(method: string, rawPath: string, agent: any, body?: unknow
   const url = new URL(`http://127.0.0.1${rawPath}`);
   const ctx = {
     req, res, agent, path: url.pathname, url,
-    requestPrincipal: { kind: 'anonymous' },
-    requestAuthorization: { nodeOperator: false },
+    authentication: requestAuthentication({ kind: 'anonymous' }),
   } as unknown as RequestContext;
   return { res, done: handleMemoryRoutes(ctx) };
 }

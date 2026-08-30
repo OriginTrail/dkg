@@ -15,6 +15,7 @@ import { seedLegacyRawLiftTestJob } from '../../publisher/test/_helpers/legacy-r
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CONTEXT_GRAPH = 'publisher-route-snapshot';
 const ENTITY = 'urn:publisher-route:snapshot:entity';
@@ -126,7 +127,7 @@ function createContext(
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
+    authentication: requestAuthentication({ kind: 'anonymous' }),
     requestAgentAddress: '0x0',
   };
 }

@@ -34,6 +34,7 @@ import {
   type PromoteListFilter,
 } from '@origintrail-official/dkg-publisher';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { daemonState } from '../src/daemon/state.js';
 
 describe('async SWM-share queue daemon routes', () => {
@@ -159,12 +160,10 @@ describe('async SWM-share queue daemon routes', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken,
           requestAgentAddress: agent.resolveAgentByToken(requestToken) ?? 'did:dkg:agent:test',
-          requestPrincipal: agent.resolveAgentByToken(requestToken)
-            ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken) }
-            : { kind: 'anonymous' },
-          requestAuthorization: { nodeOperator: false },
+          authentication: agent.resolveAgentByToken(requestToken)
+            ? requestAuthentication({ kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken), token: requestToken })
+            : requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

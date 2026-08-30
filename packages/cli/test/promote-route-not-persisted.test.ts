@@ -25,6 +25,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG_ID = 'issue-864-cg';
 const ASSERTION_NAME = 'orphan-assertion';
@@ -119,10 +120,8 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
-          requestPrincipal: { kind: 'anonymous' },
-          requestAuthorization: { nodeOperator: false },
+          authentication: requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

@@ -2,7 +2,7 @@
 //
 // Per-request context bag passed to every route-group handler.
 // Bundles the 24 parameters `handleRequest` used to take plus the 4
-// derived locals (url, path, requestToken, requestAgentAddress) so
+// derived locals (url, path, authentication, requestAgentAddress) so
 // route-group modules destructure exactly once on entry and route
 // bodies can keep referring to bare names — identical to how they
 // looked inside the monolithic `handleRequest`.
@@ -10,10 +10,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DKGAgent, OpWalletsConfig } from '@origintrail-official/dkg-agent';
 import type { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import type {
-  RequestAuthorization,
-  RequestPrincipal,
-} from '../../auth.js';
+import type { AllowedHttpAuthentication } from '../../auth.js';
 import type {
   ChatMemoryManager,
   DashboardDB,
@@ -107,16 +104,13 @@ export interface RequestContext {
   admission: AdmissionStatsView;
   /** Daemon-owned, read-only local LLM session used by the Node UI. */
   localLlm?: DaemonLocalLlmService;
-  // Derived per-request (from req.url + headers + token). Routes read
-  // `path`, `url`, `requestAgentAddress` extensively; pre-computing
-  // here keeps every group on the same fast path.
+  // Derived per-request. The correlated authentication decision is carried unchanged; identity
+  // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;
   path: string;
-  requestToken: string | undefined;
-  /** Capabilities established independently from caller identity. */
-  requestAuthorization: RequestAuthorization;
+  authentication: AllowedHttpAuthentication;
+  /** Compatibility operational identity derived once from the accepted authentication. */
   requestAgentAddress: string;
-  requestPrincipal: RequestPrincipal;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */
   emitNotification?: (event: NotificationSseEvent) => void;

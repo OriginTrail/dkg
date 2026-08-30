@@ -18,6 +18,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG_ID = 'no-funded-wallet-cg';
 const ASSERTION_NAME = 'paid-asset';
@@ -62,9 +63,8 @@ describe('POST /api/knowledge-assets/:name/vm/publish — NO_FUNDED_PUBLISHER_WA
           catchupTracker: { jobs: new Map(), latestByContextGraph: new Map() },
           extractionRegistry: {}, fileStore: {}, extractionStatus: new Map(), assertionImportLocks: new Map(),
           vectorStore: {}, embeddingProvider: null, validTokens: new Set(), apiHost: '127.0.0.1', apiPortRef: { value: 0 },
-          url, path: url.pathname, requestToken: undefined, requestAgentAddress: 'did:dkg:agent:test',
-          requestPrincipal: { kind: 'anonymous' },
-          requestAuthorization: { nodeOperator: false },
+          url, path: url.pathname, requestAgentAddress: 'did:dkg:agent:test',
+          authentication: requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {}, emitNotification: () => {},
         } as any);
         if (!res.writableEnded) { res.statusCode = 404; res.end(); }

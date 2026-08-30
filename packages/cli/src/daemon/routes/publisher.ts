@@ -117,7 +117,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -507,10 +507,8 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    requestToken,
+    authentication,
     requestAgentAddress,
-    requestAuthorization,
-    requestPrincipal,
   } = ctx;
 
 
@@ -683,13 +681,16 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // one record behind one boundary.
     let pendingTransactionOverride: PendingTransactionClearOverride | undefined;
     if (parsed.allowPendingTransaction === true) {
-      if (requestAuthorization.nodeOperator) {
+      if (canAdministerNode(authentication)) {
         pendingTransactionOverride = { kind: 'nodeOperator' };
-      } else if (requestPrincipal.kind === 'agent') {
-        pendingTransactionOverride = {
-          kind: 'agent',
-          agentAddress: requestPrincipal.agentAddress,
-        };
+      } else {
+        const agentAddress = authenticatedAgentAddress(authentication);
+        if (agentAddress) {
+          pendingTransactionOverride = {
+            kind: 'agent',
+            agentAddress,
+          };
+        }
       }
     }
     return respondTerminalClearOutcome(

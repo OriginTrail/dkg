@@ -212,6 +212,28 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(validated))?.status).toBe('validated');
   });
 
+  it('rejects malformed runtime clear authorities as nonterminal without mutation', async () => {
+    const p = createPublisher();
+    const validated = await driveToValidated(
+      p,
+      {},
+      { admittedByAgentAddress: '0xCCcCCc00000000000000000000000000000000Cc' },
+    );
+    const runtimeOptions = (pendingTransactionOverride: unknown) => ({
+      pendingTransactionOverride,
+    }) as unknown as Parameters<typeof p.clearTerminalJob>[1];
+
+    for (const malformedAuthority of [
+      { requestedBy: '0xCCcCCc00000000000000000000000000000000Cc' },
+      { kind: 'legacyOwner', agentAddress: '0xCCcCCc00000000000000000000000000000000Cc' },
+      { kind: 'agent' },
+    ]) {
+      expect(await p.clearTerminalJob(validated, runtimeOptions(malformedAuthority)))
+        .toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+      expect((await p.getStatus(validated))?.status).toBe('validated');
+    }
+  });
+
   it('lets only the admission owner explicitly clear one pre-broadcast validated job', async () => {
     const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
     const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
