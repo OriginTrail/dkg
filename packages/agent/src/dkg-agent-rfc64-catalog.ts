@@ -85,6 +85,8 @@ import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-age
 import {
   createRfc64CatalogAppliedHeadCoordinatorV1,
 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import type { Rfc64CatalogAppliedHeadEvidenceV1 } from
+  './rfc64/catalog-applied-head-evidence-v1.js';
 import {
   snapshotRfc64CatalogSynchronizationEvidenceV1,
   type Rfc64CatalogSynchronizationEvidenceV1,
@@ -921,7 +923,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ),
           logInfo: (ctx, message) => this.log.info(ctx, message),
         });
-        const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
+        const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1<
+          Rfc64CatalogAppliedHeadEvidenceV1
+        >({
           headTransport: clients.headTransport,
           contentTransport: clients.contentTransport,
           controlObjects: persistence.controlObjects,

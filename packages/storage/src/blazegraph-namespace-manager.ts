@@ -3,10 +3,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export interface BlazegraphNamespaceManagerOptions {
-  readonly serviceUrl: string;
+  readonly namespaceApiUrl: string;
   readonly fetchImpl?: typeof fetch;
-  readonly renderNamespaceXml: (namespace: string) => string;
+  readonly namespaceCodec: BlazegraphNamespaceCodec;
   readonly requestTimeoutMs?: number;
+}
+
+/** One contract owns both path safety and the XML representation. */
+export interface BlazegraphNamespaceCodec {
+  assertNamespace(namespace: string): void;
+  renderNamespaceXml(namespace: string): string;
 }
 
 export interface BlazegraphNamespaceEnsureResult {
@@ -54,7 +60,7 @@ export class BlazegraphNamespaceLease {
 export class BlazegraphNamespaceManager {
   readonly namespaceApiUrl: string;
   readonly #fetch: typeof fetch;
-  readonly #renderNamespaceXml: (namespace: string) => string;
+  readonly #namespaceCodec: BlazegraphNamespaceCodec;
   readonly #requestTimeoutMs: number;
 
   constructor(options: BlazegraphNamespaceManagerOptions) {
@@ -62,14 +68,14 @@ export class BlazegraphNamespaceManager {
       || (options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS) <= 0) {
       throw new Error('Blazegraph namespace request timeout must be a positive integer');
     }
-    this.namespaceApiUrl = deriveBlazegraphNamespaceApiUrl(options.serviceUrl);
+    this.namespaceApiUrl = normalizeBlazegraphNamespaceApiUrl(options.namespaceApiUrl);
     this.#fetch = options.fetchImpl ?? fetch;
-    this.#renderNamespaceXml = options.renderNamespaceXml;
+    this.#namespaceCodec = options.namespaceCodec;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   namespaceUrl(namespace: string): string {
-    assertNamespace(namespace);
+    this.#namespaceCodec.assertNamespace(namespace);
     return `${this.namespaceApiUrl}/${encodeURIComponent(namespace)}`;
   }
 
@@ -173,7 +179,7 @@ export class BlazegraphNamespaceManager {
     const response = await this.#boundedFetch(this.namespaceApiUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/xml' },
-      body: this.#renderNamespaceXml(namespace),
+      body: this.#namespaceCodec.renderNamespaceXml(namespace),
     }, this.#requestTimeoutMs, signal);
     if (!response.ok) {
       let detail = '';
@@ -199,31 +205,54 @@ export class BlazegraphNamespaceManager {
   }
 }
 
-function deriveBlazegraphNamespaceApiUrl(serviceUrl: string): string {
-  const parsed = new URL(serviceUrl);
+export function normalizeBlazegraphNamespaceApiUrl(namespaceApiUrl: string): string {
+  const parsed = parseHttpUrl(namespaceApiUrl, 'Blazegraph namespace API URL');
   const path = parsed.pathname.replace(/\/$/u, '');
-  const endpointMatch = /^(.*\/bigdata)\/namespace\/[^/]+\/sparql$/u.exec(path);
-  if (endpointMatch !== null) {
-    parsed.pathname = `${endpointMatch[1]}/namespace`;
-  } else if (path.endsWith('/bigdata/namespace')) {
-    parsed.pathname = path;
-  } else if (path.endsWith('/bigdata')) {
-    parsed.pathname = `${path}/namespace`;
-  } else {
-    parsed.pathname = `${path}/bigdata/namespace`.replace(/^\/+/u, '/');
+  if (!path.endsWith('/bigdata/namespace')) {
+    throw new Error('Blazegraph namespace API URL must end with /bigdata/namespace');
   }
-  parsed.search = '';
-  parsed.hash = '';
+  parsed.pathname = path;
   return parsed.toString().replace(/\/$/u, '');
 }
 
-function assertNamespace(namespace: string): void {
-  const hasControlOrSpace = [...namespace].some(
-    (character) => character.codePointAt(0)! <= 0x20,
-  );
-  if (namespace.length === 0 || namespace.length > 255 || hasControlOrSpace || /[/\\]/u.test(namespace)) {
-    throw new Error('Blazegraph namespace must be a bounded non-empty path segment');
+/** Convert only the exact per-namespace SPARQL endpoint shape used by operators. */
+export function blazegraphNamespaceApiUrlFromSparqlEndpoint(endpoint: string): string {
+  const parsed = parseHttpUrl(endpoint, 'Blazegraph SPARQL endpoint');
+  const path = parsed.pathname.replace(/\/$/u, '');
+  const match = /^(.*\/bigdata\/namespace)\/([^/]+)\/sparql$/u.exec(path);
+  const apiPath = match?.[1];
+  const namespace = match?.[2];
+  if (apiPath === undefined || namespace === undefined || namespace.length === 0) {
+    throw new Error(
+      'Blazegraph SPARQL endpoint must end with /bigdata/namespace/<namespace>/sparql',
+    );
   }
+  parsed.pathname = apiPath;
+  return parsed.toString().replace(/\/$/u, '');
+}
+
+/** Convert the CLI provisioner's exact origin-style service URL. */
+export function blazegraphNamespaceApiUrlFromBaseUrl(baseUrl: string): string {
+  const parsed = parseHttpUrl(baseUrl, 'Blazegraph base URL');
+  if (parsed.pathname !== '/' && parsed.pathname !== '') {
+    throw new Error('Blazegraph base URL must not contain a path');
+  }
+  parsed.pathname = '/bigdata/namespace';
+  return parsed.toString().replace(/\/$/u, '');
+}
+
+function parseHttpUrl(input: string, label: string): URL {
+  const parsed = new URL(input);
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+    || parsed.username.length > 0
+    || parsed.password.length > 0
+    || parsed.search.length > 0
+    || parsed.hash.length > 0
+  ) {
+    throw new Error(`${label} must be an HTTP(S) URL without credentials, query, or fragment`);
+  }
+  return parsed;
 }
 
 function normalizeReconcileAttempts(input: number, timeoutMs: number): number {

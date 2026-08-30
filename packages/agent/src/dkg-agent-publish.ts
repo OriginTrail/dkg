@@ -834,6 +834,105 @@ function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined)
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
+export interface StageKnowledgeAssetSharedWorkingMemoryInputV1 {
+  readonly store: TripleStore;
+  readonly graphManager?: GraphManager;
+  readonly contextGraphId: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string | number | bigint;
+  readonly shareOperationId: string;
+  readonly quads: readonly Quad[];
+  readonly privateMerkleRoot?: Uint8Array;
+  readonly privateTripleCount?: number;
+  readonly publisherPeerId?: string;
+  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers?: readonly string[];
+  readonly agentAddress?: string;
+  readonly subGraphName?: string;
+  readonly timestamp?: Date;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+}
+
+/**
+ * Canonical product boundary for staging one complete graph-scoped public SWM
+ * snapshot. It owns the assertion graph replacement, immutable operation
+ * snapshot, and mutable workspace head so callers cannot reproduce only a
+ * prefix of the durable staging protocol.
+ */
+export async function stageKnowledgeAssetSharedWorkingMemoryV1(
+  input: StageKnowledgeAssetSharedWorkingMemoryInputV1,
+): Promise<Readonly<{ swmGraph: string; tripleCount: number }>> {
+  const scope = createGraphKnowledgeAssetScope(input.kaUal, input.assertionVersion);
+  const graphManager = input.graphManager ?? new GraphManager(input.store);
+  const swmBucket = graphManager.sharedMemoryUri(input.contextGraphId, input.subGraphName);
+  const sharedMemoryScope: SharedMemoryGraphScope = {
+    kind: 'named-lifecycle',
+    identity: {
+      agentAddress: scope.agentAddress,
+      kaNumber: BigInt(scope.kaNumber),
+    },
+  };
+  const swmGraph = canonicalSharedMemoryScopeWriteGraph(swmBucket, sharedMemoryScope);
+  const priorSwmGraphs = await resolveSharedMemoryScopeGraphs(
+    input.store,
+    swmBucket,
+    sharedMemoryScope,
+  );
+  const replaced = await tryReplaceGraphAtomically(
+    input.store,
+    swmGraph,
+    input.quads.map((quad) => ({ ...quad, graph: swmGraph })),
+  );
+  await invalidateSwmMaterializationWitness(input.store, swmGraph, {
+    source: 'agent.stageKnowledgeAssetSharedWorkingMemoryV1.witnessInvalidate',
+  }).catch(() => {});
+  if (!replaced) {
+    throw Object.assign(
+      new Error(`Graph-scoped update requires atomic SWM replacement at ${swmGraph}`),
+      { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED', graphUri: swmGraph },
+    );
+  }
+  for (const graph of priorSwmGraphs) {
+    if (graph !== swmGraph) await input.store.dropGraph(graph);
+  }
+  await storeKnowledgeAssetOperationPublicQuads({
+    store: input.store,
+    graphManager,
+    contextGraphId: input.contextGraphId,
+    shareOperationId: input.shareOperationId,
+    kaUal: scope.ual,
+    assertionVersion: scope.assertionVersion,
+    quads: input.quads,
+    ...(input.privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: input.privateMerkleRoot }),
+    ...(input.privateTripleCount === undefined
+      ? {}
+      : { privateTripleCount: input.privateTripleCount }),
+    ...(input.publisherPeerId === undefined
+      ? {}
+      : { publisherPeerId: input.publisherPeerId }),
+    ...(input.accessPolicy === undefined ? {} : { accessPolicy: input.accessPolicy }),
+    ...(input.allowedPeers === undefined ? {} : { allowedPeers: input.allowedPeers }),
+    ...(input.agentAddress === undefined ? {} : { agentAddress: input.agentAddress }),
+    ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+    ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
+    ...(input.publicSnapshotStore === undefined
+      ? {}
+      : { publicSnapshotStore: input.publicSnapshotStore }),
+  });
+  await storeKnowledgeAssetWorkspaceHead({
+    store: input.store,
+    graphManager,
+    contextGraphId: input.contextGraphId,
+    kaUal: scope.ual,
+    assertionVersion: scope.assertionVersion,
+    shareOperationId: input.shareOperationId,
+    ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+  });
+  return Object.freeze({ swmGraph, tripleCount: input.quads.length });
+}
+
 /** Normalize the deprecated raw-byte call and validate the typed publish seam. */
 function normalizeWorkspaceGossipPublishInput(
   input: EncodedWorkspaceGossipPayload | Uint8Array,
@@ -2124,24 +2223,7 @@ export class PublishMethods extends DKGAgentBase {
     // the stable public SWM graph and remove historical checksum aliases before
     // the publisher reloads it. Any failure remains retryable and cannot touch
     // verifiable memory or the chain.
-    const updateSharedMemoryScope: SharedMemoryGraphScope = {
-      kind: 'named-lifecycle',
-      identity: {
-        agentAddress: updateScope.agentAddress,
-        kaNumber: BigInt(updateScope.kaNumber),
-      },
-    };
     const graphManager = new GraphManager(this.store);
-    const swmBucket = graphManager.sharedMemoryUri(contextGraphId, opts?.subGraphName);
-    const canonicalSwmGraph = canonicalSharedMemoryScopeWriteGraph(
-      swmBucket,
-      updateSharedMemoryScope,
-    );
-    const priorSwmGraphs = await resolveSharedMemoryScopeGraphs(
-      this.store,
-      swmBucket,
-      updateSharedMemoryScope,
-    );
     const updatePrivateStore = new PrivateContentStore(this.store, graphManager);
     await updatePrivateStore.replaceKnowledgeAssetPrivateTriples(
       contextGraphId,
@@ -2149,39 +2231,13 @@ export class PublishMethods extends DKGAgentBase {
       canonicalParts.privateQuads,
       opts?.subGraphName,
     );
-    const replacedSwm = await tryReplaceGraphAtomically(
-      this.store,
-      canonicalSwmGraph,
-      canonicalParts.publicQuads.map((quad) => ({ ...quad, graph: canonicalSwmGraph })),
-    );
-    // #2079: a REPLACE, not a drop — the catch-up lane's count gate cannot see
-    // it, so the witness must be dropped explicitly. The head is persisted only
-    // after this point, so a tear in between leaves content ahead of the head;
-    // without this, a witness for the OLD digest would still certify it.
-    // Best-effort, like every other invalidate: never fail a write that has
-    // already committed in order to drop a memo.
-    await invalidateSwmMaterializationWitness(this.store, canonicalSwmGraph, {
-      source: 'agent.publish.graphScopedUpdate.witnessInvalidate',
-    }).catch(() => {});
-    if (!replacedSwm) {
-      throw Object.assign(
-        new Error(
-          `Graph-scoped update requires atomic SWM replacement at ${canonicalSwmGraph}`,
-        ),
-        { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED', graphUri: canonicalSwmGraph },
-      );
-    }
-    for (const graph of priorSwmGraphs) {
-      if (graph !== canonicalSwmGraph) await this.store.dropGraph(graph);
-    }
-
     // Persist the exact update snapshot and monotonic SWM head before the
     // publisher can cross the chain write-ahead boundary. If the process dies
     // after the transaction lands but before local VM materialization, chain
     // reconciliation can now resolve the staged version, counts, private
     // commitment, publisher, and immutable public payload without guessing.
     const updateOperationId = ctx.operationId;
-    await storeKnowledgeAssetOperationPublicQuads({
+    await stageKnowledgeAssetSharedWorkingMemoryV1({
       store: this.store,
       graphManager,
       contextGraphId,
@@ -2198,15 +2254,6 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: opts?.subGraphName,
       timestamp: new Date(),
       publicSnapshotStore: this.publicSnapshotStore,
-    });
-    await storeKnowledgeAssetWorkspaceHead({
-      store: this.store,
-      graphManager,
-      contextGraphId,
-      kaUal: updateScope.ual,
-      assertionVersion: updateScope.assertionVersion,
-      shareOperationId: updateOperationId,
-      subGraphName: opts?.subGraphName,
     });
     // GH #842: thread the on-chain cgId so the publisher can promote the update
     // payload into the per-cgId partition the RS prover reads. Without it,

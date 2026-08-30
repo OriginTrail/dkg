@@ -30,16 +30,24 @@
  * machine-readable repo-root `blazegraph-image.json` runtime asset.
  */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as net from 'node:net';
 import blazegraphRuntimeContract from
   '@origintrail-official/dkg/blazegraph-runtime-contract';
-import { BlazegraphNamespaceManager } from '@origintrail-official/dkg-storage';
+import {
+  BlazegraphNamespaceManager,
+  blazegraphNamespaceApiUrlFromBaseUrl,
+} from '@origintrail-official/dkg-storage';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
 const {
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: NAMESPACE_XML_TEMPLATE,
   readBlazegraphImageMetadata,
 } = blazegraphRuntimeContract;
+const blazegraphNamespaceCodec = Object.freeze({
+  assertNamespace: blazegraphRuntimeContract.assertBlazegraphNamespace,
+  renderNamespaceXml: blazegraphRuntimeContract.renderBlazegraphNamespaceXml,
+});
 type BlazegraphImageMetadata = ReturnType<typeof readBlazegraphImageMetadata>;
 
 /**
@@ -226,13 +234,18 @@ function sanitiseContainerName(namespace: string): string {
 }
 
 export function normaliseBlazegraphNamespace(namespace: string): string {
-  const slug = namespace
+  const candidate = namespace
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9_.-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase();
-  return slug || 'dkg-node';
+  const slug = candidate.length === 0 || candidate === '.' || candidate === '..'
+    ? 'dkg-node'
+    : candidate;
+  if (slug.length <= 128) return slug;
+  const suffix = createHash('sha256').update(slug).digest('hex').slice(0, 12);
+  return `${slug.slice(0, 115)}-${suffix}`;
 }
 
 function sparqlUrlForNamespace(baseUrl: string, namespace: string): string {
@@ -457,9 +470,9 @@ async function reconcileNamespace(opts: {
   log: (msg: string) => void;
 }): Promise<boolean> {
   const manager = new BlazegraphNamespaceManager({
-    serviceUrl: opts.url,
+    namespaceApiUrl: blazegraphNamespaceApiUrlFromBaseUrl(opts.url),
     fetchImpl: opts.fetch,
-    renderNamespaceXml: blazegraphRuntimeContract.renderBlazegraphNamespaceXml,
+    namespaceCodec: blazegraphNamespaceCodec,
   });
   const result = await manager.ensure(opts.namespace);
   if (result.created) {
@@ -525,6 +538,7 @@ export async function provisionBlazegraphDocker(
   const pollTimeoutMs = opts.pollTimeoutMs ?? 30_000;
   const portRange = opts.portRange ?? DEFAULT_HOST_PORT_RANGE;
   const namespace = normaliseBlazegraphNamespace(opts.namespace);
+  blazegraphRuntimeContract.assertBlazegraphNamespace(namespace);
   if (namespace !== opts.namespace) {
     log(`  Normalized Blazegraph namespace "${opts.namespace}" → "${namespace}".`);
   }

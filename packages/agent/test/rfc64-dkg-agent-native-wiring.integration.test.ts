@@ -634,6 +634,30 @@ function selectedPrivateCatalogActivationV1(
   });
 }
 
+function selectedPublicCatalogActivationV1(
+  providerPeerId: string,
+): Rfc64CatalogActivationInputV1 {
+  const policy = buildOpenOwnerContextGraphPolicyV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    ownerAddress: AUTHOR,
+  });
+  return Object.freeze({
+    enabled: true,
+    deploymentProfile: NATIVE_DEPLOYMENT,
+    autoPublish: {
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    },
+    bootstrap: {
+      acceptedPolicies: [{
+        policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+        targets: [],
+        completeSwmProviders: [providerPeerId],
+      }],
+    },
+  });
+}
+
 ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
   it('preserves the EVM default chain identity for a no-admin chain config', async () => {
     const operational = ethers.Wallet.createRandom();
@@ -843,6 +867,57 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(announce).toHaveBeenCalledWith(expect.objectContaining({
       peers: [publicAnnouncementPeerId],
     }));
+  }, 60_000);
+
+  it.each([
+    { controlKind: 'selected-private' as const, driftedAccessPolicy: 0 as const },
+    { controlKind: 'selected-public' as const, driftedAccessPolicy: 1 as const },
+  ])('refuses $controlKind authoring after opposite policy-kind drift', async ({
+    controlKind,
+    driftedAccessPolicy,
+  }) => {
+    const providerPeerId = `12D3KooPolicyKindDrift${controlKind}`;
+    const authority = privateCatalogAuthorityFixtureV1();
+    const author = await startNativeAgentWithOptions({
+      name: `policy-kind-drift-${controlKind}`,
+      catalogActivation: controlKind === 'selected-private'
+        ? selectedPrivateCatalogActivationV1(providerPeerId, authority)
+        : selectedPublicCatalogActivationV1(providerPeerId),
+    });
+    const service = (author as any).rfc64PublicCatalogServiceV1;
+    const accepted = service.acceptedPolicySnapshot(NETWORK_ID, CONTEXT_GRAPH_ID);
+    expect(accepted).not.toBeNull();
+    vi.spyOn(service, 'acceptedPolicySnapshot').mockReturnValue(Object.freeze({
+      ...accepted,
+      policy: Object.freeze({ ...accepted.policy, accessPolicy: driftedAccessPolicy }),
+    }));
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: `policy-kind-drift-${controlKind}`,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: `policy-kind-drift-operation-${controlKind}`,
+    })).resolves.toMatchObject({
+      status: 'failed',
+      action: 'upsert',
+      error: expect.stringMatching(/policy changed after activation/u),
+    });
+    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+    });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(announce).not.toHaveBeenCalled();
   }, 60_000);
 
   it('projects an ordinary selected-private SWM promotion through its exact complete providers', async () => {

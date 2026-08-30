@@ -31,8 +31,10 @@ import type {
 } from './public-catalog-receiver-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
-export type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 = Pick<
-  Rfc64PublicCatalogNativeReceiverV1,
+export type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1<
+  TPostHeadExtension extends object = Readonly<Record<string, unknown>>,
+> = Pick<
+  Rfc64PublicCatalogNativeReceiverV1<TPostHeadExtension>,
   'synchronizeBoundedPublicRootCatalog'
 >;
 
@@ -56,8 +58,11 @@ export type Rfc64BoundedPublicRootCatalogStagedHeadReaderV1 = (
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
 ) => Promise<Rfc64BoundedPublicRootCatalogStagedHeadV1 | null>;
 
-export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
-  readonly nativeReceiver: Rfc64BoundedPublicRootCatalogNativeReceiverClientV1;
+export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1<
+  TPostHeadExtension extends object = Readonly<Record<string, unknown>>,
+> {
+  readonly nativeReceiver:
+    Rfc64BoundedPublicRootCatalogNativeReceiverClientV1<TPostHeadExtension>;
   readonly inventory: Pick<Rfc64InventoryV1OperationsV1, 'readAppliedCatalogHeadV1'>;
   /** Resolve from accepted policy state; never reconstruct authority from wire fields alone. */
   readonly resolveTrustedCatalogScope: Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1;
@@ -78,10 +83,13 @@ export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
   ) => boolean;
 }
 
-export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
+export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1<
+  TPostHeadExtension extends object = Readonly<Record<string, unknown>>,
+>
   implements Rfc64PublicCatalogReceiverReconcilerV1 {
   constructor(
-    private readonly options: Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1,
+    private readonly options:
+      Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1<TPostHeadExtension>,
   ) {
     if (
       typeof options?.nativeReceiver?.synchronizeBoundedPublicRootCatalog !== 'function'
@@ -200,8 +208,10 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
 }
 
 /** Construct the production scheduler adapter around one native receiver. */
-export function createRfc64BoundedPublicRootCatalogNativeReconcilerV1(
-  options: Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1,
+export function createRfc64BoundedPublicRootCatalogNativeReconcilerV1<
+  TPostHeadExtension extends object,
+>(
+  options: Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1<TPostHeadExtension>,
 ): Rfc64PublicCatalogReceiverReconcilerV1 {
   return new Rfc64BoundedPublicRootCatalogNativeReconcilerV1(options);
 }
