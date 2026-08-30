@@ -74,6 +74,7 @@ export function installSyncOnConnectPeerJobStub(
       remotePeer: string,
       recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
     ) => Promise<void>;
+    cancel?: (remotePeer: string) => void;
     finish?: (remotePeer: string) => void;
   }>,
 ): void {
@@ -84,6 +85,7 @@ export function installSyncOnConnectPeerJobStub(
     runSelected: async (recoveryPlan) => {
       await callbacks.runSelected?.(remotePeer, recoveryPlan);
     },
+    cancel: () => { callbacks.cancel?.(remotePeer); },
     finish: () => { callbacks.finish?.(remotePeer); },
   });
 }

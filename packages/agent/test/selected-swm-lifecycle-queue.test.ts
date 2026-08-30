@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  runSyncOnConnectWithTestOrdinaryLane as runSyncOnConnect,
+} from './_helpers/run-sync-on-connect.js';
 import {
   PEER,
   callSelectedSharedMemorySummary,
@@ -355,9 +357,10 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
 
   it('does not hide an unrelated shared-memory phase failure', async () => {
     const contextGraphId = 'selected-with-unrelated-failure';
+    const ordinaryContextGraphId = 'ordinary-with-failure';
     const onSyncAccounting = vi.fn();
     const shared = {
-      ...result(contextGraphId, 3, 3),
+      ...result(ordinaryContextGraphId, 3, 3),
       failedPhases: 2,
       snapshotPlaneIncomplete: 1,
       resolvedSnapshotPlaneIncomplete: 1,
@@ -371,7 +374,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       knownCorePeerIdsV2: new Set(),
       getSyncContextGraphs: () => [],
       getDurableSyncContextGraphs: () => [],
-      getSharedMemorySyncContextGraphs: () => [contextGraphId],
+      resolveOrdinaryContextGraphIds: () => [ordinaryContextGraphId],
       selectedSharedMemoryLane: {
         admitWork: () => ({
           contextGraphIds: [contextGraphId],
@@ -381,7 +384,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
               kind: 'selected-public',
               targets: [{ contextGraphId, lane: 'selected-public' }],
             },
-            shared,
+            shared: result(contextGraphId, 3, 3),
             scopeComplete: true,
             targetDiagnostics: {
               selectedPublic: { completed: 1, total: 1 },
@@ -393,7 +396,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => shared,
+      executeOrdinary: async () => shared,
       onSyncAccounting,
       logInfo: () => {},
     });

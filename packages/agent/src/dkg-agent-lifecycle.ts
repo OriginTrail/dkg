@@ -4723,6 +4723,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
   ): SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
+    let cancelled = false;
     const job: SyncOnConnectPeerJobAccounting = {
       outcomes: [],
       probe: undefined,
@@ -4795,7 +4796,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? this.tryOrdinarySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect')
           : this.trySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect'));
       },
+      cancel: () => {
+        cancelled = true;
+        job.outcomes.length = 0;
+      },
       finish: () => {
+        if (cancelled) return;
         const combined = combineSyncOnConnectPeerJobAccounting(job.outcomes);
         if (combined === null || job.probe === null || job.probe === undefined) return;
         const selectedRetryStillRequired = job.selectedAttempted

@@ -8,12 +8,14 @@ const PEER = '12D3KooWSchedulerPeer';
 function createScheduler(callbacks: Readonly<{
   runOrdinary: () => Promise<void>;
   runSelected: (plan?: string) => Promise<void>;
+  cancel?: () => void;
   finish?: () => void;
 }>): SyncOnConnectPeerScheduler<string> {
   return new SyncOnConnectPeerScheduler<string>({
     createJob: () => ({
       runOrdinary: async () => callbacks.runOrdinary(),
       runSelected: async (plan) => callbacks.runSelected(plan),
+      cancel: callbacks.cancel ?? (() => undefined),
       finish: callbacks.finish ?? (() => undefined),
     }),
   });
@@ -52,6 +54,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     const createJob = vi.fn(() => ({
       runOrdinary: async () => undefined,
       runSelected: async () => undefined,
+      cancel: () => undefined,
       finish,
     }));
     const scheduler = new SyncOnConnectPeerScheduler<string>({ createJob });
@@ -67,6 +70,7 @@ describe('sync-on-connect per-peer scheduler', () => {
   it('finalizes an active peer job once when it is cleared during a phase', async () => {
     const ordinary = deferred();
     const ordinaryStarted = deferred();
+    const cancel = vi.fn();
     const finish = vi.fn();
     const scheduler = createScheduler({
       runOrdinary: async () => {
@@ -74,6 +78,7 @@ describe('sync-on-connect per-peer scheduler', () => {
         await ordinary.promise;
       },
       runSelected: async () => undefined,
+      cancel,
       finish,
     });
 
@@ -83,6 +88,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     ordinary.resolve();
 
     await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
+    expect(cancel).toHaveBeenCalledOnce();
     expect(scheduler.size).toBe(0);
   });
 

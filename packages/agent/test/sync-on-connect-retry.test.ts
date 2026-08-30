@@ -4,10 +4,12 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
-  runSyncOnConnect,
   SyncOnConnectPostSyncError,
   type SyncOnConnectPeerOutcome,
 } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  runSyncOnConnectWithTestOrdinaryLane as runSyncOnConnect,
+} from './_helpers/run-sync-on-connect.js';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -162,6 +164,54 @@ describe('runSyncOnConnect callbacks', () => {
     ]);
   });
 
+  it('rejects overlapping selected and ordinary work before ordinary execution', async () => {
+    const remotePeer = freshPeerIdString();
+    const ordinarySync = vi.fn(async () => 0);
+
+    await expect(runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      getDurableSyncContextGraphs: () => [],
+      selectedSharedMemoryLane: {
+        admitWork: () => ({
+          contextGraphIds: ['cg-a'],
+          syncFromPeer: async () => ({
+            kind: 'selected-shared-memory',
+            requestedScope: {
+              kind: 'selected-public',
+              targets: [{ contextGraphId: 'cg-a', lane: 'selected-public' }],
+            },
+            shared: {
+              insertedTriples: 0,
+              completedPhases: 1,
+              checkpointAdvances: 0,
+            },
+            scopeComplete: true,
+            targetDiagnostics: {
+              selectedPublic: { completed: 1, total: 1 },
+              ordinaryPrivate: { completed: 0, total: 0 },
+            },
+          }),
+        }),
+      },
+      ordinarySharedMemoryLane: {
+        resolveWork: () => ({
+          contextGraphIds: ['cg-a'],
+          syncFromPeer: ordinarySync,
+        }),
+      },
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags: async () => undefined,
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    })).rejects.toThrow('Ordinary and selected shared-memory work scopes overlap');
+
+    expect(ordinarySync).not.toHaveBeenCalled();
+  });
+
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {
     const remotePeer = freshPeerIdString();
     const synced: SyncOnConnectPeerOutcome[] = [];
@@ -181,7 +231,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => {
+      executeOrdinary: async () => {
         sharedRuns += 1;
         return 0;
       },
@@ -215,7 +265,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
       onSyncAccounting: (_peerId, accounting) => {
         if (accounting) synced.push(accounting);
@@ -243,7 +293,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncFromPeer: async () => 1,
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
     });
 
@@ -266,7 +316,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
     });
 
@@ -283,7 +333,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncFromPeer: async () => 1,
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
     });
 
@@ -307,7 +357,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
       onPeerSkippedNoSync: (peerId, protocols) => {
         skipped.push({ peerId, protocols: [...protocols] });
@@ -337,7 +387,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncFromPeer: async () => 7,
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
       onPeerSkippedNoSync: (peerId) => skipped.push(peerId),
       onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
@@ -368,7 +418,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         completedPhases: 0,
         checkpointAdvances: 0,
@@ -408,7 +458,7 @@ describe('runSyncOnConnect callbacks', () => {
         }),
         refreshMetaSyncedFlags: async () => {},
         discoverContextGraphsFromStore: async () => 0,
-        syncSharedMemoryFromPeer: async () => ({
+        executeOrdinary: async () => ({
           insertedTriples: 0,
           timedOutPhases: 0,
           failedPeers: 0,
@@ -444,7 +494,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
         failedPeers: 0,
@@ -476,7 +526,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         completedPhases: 0,
         checkpointAdvances: 0,
@@ -512,7 +562,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         completedPhases: 0,
         checkpointAdvances: 0,
@@ -548,7 +598,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         completedPhases: 0,
         checkpointAdvances: 0,
@@ -581,7 +631,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         completedPhases: 0,
         checkpointAdvances: 0,
@@ -614,7 +664,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         completedPhases: 0,
         checkpointAdvances: 0,
@@ -648,7 +698,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
         failedPeers: 0,
@@ -693,7 +743,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
         failedPeers: 0,
@@ -742,7 +792,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
         failedPeers: 0,
@@ -792,7 +842,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
         failedPeers: 0,
@@ -847,7 +897,7 @@ describe('runSyncOnConnect callbacks', () => {
         contextGraphs = ['cg-a', 'cg-b'];
         return 1;
       },
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
         failedPeers: 0,
@@ -904,7 +954,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
         failedPeers: 0,
@@ -943,7 +993,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
         failedPeers: 0,
@@ -975,7 +1025,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 1,
         insertedDataTriples: 0,
         insertedMetaTriples: 1,
@@ -1010,7 +1060,7 @@ describe('runSyncOnConnect callbacks', () => {
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => ({
+      executeOrdinary: async () => ({
         insertedTriples: 0,
         insertedDataTriples: 0,
         insertedMetaTriples: 0,
@@ -1046,7 +1096,7 @@ describe('runSyncOnConnect callbacks', () => {
         discoverContextGraphsFromStore: async () => {
           throw laterError;
         },
-        syncSharedMemoryFromPeer: async () => 0,
+        executeOrdinary: async () => 0,
         logInfo: noopLog,
         onSyncAccounting: (peerId) => synced.push(peerId),
       });
@@ -1089,7 +1139,7 @@ describe('runSyncOnConnect callbacks', () => {
           contextGraphs = ['cg-a', 'cg-b'];
           return 1;
         },
-        syncSharedMemoryFromPeer: async () => 0,
+        executeOrdinary: async () => 0,
         logInfo: noopLog,
       });
     } catch (err) {
@@ -1117,7 +1167,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer,
+      executeOrdinary: syncSharedMemoryFromPeer,
       syncSharedMemoryOnConnect: false,
       logInfo: noopLog,
       onSyncAccounting: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
@@ -1143,7 +1193,7 @@ describe('runSyncOnConnect callbacks', () => {
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
     });
 

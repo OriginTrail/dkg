@@ -3,7 +3,6 @@ import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
 import {
   runSelectedSharedMemoryRetry,
-  runSyncOnConnect,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import {
@@ -14,6 +13,9 @@ import {
   installSyncOnConnectPeerJobStub,
   recorder,
 } from './_helpers/sync-on-connect-test-fixture.js';
+import {
+  runSyncOnConnectWithTestOrdinaryLane as runSyncOnConnect,
+} from './_helpers/run-sync-on-connect.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const PEER_B = '12D3KooWRnKxyUg8W3ju7BpxN3e9NAsG1T4d6TuK53LZxD41f3RC';
@@ -31,11 +33,11 @@ describe('sync-on-connect churn gates', () => {
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [configuredGraph],
-      getSharedMemorySyncContextGraphs: () => [],
+      resolveOrdinaryContextGraphIds: () => [],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
     });
 
@@ -59,11 +61,11 @@ describe('sync-on-connect churn gates', () => {
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['selected-cg'],
       getDurableSyncContextGraphs: () => ['selected-cg'],
-      getSharedMemorySyncContextGraphs: () => [],
+      resolveOrdinaryContextGraphIds: () => [],
       syncFromPeer,
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
     });
 
@@ -85,11 +87,11 @@ describe('sync-on-connect churn gates', () => {
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
       getDurableSyncContextGraphs: () => [],
-      getSharedMemorySyncContextGraphs: () => [],
+      resolveOrdinaryContextGraphIds: () => [],
       syncFromPeer,
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore,
-      syncSharedMemoryFromPeer: async () => 0,
+      executeOrdinary: async () => 0,
       logInfo: noopLog,
       onSyncAccounting: (peerId, syncOutcome) => {
         syncedPeers.push({ peerId, fresh: syncOutcome?.fresh ?? false, progress: syncOutcome?.progress });
@@ -696,7 +698,7 @@ describe('sync-on-connect churn gates', () => {
       }),
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore,
-      syncSharedMemoryFromPeer,
+      executeOrdinary: syncSharedMemoryFromPeer,
       logInfo: noopLog,
       onSyncAccounting: (peerId, syncOutcome) => {
         syncedPeers.push({
@@ -741,7 +743,7 @@ describe('sync-on-connect churn gates', () => {
       }),
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore,
-      syncSharedMemoryFromPeer,
+      executeOrdinary: syncSharedMemoryFromPeer,
       logInfo: noopLog,
       onSyncAccounting: (peerId, syncOutcome) => {
         syncedPeers.push({ peerId, fresh: syncOutcome?.fresh ?? false, progress: syncOutcome?.progress });
@@ -778,7 +780,7 @@ describe('sync-on-connect churn gates', () => {
       }),
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore,
-      syncSharedMemoryFromPeer,
+      executeOrdinary: syncSharedMemoryFromPeer,
       logInfo: noopLog,
     });
 
@@ -829,7 +831,7 @@ describe('sync-on-connect churn gates', () => {
       syncFromPeer,
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore,
-      syncSharedMemoryFromPeer,
+      executeOrdinary: syncSharedMemoryFromPeer,
       logInfo: noopLog,
       onSyncAccounting: (peerId, syncOutcome) => {
         syncedPeers.push({
@@ -863,11 +865,11 @@ describe('sync-on-connect churn gates', () => {
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['unauthorized-cg'],
-      getSharedMemorySyncContextGraphs: () => [],
+      resolveOrdinaryContextGraphIds: () => [],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer,
+      executeOrdinary: syncSharedMemoryFromPeer,
       logInfo: noopLog,
     });
 
@@ -885,14 +887,14 @@ describe('sync-on-connect churn gates', () => {
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['eligible-cg'],
-      getSharedMemorySyncContextGraphs: (peerId) => {
+      resolveOrdinaryContextGraphIds: (peerId) => {
         selectedForPeer = peerId;
         return ['eligible-cg'];
       },
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer,
+      executeOrdinary: syncSharedMemoryFromPeer,
       logInfo: noopLog,
     });
 
@@ -910,11 +912,11 @@ describe('sync-on-connect churn gates', () => {
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['eligible-cg'],
-      getSharedMemorySyncContextGraphs: () => ['eligible-cg'],
+      resolveOrdinaryContextGraphIds: () => ['eligible-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer,
+      executeOrdinary: syncSharedMemoryFromPeer,
       logInfo: noopLog,
     });
 

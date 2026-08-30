@@ -632,6 +632,76 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
   });
 
+  it('discards accumulated accounting when an active peer job is cleared', async () => {
+    const agent = await createUnstartedAgent('Rfc64CancelledPeerJobAccounting');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    let releaseOrdinary!: () => void;
+    let markOrdinaryStarted!: () => void;
+    const ordinaryRelease = new Promise<void>((resolve) => { releaseOrdinary = resolve; });
+    const ordinaryStarted = new Promise<void>((resolve) => { markOrdinaryStarted = resolve; });
+    agent.trySyncFromPeer = async (_peerId, onSyncAccounting) => {
+      markOrdinaryStarted();
+      await ordinaryRelease;
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      });
+      return 'synced';
+    };
+    let releaseSelected!: () => void;
+    let markSelectedStarted!: () => void;
+    const selectedRelease = new Promise<void>((resolve) => { releaseSelected = resolve; });
+    const selectedStarted = new Promise<void>((resolve) => { markSelectedStarted = resolve; });
+    agent.trySelectedSwmRetryFromPeer = async () => {
+      markSelectedStarted();
+      await selectedRelease;
+      return 'deferred-backpressure';
+    };
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
+
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
+    await ordinaryStarted;
+    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      () => undefined,
+      0,
+    )).toBe(true);
+    releaseOrdinary();
+    await selectedStarted;
+
+    agent.lastSuccessfulSyncAt.set(PEER_A, 1);
+    agent.lastSyncProgressAt.set(PEER_A, 1);
+    agent.syncReconcilerBackoff.set(PEER_A, {
+      failures: 4,
+      nextRetryAt: Date.now() + 60_000,
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.clearNetworkRejectedPeerState(PEER_A);
+    releaseSelected();
+    await flushTimers();
+
+    expect(applyJobAccounting).not.toHaveBeenCalled();
+    expect(agent.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect(agent.lastSyncProgressAt.has(PEER_A)).toBe(false);
+    expect(agent.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+  });
+
   it('adds owed ordinary work to the same job while exact recovery is running', async () => {
     const agent = await createUnstartedAgent('Rfc64OrdinaryUpgradeDuringExact');
     allowAllNetworkAdmission(agent);

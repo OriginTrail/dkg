@@ -27,6 +27,8 @@ interface PeerJob<SelectedPlan> {
 export interface SyncOnConnectPeerJobRunner<SelectedPlan> {
   readonly runOrdinary: () => Promise<void>;
   readonly runSelected: (recoveryPlan?: SelectedPlan) => Promise<void>;
+  /** Discard deferred accounting when the owning peer job is cancelled. */
+  readonly cancel: () => void;
   /** Commit the job's combined reconciler accounting exactly once. */
   readonly finish: () => void;
 }
@@ -60,6 +62,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
   clear(remotePeer: string): void {
     const job = this.jobs.get(remotePeer);
     if (job?.timer !== null && job?.timer !== undefined) clearTimeout(job.timer);
+    job?.runner?.cancel();
     this.jobs.delete(remotePeer);
   }
 

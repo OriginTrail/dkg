@@ -4,7 +4,6 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
   runSelectedSharedMemoryRetry,
-  runSyncOnConnect,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
@@ -22,6 +21,9 @@ import {
   type SelectedProviderSelectionAgent,
   type SelectedSwmLifecycleAgentFixture,
 } from './selected-swm-test-helpers.js';
+import {
+  runSyncOnConnectWithTestOrdinaryLane as runSyncOnConnect,
+} from './_helpers/run-sync-on-connect.js';
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
   it('accounts a real complete private-only no-op without reconciler backoff', async () => {
@@ -588,7 +590,6 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         knownCorePeerIdsV2: new Set(),
         getSyncContextGraphs: () => [],
         getDurableSyncContextGraphs: () => [],
-        getSharedMemorySyncContextGraphs: () => [publicCg],
         selectedSharedMemoryLane: {
           admitWork: () => ({
             contextGraphIds: [publicCg],
@@ -598,7 +599,6 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         syncFromPeer: async () => 0,
         refreshMetaSyncedFlags: async () => undefined,
         discoverContextGraphsFromStore: async () => 0,
-        syncSharedMemoryFromPeer: async () => summary,
         onSyncAccounting,
         logInfo: () => {},
       });
@@ -767,6 +767,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.createSyncOnConnectPeerJobRunner = (peerId: string) => ({
         runOrdinary: async () => undefined,
         runSelected: async () => { queuedPeers.push(peerId); },
+        cancel: () => undefined,
         finish: () => undefined,
       });
       queueAgent.syncReconcilerBackoff = new Map<string, unknown>();

@@ -37,7 +37,7 @@ export interface OrdinarySharedMemoryWorkItem {
   readonly syncFromPeer: () => Promise<SyncFromPeerResult>;
 }
 
-interface OrdinarySharedMemorySyncLane {
+export interface OrdinarySharedMemorySyncLane {
   resolveWork: (
     remotePeerId: string,
   ) => OrdinarySharedMemoryWorkItem | Promise<OrdinarySharedMemoryWorkItem>;
@@ -57,7 +57,7 @@ export type SyncOnConnectPeerOutcome =
       progress: boolean;
     };
 
-interface SyncOnConnectContext {
+export interface SyncOnConnectContext {
   remotePeer: string;
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
@@ -66,20 +66,13 @@ interface SyncOnConnectContext {
   getSyncContextGraphs: () => string[];
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
-  /** @deprecated Prefer ordinarySharedMemoryLane for one cohesive scope/executor. */
-  getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
   /** Cohesive selected lane; its scope resolver and typed producer cannot be mis-wired separately. */
   selectedSharedMemoryLane?: SelectedSharedMemorySyncLane;
   /** Cohesive ordinary lane; orchestration and execution share one immutable work item. */
-  ordinarySharedMemoryLane?: OrdinarySharedMemorySyncLane;
+  ordinarySharedMemoryLane: OrdinarySharedMemorySyncLane;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<DurableSyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
-  /** @deprecated Prefer ordinarySharedMemoryLane for one cohesive scope/executor. */
-  syncSharedMemoryFromPeer?: (
-    peerId: string,
-    contextGraphIds: string[],
-  ) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
@@ -305,13 +298,11 @@ export async function runSyncOnConnect(
     knownCorePeerIdsV2 = new Set<string>(),
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
-    getSharedMemorySyncContextGraphs,
     selectedSharedMemoryLane,
     ordinarySharedMemoryLane,
     syncFromPeer,
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
-    syncSharedMemoryFromPeer,
     syncSharedMemoryOnConnect = true,
     logInfo,
   } = context;
@@ -541,17 +532,10 @@ export async function runSyncOnConnect(
     }
 
     durableSyncCompleted = true;
-    const ordinarySharedMemoryWork = ordinarySharedMemoryLane
-      ? await runNonTransportStep(() => Promise.resolve(
-        ordinarySharedMemoryLane.resolveWork(remotePeer),
-      ))
-      : null;
-    const allWsContextGraphIds = ordinarySharedMemoryWork?.contextGraphIds
-      ?? (getSharedMemorySyncContextGraphs
-        ? await runNonTransportStep(() => Promise.resolve(
-          getSharedMemorySyncContextGraphs(remotePeer),
-        ))
-        : getSyncContextGraphs() ?? []);
+    const ordinarySharedMemoryWork = await runNonTransportStep(() => Promise.resolve(
+      ordinarySharedMemoryLane.resolveWork(remotePeer),
+    ));
+    const allWsContextGraphIds = ordinarySharedMemoryWork.contextGraphIds;
     const prioritySharedMemoryContextGraphIdSet = new Set(
       admittedPrioritySharedMemoryWork?.contextGraphIds ?? [],
     );
@@ -559,18 +543,12 @@ export async function runSyncOnConnect(
       (contextGraphId) => !prioritySharedMemoryContextGraphIdSet.has(contextGraphId),
     );
     if (
-      ordinarySharedMemoryWork !== null
-      && wsContextGraphIds.length !== allWsContextGraphIds.length
+      wsContextGraphIds.length !== allWsContextGraphIds.length
     ) {
       throw new TypeError('Ordinary and selected shared-memory work scopes overlap');
     }
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
-      if (ordinarySharedMemoryWork === null && syncSharedMemoryFromPeer === undefined) {
-        throw new TypeError('Missing ordinary shared-memory sync executor');
-      }
-      const wsSynced = ordinarySharedMemoryWork !== null
-        ? await ordinarySharedMemoryWork.syncFromPeer()
-        : await syncSharedMemoryFromPeer!(remotePeer, wsContextGraphIds);
+      const wsSynced = await ordinarySharedMemoryWork.syncFromPeer();
       const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
       logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
       if (sharedAccounting.deferredByBackpressure) {
