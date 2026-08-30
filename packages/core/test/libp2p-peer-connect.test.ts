@@ -209,6 +209,27 @@ describe('connectLibp2pPeer', () => {
     expect(fallback.cause).toMatchObject({ name: 'AbortError' });
   });
 
+  it('preserves a configured-relay failure when the identity fallback has no addresses', async () => {
+    const relayFailure = new Error('configured relay unavailable');
+    const noAddresses = Object.assign(new Error('no valid addresses'), {
+      name: 'NoValidAddressesError',
+    });
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn((target: unknown) => {
+        const address = targetString(target);
+        return Promise.reject(address === TARGET ? noAddresses : relayFailure);
+      }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+
+    await expect(connectLibp2pPeer(host, TARGET, [], {
+      configuredRelayTargets: [CONFIGURED_RELAYS[0]!],
+    })).rejects.toBe(relayFailure);
+    expect(host.dial.mock.calls.map(([target]) => targetString(target)))
+      .toEqual([RELAY_A, TARGET]);
+  });
+
   it('stops immediately when the caller-owned signal aborts', async () => {
     const controller = new AbortController();
     const calls: string[] = [];

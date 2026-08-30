@@ -26,6 +26,7 @@ const PEER_B = '12D3KooWB' + 'b'.repeat(43);
 const RELAY_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const RELAY_ADDR =
   `/ip4/178.104.54.178/tcp/9090/p2p/${RELAY_PEER_ID}`;
+const TARGET_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 
 type FindPeerImpl = (
   peerId: NodeIdentity,
@@ -255,6 +256,38 @@ describe('PeerResolver', () => {
     });
 
     await expect(resolver.connect(PEER_B)).rejects.toThrow('libp2p is not started');
+  });
+
+  it('does not collapse a configured-relay failure into an unresolved lookup', async () => {
+    const relayFailure = new Error('configured relay unavailable');
+    const noAddresses = Object.assign(new Error('no valid addresses'), {
+      name: 'NoValidAddressesError',
+    });
+    const host = {
+      getConnections: () => [],
+      dial: async (target: unknown) => {
+        const address = (target as { toString(): string }).toString();
+        throw address === TARGET_PEER_ID ? noAddresses : relayFailure;
+      },
+      peerStore: { merge: async () => undefined },
+    };
+    net.__findPeerImpl = async () => [];
+    net.connectPeer = async (peerId, addresses, opts) => connectLibp2pPeer(
+      host,
+      peerId,
+      addresses,
+      {
+        ...opts,
+        configuredRelayTargets: [{ peerId: RELAY_PEER_ID, addresses: [RELAY_ADDR] }],
+      },
+    );
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(TARGET_PEER_ID)).rejects.toBe(relayFailure);
   });
 
   it('connect propagates caller cancellation instead of reporting an empty lookup', async () => {

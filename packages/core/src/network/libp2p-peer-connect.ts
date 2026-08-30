@@ -92,13 +92,13 @@ function canonicalCandidatePeerId(rawTarget: string): CanonicalPeerId {
  * direct route survives, append at most four circuits through the operator's
  * configured relays while preserving the resolver and relay order.
  */
-export function planLibp2pPeerConnectionAddresses(
+function planLibp2pPeerConnectionCandidates(
   peerId: NodeIdentity,
   resolvedAddresses: readonly Address[],
   configuredRelayTargets: readonly ConfiguredRelayTarget[] = [],
-): Address[] {
+): Libp2pConnectCandidate[] {
   const canonicalPeerId = peerIdFromString(peerId).toString();
-  const planned: Address[] = [];
+  const planned: Libp2pConnectCandidate[] = [];
   const seen = new Set<string>();
   let hasPublicDirect = false;
 
@@ -114,7 +114,7 @@ export function planLibp2pPeerConnectionAddresses(
       }
       if (!seen.has(candidate.address)) {
         seen.add(candidate.address);
-        planned.push(candidate.address);
+        planned.push(candidate);
       }
       return candidate;
     } catch {
@@ -144,6 +144,19 @@ export function planLibp2pPeerConnectionAddresses(
   }
 
   return planned;
+}
+
+/** Public address projection retained for callers that only need route planning. */
+export function planLibp2pPeerConnectionAddresses(
+  peerId: NodeIdentity,
+  resolvedAddresses: readonly Address[],
+  configuredRelayTargets: readonly ConfiguredRelayTarget[] = [],
+): Address[] {
+  return planLibp2pPeerConnectionCandidates(
+    peerId,
+    resolvedAddresses,
+    configuredRelayTargets,
+  ).map((candidate) => candidate.address);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -251,11 +264,11 @@ export async function connectLibp2pPeer(
     return;
   }
 
-  const candidates = planLibp2pPeerConnectionAddresses(
+  const candidates = planLibp2pPeerConnectionCandidates(
     canonicalPeerId,
     resolvedAddresses,
     options.configuredRelayTargets,
-  ).map(parseLibp2pConnectCandidate);
+  );
 
   let lastCandidateError: unknown;
   for (const candidate of candidates) {
@@ -283,6 +296,7 @@ export async function connectLibp2pPeer(
   } catch (error) {
     if (options.signal?.aborted) throw error;
     if (error instanceof Error && error.name === 'NoValidAddressesError') {
+      if (lastCandidateError !== undefined) throw lastCandidateError;
       throw new PeerConnectionUnresolvedError(error.message, error);
     }
     if (error instanceof Error && lastCandidateError !== undefined && error.cause === undefined) {
