@@ -10,6 +10,117 @@ interface RoutineLogCountRow {
   routine_rows: number;
 }
 
+type RoutineLogSchemaDatabase = Pick<
+  Database.Database,
+  'exec' | 'prepare' | 'transaction'
+>;
+
+const ROUTINE_LOG_TRIGGER_NAMES = [
+  'track_routine_log_insert',
+  'track_routine_log_delete',
+  'track_routine_log_level_update',
+] as const;
+
+/**
+ * Install or repair the durable schema owned by routine-log retention.
+ *
+ * DashboardDB keeps migration ordering, while this module keeps the counter,
+ * index, trigger predicates, and recount transaction together with the code
+ * that consumes them.
+ */
+export function ensureRoutineLogRetentionSchema(db: RoutineLogSchemaDatabase): void {
+  const logsTable = db.prepare(`
+    SELECT 1 AS found FROM sqlite_master
+    WHERE type = 'table' AND name = 'logs'
+  `).get() as { found: number } | undefined;
+  if (!logsTable) return;
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS routine_log_retention_state (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      routine_rows INTEGER NOT NULL CHECK (routine_rows >= 0)
+    );
+    CREATE INDEX IF NOT EXISTS idx_logs_routine_id
+      ON logs(id)
+      WHERE level NOT IN ('warn', 'error');
+  `);
+
+  const triggerRows = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'trigger'
+      AND name IN (
+        'track_routine_log_insert',
+        'track_routine_log_delete',
+        'track_routine_log_level_update'
+      )
+  `).all() as Array<{ name: string }>;
+  const state = db.prepare(`
+    SELECT routine_rows
+    FROM routine_log_retention_state
+    WHERE singleton = 1
+  `).get() as RoutineLogCountRow | undefined;
+  if (
+    state
+    && ROUTINE_LOG_TRIGGER_NAMES.every(
+      (name) => triggerRows.some((row) => row.name === name),
+    )
+  ) {
+    return;
+  }
+
+  // This one-time/recovery scan is protected by an IMMEDIATE transaction.
+  // The partial index makes it covering, and every later overflow check is
+  // an O(1) singleton lookup rather than OFFSET-walking one million rows.
+  db.transaction(() => {
+    db.exec(`
+      DROP TRIGGER IF EXISTS track_routine_log_insert;
+      DROP TRIGGER IF EXISTS track_routine_log_delete;
+      DROP TRIGGER IF EXISTS track_routine_log_level_update;
+    `);
+    const count = db.prepare(`
+      SELECT COUNT(*) AS routine_rows
+      FROM logs
+      WHERE level NOT IN ('warn', 'error')
+    `).get() as RoutineLogCountRow;
+    db.prepare(`
+      INSERT INTO routine_log_retention_state (singleton, routine_rows)
+      VALUES (1, @routineRows)
+      ON CONFLICT(singleton) DO UPDATE SET routine_rows = excluded.routine_rows
+    `).run({ routineRows: count.routine_rows });
+    db.exec(`
+      CREATE TRIGGER track_routine_log_insert
+      AFTER INSERT ON logs
+      WHEN NEW.level NOT IN ('warn', 'error')
+      BEGIN
+        UPDATE routine_log_retention_state
+        SET routine_rows = routine_rows + 1
+        WHERE singleton = 1;
+      END;
+
+      CREATE TRIGGER track_routine_log_delete
+      AFTER DELETE ON logs
+      WHEN OLD.level NOT IN ('warn', 'error')
+      BEGIN
+        UPDATE routine_log_retention_state
+        SET routine_rows = MAX(0, routine_rows - 1)
+        WHERE singleton = 1;
+      END;
+
+      CREATE TRIGGER track_routine_log_level_update
+      AFTER UPDATE OF level ON logs
+      WHEN (OLD.level IN ('warn', 'error')) <> (NEW.level IN ('warn', 'error'))
+      BEGIN
+        UPDATE routine_log_retention_state
+        SET routine_rows = routine_rows + CASE
+          WHEN NEW.level NOT IN ('warn', 'error') THEN 1
+          ELSE -1
+        END
+        WHERE singleton = 1;
+      END;
+    `);
+  }).immediate();
+}
+
 /**
  * Owns count-based retention for routine log rows.
  *

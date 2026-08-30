@@ -410,6 +410,33 @@ describe('DashboardDB — retention', () => {
     expect(routineLogCount(db)).toBe(0);
   });
 
+  it('keeps replacement writes exact and does not prune the retained row', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-replace-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 1,
+      logVolumePruneBatchRows: 1,
+    });
+    try {
+      const replace = volumeDb.db.prepare(`
+        INSERT OR REPLACE INTO logs (id, ts, level, module, message)
+        VALUES (1, ?, 'info', 'compatibility', ?)
+      `);
+      replace.run(Date.now(), 'original');
+      replace.run(Date.now() + 1, 'replacement');
+
+      expect(routineLogCount(volumeDb)).toBe(1);
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+      expect(volumeDb.db.prepare(`
+        SELECT id, message FROM logs
+      `).all()).toEqual([{ id: 1, message: 'replacement' }]);
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
   it('repairs missing current-version retention triggers by recounting once', () => {
     const dbPath = join(dir, 'node-ui.db');
     db.close();
@@ -580,6 +607,39 @@ describe('DashboardDB — retention', () => {
         { level: 'info', message: 'routine-5' },
       ]);
       expect(rows).toContainEqual({ level: 'warn', message: 'keep-warning' });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves overflow visible until deferred maintenance runs', async () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-deferred-boundary-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 0,
+      logVolumePruneBatchRows: 1,
+    });
+    try {
+      volumeDb.insertLog({
+        ts: Date.now(),
+        level: 'info',
+        module: 'deferred-boundary',
+        message: 'overflow',
+      });
+
+      expect(routineLogCount(volumeDb)).toBe(1);
+      expect((volumeDb.db.prepare(`SELECT COUNT(*) AS count FROM logs`).get() as {
+        count: number;
+      }).count).toBe(1);
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(routineLogCount(volumeDb)).toBe(0);
+      expect((volumeDb.db.prepare(`SELECT COUNT(*) AS count FROM logs`).get() as {
+        count: number;
+      }).count).toBe(0);
     } finally {
       volumeDb.close();
       rmSync(volumeDir, { recursive: true, force: true });

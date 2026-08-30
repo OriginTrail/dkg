@@ -20,7 +20,10 @@ import {
   type DurableManifestPrefixDigest,
   type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
-import { RoutineLogRetention } from './routine-log-retention.js';
+import {
+  ensureRoutineLogRetentionSchema,
+  RoutineLogRetention,
+} from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
@@ -249,6 +252,10 @@ export class DashboardDB {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    // INSERT OR REPLACE performs an implicit DELETE. SQLite only runs delete
+    // triggers for that replacement when recursive triggers are enabled, and
+    // the routine-log counter relies on seeing both halves of the write.
+    this.db.pragma('recursive_triggers = ON');
     // Cap the persisted WAL file. A PASSIVE autocheckpoint resets WAL
     // frames but leaves the -wal file at its high-water mark, so a node
     // that once took a heavy write burst (e.g. the pre-rc.14 sync-page
@@ -341,98 +348,6 @@ export class DashboardDB {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
       }
     };
-    const ensureRoutineLogRetentionState = () => {
-      const logsTable = this.db.prepare(`
-        SELECT 1 AS found FROM sqlite_master
-        WHERE type = 'table' AND name = 'logs'
-      `).get() as { found: number } | undefined;
-      if (!logsTable) return;
-
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS routine_log_retention_state (
-          singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-          routine_rows INTEGER NOT NULL CHECK (routine_rows >= 0)
-        );
-        CREATE INDEX IF NOT EXISTS idx_logs_routine_id
-          ON logs(id)
-          WHERE level NOT IN ('warn', 'error');
-      `);
-
-      const requiredTriggers = [
-        'track_routine_log_insert',
-        'track_routine_log_delete',
-        'track_routine_log_level_update',
-      ];
-      const triggerRows = this.db.prepare(`
-        SELECT name FROM sqlite_master
-        WHERE type = 'trigger'
-          AND name IN (
-            'track_routine_log_insert',
-            'track_routine_log_delete',
-            'track_routine_log_level_update'
-          )
-      `).all() as Array<{ name: string }>;
-      const state = this.db.prepare(`
-        SELECT routine_rows
-        FROM routine_log_retention_state
-        WHERE singleton = 1
-      `).get() as { routine_rows: number } | undefined;
-      if (state && requiredTriggers.every((name) => triggerRows.some((row) => row.name === name))) {
-        return;
-      }
-
-      // This one-time/recovery scan is protected by an IMMEDIATE transaction.
-      // The partial index makes it covering, and every later overflow check is
-      // an O(1) singleton lookup rather than OFFSET-walking one million rows.
-      this.db.transaction(() => {
-        this.db.exec(`
-          DROP TRIGGER IF EXISTS track_routine_log_insert;
-          DROP TRIGGER IF EXISTS track_routine_log_delete;
-          DROP TRIGGER IF EXISTS track_routine_log_level_update;
-        `);
-        const count = this.db.prepare(`
-          SELECT COUNT(*) AS routine_rows
-          FROM logs
-          WHERE level NOT IN ('warn', 'error')
-        `).get() as { routine_rows: number };
-        this.db.prepare(`
-          INSERT INTO routine_log_retention_state (singleton, routine_rows)
-          VALUES (1, @routineRows)
-          ON CONFLICT(singleton) DO UPDATE SET routine_rows = excluded.routine_rows
-        `).run({ routineRows: count.routine_rows });
-        this.db.exec(`
-          CREATE TRIGGER track_routine_log_insert
-          AFTER INSERT ON logs
-          WHEN NEW.level NOT IN ('warn', 'error')
-          BEGIN
-            UPDATE routine_log_retention_state
-            SET routine_rows = routine_rows + 1
-            WHERE singleton = 1;
-          END;
-
-          CREATE TRIGGER track_routine_log_delete
-          AFTER DELETE ON logs
-          WHEN OLD.level NOT IN ('warn', 'error')
-          BEGIN
-            UPDATE routine_log_retention_state
-            SET routine_rows = MAX(0, routine_rows - 1)
-            WHERE singleton = 1;
-          END;
-
-          CREATE TRIGGER track_routine_log_level_update
-          AFTER UPDATE OF level ON logs
-          WHEN (OLD.level IN ('warn', 'error')) <> (NEW.level IN ('warn', 'error'))
-          BEGIN
-            UPDATE routine_log_retention_state
-            SET routine_rows = routine_rows + CASE
-              WHEN NEW.level NOT IN ('warn', 'error') THEN 1
-              ELSE -1
-            END
-            WHERE singleton = 1;
-          END;
-        `);
-      }).immediate();
-    };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
@@ -440,7 +355,7 @@ export class DashboardDB {
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
-      ensureRoutineLogRetentionState();
+      ensureRoutineLogRetentionSchema(this.db);
       return;
     }
 
@@ -1371,7 +1286,7 @@ export class DashboardDB {
       `).run();
     }
     if (version < 35) {
-      ensureRoutineLogRetentionState();
+      ensureRoutineLogRetentionSchema(this.db);
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
