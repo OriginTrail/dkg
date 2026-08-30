@@ -24,8 +24,8 @@
  */
 import { join } from 'node:path';
 import {
+  createManagedOxigraphRuntimeStoreConfigV1,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
-  issueManagedOxigraphRuntimeCapabilityV1,
 } from '@origintrail-official/dkg-storage';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
@@ -338,11 +338,10 @@ export async function startManagedOxigraph(
     io: opts.serverIo,
   });
 
-  const storeConfig: ManagedOxigraphResult['storeConfig'] = {
+  const runtimeStoreConfig: ManagedOxigraphResult['storeConfig'] = {
     backend: 'sparql-http',
     options: {
       ...plan.storeConfigTemplate.options,
-      managedOxigraphRuntimeCapability: issueManagedOxigraphRuntimeCapabilityV1(),
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
       getRecoveryState: () => handle.getRecoveryState(),
@@ -353,8 +352,9 @@ export async function startManagedOxigraph(
     },
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
-    storeConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
+    runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
+  const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig);
 
   return {
     handle,

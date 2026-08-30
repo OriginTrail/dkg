@@ -4,8 +4,9 @@ import {
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
+  createManagedOxigraphRuntimeStoreConfigV1,
   createTripleStore,
-  issueManagedOxigraphRuntimeCapabilityV1,
+  createManagedOxigraphSparqlStoreV1,
   SparqlHttpStore,
   SyncSharedProjectionStoreV1,
 } from '../src/index.js';
@@ -73,6 +74,14 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     });
 
     expect(forged.rfc64SharedProjectionStreamV1).toBeUndefined();
+    expect(() => createManagedOxigraphRuntimeStoreConfigV1({
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: 'https://remote.example/query',
+        updateEndpoint: 'https://remote.example/update',
+        managedByDkg: true,
+      },
+    })).toThrow(/loopback HTTP URL/u);
   });
 
   it('uses the frozen exact CONSTRUCT and exposes sorted canonical line bytes', async () => {
@@ -86,10 +95,8 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
         headers: { 'Content-Type': 'application/n-quads' },
       });
     }) as typeof fetch;
-    const store = new SparqlHttpStore({
-      queryEndpoint: 'http://managed-oxigraph.invalid/query',
-      managedByDkg: true,
-      managedOxigraphRuntimeCapability: issueManagedOxigraphRuntimeCapabilityV1(),
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
       scheduler,
     });
 
@@ -124,10 +131,9 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       `<urn:a> <urn:p> "alpha" <${GRAPH}> .`,
       ...unrelated,
     ].join('\n'), { format: 'application/n-quads' });
-    const store = new SparqlHttpStore({
+    const store = createManagedOxigraphSparqlStoreV1({
       queryEndpoint: oxigraph.queryEndpoint,
       updateEndpoint: oxigraph.updateEndpoint,
-      managedOxigraphRuntimeCapability: issueManagedOxigraphRuntimeCapabilityV1(),
     });
 
     const source = await store.rfc64SharedProjectionStreamV1!(OPERATION, {
@@ -158,9 +164,8 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       });
       return new Response(body, { status: 200 });
     }) as typeof fetch;
-    const store = new SparqlHttpStore({
-      queryEndpoint: 'http://managed-oxigraph.invalid/query',
-      managedOxigraphRuntimeCapability: issueManagedOxigraphRuntimeCapabilityV1(),
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
       scheduler,
     });
     const abort = new AbortController();
@@ -184,9 +189,8 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     globalThis.fetch = (async () => new Response(byteStream([LINE_Z, LINE_A]), {
       status: 200,
     })) as typeof fetch;
-    const store = new SparqlHttpStore({
-      queryEndpoint: 'http://managed-oxigraph.invalid/query',
-      managedOxigraphRuntimeCapability: issueManagedOxigraphRuntimeCapabilityV1(),
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
     });
     const abort = new AbortController();
     const source = await store.rfc64SharedProjectionStreamV1!(OPERATION, {
@@ -206,9 +210,8 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       LINE_Z,
       'The SPARQL operation has been cancelled',
     ]), { status: 200 })) as typeof fetch;
-    const store = new SparqlHttpStore({
-      queryEndpoint: 'http://managed-oxigraph.invalid/query',
-      managedOxigraphRuntimeCapability: issueManagedOxigraphRuntimeCapabilityV1(),
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
     });
 
     await expect(store.rfc64SharedProjectionStreamV1!(OPERATION, {
@@ -235,9 +238,8 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       },
     });
     globalThis.fetch = (async () => new Response(oversized, { status: 503 })) as typeof fetch;
-    const store = new SparqlHttpStore({
-      queryEndpoint: 'http://managed-oxigraph.invalid/query',
-      managedOxigraphRuntimeCapability: issueManagedOxigraphRuntimeCapabilityV1(),
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
     });
 
     await expect(store.rfc64SharedProjectionStreamV1!(OPERATION, {

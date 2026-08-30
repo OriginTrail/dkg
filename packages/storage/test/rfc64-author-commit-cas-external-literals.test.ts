@@ -45,6 +45,7 @@ describe('RFC-64 author commit external literal mapping', () => {
         subject: AUTHOR,
         predicate: P_HEAD,
         expectedObject: oldValue,
+        expectedQuads: [quad(AUTHOR, P_HEAD, oldValue, scalarGraph)],
         quads: [quad(AUTHOR, P_HEAD, nextValue, scalarGraph)],
       },
     });

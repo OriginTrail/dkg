@@ -174,6 +174,10 @@ describe('RFC-64 certified author commit CAS v1', () => {
       'subgraphMutationGeneration:0',
       'contextGraphMutationGeneration:0',
       'appliedSet:0',
+      'currentHead:0',
+      'subgraphMutationGeneration:0',
+      'contextGraphMutationGeneration:0',
+      'appliedSet:0',
     ]);
     expect(objectRoles).toEqual([
       'currentHead:expected',
@@ -198,6 +202,8 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(mapped.contextGraphMutationGeneration.expectedObject)
       .toBe('<urn:test:mapped:contextGraphMutationGeneration:expected>');
     expect(mapped.appliedSet.expectedObject).toBe('<urn:test:mapped:appliedSet:expected>');
+    expect(mapped.currentHead.expectedQuads?.[0]?.object)
+      .toBe('"mapped:currentHead:0:7"');
     expect(manifest.semanticQuads).toHaveLength(7);
     expect(manifest.touchedGraphs).toEqual([
       PROJECTION_GRAPH,
@@ -248,6 +254,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
       subgraphMutationGeneration: {
         ...base.subgraphMutationGeneration,
         expectedObject: '"stale"',
+        expectedQuads: [quad(MUTATION, P_GENERATION, '"stale"', STATE_GRAPH)],
       },
     });
 
@@ -324,6 +331,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
       currentHead: {
         ...base.currentHead,
         expectedObject: null,
+        expectedQuads: null,
       },
     });
     await expect(absent.rfc64AuthorCommitCasV1!(absentInput)).resolves.toBe('committed');
@@ -440,6 +448,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
       subgraphMutationGeneration: {
         ...base.subgraphMutationGeneration,
         expectedObject: '"stale"',
+        expectedQuads: [quad(MUTATION, P_GENERATION, '"stale"', STATE_GRAPH)],
       },
     }))).resolves.toBe('conflict');
     expect(await objectFor(conflicted, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBe('"stale-seal"');
@@ -542,12 +551,19 @@ describe('RFC-64 certified author commit CAS v1', () => {
         graphUri: authorCommitInput().currentHead.graphUri,
         subject: authorCommitInput().currentHead.subject,
         predicate: authorCommitInput().currentHead.predicate,
+        expectedQuads: authorCommitInput().currentHead.expectedQuads,
       },
     }))).toThrow(/duplicate guard/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
       subgraphMutationGeneration: {
         ...authorCommitInput().subgraphMutationGeneration,
         graphUri: `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}guard`,
+        expectedQuads: [quad(
+          MUTATION,
+          P_GENERATION,
+          '"1"',
+          `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}guard`,
+        )],
       },
     }))).toThrow(/internal atomic graph/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
@@ -556,6 +572,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
         graphUri: authorCommitInput().currentHead.graphUri,
         subject: authorCommitInput().currentHead.subject,
         predicate: P_APPLIED,
+        expectedQuads: [quad(AUTHOR, P_APPLIED, OLD_HEAD, HEAD_GRAPH)],
       },
     }))).toThrow(/duplicate subject replacement/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({

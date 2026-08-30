@@ -25,7 +25,6 @@ import type {
 import type {
   CanonicalAuthorSealStoreRowV1,
   Rfc64SharedProjectionStreamOperationV1,
-  Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import type {
   Rfc64ExactBindingsReadOperationV1,
@@ -33,6 +32,9 @@ import type {
 import type {
   Rfc64SharedProjectionStreamCapabilityOptionsV1,
 } from './rfc64-shared-projection-stream-capability.js';
+import {
+  copyManagedOxigraphRuntimeStoreOptionsV1,
+} from './managed-oxigraph-runtime-store.js';
 
 export interface Quad {
   subject: string;
@@ -44,6 +46,8 @@ export interface Quad {
 export interface SelectResult {
   type: 'bindings';
   bindings: Array<Record<string, string>>;
+  /** SELECT projection reported by the backend when it exposes one. */
+  variables?: string[];
 }
 
 export interface ConstructResult {
@@ -137,6 +141,7 @@ export interface TripleStore {
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
   /** Execute one member of the certified closed RFC-64 exact-bindings union. */
+  readonly rfc64ExactBindingsReadCertifiedV1?: boolean;
   rfc64ExactBindingsReadV1?(
     operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
@@ -146,11 +151,6 @@ export interface TripleStore {
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
   ): Promise<AsyncIterable<Uint8Array>>;
-  /** @deprecated Use rfc64ExactBindingsReadV1. */
-  rfc64SemanticReadV1?(
-    operation: Rfc64SemanticReadOperationV1,
-    options?: Pick<QueryOptions, 'signal'>,
-  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
@@ -576,12 +576,12 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   }
   // The outer GraphSetIndexStore replaces the adapter-local graph-list cache,
   // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
-  // process carries the separate runtime-only `managedOxigraph` capability;
-  // never derive that consistency proof from persisted namespace ownership.
-  return {
+  // process carries separate storage-issued runtime provenance; never derive
+  // that consistency proof from persisted namespace ownership.
+  return copyManagedOxigraphRuntimeStoreOptionsV1(config.options, {
     ...config.options,
     managedByDkg: false,
-  };
+  });
 }
 
 function wrapGraphSetIndex(
