@@ -45,6 +45,26 @@ function dependencies(
 }
 
 describe('RFC-64 SWM recovery authorization', () => {
+  it('keeps raw-plan authorization on the ordinary admission path', () => {
+    const deps = dependencies();
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
+
+    expect(coordinator.authorize(mixedPlan())).toEqual({
+      kind: 'rfc64-authorized-swm-recovery-v1',
+      providerPeerId: PROVIDER,
+      targets: [
+        { contextGraphId: PRIVATE, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC, lane: 'selected-public' },
+      ],
+    });
+    expect(deps.admission.requestSelectedPublicAdmission).toHaveBeenCalledWith(
+      PROVIDER,
+      [PUBLIC],
+    );
+    expect(deps.admission.requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(deps.admission.refreshSelectedPublicAdmission).not.toHaveBeenCalled();
+  });
+
   it('authorizes one immutable mixed-provider catalog plan', () => {
     const deps = dependencies();
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);

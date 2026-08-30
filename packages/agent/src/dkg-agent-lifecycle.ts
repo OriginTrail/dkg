@@ -366,6 +366,7 @@ import {
 } from './sync/on-connect/sync-on-connect.js';
 import {
   SyncOnConnectPeerScheduler,
+  type OrdinarySyncOnConnectMode,
   type OrdinarySyncOnConnectTransition,
 } from './sync/on-connect/peer-scheduler.js';
 import type {
@@ -675,6 +676,7 @@ import {
   resolveRfc64SelectedRecoveryContextGraphIdsV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
+  type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 
@@ -682,13 +684,16 @@ const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
 function ordinarySyncOnConnectSemantics(
-  transition: OrdinarySyncOnConnectTransition,
+  transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode,
 ): Readonly<{
   bypassPeerBackoff: boolean;
   includeSelectedPublicLane: boolean;
   preserveSelectedRetryOwnership: boolean;
 }> {
-  return transition === 'after-selected'
+  const normalized = transition === 'ordinary-after-selected'
+    ? 'after-selected'
+    : transition;
+  return normalized === 'after-selected'
     ? {
       bypassPeerBackoff: true,
       includeSelectedPublicLane: false,
@@ -4570,18 +4575,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   /** Production trigger shared with the RFC-64 bootstrap mixin. */
   queueRfc64SwmRecoveryPlanFromPeerOnConnect(
     this: DKGAgent,
-    recoveryPlan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
+    recoveryPlan: Readonly<
+      Rfc64PeerSwmRecoveryPlanV1 | Rfc64AuthorizedSwmRecoveryPlanV1
+    >,
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
   ): boolean {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(recoveryPlan.providerPeerId)) {
       return false;
     }
+    const authorized = 'kind' in recoveryPlan
+      ? recoveryPlan.kind === 'rfc64-authorized-swm-recovery-v1'
+        ? recoveryPlan
+        : null
+      : this.rfc64SwmRecoveryCoordinatorV1.authorize(recoveryPlan);
+    if (authorized === null) return false;
     return this.queueSyncFromPeerOnConnect(
       recoveryPlan.providerPeerId,
       handleSyncError,
       delayMs,
-      { selectedSwmRetry: true, rfc64RecoveryPlan: recoveryPlan },
+      { selectedSwmRetry: true, rfc64RecoveryPlan: authorized },
     );
   }
 
@@ -4730,7 +4743,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
-    transition: OrdinarySyncOnConnectTransition = 'ordinary',
+    transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode = 'ordinary',
   ): Promise<void> {
     if (!syncOnConnectEnabled(this.config)) return;
     const now = Date.now();
@@ -4783,7 +4796,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
-    transition: OrdinarySyncOnConnectTransition = 'ordinary',
+    transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode = 'ordinary',
   ): Promise<SyncReconcilerAttemptOutcome> {
     if (!syncOnConnectEnabled(this.config)) return 'not-started';
     return this.accountSyncAttemptWithReconciler(
@@ -4888,7 +4901,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
-    transition: OrdinarySyncOnConnectTransition = 'ordinary',
+    transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode = 'ordinary',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {

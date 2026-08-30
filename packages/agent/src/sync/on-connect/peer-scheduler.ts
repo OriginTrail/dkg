@@ -2,6 +2,8 @@
 
 export type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
 export type OrdinarySyncOnConnectTransition = 'ordinary' | 'after-selected';
+/** @deprecated Use OrdinarySyncOnConnectTransition for new scheduler integrations. */
+export type OrdinarySyncOnConnectMode = 'ordinary' | 'ordinary-after-selected';
 
 interface OrdinaryLane {
   readonly kind: 'ordinary';

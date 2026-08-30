@@ -63,6 +63,123 @@ function emptyDetailedSync(overrides: Record<string, number | boolean> = {}) {
 }
 
 describe('RFC-64 sync-on-connect scheduling', () => {
+  it('accepts the original raw recovery-plan queue contract', async () => {
+    const agent = await createUnstartedAgent('Rfc64RawPlanQueueCompatibility');
+    allowAllNetworkAdmission(agent);
+    const rawPlan = {
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      ...rawPlan,
+    };
+    const authorize = vi.fn(() => authorized);
+    (agent as any).rfc64SwmRecoveryCoordinatorV1 = { authorize };
+    const selectedRun = vi.spyOn(agent as any, 'runSelectedSwmRetryFromPeerOnConnect')
+      .mockResolvedValue(undefined);
+    const handleSyncError = vi.fn();
+
+    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      rawPlan,
+      handleSyncError,
+      0,
+    )).toBe(true);
+    await vi.waitFor(() => expect(selectedRun).toHaveBeenCalledWith(
+      PEER_A,
+      handleSyncError,
+      authorized,
+    ));
+    expect(authorize).toHaveBeenCalledOnce();
+    expect(authorize).toHaveBeenCalledWith(rawPlan);
+  });
+
+  it('does not reauthorize a catalog-authorized recovery plan', async () => {
+    const agent = await createUnstartedAgent('Rfc64AuthorizedPlanQueue');
+    allowAllNetworkAdmission(agent);
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const authorize = vi.fn(() => {
+      throw new Error('catalog-authorized plan must not be authorized twice');
+    });
+    (agent as any).rfc64SwmRecoveryCoordinatorV1 = { authorize };
+    const selectedRun = vi.spyOn(agent as any, 'runSelectedSwmRetryFromPeerOnConnect')
+      .mockResolvedValue(undefined);
+    const handleSyncError = vi.fn();
+
+    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      handleSyncError,
+      0,
+    )).toBe(true);
+    await vi.waitFor(() => expect(selectedRun).toHaveBeenCalledWith(
+      PEER_A,
+      handleSyncError,
+      authorized,
+    ));
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+  it('normalizes the original after-selected literal at runtime', async () => {
+    const agent = await createUnstartedAgent('Rfc64OldTransitionCompatibility');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).config.nodeRole = 'edge';
+    (agent as any).config.syncContextGraphs = ['selected-cg'];
+    (agent as any).config.syncSharedMemoryOnConnect = true;
+    (agent as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { contextGraphId: 'selected-cg', accessPolicy: 0 } },
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    (agent as any).getSyncReconcilerProbe = async () => ({
+      connected: true,
+      hasSyncProtocol: true,
+    });
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).planSharedMemorySyncContextGraphs = async () => ({
+      targets: [
+        { contextGraphId: 'selected-cg', lane: 'selected-public' },
+        { contextGraphId: 'ordinary-private-cg', lane: 'ordinary-private' },
+      ],
+    });
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+    const ordinarySharedSync = vi.fn(async () => emptyDetailedSync({ completedPhases: 1 }));
+    const duplicateSelectedSync = vi.fn(async () => {
+      throw new Error('selected SWM must not be re-admitted by the compatibility replay');
+    });
+    (agent as any).syncSharedMemoryFromPeerDetailed = ordinarySharedSync;
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = duplicateSelectedSync;
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    const retainedBackoff = {
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+    };
+    (agent as any).syncReconcilerBackoff.set(PEER_A, retainedBackoff);
+    const handleSyncError = vi.fn();
+
+    await agent.runSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      'ordinary-after-selected',
+    );
+
+    expect(ordinarySharedSync).toHaveBeenCalledWith(
+      PEER_A,
+      ['ordinary-private-cg'],
+      expect.any(Object),
+    );
+    expect(duplicateSelectedSync).not.toHaveBeenCalled();
+    expect((agent as any).selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(true);
+    expect((agent as any).syncReconcilerBackoff.get(PEER_A)).toBe(retainedBackoff);
+    expect(handleSyncError).not.toHaveBeenCalled();
+  });
+
   it('runs an exact mixed RFC-64 upgrade before preserving its queued ordinary sync', async () => {
     const agent = await createUnstartedAgent('Rfc64MixedPlanSingleQueueOwner');
     allowAllNetworkAdmission(agent);

@@ -34,6 +34,11 @@ export interface Rfc64SwmRecoveryCoordinatorDependenciesV1 {
   readonly admission: Rfc64SwmRecoveryAdmissionPortV1;
 }
 
+type Rfc64SwmRecoveryAuthorizationModeV1 = Readonly<
+  | { kind: 'ordinary' }
+  | { kind: 'catalog-pass'; minimumTerminalAgeMs: number }
+>;
+
 /**
  * RFC-64's complete-provider authorization boundary. Queueing, cooldown,
  * dispatch and reconciler accounting remain owned by the canonical selected-
@@ -53,6 +58,13 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       );
   }
 
+  /** Compatibility authorization for the original raw-plan queue contract. */
+  authorize(
+    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
+  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
+    return this.authorizeWithAdmission(recoveryPlan, { kind: 'ordinary' });
+  }
+
   /**
    * One catalog-pass operation owns stale terminal refresh and authorization.
    * Ordinary-private targets survive when a selected-public refresh is still
@@ -62,6 +74,16 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
     minimumTerminalAgeMs: number,
   ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
+    return this.authorizeWithAdmission(recoveryPlan, {
+      kind: 'catalog-pass',
+      minimumTerminalAgeMs,
+    });
+  }
+
+  private authorizeWithAdmission(
+    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
+    mode: Rfc64SwmRecoveryAuthorizationModeV1,
+  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
     if (!this.deps.admission.isCatalogReady(recoveryPlan.providerPeerId)) return null;
     const eligible = this.eligibleTargets(recoveryPlan);
     if (eligible === null) return null;
@@ -69,11 +91,16 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       .filter(({ lane }) => lane === 'selected-public')
       .map(({ contextGraphId }) => contextGraphId);
     const publicAccepted = requestedPublic.length > 0
-      && this.deps.admission.refreshSelectedPublicAdmission(
-        recoveryPlan.providerPeerId,
-        requestedPublic,
-        minimumTerminalAgeMs,
-      );
+      && (mode.kind === 'catalog-pass'
+        ? this.deps.admission.refreshSelectedPublicAdmission(
+          recoveryPlan.providerPeerId,
+          requestedPublic,
+          mode.minimumTerminalAgeMs,
+        )
+        : this.deps.admission.requestSelectedPublicAdmission(
+          recoveryPlan.providerPeerId,
+          requestedPublic,
+        ));
     return this.authorizedPlan(recoveryPlan.providerPeerId, eligible, publicAccepted);
   }
 
