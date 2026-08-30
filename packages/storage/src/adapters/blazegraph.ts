@@ -14,7 +14,7 @@ import type {
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
 import {
-  formatSparqlJsonBindings,
+  parseSparqlJsonSelectResponse,
   type AdapterSparqlJsonSelectResponse,
 } from './sparql-json-results.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
@@ -24,8 +24,10 @@ import {
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
 } from '@origintrail-official/dkg-core';
-import { certifyRfc64ExactBindingsReadStoreV1 } from
-  '../rfc64-exact-bindings-read-capability.js';
+import {
+  executeRfc64ExactBindingsReadCapabilityV1,
+  type Rfc64ExactBindingsReadOperationV1,
+} from '../rfc64-exact-bindings-read-capability.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -224,6 +226,7 @@ function createStoreOperationDeadline(
  */
 export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   private readonly url: string;
   private readonly operationTimeoutMs: number;
   private readonly scheduler: StorePriorityScheduler;
@@ -232,7 +235,13 @@ export class BlazegraphStore implements TripleStore {
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
-    certifyRfc64ExactBindingsReadStoreV1(this);
+  }
+
+  rfc64ExactBindingsReadV1(
+    operation: Rfc64ExactBindingsReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
   }
 
   private runStoreWork<T>(
@@ -550,8 +559,12 @@ export class BlazegraphStore implements TripleStore {
         return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
       }
 
-      const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
-      return { type: 'bindings', bindings } satisfies SelectResult;
+      const parsed = parseSparqlJsonSelectResponse(json as AdapterSparqlJsonSelectResponse);
+      return {
+        type: 'bindings',
+        bindings: parsed.bindings,
+        variables: parsed.variables,
+      } satisfies SelectResult;
       },
     );
   }

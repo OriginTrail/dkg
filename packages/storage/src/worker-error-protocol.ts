@@ -1,32 +1,35 @@
-import { Rfc64ExactBindingsReadResultErrorV1 } from
-  './rfc64-exact-bindings-read-capability.js';
-
-export const WORKER_ERROR_CODES_V1 = Object.freeze({
-  RFC64_EXACT_BINDINGS_RESULT: 'RFC64_EXACT_BINDINGS_RESULT_V1',
-} as const);
-
-export type WorkerErrorCodeV1 =
-  (typeof WORKER_ERROR_CODES_V1)[keyof typeof WORKER_ERROR_CODES_V1];
-
 export interface WorkerErrorEnvelopeV1 {
+  readonly name: string;
   readonly message: string;
-  readonly code?: WorkerErrorCodeV1;
+  readonly code?: string;
 }
 
+/** Generic transport only: feature boundaries own typed reconstruction. */
 export function serializeWorkerErrorV1(error: unknown): WorkerErrorEnvelopeV1 {
+  if (!(error instanceof Error)) {
+    return Object.freeze({ name: 'Error', message: String(error) });
+  }
+  const code = ownString(error, 'code');
   return Object.freeze({
-    message: error instanceof Error ? error.message : String(error),
-    ...(error instanceof Rfc64ExactBindingsReadResultErrorV1
-      ? { code: WORKER_ERROR_CODES_V1.RFC64_EXACT_BINDINGS_RESULT }
-      : {}),
+    name: error.name || 'Error',
+    message: error.message,
+    ...(code === undefined ? {} : { code }),
   });
 }
 
 export function deserializeWorkerErrorV1(
   envelope: WorkerErrorEnvelopeV1,
 ): Error {
-  if (envelope.code === WORKER_ERROR_CODES_V1.RFC64_EXACT_BINDINGS_RESULT) {
-    return new Rfc64ExactBindingsReadResultErrorV1(envelope.message);
-  }
-  return new Error(envelope.message);
+  const error = new Error(envelope.message) as Error & { code?: string };
+  error.name = envelope.name;
+  if (envelope.code !== undefined) error.code = envelope.code;
+  return error;
+}
+
+function ownString(input: object, key: string): string | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(input, key);
+  return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    && typeof descriptor.value === 'string'
+    ? descriptor.value
+    : undefined;
 }

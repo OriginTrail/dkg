@@ -2,13 +2,11 @@ import {
   RFC64_SEMANTIC_PREDICATES_V1,
   assertCanonicalDeterministicUalV1,
   buildCatalogAssertionScopeV1,
-  canonicalGraphScopedAuthorSealFromAssertionSealV1,
   deriveRfc64SharedProjectionGraphIriV1,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
-  parseAssertionSealQuads,
   parseContextGraphAssertionUri,
   projectRfc64SemanticRecordStoreRowsV1,
-  projectCanonicalGraphScopedAuthorSealRowsV1,
   renderRfc64SemanticStoreRowV1,
   snapshotRfc64SemanticRecordV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
@@ -266,38 +264,17 @@ function assertPayloadTargets(
       'author seal graph and subject must use the canonical lane placement',
     );
   }
-  let parsedSeal;
-  try {
-    parsedSeal = parseAssertionSealQuads(authorSealQuads, authorSealSubject);
-  } catch (cause) {
-    fail(
-      'rfc64-semantic-author-commit-schema',
-      'author seal quads are not a complete graph-scoped seal',
-      cause,
-    );
-  }
-  if (!parsedSeal) {
-    fail(
-      'rfc64-semantic-author-commit-schema',
-      'author seal quads are not a complete graph-scoped seal',
-    );
-  }
   let payload;
-  let canonicalSealRows;
   try {
-    payload = canonicalGraphScopedAuthorSealFromAssertionSealV1(parsedSeal);
-    canonicalSealRows = projectCanonicalGraphScopedAuthorSealRowsV1(payload, coordinate);
+    payload = decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      authorSealQuads,
+      coordinate,
+    ).payload;
   } catch (cause) {
     fail(
       'rfc64-semantic-author-commit-schema',
       'author seal quads are not one canonical graph-scoped seal',
       cause,
-    );
-  }
-  if (!sameQuadSet(authorSealQuads, canonicalSealRows)) {
-    fail(
-      'rfc64-semantic-author-commit-schema',
-      'author seal quads must be one exact canonical graph-scoped seal',
     );
   }
   let ual;
@@ -334,21 +311,6 @@ function assertPayloadTargets(
   }
 }
 
-function sameQuadSet(
-  left: readonly Quad[],
-  right: readonly Quad[],
-): boolean {
-  if (left.length !== right.length) return false;
-  const key = ({ graph, object, predicate, subject }: Quad): string =>
-    JSON.stringify([graph, subject, predicate, object]);
-  const expected = new Set(right.map(key));
-  const actual = new Set(left.map(key));
-  return expected.size === right.length
-    && actual.size === left.length
-    && actual.size === expected.size
-    && [...actual].every((quad) => expected.has(quad));
-}
-
 function transition<Type extends Rfc64SemanticRecordTypeV1>(
   expected: SemanticRecordOfV1<Type> | null,
   next: SemanticRecordOfV1<Type>,
@@ -377,12 +339,17 @@ function transition<Type extends Rfc64SemanticRecordTypeV1>(
   const expectedObject = expected === null
     ? null
     : renderedGuardObject(expected, guardPredicate);
+  const expectedQuads = expected === null
+    ? null
+    : Object.freeze(projectRfc64SemanticRecordStoreRowsV1(expected)
+      .map(renderRfc64SemanticStoreRowV1));
   const quads = Object.freeze(nextRows.map(renderRfc64SemanticStoreRowV1));
   return Object.freeze({
     graphUri: firstNextRow.graphIri,
     subject: firstNextRow.subjectIri,
     predicate: guardPredicate,
     expectedObject,
+    expectedQuads,
     quads,
   });
 }
@@ -507,7 +474,16 @@ function requiredRecord<Type extends Rfc64SemanticRecordTypeV1>(
   input: unknown,
   recordType: Type,
 ): SemanticRecordOfV1<Type> {
-  const record = snapshotRfc64SemanticRecordV1(input);
+  let record: Rfc64SemanticRecordV1;
+  try {
+    record = snapshotRfc64SemanticRecordV1(input);
+  } catch (cause) {
+    fail(
+      'rfc64-semantic-author-commit-schema',
+      `semantic author commit contains an invalid ${recordType}`,
+      cause,
+    );
+  }
   if (record.recordType !== recordType) {
     fail(
       'rfc64-semantic-author-commit-schema',

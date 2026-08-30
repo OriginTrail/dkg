@@ -160,6 +160,18 @@ describe('SyncSharedProjectionStoreV1', () => {
     expect(open).toHaveBeenCalledOnce();
   });
 
+  it('anchors the absolute deadline at open even before lazy consumption', async () => {
+    const open = vi.fn(async () => streamQuads(QUADS));
+    const result = await new SyncSharedProjectionStoreV1(fakeStore(open)).open(REQUEST, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 5,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(collect(result.bytes)).rejects.toMatchObject({ name: 'TimeoutError' });
+    expect(open).not.toHaveBeenCalled();
+  });
+
   it('fails closed on another graph, non-canonical order, or digest mismatch', async () => {
     await expectStreamFailure([
       { ...QUADS[0], graph: 'urn:other' },

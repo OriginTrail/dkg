@@ -59,13 +59,17 @@ export function raceStoreWorkAgainstAbort<T>(
   if (!signal) return work;
   if (signal.aborted) {
     void work.then(onLateResult).catch(() => undefined);
-    return Promise.reject(signal.reason);
+    return Promise.reject(normalizeAbortReason(signal.reason));
   }
   return new Promise<T>((resolve, reject) => {
     let aborted = false;
+    let settled = false;
     const onAbort = () => {
+      if (settled) return;
       aborted = true;
-      reject(signal.reason);
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      reject(normalizeAbortReason(signal.reason));
     };
     signal.addEventListener('abort', onAbort, { once: true });
     if (!aborted && signal.aborted) onAbort();
@@ -74,16 +78,24 @@ export function raceStoreWorkAgainstAbort<T>(
         signal.removeEventListener('abort', onAbort);
         if (aborted) {
           void Promise.resolve(onLateResult?.(value)).catch(() => undefined);
-        } else {
+        } else if (!settled) {
+          settled = true;
           resolve(value);
         }
       },
       (cause) => {
         signal.removeEventListener('abort', onAbort);
-        if (!aborted) reject(cause);
+        if (!settled) {
+          settled = true;
+          reject(cause);
+        }
       },
     );
   });
+}
+
+function normalizeAbortReason(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
 interface StoreWorkGeneration {
