@@ -297,6 +297,82 @@ async function execute(): Promise<void> {
     exact(synchronization.inventoryRowCount, ASSET_COUNT, 'private inventory row count');
     exact(synchronization.activatedTripleCount, ASSET_COUNT * 2, 'private SWM triple count');
     exact(synchronization.appliedHeadStatus, 'applied', 'private applied head status');
+    const lifecycle = output(await receiver.request(
+      'retirementLifecycleReadback',
+      'private-retirement-lifecycle',
+      'operation-completed',
+      { catalogHeadDigest: headDigest },
+    ), 'private retirement lifecycle');
+    const lifecycleRows = array(lifecycle.receipts, 'private retirement lifecycle receipts');
+    exact(lifecycleRows.length, ASSET_COUNT, 'private retirement lifecycle receipt count');
+    const lifecycleByUal = new Map<string, Readonly<Record<string, unknown>>>();
+    const normalizedLifecycleReceipts: Readonly<Record<string, unknown>>[] = [];
+    for (const [index, value] of lifecycleRows.entries()) {
+      const receipt = record(value, `private retirement lifecycle receipt ${index}`);
+      const kaUal = requiredString(receipt.kaUal, `private lifecycle ${index} KA UAL`);
+      if (lifecycleByUal.has(kaUal)) {
+        throw new Error(`private retirement lifecycle duplicates ${kaUal}`);
+      }
+      const vmCommitSequence = requiredSequence(
+        receipt.vmCommitSequence,
+        `private lifecycle ${index} VM commit sequence`,
+      );
+      const appliedHeadObservedSequence = requiredSequence(
+        receipt.appliedHeadObservedSequence,
+        `private lifecycle ${index} applied-head sequence`,
+      );
+      const swmReconciliationSequence = requiredSequence(
+        receipt.swmReconciliationSequence,
+        `private lifecycle ${index} SWM reconciliation sequence`,
+      );
+      if (
+        !(vmCommitSequence < appliedHeadObservedSequence
+          && appliedHeadObservedSequence < swmReconciliationSequence)
+      ) {
+        throw new Error(`private lifecycle ${index} does not prove VM -> head -> SWM order`);
+      }
+      const normalized = Object.freeze({
+        kind: requiredString(receipt.kind, `private lifecycle ${index} kind`),
+        catalogHeadDigest: requiredDigest(
+          receipt.catalogHeadDigest,
+          `private lifecycle ${index} catalog head`,
+        ),
+        inventoryDigest: requiredDigest(
+          receipt.inventoryDigest,
+          `private lifecycle ${index} inventory`,
+        ),
+        contextGraphId: requiredString(
+          receipt.contextGraphId,
+          `private lifecycle ${index} context graph`,
+        ),
+        kaUal,
+        assertionVersion: requiredString(
+          receipt.assertionVersion,
+          `private lifecycle ${index} assertion version`,
+        ),
+        vmGraphIri: requiredString(
+          receipt.vmGraphIri,
+          `private lifecycle ${index} VM graph`,
+        ),
+        vmPostReadDigest: requiredDigest(
+          receipt.vmPostReadDigest,
+          `private lifecycle ${index} VM post-read`,
+        ),
+        vmMaterializationStatus: requiredString(
+          receipt.vmMaterializationStatus,
+          `private lifecycle ${index} VM materialization status`,
+        ),
+        vmCommitSequence,
+        appliedHeadObservedSequence,
+        swmReconciliationSequence,
+        swmReconciliationOutcome: requiredString(
+          receipt.swmReconciliationOutcome,
+          `private lifecycle ${index} SWM reconciliation outcome`,
+        ),
+      });
+      lifecycleByUal.set(kaUal, normalized);
+      normalizedLifecycleReceipts.push(normalized);
+    }
 
     let swmActivated = 0;
     let swmRetired = 0;
@@ -336,6 +412,33 @@ async function execute(): Promise<void> {
         MemoryLayer.VerifiableMemory,
         AUTHOR,
         Number(kaNumber),
+      );
+      const lifecycleReceipt = lifecycleByUal.get(ual);
+      if (lifecycleReceipt === undefined) {
+        throw new Error(`private row ${index} has no ordered retirement lifecycle receipt`);
+      }
+      exact(
+        lifecycleReceipt.kind,
+        'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
+        `private lifecycle ${index} kind`,
+      );
+      exact(lifecycleReceipt.catalogHeadDigest, headDigest, `private lifecycle ${index} head`);
+      exact(
+        lifecycleReceipt.inventoryDigest,
+        synchronization.inventoryDigest,
+        `private lifecycle ${index} inventory`,
+      );
+      exact(
+        lifecycleReceipt.contextGraphId,
+        CONTEXT_GRAPH_ID,
+        `private lifecycle ${index} context graph`,
+      );
+      exact(lifecycleReceipt.assertionVersion, '1', `private lifecycle ${index} version`);
+      exact(lifecycleReceipt.vmGraphIri, vmGraph, `private lifecycle ${index} VM graph`);
+      exact(
+        lifecycleReceipt.swmReconciliationOutcome,
+        'retired',
+        `private lifecycle ${index} SWM outcome`,
       );
       const vm = output(await receiver.request(
         'vmGraphReadback',
@@ -395,6 +498,11 @@ async function execute(): Promise<void> {
         activated: swmActivated,
         expectedRetiredAfterVm: ASSET_COUNT,
         retiredAfterVm: swmRetired,
+        lifecycleReceipts: Object.freeze(
+          [...normalizedLifecycleReceipts].sort((left, right) => (
+            String(left.kaUal).localeCompare(String(right.kaUal))
+          )),
+        ),
       },
       vm: { expected: ASSET_COUNT, recovered: vmRecovered },
       processBoundary: {
@@ -404,7 +512,7 @@ async function execute(): Promise<void> {
       policyDigest: POLICY_DIGEST,
       repository: { testedHeadCommit, trackedSourceClean: true },
       runtimeManifestDigest: launch.manifest.manifestDigest,
-      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v2',
+      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v3',
       status: 'PASS',
     });
     const receipt = atomicWriteExactBytes(
@@ -651,6 +759,13 @@ function requiredString(value: unknown, label: string): string {
     throw new TypeError(`${label} is missing`);
   }
   return value;
+}
+
+function requiredSequence(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+  return value as number;
 }
 
 function requiredDigest(value: unknown, label: string): Digest32V1 {

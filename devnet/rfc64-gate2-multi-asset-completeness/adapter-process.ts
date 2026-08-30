@@ -488,6 +488,20 @@ async function handle(command: Command): Promise<void> {
       emitOperationResult(command, wireSynchronizationEvidence(output));
       return;
     }
+    case 'retirementLifecycleReadback': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'retirementLifecycleReadback input');
+      const catalogHeadDigest = requiredDigest(
+        input.catalogHeadDigest,
+        'retirementLifecycleReadback.catalogHeadDigest',
+      );
+      emitOperationResult(command, Object.freeze({
+        receipts: currentAgent.readRfc64FinalizedSwmRetirementLifecycleReceiptsV1(
+          catalogHeadDigest,
+        ),
+      }));
+      return;
+    }
     case 'prepareForgedAuthorizationGenesis': {
       requireRole('author');
       const output = await prepareForgedAuthorizationGenesis(
@@ -1022,6 +1036,8 @@ function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string,
     appliedHeadReadback: typeof surface.readRfc64AppliedCatalogHeadV1 === 'function',
     exactInventoryReadback:
       typeof surface.readRfc64PublicCatalogSynchronizationEvidenceV1 === 'function',
+    retirementLifecycleReadback:
+      typeof surface.readRfc64FinalizedSwmRetirementLifecycleReceiptsV1 === 'function',
     publishExactSetSuccessor:
       typeof surface.publishOpenAuthorCatalogExactSetSuccessorV1 === 'function',
     publishGenesis: typeof surface.publishOpenAuthorCatalogGenesisV1 === 'function',
