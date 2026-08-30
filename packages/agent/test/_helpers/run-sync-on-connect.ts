@@ -1,62 +1,31 @@
-import {
-  runSyncOnConnect,
-  type OrdinarySharedMemorySyncLane,
-  type OrdinarySharedMemoryWorkItem,
-  type SyncOnConnectContext,
+import type {
+  OrdinarySharedMemorySyncLane,
+  OrdinarySharedMemoryWorkItem,
 } from '../../src/sync/on-connect/sync-on-connect.js';
 
 type OrdinarySyncResult = Awaited<
   ReturnType<OrdinarySharedMemoryWorkItem['syncFromPeer']>
 >;
 
-type SyncOnConnectTestContext = Omit<
-  SyncOnConnectContext,
-  'ordinarySharedMemoryLane'
-> & {
-  ordinarySharedMemoryLane?: OrdinarySharedMemorySyncLane;
-  resolveOrdinaryContextGraphIds?: (
+/** Build the production lane shape explicitly from one scope and executor. */
+export function ordinaryLane(
+  resolveContextGraphIds: (
     remotePeerId: string,
-  ) => readonly string[] | Promise<readonly string[]>;
-  executeOrdinary?: (
+  ) => readonly string[] | Promise<readonly string[]>,
+  execute: (
     remotePeerId: string,
     contextGraphIds: readonly string[],
-  ) => Promise<OrdinarySyncResult>;
-};
-
-/** Test-only adapter for concise contexts while the core API stays cohesive. */
-export function runSyncOnConnectWithTestOrdinaryLane(
-  context: SyncOnConnectTestContext,
-): ReturnType<typeof runSyncOnConnect> {
-  const {
-    ordinarySharedMemoryLane,
-    resolveOrdinaryContextGraphIds,
-    executeOrdinary,
-    ...coreContext
-  } = context;
-  const testLane = ordinarySharedMemoryLane ?? (executeOrdinary === undefined
-    ? {
-      resolveWork: () => ({
-        contextGraphIds: [],
-        syncFromPeer: async () => 0,
-      }),
-    }
-    : {
-      resolveWork: async (remotePeerId: string) => {
-        const contextGraphIds = resolveOrdinaryContextGraphIds
-          ? await resolveOrdinaryContextGraphIds(remotePeerId)
-          : coreContext.getSyncContextGraphs();
-        const frozenContextGraphIds = Object.freeze([...contextGraphIds]);
-        return Object.freeze({
-          contextGraphIds: frozenContextGraphIds,
-          syncFromPeer: () => executeOrdinary(
-            remotePeerId,
-            frozenContextGraphIds,
-          ),
-        });
-      },
-    });
-  return runSyncOnConnect({
-    ...coreContext,
-    ordinarySharedMemoryLane: testLane,
-  });
+  ) => Promise<OrdinarySyncResult>,
+): OrdinarySharedMemorySyncLane {
+  return {
+    resolveWork: async (remotePeerId) => {
+      const frozenContextGraphIds = Object.freeze([
+        ...await resolveContextGraphIds(remotePeerId),
+      ]);
+      return Object.freeze({
+        contextGraphIds: frozenContextGraphIds,
+        syncFromPeer: () => execute(remotePeerId, frozenContextGraphIds),
+      });
+    },
+  };
 }

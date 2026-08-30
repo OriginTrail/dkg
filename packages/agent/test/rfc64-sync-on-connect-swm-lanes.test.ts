@@ -106,12 +106,12 @@ describe('RFC-64 SWM lane partition and admission', () => {
     );
   });
 
-  it('partitions one frozen SWM plan across selected and ordinary modalities', async () => {
+  it('freezes selected work early but replans ordinary work after durable metadata sync', async () => {
     const agent = await createUnstartedAgent('Rfc64FrozenSelectedSwmPlan');
     allowAllNetworkAdmission(agent);
     agent.started = true;
     agent.config.nodeRole = 'edge';
-    agent.config.syncContextGraphs = ['selected-a', 'selected-b'];
+    agent.config.syncContextGraphs = ['selected-a', 'ordinary-public'];
     agent.config.rfc64PublicCatalogBootstrap = {
       acceptedPublicPolicies: [{
         policyEnvelope: {
@@ -122,17 +122,16 @@ describe('RFC-64 SWM lane partition and admission', () => {
     };
     agent.selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-a'];
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
-    const planner = vi.fn()
-      .mockResolvedValueOnce({
-        targets: [
-          { contextGraphId: 'selected-a', lane: 'selected-public' },
-          { contextGraphId: 'selected-b', lane: 'selected-public' },
-          { contextGraphId: 'private-c', lane: 'ordinary-private' },
-        ],
-      })
-      .mockResolvedValue({
-        targets: [{ contextGraphId: 'selected-b', lane: 'selected-public' }],
-      });
+    let durableMetadataReady = false;
+    const planner = vi.fn(async () => ({
+      targets: durableMetadataReady
+        ? [
+            { contextGraphId: 'selected-a', lane: 'selected-public' as const },
+            { contextGraphId: 'ordinary-public', lane: 'selected-public' as const },
+            { contextGraphId: 'private-c', lane: 'ordinary-private' as const },
+          ]
+        : [{ contextGraphId: 'selected-a', lane: 'selected-public' as const }],
+    }));
     agent.planSharedMemorySyncContextGraphs = planner;
     agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
       admitSelectedPublic: vi.fn(() => true),
@@ -156,16 +155,28 @@ describe('RFC-64 SWM lane partition and admission', () => {
       async () => emptyDetailedSync({ completedPhases: 1 }),
     );
     agent.syncSharedMemoryFromPeerDetailed = ordinarySharedSync;
-    agent.syncFromPeerDetailed = vi.fn(
-      async () => emptyDetailedSync({ completedPhases: 1 }),
-    );
+    const durableResult = {
+      ...emptyDetailedSync({ completedPhases: 1 }),
+      complete: true,
+    };
+    agent.syncDurableRecoveryContextGraph = vi.fn(async () => {
+      durableMetadataReady = true;
+      return {
+        outcome: 'no-progress' as const,
+        result: durableResult,
+        peerResults: [{ peerId: PEER_A, result: durableResult }],
+        slices: 1,
+        peerId: PEER_A,
+        safeOffset: 0,
+      };
+    });
     agent.refreshMetaSyncedFlags = async () => undefined;
     agent.discoverContextGraphsFromStore = async () => 0;
 
     expect(await agent.trySyncFromPeer(PEER_A, undefined, 'reconcile'))
       .toBe('synced');
 
-    expect(planner).toHaveBeenCalledOnce();
+    expect(planner).toHaveBeenCalledTimes(2);
     expect(selectedSync).toHaveBeenCalledWith(
       PEER_A,
       ['selected-a'],
@@ -178,11 +189,11 @@ describe('RFC-64 SWM lane partition and admission', () => {
     );
     expect(ordinarySharedSync).toHaveBeenCalledWith(
       PEER_A,
-      ['selected-b', 'private-c'],
+      ['ordinary-public', 'private-c'],
       expect.objectContaining({
         sharedMemorySyncPlan: {
           targets: [
-            { contextGraphId: 'selected-b', lane: 'selected-public' },
+            { contextGraphId: 'ordinary-public', lane: 'selected-public' },
             { contextGraphId: 'private-c', lane: 'ordinary-private' },
           ],
         },

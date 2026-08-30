@@ -373,6 +373,66 @@ describe('RFC-64 peer-job accounting and order', () => {
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
   });
 
+  it('continues ordinary work after selected rejection and retains retry accounting', async () => {
+    const agent = await createUnstartedAgent('Rfc64SelectedRejectionOrdinaryContinuation');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    const selectedFailure = new Error('selected sync failed');
+    agent.trySelectedSwmRetryFromPeer = async () => { throw selectedFailure; };
+    const ordinaryRun = vi.fn(async (_peerId, onSyncAccounting) => {
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      });
+      return 'synced' as const;
+    });
+    agent.tryOrdinarySyncFromPeer = ordinaryRun;
+    const selectedErrors: unknown[] = [];
+    const ordinaryErrors: unknown[] = [];
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
+
+    expect(agent.queueSyncFromPeerOnConnect(
+      PEER_A,
+      (_peerId, error) => ordinaryErrors.push(error),
+      0,
+    )).toBe(true);
+    expect(agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      (_peerId, error) => selectedErrors.push(error),
+      0,
+    )).toBe(true);
+
+    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    expect(selectedErrors).toEqual([selectedFailure]);
+    expect(ordinaryErrors).toEqual([]);
+    expect(ordinaryRun).toHaveBeenCalledOnce();
+    expect(applyJobAccounting).toHaveBeenCalledOnce();
+    expect(applyJobAccounting).toHaveBeenCalledWith(
+      PEER_A,
+      {
+        reconcilerDisposition: 'retry',
+        fresh: false,
+        progress: true,
+      },
+      expect.any(Object),
+    );
+    expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+  });
+
   it('discards accumulated accounting when an active peer job is cleared', async () => {
     const agent = await createUnstartedAgent('Rfc64CancelledPeerJobAccounting');
     allowAllNetworkAdmission(agent);

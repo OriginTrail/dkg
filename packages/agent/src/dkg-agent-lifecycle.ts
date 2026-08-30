@@ -369,10 +369,11 @@ import {
   type SyncOnConnectPeerJobRunner,
 } from './sync/on-connect/peer-scheduler.js';
 import {
-  classifySyncOnConnectAttempt,
-  SyncOnConnectPeerAccountingAccumulator,
+  executeSyncOnConnectAttempt,
   type SyncReconcilerAttemptOutcome,
 } from './sync/on-connect/attempt-accounting.js';
+import { ReconciledSyncOnConnectPeerJobRunner } from
+  './sync/on-connect/peer-job-runner.js';
 import type {
   SelectedPublicSharedMemoryTarget,
   SelectedSharedMemoryRequestedScope,
@@ -4667,77 +4668,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
   ): SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
-    const accounting = new SyncOnConnectPeerAccountingAccumulator();
-    let probe: SyncReconcilerProbe | null | undefined;
-    let probePromise: Promise<SyncReconcilerProbe | null> | null = null;
-    let selectedAttempted = false;
-    const ensureProbe = async (): Promise<SyncReconcilerProbe | null> => {
-      probePromise ??= (async () => {
+    return new ReconciledSyncOnConnectPeerJobRunner({
+      acquireProbe: async () => {
         const backoff = this.syncReconcilerBackoff.get(remotePeer);
         if (backoff && Date.now() < backoff.nextRetryAt) return null;
         return this.getSyncReconcilerProbe(remotePeer);
-      })();
-      probe = await probePromise;
-      return probe;
-    };
-    const attemptPhase = async (
-      attempt: (
-        onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
-      ) => Promise<SyncOnConnectOutcome | 'not-started'>,
-    ): Promise<void> => {
-      if (await ensureProbe() === null) return;
-      const classified = await classifySyncOnConnectAttempt(attempt);
-      accounting.record(classified.accounting);
-      if (
-        classified.execution.state === 'completed'
-        && classified.execution.outcome === 'deferred-backpressure'
-      ) {
-        const detail = classified.execution.backpressureDetail === undefined
-          ? ''
-          : `: ${classified.execution.backpressureDetail}`;
-        this.log.info(
-          createOperationContext('sync'),
-          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure${detail}`,
-        );
-      } else if (classified.execution.state === 'failed') {
-        throw classified.execution.error;
-      }
-    };
-    return {
-      runSelected: async (recoveryPlan) => {
-        selectedAttempted = true;
-        await attemptPhase((onSyncAccounting) => this.trySelectedSwmRetryFromPeer(
+      },
+      runSelected: (recoveryPlan, onSyncAccounting) => (
+        this.trySelectedSwmRetryFromPeer(
           remotePeer,
           onSyncAccounting,
           'on-connect',
           recoveryPlan,
-        ));
-      },
-      runOrdinary: async () => {
-        await attemptPhase((onSyncAccounting) => selectedAttempted
+        )
+      ),
+      runOrdinary: (selectedAttempted, onSyncAccounting) => (
+        selectedAttempted
           ? this.tryOrdinarySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect')
-          : this.trySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect'));
+          : this.trySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect')
+      ),
+      selectedRetryStillRequired: () => (
+        this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
+      ),
+      resetBackoffBeforeRetry: () => {
+        this.syncReconcilerBackoff.delete(remotePeer);
       },
-      cancel: () => { accounting.cancel(); },
-      finish: () => {
-        const combined = accounting.combine();
-        if (combined === null || probe === null || probe === undefined) return;
-        const selectedRetryStillRequired = selectedAttempted
-          && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer);
-        const outcome: SyncOnConnectPeerOutcome = selectedRetryStillRequired
-          && combined.outcome.reconcilerDisposition === 'clear'
-          ? {
-              reconcilerDisposition: 'defer',
-              fresh: false,
-              progress: combined.outcome.progress,
-            }
-          : combined.outcome;
-        if (combined.resetBackoffBeforeRetry) {
-          this.syncReconcilerBackoff.delete(remotePeer);
-        }
+      commitAccounting: (outcome, probe) => {
         this.applySyncOnConnectAccounting(remotePeer, outcome, probe);
       },
-    };
+      logBackpressure: (backpressureDetail) => {
+        const detail = backpressureDetail === undefined ? '' : `: ${backpressureDetail}`;
+        this.log.info(
+          createOperationContext('sync'),
+          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure${detail}`,
+        );
+      },
+    });
   }
 
   queueSyncFromPeerOnConnect(
@@ -4925,28 +4891,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
-    const classified = await classifySyncOnConnectAttempt(attempt, {
+    return executeSyncOnConnectAttempt(attempt, {
       hasExternalAccountingEvidence: () => (
         this.lastSuccessfulSyncAt.get(remotePeer) !== lastOk
         || this.lastSyncProgressAt.get(remotePeer) !== lastProgress
       ),
-    });
-    if (classified.accounting !== undefined) {
-      this.applySyncOnConnectAccounting(remotePeer, classified.accounting, probe);
-    }
-    if (classified.execution.state === 'completed') {
-      if (classified.execution.outcome === 'deferred-backpressure') {
-        const detail = classified.execution.backpressureDetail === undefined
-          ? ''
-          : `: ${classified.execution.backpressureDetail}`;
+      recordAccounting: (outcome) => {
+        this.applySyncOnConnectAccounting(remotePeer, outcome, probe);
+      },
+      onBackpressure: (backpressureDetail) => {
+        const detail = backpressureDetail === undefined ? '' : `: ${backpressureDetail}`;
         this.log.info(
           createOperationContext('sync'),
           `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure${detail}`,
         );
-      }
-      return classified.execution.outcome;
-    }
-    throw classified.execution.error;
+      },
+    });
   }
 
   /**
@@ -4994,7 +4954,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
-    const sharedMemorySyncPlanPartitions = new Map<
+    const selectedSharedMemoryPlanPartitions = new Map<
       string,
       Promise<SharedMemorySyncContextGraphPlanPartition>
     >();
@@ -5020,14 +4980,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     const selectedLaneOwnsPinnedPublicGraphs = automaticPeerSweep
       && remotePeerIsCompleteSwmProvider;
-    const getSharedMemorySyncPlanPartition = (
+    const getSelectedSharedMemoryPlanPartition = (
       peerId: string,
     ): Promise<SharedMemorySyncContextGraphPlanPartition> => {
-      let partition = sharedMemorySyncPlanPartitions.get(peerId);
+      let partition = selectedSharedMemoryPlanPartitions.get(peerId);
       if (!partition) {
-        // One automatic run owns one unrestricted immutable snapshot. The
-        // partition below assigns every target to exactly one lane before any
-        // admission or execution callback observes it.
+        // Selected work is admitted before durable sync and must remain one
+        // immutable scope through execution. Ordinary eligibility is planned
+        // separately after durable metadata/discovery below.
         partition = this.planSharedMemorySyncContextGraphs(
           peerId,
           sharedMemoryRecoveryContextGraphIds,
@@ -5038,10 +4998,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             ? selectedPublicContextGraphIds
             : new Set<string>(),
         ));
-        sharedMemorySyncPlanPartitions.set(peerId, partition);
+        selectedSharedMemoryPlanPartitions.set(peerId, partition);
       }
       return partition;
     };
+    const getPostDurableOrdinarySharedMemoryPlan = async (
+      peerId: string,
+    ): Promise<SharedMemorySyncContextGraphPlan> => (
+      partitionSharedMemorySyncContextGraphPlan(
+        await this.planSharedMemorySyncContextGraphs(
+          peerId,
+          sharedMemoryRecoveryContextGraphIds,
+          createOperationContext('sync'),
+        ),
+        selectedLaneOwnsPinnedPublicGraphs
+          ? selectedPublicContextGraphIds
+          : new Set<string>(),
+      ).ordinaryPlan
+    );
     return runSyncOnConnect({
       remotePeer,
       syncingPeers: this.syncingPeers,
@@ -5072,7 +5046,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ? {
           selectedSharedMemoryLane: {
             admitWork: async (peerId: string) => {
-              const partition = await getSharedMemorySyncPlanPartition(peerId);
+              const partition = await getSelectedSharedMemoryPlanPartition(peerId);
               const targets = partition.selectedPlan.targets;
               const contextGraphIds = sharedMemoryPlanContextGraphIds(
                 partition.selectedPlan,
@@ -5157,9 +5131,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
       ordinarySharedMemoryLane: {
         resolveWork: async (peerId) => {
-          const partition = await getSharedMemorySyncPlanPartition(peerId);
+          // runSyncOnConnect resolves this work only after durable metadata and
+          // discovery, so newly authorized/visible ordinary CGs join this run.
+          const ordinaryPlan = await getPostDurableOrdinarySharedMemoryPlan(peerId);
           const contextGraphIds = sharedMemoryPlanContextGraphIds(
-            partition.ordinaryPlan,
+            ordinaryPlan,
           );
           return Object.freeze({
             contextGraphIds: Object.freeze([...contextGraphIds]),
@@ -5169,7 +5145,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               {
                 stopOnBackoffWorthyFailure: true,
                 source,
-                sharedMemorySyncPlan: partition.ordinaryPlan,
+                sharedMemorySyncPlan: ordinaryPlan,
               },
             ),
           });

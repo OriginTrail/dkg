@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import {
-  runSyncOnConnectWithTestOrdinaryLane as runSyncOnConnect,
-} from './_helpers/run-sync-on-connect.js';
+import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 import {
   PEER,
   callSelectedSharedMemorySummary,
@@ -367,6 +366,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
     };
 
     await runSyncOnConnect({
+      ordinarySharedMemoryLane: ordinaryLane(() => [ordinaryContextGraphId], async () => shared),
       remotePeer: PEER,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -374,7 +374,6 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       knownCorePeerIdsV2: new Set(),
       getSyncContextGraphs: () => [],
       getDurableSyncContextGraphs: () => [],
-      resolveOrdinaryContextGraphIds: () => [ordinaryContextGraphId],
       selectedSharedMemoryLane: {
         admitWork: () => ({
           contextGraphIds: [contextGraphId],
@@ -396,7 +395,6 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      executeOrdinary: async () => shared,
       onSyncAccounting,
       logInfo: () => {},
     });

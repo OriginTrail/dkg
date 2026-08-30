@@ -167,7 +167,12 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const ordinaryRun = vi.fn(async () => { ordering.push('ordinary'); });
     agent.createSyncOnConnectPeerJobRunner = (remotePeer) => {
       const runner = createPeerJob(remotePeer);
-      return { ...runner, runOrdinary: ordinaryRun };
+      return {
+        runSelected: (recoveryPlan) => runner.runSelected(recoveryPlan),
+        runOrdinary: ordinaryRun,
+        cancel: () => { runner.cancel(); },
+        finish: () => { runner.finish(); },
+      };
     };
     const errors: unknown[] = [];
     const handleSyncError = (_peerId: string, error: unknown) => { errors.push(error); };

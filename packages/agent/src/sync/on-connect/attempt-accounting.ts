@@ -91,6 +91,36 @@ export async function classifySyncOnConnectAttempt(
   }
 }
 
+/**
+ * Apply the common attempt policy to either an immediate accounting sink or a
+ * deferred peer-job accumulator. Callers only choose the sink; normalization,
+ * local-backpressure logging, and error propagation stay centralized here.
+ */
+export async function executeSyncOnConnectAttempt(
+  attempt: Parameters<typeof classifySyncOnConnectAttempt>[0],
+  options: Readonly<{
+    recordAccounting: (accounting: SyncOnConnectPeerOutcome) => void;
+    hasExternalAccountingEvidence?: () => boolean;
+    onBackpressure: (detail?: string) => void;
+  }>,
+): Promise<SyncReconcilerAttemptOutcome> {
+  const classified = options.hasExternalAccountingEvidence === undefined
+    ? await classifySyncOnConnectAttempt(attempt)
+    : await classifySyncOnConnectAttempt(attempt, {
+        hasExternalAccountingEvidence: options.hasExternalAccountingEvidence,
+      });
+  if (classified.accounting !== undefined) {
+    options.recordAccounting(classified.accounting);
+  }
+  if (classified.execution.state === 'failed') {
+    throw classified.execution.error;
+  }
+  if (classified.execution.outcome === 'deferred-backpressure') {
+    options.onBackpressure(classified.execution.backpressureDetail);
+  }
+  return classified.execution.outcome;
+}
+
 export interface CombinedSyncOnConnectPeerAccounting {
   readonly outcome: SyncOnConnectPeerOutcome;
   readonly resetBackoffBeforeRetry: boolean;
