@@ -131,11 +131,24 @@ interface MutableTargetStatusV1 {
   updatedAtMs: number | null;
 }
 
-interface BootstrapStateV1 {
-  readonly config: Readonly<{
+interface Rfc64CatalogBootstrapTargetPlanV1 extends Pick<
+  MutableTargetStatusV1,
+  'scope' | 'providers' | 'mode' | 'requiresPrivateVm'
+> {}
+
+export interface Rfc64CatalogBootstrapPartitionV1 {
+  readonly retryIntervalMs?: number;
+  readonly track2Policies: readonly Rfc64CatalogBootstrapPolicyV1[];
+  readonly track2Targets: readonly Rfc64CatalogBootstrapTargetPlanV1[];
+  readonly legacyRecoveryConfig: Readonly<{
     readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
     readonly retryIntervalMs?: number;
   }>;
+}
+
+interface BootstrapStateV1 {
+  readonly retryIntervalMs?: number;
+  readonly legacyRecoveryConfig: Rfc64CatalogBootstrapPartitionV1['legacyRecoveryConfig'];
   readonly targets: MutableTargetStatusV1[];
   readonly ctx: OperationContext;
   closed: boolean;
@@ -180,64 +193,29 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
     if (config === undefined || STATES.has(this)) return;
     const service = this.rfc64PublicCatalogServiceV1;
-    const targets = config.acceptedPolicies.flatMap((accepted) => {
-      const {
-      policyEnvelope,
-      targets: policyTargets,
-      completeSwmProviders = [],
-      } = accepted;
-      const authority = resolveRfc64CatalogAuthorityDecisionV1(
-        this.config.rfc64CatalogRollout,
-        policyEnvelope.payload.contextGraphId,
-      );
-      if (!authority.track2Enabled) return [];
-      if (service === undefined) {
-        throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
-      }
-      service.acceptPolicySnapshot({
+    const partition = partitionRfc64CatalogBootstrapV1(
+      config,
+      this.config.rfc64CatalogRollout,
+    );
+    if (partition.track2Policies.length > 0 && service === undefined) {
+      throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
+    }
+    for (const accepted of partition.track2Policies) {
+      const { policyEnvelope } = accepted;
+      service!.acceptPolicySnapshot({
         policy: policyEnvelope.payload,
         policyDigest: computeContextGraphPolicyObjectDigestV1(policyEnvelope),
         roster: accepted.rosterEnvelope?.payload,
       });
-      return policyTargets.map((target) => ({
-        mode: authority.mode as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
-        scope: Object.freeze({
-          networkId: policyEnvelope.payload.networkId,
-          contextGraphId: policyEnvelope.payload.contextGraphId,
-          subGraphName: null,
-          authorAddress: target.authorAddress,
-          catalogEra: policyEnvelope.payload.era,
-        }),
-        // Private recovery uses only graph-complete providers for every signed
-        // author catalog. Per-author candidates cannot widen that authority.
-        providers: policyEnvelope.payload.accessPolicy === 1
-          ? completeSwmProviders
-          : target.providers,
-        requiresPrivateVm:
-          policyEnvelope.payload.accessPolicy === 1
-          && policyEnvelope.payload.source.kind === 'finalized-chain',
-      }));
-    });
-    const hasLegacyRecoveryProviders = config.acceptedPolicies.some(({
-      policyEnvelope,
-      completeSwmProviders = [],
-    }) => (
-      completeSwmProviders.length > 0
-      && resolveRfc64CatalogAuthorityDecisionV1(
-        this.config.rfc64CatalogRollout,
-        policyEnvelope.payload.contextGraphId,
-      ).legacySyncAllowed
-    ));
-    const hasTrack2Policy = config.acceptedPolicies.some(({ policyEnvelope }) => (
-      resolveRfc64CatalogAuthorityDecisionV1(
-        this.config.rfc64CatalogRollout,
-        policyEnvelope.payload.contextGraphId,
-      ).track2Enabled
-    ));
-    if (!hasTrack2Policy && !hasLegacyRecoveryProviders) return;
+    }
+    const hasLegacyRecoveryProviders = partition.legacyRecoveryConfig.acceptedPolicies.some(
+      ({ completeSwmProviders = [] }) => completeSwmProviders.length > 0,
+    );
+    if (partition.track2Policies.length === 0 && !hasLegacyRecoveryProviders) return;
     const state: BootstrapStateV1 = {
-      config,
-      targets: targets.map((target) => ({
+      retryIntervalMs: partition.retryIntervalMs,
+      legacyRecoveryConfig: partition.legacyRecoveryConfig,
+      targets: partition.track2Targets.map((target) => ({
         mode: target.mode,
         scope: target.scope,
         providers: target.providers,
@@ -276,7 +254,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     return Object.freeze({
       running: state.running,
       pass: state.pass,
-      retryIntervalMs: state.config.retryIntervalMs ?? 0,
+      retryIntervalMs: state.retryIntervalMs ?? 0,
       lastPassStartedAtMs: state.lastPassStartedAtMs,
       lastPassCompletedAtMs: state.lastPassCompletedAtMs,
       targets: Object.freeze(state.targets.map(snapshotTargetStatusV1)),
@@ -322,7 +300,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       })
       .finally(() => {
         if (state.run === run) state.run = null;
-        const retryIntervalMs = state.config.retryIntervalMs ?? 0;
+        const retryIntervalMs = state.retryIntervalMs ?? 0;
         if (!state.closed && retryIntervalMs > 0) {
           state.timer = setTimeout(() => {
             state.timer = null;
@@ -344,19 +322,8 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const abortController = new AbortController();
     state.abortController = abortController;
     try {
-      const legacyRecoveryConfig = Object.freeze({
-        acceptedPolicies: Object.freeze(state.config.acceptedPolicies.filter(
-          ({ policyEnvelope }) => resolveRfc64CatalogAuthorityDecisionV1(
-            this.config.rfc64CatalogRollout,
-            policyEnvelope.payload.contextGraphId,
-          ).legacySyncAllowed,
-        )),
-        ...(state.config.retryIntervalMs === undefined
-          ? {}
-          : { retryIntervalMs: state.config.retryIntervalMs }),
-      });
       const completeSwmProviders = [...new Set(
-        legacyRecoveryConfig.acceptedPolicies.flatMap(
+        state.legacyRecoveryConfig.acceptedPolicies.flatMap(
           ({ completeSwmProviders: providers = [] }) => providers,
         ),
       )];
@@ -373,7 +340,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             // immutable provider plan owns admission for every selected graph,
             // including mixed public/private providers.
             this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-              resolveRfc64PeerSwmRecoveryPlanV1(legacyRecoveryConfig, providerPeerId),
+              resolveRfc64PeerSwmRecoveryPlanV1(
+                state.legacyRecoveryConfig,
+                providerPeerId,
+              ),
               (_peerId, error) => {
                 this.log.warn(
                   state.ctx,
@@ -498,7 +468,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
 
   private resolveRuntimeRfc64CatalogBootstrapV1(
     this: DKGAgent,
-  ): BootstrapStateV1['config'] | undefined {
+  ): Readonly<{
+    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+    readonly retryIntervalMs?: number;
+  }> | undefined {
     const current = this.config.rfc64CatalogBootstrap;
     if (current !== undefined) return current;
     const legacy = this.config.rfc64PublicCatalogBootstrap;
@@ -510,6 +483,61 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         : { retryIntervalMs: legacy.retryIntervalMs }),
     });
   }
+}
+
+/** Resolve each accepted policy exactly once into immutable lifecycle lanes. */
+export function partitionRfc64CatalogBootstrapV1(
+  config: Readonly<{
+    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+    readonly retryIntervalMs?: number;
+  }>,
+  activation: DKGAgent['config']['rfc64CatalogRollout'],
+): Rfc64CatalogBootstrapPartitionV1 {
+  const track2Policies: Rfc64CatalogBootstrapPolicyV1[] = [];
+  const track2Targets: Rfc64CatalogBootstrapTargetPlanV1[] = [];
+  const legacyPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
+  for (const accepted of config.acceptedPolicies) {
+    const { policyEnvelope, targets, completeSwmProviders = [] } = accepted;
+    const authority = resolveRfc64CatalogAuthorityDecisionV1(
+      activation,
+      policyEnvelope.payload.contextGraphId,
+    );
+    if (authority.legacySyncAllowed) legacyPolicies.push(accepted);
+    if (!authority.track2Enabled) continue;
+    track2Policies.push(accepted);
+    for (const target of targets) {
+      track2Targets.push(Object.freeze({
+        mode: authority.mode as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
+        scope: Object.freeze({
+          networkId: policyEnvelope.payload.networkId,
+          contextGraphId: policyEnvelope.payload.contextGraphId,
+          subGraphName: null,
+          authorAddress: target.authorAddress,
+          catalogEra: policyEnvelope.payload.era,
+        }),
+        // Private recovery uses only graph-complete providers for every signed
+        // author catalog. Per-author candidates cannot widen that authority.
+        providers: policyEnvelope.payload.accessPolicy === 1
+          ? completeSwmProviders
+          : target.providers,
+        requiresPrivateVm:
+          policyEnvelope.payload.accessPolicy === 1
+          && policyEnvelope.payload.source.kind === 'finalized-chain',
+      }));
+    }
+  }
+  const retry = config.retryIntervalMs === undefined
+    ? {}
+    : { retryIntervalMs: config.retryIntervalMs };
+  return Object.freeze({
+    ...retry,
+    track2Policies: Object.freeze(track2Policies),
+    track2Targets: Object.freeze(track2Targets),
+    legacyRecoveryConfig: Object.freeze({
+      acceptedPolicies: Object.freeze(legacyPolicies),
+      ...retry,
+    }),
+  });
 }
 
 function acceptedPoliciesV1(

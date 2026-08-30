@@ -32,7 +32,6 @@ import {
 export {
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
-  rfc64CatalogTrack2ModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64LegacySyncContextGraphsV1,
   type ResolvedRfc64CatalogRolloutConfigV1,
@@ -42,7 +41,7 @@ export {
 
 export {
   resolveRfc64CatalogAuthorityDecisionV1,
-  type Rfc64CatalogAuthorityDecisionV1,
+  type Rfc64CatalogAuthorityPolicyV1,
   type Rfc64CatalogReconciliationLaneV1,
 } from './catalog-rollout-authority-v1.js';
 

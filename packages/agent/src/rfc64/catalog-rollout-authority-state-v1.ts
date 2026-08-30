@@ -1,72 +1,101 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 import type { ResolvedRfc64CatalogRolloutConfigV1 } from
   './catalog-rollout-authority-v1.js';
+import {
+  createRfc64DurableFileStoreV1,
+  type Rfc64DurableFileStoreV1,
+} from './durable-file-store-v1.js';
+import type { Rfc64PersistenceV1 } from './persistence-v1.js';
+import {
+  deactivateRfc64AppliedCatalogAuthorityV1,
+  readRfc64AppliedCatalogContextGraphIdV1,
+} from './public-catalog-native-receiver-v1.js';
 
-const FILE_NAME_V1 = 'rfc64-catalog-rollout-authority-v1.json';
+const STATE_RELATIVE_PATH_V1 = 'rollout-authority-v1/state.json';
+const MAX_STATE_BYTES_V1 = 64 * 1024;
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 interface StoredRfc64CatalogAuthorityV1 {
   readonly version: 1;
   readonly catalogContextGraphs: readonly string[];
 }
+
 /**
- * Persist the set of catalog-authoritative CGs before any runtime worker starts.
- * A catalog downgrade requires a separate semantic deactivation migration; until
- * that exists, refusing the boot prevents stale catalog projections from
- * overlapping newly admitted legacy synchronization.
+ * Reconcile the operator plan with actual durable catalog authority before any
+ * network worker starts. An absent sidecar is never treated as proof of an
+ * empty catalog: every applied head is inspected and any graph leaving catalog
+ * mode is semantically deactivated before its durable applied ref is removed.
  */
 export async function persistRfc64CatalogAuthorityPlanV1(
-  dataDir: string,
+  persistence: Rfc64PersistenceV1,
+  store: TripleStore,
   activation: Readonly<{
+    readonly enabled: boolean;
     readonly selectedContextGraphs: readonly string[];
     readonly rollout: ResolvedRfc64CatalogRolloutConfigV1;
   }>,
 ): Promise<void> {
-  await mkdir(dataDir, { recursive: true });
-  const filePath = join(dataDir, FILE_NAME_V1);
-  const previous = await readStoredPlanV1(filePath);
-  const nextCatalogGraphs = Object.freeze(activation.selectedContextGraphs.filter(
+  const durableFiles = createRfc64DurableFileStoreV1<'authority-state'>(
+    persistence.rootPath,
+  );
+  // Parse the prior record even though durable inventory owns migration truth:
+  // malformed restart-critical state must fail closed rather than be replaced.
+  await readStoredPlanV1(durableFiles);
+
+  const selectedCatalogGraphs = activation.selectedContextGraphs.filter(
     (contextGraphId) => activation.rollout.contextGraphModes[contextGraphId] === 'catalog',
-  ));
-  const nextCatalogSet = new Set(nextCatalogGraphs);
-  const unsafeDowngrades = previous?.catalogContextGraphs.filter(
-    (contextGraphId) => !nextCatalogSet.has(contextGraphId),
-  ) ?? [];
-  if (unsafeDowngrades.length > 0) {
-    throw new Error(
-      'RFC-64 catalog authority downgrade requires semantic deactivation before legacy sync: '
-      + unsafeDowngrades.join(', '),
-    );
+  );
+  const nextCatalogSet = new Set(selectedCatalogGraphs);
+  for (const appliedHead of persistence.inventory.listAppliedCatalogHeadsV1()) {
+    const contextGraphId = await readRfc64AppliedCatalogContextGraphIdV1({
+      controlObjects: persistence.controlObjects,
+      appliedHead,
+    });
+    // The activation resolver deliberately preserves the pre-activation
+    // standalone catalog API when no selected-CG rollout block is enabled.
+    // Existing durable catalog authority is part of that compatibility
+    // contract, so an absent new activation must never erase it merely because
+    // it cannot name the graph in a rollout manifest.
+    if (!activation.enabled) nextCatalogSet.add(contextGraphId);
+    if (nextCatalogSet.has(contextGraphId)) continue;
+    await deactivateRfc64AppliedCatalogAuthorityV1({
+      store,
+      controlObjects: persistence.controlObjects,
+      inventory: persistence.inventory,
+      appliedHead,
+    });
   }
 
+  const nextCatalogGraphs = Object.freeze([...nextCatalogSet].sort());
   const plan: StoredRfc64CatalogAuthorityV1 = Object.freeze({
     version: 1,
     catalogContextGraphs: nextCatalogGraphs,
   });
-  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporaryPath, `${JSON.stringify(plan)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await rename(temporaryPath, filePath);
-  } finally {
-    await rm(temporaryPath, { force: true });
-  }
+  await durableFiles.replaceExactBytes({
+    relativePath: STATE_RELATIVE_PATH_V1,
+    bytes: UTF8_ENCODER.encode(`${JSON.stringify(plan)}\n`),
+    maxBytes: MAX_STATE_BYTES_V1,
+    label: 'RFC-64 catalog authority state',
+    kind: 'authority-state',
+  });
 }
 
-async function readStoredPlanV1(filePath: string): Promise<StoredRfc64CatalogAuthorityV1 | null> {
-  let raw: string;
-  try {
-    raw = await readFile(filePath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
+async function readStoredPlanV1(
+  durableFiles: Rfc64DurableFileStoreV1<'authority-state'>,
+): Promise<StoredRfc64CatalogAuthorityV1 | null> {
+  const bytes = await durableFiles.readOptionalBoundedBytes({
+    relativePath: STATE_RELATIVE_PATH_V1,
+    maxBytes: MAX_STATE_BYTES_V1,
+    label: 'RFC-64 catalog authority state',
+  });
+  if (bytes === null) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(UTF8_DECODER.decode(bytes));
   } catch (error) {
     throw new Error('RFC-64 catalog authority state is not valid JSON', { cause: error });
   }
@@ -78,9 +107,7 @@ async function readStoredPlanV1(filePath: string): Promise<StoredRfc64CatalogAut
     || (parsed as { catalogContextGraphs: unknown[] }).catalogContextGraphs.some(
       (value) => typeof value !== 'string' || value.length === 0,
     )
-  ) {
-    throw new Error('RFC-64 catalog authority state is malformed');
-  }
+  ) throw new Error('RFC-64 catalog authority state is malformed');
   const catalogContextGraphs = (parsed as { catalogContextGraphs: string[] })
     .catalogContextGraphs;
   if (new Set(catalogContextGraphs).size !== catalogContextGraphs.length) {

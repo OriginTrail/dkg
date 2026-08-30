@@ -88,7 +88,10 @@ import {
   type VerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
-import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
+import type {
+  Rfc64ControlObjectOperationsV1,
+  StoredVerifiedControlObjectV1,
+} from './control-object-store-v1.js';
 import type {
   AppliedCatalogHeadSnapshotV1,
   Rfc64InventoryV1OperationsV1,
@@ -1874,103 +1877,12 @@ async function loadExactAppliedPredecessorRows(
       throw new Error('predecessor identity, version, or row bound differs from target history');
     }
     assertAuthorCatalogHeadScopeBindingV1(predecessorHead.payload, trustedCatalogScope);
-
-    const storedDelegation = await controlObjects.getVerifiedObjectByDigest({
-      objectDigest: predecessorHead.payload.catalogIssuerDelegationDigest,
-      verifyIssuerSignature,
-    });
-    if (storedDelegation === null) throw new Error('predecessor delegation is not staged');
-    assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(storedDelegation.envelope);
-    assertDirectAuthorCatalogIssuerDelegationBindingV1(
-      storedDelegation.envelope,
-      predecessorHead,
+    return await loadExactCatalogRowsForHeadV1(
+      controlObjects,
+      storedHead,
       trustedCatalogScope,
-    );
-
-    const storedDirectory = await controlObjects.getVerifiedObjectByDigest({
-      objectDigest: predecessorHead.payload.directoryRootDigest,
       verifyIssuerSignature,
-    });
-    if (storedDirectory === null) throw new Error('predecessor directory root is not staged');
-    assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(
-      storedDirectory.envelope,
-      predecessorHead.payload.bucketCount,
     );
-    const directory = storedDirectory.envelope;
-    assertAuthorCatalogDirectoryNodeScopeBindingV1(
-      directory.payload,
-      deriveAuthorCatalogScopeFromHeadV1(predecessorHead.payload),
-    );
-    if (
-      directory.objectDigest !== predecessorHead.payload.directoryRootDigest
-      || directory.issuer !== predecessorHead.issuer
-    ) {
-      throw new Error('predecessor directory identity or issuer differs from its head');
-    }
-    const directoryPathProof = verifyAuthorCatalogDirectoryPathV1(
-      predecessorHead,
-      [directory],
-      '0' as never,
-    );
-    const descriptor = readVerifiedAuthorCatalogBucketDescriptorV1(
-      directoryPathProof,
-      predecessorHead,
-    );
-    if (descriptor.rowCount !== predecessorHead.payload.totalRows) {
-      throw new Error('predecessor directory row count differs from its head');
-    }
-    if (predecessorHead.payload.totalRows === '0') {
-      if (
-        descriptor.bucketDigest !== ZERO_DIGEST32_V1
-        || descriptor.byteLength !== '0'
-        || descriptor.rowCount !== '0'
-      ) {
-        throw new Error('empty predecessor descriptor is not canonical');
-      }
-      return Object.freeze([]);
-    }
-    if (descriptor.bucketDigest === ZERO_DIGEST32_V1) {
-      throw new Error('non-empty predecessor has an empty bucket digest');
-    }
-
-    const storedBucket = await controlObjects.getVerifiedObjectByDigest({
-      objectDigest: descriptor.bucketDigest,
-      verifyIssuerSignature,
-    });
-    if (storedBucket === null) throw new Error('predecessor bucket is not staged');
-    assertSignedAuthorCatalogBucketEnvelopeV1(storedBucket.envelope);
-    const bucket = storedBucket.envelope;
-    assertAuthorCatalogBucketScopeBindingV1(
-      bucket.payload,
-      deriveAuthorCatalogScopeFromHeadV1(predecessorHead.payload),
-    );
-    if (
-      bucket.objectDigest !== descriptor.bucketDigest
-      || bucket.issuer !== predecessorHead.issuer
-      || bucket.payload.bucketId !== descriptor.bucketId
-      || bucket.payload.rows.length.toString() !== descriptor.rowCount
-      || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
-        !== descriptor.byteLength
-    ) {
-      throw new Error('predecessor bucket differs from its verified descriptor');
-    }
-
-    for (const row of bucket.payload.rows) {
-      verifyAuthorCatalogRowAuthorshipV1({
-        catalogIssuerDelegation: storedDelegation.envelope,
-        catalogIssuerDelegationSignature: storedDelegation.issuerSignature,
-        parentAuthorAgentEvidence: null,
-        catalogHead: predecessorHead,
-        catalogHeadSignature: storedHead.issuerSignature,
-        directoryPathEnvelopes: [directory],
-        directoryPathSignatures: [storedDirectory.issuerSignature],
-        directoryPathProof,
-        catalogBucket: bucket,
-        catalogBucketSignature: storedBucket.issuerSignature,
-        targetKaId: row.kaId,
-      });
-    }
-    return Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })));
   } catch (cause) {
     fail(
       'catalog-native-receiver-history',
@@ -1978,6 +1890,199 @@ async function loadExactAppliedPredecessorRows(
       cause,
     );
   }
+}
+
+export interface DeactivateRfc64AppliedCatalogAuthorityInputV1 {
+  readonly store: TripleStore;
+  readonly controlObjects: Pick<
+    Rfc64ControlObjectOperationsV1,
+    'getVerifiedObjectByDigest'
+  >;
+  readonly inventory: Pick<
+    Rfc64InventoryV1OperationsV1,
+    'deleteAppliedCatalogHeadV1'
+  >;
+  readonly appliedHead: AppliedCatalogHeadSnapshotV1;
+  readonly verifyIssuerSignature?: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
+}
+
+export async function readRfc64AppliedCatalogContextGraphIdV1(
+  input: Pick<
+    DeactivateRfc64AppliedCatalogAuthorityInputV1,
+    'controlObjects' | 'appliedHead' | 'verifyIssuerSignature'
+  >,
+): Promise<ContextGraphIdV1> {
+  const verifyIssuerSignature = input.verifyIssuerSignature
+    ?? verifyControlEnvelopeIssuerSignatureV1;
+  const storedHead = await input.controlObjects.getVerifiedObjectByDigest({
+    objectDigest: input.appliedHead.currentCatalogHeadDigest,
+    verifyIssuerSignature,
+  });
+  if (storedHead === null) {
+    throw new Error('durable applied catalog head is missing its staged signed object');
+  }
+  assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
+  const head = storedHead.envelope;
+  const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
+  if (
+    head.objectDigest !== input.appliedHead.currentCatalogHeadDigest
+    || computeAuthorCatalogScopeDigestV1(scope) !== input.appliedHead.catalogScopeDigest
+    || scope.authorAddress !== input.appliedHead.authorAddress
+    || head.payload.version !== input.appliedHead.catalogVersion
+    || head.payload.totalRows !== input.appliedHead.inventoryRowCount
+  ) {
+    throw new Error('durable applied catalog head differs from its signed catalog closure');
+  }
+  return scope.contextGraphId;
+}
+
+/**
+ * Remove one exact catalog-owned SWM closure before yielding the CG to shadow
+ * or legacy authority. Semantic deletion precedes durable ref deletion, so a
+ * crash can only leave a retryable applied ref, never stale catalog semantics
+ * admitted beneath legacy synchronization.
+ */
+export async function deactivateRfc64AppliedCatalogAuthorityV1(
+  input: DeactivateRfc64AppliedCatalogAuthorityInputV1,
+): Promise<Readonly<{ contextGraphId: ContextGraphIdV1; removedRows: number }>> {
+  const verifyIssuerSignature = input.verifyIssuerSignature
+    ?? verifyControlEnvelopeIssuerSignatureV1;
+  const storedHead = await input.controlObjects.getVerifiedObjectByDigest({
+    objectDigest: input.appliedHead.currentCatalogHeadDigest,
+    verifyIssuerSignature,
+  });
+  if (storedHead === null) {
+    throw new Error('durable applied catalog head is missing its staged signed object');
+  }
+  assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
+  const head = storedHead.envelope;
+  const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
+  await readRfc64AppliedCatalogContextGraphIdV1(input);
+  const rows = await loadExactCatalogRowsForHeadV1(
+    input.controlObjects,
+    storedHead,
+    scope,
+    verifyIssuerSignature,
+  );
+  const removals = rows.map((row) => planOwnedRowRemoval(scope, row));
+  const journal = await snapshotSemanticTransitionV1(
+    input.store,
+    removals.map(transitionLocationFromRemoval),
+  );
+  let mutationAttempted = false;
+  try {
+    for (const removal of removals) {
+      mutationAttempted = true;
+      await deactivateExactOwnedPublicProjection(input.store, removal);
+    }
+    input.inventory.deleteAppliedCatalogHeadV1({
+      catalogScopeDigest: input.appliedHead.catalogScopeDigest,
+      authorAddress: input.appliedHead.authorAddress,
+      expectedCurrentCatalogHeadDigest: input.appliedHead.currentCatalogHeadDigest,
+    });
+  } catch (cause) {
+    if (mutationAttempted) await restoreSemanticTransitionV1(input.store, journal);
+    throw new Error('RFC-64 catalog semantic authority deactivation failed', { cause });
+  }
+  return Object.freeze({
+    contextGraphId: scope.contextGraphId,
+    removedRows: removals.length,
+  });
+}
+
+async function loadExactCatalogRowsForHeadV1(
+  controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObjectByDigest'>,
+  storedHead: StoredVerifiedControlObjectV1,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+  verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>,
+): Promise<readonly Readonly<AuthorCatalogRowV1>[]> {
+  assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
+  const head = storedHead.envelope;
+  assertAuthorCatalogHeadScopeBindingV1(head.payload, trustedCatalogScope);
+  const storedDelegation = await controlObjects.getVerifiedObjectByDigest({
+    objectDigest: head.payload.catalogIssuerDelegationDigest,
+    verifyIssuerSignature,
+  });
+  if (storedDelegation === null) throw new Error('catalog delegation is not staged');
+  assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(storedDelegation.envelope);
+  assertDirectAuthorCatalogIssuerDelegationBindingV1(
+    storedDelegation.envelope,
+    head,
+    trustedCatalogScope,
+  );
+  const storedDirectory = await controlObjects.getVerifiedObjectByDigest({
+    objectDigest: head.payload.directoryRootDigest,
+    verifyIssuerSignature,
+  });
+  if (storedDirectory === null) throw new Error('catalog directory root is not staged');
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(
+    storedDirectory.envelope,
+    head.payload.bucketCount,
+  );
+  const directory = storedDirectory.envelope;
+  assertAuthorCatalogDirectoryNodeScopeBindingV1(
+    directory.payload,
+    deriveAuthorCatalogScopeFromHeadV1(head.payload),
+  );
+  if (
+    directory.objectDigest !== head.payload.directoryRootDigest
+    || directory.issuer !== head.issuer
+  ) throw new Error('catalog directory identity or issuer differs from its head');
+  const directoryPathProof = verifyAuthorCatalogDirectoryPathV1(head, [directory], '0' as never);
+  const descriptor = readVerifiedAuthorCatalogBucketDescriptorV1(directoryPathProof, head);
+  if (descriptor.rowCount !== head.payload.totalRows) {
+    throw new Error('catalog directory row count differs from its head');
+  }
+  if (head.payload.totalRows === '0') {
+    if (
+      descriptor.bucketDigest !== ZERO_DIGEST32_V1
+      || descriptor.byteLength !== '0'
+      || descriptor.rowCount !== '0'
+    ) throw new Error('empty catalog descriptor is not canonical');
+    return Object.freeze([]);
+  }
+  if (descriptor.bucketDigest === ZERO_DIGEST32_V1) {
+    throw new Error('non-empty catalog has an empty bucket digest');
+  }
+  const storedBucket = await controlObjects.getVerifiedObjectByDigest({
+    objectDigest: descriptor.bucketDigest,
+    verifyIssuerSignature,
+  });
+  if (storedBucket === null) throw new Error('catalog bucket is not staged');
+  assertSignedAuthorCatalogBucketEnvelopeV1(storedBucket.envelope);
+  const bucket = storedBucket.envelope;
+  assertAuthorCatalogBucketScopeBindingV1(
+    bucket.payload,
+    deriveAuthorCatalogScopeFromHeadV1(head.payload),
+  );
+  if (
+    bucket.objectDigest !== descriptor.bucketDigest
+    || bucket.issuer !== head.issuer
+    || bucket.payload.bucketId !== descriptor.bucketId
+    || bucket.payload.rows.length.toString() !== descriptor.rowCount
+    || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
+      !== descriptor.byteLength
+  ) throw new Error('catalog bucket differs from its verified descriptor');
+  for (const row of bucket.payload.rows) {
+    verifyAuthorCatalogRowAuthorshipV1({
+      catalogIssuerDelegation: storedDelegation.envelope,
+      catalogIssuerDelegationSignature: storedDelegation.issuerSignature,
+      parentAuthorAgentEvidence: null,
+      catalogHead: head,
+      catalogHeadSignature: storedHead.issuerSignature,
+      directoryPathEnvelopes: [directory],
+      directoryPathSignatures: [storedDirectory.issuerSignature],
+      directoryPathProof,
+      catalogBucket: bucket,
+      catalogBucketSignature: storedBucket.issuerSignature,
+      targetKaId: row.kaId,
+    });
+  }
+  return Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })));
 }
 
 function planOwnedRowRemoval(
@@ -2270,6 +2375,9 @@ async function deactivateExactOwnedPublicProjection(
       'store lacks atomic named-graph and author-seal replacement for catalog removal',
     );
   }
+  await invalidateSwmMaterializationWitness(store, removal.swmGraph, {
+    source: 'rfc64-public-catalog-native-deactivation.witnessInvalidate',
+  }).catch(() => {});
 
   let graphExists: boolean;
   let sealRows;

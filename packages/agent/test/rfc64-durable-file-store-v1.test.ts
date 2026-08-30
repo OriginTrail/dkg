@@ -149,4 +149,45 @@ describe('RFC-64 durable file store v1', () => {
       label: 'oversized read fixture',
     })).rejects.toMatchObject({ code: 'corrupt' });
   });
+
+  it('atomically replaces bounded mutable state and repairs a post-rename interruption', async () => {
+    const containmentRoot = await temporaryDataDirectory();
+    applyRfc64OwnerOnlyPermissionsSyncV1(
+      containmentRoot,
+      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+      { entryKind: 'directory' },
+    );
+    let failAfterReplace = false;
+    const durableFiles = createRfc64DurableFileStoreForTestV1<'state'>(
+      containmentRoot,
+      Object.freeze({
+        boundary: (boundary) => {
+          if (failAfterReplace && boundary === 'state.published-replace') {
+            failAfterReplace = false;
+            throw new Error('simulated power loss after atomic replace');
+          }
+        },
+      } satisfies Rfc64DurableFileTestLifecycleV1<'state'>),
+    );
+    const input = (value: string) => ({
+      relativePath: join('mutable', 'state.json'),
+      bytes: new TextEncoder().encode(value),
+      maxBytes: 1024,
+      label: 'mutable state fixture',
+      kind: 'state' as const,
+    });
+    await durableFiles.replaceExactBytes(input('{"version":1}'));
+    failAfterReplace = true;
+    await expect(durableFiles.replaceExactBytes(input('{"version":2}')))
+      .rejects.toMatchObject({
+        code: 'durability',
+        cause: { message: 'simulated power loss after atomic replace' },
+      });
+    // Retrying the exact requested state re-establishes both durability
+    // barriers instead of treating the visible rename as a completed call.
+    await expect(durableFiles.replaceExactBytes(input('{"version":2}')))
+      .resolves.toBeUndefined();
+    await expect(readFile(join(containmentRoot, 'mutable', 'state.json'), 'utf8'))
+      .resolves.toBe('{"version":2}');
+  });
 });
