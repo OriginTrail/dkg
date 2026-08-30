@@ -212,6 +212,37 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       .toBe(10_001);
   });
 
+  it('retains process-local tip progress across unrelated preflight invalidation', async () => {
+    let head = 10_000;
+    const eventBlock = 10_001;
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry, head);
+    provider.getBlockNumber.setImpl(async () => head);
+    registry.queryFilter.setImpl(async () => []);
+
+    await collectRegistryScan(adapter, { mode: 'tip' });
+    expect((adapter as any).contextGraphRegistryTipScanCursor.getCachedWatermark(REGISTRY))
+      .toBe(10_001);
+
+    adapter.invalidatePublishPreflightCache();
+    head = 13_200;
+    registry.queryFilter.clear();
+    registry.queryFilter.setImpl(async (_filter: unknown, lo: number, hi: number) =>
+      lo <= eventBlock && eventBlock <= hi
+        ? [{ topics: [], data: '0x01', blockNumber: eventBlock }]
+        : [],
+    );
+
+    const recovered = await collectRegistryScan(adapter, { mode: 'tip' });
+
+    expect(recovered.map((cg) => cg.blockNumber)).toEqual([eventBlock]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi]))
+      .toEqual([
+        [9_951, 11_950],
+        [11_951, 13_200],
+      ]);
+  });
+
   it('persists independent tip progress across restart with split legacy stores', async () => {
     const historical = new JsonLegacyRegistryScanCursorStore();
     const tip = new JsonLegacyRegistryScanCursorStore();

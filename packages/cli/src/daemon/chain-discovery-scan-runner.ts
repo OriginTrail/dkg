@@ -26,12 +26,13 @@ export type ChainDiscoveryStartupPhase =
   | 'startupFullRecovery'
   | 'complete';
 
-export type ManagedChainDiscoveryScanOptionsInput = {
+type ChainDiscoveryRecoveryStep = 'tip' | 'incremental' | 'full';
+
+type ManagedChainDiscoveryScanOptionsInput = {
   watermarkSeeded: boolean;
   startupPhase: ChainDiscoveryStartupPhase;
   successfulScansInCycle: number;
-  fullRecoveryPending?: boolean;
-  fullRecoveryRetryReady?: boolean;
+  recoveryStep?: ChainDiscoveryRecoveryStep;
   fullScanEvery?: number;
   pageBudget?: number;
 };
@@ -51,38 +52,51 @@ export type ChainDiscoveryScanOptions =
   | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
   | { mode: 'seedFull'; throwOnChainScanFailure: true };
 
-export function chainDiscoveryScanOptions(
-  input: ManagedChainDiscoveryScanOptionsInput | LegacyChainDiscoveryScanOptionsInput,
-): ChainDiscoveryScanOptions {
-  const configuredFullScanEvery = input.fullScanEvery;
+function normalizeFullScanEvery(configured: number | undefined): number {
   let fullScanEvery = CHAIN_DISCOVERY_SCAN_SCHEDULE.fullScanEvery;
   if (
-    typeof configuredFullScanEvery === 'number' &&
-    Number.isFinite(configuredFullScanEvery) &&
-    configuredFullScanEvery >= 1
+    typeof configured === 'number' &&
+    Number.isFinite(configured) &&
+    configured >= 1
   ) {
-    fullScanEvery = Math.floor(configuredFullScanEvery);
+    fullScanEvery = Math.floor(configured);
   }
-  const configuredPageBudget = input.pageBudget;
-  const pageBudget = (
-    typeof configuredPageBudget === 'number' &&
-    Number.isFinite(configuredPageBudget) &&
-    configuredPageBudget >= 1
-  )
-    ? Math.floor(configuredPageBudget)
-    : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
+  return fullScanEvery;
+}
 
-  if (!('startupPhase' in input)) {
-    const run = input.run ?? 0;
-    const startupRecoveryScan = input.watermarkSeeded && run === 0;
-    const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
-    if (startupRecoveryScan || periodicFullResync) {
-      return { mode: 'seedFull', throwOnChainScanFailure: true };
-    }
-    return input.watermarkSeeded
-      ? { mode: 'incremental', pageBudget }
-      : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+function normalizePageBudget(configured: number | undefined): number {
+  return (
+    typeof configured === 'number' &&
+    Number.isFinite(configured) &&
+    configured >= 1
+  )
+    ? Math.floor(configured)
+    : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
+}
+
+/** Original invocation-count policy retained for external daemon-barrel callers. */
+export function chainDiscoveryScanOptions(
+  input: LegacyChainDiscoveryScanOptionsInput,
+): ChainDiscoveryScanOptions {
+  const fullScanEvery = normalizeFullScanEvery(input.fullScanEvery);
+  const pageBudget = normalizePageBudget(input.pageBudget);
+  const run = input.run ?? 0;
+  const startupRecoveryScan = input.watermarkSeeded && run === 0;
+  const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
+  if (startupRecoveryScan || periodicFullResync) {
+    return { mode: 'seedFull', throwOnChainScanFailure: true };
   }
+  return input.watermarkSeeded
+    ? { mode: 'incremental', pageBudget }
+    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+}
+
+/** Outcome-aware policy used only by the managed daemon scan runner. */
+function managedChainDiscoveryScanOptions(
+  input: ManagedChainDiscoveryScanOptionsInput,
+): ChainDiscoveryScanOptions {
+  const fullScanEvery = normalizeFullScanEvery(input.fullScanEvery);
+  const pageBudget = normalizePageBudget(input.pageBudget);
 
   if (input.startupPhase === 'undetermined') {
     return input.watermarkSeeded
@@ -97,10 +111,14 @@ export function chainDiscoveryScanOptions(
   if (input.startupPhase === 'startupFullRecovery') {
     return { mode: 'seedFull', throwOnChainScanFailure: true };
   }
-  if (input.fullRecoveryPending) {
-    return input.fullRecoveryRetryReady
-      ? { mode: 'seedFull', throwOnChainScanFailure: true }
-      : { mode: 'tip' };
+  if (input.recoveryStep === 'tip') return { mode: 'tip' };
+  if (input.recoveryStep === 'incremental') {
+    return input.watermarkSeeded
+      ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
+      : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+  }
+  if (input.recoveryStep === 'full') {
+    return { mode: 'seedFull', throwOnChainScanFailure: true };
   }
   if (input.watermarkSeeded && input.successfulScansInCycle >= fullScanEvery) {
     return { mode: 'seedFull', throwOnChainScanFailure: true };
@@ -142,8 +160,7 @@ export function createChainDiscoveryScanRunner(input: {
   let startupPhase: ChainDiscoveryStartupPhase = 'undetermined';
   let startupFullFailures = 0;
   let successfulScansInCycle = 0;
-  let fullRecoveryPending = false;
-  let fullRecoveryRetryReady = false;
+  let recoveryStep: ChainDiscoveryRecoveryStep | undefined;
   let cursorBackedFailures = 0;
   let inFlight = false;
 
@@ -167,12 +184,12 @@ export function createChainDiscoveryScanRunner(input: {
         startupPhase = watermarkSeeded ? 'startupFullRecovery' : 'cursorSeed';
       }
 
-      const options = chainDiscoveryScanOptions({
+      const scheduledRecoveryStep = recoveryStep;
+      const options = managedChainDiscoveryScanOptions({
         watermarkSeeded,
         startupPhase,
         successfulScansInCycle,
-        fullRecoveryPending,
-        fullRecoveryRetryReady,
+        recoveryStep: scheduledRecoveryStep,
         pageBudget: input.pageBudget,
         fullScanEvery: input.fullScanEvery,
       });
@@ -192,12 +209,19 @@ export function createChainDiscoveryScanRunner(input: {
           // enter steady state and interleave tip discovery before each later full retry.
           if (startupFullFailures >= 2) {
             startupPhase = 'complete';
-            fullRecoveryPending = true;
-            fullRecoveryRetryReady = false;
+            recoveryStep = 'tip';
           }
         } else if (options.mode === 'seedFull') {
-          fullRecoveryPending = true;
-          fullRecoveryRetryReady = false;
+          recoveryStep = 'tip';
+        } else if (scheduledRecoveryStep === 'tip' && options.mode === 'tip') {
+          // A tip probe cannot fill a multi-page cursor-to-tip gap by itself. Whether the probe
+          // succeeds or fails, give the usable historical cursor one bounded catch-up turn.
+          recoveryStep = watermarkSeeded ? 'incremental' : 'full';
+        } else if (
+          scheduledRecoveryStep === 'incremental' &&
+          (options.mode === 'seedFromCursor' || options.mode === 'incremental')
+        ) {
+          recoveryStep = 'full';
         } else if (options.mode === 'seedFromCursor' || options.mode === 'incremental') {
           cursorBackedFailures += 1;
           // A bounded retry absorbs transient RPC failures. Persistent cursor-backed failure means
@@ -205,14 +229,9 @@ export function createChainDiscoveryScanRunner(input: {
           // recovery alternation used for failed full scans.
           if (cursorBackedFailures >= 2) {
             startupPhase = 'complete';
-            fullRecoveryPending = true;
-            fullRecoveryRetryReady = false;
+            recoveryStep = 'tip';
             cursorBackedFailures = 0;
           }
-        } else if (fullRecoveryPending && options.mode === 'tip') {
-          // One tip-discovery attempt, successful or not, prevents an unavailable historical range
-          // from monopolizing the scheduler. The next invocation may retry full recovery.
-          fullRecoveryRetryReady = true;
         }
         return;
       }
@@ -221,17 +240,23 @@ export function createChainDiscoveryScanRunner(input: {
         startupPhase = 'complete';
         startupFullFailures = 0;
         successfulScansInCycle = 1;
-        fullRecoveryPending = false;
-        fullRecoveryRetryReady = false;
+        recoveryStep = undefined;
         cursorBackedFailures = 0;
       } else {
         if (startupPhase === 'cursorSeed') startupPhase = 'complete';
         if (options.mode === 'seedFromCursor' || options.mode === 'incremental') {
           cursorBackedFailures = 0;
         }
-        successfulScansInCycle += 1;
-        if (fullRecoveryPending && options.mode === 'tip') {
-          fullRecoveryRetryReady = true;
+        if (scheduledRecoveryStep === 'tip' && options.mode === 'tip') {
+          recoveryStep = watermarkSeeded ? 'incremental' : 'full';
+        } else if (
+          scheduledRecoveryStep === 'incremental' &&
+          (options.mode === 'seedFromCursor' || options.mode === 'incremental')
+        ) {
+          recoveryStep = 'full';
+        }
+        if (scheduledRecoveryStep === undefined) {
+          successfulScansInCycle += 1;
         }
       }
 

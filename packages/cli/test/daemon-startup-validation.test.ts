@@ -251,6 +251,20 @@ describe('daemon startup network validation', () => {
         save: expect.any(Function),
       },
     });
+    const registryCursorKey = {
+      chainId: 'gnosis:100',
+      deploymentId: buildEvmDeploymentId({
+        chainId: 'gnosis:100',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+      }),
+      registryAddress: '0x3333333333333333333333333333333333333333',
+    };
+    await createArg.contextGraphRegistryScanCursorStore.save(registryCursorKey, 111);
+    await createArg.contextGraphRegistryTipScanCursorStore.save(registryCursorKey, 222);
+    await expect(createArg.contextGraphRegistryScanCursorStore.load(registryCursorKey))
+      .resolves.toBe(111);
+    await expect(createArg.contextGraphRegistryTipScanCursorStore.load(registryCursorKey))
+      .resolves.toBe(222);
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
       chainId: 'gnosis:100',
       hubAddress: '0x1234567890123456789012345678901234567890',

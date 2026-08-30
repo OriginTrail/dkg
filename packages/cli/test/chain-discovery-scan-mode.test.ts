@@ -22,11 +22,9 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  it('uses bounded cursor-resumable watermark seeding before a seed exists', () => {
+  it('preserves bounded cursor seeding in the original helper', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: false,
-      startupPhase: 'undetermined',
-      successfulScansInCycle: 0,
     })).toEqual({
       mode: 'seedFromCursor',
       throwOnChainScanFailure: true,
@@ -34,31 +32,26 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  it('uses a startup recovery scan even when the registry watermark already exists', () => {
+  it('preserves startup full recovery in the original helper', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
-      startupPhase: 'undetermined',
-      successfulScansInCycle: 0,
     })).toEqual({
       mode: 'seedFull',
       throwOnChainScanFailure: true,
     });
   });
 
-  it('keeps steady-state daemon scans incremental after startup recovery', () => {
+  it('preserves steady-state incremental scans in the original helper', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
-      startupPhase: 'complete',
-      successfulScansInCycle: 1,
-      fullScanEvery: 48,
-    })).toEqual({ mode: 'incremental', throwOnChainScanFailure: true, pageBudget: 30 });
+      run: 1,
+    })).toEqual({ mode: 'incremental', pageBudget: 30 });
   });
 
-  it('keeps a periodic full-history recovery path after the watermark is seeded', () => {
+  it('preserves periodic full-history recovery in the original helper', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
-      startupPhase: 'complete',
-      successfulScansInCycle: 48,
+      run: 48,
       fullScanEvery: 48,
     })).toEqual({
       mode: 'seedFull',
@@ -66,41 +59,28 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  it('uses a cursor-independent tip probe while full-history recovery is pending', () => {
+  it('does not force a full scan before the original helper cadence', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
-      startupPhase: 'complete',
-      successfulScansInCycle: 48,
-      fullRecoveryPending: true,
-      fullRecoveryRetryReady: false,
-    })).toEqual({ mode: 'tip' });
-  });
-
-  it('does not force a full scan before the configured recovery cadence', () => {
-    expect(chainDiscoveryScanOptions({
-      watermarkSeeded: true,
-      startupPhase: 'complete',
-      successfulScansInCycle: 47,
+      run: 47,
       fullScanEvery: 48,
-    })).toEqual({ mode: 'incremental', throwOnChainScanFailure: true, pageBudget: 30 });
+    })).toEqual({ mode: 'incremental', pageBudget: 30 });
   });
 
   it('ignores fractional full-scan cadence overrides below one', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
-      startupPhase: 'complete',
-      successfulScansInCycle: 1,
+      run: 1,
       fullScanEvery: 0.5,
-    })).toEqual({ mode: 'incremental', throwOnChainScanFailure: true, pageBudget: 30 });
+    })).toEqual({ mode: 'incremental', pageBudget: 30 });
   });
 
   it('honors a valid custom page budget', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
-      startupPhase: 'complete',
-      successfulScansInCycle: 1,
+      run: 1,
       pageBudget: 7.9,
-    })).toEqual({ mode: 'incremental', throwOnChainScanFailure: true, pageBudget: 7 });
+    })).toEqual({ mode: 'incremental', pageBudget: 7 });
   });
 
   it('derives the daily full-resync cadence from the same schedule as the interval', () => {
@@ -247,7 +227,7 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  it('interleaves tip discovery when startup full recovery keeps failing', async () => {
+  it('uses a valid historical cursor between tip probes and failed full retries', async () => {
     const agent = {
       hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
       discoverContextGraphsFromChain: vi
@@ -255,10 +235,12 @@ describe('chainDiscoveryScanOptions', () => {
         .mockRejectedValueOnce(new Error('old archive range unavailable'))
         .mockRejectedValueOnce(new Error('old archive range still unavailable'))
         .mockResolvedValueOnce(4)
+        .mockResolvedValueOnce(2)
         .mockRejectedValueOnce(new Error('full recovery remains pending')),
     };
     const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
 
+    await runner();
     await runner();
     await runner();
     await runner();
@@ -268,8 +250,14 @@ describe('chainDiscoveryScanOptions', () => {
       'seedFull',
       'seedFull',
       'tip',
+      'incremental',
       'seedFull',
     ]);
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenNthCalledWith(4, {
+      mode: 'incremental',
+      throwOnChainScanFailure: true,
+      pageBudget: 30,
+    });
   });
 
   it('interleaves tip recovery when fresh cursor bootstrap remains blocked', async () => {
@@ -283,10 +271,12 @@ describe('chainDiscoveryScanOptions', () => {
         .mockRejectedValueOnce(new Error('bootstrap page unavailable'))
         .mockRejectedValueOnce(new Error('persisted historical page unavailable'))
         .mockResolvedValueOnce(1)
+        .mockResolvedValueOnce(0)
         .mockRejectedValueOnce(new Error('historical recovery remains pending')),
     };
     const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
 
+    await runner();
     await runner();
     await runner();
     await runner();
@@ -296,6 +286,7 @@ describe('chainDiscoveryScanOptions', () => {
       'seedFromCursor',
       'incremental',
       'tip',
+      'incremental',
       'seedFull',
     ]);
   });
@@ -345,6 +336,7 @@ describe('chainDiscoveryScanOptions', () => {
         .mockResolvedValueOnce(0)
         .mockRejectedValueOnce(new Error('historical page unavailable'))
         .mockResolvedValueOnce(1)
+        .mockResolvedValueOnce(0)
         .mockResolvedValueOnce(0),
     };
     const runner = createChainDiscoveryScanRunner({
@@ -358,12 +350,14 @@ describe('chainDiscoveryScanOptions', () => {
     await runner();
     await runner();
     await runner();
+    await runner();
 
     expect(agent.discoverContextGraphsFromChain.mock.calls.map(([options]) => options.mode)).toEqual([
       'seedFull',
       'incremental',
       'seedFull',
       'tip',
+      'incremental',
       'seedFull',
     ]);
   });

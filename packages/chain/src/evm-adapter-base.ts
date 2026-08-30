@@ -40,7 +40,10 @@ import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
-import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
+import {
+  ContextGraphRegistryHistoricalScanCursor,
+  ContextGraphRegistryTipScanCursor,
+} from './context-graph-registry-scan-cursor.js';
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -980,12 +983,12 @@ export class EVMChainAdapterBase {
     return this.contextGraphNameHashResolver;
   }
 
-  protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
+  protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryHistoricalScanCursor;
   /**
    * Independent recovery-tip progress. Keeping this cursor separate prevents a blocked historical
    * recovery range from either rewinding tip discovery or being mistaken for current-chain progress.
    */
-  protected readonly contextGraphRegistryTipScanCursor: ContextGraphRegistryScanCursor;
+  protected readonly contextGraphRegistryTipScanCursor: ContextGraphRegistryTipScanCursor;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -1012,7 +1015,6 @@ export class EVMChainAdapterBase {
     this.cachedContractDeployBlocks.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
-    this.contextGraphRegistryTipScanCursor.clearMemoryCache();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -1318,16 +1320,15 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
-    this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
+    this.contextGraphRegistryScanCursor = new ContextGraphRegistryHistoricalScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
       store: config.contextGraphRegistryScanCursorStore,
     });
-    this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryScanCursor({
+    this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryTipScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
       store: config.contextGraphRegistryTipScanCursorStore,
-      savePolicy: 'strict',
     });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;

@@ -12,7 +12,10 @@ import {
   CG_REGISTRY_MAX_SCAN_PAGES,
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from './evm-adapter-constants.js';
-import type { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
+import type {
+  ContextGraphRegistryHistoricalScanCursor,
+  ContextGraphRegistryTipScanCursor,
+} from './context-graph-registry-scan-cursor.js';
 
 type StatelessScanStart =
   | { kind: 'explicit'; fromBlock: number }
@@ -56,8 +59,8 @@ type RegistryScannerInput = {
   registry: Contract;
   registryAddress: string;
   pageSize: number;
-  historicalCursor: ContextGraphRegistryScanCursor;
-  tipCursor: ContextGraphRegistryScanCursor;
+  historicalCursor: ContextGraphRegistryHistoricalScanCursor;
+  tipCursor: ContextGraphRegistryTipScanCursor;
   resolveDeployment(): Promise<{
     fromBlock: number;
     head: number;
@@ -281,9 +284,12 @@ export class ContextGraphRegistryScanner {
       return resolveDeployment();
     };
     const historicalAcknowledge = (nextBlock: number) =>
-      this.input.historicalCursor.saveWatermark(this.input.registryAddress, nextBlock);
+      this.input.historicalCursor.saveBestEffortWatermark(
+        this.input.registryAddress,
+        nextBlock,
+      );
     const tipAcknowledge = (nextBlock: number) =>
-      this.input.tipCursor.saveWatermark(this.input.registryAddress, nextBlock);
+      this.input.tipCursor.saveStrictWatermark(this.input.registryAddress, nextBlock);
     const noAcknowledge = async () => {};
 
     switch (scanPlan.kind) {
@@ -341,7 +347,7 @@ export class ContextGraphRegistryScanner {
           : Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS);
         // Persist the conservative lower bound before the first query. Strict persistence makes a
         // configured-store failure observable; an in-process pending marker is retried here.
-        await this.input.tipCursor.saveWatermark(
+        await this.input.tipCursor.saveStrictWatermark(
           this.input.registryAddress,
           watermark ?? Math.max(1, start),
         );

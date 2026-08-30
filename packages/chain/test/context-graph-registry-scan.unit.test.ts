@@ -640,7 +640,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       throw new Error('eth_getCode should not be called');
     });
     registry.queryFilter.setImpl(async () => []);
-    await (adapter as any).contextGraphRegistryScanCursor.saveWatermark(REGISTRY, 2_050);
+    await (adapter as any).contextGraphRegistryScanCursor.saveBestEffortWatermark(
+      REGISTRY,
+      2_050,
+    );
 
     await collectRegistryScan(adapter, {
       mode: 'incremental',
