@@ -2442,6 +2442,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // every other node protocol. Dormant when no dataDir opened persistence.
     this.startRfc64PublicCatalogServiceV1(ctx);
     this.startRfc64PublicCatalogBootstrapV1(ctx);
+    this.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
 
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);

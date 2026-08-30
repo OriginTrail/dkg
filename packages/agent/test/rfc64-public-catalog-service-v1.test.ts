@@ -11,6 +11,7 @@ import {
   type EvmAddressV1,
   type MemberRosterV1,
   type ProtocolRouter,
+  type SendOptions,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -79,9 +80,18 @@ type RouterHandler = (
 class RecordingRouter {
   readonly handlers = new Map<string, RouterHandler>();
   readonly events: string[] = [];
-  readonly sends: Array<Readonly<{ protocolId: string; data: Uint8Array }>> = [];
+  readonly sends: Array<Readonly<{
+    peerId: string;
+    protocolId: string;
+    data: Uint8Array;
+    options?: SendOptions;
+  }>> = [];
   failRegistrationFor: string | undefined;
-  sendResponse: (protocolId: string) => Promise<Uint8Array> = async () => Uint8Array.of(0);
+  sendResponse: (
+    protocolId: string,
+    options: SendOptions | undefined,
+    peerId: string,
+  ) => Promise<Uint8Array> = async () => Uint8Array.of(0);
 
   register(protocolId: string, handler: RouterHandler): void {
     this.events.push(`register:${protocolId}`);
@@ -97,13 +107,14 @@ class RecordingRouter {
   }
 
   async send(
-    _peerId: string,
+    peerId: string,
     protocolId: string,
     data: Uint8Array,
+    options?: SendOptions,
   ): Promise<Uint8Array> {
     this.events.push(`send:${protocolId}`);
-    this.sends.push(Object.freeze({ protocolId, data }));
-    return this.sendResponse(protocolId);
+    this.sends.push(Object.freeze({ peerId, protocolId, data, options }));
+    return this.sendResponse(protocolId, options, peerId);
   }
 
   asProtocolRouter(): ProtocolRouter {
@@ -1014,6 +1025,45 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       router,
       `send:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
     )).toBe(sendsBefore);
+    await service.close();
+  });
+
+  it('propagates announcement cancellation and skips every later peer', async () => {
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+    });
+    const policy = acceptPolicy(service);
+    const head = announcement(policy.policyDigest);
+    const controller = new AbortController();
+    let markFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+    router.sendResponse = async (_protocolId, options, peerId) => {
+      expect(peerId).toBe('peer-blocked');
+      expect(options?.signal).toBe(controller.signal);
+      markFirstEntered();
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+          once: true,
+        });
+      });
+    };
+    service.start();
+
+    const announcing = service.announceCatalogHead({
+      announcement: head,
+      peers: ['peer-blocked', 'peer-must-not-run'],
+      signal: controller.signal,
+    });
+    await firstEntered;
+    controller.abort(new Error('repair closing'));
+    await expect(announcing).resolves.toMatchObject({
+      announcedPeers: [],
+      failedPeers: [{ peerId: 'peer-blocked', error: 'repair closing' }],
+    });
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['peer-blocked']);
     await service.close();
   });
 

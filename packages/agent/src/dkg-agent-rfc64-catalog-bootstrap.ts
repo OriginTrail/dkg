@@ -4,7 +4,6 @@
 
 import {
   computeContextGraphPolicyObjectDigestV1,
-  createOperationContext,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -20,6 +19,8 @@ import type {
   Rfc64PublicCatalogBootstrapConfigV1,
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
+import type { Rfc64PublicCatalogAuthorRepairStatusV1 } from
+  './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
@@ -56,30 +57,6 @@ export interface Rfc64PublicCatalogBootstrapTargetStatusV1 {
   readonly providerPeerId: string | null;
   readonly appliedHeadDigest: Digest32V1 | null;
   readonly stagedHeadDigest: Digest32V1 | null;
-  readonly catalogVersion: string | null;
-  readonly inventoryRowCount: string | null;
-  readonly lastError: string | null;
-  readonly updatedAtMs: number | null;
-}
-
-export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
-  | 'pending'
-  | 'inactive'
-  | 'unavailable'
-  | 'reconciled'
-  | 'no-inventory'
-  | 'failed';
-
-/**
- * Restart/retry evidence for one locally controlled author in one explicitly
- * selected public CG. This lane never discovers or subscribes to graphs.
- */
-export interface Rfc64PublicCatalogAuthorRepairStatusV1 {
-  readonly contextGraphId: ContextGraphIdV1;
-  readonly authorAddress: EvmAddressV1;
-  readonly outcome: Rfc64PublicCatalogAuthorRepairOutcomeV1;
-  readonly attempts: number;
-  readonly inventoryHeadObjectDigest: Digest32V1 | null;
   readonly catalogVersion: string | null;
   readonly inventoryRowCount: string | null;
   readonly lastError: string | null;
@@ -162,18 +139,6 @@ interface Rfc64CatalogBootstrapTargetPlanV1 extends Pick<
   'scope' | 'providers' | 'mode' | 'requiresPrivateVm'
 > {}
 
-interface MutableAuthorRepairStatusV1 {
-  readonly contextGraphId: ContextGraphIdV1;
-  readonly authorAddress: EvmAddressV1;
-  outcome: Rfc64PublicCatalogAuthorRepairOutcomeV1;
-  attempts: number;
-  inventoryHeadObjectDigest: Digest32V1 | null;
-  catalogVersion: string | null;
-  inventoryRowCount: string | null;
-  lastError: string | null;
-  updatedAtMs: number | null;
-}
-
 export interface Rfc64CatalogBootstrapPartitionV1 {
   readonly retryIntervalMs?: number;
   readonly track2Policies: readonly Rfc64CatalogBootstrapPolicyV1[];
@@ -188,7 +153,6 @@ interface BootstrapStateV1 {
   readonly retryIntervalMs?: number;
   readonly legacyRecoveryConfig: Rfc64CatalogBootstrapPartitionV1['legacyRecoveryConfig'];
   readonly targets: MutableTargetStatusV1[];
-  readonly authorRepairs: MutableAuthorRepairStatusV1[];
   readonly ctx: OperationContext;
   closed: boolean;
   running: boolean;
@@ -250,13 +214,9 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const hasLegacyRecoveryProviders = partition.legacyRecoveryConfig.acceptedPolicies.some(
       ({ completeSwmProviders = [] }) => completeSwmProviders.length > 0,
     );
-    const authorRepairs = this.planRfc64LocalPublicCatalogAuthorRepairsV1(
-      partition.track2Targets,
-    );
     if (
       partition.track2Policies.length === 0
       && !hasLegacyRecoveryProviders
-      && authorRepairs.length === 0
     ) return;
     const state: BootstrapStateV1 = {
       retryIntervalMs: partition.retryIntervalMs,
@@ -277,7 +237,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         lastError: null,
         updatedAtMs: null,
       })),
-      authorRepairs,
       ctx,
       closed: false,
       running: false,
@@ -305,23 +264,28 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       lastPassStartedAtMs: state.lastPassStartedAtMs,
       lastPassCompletedAtMs: state.lastPassCompletedAtMs,
       targets: Object.freeze(state.targets.map(snapshotTargetStatusV1)),
-      authorRepairs: Object.freeze(state.authorRepairs.map(snapshotAuthorRepairStatusV1)),
+      authorRepairs:
+        this.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs
+        ?? Object.freeze([]),
     });
   }
 
   /** Wait for the currently running startup/refresh pass only. */
   async whenRfc64PublicCatalogBootstrapIdleV1(this: DKGAgent): Promise<void> {
     const state = STATES.get(this);
-    if (state === undefined) return;
-    while (state.run !== null) {
-      const current = state.run;
-      await current;
-      if (state.run === current) return;
+    if (state !== undefined) {
+      while (state.run !== null) {
+        const current = state.run;
+        await current;
+        if (state.run === current) break;
+      }
     }
+    await this.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
   }
 
   /** Stop future retries and abort/drain the current pass before service close. */
   async closeRfc64PublicCatalogBootstrapV1(this: DKGAgent): Promise<void> {
+    await this.closeRfc64SwmCatalogProjectionSupervisorV1();
     const state = STATES.get(this);
     if (state === undefined) return;
     state.closed = true;
@@ -370,19 +334,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const abortController = new AbortController();
     state.abortController = abortController;
     try {
-      // Repair locally owned durable author state before any remote discovery
-      // can spend this pass's transport budget.
-      await mapWithConcurrency(
-        state.authorRepairs,
-        MAX_CONCURRENT_TARGETS_V1,
-        async (repair) => {
-          if (state.closed || abortController.signal.aborted) return;
-          await this.reconcileRfc64LocalPublicCatalogAuthorV1(
-            repair,
-            abortController.signal,
-          );
-        },
-      );
       const completeSwmProviders = [...new Set(
         state.legacyRecoveryConfig.acceptedPolicies.flatMap(
           ({ completeSwmProviders: providers = [] }) => providers,
@@ -436,99 +387,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       if (state.abortController === abortController) state.abortController = null;
       state.running = false;
       state.lastPassCompletedAtMs = Date.now();
-    }
-  }
-
-  /**
-   * Intersect the bounded accepted catalog manifest with authors whose
-   * identities are registered on this node. Remote authors and unselected
-   * CGs can never enter this repair lane.
-   */
-  private planRfc64LocalPublicCatalogAuthorRepairsV1(
-    this: DKGAgent,
-    targets: readonly Rfc64CatalogBootstrapTargetPlanV1[],
-  ): MutableAuthorRepairStatusV1[] {
-    return targets.flatMap(({ mode, scope }): MutableAuthorRepairStatusV1[] => {
-      const candidate = this.resolveRfc64LocalPublicCatalogAuthorRepairCandidateV1({
-        mode,
-        contextGraphId: scope.contextGraphId,
-        authorAddress: scope.authorAddress,
-      });
-      return candidate === null ? [] : [{
-        contextGraphId: candidate.contextGraphId,
-        authorAddress: candidate.authorAddress,
-        outcome: 'pending',
-        attempts: 0,
-        inventoryHeadObjectDigest: null,
-        catalogVersion: null,
-        inventoryRowCount: null,
-        lastError: null,
-        updatedAtMs: null,
-      }];
-    });
-  }
-
-  private async reconcileRfc64LocalPublicCatalogAuthorV1(
-    this: DKGAgent,
-    repair: MutableAuthorRepairStatusV1,
-    signal: AbortSignal,
-  ): Promise<void> {
-    repair.attempts += 1;
-    try {
-      const result = await this.repairRfc64LocalPublicCatalogAuthorV1({
-        candidate: {
-          contextGraphId: repair.contextGraphId,
-          authorAddress: repair.authorAddress,
-        },
-        signal,
-      });
-      if (signal.aborted) return;
-      if (result.outcome === 'inactive' || result.outcome === 'no-inventory') {
-        Object.assign(repair, {
-          outcome: result.outcome,
-          inventoryHeadObjectDigest: null,
-          catalogVersion: null,
-          inventoryRowCount: null,
-          lastError: null,
-          updatedAtMs: Date.now(),
-        });
-        return;
-      }
-      if (result.outcome === 'unavailable') {
-        Object.assign(repair, {
-          outcome: 'unavailable',
-          inventoryHeadObjectDigest: null,
-          catalogVersion: null,
-          inventoryRowCount: null,
-          lastError: boundedErrorV1(result.error),
-          updatedAtMs: Date.now(),
-        });
-        return;
-      }
-      const reconciled = result.reconciliation;
-      Object.assign(repair, {
-        outcome: 'reconciled',
-        inventoryHeadObjectDigest: reconciled.inventoryHeadObjectDigest,
-        catalogVersion: reconciled.appliedHead?.catalogVersion ?? null,
-        inventoryRowCount:
-          reconciled.appliedHead?.inventoryRowCount ?? String(reconciled.targetAssetCount),
-        lastError: null,
-        updatedAtMs: Date.now(),
-      });
-    } catch (error) {
-      if (signal.aborted) return;
-      Object.assign(repair, {
-        outcome: 'failed',
-        inventoryHeadObjectDigest: null,
-        catalogVersion: null,
-        inventoryRowCount: null,
-        lastError: boundedErrorV1(errorMessageV1(error)),
-        updatedAtMs: Date.now(),
-      });
-      this.log.warn(
-        createOperationContext('system'),
-        `RFC-64 local author catalog repair failed for ${repair.contextGraphId} / ${repair.authorAddress}: ${errorMessageV1(error)}`,
-      );
     }
   }
 
@@ -726,12 +584,6 @@ function snapshotTargetStatusV1(
     lastError: target.lastError,
     updatedAtMs: target.updatedAtMs,
   });
-}
-
-function snapshotAuthorRepairStatusV1(
-  repair: MutableAuthorRepairStatusV1,
-): Readonly<Rfc64PublicCatalogAuthorRepairStatusV1> {
-  return Object.freeze({ ...repair });
 }
 
 function errorMessageV1(error: unknown): string {
