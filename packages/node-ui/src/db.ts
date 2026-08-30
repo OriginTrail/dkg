@@ -20,7 +20,10 @@ import {
   type DurableManifestPrefixDigest,
   type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
-import { RoutineLogRetention } from './routine-log-retention.js';
+import {
+  RoutineLogRetention,
+  installRoutineLogRetentionSchema,
+} from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
@@ -341,96 +344,6 @@ export class DashboardDB {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
       }
     };
-    const ensureRoutineLogRetentionIndex = () => {
-      const logsTable = this.db.prepare(`
-        SELECT 1 AS found FROM sqlite_master
-        WHERE type = 'table' AND name = 'logs'
-      `).get() as { found: number } | undefined;
-      if (!logsTable) return;
-
-      const expectedTriggers = [
-        'track_routine_log_insert',
-        'track_routine_log_delete',
-        'track_routine_log_level_to_protected',
-        'track_routine_log_level_to_routine',
-      ];
-      const existingTriggers = new Set(
-        (this.db.prepare(`
-          SELECT name FROM sqlite_master
-          WHERE type = 'trigger'
-            AND name IN (${expectedTriggers.map(() => '?').join(', ')})
-        `).all(...expectedTriggers) as Array<{ name: string }>).map(({ name }) => name),
-      );
-      const stateTable = this.db.prepare(`
-        SELECT 1 AS found FROM sqlite_master
-        WHERE type = 'table' AND name = 'log_retention_state'
-      `).get() as { found: number } | undefined;
-      const stateRow = stateTable
-        ? this.db.prepare(`
-          SELECT 1 AS found FROM log_retention_state WHERE singleton_id = 1
-        `).get() as { found: number } | undefined
-        : undefined;
-      const needsReseed = !stateTable
-        || !stateRow
-        || expectedTriggers.some((name) => !existingTriggers.has(name));
-
-      this.db.exec(`
-        CREATE INDEX IF NOT EXISTS idx_logs_routine_id
-          ON logs(id) WHERE level NOT IN ('warn', 'error');
-        CREATE TABLE IF NOT EXISTS log_retention_state (
-          singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
-          routine_count INTEGER NOT NULL CHECK (routine_count >= 0)
-        );
-      `);
-      if (needsReseed) {
-        this.db.prepare(`
-          INSERT INTO log_retention_state(singleton_id, routine_count)
-          SELECT 1, COUNT(*) FROM logs
-          WHERE level NOT IN ('warn', 'error')
-          ON CONFLICT(singleton_id) DO UPDATE
-            SET routine_count = excluded.routine_count
-        `).run();
-      }
-      this.db.exec(`
-        CREATE TRIGGER IF NOT EXISTS track_routine_log_insert
-        AFTER INSERT ON logs
-        WHEN NEW.level NOT IN ('warn', 'error')
-        BEGIN
-          UPDATE log_retention_state
-          SET routine_count = routine_count + 1
-          WHERE singleton_id = 1;
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS track_routine_log_delete
-        AFTER DELETE ON logs
-        WHEN OLD.level NOT IN ('warn', 'error')
-        BEGIN
-          UPDATE log_retention_state
-          SET routine_count = routine_count - 1
-          WHERE singleton_id = 1;
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS track_routine_log_level_to_protected
-        AFTER UPDATE OF level ON logs
-        WHEN OLD.level NOT IN ('warn', 'error')
-          AND NEW.level IN ('warn', 'error')
-        BEGIN
-          UPDATE log_retention_state
-          SET routine_count = routine_count - 1
-          WHERE singleton_id = 1;
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS track_routine_log_level_to_routine
-        AFTER UPDATE OF level ON logs
-        WHEN OLD.level IN ('warn', 'error')
-          AND NEW.level NOT IN ('warn', 'error')
-        BEGIN
-          UPDATE log_retention_state
-          SET routine_count = routine_count + 1
-          WHERE singleton_id = 1;
-        END;
-      `);
-    };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
@@ -438,7 +351,7 @@ export class DashboardDB {
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
-      ensureRoutineLogRetentionIndex();
+      installRoutineLogRetentionSchema(this.db);
       return;
     }
 
@@ -1374,7 +1287,7 @@ export class DashboardDB {
       // tick. Maintain the exact count transactionally and index only routine
       // row ids, so overflow checks are O(1) and each prune touches at most one
       // configured batch.
-      ensureRoutineLogRetentionIndex();
+      installRoutineLogRetentionSchema(this.db);
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {

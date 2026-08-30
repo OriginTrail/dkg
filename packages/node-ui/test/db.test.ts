@@ -447,6 +447,81 @@ describe('DashboardDB — retention', () => {
     }
   });
 
+  it('seeds and prunes populated pre-V35 routine logs during a V34 upgrade', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TRIGGER IF EXISTS track_routine_log_insert;
+      DROP TRIGGER IF EXISTS track_routine_log_delete;
+      DROP TRIGGER IF EXISTS track_routine_log_level_to_protected;
+      DROP TRIGGER IF EXISTS track_routine_log_level_to_routine;
+      DROP INDEX IF EXISTS idx_logs_routine_id;
+      DROP TABLE IF EXISTS log_retention_state;
+    `);
+    const insert = raw.prepare(
+      `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'pre-v35', ?)`,
+    );
+    insert.run(Date.now(), 'info', 'routine-0');
+    insert.run(Date.now() + 1, 'debug', 'routine-1');
+    insert.run(Date.now() + 2, 'info', 'routine-2');
+    insert.run(Date.now() + 3, 'debug', 'routine-3');
+    insert.run(Date.now() + 4, 'warn', 'keep-warn');
+    insert.run(Date.now() + 5, 'error', 'keep-error');
+    raw.pragma('user_version = 34');
+    raw.close();
+
+    db = new DashboardDB({
+      dataDir: dir,
+      retentionDays: 365,
+      routineLogRowCap: 2,
+      logVolumePruneBatchRows: 10,
+    });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 4 });
+
+    expect(db.pruneLogVolumeBatch()).toMatchObject({ deleted: 2 });
+    expect(db.db.prepare(`
+      SELECT level, message FROM logs ORDER BY id ASC
+    `).all()).toEqual([
+      { level: 'info', message: 'routine-2' },
+      { level: 'debug', message: 'routine-3' },
+      { level: 'warn', message: 'keep-warn' },
+      { level: 'error', message: 'keep-error' },
+    ]);
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 2 });
+  });
+
+  it('fails loudly on missing retention state and repairs it on reopen', () => {
+    db.insertLog({
+      ts: Date.now(),
+      level: 'info',
+      module: 'retention-invariant',
+      message: 'routine-row',
+    });
+    db.db.exec('DELETE FROM log_retention_state WHERE singleton_id = 1');
+
+    expect(() => db.pruneLogVolumeBatch()).toThrow(
+      /retention state is missing its singleton row/,
+    );
+
+    db.close();
+    db = new DashboardDB({
+      dataDir: dir,
+      retentionDays: 365,
+      routineLogRowCap: 0,
+      logVolumePruneBatchRows: 1,
+    });
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 1 });
+    expect(db.pruneLogVolumeBatch()).toMatchObject({ deleted: 1 });
+  });
+
   it('preserves ambiguous pre-upgrade compatibility rows below the public cap', () => {
     const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-legacy-compat-'));
     const dbPath = join(volumeDir, 'node-ui.db');
