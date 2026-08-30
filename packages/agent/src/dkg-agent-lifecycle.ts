@@ -684,16 +684,13 @@ const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
 function ordinarySyncOnConnectSemantics(
-  transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode,
+  transition: OrdinarySyncOnConnectTransition,
 ): Readonly<{
   bypassPeerBackoff: boolean;
   includeSelectedPublicLane: boolean;
   preserveSelectedRetryOwnership: boolean;
 }> {
-  const normalized = transition === 'ordinary-after-selected'
-    ? 'after-selected'
-    : transition;
-  return normalized === 'after-selected'
+  return transition === 'after-selected'
     ? {
       bypassPeerBackoff: true,
       includeSelectedPublicLane: false,
@@ -4746,9 +4743,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode = 'ordinary',
   ): Promise<void> {
     if (!syncOnConnectEnabled(this.config)) return;
+    // Compatibility ends here: the scheduler and every downstream lifecycle
+    // stage use one canonical transition vocabulary.
+    const normalizedTransition: OrdinarySyncOnConnectTransition =
+      transition === 'ordinary-after-selected' ? 'after-selected' : transition;
     const now = Date.now();
     const backoff = this.syncReconcilerBackoff.get(remotePeer);
-    const semantics = ordinarySyncOnConnectSemantics(transition);
+    const semantics = ordinarySyncOnConnectSemantics(normalizedTransition);
     if (!semantics.bypassPeerBackoff && backoff && now < backoff.nextRetryAt) return;
 
     const probe = await this.getSyncReconcilerProbe(remotePeer);
@@ -4757,7 +4758,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         probe,
         'on-connect',
-        transition,
+        normalizedTransition,
       );
     } catch (err: unknown) {
       handleSyncError(remotePeer, err);
@@ -4796,7 +4797,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
-    transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode = 'ordinary',
+    transition: OrdinarySyncOnConnectTransition = 'ordinary',
   ): Promise<SyncReconcilerAttemptOutcome> {
     if (!syncOnConnectEnabled(this.config)) return 'not-started';
     return this.accountSyncAttemptWithReconciler(
@@ -4901,7 +4902,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
-    transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode = 'ordinary',
+    transition: OrdinarySyncOnConnectTransition = 'ordinary',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
