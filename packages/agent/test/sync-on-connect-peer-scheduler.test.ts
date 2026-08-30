@@ -167,6 +167,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     const firstErrors: unknown[] = [];
     const lateErrors: unknown[] = [];
     const selectedPlans: string[] = [];
+    const finish = vi.fn();
     const scheduler = createScheduler({
       runSelected: async (plan) => {
         if (plan !== undefined) selectedPlans.push(plan);
@@ -176,6 +177,7 @@ describe('sync-on-connect per-peer scheduler', () => {
         await ordinary.promise;
         throw ordinaryFailure;
       },
+      finish,
     });
 
     expect(scheduler.enqueueOrdinary(
@@ -196,5 +198,6 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(firstErrors).toEqual([ordinaryFailure]);
     expect(lateErrors).toEqual([]);
     expect(selectedPlans).toEqual(['late-plan']);
+    expect(finish).toHaveBeenCalledOnce();
   });
 });

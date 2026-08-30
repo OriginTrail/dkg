@@ -569,6 +569,36 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
   });
 
+  it('commits one retry when a queued ordinary phase rejects', async () => {
+    const agent = await createUnstartedAgent('Rfc64QueuedOrdinaryRejectionAccounting');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    const failure = new Error('ordinary sync failed');
+    agent.trySyncFromPeer = async () => { throw failure; };
+    const handleSyncError = vi.fn();
+
+    expect(agent.queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+    )).toBe(true);
+
+    await vi.waitFor(() => expect(handleSyncError).toHaveBeenCalledWith(
+      PEER_A,
+      failure,
+    ));
+    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+  });
+
   it('adds owed ordinary work to the same job while exact recovery is running', async () => {
     const agent = await createUnstartedAgent('Rfc64OrdinaryUpgradeDuringExact');
     allowAllNetworkAdmission(agent);
@@ -663,7 +693,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     );
   });
 
-  it('freezes one unrestricted SWM plan while separating pinned and ordinary public graphs', async () => {
+  it('partitions one frozen SWM plan across selected and ordinary modalities', async () => {
     const agent = await createUnstartedAgent('Rfc64FrozenSelectedSwmPlan');
     allowAllNetworkAdmission(agent);
     agent.started = true;
@@ -684,6 +714,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
         targets: [
           { contextGraphId: 'selected-a', lane: 'selected-public' },
           { contextGraphId: 'selected-b', lane: 'selected-public' },
+          { contextGraphId: 'private-c', lane: 'ordinary-private' },
         ],
       })
       .mockResolvedValue({
@@ -734,11 +765,12 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     );
     expect(ordinarySharedSync).toHaveBeenCalledWith(
       PEER_A,
-      ['selected-b'],
+      ['selected-b', 'private-c'],
       expect.objectContaining({
         sharedMemorySyncPlan: {
           targets: [
             { contextGraphId: 'selected-b', lane: 'selected-public' },
+            { contextGraphId: 'private-c', lane: 'ordinary-private' },
           ],
         },
       }),

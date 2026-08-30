@@ -1362,6 +1362,51 @@ function sharedMemoryPlanTargets<Lane extends Rfc64SwmRecoveryTargetV1['lane']>(
   );
 }
 
+type SharedMemorySyncContextGraphPlanPartition = Readonly<{
+  readonly selectedPlan: Readonly<{
+    readonly targets: readonly SelectedPublicSharedMemoryTarget[];
+  }>;
+  readonly selectedContextGraphIds: readonly string[];
+  readonly ordinaryPlan: SharedMemorySyncContextGraphPlan;
+  readonly ordinaryContextGraphIds: readonly string[];
+}>;
+
+function isSelectedPublicSharedMemoryTarget(
+  target: Readonly<Rfc64SwmRecoveryTargetV1>,
+): target is SelectedPublicSharedMemoryTarget {
+  return target.lane === 'selected-public';
+}
+
+function partitionSharedMemorySyncContextGraphPlan(
+  plan: SharedMemorySyncContextGraphPlan,
+  selectedPublicContextGraphIds: ReadonlySet<string>,
+): SharedMemorySyncContextGraphPlanPartition {
+  const selectedTargets: SelectedPublicSharedMemoryTarget[] = [];
+  const ordinaryTargets: Readonly<Rfc64SwmRecoveryTargetV1>[] = [];
+  for (const target of plan.targets) {
+    if (
+      isSelectedPublicSharedMemoryTarget(target)
+      && selectedPublicContextGraphIds.has(target.contextGraphId)
+    ) {
+      selectedTargets.push(target);
+    } else {
+      ordinaryTargets.push(target);
+    }
+  }
+  const frozenSelectedTargets = Object.freeze([...selectedTargets]);
+  const frozenOrdinaryTargets = Object.freeze([...ordinaryTargets]);
+  return Object.freeze({
+    selectedPlan: Object.freeze({ targets: frozenSelectedTargets }),
+    selectedContextGraphIds: Object.freeze(
+      frozenSelectedTargets.map(({ contextGraphId }) => contextGraphId),
+    ),
+    ordinaryPlan: Object.freeze({ targets: frozenOrdinaryTargets }),
+    ordinaryContextGraphIds: Object.freeze(
+      frozenOrdinaryTargets.map(({ contextGraphId }) => contextGraphId),
+    ),
+  });
+}
+
 function enforceRfc64CompleteProviderAuthority(
   plan: SharedMemorySyncContextGraphPlan,
   remotePeerId: string | undefined,
@@ -5056,7 +5101,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
-    const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
+    const sharedMemorySyncPlanPartitions = new Map<
+      string,
+      Promise<SharedMemorySyncContextGraphPlanPartition>
+    >();
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
     const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
@@ -5077,21 +5125,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const selectedPublicContextGraphIds = new Set(
       this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer),
     );
-    const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
-      let plan = sharedMemorySyncPlans.get(peerId);
-      if (!plan) {
+    const selectedLaneOwnsPinnedPublicGraphs = automaticPeerSweep
+      && remotePeerIsCompleteSwmProvider;
+    const getSharedMemorySyncPlanPartition = (
+      peerId: string,
+    ): Promise<SharedMemorySyncContextGraphPlanPartition> => {
+      let partition = sharedMemorySyncPlanPartitions.get(peerId);
+      if (!partition) {
         // One automatic run owns one unrestricted immutable snapshot. The
-        // selected lane projects only peer-pinned public targets from it;
-        // ordinary SWM retains every unrelated eligible target from the same
-        // snapshot instead of inheriting the selected-lane restriction.
-        plan = this.planSharedMemorySyncContextGraphs(
+        // partition below assigns every target to exactly one lane before any
+        // admission or execution callback observes it.
+        partition = this.planSharedMemorySyncContextGraphs(
           peerId,
           sharedMemoryRecoveryContextGraphIds,
           createOperationContext('sync'),
-        );
-        sharedMemorySyncPlans.set(peerId, plan);
+        ).then((plan) => partitionSharedMemorySyncContextGraphPlan(
+          plan,
+          selectedLaneOwnsPinnedPublicGraphs
+            ? selectedPublicContextGraphIds
+            : new Set<string>(),
+        ));
+        sharedMemorySyncPlanPartitions.set(peerId, partition);
       }
-      return plan;
+      return partition;
     };
     return runSyncOnConnect({
       remotePeer,
@@ -5118,14 +5174,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return completeSwmProviders.length === 0 || this.knownCorePeerIds.has(remotePeer);
       }),
       getSharedMemorySyncContextGraphs: async (peerId) => {
-        const contextGraphIds = sharedMemoryPlanContextGraphIds(
-          await getSharedMemorySyncPlan(peerId),
-        );
-        return automaticPeerSweep && remotePeerIsCompleteSwmProvider
-          ? contextGraphIds.filter((contextGraphId) => (
-            !selectedPublicContextGraphIds.has(contextGraphId)
-          ))
-          : contextGraphIds;
+        const partition = await getSharedMemorySyncPlanPartition(peerId);
+        return [...partition.ordinaryContextGraphIds];
       },
       ...(automaticPeerSweep
         && remotePeerIsCompleteSwmProvider
@@ -5133,11 +5183,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ? {
           selectedSharedMemoryLane: {
             admitWork: async (peerId: string) => {
-              const targets: readonly SelectedPublicSharedMemoryTarget[] = sharedMemoryPlanTargets(
-                await getSharedMemorySyncPlan(peerId),
-                'selected-public',
-              ).filter(({ contextGraphId }) => selectedPublicContextGraphIds.has(contextGraphId));
-              const contextGraphIds = targets.map(({ contextGraphId }) => contextGraphId);
+              const partition = await getSharedMemorySyncPlanPartition(peerId);
+              const targets = partition.selectedPlan.targets;
+              const contextGraphIds = [...partition.selectedContextGraphIds];
               return this.rfc64SwmRecoveryCoordinatorV1.admitSelectedPublic(
                 peerId,
                 contextGraphIds,
@@ -5216,19 +5264,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
-      syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => {
-        const sharedMemorySyncPlan = await getSharedMemorySyncPlan(peerId);
-        const ordinaryContextGraphIds = new Set(contextGraphIds);
-        const ordinaryPlan = Object.freeze({
-          targets: Object.freeze(sharedMemorySyncPlan.targets.filter(
-            ({ contextGraphId }) => ordinaryContextGraphIds.has(contextGraphId),
-          )),
-        });
-        return this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
-          stopOnBackoffWorthyFailure: true,
-          source,
-          sharedMemorySyncPlan: ordinaryPlan,
-        });
+      syncSharedMemoryFromPeer: async (peerId) => {
+        const partition = await getSharedMemorySyncPlanPartition(peerId);
+        return this.syncSharedMemoryFromPeerDetailed(
+          peerId,
+          [...partition.ordinaryContextGraphIds],
+          {
+            stopOnBackoffWorthyFailure: true,
+            source,
+            sharedMemorySyncPlan: partition.ordinaryPlan,
+          },
+        );
       },
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config)
         && (this.config.syncSharedMemoryOnConnect ?? true),
