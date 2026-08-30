@@ -68,6 +68,7 @@ function queryRouteContext(
     requestToken: undefined,
     requestAgentAddress: '',
     requestPrincipal: { kind: 'anonymous' },
+    requestAuthorization: { nodeOperator: false },
   } as unknown as RequestContext;
 }
 

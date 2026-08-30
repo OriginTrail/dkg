@@ -106,6 +106,7 @@ describe('GET/PUT /api/context-graph/{id}/join-policy', () => {
         requestPrincipal: agent.resolveAgentByToken(requestToken)
           ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken)! }
           : { kind: 'nodeOperator' },
+        requestAuthorization: { nodeOperator: !agent.resolveAgentByToken(requestToken) },
       } as any);
       if (!res.writableEnded) {
         res.writeHead(404, { 'content-type': 'application/json' });

@@ -79,6 +79,7 @@ describe('context graph targeted reconcile route', () => {
         requestPrincipal: options.agentAddress
           ? { kind: 'agent', agentAddress: options.agentAddress }
           : { kind: 'nodeOperator' },
+        requestAuthorization: { nodeOperator: !options.agentAddress },
       } as any);
       if (!res.writableEnded) {
         res.statusCode = 404;

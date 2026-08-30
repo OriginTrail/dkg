@@ -85,6 +85,7 @@ describe('import artifact daemon routes', () => {
           requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
           requestPrincipal: { kind: 'anonymous' },
+          requestAuthorization: { nodeOperator: false },
           emitMemoryGraphChanged: (event) => events.push(event),
         } as any);
         if (!res.writableEnded) {

@@ -61,6 +61,7 @@ function buildTurnCtx(body: unknown, agent: Record<string, any>, requestAgentAdd
     requestToken: 'agent-token',
     requestAgentAddress,
     requestPrincipal: { kind: 'agent', agentAddress: requestAgentAddress },
+    requestAuthorization: { nodeOperator: false },
     emitMemoryGraphChanged: vi.fn(),
     emitNotification: vi.fn(),
   } as unknown as RequestContext;

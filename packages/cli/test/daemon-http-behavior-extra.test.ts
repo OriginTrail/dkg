@@ -887,6 +887,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
           requestPrincipal: { kind: 'nodeOperator' },
+          requestAuthorization: { nodeOperator: true },
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -978,6 +979,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
           requestPrincipal: { kind: 'nodeOperator' },
+          requestAuthorization: { nodeOperator: true },
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -1115,6 +1117,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
           requestPrincipal: { kind: 'nodeOperator' },
+          requestAuthorization: { nodeOperator: true },
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -1233,6 +1236,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
           requestPrincipal: { kind: 'nodeOperator' },
+          requestAuthorization: { nodeOperator: true },
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -1351,6 +1355,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
           requestPrincipal: { kind: 'nodeOperator' },
+          requestAuthorization: { nodeOperator: true },
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -2506,6 +2511,7 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           requestToken: undefined,
           requestAgentAddress: CALLER,
           requestPrincipal: { kind: 'nodeOperator' },
+          requestAuthorization: { nodeOperator: true },
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;

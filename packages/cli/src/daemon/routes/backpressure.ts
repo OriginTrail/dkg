@@ -14,12 +14,12 @@ export async function handleBackpressureRoutes(ctx: RequestContext): Promise<voi
     req,
     res,
     path,
-    requestPrincipal,
+    requestAuthorization,
   } = ctx;
 
   if (req.method !== 'GET' || path !== '/api/diagnostics/backpressure') return;
 
-  const isNodeAdminCaller = requestPrincipal.kind === 'nodeOperator';
+  const isNodeAdminCaller = requestAuthorization.nodeOperator;
   if (!isNodeAdminCaller) {
     return jsonResponse(res, 403, {
       error:

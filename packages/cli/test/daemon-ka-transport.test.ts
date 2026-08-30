@@ -47,6 +47,7 @@ function runKaCtx(
     requestPrincipal: tokenAgentAddress
       ? { kind: 'agent', agentAddress: tokenAgentAddress }
       : { kind: 'anonymous' },
+    requestAuthorization: { nodeOperator: false },
     ...ctxOverrides,
   } as unknown as RequestContext;
   return { res, done: handleKnowledgeAssetsRoutes(ctx) };
@@ -58,7 +59,9 @@ function runMemoryCtx(method: string, rawPath: string, agent: any, body?: unknow
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${rawPath}`);
   const ctx = {
-    req, res, agent, path: url.pathname, url, requestPrincipal: { kind: 'anonymous' },
+    req, res, agent, path: url.pathname, url,
+    requestPrincipal: { kind: 'anonymous' },
+    requestAuthorization: { nodeOperator: false },
   } as unknown as RequestContext;
   return { res, done: handleMemoryRoutes(ctx) };
 }

@@ -9,7 +9,11 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DKGAgent, OpWalletsConfig } from '@origintrail-official/dkg-agent';
-import type { ExtractionPipelineRegistry, RequestPrincipal } from '@origintrail-official/dkg-core';
+import type { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
+import type {
+  RequestAuthorization,
+  RequestPrincipal,
+} from '../../auth.js';
 import type {
   ChatMemoryManager,
   DashboardDB,
@@ -109,8 +113,8 @@ export interface RequestContext {
   url: URL;
   path: string;
   requestToken: string | undefined;
-  /** True only when the canonical auth boundary accepted a real credential. */
-  requestCredentialAuthenticated: boolean;
+  /** Capabilities established independently from caller identity. */
+  requestAuthorization: RequestAuthorization;
   requestAgentAddress: string;
   requestPrincipal: RequestPrincipal;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;

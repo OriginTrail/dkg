@@ -11,7 +11,6 @@ import { readFileSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { RequestPrincipal } from '@origintrail-official/dkg-core';
 import { dkgDir } from './config.js';
 
 // ---------------------------------------------------------------------------
@@ -25,22 +24,43 @@ export interface AuthConfig {
   tokens?: string[];
 }
 
-export type HttpAuthenticationResult =
+/** HTTP identity established by the CLI daemon's authentication boundary. */
+export type RequestPrincipal =
+  | { readonly kind: 'agent'; readonly agentAddress: string }
+  | { readonly kind: 'nodeOperator' }
+  | { readonly kind: 'anonymous' };
+
+/** Capabilities are independent from identity (notably when authentication is disabled). */
+export interface RequestAuthorization {
+  readonly nodeOperator: boolean;
+}
+
+type HttpCredentialDecision =
   | { readonly allowed: false }
   | {
     readonly allowed: true;
+    readonly mode: 'disabled' | 'public';
     readonly requestToken: string | undefined;
-    readonly requestPrincipal: RequestPrincipal;
-    readonly requestCredentialAuthenticated: boolean;
+    readonly acceptedToken: string | undefined;
+  }
+  | {
+    readonly allowed: true;
+    readonly mode: 'authenticated';
+    readonly requestToken: string;
+    readonly acceptedToken: string;
   };
 
-type AcceptedHttpCredential = {
+export type AllowedHttpAuthentication = {
+  readonly allowed: true;
   readonly mode: 'disabled' | 'public' | 'authenticated';
   readonly requestToken: string | undefined;
-  readonly acceptedToken: string | undefined;
+  readonly requestPrincipal: RequestPrincipal;
+  readonly requestAuthorization: RequestAuthorization;
 };
 
-const acceptedHttpCredentials = new WeakMap<IncomingMessage, AcceptedHttpCredential>();
+export type HttpAuthenticationResult =
+  | { readonly allowed: false }
+  | AllowedHttpAuthentication;
 
 // ---------------------------------------------------------------------------
 // Token file management
@@ -839,36 +859,35 @@ function isPublicPath(method: string, pathname: string): boolean {
  * synchronously to a bare `boolean` so existing fast-path callers do
  * not pay an awaiting cost on hot routes.
  */
-export function httpAuthGuard(
+function evaluateHttpCredential(
   req: IncomingMessage,
   res: ServerResponse,
   authEnabled: boolean,
   validTokens: Set<string>,
   corsOrigin?: string | null,
-): boolean | Promise<boolean> {
-  acceptedHttpCredentials.delete(req);
+): HttpCredentialDecision | Promise<HttpCredentialDecision> {
   const headerToken = extractBearerToken(req.headers.authorization);
   if (!authEnabled) {
     const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
-    acceptedHttpCredentials.set(req, {
+    return {
+      allowed: true,
       mode: 'disabled', requestToken: headerToken, acceptedToken,
-    });
-    return true;
+    };
   }
   if (req.method === 'OPTIONS') {
-    acceptedHttpCredentials.set(req, {
+    return {
+      allowed: true,
       mode: 'public', requestToken: headerToken, acceptedToken: undefined,
-    });
-    return true;
+    };
   }
 
   const pathname = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname;
   if (isPublicPath(req.method ?? '', pathname)) {
     const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
-    acceptedHttpCredentials.set(req, {
+    return {
+      allowed: true,
       mode: 'public', requestToken: headerToken, acceptedToken,
-    });
-    return true;
+    };
   }
 
   const token = headerToken;
@@ -886,9 +905,10 @@ export function httpAuthGuard(
   }
 
   if (acceptedToken) {
-    acceptedHttpCredentials.set(req, {
+    const accepted: HttpCredentialDecision = {
+      allowed: true,
       mode: 'authenticated', requestToken: acceptedToken, acceptedToken,
-    });
+    };
     const now = Date.now();
 
     // CLI-10: stale-timestamp gate. If the client opted into the
@@ -912,7 +932,7 @@ export function httpAuthGuard(
         res.end(
           JSON.stringify({ error: 'Stale or unparseable x-dkg-timestamp' }),
         );
-        return false;
+        return { allowed: false };
       }
     }
 
@@ -948,7 +968,7 @@ export function httpAuthGuard(
         res.end(JSON.stringify({
           error: 'Signed-request mode requires x-dkg-timestamp, x-dkg-nonce, and x-dkg-signature.',
         }));
-        return false;
+        return { allowed: false };
       }
       // Pre-body replay rejection: an attacker swapping in a fresh
       // nonce still fails the post-body HMAC (nonce is bound), but
@@ -974,7 +994,7 @@ export function httpAuthGuard(
           'Access-Control-Allow-Origin': corsOrigin ?? '*',
         });
         res.end(JSON.stringify({ error: 'Replayed nonce' }));
-        return false;
+        return { allowed: false };
       }
       // Stash the auth context so route handlers can call
       // verifyHttpSignedRequestAfterBody(req, rawBody) after
@@ -1084,7 +1104,7 @@ export function httpAuthGuard(
               error: `Signed request rejected: ${outcome.reason}`,
             }),
           );
-          return false;
+          return { allowed: false };
         }
         pending.verified = true;
       } else {
@@ -1122,10 +1142,10 @@ export function httpAuthGuard(
           req,
           res,
           corsOrigin ?? undefined,
-        );
+        ).then((allowed) => (allowed ? accepted : { allowed: false }));
       }
 
-      return true;
+      return accepted;
     }
 
     // the previous revision of this
@@ -1144,7 +1164,7 @@ export function httpAuthGuard(
     // responsible for whatever replay semantics they need at the
     // application layer.
 
-    return true;
+    return accepted;
   }
 
   res.writeHead(401, {
@@ -1154,12 +1174,29 @@ export function httpAuthGuard(
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   });
   res.end(JSON.stringify({ error: 'Unauthorized — provide a valid Bearer token in the Authorization header' }));
-  return false;
+  return { allowed: false };
 }
 
 /**
- * Canonical daemon authentication boundary. The guard decides credential acceptance once; this
- * adapter turns that accepted credential into the principal passed to every route.
+ * Compatibility adapter for callers that only need an allow/deny result. The canonical evaluator
+ * still returns one explicit credential decision; this wrapper projects that decision to boolean.
+ */
+export function httpAuthGuard(
+  req: IncomingMessage,
+  res: ServerResponse,
+  authEnabled: boolean,
+  validTokens: Set<string>,
+  corsOrigin?: string | null,
+): boolean | Promise<boolean> {
+  const decision = evaluateHttpCredential(req, res, authEnabled, validTokens, corsOrigin);
+  return decision instanceof Promise
+    ? decision.then((resolved) => resolved.allowed)
+    : decision.allowed;
+}
+
+/**
+ * Canonical daemon authentication boundary. Credential acceptance, identity and authority all
+ * derive from the same explicit decision; route code never re-authenticates the request.
  */
 export async function authenticateHttpRequest(input: {
   readonly req: IncomingMessage;
@@ -1169,44 +1206,31 @@ export async function authenticateHttpRequest(input: {
   readonly resolveAgentByToken: (token: string) => string | undefined;
   readonly corsOrigin?: string | null;
 }): Promise<HttpAuthenticationResult> {
-  const allowed = await httpAuthGuard(
+  const credential = await evaluateHttpCredential(
     input.req,
     input.res,
     input.authEnabled,
     input.validTokens,
     input.corsOrigin,
   );
-  if (!allowed) return { allowed: false };
+  if (!credential.allowed) return credential;
 
-  const credential = acceptedHttpCredentials.get(input.req);
-  if (!credential) {
-    throw new Error('HTTP authentication succeeded without an accepted credential decision');
-  }
-  if (credential.mode === 'disabled' && !credential.acceptedToken) {
-    return {
-      allowed: true,
-      requestToken: credential.requestToken,
-      requestPrincipal: { kind: 'nodeOperator' },
-      requestCredentialAuthenticated: false,
-    };
-  }
-  if (!credential.acceptedToken) {
-    return {
-      allowed: true,
-      requestToken: credential.requestToken,
-      requestPrincipal: { kind: 'anonymous' },
-      requestCredentialAuthenticated: false,
-    };
-  }
-
-  const agentAddress = input.resolveAgentByToken(credential.acceptedToken);
+  const agentAddress = credential.acceptedToken
+    ? input.resolveAgentByToken(credential.acceptedToken)
+    : undefined;
+  const requestPrincipal: RequestPrincipal = agentAddress
+    ? { kind: 'agent', agentAddress }
+    : credential.acceptedToken
+      ? { kind: 'nodeOperator' }
+      : { kind: 'anonymous' };
   return {
     allowed: true,
+    mode: credential.mode,
     requestToken: credential.requestToken,
-    requestPrincipal: agentAddress
-      ? { kind: 'agent', agentAddress }
-      : { kind: 'nodeOperator' },
-    requestCredentialAuthenticated: true,
+    requestPrincipal,
+    requestAuthorization: {
+      nodeOperator: credential.mode === 'disabled' || requestPrincipal.kind === 'nodeOperator',
+    },
   };
 }
 

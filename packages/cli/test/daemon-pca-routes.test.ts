@@ -50,7 +50,12 @@ function runCtx(
       ? (auth.requestToken && agent.resolveAgentByToken?.(auth.requestToken)
         ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(auth.requestToken) }
         : { kind: 'nodeOperator' })
-      : { kind: 'nodeOperator' },
+      : { kind: 'anonymous' },
+    requestAuthorization: {
+      nodeOperator: !auth?.authEnabled
+        || !auth.requestToken
+        || !agent.resolveAgentByToken?.(auth.requestToken),
+    },
   } as unknown as RequestContext;
   return { res, done: handlePcaRoutes(ctx) };
 }

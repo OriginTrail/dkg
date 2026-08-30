@@ -43,6 +43,7 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
     path: url.pathname,
     url,
     requestPrincipal: { kind: 'anonymous' },
+    requestAuthorization: { nodeOperator: false },
   } as unknown as RequestContext;
   return { ctx, res };
 }

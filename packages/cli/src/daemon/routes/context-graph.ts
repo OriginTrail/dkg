@@ -627,12 +627,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     path,
     requestToken,
     requestAgentAddress,
+    requestAuthorization,
     requestPrincipal,
     emitMemoryGraphChanged,
   } = ctx;
   // Node-wide gates consume the principal established by authentication; route code must not
   // reinterpret token storage or agent-token resolution.
-  const isNodeAdminCaller = (): boolean => requestPrincipal.kind === 'nodeOperator';
+  const isNodeAdminCaller = (): boolean => requestAuthorization.nodeOperator;
   const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
     ? requestPrincipal.agentAddress
     : undefined;

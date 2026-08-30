@@ -222,6 +222,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
           requestPrincipal: tokenAgentAddress
             ? { kind: 'agent', agentAddress: tokenAgentAddress }
             : { kind: 'anonymous' },
+          requestAuthorization: { nodeOperator: false },
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

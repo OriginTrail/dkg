@@ -71,6 +71,7 @@ describe('POST /api/context-graph/register — effective publishPolicy resolutio
         routePlugins: [], url, path: url.pathname, requestToken: undefined,
         requestAgentAddress: '0x0000000000000000000000000000000000000001',
         requestPrincipal: { kind: 'nodeOperator' },
+        requestAuthorization: { nodeOperator: true },
       } as any);
       if (!res.writableEnded) { res.statusCode = 404; res.end(); }
     });

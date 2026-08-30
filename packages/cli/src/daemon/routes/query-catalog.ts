@@ -45,6 +45,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     res,
     agent,
     path,
+    requestAuthorization,
     requestPrincipal,
     emitMemoryGraphChanged,
   } = ctx;
@@ -159,7 +160,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     const callerAgentAddress = requestPrincipal.kind === 'agent'
       ? requestPrincipal.agentAddress
       : undefined;
-    const isNodeAdmin = requestPrincipal.kind === 'nodeOperator';
+    const isNodeAdmin = requestAuthorization.nodeOperator;
     if (
       !isNodeAdmin
       && !(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))

@@ -3662,7 +3662,7 @@ async function runDaemonInnerWithStartupOwnership(
         req,
         res,
         requestToken: authentication.requestToken,
-        requestCredentialAuthenticated: authentication.requestCredentialAuthenticated,
+        requestAuthorization: authentication.requestAuthorization,
         requestPrincipal: authentication.requestPrincipal,
         agent,
         publisherControl,

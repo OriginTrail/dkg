@@ -53,6 +53,7 @@ function runCtx(
     requestPrincipal: tokenAgentAddress
       ? { kind: 'agent', agentAddress: tokenAgentAddress }
       : { kind: 'nodeOperator' },
+    requestAuthorization: { nodeOperator: !tokenAgentAddress },
     validTokens: new Set<string>(),
   } as unknown as RequestContext;
   return { res, done: handleAgentChatRoutes(ctx) };

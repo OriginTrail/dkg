@@ -157,6 +157,7 @@ describe('promote-async daemon lifecycle wiring', () => {
           requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
           requestPrincipal: { kind: 'anonymous' },
+          requestAuthorization: { nodeOperator: false },
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

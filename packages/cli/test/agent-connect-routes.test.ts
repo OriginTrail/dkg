@@ -30,6 +30,7 @@ function runConnect(agent: any, body: unknown) {
     requestToken: undefined,
     requestAgentAddress: '',
     requestPrincipal: { kind: 'nodeOperator' },
+    requestAuthorization: { nodeOperator: true },
   } as unknown as RequestContext;
   return { res, done: handleAgentChatRoutes(ctx) };
 }

@@ -4,6 +4,7 @@ import {
   backpressureRegistry,
   type BackpressureSource,
 } from '@origintrail-official/dkg-core';
+import { authenticateHttpRequest } from '../src/auth.js';
 import { handleBackpressureRoutes } from '../src/daemon/routes/backpressure.js';
 
 describe('backpressure diagnostics route', () => {
@@ -47,22 +48,29 @@ describe('backpressure diagnostics route', () => {
       resolveAgentByToken: (token: string) =>
         token === options.requestToken ? options.tokenAgentAddress : undefined,
     };
+    const authEnabled = options.authEnabled ?? true;
+    const validTokens = new Set(options.requestToken ? [options.requestToken] : []);
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const authentication = await authenticateHttpRequest({
+        req,
+        res,
+        authEnabled,
+        validTokens,
+        resolveAgentByToken: agent.resolveAgentByToken,
+      });
+      if (!authentication.allowed) return;
       await handleBackpressureRoutes({
         req,
         res,
         agent,
-        config: { auth: { enabled: options.authEnabled ?? true } },
-        validTokens: new Set(options.requestToken ? [options.requestToken] : []),
+        config: { auth: { enabled: authEnabled } },
+        validTokens,
         url,
         path: url.pathname,
-        requestToken: options.requestToken,
-        requestPrincipal: options.authEnabled === false
-          ? { kind: 'nodeOperator' }
-          : (options.tokenAgentAddress
-            ? { kind: 'agent', agentAddress: options.tokenAgentAddress }
-            : { kind: 'nodeOperator' }),
+        requestToken: authentication.requestToken,
+        requestAuthorization: authentication.requestAuthorization,
+        requestPrincipal: authentication.requestPrincipal,
       } as any);
       if (!res.writableEnded) {
         res.statusCode = 404;
@@ -74,6 +82,9 @@ describe('backpressure diagnostics route', () => {
     if (!address || typeof address === 'string') throw new Error('route test server did not bind');
     const response = await fetch(
       `http://127.0.0.1:${address.port}/api/diagnostics/backpressure`,
+      options.requestToken
+        ? { headers: { authorization: `Bearer ${options.requestToken}` } }
+        : undefined,
     );
     return { status: response.status, body: await response.json() };
   }
@@ -103,6 +114,15 @@ describe('backpressure diagnostics route', () => {
 
   it('allows tokenless diagnostics when daemon auth is disabled', async () => {
     const result = await request({ authEnabled: false });
+    expect(result.status).toBe(200);
+  });
+
+  it('retains node-operator capability for a valid agent bearer when auth is disabled', async () => {
+    const result = await request({
+      authEnabled: false,
+      requestToken: 'agent-token',
+      tokenAgentAddress: '0xagent',
+    });
     expect(result.status).toBe(200);
   });
 });

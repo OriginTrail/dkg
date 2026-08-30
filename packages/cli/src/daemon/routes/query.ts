@@ -442,7 +442,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     url,
     path,
     requestAgentAddress,
-    requestCredentialAuthenticated,
+    requestAuthorization,
     requestPrincipal,
     emitMemoryGraphChanged,
   } = ctx;
@@ -558,8 +558,8 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // DKGAgent.query's isolation check; only anonymous working-memory requests need this local
       // self-alias fallback gate.
       const isAdminToken =
-        requestPrincipal.kind === 'nodeOperator'
-        && requestCredentialAuthenticated;
+        requestAuthorization.nodeOperator
+        && requestPrincipal.kind === 'nodeOperator';
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
       if (
         !hasRecognisedIdentity &&

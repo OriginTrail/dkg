@@ -64,6 +64,7 @@ describe('POST /api/knowledge-assets/:name/vm/publish — NO_FUNDED_PUBLISHER_WA
           vectorStore: {}, embeddingProvider: null, validTokens: new Set(), apiHost: '127.0.0.1', apiPortRef: { value: 0 },
           url, path: url.pathname, requestToken: undefined, requestAgentAddress: 'did:dkg:agent:test',
           requestPrincipal: { kind: 'anonymous' },
+          requestAuthorization: { nodeOperator: false },
           emitMemoryGraphChanged: () => {}, emitNotification: () => {},
         } as any);
         if (!res.writableEnded) { res.statusCode = 404; res.end(); }

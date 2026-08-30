@@ -29,7 +29,7 @@ function serviceErrorResponse(
 }
 
 function isNodeAdminCaller(ctx: RequestContext): boolean {
-  return ctx.requestPrincipal.kind === 'nodeOperator';
+  return ctx.requestAuthorization.nodeOperator;
 }
 
 async function readJsonObject(ctx: RequestContext): Promise<Record<string, unknown> | null> {

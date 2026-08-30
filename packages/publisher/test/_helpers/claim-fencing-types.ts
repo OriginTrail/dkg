@@ -14,7 +14,6 @@ import type {
   TripleStoreAsyncLiftPublisher,
 } from '../../src/index.js';
 import type { LiftJobTransaction } from '../../src/async-lift-claim-session.js';
-import type { RequestPrincipal } from '@origintrail-official/dkg-core';
 import {
   canonicalLiftJobPayload,
   type LiftJobPayloadDecodeResult,
@@ -43,7 +42,7 @@ const contradictoryClearAuthority: PendingTransactionClearOverride = {
 };
 void emptyClearAuthority;
 void contradictoryClearAuthority;
-const anonymousPrincipal: RequestPrincipal = { kind: 'anonymous' };
+const anonymousPrincipal = { kind: 'anonymous' } as const;
 // @ts-expect-error Anonymous requests cannot become a pending-transaction override.
 const anonymousClearAuthority: PendingTransactionClearOverride = anonymousPrincipal;
 void anonymousClearAuthority;

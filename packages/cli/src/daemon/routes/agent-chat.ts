@@ -442,6 +442,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     url,
     path,
     requestAgentAddress,
+    requestAuthorization,
     requestPrincipal,
   } = ctx;
   const authenticatedAgentAddress = requestPrincipal.kind === 'agent'
@@ -603,7 +604,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // agent's; gating to admin avoids a non-default-agent token tricking
   // the daemon into republishing on demand for spam.
   if (req.method === "POST" && path === "/api/agent/publish-profile") {
-    if (requestPrincipal.kind !== 'nodeOperator') {
+    if (!requestAuthorization.nodeOperator) {
       return jsonResponse(res, 403, {
         error: 'POST /api/agent/publish-profile requires a node-level admin token; agent-scoped tokens cannot trigger a profile republish.',
       });

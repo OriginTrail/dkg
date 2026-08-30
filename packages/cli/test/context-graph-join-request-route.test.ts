@@ -37,6 +37,7 @@ async function startRouteServer(agent: Record<string, unknown>): Promise<Server>
       requestToken: undefined,
       requestAgentAddress: undefined,
       requestPrincipal: { kind: 'nodeOperator' },
+      requestAuthorization: { nodeOperator: true },
     } as any);
     if (!res.writableEnded) {
       res.writeHead(404, { 'content-type': 'application/json' });
@@ -126,6 +127,7 @@ describe('POST /api/context-graph/{id}/request-join', () => {
         requestToken: undefined,
         requestAgentAddress: undefined,
         requestPrincipal: { kind: 'nodeOperator' },
+        requestAuthorization: { nodeOperator: true },
       } as any);
       if (!res.writableEnded) {
         res.writeHead(404, { 'content-type': 'application/json' });

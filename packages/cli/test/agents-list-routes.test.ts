@@ -393,6 +393,7 @@ async function getAgents(agent: any, qs = '') {
     requestToken: undefined,
     requestAgentAddress: '',
     requestPrincipal: { kind: 'nodeOperator' },
+    requestAuthorization: { nodeOperator: true },
   } as unknown as RequestContext;
   await handleAgentChatRoutes(ctx);
   return { status: res.statusCode, body: JSON.parse(res.body) };

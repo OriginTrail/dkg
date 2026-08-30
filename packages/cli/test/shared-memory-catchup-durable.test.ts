@@ -36,6 +36,7 @@ function buildCatchupCtx(body: unknown, agent: Record<string, any>) {
     path: url.pathname,
     url,
     requestPrincipal: { kind: 'anonymous' },
+    requestAuthorization: { nodeOperator: false },
   } as unknown as RequestContext;
   return { ctx, res };
 }

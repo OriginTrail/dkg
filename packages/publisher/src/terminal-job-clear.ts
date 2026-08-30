@@ -1,5 +1,3 @@
-import type { AuthenticatedRequestPrincipal } from '@origintrail-official/dkg-core';
-
 // #1837 — shared contract for the atomic by-exact-jobId TERMINAL clear OUTCOME, owned by
 // NEITHER queue (lift nor promote) so a generic admin-clear result is not coupled to one
 // implementation family's type module. (The job-id grammar guard lives in `./job-id.ts`.)
@@ -22,7 +20,9 @@ export type TerminalJobClearOutcome =
  * The variants are deliberately mutually exclusive: an agent accepts risk only for its own
  * admission lane, while the node operator owns the queue and needs no agent identity.
  */
-export type PendingTransactionClearOverride = AuthenticatedRequestPrincipal;
+export type PendingTransactionClearOverride =
+  | { readonly kind: 'agent'; readonly agentAddress: string }
+  | { readonly kind: 'nodeOperator' };
 
 export interface TargetedLiftJobClearOptions {
   readonly pendingTransactionOverride?: PendingTransactionClearOverride;

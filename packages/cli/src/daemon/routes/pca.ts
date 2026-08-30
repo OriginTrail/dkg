@@ -393,7 +393,7 @@ function serializeAccountInfo(
 }
 
 export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, path, requestPrincipal, opWallets } = ctx;
+  const { req, res, agent, path, requestAuthorization, opWallets } = ctx;
 
   if (!path.startsWith('/api/pca')) return;
 
@@ -415,7 +415,7 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
   // or attaching a publishing agent are operator actions: require a node-level
   // admin token, not a per-agent (dkg_at_) token. Mirrors isNodeAdminCaller in
   // context-graph.ts. Reads and the permissionless `settle` are NOT gated.
-  const isNodeAdmin = (): boolean => requestPrincipal.kind === 'nodeOperator';
+  const isNodeAdmin = (): boolean => requestAuthorization.nodeOperator;
   const requireNodeAdmin = (): boolean => {
     if (isNodeAdmin()) return true;
     jsonResponse(res, 403, {

@@ -276,6 +276,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         requestToken: undefined,
         requestAgentAddress: undefined,
         requestPrincipal: { kind: 'nodeOperator' },
+        requestAuthorization: { nodeOperator: true },
       } as any;
       await handleContextGraphRoutes(routeContext);
       if (!res.writableEnded) await handleQueryRoutes(routeContext);

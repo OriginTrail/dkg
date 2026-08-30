@@ -87,14 +87,14 @@ describe('clear-job pending-transaction override authorization', () => {
           validTokens,
           resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
         });
-        if (!authentication.allowed) return;
+        if (!authentication.allowed) return authentication;
         const ctx = {
           req: req as RequestContext['req'],
           res: res as unknown as ServerResponse,
           url: new URL(`http://127.0.0.1${path}`),
           path,
           requestToken: authentication.requestToken,
-          requestCredentialAuthenticated: authentication.requestCredentialAuthenticated,
+          requestAuthorization: authentication.requestAuthorization,
           requestAgentAddress: caller.requestAgentAddress,
           requestPrincipal: authentication.requestPrincipal,
           agent,
@@ -103,6 +103,7 @@ describe('clear-job pending-transaction override authorization', () => {
           publisherControl,
         } as unknown as RequestContext;
         await handlePublisherRoutes(ctx);
+        return authentication;
       },
       calls,
       res,
@@ -167,6 +168,71 @@ describe('clear-job pending-transaction override authorization', () => {
       jobId: 'legacy-job',
       authority: { kind: 'nodeOperator' },
     }]);
+  });
+
+  it('preserves agent identity and operator authority for a valid bearer when auth is disabled', async () => {
+    const { run, calls } = post(
+      { jobId: 'legacy-agent-job', allowPendingTransaction: true },
+      {
+        requestAgentAddress: OWNER,
+        requestToken: 'dkg_at_owner',
+        tokenAgentAddress: OWNER,
+        authEnabled: false,
+      },
+    );
+    const authentication = await run();
+
+    expect(authentication).toMatchObject({
+      allowed: true,
+      mode: 'disabled',
+      requestPrincipal: { kind: 'agent', agentAddress: OWNER },
+      requestAuthorization: { nodeOperator: true },
+    });
+    expect(calls).toEqual([{
+      jobId: 'legacy-agent-job',
+      authority: { kind: 'nodeOperator' },
+    }]);
+  });
+
+  it('keeps an invalid optional bearer anonymous without removing auth-disabled operator authority', async () => {
+    const { run, calls } = post(
+      { jobId: 'legacy-junk-token-job', allowPendingTransaction: true },
+      {
+        requestAgentAddress: DEFAULT_AGENT,
+        requestToken: 'junk-token',
+        validTokens: new Set(),
+        authEnabled: false,
+      },
+    );
+    const authentication = await run();
+
+    expect(authentication).toMatchObject({
+      allowed: true,
+      mode: 'disabled',
+      requestPrincipal: { kind: 'anonymous' },
+      requestAuthorization: { nodeOperator: true },
+    });
+    expect(calls[0]?.authority).toEqual({ kind: 'nodeOperator' });
+  });
+
+  it('keeps a valid node token identified as the operator when auth is disabled', async () => {
+    const { run, calls } = post(
+      { jobId: 'legacy-node-token-job', allowPendingTransaction: true },
+      {
+        requestAgentAddress: DEFAULT_AGENT,
+        requestToken: 'node-admin-token',
+        authEnabled: false,
+      },
+    );
+    const authentication = await run();
+
+    expect(authentication).toMatchObject({
+      allowed: true,
+      mode: 'disabled',
+      requestPrincipal: { kind: 'nodeOperator' },
+      requestAuthorization: { nodeOperator: true },
+    });
+    expect(calls[0]?.authority).toEqual({ kind: 'nodeOperator' });
   });
 
   it('does NOT grant it to the owner who did not ask for it', async () => {

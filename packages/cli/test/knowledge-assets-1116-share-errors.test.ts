@@ -174,6 +174,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           requestPrincipal: routeOverrides.requestToken && agent.resolveAgentByToken(routeOverrides.requestToken)
             ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(routeOverrides.requestToken) }
             : { kind: 'anonymous' },
+          requestAuthorization: { nodeOperator: false },
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

@@ -283,6 +283,7 @@ async function createHarness(opts: HarnessOptions = {}) {
       routePlugins: [], url, path: url.pathname,
       requestToken: undefined, requestAgentAddress: undefined,
       requestPrincipal: { kind: 'nodeOperator' },
+      requestAuthorization: { nodeOperator: true },
     } as any;
     await handleContextGraphRoutes(routeContext);
     if (!res.writableEnded) await handleQueryRoutes(routeContext);
