@@ -376,6 +376,7 @@ export {
   unwrapPromoteReplaySafeError,
   type PromoteReplaySafeErrorDiagnostic,
 } from './promote-replay-safety.js';
+export { type LegacyWmMigrationResult } from './legacy-wm-migration.js';
 export {
   AsyncLiftRunner,
   type AsyncLiftRunnerConfig,

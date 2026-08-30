@@ -14,6 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
@@ -24,9 +25,7 @@ import {
   type PromoteRequest,
   type PromoteTerminalJobClearer,
 } from '@origintrail-official/dkg-publisher';
-// Test-only deep import: production consumers receive only the closed guard
-// and unwrapping functions from the publisher package root.
-import { classifyExactSwmGraphReplaceFailure } from '../../publisher/dist/promote-replay-safety.js';
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import {
   classifyPromoteError,
   createPromoteWorkerSupervisor,

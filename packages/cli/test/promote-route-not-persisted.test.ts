@@ -22,11 +22,11 @@
  * tests in `packages/publisher/test/draft-lifecycle.test.ts`).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { createServer, type Server } from 'node:http';
 import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
-// Test-only deep import: the producer constructor is not part of the package API.
-import { classifyExactSwmGraphReplaceFailure } from '../../publisher/dist/promote-replay-safety.js';
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 
 const CG_ID = 'issue-864-cg';

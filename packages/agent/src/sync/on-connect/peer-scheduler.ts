@@ -2,7 +2,10 @@
 
 import type { SyncReconcilerAttemptOutcome } from './attempt-accounting.js';
 
-export type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
+export type SyncOnConnectErrorHandler = (
+  remotePeer: string,
+  error: unknown,
+) => void | Promise<void>;
 export type SyncOnConnectSchedulerInternalStage =
   | 'lane-error-handler'
   | 'runner-finalizer'
@@ -39,7 +42,7 @@ export interface SyncOnConnectPeerJobRunner<SelectedPlan> {
   /** Discard deferred accounting when the owning peer job is cancelled. */
   readonly cancel: () => void;
   /** Commit the job's combined reconciler accounting exactly once. */
-  readonly finish: () => void;
+  readonly finish: () => void | Promise<void>;
 }
 
 export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
@@ -52,7 +55,7 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
     remotePeer: string,
     error: unknown,
     stage: SyncOnConnectSchedulerInternalStage,
-  ) => void;
+  ) => void | Promise<void>;
 }
 
 /**
@@ -141,7 +144,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       // Lane and finalizer failures are routed inside drain. Keep an observable
       // terminal boundary for genuinely unexpected scheduler defects.
       void this.drain(remotePeer, job).catch((error: unknown) => {
-        this.reportInternalError(remotePeer, error, 'scheduler-drain');
+        void this.reportInternalError(remotePeer, error, 'scheduler-drain');
       });
     }, delayMs);
   }
@@ -168,11 +171,11 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
         if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
         for (const failedLane of failedLanes) {
           try {
-            failedLane.handleSyncError(remotePeer, error);
+            await failedLane.handleSyncError(remotePeer, error);
           } catch (consumerError: unknown) {
             // Consumer failures are terminally contained by scheduler ownership;
             // continue notifying the remaining accepted lanes.
-            this.reportInternalError(
+            await this.reportInternalError(
               remotePeer,
               consumerError,
               'lane-error-handler',
@@ -193,9 +196,9 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
           // enqueue may replace a pending selected lane, but it must never
           // redirect an already-running lane's rejection to the newer caller.
           try {
-            lane.handleSyncError(remotePeer, error);
+            await lane.handleSyncError(remotePeer, error);
           } catch (consumerError: unknown) {
-            this.reportInternalError(
+            await this.reportInternalError(
               remotePeer,
               consumerError,
               'lane-error-handler',
@@ -210,9 +213,9 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     } finally {
       try {
         try {
-          runner?.finish();
+          await runner?.finish();
         } catch (error: unknown) {
-          this.reportInternalError(remotePeer, error, 'runner-finalizer');
+          await this.reportInternalError(remotePeer, error, 'runner-finalizer');
         }
       } finally {
         if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
@@ -220,13 +223,13 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     }
   }
 
-  private reportInternalError(
+  private async reportInternalError(
     remotePeer: string,
     error: unknown,
     stage: SyncOnConnectSchedulerInternalStage,
-  ): void {
+  ): Promise<void> {
     try {
-      this.callbacks.onInternalError(remotePeer, error, stage);
+      await this.callbacks.onInternalError(remotePeer, error, stage);
     } catch {
       // The diagnostic sink is advisory and must not break scheduler cleanup.
     }

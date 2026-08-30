@@ -21,6 +21,8 @@ type ReplaySafeConstructorStaysInternal = AssertFalse<
 type ReplaySafeCodeStaysInternal = AssertFalse<
   'PROMOTE_REPLAY_SAFE_ERROR_CODE' extends keyof PublisherApi ? true : false
 >;
+// @ts-expect-error Producer certification must not be importable as a package subpath.
+type ReplaySafetyDeepModuleStaysClosed = typeof import('@origintrail-official/dkg-publisher/dist/promote-replay-safety.js');
 
 export type {
   ReplaySafeGuardIsPublic,
@@ -29,4 +31,5 @@ export type {
   ReplaySafeCertifierStaysInternal,
   ReplaySafeConstructorStaysInternal,
   ReplaySafeCodeStaysInternal,
+  ReplaySafetyDeepModuleStaysClosed,
 };

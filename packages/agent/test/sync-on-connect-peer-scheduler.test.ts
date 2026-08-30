@@ -9,7 +9,7 @@ function createScheduler(callbacks: Readonly<{
   runOrdinary: () => Promise<void>;
   runSelected: (plan?: string) => Promise<void>;
   cancel?: () => void;
-  finish?: () => void;
+  finish?: () => void | Promise<void>;
   onInternalError?: (
     peer: string,
     error: unknown,
@@ -117,8 +117,9 @@ describe('sync-on-connect per-peer scheduler', () => {
   it('contains an error-handler rejection after timer ownership ends', async () => {
     const phaseFailure = new Error('ordinary phase failed');
     const consumerFailure = new Error('error consumer failed');
+    const diagnosticFailure = new Error('diagnostic sink failed');
     const finish = vi.fn();
-    const onInternalError = vi.fn();
+    const onInternalError = vi.fn(async () => { throw diagnosticFailure; });
     const unhandled: unknown[] = [];
     const onUnhandled = (error: unknown) => { unhandled.push(error); };
     process.on('unhandledRejection', onUnhandled);
@@ -132,7 +133,7 @@ describe('sync-on-connect per-peer scheduler', () => {
 
       expect(scheduler.enqueueOrdinary(
         PEER,
-        () => { throw consumerFailure; },
+        async () => { throw consumerFailure; },
         0,
       )).toBe(true);
       await vi.waitFor(() => expect(scheduler.size).toBe(0));
@@ -204,7 +205,7 @@ describe('sync-on-connect per-peer scheduler', () => {
       const scheduler = createScheduler({
         runSelected: async () => undefined,
         runOrdinary: async () => undefined,
-        finish: () => { throw finalizerFailure; },
+        finish: async () => { throw finalizerFailure; },
         onInternalError,
       });
 

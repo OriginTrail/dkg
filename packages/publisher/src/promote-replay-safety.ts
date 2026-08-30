@@ -1,8 +1,9 @@
-import { isStoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import {
+  isStoreOperationTimeoutError,
+  type StoreOperationTimeoutErrorLike,
+} from '@origintrail-official/dkg-storage';
 
 const PROMOTE_REPLAY_SAFE_ERROR_CODE = 'PROMOTE_REPLAY_SAFE_FAILURE';
-const EXACT_SWM_GRAPH_REPLACEMENT_STAGE =
-  'atomic-exact-swm-graph-replacement' as const;
 
 const certifiedReplaySafeErrors = new WeakSet<object>();
 
@@ -11,31 +12,10 @@ export interface PromoteReplaySafeErrorDiagnostic {
   readonly code: 'PROMOTE_REPLAY_SAFE_FAILURE';
 }
 
-/**
- * Producer-owned proof that retrying the complete promote attempt converges.
- * Consumers must never infer this disposition from a low-level store operation.
- */
-class PromoteReplaySafeError extends Error {
-  override readonly name = 'PromoteReplaySafeError';
-  readonly code = PROMOTE_REPLAY_SAFE_ERROR_CODE;
-  readonly stage = EXACT_SWM_GRAPH_REPLACEMENT_STAGE;
-  override readonly cause: unknown;
-
-  constructor(cause: unknown) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
-    super(
-      `Promote may be retried after ${EXACT_SWM_GRAPH_REPLACEMENT_STAGE}: ${detail}`,
-      { cause },
-    );
-    this.cause = cause;
-    certifiedReplaySafeErrors.add(this);
-  }
-}
-
-/** Consume replay-safe certification without exposing a forgeable producer API. */
+/** Consume replay-safe certification without replacing the storage error contract. */
 export function isPromoteReplaySafeError(
   error: unknown,
-): error is Error & { readonly cause: unknown } {
+): error is StoreOperationTimeoutErrorLike {
   return error !== null
     && typeof error === 'object'
     && certifiedReplaySafeErrors.has(error);
@@ -50,9 +30,12 @@ export function getPromoteReplaySafeErrorDiagnostic(
     : undefined;
 }
 
-/** Unwrap producer-certified replay safety at the publisher/consumer boundary. */
+/**
+ * Compatibility helper retained for consumers written against the earlier
+ * wrapper boundary. Certified failures now retain their original identity.
+ */
 export function unwrapPromoteReplaySafeError(error: unknown): unknown {
-  return isPromoteReplaySafeError(error) ? error.cause : error;
+  return error;
 }
 
 /**
@@ -60,9 +43,10 @@ export function unwrapPromoteReplaySafeError(error: unknown): unknown {
  * an indeterminate atomic replace has only the permitted old-or-new outcomes.
  */
 export function classifyExactSwmGraphReplaceFailure(error: unknown): unknown {
-  return isStoreOperationTimeoutError(error)
+  if (isStoreOperationTimeoutError(error)
     && error.outcome === 'indeterminate'
-    && error.storeOperation === 'replaceGraph'
-    ? new PromoteReplaySafeError(error)
-    : error;
+    && error.storeOperation === 'replaceGraph') {
+    certifiedReplaySafeErrors.add(error);
+  }
+  return error;
 }

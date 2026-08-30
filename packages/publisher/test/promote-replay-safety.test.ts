@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import {
+  StoreOperationTimeoutError,
+  isStoreOperationTimeoutError,
+} from '@origintrail-official/dkg-storage';
 
 import {
   classifyExactSwmGraphReplaceFailure,
@@ -17,6 +20,8 @@ describe('promote replay safety', () => {
     });
 
     const classified = classifyExactSwmGraphReplaceFailure(replaceFailure);
+    expect(classified).toBe(replaceFailure);
+    expect(isStoreOperationTimeoutError(classified)).toBe(true);
     expect(isPromoteReplaySafeError(classified)).toBe(true);
     expect(getPromoteReplaySafeErrorDiagnostic(classified)).toEqual({
       name: 'PromoteReplaySafeError',
@@ -41,30 +46,32 @@ describe('promote replay safety', () => {
 
   it('rejects a structurally identical marker that did not originate at the producer boundary', () => {
     const forgedShape = Object.freeze({
-      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
-      stage: 'atomic-exact-swm-graph-replacement' as const,
-      cause: new Error('indeterminate replacement'),
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      storeOperation: 'replaceGraph',
+      outcome: 'indeterminate',
     });
 
+    expect(isStoreOperationTimeoutError(forgedShape)).toBe(true);
     expect(isPromoteReplaySafeError(forgedShape)).toBe(false);
     expect(getPromoteReplaySafeErrorDiagnostic(forgedShape)).toBeUndefined();
     expect(unwrapPromoteReplaySafeError(forgedShape)).toBe(forgedShape);
   });
 
   it.each([
-    ['missing stage', { code: 'PROMOTE_REPLAY_SAFE_FAILURE' }],
-    ['missing cause', {
-      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
-      stage: 'atomic-exact-swm-graph-replacement',
-    }],
-    ['unknown stage', {
-      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
-      stage: 'other',
-    }],
-    ['misspelled stage', {
-      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
-      stage: 'atomic-exact-swm-graph-replacment',
-    }],
+    ['plain error', new Error('replace failed')],
+    ['unclassified timeout', new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      outcome: 'indeterminate',
+    })],
+    ['wrong operation', new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'insert',
+      outcome: 'indeterminate',
+    })],
   ])('fails closed for an untrusted marker with %s', (_label, malformed) => {
     expect(isPromoteReplaySafeError(malformed)).toBe(false);
   });

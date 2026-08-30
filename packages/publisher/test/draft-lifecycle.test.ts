@@ -3,6 +3,7 @@ import {
   GraphManager,
   OxigraphStore,
   StoreOperationTimeoutError,
+  isStoreOperationTimeoutError,
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import {
@@ -559,6 +560,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       } catch (error) {
         rejection = error;
       }
+      expect(rejection).toBe(failure);
+      expect(isStoreOperationTimeoutError(rejection)).toBe(true);
       expect(isPromoteReplaySafeError(rejection)).toBe(true);
       expect(unwrapPromoteReplaySafeError(rejection)).toBe(failure);
       expect(injected).toBe(true);
@@ -606,12 +609,15 @@ describe('Working Memory Assertion Lifecycle', () => {
     );
 
     try {
-      await expect(
-        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT),
-      ).rejects.toMatchObject({
-        stage: 'atomic-exact-swm-graph-replacement',
-        cause: failure,
-      });
+      let rejection: unknown;
+      try {
+        await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBe(failure);
+      expect(isStoreOperationTimeoutError(rejection)).toBe(true);
+      expect(isPromoteReplaySafeError(rejection)).toBe(true);
       expect(injected).toBe(true);
       expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
       await expect(store.query(

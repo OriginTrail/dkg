@@ -5,14 +5,14 @@
 // call, so a route regression would not be caught by the helper unit test alone.
 // Driven in-process via handleKnowledgeAssetsRoutes with a stub agent — no
 // daemon / storage / native deps.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
-// Test-only deep import: the producer constructor is not part of the package API.
-import { classifyExactSwmGraphReplaceFailure } from '../../publisher/dist/promote-replay-safety.js';
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
