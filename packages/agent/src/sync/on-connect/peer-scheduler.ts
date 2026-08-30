@@ -127,16 +127,25 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     this.jobs.set(remotePeer, job);
     job.timer = setTimeout(() => {
       job.timer = null;
-      void this.drain(remotePeer, job);
+      // Lane failures are routed inside drain. This terminal catch prevents a
+      // throwing consumer error handler or runner finalizer from becoming an
+      // unhandled rejection after the timer relinquishes ownership.
+      void this.drain(remotePeer, job).catch(() => undefined);
     }, delayMs);
   }
 
   private async drain(remotePeer: string, job: PeerJob<SelectedPlan>): Promise<void> {
-    const runner = job.runner ??= this.callbacks.createJob(remotePeer);
+    let runner: SyncOnConnectPeerJobRunner<SelectedPlan> | null = null;
     try {
+      let lane = this.claimNext(job);
+      if (lane === null) return;
+      try {
+        runner = job.runner ??= this.callbacks.createJob(remotePeer);
+      } catch (error: unknown) {
+        lane.handleSyncError(remotePeer, error);
+        return;
+      }
       while (this.jobs.get(remotePeer) === job) {
-        const lane = this.claimNext(job);
-        if (lane === null) return;
         try {
           if (lane.kind === 'selected') {
             await runner.runSelected(lane.recoveryPlan);
@@ -151,10 +160,12 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
         } finally {
           if (this.jobs.get(remotePeer) === job) job.currentLane = null;
         }
+        lane = this.claimNext(job);
+        if (lane === null) return;
       }
     } finally {
       try {
-        runner.finish();
+        runner?.finish();
       } finally {
         if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
       }

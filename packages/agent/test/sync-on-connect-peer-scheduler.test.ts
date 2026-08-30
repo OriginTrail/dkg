@@ -67,6 +67,41 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(finish).not.toHaveBeenCalled();
   });
 
+  it('cleans up a construction failure, reports it to the claimed lane, and re-enqueues', async () => {
+    const constructionFailure = new Error('runner construction failed');
+    const ordinaryError = vi.fn();
+    const selectedError = vi.fn();
+    const runOrdinary = vi.fn(async () => undefined);
+    let createAttempts = 0;
+    const scheduler = new SyncOnConnectPeerScheduler<string>({
+      createJob: () => {
+        createAttempts += 1;
+        if (createAttempts === 1) throw constructionFailure;
+        return {
+          runOrdinary,
+          runSelected: async () => undefined,
+          cancel: () => undefined,
+          finish: () => undefined,
+        };
+      },
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, ordinaryError, 0)).toBe(true);
+    expect(scheduler.enqueueSelected(PEER, selectedError, 0, 'exact-plan')).toBe(true);
+
+    await vi.waitFor(() => expect(selectedError).toHaveBeenCalledWith(
+      PEER,
+      constructionFailure,
+    ));
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(ordinaryError).not.toHaveBeenCalled();
+
+    expect(scheduler.enqueueOrdinary(PEER, ordinaryError, 0)).toBe(true);
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(createAttempts).toBe(2);
+    expect(runOrdinary).toHaveBeenCalledOnce();
+  });
+
   it('finalizes an active peer job once when it is cleared during a phase', async () => {
     const ordinary = deferred();
     const ordinaryStarted = deferred();
