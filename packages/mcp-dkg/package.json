@@ -44,7 +44,6 @@
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-rdf-utils": "workspace:*",
-    "@origintrail-official/dkg-core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1",
     "zod": "^3.25",
     "yaml": "^2.6.0"

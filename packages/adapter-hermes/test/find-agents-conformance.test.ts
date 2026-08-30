@@ -29,13 +29,22 @@ describe('hermes dkg_find_agents conformance with the dkg-core contract', () => 
     expect(advertised).toEqual([...AGENT_CONNECTION_STATUSES]);
   });
 
-  it('advertises every tool argument the other adapters advertise', () => {
-    for (const arg of ['framework', 'skill_type', 'connection_status', 'local', 'limit', 'cursor']) {
+  // The expected vocabulary is DERIVED from dkg-core's map, not restated: an
+  // option added to the canonical contract makes these expectations grow and
+  // the unchanged Python side fail — a closed hand-written list would let a
+  // vocabulary ADDITION slip through unnoticed.
+  const camelToSnake = (name: string): string => name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  const expectedArgToWire = Object.fromEntries(
+    Object.entries(AGENT_LIST_WIRE_KEYS).map(([option, wire]) => [camelToSnake(option), wire]),
+  );
+
+  it('advertises every tool argument in the canonical vocabulary', () => {
+    for (const arg of Object.keys(expectedArgToWire)) {
       expect(schemaBlock, `schema is missing "${arg}"`).toMatch(new RegExp(`"${arg}":\\s*\\{`));
     }
   });
 
-  it('maps tool arguments to the canonical wire spellings', () => {
+  it('maps exactly the canonical vocabulary to the canonical wire spellings', () => {
     const mapBlock = source.slice(
       source.indexOf('_FIND_AGENTS_ARG_TO_WIRE'),
       source.indexOf('def _handle_find_agents'),
@@ -43,13 +52,6 @@ describe('hermes dkg_find_agents conformance with the dkg-core contract', () => 
     const entries = Object.fromEntries(
       [...mapBlock.matchAll(/"([a-z_]+)":\s*"([a-zA-Z_]+)"/g)].map((m) => [m[1], m[2]]),
     );
-    expect(entries).toEqual({
-      framework: AGENT_LIST_WIRE_KEYS.framework,
-      skill_type: AGENT_LIST_WIRE_KEYS.skillType,
-      connection_status: AGENT_LIST_WIRE_KEYS.connectionStatus,
-      local: AGENT_LIST_WIRE_KEYS.local,
-      limit: AGENT_LIST_WIRE_KEYS.limit,
-      cursor: AGENT_LIST_WIRE_KEYS.cursor,
-    });
+    expect(entries).toEqual(expectedArgToWire);
   });
 });
