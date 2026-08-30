@@ -59,6 +59,7 @@ import {
 } from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
+import { createVmReconcilePeerTopology } from '../src/vm-reconcile-peer-topology.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -1240,6 +1241,40 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch.calls).toHaveLength(3);
     expect(expensiveScans).toBe(0);
   });
+
+  it.each([
+    ['preferred peer', 154n, 'peer-new', false],
+    ['privacy mode', 155n, 'peer-stable', true],
+  ] as const)(
+    'refetches after a cached miss when the %s changes',
+    async (_field, onChainCgId, preferredPeerId, privateOnly) => {
+      const internals = await boot();
+      const localCgId = onChainCgId.toString();
+      registerUnmatchedKC(internals.chain, 9_000n + onChainCgId, onChainCgId);
+      let peerTopology = createVmReconcilePeerTopology({
+        preferredPeerId: 'peer-stable',
+        privateOnly: false,
+        peers: [{ peerId: 'peer-stable', core: false }],
+      });
+      (internals as any).vmReconcilePeerTopology = async () => peerTopology;
+      const fetch = recorder(async () => emptyCatchupStats());
+      (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+      await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+        .resolves.toEqual({ status: 'pending' });
+      const initialFetches = fetch.calls.length;
+      expect(initialFetches).toBeGreaterThan(0);
+
+      peerTopology = createVmReconcilePeerTopology({
+        preferredPeerId,
+        privateOnly,
+        peers: [{ peerId: 'peer-stable', core: false }],
+      });
+      await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+        .resolves.toEqual({ status: 'pending' });
+      expect(fetch.calls.length).toBeGreaterThan(initialFetches);
+    },
+  );
 
   it('reuses a negative cache entry when a previously checked peer disappears', async () => {
     const internals = await boot();

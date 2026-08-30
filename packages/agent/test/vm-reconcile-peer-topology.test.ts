@@ -118,6 +118,27 @@ describe('VM reconcile peer-topology compatibility', () => {
     )).toBe(false);
   });
 
+  it.each([
+    ['preferred peer', 'b', false],
+    ['privacy mode', 'a', true],
+  ] as const)('rejects reuse when the %s changes', (_field, preferredPeerId, privateOnly) => {
+    const cachedTopology = createVmReconcilePeerTopology({
+      preferredPeerId: 'a',
+      privateOnly: false,
+      peers: [{ peerId: 'a', core: false }],
+    });
+    const currentTopology = createVmReconcilePeerTopology({
+      preferredPeerId,
+      privateOnly,
+      peers: [{ peerId: 'a', core: false }],
+    });
+
+    expect(canReuseVmReconcilePeerTopology(
+      evidence(cachedTopology, ['a']),
+      currentTopology,
+    )).toBe(false);
+  });
+
   it('preserves explicit unreadable equality and rejects malformed domain records', () => {
     const readable = topology([{ peerId: 'a' }]);
     expect(canReuseVmReconcilePeerTopology(
