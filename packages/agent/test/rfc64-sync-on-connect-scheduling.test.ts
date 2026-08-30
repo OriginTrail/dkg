@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
+import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import {
   allowAllNetworkAdmission,
   createRfc64CoordinatorStub,
@@ -569,6 +570,27 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
   });
 
+  it('omits retry accounting when a peer-job phase throws local backpressure', async () => {
+    const agent = await createUnstartedAgent('Rfc64PeerJobBackpressureAccounting');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    agent.trySelectedSwmRetryFromPeer = async () => {
+      throw new SyncBackpressureBusyError('sync queue full');
+    };
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await runner.runSelected();
+    runner.finish();
+
+    expect(applyJobAccounting).not.toHaveBeenCalled();
+    expect(agent.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+  });
+
   it('commits one retry when a queued ordinary phase rejects', async () => {
     const agent = await createUnstartedAgent('Rfc64QueuedOrdinaryRejectionAccounting');
     allowAllNetworkAdmission(agent);
@@ -583,6 +605,7 @@ describe('RFC-64 sync-on-connect scheduling', () => {
     });
     const failure = new Error('ordinary sync failed');
     agent.trySyncFromPeer = async () => { throw failure; };
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
     const handleSyncError = vi.fn();
 
     expect(agent.queueSyncFromPeerOnConnect(
@@ -596,6 +619,16 @@ describe('RFC-64 sync-on-connect scheduling', () => {
       failure,
     ));
     await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    expect(applyJobAccounting).toHaveBeenCalledOnce();
+    expect(applyJobAccounting).toHaveBeenCalledWith(
+      PEER_A,
+      {
+        reconcilerDisposition: 'retry',
+        fresh: false,
+        progress: false,
+      },
+      expect.any(Object),
+    );
     expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
   });
 
