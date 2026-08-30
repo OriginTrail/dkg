@@ -120,3 +120,50 @@ test('the trusted CLI ignores a candidate-owned checker implementation', (t) => 
   assert.equal(invocation.status, 1);
   assert.match(invocation.stderr, /unrecognized-source/);
 });
+
+test('the CLI accepts its default root and rejects incomplete or unknown options', () => {
+  const defaultInvocation = spawnSync(process.execPath, [CHECKER_PATH], { encoding: 'utf8' });
+  assert.equal(defaultInvocation.status, 0, defaultInvocation.stderr);
+
+  const missingValue = spawnSync(process.execPath, [CHECKER_PATH, '--repo'], { encoding: 'utf8' });
+  assert.equal(missingValue.status, 1);
+  assert.match(missingValue.stderr, /argument missing|option.*repo/i);
+
+  const unknownOption = spawnSync(process.execPath, [CHECKER_PATH, '--unknown'], { encoding: 'utf8' });
+  assert.equal(unknownOption.status, 1);
+  assert.match(unknownOption.stderr, /unknown option.*--unknown/i);
+});
+
+test('the CLI keeps the last repeated --repo value', (t) => {
+  const cleanRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-text-nul-clean-'));
+  const brokenRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-text-nul-broken-'));
+  t.after(() => {
+    fs.rmSync(cleanRoot, { recursive: true, force: true });
+    fs.rmSync(brokenRoot, { recursive: true, force: true });
+  });
+  for (const repoRoot of [cleanRoot, brokenRoot]) {
+    const invocation = spawnSync('git', ['init', '--quiet'], { cwd: repoRoot, encoding: 'utf8' });
+    assert.equal(invocation.status, 0, invocation.stderr);
+  }
+  fs.writeFileSync(path.join(cleanRoot, 'source.mjs'), 'export const clean = true;\n');
+  fs.writeFileSync(path.join(brokenRoot, 'source.mjs'), Buffer.from([0x61, 0x00, 0x62]));
+  for (const repoRoot of [cleanRoot, brokenRoot]) {
+    const invocation = spawnSync('git', ['add', '--all'], { cwd: repoRoot, encoding: 'utf8' });
+    assert.equal(invocation.status, 0, invocation.stderr);
+  }
+
+  const cleanLast = spawnSync(
+    process.execPath,
+    [CHECKER_PATH, '--repo', brokenRoot, '--repo', cleanRoot],
+    { encoding: 'utf8' },
+  );
+  assert.equal(cleanLast.status, 0, cleanLast.stderr);
+
+  const brokenLast = spawnSync(
+    process.execPath,
+    [CHECKER_PATH, '--repo', cleanRoot, '--repo', brokenRoot],
+    { encoding: 'utf8' },
+  );
+  assert.equal(brokenLast.status, 1);
+  assert.match(brokenLast.stderr, /source\.mjs/);
+});

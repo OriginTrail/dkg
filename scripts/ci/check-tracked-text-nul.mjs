@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -114,21 +115,17 @@ export function runTrackedTextNulCheck({
   return 1;
 }
 
-export function parseTrackedTextNulArguments(args) {
-  let repoRoot = REPO_ROOT;
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== '--repo' || !args[index + 1]) {
-      throw new Error(`Usage: ${path.basename(process.argv[1] ?? 'check-tracked-text-nul.mjs')} [--repo PATH]`);
-    }
-    repoRoot = path.resolve(args[index + 1]);
-    index += 1;
-  }
-  return { repoRoot };
-}
-
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    process.exitCode = runTrackedTextNulCheck(parseTrackedTextNulArguments(process.argv.slice(2)));
+    const { values } = parseArgs({
+      args: process.argv.slice(2),
+      options: { repo: { type: 'string' } },
+      strict: true,
+      allowPositionals: false,
+    });
+    process.exitCode = runTrackedTextNulCheck({
+      repoRoot: path.resolve(values.repo ?? REPO_ROOT),
+    });
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
