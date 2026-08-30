@@ -1,17 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
-import { registerMaintenanceCommands } from '../src/commands/maintenance.js';
-import { resolveExplicitNpmUpdateTarget } from '../src/daemon/auto-update.js';
+import {
+  registerUpdateCommand,
+  type MaintenanceUpdateCommandDeps,
+} from '../src/commands/maintenance.js';
+import {
+  resolveExplicitNpmUpdateTarget,
+  resolveNpmDistTag,
+  type NpmVersionResult,
+} from '../src/daemon/auto-update.js';
+import type { DkgConfig } from '../src/config.js';
 
 describe('resolveExplicitNpmUpdateTarget', () => {
   const log = () => {};
-  const resolverReturning = (ret: { version: string | null; error?: boolean }) =>
-    vi.fn(async () => ret);
+  const resolverReturning = (result: NpmVersionResult) =>
+    vi.fn(async () => result);
 
   it('allows an exact prerelease only when allowPrerelease=true', async () => {
     const resolve = resolverReturning({ version: null });
     expect(await resolveExplicitNpmUpdateTarget('10.1.0-rc.1', true, log, {
-      resolveLatestNpmVersion: resolve,
+      resolveNpmDistTag: resolve,
     })).toEqual({ status: 'allowed', version: '10.1.0-rc.1' });
     expect(resolve).not.toHaveBeenCalled();
   });
@@ -19,7 +27,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
   it('allows an exact stable version without a registry lookup', async () => {
     const resolve = resolverReturning({ version: null });
     expect(await resolveExplicitNpmUpdateTarget('10.1.0', false, log, {
-      resolveLatestNpmVersion: resolve,
+      resolveNpmDistTag: resolve,
     })).toEqual({ status: 'allowed', version: '10.1.0' });
     expect(resolve).not.toHaveBeenCalled();
   });
@@ -32,22 +40,22 @@ describe('resolveExplicitNpmUpdateTarget', () => {
   it('pins a stable dist-tag to the concrete version that passed policy', async () => {
     const resolve = resolverReturning({ version: '10.0.0' });
     expect(await resolveExplicitNpmUpdateTarget('latest', false, log, {
-      resolveLatestNpmVersion: resolve,
+      resolveNpmDistTag: resolve,
     })).toEqual({ status: 'allowed', version: '10.0.0' });
-    expect(resolve).toHaveBeenCalledWith(log, true, 'latest');
+    expect(resolve).toHaveBeenCalledWith('latest', log);
   });
 
   it('pins a prerelease dist-tag when prereleases are explicitly allowed', async () => {
     const resolve = resolverReturning({ version: '10.1.0-rc.1' });
     expect(await resolveExplicitNpmUpdateTarget('next', true, log, {
-      resolveLatestNpmVersion: resolve,
+      resolveNpmDistTag: resolve,
     })).toEqual({ status: 'allowed', version: '10.1.0-rc.1' });
   });
 
   it('rejects a dist-tag resolving to a prerelease on a stable-only node', async () => {
     const resolve = resolverReturning({ version: '10.1.0-rc.1' });
     const result = await resolveExplicitNpmUpdateTarget('latest', false, log, {
-      resolveLatestNpmVersion: resolve,
+      resolveNpmDistTag: resolve,
     });
     expect(result.status).toBe('rejected');
   });
@@ -55,7 +63,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
   it('reports registry resolution errors separately and fails closed', async () => {
     const resolve = resolverReturning({ version: null, error: true });
     const result = await resolveExplicitNpmUpdateTarget('latest', false, log, {
-      resolveLatestNpmVersion: resolve,
+      resolveNpmDistTag: resolve,
     });
     expect(result.status).toBe('registry-error');
   });
@@ -65,11 +73,24 @@ describe('resolveExplicitNpmUpdateTarget', () => {
     async (target) => {
       const resolve = resolverReturning({ version: null });
       const result = await resolveExplicitNpmUpdateTarget(target, false, log, {
-        resolveLatestNpmVersion: resolve,
+        resolveNpmDistTag: resolve,
       });
       expect(result.status).toBe('rejected');
     },
   );
+});
+
+describe('resolveNpmDistTag registry boundary', () => {
+  it('resolves only the requested tag through the injected registry gateway', async () => {
+    const fetchNpmDistTags = vi.fn(async () => ({
+      tags: { latest: '10.0.1', next: '10.1.0-rc.1' },
+    }));
+
+    await expect(resolveNpmDistTag('next', () => undefined, {
+      fetchNpmDistTags,
+    })).resolves.toEqual({ version: '10.1.0-rc.1' });
+    expect(fetchNpmDistTags).toHaveBeenCalledOnce();
+  });
 });
 
 describe('dkg update command stable-only wiring', () => {
@@ -77,38 +98,48 @@ describe('dkg update command stable-only wiring', () => {
     vi.restoreAllMocks();
   });
 
-  function commandHarness(resolvedTag: string | null = null) {
+  function commandHarness(
+    resolvedTag: string | null = null,
+    runPreflight = vi.fn(async () => undefined),
+  ) {
+    const config: DkgConfig = {
+      name: 'update-test',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      autoUpdate: { enabled: true, source: 'npm', allowPrerelease: false },
+    };
     const performNpmUpdate = vi.fn(async () => 'updated' as const);
     const performNpmUpdateEdge = vi.fn(async () => 'updated' as const);
-    const resolveTag = vi.fn(async () => ({ version: resolvedTag, error: false as const }));
+    const resolveTag = vi.fn(async (): Promise<NpmVersionResult> => ({
+      version: resolvedTag,
+      error: false,
+    }));
     const program = new Command();
     program.exitOverride();
-    registerMaintenanceCommands(program, {
-      loadConfig: vi.fn(async () => ({
-        nodeRole: 'edge',
-        apiPort: 9200,
-        autoUpdate: { enabled: true, source: 'npm', allowPrerelease: false },
-      })) as any,
-      loadNetworkConfig: vi.fn() as any,
-      loadResolvedNetworkConfig: vi.fn(async () => ({ network: undefined })) as any,
-      resolveStandaloneInstall: vi.fn(() => true) as any,
+    const deps: MaintenanceUpdateCommandDeps = {
+      loadConfig: vi.fn(async () => config),
+      loadNetworkConfig: vi.fn(async () => null),
+      loadResolvedNetworkConfig: vi.fn(async () => ({ name: 'testnet', network: null })),
+      resolveStandaloneInstall: vi.fn(() => true),
       resolveExplicitNpmUpdateTarget: (target, allowPrerelease, log) =>
         resolveExplicitNpmUpdateTarget(target, allowPrerelease, log, {
-          resolveLatestNpmVersion: resolveTag,
+          resolveNpmDistTag: resolveTag,
         }),
-      checkForNpmVersionUpdate: vi.fn() as any,
+      checkForNpmVersionUpdate: vi.fn(async () => ({ status: 'up-to-date' })),
       performNpmUpdate,
       performNpmUpdateEdge,
       getCurrentCliVersion: () => '10.0.0',
       stopDaemonIfRunning: vi.fn(async () => true),
-      runPreflight: vi.fn(async () => undefined),
-    });
+      runPreflight,
+    };
+    registerUpdateCommand(program, deps);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code}`);
     }) as never);
-    return { program, performNpmUpdate, performNpmUpdateEdge };
+    return { config, deps, program, performNpmUpdate, performNpmUpdateEdge, runPreflight };
   }
 
   it('refuses an explicit prerelease before dispatching either installer', async () => {
@@ -132,9 +163,39 @@ describe('dkg update command stable-only wiring', () => {
   it('installs the concrete stable version resolved from a mutable dist-tag', async () => {
     const harness = commandHarness('10.0.1');
     await harness.program.parseAsync(['node', 'dkg', 'update', 'latest']);
+    expect(harness.runPreflight).toHaveBeenCalledWith(harness.config);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).toHaveBeenCalledWith(
       '10.0.1',
+      '10.0.0',
+      expect.any(Function),
+    );
+    expect(harness.runPreflight.mock.invocationCallOrder[0])
+      .toBeLessThan(harness.performNpmUpdateEdge.mock.invocationCallOrder[0]);
+  });
+
+  it('blocks installer dispatch when update preflight does not complete', async () => {
+    const sentinel = new Error('preflight-blocked');
+    const runPreflight = vi.fn(async () => {
+      throw sentinel;
+    });
+    const harness = commandHarness(null, runPreflight);
+
+    await expect(harness.program.parseAsync([
+      'node', 'dkg', 'update', '10.0.1',
+    ])).rejects.toBe(sentinel);
+    expect(runPreflight).toHaveBeenCalledWith(harness.config);
+    expect(harness.performNpmUpdate).not.toHaveBeenCalled();
+    expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
+  });
+
+  it('lets --allow-prerelease override stable-only config through installer dispatch', async () => {
+    const harness = commandHarness();
+    await harness.program.parseAsync([
+      'node', 'dkg', 'update', '10.1.0-rc.1', '--allow-prerelease',
+    ]);
+    expect(harness.performNpmUpdateEdge).toHaveBeenCalledWith(
+      '10.1.0-rc.1',
       '10.0.0',
       expect.any(Function),
     );

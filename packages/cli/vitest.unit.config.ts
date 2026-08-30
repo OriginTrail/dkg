@@ -62,7 +62,6 @@ export default defineConfig({
           // contributors can run it via `pnpm test:unit` in ~2s instead of
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
-          'test/auto-update-version-status.test.ts',
           'test/auto-update.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/dkg-doctor.test.ts',

@@ -99,7 +99,7 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 
-type MaintenanceUpdateCommandDeps = {
+export type MaintenanceUpdateCommandDeps = {
   loadConfig: typeof loadConfig;
   loadNetworkConfig: typeof loadNetworkConfig;
   loadResolvedNetworkConfig: typeof loadResolvedNetworkConfig;
@@ -136,11 +136,11 @@ async function runDefaultUpdatePreflight(
   }
 }
 
-export function registerMaintenanceCommands(
+export function registerUpdateCommand(
   program: Command,
-  overrides: Partial<MaintenanceUpdateCommandDeps> = {},
+  deps?: MaintenanceUpdateCommandDeps,
 ): void {
-  const updateDeps: MaintenanceUpdateCommandDeps = {
+  const updateDeps: MaintenanceUpdateCommandDeps = deps ?? {
     loadConfig,
     loadNetworkConfig,
     loadResolvedNetworkConfig,
@@ -152,7 +152,6 @@ export function registerMaintenanceCommands(
     getCurrentCliVersion,
     stopDaemonIfRunning,
     runPreflight: runDefaultUpdatePreflight,
-    ...overrides,
   };
 // ─── dkg update ──────────────────────────────────────────────────────
 //
@@ -322,6 +321,10 @@ program
     );
     process.exit(1);
   });
+}
+
+export function registerMaintenanceCommands(program: Command): void {
+  registerUpdateCommand(program);
 
 // ─── dkg rollback ────────────────────────────────────────────────────
 

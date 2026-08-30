@@ -293,6 +293,10 @@ export type NpmVersionResult =
   | { version: null; error: true }
   | { version: null; error: false };
 
+export type NpmDistTagsResult =
+  | { tags: Record<string, string>; error?: false }
+  | { tags: null; error: true };
+
 /** True when `v` is a valid semver string. */
 export function isValidSemver(v: string): boolean {
   const candidate = v.trim();
@@ -313,6 +317,49 @@ export type ExplicitNpmUpdateTargetDecision =
   | { status: 'rejected'; reason: string }
   | { status: 'registry-error'; reason: string };
 
+/** Canonical npm-registry boundary shared by automatic and explicit updates. */
+export async function fetchNpmDistTags(
+  log: (message: string) => void,
+): Promise<NpmDistTagsResult> {
+  const { fetch } = _autoUpdateIo;
+  const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "application/vnd.npm.install-v1+json" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) {
+      log(
+        `Auto-update (npm): registry returned ${response.status} for ${CLI_NPM_PACKAGE}`,
+      );
+      return { tags: null, error: true };
+    }
+    const data = (await response.json()) as { "dist-tags"?: Record<string, string> };
+    return data["dist-tags"]
+      ? { tags: data["dist-tags"] }
+      : { tags: null, error: true };
+  } catch (err: any) {
+    log(
+      `Auto-update (npm): registry check failed (${err?.message ?? String(err)})`,
+    );
+    return { tags: null, error: true };
+  }
+}
+
+/** Resolve exactly one npm dist-tag without applying auto-update selection policy. */
+export async function resolveNpmDistTag(
+  tag: string,
+  log: (message: string) => void,
+  deps: { fetchNpmDistTags?: typeof fetchNpmDistTags } = {},
+): Promise<NpmVersionResult> {
+  const result = await (deps.fetchNpmDistTags ?? fetchNpmDistTags)(log);
+  if (result.error) return { version: null, error: true };
+  const version = result.tags[tag] ?? null;
+  return version && isValidSemver(version)
+    ? { version }
+    : { version: null, error: false };
+}
+
 /**
  * Classify an explicit `dkg update <target>` against the npm update policy.
  * Exact versions stay exact; dist-tags are resolved once and returned as the
@@ -324,7 +371,7 @@ export async function resolveExplicitNpmUpdateTarget(
   allowPrerelease: boolean,
   log: (message: string) => void,
   deps: {
-    resolveLatestNpmVersion?: typeof resolveLatestNpmVersion;
+    resolveNpmDistTag?: typeof resolveNpmDistTag;
   } = {},
 ): Promise<ExplicitNpmUpdateTargetDecision> {
   const normalizedTarget = target.trim().replace(/^v/, '');
@@ -339,8 +386,8 @@ export async function resolveExplicitNpmUpdateTarget(
     return { status: 'allowed', version: normalizedTarget };
   }
 
-  const resolveTarget = deps.resolveLatestNpmVersion ?? resolveLatestNpmVersion;
-  const resolved = await resolveTarget(log, true, normalizedTarget);
+  const resolveTarget = deps.resolveNpmDistTag ?? resolveNpmDistTag;
+  const resolved = await resolveTarget(normalizedTarget, log);
   if (resolved.error) {
     return {
       status: 'registry-error',
@@ -367,23 +414,11 @@ export async function resolveLatestNpmVersion(
   allowPrerelease = true,
   channel?: string,
 ): Promise<NpmVersionResult> {
-  const { fetch } = _autoUpdateIo;
-  const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
-  try {
-    const res = await fetch(url, {
-      headers: { Accept: "application/vnd.npm.install-v1+json" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) {
-      log(
-        `Auto-update (npm): registry returned ${res.status} for ${CLI_NPM_PACKAGE}`,
-      );
-      return { version: null, error: true };
-    }
-    const data = (await res.json()) as { "dist-tags"?: Record<string, string> };
-    const tags = data["dist-tags"];
-    if (!tags) return { version: null, error: true };
+  const result = await fetchNpmDistTags(log);
+  if (result.error) return { version: null, error: true };
+  const tags = result.tags;
 
+  try {
     // Channel pin: follow ONLY this dist-tag (e.g. "testnet"), ignoring the
     // default latest/dev/beta/next set. Lets a cohort track its own release
     // line without being captured by whatever `latest` points at.
@@ -430,10 +465,7 @@ export async function resolveLatestNpmVersion(
     if (candidates.length === 0) return { version: null, error: false };
     candidates.sort((a, b) => compareSemver(b, a));
     return { version: candidates[0] };
-  } catch (err: any) {
-    log(
-      `Auto-update (npm): registry check failed (${err?.message ?? String(err)})`,
-    );
+  } catch {
     return { version: null, error: true };
   }
 }
@@ -534,34 +566,6 @@ export function deriveUpdateCheckState(
     latestVersion:
       npmStatus.status === "available" ? npmStatus.version ?? "" : "",
   };
-}
-
-export type AutoUpdateVersionStatus =
-  | "disabled"
-  | "updating"
-  | "unknown"
-  | "channel-missing"
-  | "latest"
-  | "behind";
-
-/**
- * Pure projection used by the remote log stream's `versionStatus` callback.
- * Keep the missing-channel check ahead of the ordinary up-to-date result: a
- * pinned channel with no acceptable target has nothing to install, but it is
- * still an operator-visible configuration/publication problem.
- */
-export function deriveAutoUpdateVersionStatus(params: {
-  autoUpdateEnabled: boolean;
-  isUpdating: boolean;
-  checkedAt: number;
-  channelTargetMissing: boolean;
-  upToDate: boolean;
-}): AutoUpdateVersionStatus {
-  if (!params.autoUpdateEnabled) return "disabled";
-  if (params.isUpdating) return "updating";
-  if (params.checkedAt === 0) return "unknown";
-  if (params.channelTargetMissing) return "channel-missing";
-  return params.upToDate ? "latest" : "behind";
 }
 
 /**

@@ -312,7 +312,6 @@ import {
   type NpmVersionResult,
   resolveLatestNpmVersion,
   compareSemver,
-  deriveAutoUpdateVersionStatus,
   acquireUpdateLock,
   releaseUpdateLock,
 } from './auto-update.js';
@@ -2819,13 +2818,13 @@ export async function runDaemonInner(
       commit: nodeCommit,
       role: config.nodeRole ?? "edge",
       autoUpdate: autoUpdateEnabled,
-      versionStatus: () => deriveAutoUpdateVersionStatus({
-        autoUpdateEnabled,
-        isUpdating: daemonState.isUpdating,
-        checkedAt: daemonState.lastUpdateCheck.checkedAt,
-        channelTargetMissing: daemonState.lastUpdateCheck.channelTargetMissing,
-        upToDate: daemonState.lastUpdateCheck.upToDate,
-      }),
+      versionStatus: () => {
+        if (!autoUpdateEnabled) return "disabled";
+        if (daemonState.isUpdating) return "updating";
+        if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
+        if (daemonState.lastUpdateCheck.channelTargetMissing) return "channel-missing";
+        return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
+      },
     });
     logPusher.start();
     log(
