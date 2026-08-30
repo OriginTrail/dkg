@@ -753,19 +753,25 @@ export class SparqlHttpStore implements TripleStore {
   async replaceSubjectPrefix(
     graphUri: string,
     prefix: string,
-    quads: DKGQuad[],
+    replacementQuads: DKGQuad[],
+    additionalQuads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
     if (!this.atomicUpdates) {
       throw new UnsupportedTripleStoreCapabilityError('replaceSubjectPrefix', 'SparqlHttpStore');
     }
-    assertQuadLiteralsMutf8Safe(quads, {
+    assertQuadLiteralsMutf8Safe([...replacementQuads, ...additionalQuads], {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.replaceSubjectPrefix',
     });
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
-      update: buildAtomicSubjectPrefixReplaceUpdate(graphUri, prefix, quads),
+      update: buildAtomicSubjectPrefixReplaceUpdate(
+        graphUri,
+        prefix,
+        replacementQuads,
+        additionalQuads,
+      ),
       options: { ...options, source: options?.source ?? 'sparql-http.replaceSubjectPrefix' },
       operation: 'replaceSubjectPrefix',
     });

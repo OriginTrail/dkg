@@ -355,6 +355,7 @@ import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
+import { createRequesterTransportPlan } from './sync/requester/transport-plan.js';
 import {
   recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
@@ -953,6 +954,25 @@ async function runPrioritizedSyncWork(
   return durableSyncAccumulatorHasTerminalBoundary(accumulator)
     ? finalizeDurableSyncCompletion(accumulator)
     : undefined;
+}
+
+async function runPlannedChangelogContextGraph(
+  agent: DKGAgent,
+  ctx: OperationContext,
+  remotePeerId: string,
+  contextGraphId: string,
+  onAccessDenied: ((contextGraphId: string) => void) | undefined,
+  onFallback: (contextGraphId: string, error: unknown) => void,
+): Promise<DurableSyncAccumulator> {
+  try {
+    const result = await agent.runChangelogSyncForCg(ctx, remotePeerId, contextGraphId);
+    if (result.deniedPhases > 0) onAccessDenied?.(contextGraphId);
+    return durableSyncAccumulatorFromResult(result);
+  } catch (error) {
+    if (getSyncBackpressureBusyError(error)) throw error;
+    onFallback(contextGraphId, error);
+    return createDurableSyncAccumulator();
+  }
 }
 
 function combineSyncAdmissionSignals(
@@ -5956,7 +5976,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     const remainingLegacyCgs: string[] = [];
-    const work: ContextGraphSyncWork<DurableSyncAccumulator>[] = [];
     const legacyOptions: LegacyDurableContextGraphOptions = {
       onPhase,
       onAtomicCommitStarted: options?.onAtomicCommitStarted,
@@ -5968,61 +5987,47 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isCurrent: options?.isCurrent,
       durableMetaContinuation: options?.durableMetaContinuation,
     };
-    const durableWork = (
-      contextGraphId: string,
-    ): ContextGraphSyncWork<DurableSyncAccumulator> => ({
-      contextGraphId,
-      lane: 'durable',
-      operationId: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
-      run: async (remainingContextGraphs) => durableSyncAccumulatorFromResult(
-        await this.runLegacyDurableSyncForContextGraph(
-          ctx,
-          remotePeerId,
-          contextGraphId,
-          remainingContextGraphs,
-          legacyOptions,
-        ),
-      ),
-    });
-    const changelogWork = (
-      contextGraphId: string,
-    ): ContextGraphSyncWork<DurableSyncAccumulator> => ({
-      contextGraphId,
-      lane: 'changelog',
-      operationId: `changelog:${contextGraphId}:${remotePeerId.slice(-8)}`,
-      run: async () => {
-        try {
-          const result = await this.runChangelogSyncForCg(ctx, remotePeerId, contextGraphId);
-          if (result.deniedPhases > 0) onAccessDenied?.(contextGraphId);
-          return durableSyncAccumulatorFromResult(result);
-        } catch (error) {
-          if (getSyncBackpressureBusyError(error)) throw error;
-          this.log.warn(
-            ctx,
-            `Changelog sync failed for CG ${contextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`,
-          );
-          remainingLegacyCgs.push(contextGraphId);
-          return createDurableSyncAccumulator();
-        }
-      },
-    });
-
-    for (const contextGraphId of contextGraphIds) {
-      if (
+    const plan = await createRequesterTransportPlan<DurableSyncAccumulator>({
+      remotePeerId,
+      contextGraphIds,
+      selectLane: async (contextGraphId) => (
         isAgentRegistryContextGraph(contextGraphId)
         || await this.isPrivateContextGraph(contextGraphId)
-      ) {
-        work.push(durableWork(contextGraphId));
-        continue;
-      }
-      work.push(changelogWork(contextGraphId));
-    }
+          ? 'durable'
+          : 'changelog'
+      ),
+      runDurable: async (contextGraphId, remainingContextGraphs) => (
+        durableSyncAccumulatorFromResult(
+          await this.runLegacyDurableSyncForContextGraph(
+            ctx,
+            remotePeerId,
+            contextGraphId,
+            remainingContextGraphs,
+            legacyOptions,
+          ),
+        )
+      ),
+      runChangelog: (contextGraphId) => runPlannedChangelogContextGraph(
+        this,
+        ctx,
+        remotePeerId,
+        contextGraphId,
+        onAccessDenied,
+        (failedContextGraphId, error) => {
+          this.log.warn(
+            ctx,
+            `Changelog sync failed for CG ${failedContextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`,
+          );
+          remainingLegacyCgs.push(failedContextGraphId);
+        },
+      ),
+    });
 
     const result = await runPrioritizedSyncWork(
       this,
       ctx,
       remotePeerId,
-      work,
+      plan.work,
       this.config.syncContextGraphPriorities,
       (item, error) => this.log.info(
         ctx,
@@ -6514,6 +6519,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   remotePeerId,
                   quads: filtered.kept,
                   insertForwarded: (quads, insertOptions) => this.store.insert(quads, insertOptions),
+                  authenticatedFreshness: this.authoritativeAgentSnapshots.profileFreshness,
                   options: {
                     priority: 'background',
                     source: 'agent.durableSync.agentRegistryReconcile',
@@ -6858,42 +6864,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return { remainingLegacyCgs: contextGraphIds };
     }
     const legacyCgs: string[] = [];
-    const work: ContextGraphSyncWork<DurableSyncAccumulator>[] = [];
-    for (const contextGraphId of contextGraphIds) {
-      // Transport selection belongs to runPrioritizedSyncPlan. A direct caller
-      // of this lane gets a strict changelog-only operation and an explicit
-      // legacy remainder for anything it cannot handle.
-      if (isAgentRegistryContextGraph(contextGraphId)) {
-        legacyCgs.push(contextGraphId);
-        continue;
-      }
-      if (await this.isPrivateContextGraph(contextGraphId)) {
-        legacyCgs.push(contextGraphId);
-        continue;
-      }
-      work.push({
+    const plan = await createRequesterTransportPlan<DurableSyncAccumulator>({
+      remotePeerId,
+      contextGraphIds,
+      // A direct caller gets strict changelog behavior and an explicit legacy
+      // remainder for every graph whose lane belongs to the mixed coordinator.
+      selectLane: async (contextGraphId) => (
+        isAgentRegistryContextGraph(contextGraphId)
+        || await this.isPrivateContextGraph(contextGraphId)
+          ? 'deferred'
+          : 'changelog'
+      ),
+      runDurable: async () => {
+        throw new Error('Strict changelog plans cannot contain durable work');
+      },
+      runChangelog: (contextGraphId) => runPlannedChangelogContextGraph(
+        this,
+        ctx,
+        remotePeerId,
         contextGraphId,
-        lane: 'changelog' as const,
-        operationId: `changelog:${contextGraphId}:${remotePeerId.slice(-8)}`,
-        run: async (): Promise<DurableSyncAccumulator> => {
-          try {
-            const result = await this.runChangelogSyncForCg(ctx, remotePeerId, contextGraphId);
-            if (result.deniedPhases > 0) onAccessDenied?.(contextGraphId);
-            return durableSyncAccumulatorFromResult(result);
-          } catch (error) {
-            if (getSyncBackpressureBusyError(error)) throw error;
-            this.log.warn(ctx, `Changelog sync failed for CG ${contextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
-            legacyCgs.push(contextGraphId);
-            return createDurableSyncAccumulator();
-          }
+        onAccessDenied,
+        (failedContextGraphId, error) => {
+          this.log.warn(ctx, `Changelog sync failed for CG ${failedContextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
+          legacyCgs.push(failedContextGraphId);
         },
-      });
-    }
+      ),
+    });
+    legacyCgs.push(...plan.deferredContextGraphIds);
     const result = await runPrioritizedSyncWork(
       this,
       ctx,
       remotePeerId,
-      work,
+      plan.work,
       this.config.syncContextGraphPriorities,
       (item, error) => this.log.info(
         ctx,

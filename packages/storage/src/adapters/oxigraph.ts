@@ -434,12 +434,22 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
-  async replaceSubjectPrefix(graphUri: string, prefix: string, quads: DKGQuad[]): Promise<void> {
-    assertQuadLiteralsMutf8Safe(quads, {
+  async replaceSubjectPrefix(
+    graphUri: string,
+    prefix: string,
+    replacementQuads: DKGQuad[],
+    additionalQuads: DKGQuad[],
+  ): Promise<void> {
+    assertQuadLiteralsMutf8Safe([...replacementQuads, ...additionalQuads], {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'OxigraphStore.replaceSubjectPrefix',
     });
-    this.store.update(buildAtomicSubjectPrefixReplaceUpdate(graphUri, prefix, quads));
+    this.store.update(buildAtomicSubjectPrefixReplaceUpdate(
+      graphUri,
+      prefix,
+      replacementQuads,
+      additionalQuads,
+    ));
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }

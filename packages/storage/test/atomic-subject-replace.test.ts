@@ -169,7 +169,7 @@ describe('buildAtomicSubjectPrefixReplaceUpdate', () => {
     await store.replaceSubjectPrefix(GRAPH, ROOT, [
       quad(ROOT, 'urn:test:status', '"fresh"'),
       quad(`${ROOT}/.well-known/genid/cap2`, 'urn:test:name', '"fresh-capability"'),
-    ]);
+    ], [quad(SUBJECT_B, 'urn:test:forwarded', '"new"')]);
 
     const result = await store.query(
       `SELECT ?s ?p ?o WHERE { GRAPH <${GRAPH}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
@@ -180,6 +180,7 @@ describe('buildAtomicSubjectPrefixReplaceUpdate', () => {
       { s: `${ROOT}/.well-known/genid/cap2`, p: 'urn:test:name', o: '"fresh-capability"' },
       { s: COLLIDING_ROOT, p: 'urn:test:status', o: '"unrelated"' },
       { s: SUBJECT_B, p: 'urn:test:kind', o: '"request"' },
+      { s: SUBJECT_B, p: 'urn:test:forwarded', o: '"new"' },
     ]));
     expect(bindings).not.toEqual(expect.arrayContaining([
       { s: slashChild, p: 'urn:test:name', o: '"obsolete-capability"' },

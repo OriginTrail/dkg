@@ -187,12 +187,16 @@ export interface TripleStore {
   /**
    * Atomically replace a canonical root subject and all of its `/`- or
    * `#`-delimited descendants inside one shared graph, leaving unrelated roots
-   * untouched.
+   * untouched. `additionalQuads` are inserted in the same backend transaction
+   * and MUST target the same graph but remain outside the replaced tree. This
+   * lets reconciliation publish one owned replacement plus append-only hints
+   * without exposing or retaining a half-applied plan.
    */
   replaceSubjectPrefix?(
     graphUri: string,
     subjectPrefix: string,
-    quads: Quad[],
+    replacementQuads: Quad[],
+    additionalQuads: Quad[],
     options?: QueryOptions,
   ): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
@@ -416,13 +420,21 @@ export async function tryReplaceSubjectPrefixAtomically(
   store: TripleStore,
   graphUri: string,
   subjectPrefix: string,
-  quads: Quad[],
+  replacementQuads: Quad[],
+  additionalQuads: Quad[] = [],
   options: QueryOptions = {},
 ): Promise<boolean> {
   const replace = store.replaceSubjectPrefix;
   if (typeof replace !== 'function') return false;
   try {
-    await replace.call(store, graphUri, subjectPrefix, quads, options);
+    await replace.call(
+      store,
+      graphUri,
+      subjectPrefix,
+      replacementQuads,
+      additionalQuads,
+      options,
+    );
     return true;
   } catch (error) {
     if (

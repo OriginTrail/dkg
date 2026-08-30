@@ -136,7 +136,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, signAgentPeerIdBinding, type AgentProfileConfig } from './profile.js';
 import {
   signAgentDelegation,
   verifyAgentDelegation,
@@ -492,6 +492,15 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
     const profileConfig: AgentProfileConfig = {
       peerId: this.node.peerId,
+      ...(defaultAgent?.privateKey
+        ? {
+            peerIdProof: signAgentPeerIdBinding(
+              defaultAgent.agentAddress,
+              this.node.peerId,
+              defaultAgent.privateKey,
+            ),
+          }
+        : {}),
       name: this.config.name,
       description: this.config.description,
       framework: this.config.framework,

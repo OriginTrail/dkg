@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertSafeIri } from '@origintrail-official/dkg-core';
+import {
+  AGENT_DID_PREFIX,
+  DKG_ONTOLOGY,
+  assertSafeIri,
+} from '@origintrail-official/dkg-core';
+import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import {
   tryReplaceSubjectPrefixAtomically,
   type Quad,
   type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { verifyAgentPeerIdBinding } from '../../profile.js';
 import type { SyncCheckpointStore } from '../checkpoint/state.js';
 import { deleteSyncPageCheckpoint, type SyncPageResult } from './page-fetch.js';
 
@@ -47,13 +53,13 @@ export interface AuthoritativeSnapshotMaterializationResult {
   readonly committed: boolean;
 }
 
-const AGENT_DID_PREFIX = 'did:dkg:agent:';
-const DKG_PEER_ID = 'https://dkg.network/ontology#peerId';
-const DKG_LAST_SEEN = 'https://dkg.network/ontology#lastSeen';
-
 interface ExistingAgentProfile {
-  readonly peerIds: Set<string>;
-  readonly lastSeen?: number;
+  readonly quads: Quad[];
+}
+
+export interface AuthenticatedAgentProfileFreshness {
+  accepts(root: string, peerId: string, incomingLastSeen: number | undefined): boolean;
+  record(root: string, peerId: string, incomingLastSeen: number | undefined): void;
 }
 
 export interface AgentRegistrySnapshotReconcileRequest {
@@ -62,6 +68,7 @@ export interface AgentRegistrySnapshotReconcileRequest {
   readonly remotePeerId: string;
   readonly quads: readonly Quad[];
   readonly insertForwarded: (quads: Quad[], options?: QueryOptions) => Promise<void>;
+  readonly authenticatedFreshness?: AuthenticatedAgentProfileFreshness;
   readonly options?: QueryOptions;
   readonly invalidate: () => void;
 }
@@ -70,34 +77,37 @@ export interface AgentRegistrySnapshotReconcileRequest {
  * Reconcile a completed AGENTS snapshot without assigning global absence
  * authority to an ordinary peer.
  *
- * A responder may replace exactly one established profile tree: the canonical
- * agent root whose local and incoming `dkg:peerId` bindings both equal its
- * authenticated libp2p identity. A first-seen profile is appended, never used
- * for a destructive replacement; the next authenticated refresh may replace
- * it. A valid older `dkg:lastSeen` snapshot cannot roll a newer local profile
- * back.
+ * A responder may replace exactly one self-authenticating profile tree: the
+ * legacy canonical root `did:dkg:agent:<authenticated-peer-id>` carrying the
+ * same `dkg:peerId`, or a wallet-address root carrying a valid wallet signature
+ * over that peer ID. Co-located fields whose signatures do not cover the peer
+ * ID are independently replayable and do not grant authority.
  *
- * Other profiles are useful transitive discovery hints, but are inserted only
- * when their root is absent locally. Their omission or stale copy can therefore
- * neither erase nor overwrite a locally newer profile. Unscoped legacy
- * registry facts remain append-only for rolling compatibility.
+ * Other self-authenticating peer-DID profiles are useful transitive discovery
+ * hints and are inserted only while their root is absent locally. Every
+ * agent-rooted subject is classified even when its peer-id row is omitted, so
+ * an attacker cannot target an established profile through an "unscoped"
+ * append. Unscoped non-agent legacy facts remain append-only for compatibility.
  */
 export async function reconcileAgentRegistrySnapshot(
   request: AgentRegistrySnapshotReconcileRequest,
 ): Promise<number> {
-  const roots = new Map<string, string>();
+  const incomingProfiles = new Map<string, Quad[]>();
+  const unscopedQuads: Quad[] = [];
   for (const quad of request.quads) {
-    if (
-      quad.graph !== request.graphUri
-      || quad.predicate !== DKG_PEER_ID
-      || !quad.subject.startsWith(AGENT_DID_PREFIX)
-    ) continue;
-    const peerId = plainLiteral(quad.object);
-    if (peerId) roots.set(quad.subject, peerId);
+    if (quad.graph !== request.graphUri) continue;
+    const root = agentRootForSubject(quad.subject);
+    if (!root) {
+      unscopedQuads.push(quad);
+      continue;
+    }
+    const profile = incomingProfiles.get(root) ?? [];
+    profile.push(quad);
+    incomingProfiles.set(root, profile);
   }
 
-  const ownedRoots = [...roots]
-    .filter(([, peerId]) => peerId === request.remotePeerId)
+  const ownedRoots = [...incomingProfiles]
+    .filter(([root, quads]) => authenticatedPeerForProfile(root, quads) === request.remotePeerId)
     .map(([root]) => root);
   if (ownedRoots.length > 1) {
     throw Object.assign(
@@ -106,12 +116,7 @@ export async function reconcileAgentRegistrySnapshot(
     );
   }
   const ownedRoot = ownedRoots[0];
-  const rootEntries = [...roots.keys()].sort((a, b) => b.length - a.length);
-  const rootForSubject = (subject: string): string | undefined => rootEntries.find(
-    (root) => subject === root
-      || subject.startsWith(`${root}/`)
-      || subject.startsWith(`${root}#`),
-  );
+  const rootEntries = [...incomingProfiles.keys()];
 
   const existingProfiles = await loadExistingProfiles(
     request.store,
@@ -119,43 +124,48 @@ export async function reconcileAgentRegistrySnapshot(
     rootEntries,
     request.options,
   );
-  const existingOwnedProfile = ownedRoot ? existingProfiles.get(ownedRoot) : undefined;
-  const ownedProfileIsEstablished = Boolean(
-    existingOwnedProfile
-    && existingOwnedProfile.peerIds.size === 1
-    && existingOwnedProfile.peerIds.has(request.remotePeerId),
-  );
   const incomingLastSeen = ownedRoot
-    ? latestTimestamp(request.quads, ownedRoot, DKG_LAST_SEEN)
+    ? latestTimestamp(
+        incomingProfiles.get(ownedRoot) ?? [],
+        ownedRoot,
+        DKG_ONTOLOGY.DKG_LAST_SEEN,
+      )
     : undefined;
-  const ownedProfileIsCurrent = ownedProfileIsEstablished
-    && !isOlderProfile(incomingLastSeen, existingOwnedProfile?.lastSeen);
-  const ownedQuads: Quad[] = [];
-  const forwardedQuads: Quad[] = [];
-  for (const quad of request.quads) {
-    const root = rootForSubject(quad.subject);
-    if (root === ownedRoot && ownedProfileIsCurrent) {
-      ownedQuads.push(quad);
-    } else if (root === ownedRoot && existingOwnedProfile === undefined) {
-      // Establish the peer-to-profile binding without granting the same
-      // untrusted first snapshot deletion authority over a pre-existing root.
-      forwardedQuads.push(quad);
-    } else if (root === undefined || !existingProfiles.has(root)) {
-      forwardedQuads.push(quad);
+  // Persisted registry rows do not carry provenance: a transitive hint can
+  // replay the victim's peer-id and a far-future timestamp. Freshness becomes
+  // authoritative only after this node has observed a directly authenticated
+  // snapshot from that peer during this process's authenticated observations.
+  const ownedProfileIsCurrent = Boolean(ownedRoot && (
+    request.authenticatedFreshness?.accepts(
+      ownedRoot,
+      request.remotePeerId,
+      incomingLastSeen,
+    ) ?? true
+  ));
+  const ownedQuads = ownedRoot && ownedProfileIsCurrent
+    ? [...(incomingProfiles.get(ownedRoot) ?? [])]
+    : [];
+  const forwardedQuads = [...unscopedQuads];
+  for (const [root, quads] of incomingProfiles) {
+    if (root === ownedRoot) continue;
+    // Only a structurally self-authenticating peer DID or a wallet root with a
+    // valid peer-binding signature can safely enter the shared registry path.
+    if (
+      !existingProfiles.has(root)
+      && authenticatedPeerForProfile(root, quads) !== undefined
+    ) {
+      forwardedQuads.push(...quads);
     }
   }
 
   let committedTriples = 0;
-  if (forwardedQuads.length > 0) {
-    await request.insertForwarded(forwardedQuads, request.options);
-    committedTriples += forwardedQuads.length;
-  }
   if (ownedRoot && ownedProfileIsCurrent) {
     const replaced = await tryReplaceSubjectPrefixAtomically(
       request.store,
       request.graphUri,
       ownedRoot,
       ownedQuads,
+      forwardedQuads,
       request.options,
     );
     if (!replaced) {
@@ -164,7 +174,15 @@ export async function reconcileAgentRegistrySnapshot(
         { code: 'AGENTS_ATOMIC_PROFILE_REPLACE_UNSUPPORTED' },
       );
     }
-    committedTriples += ownedQuads.length;
+    committedTriples += ownedQuads.length + forwardedQuads.length;
+    request.authenticatedFreshness?.record(
+      ownedRoot,
+      request.remotePeerId,
+      incomingLastSeen,
+    );
+  } else if (forwardedQuads.length > 0) {
+    await request.insertForwarded(forwardedQuads, request.options);
+    committedTriples += forwardedQuads.length;
   }
   if (committedTriples > 0) request.invalidate();
   return committedTriples;
@@ -176,30 +194,79 @@ async function loadExistingProfiles(
   roots: readonly string[],
   options?: QueryOptions,
 ): Promise<Map<string, ExistingAgentProfile>> {
-  const existing = new Map<string, { peerIds: Set<string>; lastSeen?: number }>();
+  const existing = new Map<string, { quads: Quad[] }>();
   for (let start = 0; start < roots.length; start += 128) {
     const chunk = roots.slice(start, start + 128);
     if (chunk.length === 0) continue;
     const values = chunk.map((root) => `<${assertSafeIri(root)}>`).join(' ');
     const result = await store.query(
-      `SELECT ?profile ?peerId ?lastSeen WHERE { VALUES ?profile { ${values} } GRAPH <${assertSafeIri(graphUri)}> { ?profile ?profilePredicate ?profileObject . OPTIONAL { ?profile <${DKG_PEER_ID}> ?peerId } OPTIONAL { ?profile <${DKG_LAST_SEEN}> ?lastSeen } } }`,
+      `SELECT ?profile ?subject ?predicate ?object WHERE { GRAPH <${assertSafeIri(graphUri)}> { VALUES ?profile { ${values} } ?subject ?predicate ?object . FILTER(?subject = ?profile || STRSTARTS(STR(?subject), CONCAT(STR(?profile), "/")) || STRSTARTS(STR(?subject), CONCAT(STR(?profile), "#"))) } }`,
       options,
     );
     if (result.type !== 'bindings') continue;
     for (const row of result.bindings) {
       const profile = unwrapIri(row['profile']);
       if (!profile) continue;
-      const state = existing.get(profile) ?? { peerIds: new Set<string>() };
-      const peerId = plainLiteral(row['peerId'] ?? '');
-      if (peerId) state.peerIds.add(peerId);
-      const lastSeen = parseTimestamp(row['lastSeen']);
-      if (lastSeen !== undefined && (state.lastSeen === undefined || lastSeen > state.lastSeen)) {
-        state.lastSeen = lastSeen;
-      }
+      const subject = unwrapIri(row['subject']);
+      const predicate = unwrapIri(row['predicate']);
+      const object = row['object'];
+      if (!subject || !predicate || object === undefined) continue;
+      const state = existing.get(profile) ?? { quads: [] };
+      const quad = { graph: graphUri, subject, predicate, object };
+      state.quads.push(quad);
       existing.set(profile, state);
     }
   }
   return existing;
+}
+
+function agentRootForSubject(subject: string): string | undefined {
+  if (!subject.startsWith(AGENT_DID_PREFIX)) return undefined;
+  const suffix = subject.slice(AGENT_DID_PREFIX.length);
+  const slash = suffix.indexOf('/');
+  const fragment = suffix.indexOf('#');
+  const delimiter = [slash, fragment]
+    .filter((index) => index >= 0)
+    .reduce((lowest, index) => Math.min(lowest, index), suffix.length);
+  const identifier = suffix.slice(0, delimiter);
+  return identifier ? `${AGENT_DID_PREFIX}${identifier}` : undefined;
+}
+
+/**
+ * Return the peer whose identity is proven by this profile shape. At present
+ * peer-ID-rooted legacy profiles are self-authenticating. Address-rooted
+ * profiles must carry a wallet signature over their peer ID; other co-located
+ * wallet/key proofs are not sufficient because they can be replayed with an
+ * attacker-controlled peer-id row.
+ */
+function authenticatedPeerForProfile(
+  root: string,
+  quads: readonly Quad[],
+): string | undefined {
+  const peerIds = new Set(
+    quads
+      .filter((quad) => quad.subject === root && quad.predicate === DKG_ONTOLOGY.DKG_PEER_ID)
+      .map((quad) => plainLiteral(quad.object))
+      .filter((peerId): peerId is string => peerId !== undefined),
+  );
+  if (peerIds.size !== 1) return undefined;
+  const peerId = [...peerIds][0];
+  if (root === `${AGENT_DID_PREFIX}${peerId}`) return peerId;
+  const agentAddress = root.slice(AGENT_DID_PREFIX.length);
+  if (!/^0x[0-9a-fA-F]{40}$/.test(agentAddress)) return undefined;
+  const proofs = new Set(
+    quads
+      .filter((quad) => (
+        quad.subject === root
+        && quad.predicate === DKG_ONTOLOGY.DKG_PEER_ID_PROOF
+      ))
+      .map((quad) => plainLiteral(quad.object))
+      .filter((proof): proof is string => proof !== undefined),
+  );
+  if (proofs.size !== 1) return undefined;
+  return verifyAgentPeerIdBinding(agentAddress, peerId, [...proofs][0])
+    ? peerId
+    : undefined;
 }
 
 function latestTimestamp(
@@ -223,14 +290,8 @@ function parseTimestamp(term: string | undefined): number | undefined {
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
-function isOlderProfile(incoming: number | undefined, existing: number | undefined): boolean {
-  if (existing === undefined) return false;
-  return incoming === undefined || incoming < existing;
-}
-
 function plainLiteral(term: string): string | undefined {
-  const match = term.match(/^"([^"\\]*)"(?:@[^\s]+|\^\^<?[^>\s]+>?)?$/);
-  return match?.[1];
+  return parseRdfLiteralTerm(term)?.value;
 }
 
 function unwrapIri(term: string | undefined): string | undefined {
@@ -249,8 +310,26 @@ export class AuthoritativeGraphSnapshotMaterializer {
     string,
     RetainedAuthoritativeSnapshot
   >();
+  private readonly authenticatedProfileFreshness = new Map<
+    string,
+    { peerId: string; lastSeen?: number }
+  >();
 
   constructor(private readonly checkpointStore: SyncCheckpointStore) {}
+
+  readonly profileFreshness: AuthenticatedAgentProfileFreshness = {
+    accepts: (root, peerId, incomingLastSeen) => {
+      const current = this.authenticatedProfileFreshness.get(root);
+      if (!current || current.peerId !== peerId || current.lastSeen === undefined) return true;
+      return incomingLastSeen !== undefined && incomingLastSeen >= current.lastSeen;
+    },
+    record: (root, peerId, incomingLastSeen) => {
+      this.authenticatedProfileFreshness.set(root, {
+        peerId,
+        ...(incomingLastSeen === undefined ? {} : { lastSeen: incomingLastSeen }),
+      });
+    },
+  };
 
   /**
    * Reconcile retained bytes with the durable requester checkpoint before a

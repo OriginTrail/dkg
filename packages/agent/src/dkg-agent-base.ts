@@ -558,9 +558,15 @@ export function createListContextGraphsCacheInvalidatingStore(
           )
       : undefined,
     replaceSubjectPrefix: innerStore.replaceSubjectPrefix
-      ? (graphUri, prefix, quads, options) =>
+      ? (graphUri, prefix, replacementQuads, additionalQuads, options) =>
           invalidateAfterMutation(
-            () => innerStore.replaceSubjectPrefix!(graphUri, prefix, quads, options),
+            () => innerStore.replaceSubjectPrefix!(
+              graphUri,
+              prefix,
+              replacementQuads,
+              additionalQuads,
+              options,
+            ),
             () => true,
             () => markProjectionDirty?.(undefined, graphUri),
           )

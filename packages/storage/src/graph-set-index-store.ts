@@ -489,18 +489,31 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   async replaceSubjectPrefix(
     graphUri: string,
     prefix: string,
-    quads: Quad[],
+    replacementQuads: Quad[],
+    additionalQuads: Quad[],
     options?: QueryOptions,
   ): Promise<void> {
     if (typeof this.inner.replaceSubjectPrefix !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('replaceSubjectPrefix', 'GraphSetIndexStore');
     }
     if (!this.enabled) {
-      await this.inner.replaceSubjectPrefix(graphUri, prefix, quads, options);
+      await this.inner.replaceSubjectPrefix(
+        graphUri,
+        prefix,
+        replacementQuads,
+        additionalQuads,
+        options,
+      );
       return;
     }
     try {
-      await this.inner.replaceSubjectPrefix(graphUri, prefix, quads, options);
+      await this.inner.replaceSubjectPrefix(
+        graphUri,
+        prefix,
+        replacementQuads,
+        additionalQuads,
+        options,
+      );
     } catch (error) {
       if (!isAtomicReplaceOperationNotStarted(error, 'replaceSubjectPrefix')) {
         this.scheduleFullRefresh('replaceSubjectPrefix');

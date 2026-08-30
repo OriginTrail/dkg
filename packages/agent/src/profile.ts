@@ -1,4 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { ethers } from 'ethers';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -82,6 +83,8 @@ export interface AgentProfileEncryptionKey {
 
 export interface AgentProfileConfig {
   peerId: string;
+  /** Wallet signature binding an address-form agent DID to this libp2p peer. */
+  peerIdProof?: string;
   name: string;
   description?: string;
   framework?: string;
@@ -172,6 +175,9 @@ export function buildAgentProfile(config: AgentProfileConfig): {
 
   // DKG P2P properties
   q(entity, `${DKG}peerId`, `"${config.peerId}"`);
+  if (config.peerIdProof) {
+    q(entity, DKG_ONTOLOGY.DKG_PEER_ID_PROOF, `"${config.peerIdProof}"`);
+  }
   q(entity, `${DKG}nodeRole`, `"${role}"`);
 
   if (config.publicKey) {
@@ -272,4 +278,40 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   }
 
   return { quads, rootEntity: entity };
+}
+
+const AGENT_PEER_BINDING_DOMAIN = 'OriginTrail DKG agent peer binding v1';
+
+/** Canonical, domain-separated message signed by a wallet-rooted agent profile. */
+export function agentPeerIdBindingMessage(agentAddress: string, peerId: string): string {
+  return `${AGENT_PEER_BINDING_DOMAIN}\n${ethers.getAddress(agentAddress)}\n${peerId}`;
+}
+
+export function signAgentPeerIdBinding(
+  agentAddress: string,
+  peerId: string,
+  privateKey: string,
+): string {
+  const wallet = new ethers.Wallet(privateKey);
+  if (wallet.address.toLowerCase() !== agentAddress.toLowerCase()) {
+    throw new Error(`Peer binding key does not control agent address ${agentAddress}`);
+  }
+  return wallet.signingKey.sign(
+    ethers.hashMessage(agentPeerIdBindingMessage(agentAddress, peerId)),
+  ).serialized;
+}
+
+export function verifyAgentPeerIdBinding(
+  agentAddress: string,
+  peerId: string,
+  proof: string,
+): boolean {
+  try {
+    return ethers.verifyMessage(
+      agentPeerIdBindingMessage(agentAddress, peerId),
+      proof,
+    ).toLowerCase() === ethers.getAddress(agentAddress).toLowerCase();
+  } catch {
+    return false;
+  }
 }

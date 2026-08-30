@@ -170,7 +170,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   async replaceSubjectPrefix(
     graphUri: string,
     prefix: string,
-    quads: Quad[],
+    replacementQuads: Quad[],
+    additionalQuads: Quad[],
     options?: QueryOptions,
   ): Promise<void> {
     if (typeof this.inner.replaceSubjectPrefix !== 'function') {
@@ -179,10 +180,19 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    const externalized = await Promise.all(
-      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    const externalizedReplacement = await Promise.all(
+      replacementQuads.map((quad) => this.externalizeInsertQuad(quad)),
     );
-    await this.inner.replaceSubjectPrefix(graphUri, prefix, externalized, options);
+    const externalizedAdditional = await Promise.all(
+      additionalQuads.map((quad) => this.externalizeInsertQuad(quad)),
+    );
+    await this.inner.replaceSubjectPrefix(
+      graphUri,
+      prefix,
+      externalizedReplacement,
+      externalizedAdditional,
+      options,
+    );
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {

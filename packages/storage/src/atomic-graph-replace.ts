@@ -160,9 +160,10 @@ export function buildAtomicSubjectReplaceUpdate(
 
 /**
  * Build one transactional SPARQL Modify that replaces every subject rooted at
- * `subjectPrefix` inside a shared graph. Unlike two separate DELETE/INSERT
- * operations, the single DELETE/INSERT/WHERE form is one backend commit: a
- * reader observes the complete old profile tree or the complete new one.
+ * `subjectPrefix` inside a shared graph and optionally inserts unrelated rows.
+ * Unlike separate replace/append operations, the single DELETE/INSERT/WHERE
+ * form is one backend commit: a reader observes the complete old plan or the
+ * complete reconciled plan.
  *
  * The prefix root itself is included. Descendants must use the conventional
  * `${root}/...` or `${root}#...` skolem namespace, which covers profile-owned
@@ -172,21 +173,43 @@ export function buildAtomicSubjectReplaceUpdate(
 export function buildAtomicSubjectPrefixReplaceUpdate(
   graphUri: string,
   subjectPrefix: string,
-  insertQuads: readonly Quad[],
+  replacementQuads: readonly Quad[],
+  additionalQuads: readonly Quad[] = [],
 ): string {
   const target = assertSafeIri(graphUri);
   const safePrefix = assertSafeIri(subjectPrefix);
-  assertSubjectPrefixReplacementPayload(graphUri, subjectPrefix, insertQuads);
+  assertSubjectPrefixReplacementPayload(graphUri, subjectPrefix, replacementQuads);
+  assertAdditionalSubjectPrefixPayload(graphUri, subjectPrefix, additionalQuads);
   const deleteTemplate = `GRAPH <${target}> { ?existingSubject ?existingPredicate ?existingObject }`;
   const where =
     `OPTIONAL { ${deleteTemplate} ` +
     `FILTER(?existingSubject = <${safePrefix}> || ` +
     `STRSTARTS(STR(?existingSubject), "${safePrefix}/") || ` +
     `STRSTARTS(STR(?existingSubject), "${safePrefix}#")) }`;
+  const insertQuads = [...replacementQuads, ...additionalQuads];
   const insert = insertQuads.length > 0
     ? `\nINSERT {\n${formatGraphBlock(target, insertQuads)}\n}`
     : '';
   return `DELETE { ${deleteTemplate} }${insert}\nWHERE { ${where} }`;
+}
+
+function assertAdditionalSubjectPrefixPayload(
+  graphUri: string,
+  subjectPrefix: string,
+  quads: readonly Quad[],
+): void {
+  assertReplacementPayload(graphUri, quads);
+  for (const [index, quad] of quads.entries()) {
+    if (
+      quad.subject === subjectPrefix
+      || quad.subject.startsWith(`${subjectPrefix}/`)
+      || quad.subject.startsWith(`${subjectPrefix}#`)
+    ) {
+      throw new Error(
+        `Atomic subject-prefix additional quad ${index} must be outside prefix "${subjectPrefix}"`,
+      );
+    }
+  }
 }
 
 function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {

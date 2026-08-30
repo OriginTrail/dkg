@@ -1279,6 +1279,50 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads).toHaveLength(1);
   });
 
+  it('replaceSubjectPrefix atomically replaces one tree and inserts forwarded rows', async () => {
+    insertedQuads.length = 0;
+    const atomicStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      atomicUpdates: true,
+    });
+    await atomicStore.replaceSubjectPrefix(
+      'http://ex.org/g1',
+      'http://ex.org/agent',
+      [{
+        subject: 'http://ex.org/agent',
+        predicate: 'http://ex.org/p',
+        object: '"fresh"',
+        graph: 'http://ex.org/g1',
+      }],
+      [{
+        subject: 'http://ex.org/forwarded',
+        predicate: 'http://ex.org/p',
+        object: '"hint"',
+        graph: 'http://ex.org/g1',
+      }],
+    );
+
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('DELETE {');
+    expect(insertedQuads[0]).toContain('<http://ex.org/agent>');
+    expect(insertedQuads[0]).toContain('<http://ex.org/forwarded>');
+  });
+
+  it('replaceSubjectPrefix fails before dispatch without atomic endpoint support', async () => {
+    insertedQuads.length = 0;
+    await expect(store.replaceSubjectPrefix(
+      'http://ex.org/g1',
+      'http://ex.org/agent',
+      [],
+      [],
+    )).rejects.toMatchObject({
+      name: 'UnsupportedTripleStoreCapabilityError',
+      capability: 'replaceSubjectPrefix',
+    });
+    expect(insertedQuads).toHaveLength(0);
+  });
+
   it('advances write generation when an atomic replace has an indeterminate remote failure', async () => {
     const graph = 'http://ex.org/possibly-committed';
     const metaGraph = 'http://ex.org/possibly-committed/meta';
@@ -1310,6 +1354,15 @@ describe('SparqlHttpStore (test server)', () => {
       {
         affected: [graph],
         attempt: (store) => store.replaceSubject(graph, subject, replacement),
+      },
+      {
+        affected: [graph],
+        attempt: (store) => store.replaceSubjectPrefix(
+          graph,
+          subject,
+          replacement,
+          [{ ...replacement[0], subject: `${subject}:forwarded` }],
+        ),
       },
     ];
 
@@ -1435,6 +1488,16 @@ describe('SparqlHttpStore (test server)', () => {
         scope: graph,
         attempt: (store) => store.replaceSubject(graph, subject, [quad]),
       },
+      {
+        name: 'replaceSubjectPrefix',
+        scope: graph,
+        attempt: (store) => store.replaceSubjectPrefix(
+          graph,
+          subject,
+          [quad],
+          [{ ...quad, subject: `${subject}:forwarded` }],
+        ),
+      },
       { name: 'dropGraph', scope: graph, attempt: (store) => store.dropGraph(graph) },
     ];
 
@@ -1550,6 +1613,14 @@ describe('SparqlHttpStore (test server)', () => {
       const before = recoveringStore.getWriteRevision(graph);
       await expect(recoveringStore.replaceSubject(graph, 'http://ex.org/s', [])).rejects
         .toMatchObject({ outcome: 'not_started' });
+      expect(recoveringStore.getWriteRevision(graph)).toEqual(before);
+      expect(fetchCalls).toBe(0);
+      await expect(recoveringStore.replaceSubjectPrefix(
+        graph,
+        'http://ex.org/s',
+        [],
+        [],
+      )).rejects.toMatchObject({ outcome: 'not_started' });
       expect(recoveringStore.getWriteRevision(graph)).toEqual(before);
       expect(fetchCalls).toBe(0);
     } finally {

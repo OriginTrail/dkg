@@ -478,15 +478,16 @@ export class BlazegraphStore implements TripleStore {
   async replaceSubjectPrefix(
     graphUri: string,
     prefix: string,
-    quads: DKGQuad[],
+    replacementQuads: DKGQuad[],
+    additionalQuads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    assertQuadLiteralsMutf8Safe(quads, {
+    assertQuadLiteralsMutf8Safe([...replacementQuads, ...additionalQuads], {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.replaceSubjectPrefix',
     });
     await this.sparqlUpdate(
-      buildAtomicSubjectPrefixReplaceUpdate(graphUri, prefix, quads),
+      buildAtomicSubjectPrefixReplaceUpdate(graphUri, prefix, replacementQuads, additionalQuads),
       { ...options, source: options?.source ?? 'blazegraph.replaceSubjectPrefix' },
       'replaceSubjectPrefix',
     );
