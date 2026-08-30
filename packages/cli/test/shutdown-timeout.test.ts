@@ -3,12 +3,17 @@ import {
   SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
   SHUTDOWN_FORCED_OFFSET,
   SHUTDOWN_HARD_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
+  MIN_SHUTDOWN_HARD_TIMEOUT_MS,
+  MAX_SHUTDOWN_HARD_TIMEOUT_MS,
+  resolveShutdownHardTimeoutMs,
   decodeForcedExitCode,
   encodeForcedShutdownExitCode,
   isForcedShutdownExitCode,
   raceShutdownWithTimeout,
 } from '../src/daemon/shutdown.js';
 import { DAEMON_EXIT_CODE_RESTART } from '../src/daemon/manifest.js';
+import { resolveDaemonShutdownHardTimeoutMs } from '../src/daemon/lifecycle.js';
 
 describe('shutdown constants', () => {
   it('declares SHUTDOWN_FORCED_OFFSET = 100 so 0+offset and 75+offset both fit in an 8-bit exit code', () => {
@@ -21,11 +26,44 @@ describe('shutdown constants', () => {
   });
 
   it('uses a 15s default hard-timeout — generous enough to let normal shutdowns finish, tight enough to recover from a stuck Core in one update cycle', () => {
-    expect(SHUTDOWN_HARD_TIMEOUT_MS).toBe(15_000);
+    expect(SHUTDOWN_HARD_TIMEOUT_MS).toBe(DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS);
   });
 
   it('uses a 1s default forced-cleanup timeout — bounded separately from the wall-clock cutoff so a stalled FS op cannot recreate the zombie shape', () => {
     expect(SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS).toBe(1_000);
+  });
+});
+
+describe('resolveShutdownHardTimeoutMs', () => {
+  it('preserves the 15 second default and accepts both inclusive bounds', () => {
+    expect(resolveShutdownHardTimeoutMs(undefined)).toBe(15_000);
+    expect(resolveShutdownHardTimeoutMs(String(MIN_SHUTDOWN_HARD_TIMEOUT_MS))).toBe(5_000);
+    expect(resolveShutdownHardTimeoutMs(String(MAX_SHUTDOWN_HARD_TIMEOUT_MS))).toBe(300_000);
+    expect(resolveShutdownHardTimeoutMs('60000')).toBe(60_000);
+  });
+
+  it.each([
+    '',
+    'not-a-number',
+    '1.5',
+    '-1',
+    '0',
+    String(MIN_SHUTDOWN_HARD_TIMEOUT_MS - 1),
+    String(MAX_SHUTDOWN_HARD_TIMEOUT_MS + 1),
+    String(Number.MAX_SAFE_INTEGER + 1),
+    'Infinity',
+  ])('rejects malformed or unsafe override %j', (value) => {
+    expect(() => resolveShutdownHardTimeoutMs(value)).toThrow(
+      /DKG_SHUTDOWN_HARD_TIMEOUT_MS must be an integer/u,
+    );
+  });
+
+  it('captures startup input so later environment mutation cannot change it', () => {
+    const env: NodeJS.ProcessEnv = { DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000' };
+    const captured = resolveDaemonShutdownHardTimeoutMs(env);
+    env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
+    expect(captured).toBe(60_000);
+    expect(resolveDaemonShutdownHardTimeoutMs(env)).toBe(5_000);
   });
 });
 

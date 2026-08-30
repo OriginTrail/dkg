@@ -7,7 +7,9 @@ import {
 import { DAEMON_EXIT_CODE_RESTART, decodeForcedExitCode } from './daemon.js';
 import {
   isLivenessProbeEnabled, startLivenessWatcher, LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
+  shutdownGraceMsForHardTimeout,
 } from './daemon/supervisor-liveness.js';
+import { resolveShutdownHardTimeoutMs } from './daemon/shutdown.js';
 import {
   sleep, withSelectedDkgHome, selectedDkgHomeForEnv, probeHostForApiHost,
 } from './cli-helpers.js';
@@ -37,8 +39,10 @@ function supervisorWarn(message: string): void {
  */
 async function maybeStartSupervisorLivenessWatcher(
   child: { kill(signal: 'SIGKILL'): boolean },
+  childEnv: NodeJS.ProcessEnv = process.env,
+  shutdownGraceMs = resolveSupervisorShutdownGraceMs(childEnv),
 ): Promise<() => void> {
-  if (!isLivenessProbeEnabled(process.env.DKG_SUPERVISOR_LIVENESS_PROBE)) {
+  if (!isLivenessProbeEnabled(childEnv.DKG_SUPERVISOR_LIVENESS_PROBE)) {
     return () => {};
   }
 
@@ -63,6 +67,7 @@ async function maybeStartSupervisorLivenessWatcher(
           // intentionally shutting down" signal. Without this the watcher
           // would race a slow teardown and SIGKILL mid-cleanup.
           isShuttingDown: () => !existsSync(apiPortPath()),
+          shutdownGraceMs,
           onUnresponsive: () => {
             supervisorWarn(
               `[supervisor] worker unresponsive after ${LIVENESS_CONSECUTIVE_FAILURES_TO_KILL} consecutive liveness probes; SIGKILL + respawn.`,
@@ -89,8 +94,16 @@ async function maybeStartSupervisorLivenessWatcher(
   };
 }
 
+function resolveSupervisorShutdownGraceMs(env: NodeJS.ProcessEnv): number {
+  return shutdownGraceMsForHardTimeout(
+    resolveShutdownHardTimeoutMs(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS),
+  );
+}
+
 async function runDaemonSupervisor(): Promise<void> {
   process.env.DKG_HOME = selectedDkgHomeForEnv(process.env);
+  const childEnv = withSelectedDkgHome(process.env);
+  const shutdownGraceMs = resolveSupervisorShutdownGraceMs(childEnv);
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
 
@@ -106,7 +119,7 @@ async function runDaemonSupervisor(): Promise<void> {
       daemonCommand.args,
       {
         stdio: ['ignore', 'ignore', 'ignore'],
-        env: withSelectedDkgHome(process.env),
+        env: childEnv,
       },
     );
 
@@ -116,7 +129,11 @@ async function runDaemonSupervisor(): Promise<void> {
     // takes it from there. Gated by DKG_SUPERVISOR_LIVENESS_PROBE so
     // tests + headless-worker scenarios can opt out. See
     // packages/cli/src/daemon/supervisor-liveness.ts for the full rationale.
-    const stopWatcher = await maybeStartSupervisorLivenessWatcher(child);
+    const stopWatcher = await maybeStartSupervisorLivenessWatcher(
+      child,
+      childEnv,
+      shutdownGraceMs,
+    );
 
     const rawExitCode = await new Promise<number | null>((resolve) => {
       child.once('exit', (code) => resolve(code));
@@ -145,6 +162,7 @@ async function runDaemonSupervisor(): Promise<void> {
 }
 
 async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const shutdownGraceMs = resolveSupervisorShutdownGraceMs(childEnv);
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
   let currentChild: ReturnType<typeof spawn> | null = null;
@@ -176,7 +194,11 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
       },
     );
 
-    const stopWatcher = await maybeStartSupervisorLivenessWatcher(currentChild);
+    const stopWatcher = await maybeStartSupervisorLivenessWatcher(
+      currentChild,
+      childEnv,
+      shutdownGraceMs,
+    );
 
     const rawExitCode = await new Promise<number | null>((resolve) => {
       currentChild!.once('exit', (code) => resolve(code));
@@ -214,6 +236,7 @@ export {
   appendSupervisorLog,
   supervisorWarn,
   maybeStartSupervisorLivenessWatcher,
+  resolveSupervisorShutdownGraceMs,
   runDaemonSupervisor,
   runForegroundSupervisor,
 };

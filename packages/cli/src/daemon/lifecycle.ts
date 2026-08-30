@@ -277,9 +277,9 @@ import {
   carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
 import {
-  SHUTDOWN_HARD_TIMEOUT_MS,
   encodeForcedShutdownExitCode,
   raceShutdownWithTimeout,
+  resolveShutdownHardTimeoutMs,
 } from './shutdown.js';
 import {
   resolveNameToPeerId,
@@ -1148,6 +1148,9 @@ export async function runDaemonInner(
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
 ): Promise<void> {
+  // Resolve operator input once at the canonical daemon startup boundary.
+  // Shutdown mechanics stay independent of later environment mutation.
+  const shutdownHardTimeoutMs = resolveDaemonShutdownHardTimeoutMs(process.env);
   let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
   try {
     await runDaemonInnerWithStartupOwnership(
@@ -1155,6 +1158,7 @@ export async function runDaemonInner(
       config,
       startedAt,
       (cleanup) => { cleanupOwnedStartupResources = cleanup; },
+      shutdownHardTimeoutMs,
     );
   } catch (error) {
     await cleanupOwnedStartupResources?.();
@@ -1167,6 +1171,7 @@ async function runDaemonInnerWithStartupOwnership(
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
+  shutdownHardTimeoutMs: number,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
@@ -3872,7 +3877,7 @@ async function runDaemonInnerWithStartupOwnership(
     });
     const { forced } = await raceShutdownWithTimeout(
       cleanup,
-      SHUTDOWN_HARD_TIMEOUT_MS,
+      shutdownHardTimeoutMs,
       log,
       cleanupStateFiles,
     );
@@ -3881,4 +3886,8 @@ async function runDaemonInnerWithStartupOwnership(
 
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+}
+
+export function resolveDaemonShutdownHardTimeoutMs(env: NodeJS.ProcessEnv): number {
+  return resolveShutdownHardTimeoutMs(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
 }

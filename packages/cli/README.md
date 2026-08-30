@@ -300,6 +300,12 @@ modes auto-renewal can't recover from:
 | `dkg update` | Update the node software from npm (blue-green slots for Core nodes) |
 | `dkg rollback` | Roll back to the previous software slot |
 
+Graceful shutdown keeps a 15-second hard-stop safety budget by default. Nodes
+that must drain longer RPC callbacks may set `DKG_SHUTDOWN_HARD_TIMEOUT_MS` to
+an integer from `5000` through `300000` before `dkg start`. Invalid, blank,
+fractional, or out-of-range values fail startup; the watchdog cannot be
+disabled through this setting.
+
 Run `dkg <command> --help` for per-command options.
 
 ### Local LLM over DKG MCP

@@ -9,7 +9,8 @@
  * (`kill -9`) is the only recovery. This module provides:
  *
  *   1. A wall-clock deadline ({@link raceShutdownWithTimeout}) so a stuck
- *      graceful path always yields to a forced exit within {@link SHUTDOWN_HARD_TIMEOUT_MS}
+ *      graceful path always yields to a forced exit within the explicitly
+ *      resolved shutdown hard timeout
  *      (plus at most {@link SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS} for best-effort
  *      forced cleanup — see below).
  *   2. An exit-code convention ({@link SHUTDOWN_FORCED_OFFSET}) so the supervisor
@@ -25,8 +26,36 @@
 
 import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
 
-/** Default deadline for graceful shutdown before we hard-exit. */
-export const SHUTDOWN_HARD_TIMEOUT_MS = 15_000;
+/** Default and permitted bounds for graceful shutdown before hard exit. */
+export const DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS = 15_000;
+export const MIN_SHUTDOWN_HARD_TIMEOUT_MS = 5_000;
+export const MAX_SHUTDOWN_HARD_TIMEOUT_MS = 300_000;
+
+/**
+ * Resolve the hard-stop guard without weakening the default fleet behavior.
+ * This function is intentionally explicit-input only: callers capture the
+ * environment once at their startup boundary, so later mutation and module
+ * import order cannot change a running worker's deadline.
+ */
+export function resolveShutdownHardTimeoutMs(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
+  const parsed = Number(value);
+  if (
+    value.trim() === ''
+    || !Number.isSafeInteger(parsed)
+    || parsed < MIN_SHUTDOWN_HARD_TIMEOUT_MS
+    || parsed > MAX_SHUTDOWN_HARD_TIMEOUT_MS
+  ) {
+    throw new TypeError(
+      `DKG_SHUTDOWN_HARD_TIMEOUT_MS must be an integer from `
+        + `${MIN_SHUTDOWN_HARD_TIMEOUT_MS} to ${MAX_SHUTDOWN_HARD_TIMEOUT_MS}`,
+    );
+  }
+  return parsed;
+}
+
+/** Backward-compatible name for the unchanged fleet default. */
+export const SHUTDOWN_HARD_TIMEOUT_MS = DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
 
 /**
  * Per-callsite budget for the best-effort forced-cleanup hook (state-file
