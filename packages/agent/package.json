@@ -33,6 +33,7 @@
     "./dist/rfc64/swm-inventory-catalog-reconciler-v1.js": null,
     "./dist/rfc64/abort-v1.js": null,
     "./dist/rfc64/serialized-scope-runtime-v1.js": null,
+    "./dist/rfc64/swm-catalog-reconciliation-coordinator-v1.js": null,
     "./dist/rfc64/control-envelope-signer-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,

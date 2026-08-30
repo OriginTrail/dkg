@@ -924,6 +924,8 @@ function makeQueuedAgentHarness(options: {
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   agentLike.observeRfc64ConfirmedVmV1 =
     (DKGAgent.prototype as any).observeRfc64ConfirmedVmV1;
+  agentLike.requestRfc64SwmCatalogReconciliationForMutationV1 =
+    (DKGAgent.prototype as any).requestRfc64SwmCatalogReconciliationForMutationV1;
   agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => ({
     status: 'dormant',
     action: 'remove',
@@ -1001,6 +1003,8 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       error: null,
     }));
     agentLike.removeRfc64SwmAuthorInventoryShadowV1 = removal;
+    const reconciliation = recorder(async () => null);
+    agentLike.reconcileRfc64PublicCatalogFromSwmInventoryV1 = reconciliation;
     const catalogAuthoring = recorder(async () => null);
     const legacyCatalogAuthoring = recorder(async () => null);
     agentLike.recordRfc64PublicCatalogAssetV1 = catalogAuthoring;
@@ -1033,6 +1037,12 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
         contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       },
     });
+    expect(reconciliation.calls).toEqual([[{
+      contextGraphId: 'public-cg',
+      authorAddress: QUEUED_TEST_AUTHOR,
+    }]]);
+    expect(agentLike.log.warn.calls.flat().map(String).join('\n'))
+      .not.toContain('RFC-64 SWM inventory shadow removal escaped');
     expect(catalogAuthoring.calls).toHaveLength(0);
     expect(legacyCatalogAuthoring.calls).toHaveLength(0);
   });

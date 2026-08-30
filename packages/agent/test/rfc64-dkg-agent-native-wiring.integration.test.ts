@@ -1234,6 +1234,59 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
     await author.store.deleteByPattern(conflictingAuthorQuad);
 
+    await author.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { version: '0', totalRows: '1' } } });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+
+    const initialReconcile = author.reconcileRfc64PublicCatalogFromSwmInventoryV1.bind(author);
+    const initialReconcileSpy = vi
+      .spyOn(author, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+      .mockRejectedValueOnce(new Error('simulated idempotent removal retry'))
+      .mockImplementation(initialReconcile);
+    await author.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      seal,
+      assertionUri,
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    await author.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      seal,
+      assertionUri,
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    initialReconcileSpy.mockRestore();
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
+    expect(author.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
+      attemptedRemovals: 2,
+      appliedRemovals: 1,
+      absentRemovals: 1,
+    });
+
     const first = await author.recordRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
@@ -1245,7 +1298,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
     })).toMatchObject({
-      head: { payload: { version: '0', totalRows: '1' } },
+      head: { payload: { version: '2', totalRows: '1' } },
       rows: [{
         assertionCoordinate,
         assertionVersion: canonicalSeal.assertionVersion,
@@ -1264,10 +1317,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toBeNull();
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
     expect(author.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
-      attemptedUpserts: 2,
-      appliedUpserts: 1,
+      attemptedUpserts: 3,
+      appliedUpserts: 2,
       existingUpserts: 0,
       failed: 1,
     });
@@ -1322,7 +1375,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toBeNull();
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
     restarted.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -1344,7 +1397,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    })).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
     await restarted.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
@@ -1357,13 +1410,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
     })).toMatchObject({
-      head: { payload: { version: '1', totalRows: '0' } },
+      head: { payload: { version: '3', totalRows: '0' } },
       rows: [],
     });
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
+    })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '0' });
     expect(restarted.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
       attemptedRemovals: 1,
       appliedRemovals: 1,

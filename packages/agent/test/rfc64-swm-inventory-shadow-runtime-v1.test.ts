@@ -101,4 +101,5 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     await expect(second).resolves.toBe(2);
     expect(events).toEqual(['first-enter', 'unrelated', 'first-exit', 'second']);
   });
+
 });

@@ -70,6 +70,10 @@ import {
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
+import {
+  Rfc64SwmCatalogReconciliationCoordinatorV1,
+  type Rfc64SwmCatalogReconciliationScopeV1,
+} from './rfc64/swm-catalog-reconciliation-coordinator-v1.js';
 import { resolveRfc64CatalogAuthorityDecisionV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import {
@@ -96,6 +100,24 @@ function rfc64SwmInventoryShadowRuntimeV1(
     rfc64SwmInventoryShadowRuntimesV1.set(agent, runtime);
   }
   return runtime;
+}
+
+const rfc64SwmCatalogReconciliationCoordinatorsV1 = new WeakMap<
+  DKGAgent,
+  Rfc64SwmCatalogReconciliationCoordinatorV1
+>();
+
+function rfc64SwmCatalogReconciliationCoordinatorV1(
+  agent: DKGAgent,
+): Rfc64SwmCatalogReconciliationCoordinatorV1 {
+  let coordinator = rfc64SwmCatalogReconciliationCoordinatorsV1.get(agent);
+  if (coordinator === undefined) {
+    coordinator = new Rfc64SwmCatalogReconciliationCoordinatorV1(async (scope) => {
+      await agent.reconcileRfc64PublicCatalogFromSwmInventoryV1(scope);
+    });
+    rfc64SwmCatalogReconciliationCoordinatorsV1.set(agent, coordinator);
+  }
+  return coordinator;
 }
 
 function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
@@ -250,18 +272,29 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<void> {
     try {
       const result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
-      if (result.status === 'applied' || result.status === 'existing') {
-        await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
-          contextGraphId: params.contextGraphId as ContextGraphIdV1,
-          authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
-        });
-      }
+      await this.requestRfc64SwmCatalogReconciliationForMutationV1(result, {
+        contextGraphId: params.contextGraphId as ContextGraphIdV1,
+        authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
+      });
     } catch (cause) {
       this.log.warn(
         params.ctx,
         `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
+  }
+
+  private async requestRfc64SwmCatalogReconciliationForMutationV1(
+    this: DKGAgent,
+    result: Rfc64SwmAuthorInventoryShadowMutationResultV1,
+    scope: Readonly<Rfc64SwmCatalogReconciliationScopeV1>,
+  ): Promise<void> {
+    if (
+      result.status !== 'applied'
+      && result.status !== 'existing'
+      && result.status !== 'absent'
+    ) return;
+    await rfc64SwmCatalogReconciliationCoordinatorV1(this).request(scope);
   }
 
   /** Await a point-in-time observer snapshot for tests and controlled drains. */
@@ -337,12 +370,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             subGraphName,
             seal: params.seal,
           });
-          if (result.status === 'applied' || result.status === 'absent') {
-            await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
-              contextGraphId: contextGraphId as ContextGraphIdV1,
-              authorAddress: confirmedSeal.authorAddress,
-            });
-          }
+          await this.requestRfc64SwmCatalogReconciliationForMutationV1(result, {
+            contextGraphId: contextGraphId as ContextGraphIdV1,
+            authorAddress: confirmedSeal.authorAddress,
+          });
         },
       );
     } catch (cause) {
@@ -638,8 +669,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       const signer = this.createRfc64CatalogAuthorSignerV1(canonicalSeal.authorAddress);
       const issuedAt = Math.max(Date.now(), Number(sharedAt)).toString() as TimestampMsV1;
       const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+      const inventoryScopeKey = `${inventoryScopeDigest}\n${canonicalSeal.authorAddress}`;
       const maintained = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
-        `${inventoryScopeDigest}\n${canonicalSeal.authorAddress}`,
+        inventoryScopeKey,
         () => maintainRfc64SwmAuthorInventoryV1(
           persistence.swmAuthorInventory,
           {
@@ -713,8 +745,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
       const signer = this.createRfc64CatalogAuthorSignerV1(seal.authorAddress);
       const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+      const inventoryScopeKey = `${inventoryScopeDigest}\n${seal.authorAddress}`;
       const removed = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
-        `${inventoryScopeDigest}\n${seal.authorAddress}`,
+        inventoryScopeKey,
         () => removeRfc64SwmAuthorInventoryRowV1(
           persistence.swmAuthorInventory,
           {
