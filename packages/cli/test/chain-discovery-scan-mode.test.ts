@@ -72,6 +72,32 @@ describe('chainDiscoveryScanOptions', () => {
     })).toEqual({ mode: 'incremental', pageBudget: 7 });
   });
 
+});
+
+describe('createChainDiscoveryScanRunner (GH#2323)', () => {
+  /**
+   * Runner + spies for the common shape: a probe that reports the watermark
+   * seeded, and a discover implementation supplied per test. Pass a
+   * preconfigured vi.fn (mock chains) or a plain implementation.
+   */
+  const makeRunner = (input: {
+    discover:
+      | ReturnType<typeof vi.fn>
+      | ((options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>);
+    log?: ReturnType<typeof vi.fn>;
+    fullScanEvery?: number;
+  }) => {
+    const discover = 'mock' in input.discover ? input.discover : vi.fn(input.discover);
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: discover as (
+        options: ReturnType<typeof chainDiscoveryScanOptions>,
+      ) => Promise<number>,
+    };
+    const log = input.log ?? vi.fn();
+    return { agent, log, runner: createChainDiscoveryScanRunner({ agent, log, fullScanEvery: input.fullScanEvery }) };
+  };
+
   it('serializes overlapping scheduled chain scans and resets after settle', async () => {
     let resolveFirstScan: ((value: number) => void) | undefined;
     const firstScan = new Promise<number>((resolve) => {
@@ -246,18 +272,13 @@ describe('chainDiscoveryScanOptions', () => {
   // historical page would block incremental discovery of new blocks forever.
   it('a permanently failing seedFull releases its slot and incremental discovery continues', async () => {
     const modes: string[] = [];
-    const agent = {
-      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
-      discoverContextGraphsFromChain: vi.fn(
-        async (options: ReturnType<typeof chainDiscoveryScanOptions>) => {
-          modes.push(options.mode);
-          if (options.mode === 'seedFull') throw new Error('historical page 404s deterministically');
-          return 0;
-        },
-      ),
-    };
-    const log = vi.fn();
-    const runner = createChainDiscoveryScanRunner({ agent, log });
+    const { log, runner } = makeRunner({
+      discover: async (options) => {
+        modes.push(options.mode);
+        if (options.mode === 'seedFull') throw new Error('historical page 404s deterministically');
+        return 0;
+      },
+    });
 
     // Initial attempt + MAX consecutive retries, all seedFull, all failing.
     for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner();
@@ -279,17 +300,13 @@ describe('chainDiscoveryScanOptions', () => {
   it('an overdue full resync clears once an injected attempt succeeds', async () => {
     let seedFullFails = true;
     const modes: string[] = [];
-    const agent = {
-      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
-      discoverContextGraphsFromChain: vi.fn(
-        async (options: ReturnType<typeof chainDiscoveryScanOptions>) => {
-          modes.push(options.mode);
-          if (options.mode === 'seedFull' && seedFullFails) throw new Error('flaky RPC');
-          return 0;
-        },
-      ),
-    };
-    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+    const { runner } = makeRunner({
+      discover: async (options) => {
+        modes.push(options.mode);
+        if (options.mode === 'seedFull' && seedFullFails) throw new Error('flaky RPC');
+        return 0;
+      },
+    });
 
     for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner(); // exhaust
     seedFullFails = false;
@@ -420,16 +437,12 @@ describe('chainDiscoveryScanOptions', () => {
 
   it('an overdue resync fires on schedule even while incremental scans fail', async () => {
     const modes: string[] = [];
-    const agent = {
-      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
-      discoverContextGraphsFromChain: vi.fn(
-        async (options: ReturnType<typeof chainDiscoveryScanOptions>) => {
-          modes.push(options.mode);
-          throw new Error('everything fails');
-        },
-      ),
-    };
-    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+    const { runner } = makeRunner({
+      discover: async (options) => {
+        modes.push(options.mode);
+        throw new Error('everything fails');
+      },
+    });
 
     // Exhaust the startup seedFull: initial attempt + MAX retries.
     for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner();
@@ -444,10 +457,7 @@ describe('chainDiscoveryScanOptions', () => {
     expect(window.slice(0, -1).every((m) => m === 'incremental')).toBe(true);
     expect(window.at(-1)).toBe('seedFull');
   });
-});
 
-// The policy is two pure functions over a discriminated state; pin the
-// transition table directly, not only through tick sequences.
   // A rejection VALUE is arbitrary: `Object.create(null)` has no toString
   // and a poisoned toString throws during formatting. The lifecycle hands
   // this runner to a timer with no rejection handler, so a throw escaping
@@ -490,7 +500,10 @@ describe('chainDiscoveryScanOptions', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('watermark probe failed'));
     expect(agent.discoverContextGraphsFromChain).not.toHaveBeenCalled();
   });
+});
 
+// The policy is two pure functions over a discriminated state; pin the
+// transition table directly, not only through tick sequences.
 describe('scan scheduler transitions (GH#2323)', () => {
   const seedFull = { mode: 'seedFull', throwOnChainScanFailure: true } as const;
   const incremental = { mode: 'incremental', pageBudget: 30 } as const;
