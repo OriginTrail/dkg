@@ -67,6 +67,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     this.assertActive();
     const automaticSelectedPhase = this.automaticSelectedPhase;
     this.automaticSelectedPhase = null;
+    let selectedPhaseFailed = false;
     let selectedError: unknown;
     if (automaticSelectedPhase !== null) {
       try {
@@ -75,6 +76,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
         // Automatic selected work must not starve unrelated ordinary work.
         // Its retry accounting remains in the job ledger and its error is
         // reported by the owning ordinary lane after that work drains.
+        selectedPhaseFailed = true;
         selectedError = error;
       }
     }
@@ -82,7 +84,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     try {
       ordinaryOutcome = await this.attemptPhase('ordinary', this.dependencies.runOrdinary);
     } catch (ordinaryError: unknown) {
-      if (selectedError !== undefined) {
+      if (selectedPhaseFailed) {
         throw new AggregateError(
           [selectedError, ordinaryError],
           'Automatic selected and ordinary sync-on-connect phases both failed',
@@ -90,7 +92,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
       }
       throw ordinaryError;
     }
-    if (selectedError !== undefined) throw selectedError;
+    if (selectedPhaseFailed) throw selectedError;
     return ordinaryOutcome;
   }
 

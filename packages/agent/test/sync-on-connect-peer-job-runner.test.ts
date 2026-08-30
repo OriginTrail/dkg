@@ -72,6 +72,28 @@ describe('sync-on-connect peer-job phase accounting', () => {
     }, PROBE);
   });
 
+  it('preserves an undefined automatic selected rejection', async () => {
+    const { runner, commitAccounting } = createRunner({
+      runAutomaticSelected: () => Promise.reject(undefined),
+      runOrdinary: async () => completed({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      }),
+    });
+
+    await expect(runner.runAutomaticSelectedThenOrdinary())
+      .rejects.toBeUndefined();
+    runner.finish();
+
+    expect(commitAccounting).toHaveBeenCalledOnce();
+    expect(commitAccounting).toHaveBeenCalledWith({
+      reconcilerDisposition: 'retry',
+      fresh: false,
+      progress: true,
+    }, PROBE);
+  });
+
   it('retains both automatic selected and ordinary failures and commits once', async () => {
     const selectedFailure = new Error('automatic selected failed');
     const ordinaryFailure = new Error('ordinary failed');
