@@ -77,7 +77,18 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
         selectedError = error;
       }
     }
-    const ordinaryOutcome = await this.attemptPhase(this.dependencies.runOrdinary);
+    let ordinaryOutcome: SyncReconcilerAttemptOutcome;
+    try {
+      ordinaryOutcome = await this.attemptPhase(this.dependencies.runOrdinary);
+    } catch (ordinaryError: unknown) {
+      if (selectedError !== undefined) {
+        throw new AggregateError(
+          [selectedError, ordinaryError],
+          'Automatic selected and ordinary sync-on-connect phases both failed',
+        );
+      }
+      throw ordinaryError;
+    }
     if (selectedError !== undefined) throw selectedError;
     return ordinaryOutcome;
   }
