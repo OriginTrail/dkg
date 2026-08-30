@@ -3,6 +3,7 @@ import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 
 import {
   classifyExactSwmGraphReplaceFailure,
+  getPromoteReplaySafeErrorDiagnostic,
   isPromoteReplaySafeError,
   unwrapPromoteReplaySafeError,
 } from '../src/promote-replay-safety.js';
@@ -17,6 +18,10 @@ describe('promote replay safety', () => {
 
     const classified = classifyExactSwmGraphReplaceFailure(replaceFailure);
     expect(isPromoteReplaySafeError(classified)).toBe(true);
+    expect(getPromoteReplaySafeErrorDiagnostic(classified)).toEqual({
+      name: 'PromoteReplaySafeError',
+      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+    });
     expect(unwrapPromoteReplaySafeError(classified)).toBe(replaceFailure);
   });
 
@@ -42,6 +47,7 @@ describe('promote replay safety', () => {
     });
 
     expect(isPromoteReplaySafeError(forgedShape)).toBe(false);
+    expect(getPromoteReplaySafeErrorDiagnostic(forgedShape)).toBeUndefined();
     expect(unwrapPromoteReplaySafeError(forgedShape)).toBe(forgedShape);
   });
 

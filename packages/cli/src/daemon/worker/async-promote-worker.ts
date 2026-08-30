@@ -41,6 +41,7 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
+  getPromoteReplaySafeErrorDiagnostic,
   PromoteJobLeaseError,
   isPromoteReplaySafeError,
   type AsyncPromoteQueue,
@@ -178,7 +179,6 @@ const SAFE_ERROR_NAMES = new Set([
   'CuratorUnconfirmedError',
   'CuratorRejectedError',
   'AssertionNotPersistedError',
-  'PromoteReplaySafeError',
 ]);
 const SAFE_ERROR_CODES = new Set([
   'PAYLOAD_TOO_LARGE',
@@ -186,7 +186,6 @@ const SAFE_ERROR_CODES = new Set([
   'CURATOR_UNCONFIRMED',
   'CURATOR_REJECTED',
   'ASSERTION_NOT_PERSISTED',
-  'PROMOTE_REPLAY_SAFE_FAILURE',
 ]);
 
 function untagPromoteMessage(message: string): string {
@@ -248,6 +247,7 @@ function logPromoteAttemptFailure(input: {
   log: PromoteWorkerLogger;
 }): void {
   try {
+    const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(input.err);
     bestEffortLog(
       input.log,
       `[async-promote-worker] ${JSON.stringify({
@@ -261,8 +261,12 @@ function logPromoteAttemptFailure(input: {
         stage: diagnosticPromoteStage(input.message),
         classification: input.classified.classification,
         retryable: input.classified.retryable,
-        errorName: safeErrorIdentity(input.err, 'name', SAFE_ERROR_NAMES) ?? 'unknown',
-        errorCode: safeErrorIdentity(input.err, 'code', SAFE_ERROR_CODES) ?? 'unknown',
+        errorName: replaySafeDiagnostic?.name
+          ?? safeErrorIdentity(input.err, 'name', SAFE_ERROR_NAMES)
+          ?? 'unknown',
+        errorCode: replaySafeDiagnostic?.code
+          ?? safeErrorIdentity(input.err, 'code', SAFE_ERROR_CODES)
+          ?? 'unknown',
       })}`,
     );
   } catch {

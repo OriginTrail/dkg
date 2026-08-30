@@ -6,6 +6,9 @@ type AssertFalse<Value extends false> = Value;
 type ReplaySafeGuardIsPublic = AssertTrue<
   'isPromoteReplaySafeError' extends keyof PublisherApi ? true : false
 >;
+type ReplaySafeDiagnosticHelperIsPublic = AssertTrue<
+  'getPromoteReplaySafeErrorDiagnostic' extends keyof PublisherApi ? true : false
+>;
 type ReplaySafeUnwrapperIsPublic = AssertTrue<
   'unwrapPromoteReplaySafeError' extends keyof PublisherApi ? true : false
 >;
@@ -21,6 +24,7 @@ type ReplaySafeCodeStaysInternal = AssertFalse<
 
 export type {
   ReplaySafeGuardIsPublic,
+  ReplaySafeDiagnosticHelperIsPublic,
   ReplaySafeUnwrapperIsPublic,
   ReplaySafeCertifierStaysInternal,
   ReplaySafeConstructorStaysInternal,

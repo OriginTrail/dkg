@@ -6,6 +6,11 @@ const EXACT_SWM_GRAPH_REPLACEMENT_STAGE =
 
 const certifiedReplaySafeErrors = new WeakSet<object>();
 
+export interface PromoteReplaySafeErrorDiagnostic {
+  readonly name: 'PromoteReplaySafeError';
+  readonly code: 'PROMOTE_REPLAY_SAFE_FAILURE';
+}
+
 /**
  * Producer-owned proof that retrying the complete promote attempt converges.
  * Consumers must never infer this disposition from a low-level store operation.
@@ -34,6 +39,15 @@ export function isPromoteReplaySafeError(
   return error !== null
     && typeof error === 'object'
     && certifiedReplaySafeErrors.has(error);
+}
+
+/** Return a bounded identity only for producer-certified replay-safe errors. */
+export function getPromoteReplaySafeErrorDiagnostic(
+  error: unknown,
+): PromoteReplaySafeErrorDiagnostic | undefined {
+  return isPromoteReplaySafeError(error)
+    ? { name: 'PromoteReplaySafeError', code: PROMOTE_REPLAY_SAFE_ERROR_CODE }
+    : undefined;
 }
 
 /** Unwrap producer-certified replay safety at the publisher/consumer boundary. */

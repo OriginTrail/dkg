@@ -429,6 +429,39 @@ describe('runPromoteJob', () => {
     ]);
   });
 
+  it('uses publisher-owned diagnostics for a certified replay-safe failure', async () => {
+    const job = await enqueueAndClaim();
+    const replaySafeFailure = classifyExactSwmGraphReplaceFailure(
+      new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'replaceGraph',
+        outcome: 'indeterminate',
+      }),
+    );
+
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw replaySafeFailure;
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    expect(promoteFailureDiagnostics(logs)).toEqual([
+      expect.objectContaining({
+        classification: 'transient',
+        retryable: true,
+        errorName: 'PromoteReplaySafeError',
+        errorCode: 'PROMOTE_REPLAY_SAFE_FAILURE',
+      }),
+    ]);
+  });
+
   it('on cap_exceeded error, transitions to failed (terminal)', async () => {
     const job = await enqueueAndClaim();
     const result = await runPromoteJob({
