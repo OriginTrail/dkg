@@ -15,7 +15,10 @@ import type {
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
 } from './lift-job.js';
-import type { LiftJobRetryProjection } from './async-lift-retry-disposition.js';
+import type {
+  LiftJobRetryProjection,
+  TargetedLiftJobClearOptions,
+} from './async-lift-retry-disposition.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
@@ -386,24 +389,12 @@ export interface VmPublishAdmissionJournalReader {
 export interface VmPublishTerminalJobClearer {
   /**
    * GH#2270 follow-up (🔴 3823952704) — `allowPendingTransaction` opts in to clearing a job whose
-   * transaction may still land. It is OFF by default: the caller must have established the right
-   * to take that risk for this specific job, because the route this is reached through is open to
-   * every registered agent token.
+   * transaction may still land. It is OFF by default: an agent must own this job's admission lane,
+   * while an authenticated node operator may accept the risk for any job in the node's queue.
    */
   clearTerminalJob(
     jobId: string,
-    options?: {
-      /**
-       * GH#2270 follow-up — opt in to clearing a job whose transaction may still land.
-       *
-       * ONE value rather than a flag beside an identity: the request and the authority to make it
-       * are the same fact, and splitting them let `{ allowPendingTransaction: true }` and
-       * `{ requireOwnerAgentAddress: x }` each compile while silently behaving like an ordinary
-       * clear. Present means "this caller asks"; the publisher grants it only for a job that
-       * caller enqueued.
-       */
-      readonly pendingTransactionOverride?: { readonly requestedBy: string };
-    },
+    options?: TargetedLiftJobClearOptions,
   ): Promise<TerminalJobClearOutcome>;
 }
 

@@ -256,13 +256,30 @@ export function selectLifecycleBindingJobs(
  * {@link isBulkClearableTerminalLiftJob}) and `clearTerminalJob(jobId)` so they cannot drift. A job
  * is clearable iff it is in a native terminal state (finalized|failed) AND is not a
  * `retry_recovery`-failed job — those may still carry a pending on-chain tx that periodic recovery
- * will finalize, so NEITHER clear lane removes them (they leave the queue when `recover()`
- * finalizes them from chain). A `retry_recovery`-failed job is therefore treated as
- * NONTERMINAL-for-cleanup.
+ * will finalize, so ordinary and bulk cleanup do not remove them. The separately authorized,
+ * exact-job override below is their deliberate operator/owner exit. A `retry_recovery`-failed job
+ * is therefore treated as NONTERMINAL-for-routine-cleanup.
  */
 export function isClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
   return isTerminalLiftJobState(job.status)
     && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+}
+
+/**
+ * Authenticated authority accompanying an explicit pending-transaction clear request.
+ *
+ * `requestedBy` preserves the agent-scoped, owner-only lane. The node-operator bit is set only
+ * by the daemon after it distinguishes the node token from an agent token; it deliberately does
+ * not impersonate the default agent, because an operator may clear any job on the node (including
+ * records created before admission ownership was persisted).
+ */
+export interface PendingTransactionClearOverride {
+  readonly requestedBy?: string;
+  readonly requestedByNodeOperator?: true;
+}
+
+export interface TargetedLiftJobClearOptions {
+  readonly pendingTransactionOverride?: PendingTransactionClearOverride;
 }
 
 /**
@@ -343,13 +360,14 @@ export function resolveHeldJobSettlementCapability(wiring: {
  * Does this caller own the job's admission lane?
  *
  * The pending-transaction override below is destructive and `/api/publisher/clear-job` is open to
- * every registered agent token, so the right to accept that risk is per JOB, not per node.
+ * every registered agent token, so an AGENT'S right to accept that risk is per job. The separately
+ * authenticated node operator owns the queue and is authorized independently.
  *
  * The owner is the AUTHENTICATED ENQUEUER, not the resolved author: curated publishing lets those
  * differ (GH#1778), so a curator may submit for another author and it is the curator who admitted
- * the job. A record with no admission has nobody to match and is denied — falling back to the
- * author would grant the override to an identity that did not enqueue anything, and the risk being
- * accepted is a double publish.
+ * the job. A record with no admission has no agent to match — falling back to the author would
+ * grant the override to an identity that did not enqueue anything. Only the node-operator lane may
+ * clear such a legacy record.
  *
  * This boundary is generic over job kind on purpose (3824743779): it reads one typed job-level
  * field and never inspects an operation payload, so a new job variant needs no case here.
@@ -377,7 +395,7 @@ function ownsLiftJobAdmissionLane(job: PersistedLiftJob, agentAddress: string | 
  *
  * #1837's base predicate treats transaction-bearing jobs as nonterminal-for-cleanup, because
  * periodic recovery may still finalize them from chain. That is right for bulk cleanup. The
- * explicit owner override is also the exit when an operator abandons one exact closed-run record:
+ * explicit agent-owner/node-operator override is the exit for one exact closed-run record:
  * it accepts a pre-broadcast `validated` record, a `retry_recovery` failure, or a live
  * `broadcast`/`included` record. The append-only journal remains, and no broad clear receives this
  * authority. A `claimed` record stays denied because it can still be running before validation;
@@ -387,25 +405,23 @@ function ownsLiftJobAdmissionLane(job: PersistedLiftJob, agentAddress: string | 
  * way it would silently absorb every future reason a terminal job becomes protected. Additions to
  * the base policy stay denied here until someone allows them on purpose.
  *
- * The caller must also be entitled to it — see {@link ownsLiftJobAdmissionLane}.
+ * The caller must also be entitled to it: either the admission owner (see
+ * {@link ownsLiftJobAdmissionLane}) or the authenticated node operator.
  */
 export function isTargetedClearableLiftJob(
   job: PersistedLiftJob,
-  options: {
-    /**
-     * The override as the CALLER made it: who requested it, not whether someone decided they
-     * may have it (3825162663). Taking a boolean here reduced authenticated authority to a flag at
-     * the call site and left the ownership check as a separate step a future targeted-clear
-     * could forget while still reading the apparently canonical predicate.
-     */
-    readonly pendingTransactionOverride?: { readonly requestedBy?: string };
-  } = {},
+  options: TargetedLiftJobClearOptions = {},
 ): boolean {
   if (isClearableTerminalLiftJob(job)) return true;
   const override = options.pendingTransactionOverride;
   if (!override) return false;
-  // Authority and state eligibility are decided together, so neither can be granted alone.
-  if (!ownsLiftJobAdmissionLane(job, override.requestedBy)) return false;
+  // Authority and state eligibility are decided together, under the same job lock. An agent may
+  // accept risk only for the lane it admitted; a node operator owns the queue and may accept it
+  // for any job, including an unstamped pre-upgrade record.
+  if (
+    override.requestedByNodeOperator !== true
+    && !ownsLiftJobAdmissionLane(job, override.requestedBy)
+  ) return false;
   if (job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') return true;
   return isTerminalLiftJobState(job.status)
     && isFailedJob(job)

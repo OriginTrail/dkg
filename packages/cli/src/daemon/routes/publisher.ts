@@ -666,18 +666,28 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
     }
     // GH#2270 follow-up (🔴 3823952704, 🔴 3824098476) — clearing a job whose transaction may
-    // still land is a DESTRUCTIVE override, and this route is open to every registered agent token
-    // with no ownership check of its own. The route therefore states WHO is asking and WHAT they
-    // asked for; it does not look the job up itself.
+    // still land is a DESTRUCTIVE override, and this route is open to both agent and node tokens.
+    // The route authenticates WHICH principal tier is asking and WHAT it asked for; it does not
+    // look the job up or decide agent ownership itself.
     //
     // That matters: an earlier version read the job here, which put an unvalidated jobId into a
     // query before `clearTerminalJob`'s safe-id guard ran, and decided ownership outside the claim
     // lock the clear then takes. Validation, the ownership decision and the delete now happen on
     // one record behind one boundary.
+    const isNodeOperatorCaller = config.auth?.enabled === false
+      || (
+        !!requestToken
+        && validTokens.has(requestToken)
+        && !agent.resolveAgentByToken(requestToken)
+      );
     return respondTerminalClearOutcome(
       res,
       await publisherControl.clearTerminalJob(jobId, parsed.allowPendingTransaction === true
-        ? { pendingTransactionOverride: { requestedBy: requestAgentAddress } }
+        ? {
+          pendingTransactionOverride: isNodeOperatorCaller
+            ? { requestedByNodeOperator: true }
+            : { requestedBy: requestAgentAddress },
+        }
         : {}),
       jobId,
     );

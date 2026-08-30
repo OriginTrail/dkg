@@ -298,6 +298,11 @@ export {
   type LiftJobRetryProjection,
   type LiftJobRetryWaitingReason,
 } from './async-lift-retry-disposition.js';
+// Public option types for the narrow terminal-job administrative capability.
+export {
+  type PendingTransactionClearOverride,
+  type TargetedLiftJobClearOptions,
+} from './async-lift-retry-disposition.js';
 export {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,

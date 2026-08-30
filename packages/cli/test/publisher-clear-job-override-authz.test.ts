@@ -8,18 +8,29 @@ import type { RequestContext } from '../src/daemon/handle-request.js';
  * GH#2270 follow-up (🔴 3823952704) — who may force-clear a job whose transaction may still land.
  *
  * The by-id clear is the stated exit for a held UPDATE, but `/api/publisher/clear-job` is reachable
- * by every registered agent token and does no ownership check of its own. Widening the predicate
- * for all callers therefore let one agent delete another lifecycle's only chain-recovery record —
- * and if that transaction later landed, or the owner resubmitted, the node could publish twice.
+ * by every registered agent token. Widening the predicate for all callers therefore let one agent
+ * delete another lifecycle's only chain-recovery record — and if that transaction later landed,
+ * or the owner resubmitted, the node could publish twice. The node token is a distinct operator
+ * tier: it owns the queue and must not be collapsed into the default agent identity.
  *
- * Two conditions are required, and these rows pin each one independently.
+ * These rows pin the three tiers: owning agent, node operator, and unrelated agent.
  */
 describe('clear-job pending-transaction override authorization', () => {
   const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
   const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+  const DEFAULT_AGENT = '0xCCcCCc00000000000000000000000000000000Cc';
 
-  function post(body: unknown, requestAgentAddress: string) {
-    const calls: Array<{ jobId: string; requestedBy?: string }> = [];
+  function post(body: unknown, caller: {
+    requestAgentAddress: string;
+    requestToken?: string;
+    tokenAgentAddress?: string;
+    authEnabled?: boolean;
+  }) {
+    const calls: Array<{
+      jobId: string;
+      requestedBy?: string;
+      requestedByNodeOperator?: true;
+    }> = [];
     const path = '/api/publisher/clear-job';
     const req = Readable.from([]);
     Object.assign(req, {
@@ -38,20 +49,40 @@ describe('clear-job pending-transaction override authorization', () => {
       getStatus: async () => { throw new Error('route must not query the job'); },
       clearTerminalJob: async (
         jobId: string,
-        options?: { pendingTransactionOverride?: { requestedBy: string } },
+        options?: {
+          pendingTransactionOverride?: {
+            requestedBy?: string;
+            requestedByNodeOperator?: true;
+          };
+        },
       ) => {
-        calls.push({ jobId, requestedBy: options?.pendingTransactionOverride?.requestedBy });
+        calls.push({
+          jobId,
+          requestedBy: options?.pendingTransactionOverride?.requestedBy,
+          requestedByNodeOperator:
+            options?.pendingTransactionOverride?.requestedByNodeOperator,
+        });
         return { outcome: 'cleared' as const };
       },
     } as unknown as RequestContext['publisherControl'];
+
+    const requestToken = caller.requestToken;
+    const agent = {
+      resolveAgentByToken: (token: string) => (
+        token === requestToken ? caller.tokenAgentAddress : undefined
+      ),
+    } as unknown as RequestContext['agent'];
 
     const ctx = {
       req: req as RequestContext['req'],
       res: res as unknown as ServerResponse,
       url: new URL(`http://127.0.0.1${path}`),
       path,
-      requestToken: 'dkg_at_test',
-      requestAgentAddress,
+      requestToken,
+      requestAgentAddress: caller.requestAgentAddress,
+      agent,
+      config: { auth: { enabled: caller.authEnabled ?? true } },
+      validTokens: new Set(requestToken ? [requestToken] : []),
       publisherControl,
     } as unknown as RequestContext;
 
@@ -60,26 +91,85 @@ describe('clear-job pending-transaction override authorization', () => {
 
   it('does NOT grant the override to an agent that does not own the job', async () => {
     // The reviewer's scenario: agent B force-clearing agent A's held job.
-    const { run, calls } = post({ jobId: 'job-1', allowPendingTransaction: true }, OTHER);
+    const { run, calls } = post(
+      { jobId: 'job-1', allowPendingTransaction: true },
+      {
+        requestAgentAddress: OTHER,
+        requestToken: 'dkg_at_other',
+        tokenAgentAddress: OTHER,
+      },
+    );
     await run();
     // The route forwards WHO is asking; the publisher decides, atomically, on the record it is
     // about to delete. What matters here is that the caller's identity is not lost on the way.
-    expect(calls).toEqual([{ jobId: 'job-1', requestedBy: OTHER }]);
+    expect(calls).toEqual([{
+      jobId: 'job-1',
+      requestedBy: OTHER,
+      requestedByNodeOperator: undefined,
+    }]);
   });
 
   it('grants it to the owning agent that explicitly asks', async () => {
     // The discriminating half — without it, refusing everyone would pass the row above.
-    const { run, calls } = post({ jobId: 'job-1', allowPendingTransaction: true }, OWNER);
+    const { run, calls } = post(
+      { jobId: 'job-1', allowPendingTransaction: true },
+      {
+        requestAgentAddress: OWNER,
+        requestToken: 'dkg_at_owner',
+        tokenAgentAddress: OWNER,
+      },
+    );
     await run();
-    expect(calls).toEqual([{ jobId: 'job-1', requestedBy: OWNER }]);
+    expect(calls).toEqual([{
+      jobId: 'job-1',
+      requestedBy: OWNER,
+      requestedByNodeOperator: undefined,
+    }]);
+  });
+
+  it('grants a distinct node-operator override instead of impersonating the default agent', async () => {
+    const { run, calls } = post(
+      { jobId: 'job-1', allowPendingTransaction: true },
+      { requestAgentAddress: DEFAULT_AGENT, requestToken: 'node-admin-token' },
+    );
+    await run();
+    expect(calls).toEqual([{
+      jobId: 'job-1',
+      requestedBy: undefined,
+      requestedByNodeOperator: true,
+    }]);
+  });
+
+  it('treats the tokenless auth-disabled daemon as the node operator', async () => {
+    const { run, calls } = post(
+      { jobId: 'legacy-job', allowPendingTransaction: true },
+      { requestAgentAddress: DEFAULT_AGENT, authEnabled: false },
+    );
+    await run();
+    expect(calls).toEqual([{
+      jobId: 'legacy-job',
+      requestedBy: undefined,
+      requestedByNodeOperator: true,
+    }]);
   });
 
   it('does NOT grant it to the owner who did not ask for it', async () => {
     // Ownership alone is not consent: an ordinary terminal clear must stay ordinary.
-    const { run, calls } = post({ jobId: 'job-1' }, OWNER);
+    const { run, calls } = post(
+      { jobId: 'job-1' },
+      {
+        requestAgentAddress: OWNER,
+        requestToken: 'dkg_at_owner',
+        tokenAgentAddress: OWNER,
+      },
+    );
     await run();
     // No override asked for: the value is absent entirely, not a false flag beside an identity.
-    expect(calls).toEqual([{ jobId: 'job-1', requestedBy: undefined }]);
+    expect(calls).toEqual([{
+      jobId: 'job-1',
+      requestedBy: undefined,
+      requestedByNodeOperator: undefined,
+    }]);
   });
 });
 
