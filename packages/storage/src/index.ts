@@ -14,6 +14,8 @@ export {
   type TripleStoreQueryOptions,
   type UpdateOptions,
   type LargeLiteralStorageConfig,
+  STORE_WORK_PRIORITIES,
+  isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
   deleteByPatternWithoutCount,

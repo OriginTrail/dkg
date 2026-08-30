@@ -5,7 +5,9 @@ import {
   StoreSchedulerBusyError,
   isStoreSchedulerBusyError,
 } from '../src/store-priority-scheduler.js';
-import type { StoreWorkPriority } from '../src/triple-store.js';
+import {
+  STORE_WORK_PRIORITIES,
+} from '../src/triple-store.js';
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -78,7 +80,7 @@ describe('StorePriorityScheduler', () => {
     }
   });
 
-  for (const priority of ['ack', 'health', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
+  for (const priority of STORE_WORK_PRIORITIES) {
     it(`bounds the ${priority} queue and returns a typed retryable rejection`, async () => {
       const scheduler = new StorePriorityScheduler({
         maxConcurrent: 1,
@@ -256,7 +258,9 @@ describe('StorePriorityScheduler', () => {
       storeOperation: 'query',
     };
 
-    expect(isStoreSchedulerBusyError(structural)).toBe(true);
+    for (const priority of STORE_WORK_PRIORITIES) {
+      expect(isStoreSchedulerBusyError({ ...structural, priority })).toBe(true);
+    }
     expect(isStoreSchedulerBusyError({ ...structural, reason: undefined })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, priority: 'urgent' })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, operation: undefined })).toBe(false);

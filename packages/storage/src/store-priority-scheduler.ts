@@ -7,7 +7,12 @@ import {
   type SchedulerPressureOutcome,
   type SchedulerPressureTicket,
 } from '@origintrail-official/dkg-core';
-import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
+import {
+  isStoreWorkPriority,
+  STORE_WORK_PRIORITIES,
+  type StorePressureSnapshot,
+  type StoreWorkPriority,
+} from './triple-store.js';
 import {
   STORE_OPERATION_OUTCOME_TAG,
   isStoreOperation,
@@ -82,13 +87,6 @@ export interface StoreSchedulerBusyErrorLike extends StoreOperationOutcomeTagged
   readonly operation: string;
 }
 
-const STORE_WORK_PRIORITIES: ReadonlySet<string> = new Set([
-  'ack',
-  'health',
-  'normal',
-  'background',
-]);
-
 /** Canonical cross-package guard for retry-safe scheduler admission errors. */
 export function isStoreSchedulerBusyError(
   error: unknown,
@@ -100,8 +98,7 @@ export function isStoreSchedulerBusyError(
     && shaped.outcome === 'not_started'
     && shaped.storeOperationOutcomeTag === STORE_OPERATION_OUTCOME_TAG
     && (shaped.reason === 'queue_full' || shaped.reason === 'queue_wait_timeout')
-    && typeof shaped.priority === 'string'
-    && STORE_WORK_PRIORITIES.has(shaped.priority)
+    && isStoreWorkPriority(shaped.priority)
     && typeof shaped.operation === 'string'
     && (shaped.storeOperation === undefined || isStoreOperation(shaped.storeOperation));
 }
@@ -288,10 +285,7 @@ function metricOperation(operation: string): string {
 }
 
 export function storeWorkPriorityRank(priority: StoreWorkPriority): number {
-  if (priority === 'ack') return 0;
-  if (priority === 'health') return 1;
-  if (priority === 'normal') return 2;
-  return 3;
+  return STORE_WORK_PRIORITIES.indexOf(priority);
 }
 
 export class StorePriorityScheduler extends ObservableScheduler {
@@ -524,9 +518,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private nextRunnable(): QueueEntry<unknown> | undefined {
-    const priorities: StoreWorkPriority[] = ['ack', 'health', 'normal', 'background'];
-    priorities.sort((a, b) => storeWorkPriorityRank(a) - storeWorkPriorityRank(b));
-    for (const priority of priorities) {
+    for (const priority of STORE_WORK_PRIORITIES) {
       const queue = this.queues[priority];
       if (queue.length === 0) continue;
       if (!this.canStart(priority)) continue;

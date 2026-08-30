@@ -43,7 +43,13 @@ export interface AskResult {
 
 export type QueryResult = SelectResult | ConstructResult | AskResult;
 export type QueryCancellationMode = 'interruptible' | 'pre-dispatch';
-export type StoreWorkPriority = 'ack' | 'health' | 'normal' | 'background';
+export const STORE_WORK_PRIORITIES = ['ack', 'health', 'normal', 'background'] as const;
+export type StoreWorkPriority = (typeof STORE_WORK_PRIORITIES)[number];
+
+export function isStoreWorkPriority(value: unknown): value is StoreWorkPriority {
+  return typeof value === 'string'
+    && (STORE_WORK_PRIORITIES as readonly string[]).includes(value);
+}
 
 export interface StorePressureSnapshot {
   ackInflight: number;

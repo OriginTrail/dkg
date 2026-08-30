@@ -69,7 +69,9 @@ type ContradictoryOkResponse = QueryResponseBase & {
   code: 'STORE_BUSY';
   retryable: true;
 };
-export type QueryResponseTypeAssertions = [
+// Compile-only contract: intentionally private so fixture types do not enter the public API.
+// eslint-disable-next-line no-unused-vars
+type QueryResponseTypeAssertions = [
   AssertFalse<IncompleteBusyResponse extends QueryResponse ? true : false>,
   AssertFalse<ContradictoryOkResponse extends QueryResponse ? true : false>,
 ];
