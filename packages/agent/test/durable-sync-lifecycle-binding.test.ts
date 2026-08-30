@@ -96,6 +96,11 @@ import {
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
+import {
+  getSyncCheckpointKey,
+  MemorySyncCheckpointStore,
+} from '../src/sync/checkpoint/state.js';
+import { AuthoritativeGraphSnapshotMaterializer } from '../src/sync/requester/authoritative-graph-snapshot.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -591,10 +596,16 @@ describe('durable sync lifecycle chain binding', () => {
     const replaceGraph = vi.fn(async (_graph: string, quads: typeof live) => {
       live = [...quads];
     });
+    const syncCheckpoints = new MemorySyncCheckpointStore();
+    const authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(
+      syncCheckpoints,
+    );
     const insertSyncedQuadsAndInvalidateListCache = vi.fn(async () => {});
     const agentLike: any = {
       config: {},
       store: { replaceGraph },
+      syncCheckpoints,
+      authoritativeAgentSnapshots,
       processDurableBatchInWorker: async () => ({}),
       insertSyncedQuadsAndInvalidateListCache,
       oversizeTombstoneLog: { record: vi.fn() },
@@ -603,17 +614,49 @@ describe('durable sync lifecycle chain binding', () => {
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
     mockedRunDurableSync.mockImplementationOnce(async (syncContext) => {
-      await syncContext.storeInsert({ quads: [fresh] });
-      await syncContext.onVerifiedFullSnapshot?.({
+      const checkpointKey = getSyncCheckpointKey(
+        'peer-agents',
+        SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        false,
+        'data',
+      );
+      syncCheckpoints.setResponderSession(
+        checkpointKey,
+        'agents-session-complete',
+        Date.now() + 60_000,
+        Date.now(),
+        undefined,
+        undefined,
+        1,
+      );
+      const materialized = await syncContext.authoritativeSnapshotMaterializer!.materialize({
         contextGraphId: SYSTEM_CONTEXT_GRAPHS.AGENTS,
-        verifiedDataGraphs: new Set([graph]),
-        verifiedMetaGraphs: new Set(),
-        metaFetched: false,
+        graphUri: graph,
+        verifiedQuads: [fresh],
+        page: {
+          quads: [fresh],
+          bytesReceived: 1,
+          resumedFromOffset: 0,
+          rawResumedFromOffset: 0,
+          nextOffset: 1,
+          rawNextOffset: 1,
+          checkpointKey,
+          completed: true,
+          timedOut: false,
+        },
+        retainablePrefix: true,
+        completeSnapshot: true,
+        snapshot: {
+          contextGraphId: SYSTEM_CONTEXT_GRAPHS.AGENTS,
+          verifiedDataGraphs: new Set([graph]),
+          verifiedMetaGraphs: new Set(),
+          metaFetched: false,
+        },
       });
       return {
         ...createIncompleteDurableSyncResult(),
-        insertedTriples: 1,
-        insertedDataTriples: 1,
+        insertedTriples: materialized.committedTriples,
+        insertedDataTriples: materialized.committedTriples,
         completedPhases: 2,
         complete: true,
       };
@@ -656,9 +699,15 @@ describe('durable sync lifecycle chain binding', () => {
     const replaceGraph = vi.fn(async (_graph: string, quads: typeof live) => {
       live = [...quads];
     });
+    const syncCheckpoints = new MemorySyncCheckpointStore();
+    const authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(
+      syncCheckpoints,
+    );
     const agentLike: any = {
       config: {},
       store: { replaceGraph },
+      syncCheckpoints,
+      authoritativeAgentSnapshots,
       processDurableBatchInWorker: async () => ({}),
       insertSyncedQuadsAndInvalidateListCache: vi.fn(async () => {}),
       oversizeTombstoneLog: { record: vi.fn() },
@@ -667,11 +716,43 @@ describe('durable sync lifecycle chain binding', () => {
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
     mockedRunDurableSync.mockImplementationOnce(async (syncContext) => {
-      await syncContext.storeInsert({ quads: [fresh] });
+      const checkpointKey = getSyncCheckpointKey(
+        'peer-agents',
+        SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        false,
+        'data',
+      );
+      syncCheckpoints.setResponderSession(
+        checkpointKey,
+        'agents-session-partial',
+        Date.now() + 60_000,
+        Date.now(),
+        undefined,
+        undefined,
+        1,
+      );
+      const materialized = await syncContext.authoritativeSnapshotMaterializer!.materialize({
+        contextGraphId: SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        graphUri: graph,
+        verifiedQuads: [fresh],
+        page: {
+          quads: [fresh],
+          bytesReceived: 1,
+          resumedFromOffset: 0,
+          rawResumedFromOffset: 0,
+          nextOffset: 1,
+          rawNextOffset: 1,
+          checkpointKey,
+          completed: false,
+          timedOut: true,
+        },
+        retainablePrefix: true,
+        completeSnapshot: false,
+      });
       return {
         ...createIncompleteDurableSyncResult(),
-        insertedTriples: 1,
-        insertedDataTriples: 1,
+        insertedTriples: materialized.committedTriples,
+        insertedDataTriples: materialized.committedTriples,
       };
     });
 

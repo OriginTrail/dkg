@@ -27,6 +27,7 @@ import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
+import { AuthoritativeGraphSnapshotMaterializer } from './sync/requester/authoritative-graph-snapshot.js';
 import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
 import type {
   Rfc64AuthorizedSwmRecoveryPlanV1,
@@ -1665,6 +1666,8 @@ export class DKGAgentBase {
    * by PR #237 (sync-refactor-rebased).
    */
   protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
+  /** Private, resumable staging for mutable authoritative graph snapshots. */
+  protected authoritativeAgentSnapshots!: AuthoritativeGraphSnapshotMaterializer;
   protected changelogCursors: ChangelogCursorStore = new MemoryChangelogCursorStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
   /** Agent-owned retained selected-SWM transfers, created lazily and drained before store close. */
@@ -1764,6 +1767,9 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceAgentRecipientResolver((input) => (this as unknown as DKGAgent).resolveWorkspaceRecipientsGated(input));
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
+    this.authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(
+      this.syncCheckpoints,
+    );
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
   }
 
