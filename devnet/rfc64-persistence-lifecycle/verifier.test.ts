@@ -336,6 +336,7 @@ function directoryPathsFor(objectDigest: string): string[] {
     'rfc64-sync/control-objects-v1/signatures',
     `rfc64-sync/control-objects-v1/signatures/${prefix}`,
     `rfc64-sync/control-objects-v1/signatures/${prefix}/${objectHex}`,
+    'rfc64-sync/rollout-authority-v1',
   ];
 }
 
