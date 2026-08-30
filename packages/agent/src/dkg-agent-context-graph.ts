@@ -93,7 +93,7 @@ import {
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -940,9 +940,9 @@ export class ContextGraphMethods extends DKGAgentBase {
       // Defensive: replace any stray creator/curator triples (e.g. from
       // a previous build that backfilled per node) so this register call
       // becomes the single source of truth.
-      await this.deleteStoreByPatternWithoutCount({ graph: defGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
-      await this.deleteStoreByPatternWithoutCount({ graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
-      await this.deleteStoreByPatternWithoutCount({ graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
+      await deleteByPatternWithoutCount(this.store, { graph: defGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+      await deleteByPatternWithoutCount(this.store, { graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+      await deleteByPatternWithoutCount(this.store, { graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
       const authorityQuads: Quad[] = [
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
@@ -1164,7 +1164,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
       if (onChainLive) {
         this.log.info(ctx, `Context graph "${id}" already has on-chain ID ${existingOnChainId} — skipping chain call`);
-        await this.deleteStoreByPatternWithoutCount({
+        await deleteByPatternWithoutCount(this.store, {
           graph: cgMetaGraph,
           subject: contextGraphUri,
           predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
@@ -1180,7 +1180,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         `Context graph "${id}" has local on-chain id ${existingOnChainId} but it is not active on-chain — re-registering`,
       );
       const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-      await this.deleteStoreByPatternWithoutCount({
+      await deleteByPatternWithoutCount(this.store, {
         graph: ontologyGraph,
         subject: contextGraphUri,
         predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
@@ -1442,7 +1442,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     // slot from the curator's private `_meta` snapshot.  A private joiner may
     // have missed the one-shot ontology gossip emitted below and must not be
     // left unable to start chain-driven VM reconciliation as a result.
-    await this.deleteStoreByPatternWithoutCount({
+    await deleteByPatternWithoutCount(this.store, {
       graph: cgMetaGraph,
       subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
@@ -1450,12 +1450,12 @@ export class ContextGraphMethods extends DKGAgentBase {
     // Single-valued binding guard (RS heal): the on-chain id is immutable, so
     // clear any prior value before insert — the cgId resolver / heal read this
     // and must never see a multi-valued (LIMIT-1-nondeterministic) binding.
-    await this.deleteStoreByPatternWithoutCount({
+    await deleteByPatternWithoutCount(this.store, {
       graph: ontologyGraph,
       subject: contextGraphUri,
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
     });
-    await this.deleteStoreByPatternWithoutCount({
+    await deleteByPatternWithoutCount(this.store, {
       graph: cgMetaGraph,
       subject: contextGraphUri,
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
@@ -1832,7 +1832,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     // and immediately before this call. The first awaited operation here is
     // therefore also the first persistent membership mutation.
     if (delegationUri) {
-      await this.deleteStoreByPatternWithoutCount({ graph: cgMetaGraph, subject: delegationUri });
+      await deleteByPatternWithoutCount(this.store, { graph: cgMetaGraph, subject: delegationUri });
     }
     await this.store.insert(quadsToInsert);
     this.invalidateListContextGraphsCache();
@@ -1929,7 +1929,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
 
-    await this.deleteStoreByPatternWithoutCount({
+    await deleteByPatternWithoutCount(this.store, {
       graph: cgMetaGraph,
       subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
@@ -1941,7 +1941,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     // primary allowlist. See `inviteAgentToContextGraph` for the
     // matching write side.
     const delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${agentAddress.toLowerCase()}`;
-    await this.deleteStoreByPatternWithoutCount({ graph: cgMetaGraph, subject: delegationUri });
+    await deleteByPatternWithoutCount(this.store, { graph: cgMetaGraph, subject: delegationUri });
     // Persist a LOCAL tombstone so the recipient resolver excludes this
     // agent from future sender-key wraps even when peer-sync has
     // replicated the original `dkg:allowedAgent` triple onto this store
@@ -2027,12 +2027,12 @@ export class ContextGraphMethods extends DKGAgentBase {
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const schemaName = DKG_ONTOLOGY.SCHEMA_NAME;
 
-    await this.deleteStoreByPatternWithoutCount({
+    await deleteByPatternWithoutCount(this.store, {
       subject: contextGraphUri,
       predicate: schemaName,
       graph: ontologyGraph,
     });
-    await this.deleteStoreByPatternWithoutCount({
+    await deleteByPatternWithoutCount(this.store, {
       subject: contextGraphUri,
       predicate: schemaName,
       graph: cgMetaGraph,

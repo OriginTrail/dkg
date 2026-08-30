@@ -109,6 +109,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import {
+  deleteByPatternWithoutCount,
   GraphManager,
   PrivateContentStore,
   createTripleStore,
@@ -1960,7 +1961,7 @@ export class PublishMethods extends DKGAgentBase {
           publishProjection: async (_id, quads, graph) => {
             const subjects = new Set(quads.map((q) => q.subject));
             for (const subject of subjects) {
-              await this.deleteStoreByPatternWithoutCount({ graph, subject });
+              await deleteByPatternWithoutCount(this.store, { graph, subject });
             }
             await this.store.insert(quads);
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
@@ -2779,7 +2780,7 @@ export class PublishMethods extends DKGAgentBase {
       // version may need replacement, but a failure after its delete is safe:
       // the durable seal is written first and an idempotent finalize retry
       // repairs this row before returning.
-      await this.deleteStoreByPatternWithoutCount({
+      await deleteByPatternWithoutCount(this.store, {
         graph: metaGraph,
         subject: lifecycleUri,
         predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
@@ -5717,7 +5718,7 @@ export class PublishMethods extends DKGAgentBase {
           : contextGraphWorkspaceMetaGraphUri(request.contextGraphId);
         const keepLiteral = `"${keepRootCopyOnLabel}"`;
         for (const root of rootEntities.filter(isSafeIri)) {
-          await this.deleteStoreByPatternWithoutCount({
+          await deleteByPatternWithoutCount(this.store, {
             subject: root,
             predicate: KEEP_ROOT_COPY_PREDICATE,
             graph: wsMetaGraph,
@@ -6195,12 +6196,12 @@ export class PublishMethods extends DKGAgentBase {
         const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
         const STATE_PRED = 'http://dkg.io/ontology/state';
         for (const subj of [lifecycleUri, assertionUri]) {
-          await this.deleteStoreByPatternWithoutCount({ subject: subj, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+          await deleteByPatternWithoutCount(this.store, { subject: subj, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
           await this.store.insert([
             { subject: subj, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
           ]);
         }
-        await this.deleteStoreByPatternWithoutCount({ subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
+        await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
         await this.store.insert([
           { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
         ]);
@@ -6219,7 +6220,7 @@ export class PublishMethods extends DKGAgentBase {
         if (result.ual) {
           try {
             const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
-            await this.deleteStoreByPatternWithoutCount({ subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
+            await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
             await this.store.insert([
               { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, object: `"${result.ual}"`, graph: metaGraph },
             ]);
@@ -6263,7 +6264,7 @@ export class PublishMethods extends DKGAgentBase {
             const vmAuthor = '0x' + (vmKaIdBig >> 96n).toString(16).padStart(40, '0');
             const vmNumber = vmKaIdBig & ((1n << 96n) - 1n);
             const vmGraph = contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, opts?.subGraphName);
-            await this.deleteStoreByPatternWithoutCount({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
+            await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
             await this.store.insert([
               { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph },
             ]);
@@ -6283,7 +6284,7 @@ export class PublishMethods extends DKGAgentBase {
             // Any non-"WM" value short-circuits that guard, so "VM" keeps the
             // no-op witness AND tells the truth about the layer.
             const wmGraph = contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, vmAuthor, vmNumber, opts?.subGraphName);
-            await this.deleteStoreByPatternWithoutCount({ subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+            await deleteByPatternWithoutCount(this.store, { subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
             await this.store.insert([
               { subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
             ]);
@@ -6441,7 +6442,7 @@ export class PublishMethods extends DKGAgentBase {
     metaGraph: string,
   ): Promise<void> {
     const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
-    await this.deleteStoreByPatternWithoutCount({ subject: lifecycleUri, predicate: pred, graph: metaGraph });
+    await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
     await this.store.insert([
       { subject: lifecycleUri, predicate: pred, object: `"${bare}"`, graph: metaGraph },
     ]);
@@ -6479,7 +6480,7 @@ export class PublishMethods extends DKGAgentBase {
       // divergent row is not.
     }
     if (vmBare !== undefined && vmBare === bare) {
-      await this.deleteStoreByPatternWithoutCount({ subject: lifecycleUri, predicate: pred, graph: metaGraph });
+      await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
       return;
     }
     await this._stampPointer(lifecycleUri, pred, bare, metaGraph);
@@ -6924,7 +6925,7 @@ export class PublishMethods extends DKGAgentBase {
           : contextGraphWorkspaceMetaGraphUri(contextGraphId);
         const keepLiteral = `"${keepRootCopyOnLabel}"`;
         for (const root of rootEntities.filter(isSafeIri)) {
-          await this.deleteStoreByPatternWithoutCount({
+          await deleteByPatternWithoutCount(this.store, {
             subject: root,
             predicate: KEEP_ROOT_COPY_PREDICATE,
             graph: wsMetaGraph,

@@ -1774,14 +1774,6 @@ export class DKGAgentBase {
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
   }
 
-  /** Use the backend's one-round-trip delete path when no exact count is consumed. */
-  protected deleteStoreByPatternWithoutCount(
-    pattern: Partial<Quad>,
-    options?: QueryOptions,
-  ): Promise<void> {
-    return deleteByPatternWithoutCount(this.store, pattern, options);
-  }
-
   /**
    * Acquire the RFC-64 inventory, finish bounded stale-candidate cleanup, and
    * open the inherited-owner control-object tree before network consumers.
