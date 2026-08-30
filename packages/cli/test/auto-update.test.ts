@@ -1291,7 +1291,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
   });
 
   it('normalizes only own string dist-tags at the registry gateway', async () => {
-    const { fetchNpmDistTags } = await import('../src/daemon.js');
+    const { fetchNpmDistTags } = await import('../src/update/npm-registry.js');
     fetchImpl = async () => ({
       ok: true,
       json: async () => ({
@@ -1306,7 +1306,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
   });
 
   it('rejects a malformed dist-tags container at the registry gateway', async () => {
-    const { fetchNpmDistTags } = await import('../src/daemon.js');
+    const { fetchNpmDistTags } = await import('../src/update/npm-registry.js');
     fetchImpl = async () => ({
       ok: true,
       json: async () => ({ 'dist-tags': ['9.1.0'] }),

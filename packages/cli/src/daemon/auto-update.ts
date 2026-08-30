@@ -78,21 +78,10 @@ import {
 } from '../update/npm-registry.js';
 export {
   compareSemver,
-  decodeNpmDistTags,
-  fetchNpmDistTags,
   isPrerelease,
   isValidSemver,
-  resolveExplicitNpmUpdateTarget,
   resolveLatestNpmVersion,
-  resolveNpmDistTag,
-  type ExplicitNpmUpdateTargetDecision,
-  type NpmDistTagResult,
-  type NpmDistTagsResult,
-  type NpmRegistryDeps,
-  type NpmRegistryFailure,
-  type NpmRegistryFetch,
   type NpmVersionResult,
-  type NpmVersionNoTargetReason,
 } from '../update/npm-registry.js';
 
 const execAsync = promisify(exec);
