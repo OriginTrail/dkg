@@ -318,7 +318,16 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       router: router.asProtocolRouter(),
       controlObjects: store,
       accessPolicyAuthority: accessPolicyAuthority(),
-      resolveContextGraphMode: () => 'legacy',
+      resolveContextGraphAuthority: (contextGraphId) => Object.freeze({
+        contextGraphId,
+        selected: true,
+        mode: 'legacy',
+        killSwitchActive: false,
+        legacySyncAllowed: true,
+        track2Enabled: false,
+        authoringAllowed: false,
+        reconciliationLane: 'legacy',
+      }),
     });
     service.start();
 
@@ -353,11 +362,21 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       resolveContextGraphAuthority: (contextGraphId) => Object.freeze(
         contextGraphId === legacyCg
           ? {
+            contextGraphId,
+            selected: true,
+            mode: 'legacy' as const,
+            killSwitchActive: false,
+            legacySyncAllowed: true as const,
             track2Enabled: false,
             authoringAllowed: false,
             reconciliationLane: 'legacy' as const,
           }
           : {
+            contextGraphId,
+            selected: true,
+            mode: 'catalog' as const,
+            killSwitchActive: false,
+            legacySyncAllowed: false as const,
             track2Enabled: true,
             authoringAllowed: true,
             reconciliationLane: 'catalog-apply' as const,
@@ -1670,7 +1689,16 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       controlObjects: store,
       accessPolicyAuthority: accessPolicyAuthority(),
       onHeadStaged,
-      resolveContextGraphMode: () => 'shadow',
+      resolveContextGraphAuthority: (contextGraphId) => Object.freeze({
+        contextGraphId,
+        selected: true,
+        mode: 'shadow',
+        killSwitchActive: false,
+        legacySyncAllowed: true,
+        track2Enabled: true,
+        authoringAllowed: true,
+        reconciliationLane: 'shadow-stage',
+      }),
       native: nativeOptions(() => ({
         isHeadApplied: async () => false,
         reconcileHead,

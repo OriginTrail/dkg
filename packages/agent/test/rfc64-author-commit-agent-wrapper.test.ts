@@ -16,6 +16,7 @@ function input(): Rfc64AuthorCommitCasInputV1 {
     subject,
     predicate,
     expectedObject: oldValue,
+    expectedQuads: [{ subject, predicate, object: oldValue, graph: stateGraph }],
     quads: [{ subject, predicate, object: nextValue, graph: stateGraph }],
   });
   return {
@@ -29,6 +30,7 @@ function input(): Rfc64AuthorCommitCasInputV1 {
       subject: 'urn:author',
       predicate: 'urn:head',
       expectedObject: 'urn:old',
+      expectedQuads: [{ subject: 'urn:author', predicate: 'urn:head', object: 'urn:old', graph: 'urn:heads' }],
       quads: [{ subject: 'urn:author', predicate: 'urn:head', object: 'urn:new', graph: 'urn:heads' }],
     },
     subgraphMutationGeneration: transition('urn:subgraph-mutation', 'urn:generation', '"1"', '"2"'),

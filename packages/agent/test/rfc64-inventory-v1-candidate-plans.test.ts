@@ -314,10 +314,12 @@ function expectPlanGate(plans: PlanClass): void {
     plans.getAppliedHead.some((detail) => detail.includes('USING PRIMARY KEY')),
     `${INVENTORY_V1_STATEMENT_IDS.getAppliedHead} must use its exact scope primary key`,
   ).toBe(true);
-  expect(
-    plans.updateAppliedHeadCas.some((detail) => detail.includes('USING PRIMARY KEY')),
-    `${INVENTORY_V1_STATEMENT_IDS.updateAppliedHeadCas} must use its exact scope primary key`,
-  ).toBe(true);
+  for (const statementId of ['updateAppliedHeadCas', 'deleteAppliedHeadCas'] as const) {
+    expect(
+      plans[statementId].some((detail) => detail.includes('USING PRIMARY KEY')),
+      `${INVENTORY_V1_STATEMENT_IDS[statementId]} must use its exact scope primary key`,
+    ).toBe(true);
+  }
 
   for (const statementId of [
     'getSwmAuthorHead',

@@ -1,5 +1,4 @@
 import { access, readFile, rm } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -9,6 +8,8 @@ import {
   readExactGraphPaged,
   type Quad,
 } from '@origintrail-official/dkg-storage';
+import blazegraphRuntimeContract from
+  '@origintrail-official/dkg/blazegraph-runtime-contract';
 
 import {
   parseRolloutStoreBackend,
@@ -41,19 +42,12 @@ export interface RolloutStoreFixtureOptions {
   readonly storeDataDirs?: Readonly<Record<RolloutStoreRole, readonly string[]>>;
 }
 
-interface BlazegraphRuntimeContract {
-  renderBlazegraphNamespaceXml(namespace: string): string;
-}
-
 const DEFAULT_MANAGEMENT_TIMEOUT_MS = 30_000;
 const DEFAULT_STORE_DATA_DIRS = Object.freeze({
   author: Object.freeze(['author']),
   receiver: Object.freeze(['receiver']),
 });
-const require = createRequire(import.meta.url);
-const { renderBlazegraphNamespaceXml } = require(
-  '../../packages/cli/blazegraph-image-metadata.cjs',
-) as BlazegraphRuntimeContract;
+const { renderBlazegraphNamespaceXml } = blazegraphRuntimeContract;
 
 export async function createRolloutStoreFixture(
   options: RolloutStoreFixtureOptions = {},

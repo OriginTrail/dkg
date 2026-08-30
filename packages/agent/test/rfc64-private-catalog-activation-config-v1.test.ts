@@ -18,8 +18,8 @@ import {
 import {
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
-  rfc64CatalogTrack2ModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
+  resolveRfc64CatalogAuthorityDecisionV1,
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
@@ -310,7 +310,8 @@ describe('RFC-64 private catalog activation', () => {
     });
     expect(rfc64CatalogRolloutModeForContextGraphV1(disabled, PUBLIC_CG)).toBe('legacy');
     expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(disabled, PUBLIC_CG)).toBe(true);
-    expect(rfc64CatalogTrack2ModeForContextGraphV1(disabled, PUBLIC_CG)).toBe('catalog');
+    expect(resolveRfc64CatalogAuthorityDecisionV1(disabled as never, PUBLIC_CG))
+      .toMatchObject({ reconciliationLane: 'catalog-apply', authoringAllowed: true });
   });
 
   it('normalizes the previous release disabled resolved activation shapes', () => {

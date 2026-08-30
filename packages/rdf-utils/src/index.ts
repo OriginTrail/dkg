@@ -11,6 +11,17 @@ const RDF_LITERAL_SHORT_ESCAPES: Readonly<Record<string, string>> = Object.freez
 
 const RDF_LITERAL_ESCAPE_PATTERN = /["\\\u0000-\u001F\u007F]/g;
 
+const NTRIPLES_ECHAR_VALUES: Readonly<Record<string, string>> = Object.freeze({
+  b: '\b',
+  t: '\t',
+  n: '\n',
+  f: '\f',
+  r: '\r',
+  '"': '"',
+  "'": "'",
+  '\\': '\\',
+});
+
 export interface DecodeNTriplesUcharEscapesOptions {
   /** Preserve malformed or non-UCHAR backslash sequences instead of rejecting. */
   invalidEscape?: 'reject' | 'preserve';
@@ -30,6 +41,14 @@ export interface DecodeNTriplesUcharEscapesOptions {
  */
 export function decodeNTriplesUcharEscapes(
   value: string,
+  options: DecodeNTriplesUcharEscapesOptions & { invalidEscape: 'preserve' },
+): string;
+export function decodeNTriplesUcharEscapes(
+  value: string,
+  options?: DecodeNTriplesUcharEscapesOptions,
+): string | null;
+export function decodeNTriplesUcharEscapes(
+  value: string,
   options: DecodeNTriplesUcharEscapesOptions = {},
 ): string | null {
   if (!value.includes('\\')) return value;
@@ -37,51 +56,36 @@ export function decodeNTriplesUcharEscapes(
   const surrogatePolicy = options.surrogatePolicy ?? 'reject';
   let decoded = '';
 
-  for (let index = 0; index < value.length; index += 1) {
+  for (let index = 0; index < value.length;) {
     if (value[index] !== '\\') {
       decoded += value[index];
+      index += 1;
       continue;
     }
-    const marker = value[index + 1];
-    const digits = marker === 'u' ? 4 : marker === 'U' ? 8 : 0;
-    const hex = digits === 0 ? '' : value.slice(index + 2, index + 2 + digits);
-    const rawEscape = digits === 0 ? value.slice(index, index + 2) : `\\${marker}${hex}`;
-    if (digits === 0 || hex.length !== digits || !/^[0-9A-Fa-f]+$/.test(hex)) {
+    const token = scanNTriplesEscape(value, index, surrogatePolicy);
+    if (token.kind !== 'uchar') {
       if (!preserveInvalid) return null;
-      decoded += rawEscape;
-      index += Math.max(0, rawEscape.length - 1);
+      decoded += value.slice(index, token.nextIndex);
+      index = token.nextIndex;
       continue;
     }
-
-    let codePoint = Number.parseInt(hex, 16);
-    index += digits + 1;
-    if (codePoint > 0x10ffff) {
-      if (!preserveInvalid) return null;
-      decoded += rawEscape;
-      continue;
-    }
-    if (codePoint >= 0xd800 && codePoint <= 0xdbff && surrogatePolicy === 'combine') {
-      const lowHex = value.slice(index + 3, index + 7);
-      if (value.slice(index + 1, index + 3) !== '\\u'
-        || lowHex.length !== 4
-        || !/^[dD][c-fC-F][0-9A-Fa-f]{2}$/.test(lowHex)) {
-        if (!preserveInvalid) return null;
-        decoded += rawEscape;
-        continue;
-      }
-      const low = Number.parseInt(lowHex, 16);
-      codePoint = 0x10000 + ((codePoint - 0xd800) * 0x400) + (low - 0xdc00);
-      index += 6;
-    } else if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
-      if (surrogatePolicy !== 'allow') {
-        if (!preserveInvalid) return null;
-        decoded += rawEscape;
-        continue;
-      }
-    }
-    decoded += String.fromCodePoint(codePoint);
+    decoded += token.decoded;
+    index = token.nextIndex;
   }
   return decoded;
+}
+
+/** Decode strict IRI-position UCHAR escapes, including Blazegraph short surrogate pairs. */
+export function decodeNTriplesIriEscapesStrict(value: string): string | null {
+  return decodeNTriplesUcharEscapes(value, { surrogatePolicy: 'combine' });
+}
+
+/** Preserve the deployed V10 datatype-IRI replacement behavior exactly. */
+export function decodeNTriplesIriEscapesPreservingLegacy(value: string): string {
+  return decodeNTriplesUcharEscapes(value, {
+    invalidEscape: 'preserve',
+    surrogatePolicy: 'allow',
+  });
 }
 
 /**
@@ -171,63 +175,92 @@ export interface DecodeRdfLiteralBodyOptions {
  */
 export function decodeRdfLiteralBody(
   value: string,
+  options: DecodeRdfLiteralBodyOptions & { invalidEscape: 'preserve' },
+): string;
+export function decodeRdfLiteralBody(
+  value: string,
+  options?: DecodeRdfLiteralBodyOptions,
+): string | null;
+export function decodeRdfLiteralBody(
+  value: string,
   options: DecodeRdfLiteralBodyOptions = {},
 ): string | null {
   if (!value.includes('\\')) return value;
 
   const preserveInvalid = options.invalidEscape === 'preserve';
   let result = '';
-  for (let index = 0; index < value.length; index++) {
+  const surrogatePolicy = options.allowSurrogateCodePoints === true ? 'allow' : 'reject';
+  for (let index = 0; index < value.length;) {
     const character = value[index];
     if (character !== '\\') {
       result += character;
+      index += 1;
       continue;
     }
-    if (index + 1 >= value.length) return preserveInvalid ? `${result}\\` : null;
-
-    const escaped = value[++index];
-    switch (escaped) {
-      case 'n': result += '\n'; break;
-      case 'r': result += '\r'; break;
-      case 't': result += '\t'; break;
-      case 'b': result += '\b'; break;
-      case 'f': result += '\f'; break;
-      case '"': result += '"'; break;
-      case "'": result += "'"; break;
-      case '\\': result += '\\'; break;
-      case 'u':
-      case 'U': {
-        const length = escaped === 'u' ? 4 : 8;
-        const hex = value.slice(index + 1, index + 1 + length);
-        if (hex.length !== length || !/^[0-9A-Fa-f]+$/.test(hex)) {
-          if (!preserveInvalid) return null;
-          result += `\\${escaped}`;
-          break;
-        }
-        const decoded = decodeUnicodeCodePoint(hex, options.allowSurrogateCodePoints === true);
-        if (decoded === null) {
-          if (!preserveInvalid) return null;
-          result += `\\${escaped}${hex}`;
-        } else {
-          result += decoded;
-        }
-        index += length;
-        break;
-      }
-      default:
-        if (!preserveInvalid) return null;
-        result += `\\${escaped}`;
-        break;
+    const token = scanNTriplesEscape(value, index, surrogatePolicy);
+    if (token.kind === 'echar' || token.kind === 'uchar') {
+      result += token.decoded;
+      index = token.nextIndex;
+      continue;
     }
+    if (!preserveInvalid) return null;
+    result += value.slice(index, token.nextIndex);
+    index = token.nextIndex;
   }
   return result;
 }
 
-function decodeUnicodeCodePoint(hex: string, allowSurrogates: boolean): string | null {
-  const codePoint = Number.parseInt(hex, 16);
-  if (codePoint > 0x10FFFF) return null;
-  if (!allowSurrogates && codePoint >= 0xD800 && codePoint <= 0xDFFF) return null;
-  return String.fromCodePoint(codePoint);
+type NTriplesSurrogatePolicy = NonNullable<DecodeNTriplesUcharEscapesOptions['surrogatePolicy']>;
+
+type NTriplesEscapeToken =
+  | { readonly kind: 'echar' | 'uchar'; readonly decoded: string; readonly nextIndex: number }
+  | { readonly kind: 'invalid'; readonly nextIndex: number };
+
+/** One cursor owner for ECHAR/UCHAR width, hex, scalar, and surrogate handling. */
+function scanNTriplesEscape(
+  value: string,
+  start: number,
+  surrogatePolicy: NTriplesSurrogatePolicy,
+): NTriplesEscapeToken {
+  const marker = value[start + 1];
+  const echar = marker === undefined ? undefined : NTRIPLES_ECHAR_VALUES[marker];
+  if (echar !== undefined) {
+    return { kind: 'echar', decoded: echar, nextIndex: start + 2 };
+  }
+  const digits = marker === 'u' ? 4 : marker === 'U' ? 8 : 0;
+  if (digits === 0) return { kind: 'invalid', nextIndex: start + 1 };
+
+  const end = start + 2 + digits;
+  const hex = value.slice(start + 2, end);
+  if (hex.length !== digits || !/^[0-9A-Fa-f]+$/.test(hex)) {
+    // Consume only the slash. This exactly preserves the legacy regex scan:
+    // a later valid escape overlapping a malformed prefix is still decoded.
+    return { kind: 'invalid', nextIndex: start + 1 };
+  }
+  let codePoint = Number.parseInt(hex, 16);
+  if (codePoint > 0x10ffff) return { kind: 'invalid', nextIndex: end };
+
+  if (codePoint >= 0xd800 && codePoint <= 0xdbff && surrogatePolicy === 'combine') {
+    // Long-form UCHAR represents a code point and can never encode a surrogate
+    // half. Only Blazegraph's two adjacent short escapes are compatible here.
+    if (marker !== 'u') return { kind: 'invalid', nextIndex: end };
+    const lowStart = end;
+    const lowHex = value.slice(lowStart + 2, lowStart + 6);
+    if (
+      value.slice(lowStart, lowStart + 2) !== '\\u'
+      || lowHex.length !== 4
+      || !/^[dD][c-fC-F][0-9A-Fa-f]{2}$/.test(lowHex)
+    ) {
+      return { kind: 'invalid', nextIndex: end };
+    }
+    const low = Number.parseInt(lowHex, 16);
+    codePoint = 0x10000 + ((codePoint - 0xd800) * 0x400) + (low - 0xdc00);
+    return { kind: 'uchar', decoded: String.fromCodePoint(codePoint), nextIndex: lowStart + 6 };
+  }
+  if (codePoint >= 0xd800 && codePoint <= 0xdfff && surrogatePolicy !== 'allow') {
+    return { kind: 'invalid', nextIndex: end };
+  }
+  return { kind: 'uchar', decoded: String.fromCodePoint(codePoint), nextIndex: end };
 }
 
 /** Parse the N-Triples-style literal term emitted by {@link formatCanonicalRdfLiteralTerm}. */

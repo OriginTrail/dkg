@@ -1,9 +1,11 @@
 import {
+  assertAuthorCatalogScopeV1,
   assertCanonicalChainId,
   assertCanonicalEvmAddress,
   assertCanonicalGraphScopedAuthorSealV1,
   assertNetworkIdV1,
   buildAuthorAttestationTypedData,
+  type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
 } from '@origintrail-official/dkg-core';
@@ -62,6 +64,24 @@ export const GATE1_ROLE_MASTER_KEYS = Object.freeze({
   receiver: '2b'.repeat(32),
 });
 
+export function createGate1CatalogScopeV1(
+  contextGraphId: string,
+): AuthorCatalogScopeV1 {
+  const scope: unknown = {
+    networkId: GATE1_NETWORK_ID,
+    contextGraphId,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    subGraphName: null,
+    authorAddress: GATE1_AUTHOR_ADDRESS,
+    era: '0',
+    bucketCount: '1',
+  };
+  assertAuthorCatalogScopeV1(scope);
+  return Object.freeze(scope);
+}
+
 export async function createGate1AuthorSealV1(
 ): Promise<CanonicalGraphScopedAuthorSealV1> {
   const typedData = buildAuthorAttestationTypedData({
@@ -76,7 +96,7 @@ export async function createGate1AuthorSealV1(
     typedData.types,
     typedData.message,
   ));
-  const seal = {
+  const seal: unknown = {
     assertionMerkleRoot: GATE1_ASSERTION_ROOT,
     authorAddress: GATE1_AUTHOR_ADDRESS,
     authorAttestationR: signature.r,
@@ -92,7 +112,7 @@ export async function createGate1AuthorSealV1(
     publicTripleCount: '2',
     privateTripleCount: '0',
     privateMerkleRoot: null,
-  } as unknown as CanonicalGraphScopedAuthorSealV1;
+  };
   assertCanonicalGraphScopedAuthorSealV1(seal);
   return seal;
 }

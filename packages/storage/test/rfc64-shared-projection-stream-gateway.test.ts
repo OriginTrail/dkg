@@ -89,6 +89,37 @@ describe('SyncSharedProjectionStoreV1', () => {
     expect(open).toHaveBeenCalledOnce();
   });
 
+  it('anchors the absolute deadline at open even before lazy consumption', async () => {
+    const open = vi.fn(async () => streamLines(TRIPLES));
+    const result = await new SyncSharedProjectionStoreV1(fakeStore(open)).open(REQUEST, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 5,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(collect(result.bytes)).rejects.toMatchObject({ name: 'TimeoutError' });
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('rejects semantically valid but noncanonical capability bytes', async () => {
+    const integer = Object.freeze({
+      subject: 'urn:a',
+      predicate: 'urn:p',
+      object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    });
+    const request = createRfc64SharedProjectionTestFixture({ triples: [integer] }).request;
+    const noncanonical = new TextEncoder().encode(
+      '<urn:a> <urn:p> "00000000000000000001"^^<http://www.w3.org/2001/XMLSchema#integer> .\n',
+    );
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(async () => streamCanonicalLines([noncanonical])),
+    ).open(request, { operatorByteCeiling: 4096, timeoutMs: 1000 });
+
+    await expect(collect(result.bytes)).rejects.toMatchObject({
+      code: 'rfc64-shared-projection-stream-result',
+    });
+  });
+
   it('fails closed on non-canonical order or digest mismatch', async () => {
     await expectStreamFailure([TRIPLES[1], TRIPLES[0]], /canonical byte order/);
     await expectStreamFailure([
