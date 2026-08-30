@@ -54,11 +54,24 @@ export const TRACKED_TEXT_PATHS = Object.freeze([
   'LICENSE',
 ]);
 
-function nulSeparatedPaths(buffer) {
-  return buffer
-    .toString('utf8')
-    .split('\0')
-    .filter(Boolean);
+function nulSeparatedPathBuffers(buffer) {
+  const paths = [];
+  let start = 0;
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (buffer[index] !== 0) continue;
+    if (index > start) paths.push(buffer.subarray(start, index));
+    start = index + 1;
+  }
+  if (start < buffer.length) paths.push(buffer.subarray(start));
+  return paths;
+}
+
+function absolutePathBuffer(repoRoot, relativePath) {
+  return Buffer.concat([
+    Buffer.from(path.resolve(repoRoot)),
+    Buffer.from(path.sep),
+    relativePath,
+  ]);
 }
 
 function commandFailure(command, result) {
@@ -85,22 +98,9 @@ export function findTrackedTextFilesWithNul({
   spawnProcess = spawnSync,
   readFile = fs.readFileSync,
 } = {}) {
-  // Do not add `-I`: it excludes the binary-classified files this guard exists to catch.
-  const grep = runGit(
-    spawnProcess,
-    ['grep', '-z', '-l', '-P', '\\x00', '--', ...TRACKED_TEXT_PATHS],
-    repoRoot,
-  );
-  if (grep.status === 0) return nulSeparatedPaths(grep.stdout);
-  if (grep.status === 1) return [];
-
-  const grepError = Buffer.from(grep.stderr ?? '').toString('utf8');
-  if (!/(?:PCRE|Perl-compatible)/i.test(grepError)) {
-    throw commandFailure('git grep', grep);
-  }
-
-  // Portable fallback for Git builds compiled without PCRE. `git ls-files` keeps the scope to
-  // tracked paths; reading Buffers avoids any text-decoder normalization hiding a literal byte.
+  // One portable path on every platform: Git applies the text allowlist, emits raw NUL-delimited
+  // pathname bytes, and Node inspects the working-tree file as bytes. Do not decode a pathname
+  // before opening it: Git permits non-UTF-8 names and fs.readFileSync accepts a Buffer path.
   const listing = runGit(
     spawnProcess,
     ['ls-files', '-z', '--', ...TRACKED_TEXT_PATHS],
@@ -109,27 +109,34 @@ export function findTrackedTextFilesWithNul({
   if (listing.status !== 0) throw commandFailure('git ls-files', listing);
 
   const offenders = [];
-  for (const filePath of nulSeparatedPaths(listing.stdout)) {
+  for (const filePath of nulSeparatedPathBuffers(listing.stdout)) {
     try {
-      if (readFile(path.join(repoRoot, filePath)).includes(0)) offenders.push(filePath);
+      if (readFile(absolutePathBuffer(repoRoot, filePath)).includes(0)) offenders.push(filePath);
     } catch (error) {
-      // A tracked file can be absent in a developer's unstaged deletion. Git grep ignores that
-      // working-tree path too; CI checkouts are complete, so parity is preferable to a false fail.
+      // A tracked file can be absent in a developer's unstaged deletion. Preserve that local
+      // workflow, but fail closed for every other read error; CI checkouts are complete.
       if (error?.code !== 'ENOENT') throw error;
     }
   }
   return offenders;
 }
 
-export function runTrackedTextNulCheck(options) {
-  const offenders = findTrackedTextFilesWithNul(options);
+export function runTrackedTextNulCheck({
+  log = console.log,
+  logError = console.error,
+  ...scanOptions
+} = {}) {
+  const offenders = findTrackedTextFilesWithNul(scanOptions);
   if (offenders.length === 0) {
-    console.log('Tracked text NUL-byte check passed.');
+    log('Tracked text NUL-byte check passed.');
     return 0;
   }
-  console.error('Literal NUL byte(s) found in tracked text files:');
-  for (const filePath of offenders) console.error(`  ${JSON.stringify(filePath)}`);
-  console.error('Remove the NUL bytes; do not suppress this check with git grep -I.');
+  logError('Literal NUL byte(s) found in tracked text files:');
+  for (const filePath of offenders) {
+    // Decode only for human diagnostics; file lookup above always uses the original bytes.
+    logError(`  ${JSON.stringify(filePath.toString('utf8'))}`);
+  }
+  logError('Remove the NUL bytes from these source/config/document files.');
   return 1;
 }
 
