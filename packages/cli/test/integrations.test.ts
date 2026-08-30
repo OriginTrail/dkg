@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Command } from 'commander';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // This package is `"type": "module"`. Vitest's transform happens to supply
@@ -805,6 +805,14 @@ describe('integration commands (Commander layer, real wire)', () => {
   const beta = manualEntry('beta-graph', 'Beta Graph', 'verified');
   const communityOnly = manualEntry('gamma-tool', 'Gamma Tool', 'community');
 
+  const mcpNoArgs = {
+    ...baseEntry,
+    slug: 'mcp-no-args',
+    name: 'MCP No Args',
+    install: { kind: 'mcp', command: 'my-mcp-server' },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
   // npm-global service WITHOUT `npmGlobal.binary` — schema-valid, and the shape
   // resolveBinary's package-name fallback exists for.
   const svcEntry = {
@@ -871,7 +879,16 @@ describe('integration commands (Commander layer, real wire)', () => {
     process.env.DKG_REGISTRY_INDEX_URL = `${registryBase}/index`;
     process.env.DKG_REGISTRY_RAW_BASE = `${registryBase}/raw`;
 
-    for (const e of [alpha, beta, communityOnly, svcEntry, svcNoMeta, svcBinary, svcBlankPkg]) {
+    for (const e of [
+      alpha,
+      beta,
+      communityOnly,
+      mcpNoArgs,
+      svcEntry,
+      svcNoMeta,
+      svcBinary,
+      svcBlankPkg,
+    ]) {
       registryRoutes.set(`/raw/${e.slug}.json`, { status: 200, body: JSON.stringify(e) });
     }
     // Only the manual entries are indexed: `installed` runs detectInstalled over
@@ -952,6 +969,50 @@ describe('integration commands (Commander layer, real wire)', () => {
 
     const inst = JSON.parse(await runCli(['integration', 'installed', '--json']));
     expect(inst.installed.map((r: { slug: string }) => r.slug)).toContain('gamma-tool');
+  });
+
+  it('routes a detectable registry entry through real installed detection', async () => {
+    const fakeBin = await mkdtemp(join(tmpdir(), 'dkg-integration-npm-'));
+    const originalPath = process.env.PATH;
+    const npmResult = JSON.stringify({
+      dependencies: { '@acme/svc': { version: '2.0.0' } },
+    });
+    await writeFile(
+      join(fakeBin, 'npm'),
+      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(npmResult)});\n`,
+      'utf8',
+    );
+    await chmod(join(fakeBin, 'npm'), 0o755);
+    await writeFile(
+      join(fakeBin, 'npm.cmd'),
+      `@echo off\r\necho ${npmResult}\r\n`,
+      'utf8',
+    );
+    process.env.PATH = [fakeBin, originalPath].filter(Boolean).join(delimiter);
+    registryRoutes.set('/index', {
+      status: 200,
+      body: JSON.stringify([alpha, svcEntry].map((entry) => ({ name: `${entry.slug}.json` }))),
+    });
+
+    try {
+      const parsed = JSON.parse(await runCli(['integration', 'installed', '--json']));
+      expect(parsed.installed).toContainEqual({
+        slug: 'svc-ok',
+        kind: 'service',
+        state: 'installed',
+        detail: '@acme/svc@2.0.0',
+      });
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it('prints schema-valid MCP entries with no args through `info`', async () => {
+    const output = await runCli(['integration', 'info', mcpNoArgs.slug]);
+    expect(output).toContain('MCP No Args  [verified]');
+    expect(output).toContain('command:    my-mcp-server (no args declared)');
   });
 
   it('`search --tier community --json` widens to community entries', async () => {
