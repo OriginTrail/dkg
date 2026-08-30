@@ -42,7 +42,7 @@ export interface SyncOnConnectPeerJobRunner<SelectedPlan> {
   /** Discard deferred accounting when the owning peer job is cancelled. */
   readonly cancel: () => void;
   /** Commit the job's combined reconciler accounting exactly once. */
-  readonly finish: () => void | Promise<void>;
+  readonly finish: () => void;
 }
 
 export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
@@ -64,7 +64,6 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
  */
 export class SyncOnConnectPeerScheduler<SelectedPlan> {
   private readonly jobs = new Map<string, PeerJob<SelectedPlan>>();
-  private readonly finalizationBarriers = new Map<string, Promise<void>>();
 
   constructor(
     private readonly callbacks: SyncOnConnectPeerSchedulerCallbacks<SelectedPlan>,
@@ -140,23 +139,14 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       timer: null,
     };
     this.jobs.set(remotePeer, job);
-    const start = () => {
-      if (this.jobs.get(remotePeer) !== job) return;
-      job.timer = setTimeout(() => {
-        job.timer = null;
-        // Lane and finalizer failures are routed inside drain. Keep an observable
-        // terminal boundary for genuinely unexpected scheduler defects.
-        void this.drain(remotePeer, job).catch((error: unknown) => {
-          void this.reportInternalError(remotePeer, error, 'scheduler-drain');
-        });
-      }, delayMs);
-    };
-    const finalizationBarrier = this.finalizationBarriers.get(remotePeer);
-    if (finalizationBarrier === undefined) {
-      start();
-    } else {
-      void finalizationBarrier.then(start);
-    }
+    job.timer = setTimeout(() => {
+      job.timer = null;
+      // Lane and finalizer failures are routed inside drain. Keep an observable
+      // terminal boundary for genuinely unexpected scheduler defects.
+      void this.drain(remotePeer, job).catch((error: unknown) => {
+        void this.reportInternalError(remotePeer, error, 'scheduler-drain');
+      });
+    }, delayMs);
   }
 
   private async drain(remotePeer: string, job: PeerJob<SelectedPlan>): Promise<void> {
@@ -221,38 +211,18 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
         if (lane === null) return;
       }
     } finally {
-      // No lane remains claimable by this drain. Detach before awaiting an
-      // asynchronous finalizer so a concurrent enqueue creates a replacement
-      // job instead of adding work to this terminal job.
+      // No lane remains claimable by this drain. Detach before finalization so
+      // a reentrant enqueue creates a replacement job instead of adding work
+      // to this terminal job. finish() is intentionally synchronous: its only
+      // production implementation commits in-memory reconciler accounting.
       if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
       if (runner !== null) {
-        let releaseFinalizationBarrier!: () => void;
-        const finalizationBarrier = new Promise<void>((resolve) => {
-          releaseFinalizationBarrier = resolve;
-        });
-        // Install the barrier before invoking finish(): a synchronous finalizer
-        // callback may itself enqueue replacement work.
-        this.finalizationBarriers.set(remotePeer, finalizationBarrier);
         try {
-          await this.finalizeRunner(remotePeer, runner);
-        } finally {
-          if (this.finalizationBarriers.get(remotePeer) === finalizationBarrier) {
-            this.finalizationBarriers.delete(remotePeer);
-          }
-          releaseFinalizationBarrier();
+          runner.finish();
+        } catch (error: unknown) {
+          await this.reportInternalError(remotePeer, error, 'runner-finalizer');
         }
       }
-    }
-  }
-
-  private async finalizeRunner(
-    remotePeer: string,
-    runner: SyncOnConnectPeerJobRunner<SelectedPlan>,
-  ): Promise<void> {
-    try {
-      await runner.finish();
-    } catch (error: unknown) {
-      await this.reportInternalError(remotePeer, error, 'runner-finalizer');
     }
   }
 

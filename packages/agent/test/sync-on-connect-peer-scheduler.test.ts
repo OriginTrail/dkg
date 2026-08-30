@@ -9,7 +9,7 @@ function createScheduler(callbacks: Readonly<{
   runOrdinary: () => Promise<void>;
   runSelected: (plan?: string) => Promise<void>;
   cancel?: () => void;
-  finish?: () => void | Promise<void>;
+  finish?: () => void;
   onInternalError?: (
     peer: string,
     error: unknown,
@@ -195,7 +195,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     );
   });
 
-  it('contains a finalizer rejection after cleaning up the peer job', async () => {
+  it('contains a finalizer failure after cleaning up the peer job', async () => {
     const finalizerFailure = new Error('runner finalizer failed');
     const onInternalError = vi.fn();
     const unhandled: unknown[] = [];
@@ -205,7 +205,7 @@ describe('sync-on-connect per-peer scheduler', () => {
       const scheduler = createScheduler({
         runSelected: async () => undefined,
         runOrdinary: async () => undefined,
-        finish: async () => { throw finalizerFailure; },
+        finish: () => { throw finalizerFailure; },
         onInternalError,
       });
 
@@ -224,59 +224,8 @@ describe('sync-on-connect per-peer scheduler', () => {
     }
   });
 
-  it('runs work accepted while an earlier job is finalizing', async () => {
-    const firstFinishStarted = deferred();
-    const releaseFirstFinish = deferred();
-    const selectedPlans: string[] = [];
-    const accountingCommits: string[] = [];
-    let jobCount = 0;
-    const scheduler = new SyncOnConnectPeerScheduler<string>({
-      createJob: () => {
-        jobCount += 1;
-        const currentJob = jobCount;
-        return {
-          runAutomaticSelectedThenOrdinary: async () => 'synced',
-          runSelected: async (plan) => {
-            if (plan !== undefined) selectedPlans.push(plan);
-            return 'synced';
-          },
-          cancel: () => undefined,
-          finish: currentJob === 1
-            ? async () => {
-              firstFinishStarted.resolve();
-              await releaseFirstFinish.promise;
-              accountingCommits.push('retry');
-            }
-            : () => { accountingCommits.push('clear'); },
-        };
-      },
-      onInternalError: () => undefined,
-    });
-
-    expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
-    await firstFinishStarted.promise;
-
-    expect(scheduler.has(PEER)).toBe(false);
-    expect(scheduler.enqueueSelected(
-      PEER,
-      () => undefined,
-      0,
-      'during-finalize',
-    )).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(selectedPlans).toEqual([]);
-    expect(accountingCommits).toEqual([]);
-
-    releaseFirstFinish.resolve();
-    await vi.waitFor(() => expect(scheduler.size).toBe(0));
-    expect(selectedPlans).toEqual(['during-finalize']);
-    expect(accountingCommits).toEqual(['retry', 'clear']);
-    expect(jobCount).toBe(2);
-  });
-
-  it('barriers replacement work enqueued synchronously inside finish', async () => {
+  it('runs replacement work enqueued synchronously inside finish after commit', async () => {
     const replacementAccepted = deferred();
-    const releaseFirstFinish = deferred();
     const selectedPlans: string[] = [];
     const accountingCommits: string[] = [];
     let jobCount = 0;
@@ -293,16 +242,16 @@ describe('sync-on-connect per-peer scheduler', () => {
           },
           cancel: () => undefined,
           finish: currentJob === 1
-            ? async () => {
+            ? () => {
               expect(scheduler.enqueueSelected(
                 PEER,
                 () => undefined,
                 0,
                 'reentrant-finalizer-plan',
               )).toBe(true);
-              replacementAccepted.resolve();
-              await releaseFirstFinish.promise;
+              expect(selectedPlans).toEqual([]);
               accountingCommits.push('retry');
+              replacementAccepted.resolve();
             }
             : () => { accountingCommits.push('clear'); },
         };
@@ -312,11 +261,9 @@ describe('sync-on-connect per-peer scheduler', () => {
 
     expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
     await replacementAccepted.promise;
-    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(selectedPlans).toEqual([]);
-    expect(accountingCommits).toEqual([]);
+    expect(accountingCommits).toEqual(['retry']);
 
-    releaseFirstFinish.resolve();
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
     expect(selectedPlans).toEqual(['reentrant-finalizer-plan']);
     expect(accountingCommits).toEqual(['retry', 'clear']);
