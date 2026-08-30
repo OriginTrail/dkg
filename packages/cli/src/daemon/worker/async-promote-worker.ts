@@ -282,6 +282,13 @@ function logPromoteAttemptFailure(input: {
  * the worker.
  */
 export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
+  // Workflow-level replay safety is a typed producer disposition. It is more
+  // authoritative than diagnostic prose inherited from the wrapped cause,
+  // including incidental cap-like wording.
+  if (isPromoteReplaySafeError(err)) {
+    return { classification: 'transient', retryable: true };
+  }
+
   const raw = err instanceof Error ? err.message : String(err);
   // #1464 — strip a leading diagnostic "[promote:<step>] " tag (added by the publisher's
   // promote step-tagging) BEFORE substring-classifying, so a step LABEL can never inject a
@@ -311,13 +318,6 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   //    "Request body too large (>262144 bytes)".
   if (message.includes('request body too large') || message.includes('payload too large')) {
     return { classification: 'cap_exceeded', retryable: false };
-  }
-
-  // The promotion producer owns workflow-level replay safety. A typed
-  // disposition means it proved that retrying the complete attempt converges;
-  // the worker never infers that from a low-level storage operation name.
-  if (isPromoteReplaySafeError(err)) {
-    return { classification: 'transient', retryable: true };
   }
 
   // Managed-store recovery can declare the exact operation outcome. A request

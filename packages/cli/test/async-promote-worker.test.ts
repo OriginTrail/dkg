@@ -199,6 +199,10 @@ describe('classifyPromoteError', () => {
       'atomic-exact-swm-graph-replacement',
       rawReplaceFailure,
     ))).toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(new PromoteReplaySafeError(
+      'atomic-exact-swm-graph-replacement',
+      new Error('payload too large while reading the indeterminate timeout response'),
+    ))).toEqual({ classification: 'transient', retryable: true });
     expect(classifyPromoteError({
       code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       stage: 'atomic-exact-swm-graph-replacement',

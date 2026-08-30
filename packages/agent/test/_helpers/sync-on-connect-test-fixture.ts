@@ -1,23 +1,16 @@
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import { DKGAgent, type DKGAgentConfig } from '../../src/index.js';
+import type { ContextGraphSub, SyncReconcilerBackoff } from '../../src/dkg-agent-types.js';
+import type { Rfc64SwmRecoveryCoordinatorV1 } from '../../src/rfc64/swm-recovery-coordinator-v1.js';
+import type { Rfc64AuthorizedSwmRecoveryPlanV1 } from '../../src/rfc64/swm-recovery-plan-v1.js';
+import type { SelectedSwmBootstrapAdmission } from '../../src/sync/selected-swm-bootstrap-admission.js';
+import type { SyncOnConnectPeerScheduler } from '../../src/sync/on-connect/peer-scheduler.js';
 
-// Lifecycle tests need to replace private collaborators deliberately. Keep the
-// unchecked function shape confined to this one named seam so test files still
-// get checked property names and share one fixture contract.
-type TestHook = (...args: any[]) => any;
-
-interface TestBackoffState {
-  failures: number;
-  nextRetryAt: number;
-}
-
-interface TestBackoffMap {
-  get(peerId: string): TestBackoffState;
-  set(peerId: string, value: TestBackoffState): TestBackoffMap;
-  has(peerId: string): boolean;
-  delete(peerId: string): boolean;
-}
+type Rfc64CoordinatorTestPort = Partial<Pick<
+  Rfc64SwmRecoveryCoordinatorV1,
+  'admitSelectedPublic' | 'authorize' | 'authorizeForCatalogPass' | 'revalidate'
+>>;
 
 interface SyncOnConnectPrivateSeam {
   started: boolean;
@@ -38,57 +31,13 @@ interface SyncOnConnectPrivateSeam {
   lastSuccessfulSyncAt: Map<string, number>;
   lastSyncDisconnectedAt: Map<string, number>;
   lastSyncProgressAt: Map<string, number>;
-  syncReconcilerBackoff: TestBackoffMap;
-  subscribedContextGraphs: Map<string, Record<string, unknown>>;
-  selectedSwmBootstrapAdmission: {
-    readonly size: number;
-    request: TestHook;
-    isRetryRequired: TestHook;
-    beginTransfer: TestHook;
-    markTransferTerminal: TestHook;
-    snapshot: TestHook;
-  };
-  syncOnConnectPeerScheduler: {
-    readonly size: number;
-    has: (peerId: string) => boolean;
-  };
-  rfc64SwmRecoveryCoordinatorV1: {
-    authorize?: TestHook;
-    authorizeForCatalogPass?: TestHook;
-    revalidate?: TestHook;
-    admitSelectedPublic?: TestHook;
-  };
-  attemptSelectedSwmRetryWithReconcilerAccounting: TestHook;
-  attemptSyncFromPeerWithReconcilerAccounting: TestHook;
-  canUseSharedMemoryForContextGraph: TestHook;
-  clearNetworkRejectedPeerState: TestHook;
-  discoverContextGraphsFromStore: TestHook;
-  getPeerProtocols: TestHook;
-  getSharedMemorySyncContextGraphs: TestHook;
-  getSyncReconcilerProbe: TestHook;
-  isCuratorOf: TestHook;
-  isPrivateContextGraph: TestHook;
-  persistLocalNodeMembership: TestHook;
-  planSharedMemorySyncContextGraphs: TestHook;
-  queueRfc64SwmRecoveryPlanFromPeerOnConnect: TestHook;
-  queueSelectedSwmFromPeerOnConnect: TestHook;
-  queueSyncFromPeerOnConnect: TestHook;
-  reconcileSyncFromConnectedPeers: TestHook;
-  recoverContextGraphSwmFromPeer: TestHook;
-  refreshMetaFromCurator: TestHook;
-  refreshMetaSyncedFlags: TestHook;
-  resolveCuratorPeerId: TestHook;
-  resolveRfc64CompleteSwmProviderPeerIdsV1: TestHook;
-  runCatchupOverPeers: TestHook;
-  runSelectedSwmRetryFromPeerOnConnect: TestHook;
-  runSyncFromPeerOnConnect: TestHook;
-  selectedSwmBootstrapContextGraphIdsForPeer: TestHook;
-  syncFromPeerDetailed: TestHook;
-  syncSelectedSharedMemoryFromPeerDetailed: TestHook;
-  syncSharedMemoryFromPeerDetailed: TestHook;
-  trySelectedSwmRetryFromPeer: TestHook;
-  trySyncFromPeer: TestHook;
-  waitForSyncProtocol: TestHook;
+  syncReconcilerBackoff: Map<string, SyncReconcilerBackoff>;
+  subscribedContextGraphs: Map<string, ContextGraphSub>;
+  selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
+  syncOnConnectPeerScheduler: SyncOnConnectPeerScheduler<
+    Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>
+  >;
+  rfc64SwmRecoveryCoordinatorV1: Rfc64CoordinatorTestPort;
 }
 
 type PublicDKGAgent = Pick<DKGAgent, keyof DKGAgent>;
