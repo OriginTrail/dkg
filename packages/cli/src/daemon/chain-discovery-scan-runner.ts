@@ -90,6 +90,16 @@ function safeLog(log: (message: string) => void, message: string): void {
   }
 }
 
+function safeErrorMessage(error: unknown): string {
+  try {
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    // Promise rejection reasons are arbitrary values. Even property access or coercion can throw,
+    // so error reporting must have a value-independent fallback inside the scan failure boundary.
+    return 'unformattable error';
+  }
+}
+
 export function createChainDiscoveryScanRunner(input: {
   agent: {
     hasContextGraphRegistryScanWatermark(): Promise<boolean>;
@@ -119,7 +129,7 @@ export function createChainDiscoveryScanRunner(input: {
       } catch (error) {
         safeLog(
           input.log,
-          `Chain scan: watermark probe failed: ${error instanceof Error ? error.message : String(error)}`,
+          `Chain scan: watermark probe failed: ${safeErrorMessage(error)}`,
         );
         return;
       }
@@ -144,7 +154,7 @@ export function createChainDiscoveryScanRunner(input: {
       } catch (error) {
         safeLog(
           input.log,
-          `Chain scan: ${options.mode} scan failed: ${error instanceof Error ? error.message : String(error)}`,
+          `Chain scan: ${options.mode} scan failed: ${safeErrorMessage(error)}`,
         );
 
         if (startupPhase === 'startupFullRecovery') {

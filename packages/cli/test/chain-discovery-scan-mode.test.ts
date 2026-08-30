@@ -352,4 +352,34 @@ describe('chainDiscoveryScanOptions', () => {
 
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
   });
+
+  it('contains unformattable rejection reasons and remains reusable across both failure paths', async () => {
+    const hostileReason = {
+      toString() {
+        throw new Error('format failed');
+      },
+    };
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi
+        .fn<() => Promise<boolean>>()
+        .mockRejectedValueOnce(hostileReason)
+        .mockResolvedValue(true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockRejectedValueOnce(hostileReason)
+        .mockResolvedValueOnce(2),
+    };
+    const log = vi.fn();
+    const runner = createChainDiscoveryScanRunner({ agent, log });
+
+    await expect(runner()).resolves.toBeUndefined();
+    await expect(runner()).resolves.toBeUndefined();
+    await expect(runner()).resolves.toBeUndefined();
+
+    expect(log).toHaveBeenCalledWith('Chain scan: watermark probe failed: unformattable error');
+    expect(log).toHaveBeenCalledWith('Chain scan: seedFull scan failed: unformattable error');
+    expect(log).toHaveBeenCalledWith('Chain scan: discovered 2 new context graph(s)');
+    expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(3);
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
+  });
 });
