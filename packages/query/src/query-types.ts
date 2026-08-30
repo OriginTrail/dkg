@@ -14,6 +14,8 @@ export type QueryStatus =
   | 'GAS_LIMIT_EXCEEDED'
   | 'UNSUPPORTED_LOOKUP';
 
+export type NonBusyQueryStatus = Exclude<QueryStatus, 'BUSY'>;
+
 export interface QueryRequest {
   operationId: string;
   lookupType: LookupType;
@@ -26,25 +28,51 @@ export interface QueryRequest {
   timeout?: number;
 }
 
-export interface QueryResponse {
+interface QueryResponseBase {
   operationId: string;
-  status: QueryStatus;
+  truncated: boolean;
+  resultCount: number;
+}
+
+export interface QueryNonBusyResponse extends QueryResponseBase {
+  status: NonBusyQueryStatus;
   ntriples?: string;
   bindings?: string;
   entityUris?: string[];
-  truncated: boolean;
-  resultCount: number;
   gasConsumed?: number;
   error?: string;
-  /** Stable machine-readable code for retryable protocol outcomes. */
-  code?: string;
-  /** True only when repeating the same request is safe. */
-  retryable?: boolean;
-  /** Bounded delay suggested by the responding node. */
-  retryAfterMs?: number;
-  /** Bounded scheduler reason when the request was rejected before dispatch. */
-  reason?: 'queue_full' | 'queue_wait_timeout';
+  code?: never;
+  retryable?: never;
+  retryAfterMs?: never;
+  reason?: never;
 }
+
+export interface QueryBusyResponse extends QueryResponseBase {
+  status: 'BUSY';
+  error: string;
+  code: 'STORE_BUSY';
+  retryable: true;
+  retryAfterMs: number;
+  reason?: 'queue_full' | 'queue_wait_timeout';
+  ntriples?: never;
+  bindings?: never;
+  entityUris?: never;
+  gasConsumed?: never;
+}
+
+export type QueryResponse = QueryNonBusyResponse | QueryBusyResponse;
+
+type AssertFalse<T extends false> = T;
+type IncompleteBusyResponse = QueryResponseBase & { status: 'BUSY' };
+type ContradictoryOkResponse = QueryResponseBase & {
+  status: 'OK';
+  code: 'STORE_BUSY';
+  retryable: true;
+};
+export type QueryResponseTypeAssertions = [
+  AssertFalse<IncompleteBusyResponse extends QueryResponse ? true : false>,
+  AssertFalse<ContradictoryOkResponse extends QueryResponse ? true : false>,
+];
 
 export interface ContextGraphQueryPolicy {
   policy: 'deny' | 'public' | 'allowList';

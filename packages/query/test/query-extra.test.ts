@@ -1168,6 +1168,52 @@ describe('[Q-6] QueryHandler error taxonomy', () => {
       retryAfterMs: 1_000,
     });
   });
+
+  it('preserves the structured busy response through UAL resolution', async () => {
+    const busy = new StoreSchedulerBusyError(
+      'queue_full',
+      'normal',
+      'remote-query.resolveKnowledgeAsset',
+    );
+    const queryEngine = {
+      resolveKnowledgeAsset: async () => { throw busy; },
+    } as unknown as DKGQueryEngine;
+    const handler = new QueryHandler(queryEngine, { defaultPolicy: 'public' });
+
+    const response = await handler.handle({
+      operationId: 'busy-ual',
+      lookupType: 'ENTITY_BY_UAL',
+      ual: 'did:dkg:testnet:31337/0xabc/1',
+    }, 'peer-busy');
+
+    expect(response).toMatchObject({
+      operationId: 'busy-ual',
+      status: 'BUSY',
+      code: 'STORE_BUSY',
+      retryable: true,
+      retryAfterMs: 1_000,
+      reason: 'queue_full',
+    });
+  });
+
+  it('preserves the ordinary UAL resolution failure text at the outer boundary', async () => {
+    const queryEngine = {
+      resolveKnowledgeAsset: async () => { throw new Error('resolver failed'); },
+    } as unknown as DKGQueryEngine;
+    const handler = new QueryHandler(queryEngine, { defaultPolicy: 'public' });
+
+    const response = await handler.handle({
+      operationId: 'failed-ual',
+      lookupType: 'ENTITY_BY_UAL',
+      ual: 'did:dkg:testnet:31337/0xabc/1',
+    }, 'peer');
+
+    expect(response).toMatchObject({
+      operationId: 'failed-ual',
+      status: 'ERROR',
+      error: 'Failed to resolve UAL: did:dkg:testnet:31337/0xabc/1',
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

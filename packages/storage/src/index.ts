@@ -46,6 +46,7 @@ export {
 export {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
+  isStoreSchedulerBusyError,
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
   DEFAULT_STORE_QUEUE_LIMIT,
@@ -56,6 +57,7 @@ export {
   type StoreSchedulerBusyReason,
   type StoreSchedulerOperationMetadata,
   type StoreSchedulerBusyErrorOptions,
+  type StoreSchedulerBusyErrorLike,
 } from './store-priority-scheduler.js';
 export {
   STORE_OPERATION_TIMEOUT_CODE,

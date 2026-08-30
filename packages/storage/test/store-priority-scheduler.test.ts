@@ -3,6 +3,7 @@ import { availableParallelism } from 'node:os';
 import {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
+  isStoreSchedulerBusyError,
 } from '../src/store-priority-scheduler.js';
 import type { StoreWorkPriority } from '../src/triple-store.js';
 
@@ -240,6 +241,26 @@ describe('StorePriorityScheduler', () => {
       retryable: true,
       reason: 'queue_full',
     });
+    expect(isStoreSchedulerBusyError(error)).toBe(true);
+  });
+
+  it('recognizes only complete structural busy errors across package boundaries', () => {
+    const structural = {
+      code: 'STORE_SCHEDULER_BUSY',
+      retryable: true,
+      outcome: 'not_started',
+      storeOperationOutcomeTag: 'dkg.store-operation-outcome.v1',
+      reason: 'queue_wait_timeout',
+      priority: 'normal',
+      operation: 'remote-query.read',
+      storeOperation: 'query',
+    };
+
+    expect(isStoreSchedulerBusyError(structural)).toBe(true);
+    expect(isStoreSchedulerBusyError({ ...structural, reason: undefined })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, priority: 'urgent' })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, operation: undefined })).toBe(false);
+    expect(isStoreSchedulerBusyError({ code: 'STORE_SCHEDULER_BUSY' })).toBe(false);
   });
 
   it('binds canonical operations at both scheduler-owned admission rejection sites', async () => {

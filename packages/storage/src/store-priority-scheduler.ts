@@ -10,6 +10,7 @@ import {
 import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
 import {
   STORE_OPERATION_OUTCOME_TAG,
+  isStoreOperation,
   type StoreOperation,
   type StoreOperationOutcomeTagged,
 } from './store-operation-outcome.js';
@@ -70,6 +71,39 @@ export class StoreSchedulerBusyError extends Error implements StoreOperationOutc
     this.name = 'StoreSchedulerBusyError';
     this.storeOperation = options?.storeOperation;
   }
+}
+
+export interface StoreSchedulerBusyErrorLike extends StoreOperationOutcomeTagged {
+  readonly code: 'STORE_SCHEDULER_BUSY';
+  readonly retryable: true;
+  readonly outcome: 'not_started';
+  readonly reason: StoreSchedulerBusyReason;
+  readonly priority: StoreWorkPriority;
+  readonly operation: string;
+}
+
+const STORE_WORK_PRIORITIES: ReadonlySet<string> = new Set([
+  'ack',
+  'health',
+  'normal',
+  'background',
+]);
+
+/** Canonical cross-package guard for retry-safe scheduler admission errors. */
+export function isStoreSchedulerBusyError(
+  error: unknown,
+): error is StoreSchedulerBusyErrorLike {
+  if (!error || typeof error !== 'object') return false;
+  const shaped = error as Partial<StoreSchedulerBusyErrorLike>;
+  return shaped.code === 'STORE_SCHEDULER_BUSY'
+    && shaped.retryable === true
+    && shaped.outcome === 'not_started'
+    && shaped.storeOperationOutcomeTag === STORE_OPERATION_OUTCOME_TAG
+    && (shaped.reason === 'queue_full' || shaped.reason === 'queue_wait_timeout')
+    && typeof shaped.priority === 'string'
+    && STORE_WORK_PRIORITIES.has(shaped.priority)
+    && typeof shaped.operation === 'string'
+    && (shaped.storeOperation === undefined || isStoreOperation(shaped.storeOperation));
 }
 
 export type StorePriorityQueueLimits = Record<StoreWorkPriority, number>;

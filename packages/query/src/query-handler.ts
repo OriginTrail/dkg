@@ -1,6 +1,10 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
 import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
-import { quadsToNQuads, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import {
+  isStoreSchedulerBusyError,
+  quadsToNQuads,
+  type StoreSchedulerBusyErrorLike,
+} from '@origintrail-official/dkg-storage';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
@@ -10,7 +14,8 @@ import type {
   QueryAccessConfig,
   ContextGraphQueryPolicy,
   LookupType,
-  QueryStatus,
+  NonBusyQueryStatus,
+  QueryBusyResponse,
 } from './query-types.js';
 
 const DEFAULT_LIMIT = 100;
@@ -30,6 +35,13 @@ const PUBLIC_CG_CACHE_MAX_ENTRIES = 1000;
 interface RateBucket {
   count: number;
   resetAt: number;
+}
+
+class UalResolutionError extends Error {
+  constructor(readonly ual: string, cause: unknown) {
+    super(`Failed to resolve UAL: ${ual}`, { cause });
+    this.name = 'UalResolutionError';
+  }
 }
 
 /**
@@ -146,7 +158,11 @@ export class QueryHandler {
 
       return this.enforceResultSize(response);
     } catch (err) {
-      if (isStoreSchedulerBusyError(err)) return storeBusyResponse(opId, err);
+      const busyError = storeSchedulerBusyCause(err);
+      if (busyError) return storeBusyResponse(opId, busyError);
+      if (err instanceof UalResolutionError) {
+        return errorResponse(opId, 'ERROR', err.message);
+      }
       return errorResponse(opId, 'ERROR', 'Internal error processing query');
     }
   }
@@ -287,33 +303,34 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing ual');
     }
 
+    let resolved;
     try {
-      const resolved = this.queryEngine.resolveKnowledgeAsset
+      resolved = this.queryEngine.resolveKnowledgeAsset
         ? await this.queryEngine.resolveKnowledgeAsset(ual)
         : await this.queryEngine.resolveKA(ual);
-      // PR #1107 review (🔴): enforce the RESOLVED context graph's access
-      // policy — config entry first (operator override), then the #1105
-      // on-chain public resolver. Pre-fix, UAL lookups bypassed per-CG
-      // evaluation entirely: they were denied for on-chain-public CGs on
-      // default configs, yet allowed THROUGH explicitly denied CGs whenever
-      // any other public CG existed on the node.
-      const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
-      if (denied) return { ...denied, operationId: opId };
-      const ntriples = quadsToNQuads(
-        resolved.quads.map((quad) => ({ ...quad, graph: '' })),
-      );
-
-      return {
-        operationId: opId,
-        status: 'OK',
-        ntriples,
-        truncated: false,
-        resultCount: resolved.quads.length,
-      };
-    } catch (err) {
-      if (isStoreSchedulerBusyError(err)) throw err;
-      return errorResponse(opId, 'ERROR', `Failed to resolve UAL: ${ual}`);
+    } catch (cause) {
+      throw new UalResolutionError(ual, cause);
     }
+
+    // PR #1107 review (🔴): enforce the RESOLVED context graph's access
+    // policy — config entry first (operator override), then the #1105
+    // on-chain public resolver. Pre-fix, UAL lookups bypassed per-CG
+    // evaluation entirely: they were denied for on-chain-public CGs on
+    // default configs, yet allowed THROUGH explicitly denied CGs whenever
+    // any other public CG existed on the node.
+    const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
+    if (denied) return { ...denied, operationId: opId };
+    const ntriples = quadsToNQuads(
+      resolved.quads.map((quad) => ({ ...quad, graph: '' })),
+    );
+
+    return {
+      operationId: opId,
+      status: 'OK',
+      ntriples,
+      truncated: false,
+      resultCount: resolved.quads.length,
+    };
   }
 
   private async lookupByType(
@@ -445,7 +462,7 @@ export class QueryHandler {
 
   private enforceResultSize(response: QueryResponse): QueryResponse {
     const serialized = JSON.stringify(response);
-    if (serialized.length <= MAX_RESULT_BYTES) return response;
+    if (serialized.length <= MAX_RESULT_BYTES || response.status === 'BUSY') return response;
 
     return {
       ...response,
@@ -456,7 +473,11 @@ export class QueryHandler {
   }
 }
 
-function errorResponse(opId: string, status: QueryStatus, error: string): QueryResponse {
+function errorResponse(
+  opId: string,
+  status: NonBusyQueryStatus,
+  error: string,
+): QueryResponse {
   return {
     operationId: opId,
     status,
@@ -466,23 +487,20 @@ function errorResponse(opId: string, status: QueryStatus, error: string): QueryR
   };
 }
 
-function isStoreSchedulerBusyError(
+function storeSchedulerBusyCause(
   error: unknown,
-): error is StoreSchedulerBusyError {
-  return error instanceof StoreSchedulerBusyError || (
-    typeof error === 'object'
-    && error !== null
-    && (error as { code?: unknown }).code === 'STORE_SCHEDULER_BUSY'
-  );
+): StoreSchedulerBusyErrorLike | null {
+  if (isStoreSchedulerBusyError(error)) return error;
+  if (error instanceof UalResolutionError && isStoreSchedulerBusyError(error.cause)) {
+    return error.cause;
+  }
+  return null;
 }
 
 function storeBusyResponse(
   opId: string,
-  error: StoreSchedulerBusyError,
-): QueryResponse {
-  const reason = error.reason === 'queue_full' || error.reason === 'queue_wait_timeout'
-    ? error.reason
-    : undefined;
+  error: StoreSchedulerBusyErrorLike,
+): QueryBusyResponse {
   return {
     operationId: opId,
     status: 'BUSY',
@@ -492,7 +510,7 @@ function storeBusyResponse(
     code: 'STORE_BUSY',
     retryable: true,
     retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
-    ...(reason ? { reason } : {}),
+    reason: error.reason,
   };
 }
 
