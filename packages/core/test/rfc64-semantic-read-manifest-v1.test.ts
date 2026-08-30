@@ -7,6 +7,7 @@ import {
   RFC64_SEMANTIC_READ_QUERY_IDS_V1,
   RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1,
   compileRfc64SemanticReadOperationV1,
+  compileRfc64SemanticReadOperationV2,
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
   deriveRfc64SubgraphSemanticAddressesV1,
@@ -112,6 +113,26 @@ const CASES: readonly {
 ];
 
 describe('RFC-64 semantic read manifest v1', () => {
+  it('compiles one backend-neutral operation for every certified store route', () => {
+    for (const fixture of CASES) {
+      const operation = compileRfc64SemanticReadOperationV2(fixture.coordinate);
+      expect(operation.queryId).toBe(fixture.expectedQueryId);
+      expect(operation.graphIri).toBe(fixture.expectedAddress.graphUri);
+      expect(operation.subjectIri).toBe(fixture.expectedAddress.subject);
+      expect('backend' in operation).toBe(false);
+
+      for (const backend of RFC64_SEMANTIC_READ_BACKENDS_V1) {
+        const legacy = compileRfc64SemanticReadOperationV1({
+          backend,
+          coordinate: fixture.coordinate,
+        });
+        const { backend: route, ...compiled } = legacy;
+        expect(route).toBe(backend);
+        expect(compiled).toEqual(operation);
+      }
+    }
+  });
+
   it('covers every semantic record through the six closed read IDs', () => {
     expect(RFC64_SEMANTIC_READ_QUERY_IDS_V1).toHaveLength(6);
     expect(new Set(CASES.map(({ coordinate }) => coordinate.recordType))).toEqual(

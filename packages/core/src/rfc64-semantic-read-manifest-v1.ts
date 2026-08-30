@@ -42,8 +42,8 @@ export interface Rfc64SemanticReadTemplateInputV1 {
   readonly coordinate: Rfc64SemanticRecordCoordinateV1;
 }
 
-export interface Rfc64SemanticReadOperationV1 {
-  readonly backend: Rfc64SemanticReadBackendV1;
+/** Backend-neutral semantic read operation used by new consumers. */
+export interface Rfc64SemanticReadOperationV2 {
   readonly queryId: Rfc64SemanticReadQueryIdV1;
   readonly recordType: Rfc64SemanticRecordTypeV1;
   readonly coordinate: Rfc64SemanticRecordCoordinateV1;
@@ -56,6 +56,14 @@ export interface Rfc64SemanticReadOperationV1 {
   readonly responseByteCeiling: number;
   readonly concurrencyClass: typeof RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1;
   readonly sparql: string;
+}
+
+/**
+ * Compatibility shape for the original public V1 compiler. The backend label
+ * is routing metadata only; it never changes the compiled operation.
+ */
+export interface Rfc64SemanticReadOperationV1 extends Rfc64SemanticReadOperationV2 {
+  readonly backend: Rfc64SemanticReadBackendV1;
 }
 
 export type Rfc64SemanticReadManifestErrorCodeV1 =
@@ -78,20 +86,18 @@ const BACKENDS = new Set<string>(RFC64_SEMANTIC_READ_BACKENDS_V1);
  * Compile one closed, exact-subject RFC-64 semantic read operation.
  *
  * The record coordinate is the sole discriminant: the compiler derives the
- * matching query ID and canonical address. Callers cannot pair correlated
- * query and record-type inputs or supply raw SPARQL.
+ * matching query ID and canonical address. Backend routing is intentionally
+ * absent from this contract.
  */
-export function compileRfc64SemanticReadOperationV1(
+export function compileRfc64SemanticReadOperationV2(
   input: unknown,
-): Rfc64SemanticReadOperationV1 {
-  const request = snapshotInput(input);
-  const coordinate = snapshotRfc64SemanticRecordCoordinateV1(request.coordinate);
+): Rfc64SemanticReadOperationV2 {
+  const coordinate = snapshotRfc64SemanticRecordCoordinateV1(input);
   const queryId = queryIdForRecordType(coordinate.recordType);
   const address = deriveRfc64SemanticRecordAddressFromCoordinateV1(coordinate);
   const expectedRowCount = RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1[coordinate.recordType];
   const rowCeiling = expectedRowCount + 1;
   return Object.freeze({
-    backend: request.backend,
     queryId,
     recordType: coordinate.recordType,
     coordinate,
@@ -105,6 +111,19 @@ export function compileRfc64SemanticReadOperationV1(
     concurrencyClass: RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1,
     sparql: renderExactSubjectRead(address, rowCeiling),
   });
+}
+
+/**
+ * Compile the original V1 operation shape without changing existing callers.
+ * @deprecated New code should route the store separately and compile through
+ * {@link compileRfc64SemanticReadOperationV2}.
+ */
+export function compileRfc64SemanticReadOperationV1(
+  input: unknown,
+): Rfc64SemanticReadOperationV1 {
+  const request = snapshotInput(input);
+  const operation = compileRfc64SemanticReadOperationV2(request.coordinate);
+  return Object.freeze({ backend: request.backend, ...operation });
 }
 
 function snapshotInput(input: unknown): {
