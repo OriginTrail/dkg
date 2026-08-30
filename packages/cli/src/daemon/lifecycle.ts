@@ -1723,6 +1723,10 @@ async function runDaemonInnerWithStartupOwnership(
   const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
+  const contextGraphRegistryTipScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(
+    dashDb,
+    { cursorKind: 'tip' },
+  );
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1852,10 +1856,8 @@ async function runDaemonInnerWithStartupOwnership(
     syncCheckpointStore,
     changelogCursorStore,
     chainEventCursorStore,
-    contextGraphRegistryScanCursorStore: {
-      kind: 'roleAware',
-      store: contextGraphRegistryScanCursorStore,
-    },
+    contextGraphRegistryScanCursorStore,
+    contextGraphRegistryTipScanCursorStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

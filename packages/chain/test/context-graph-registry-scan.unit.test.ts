@@ -13,7 +13,7 @@ import {
   makeRegistry,
   minimalConfig,
   recorder,
-  roleAwareRegistryCursorPersistence,
+  registryCursorStores,
   seam,
 } from './context-graph-registry-scan-test-support.js';
 
@@ -87,7 +87,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const store = new MemoryRegistryScanCursorStore();
     const registry = makeRegistry();
     const { adapter } = makeAdapter(registry, 4_999, {
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     registry.queryFilter.queueOnce({
       type: 'return',
@@ -169,7 +169,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 2_100, {
       cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     registry.queryFilter.setImpl(async () => []);
 
@@ -242,7 +242,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
     const { adapter } = makeAdapter(registry, 2_100, {
       cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
 
     const seeded = await adapter.listContextGraphsFromChain(undefined, {
@@ -335,7 +335,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const registry = makeRegistry();
     const { adapter } = makeAdapter(registry, 5_000, {
       cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     registry.queryFilter.setImpl(async () => []);
 
@@ -353,7 +353,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const restartedRegistry = makeRegistry();
     const { adapter: restarted, provider } = makeAdapter(restartedRegistry, 5_000, {
       cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     provider.getCode = seam(async () => {
       throw new Error('deploy block probing should not run with persisted cursor');
@@ -380,7 +380,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
     const { adapter } = makeAdapter(registry, 2_100, {
       cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
 
     const iterator = adapter.scanContextGraphRegistryPages({
@@ -397,7 +397,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const restartedRegistry = makeRegistry();
     const { adapter: restarted } = makeAdapter(restartedRegistry, 2_100, {
       cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     restartedRegistry.queryFilter.setImpl(async () => []);
 
@@ -492,7 +492,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 5_000, {
       cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     provider.getCode = seam(async () => {
       throw new Error('deploy block probing should not run with persisted cursor');
@@ -528,7 +528,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
     const { adapter } = makeAdapter(registry, 3_500, {
       cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
 
     const results = await collectRegistryScan(adapter, {
@@ -549,7 +549,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const store = new MemoryRegistryScanCursorStore();
     const seedRegistry = makeRegistry();
     const { adapter: seedAdapter } = makeAdapter(seedRegistry, 2_100, {
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     seedRegistry.queryFilter.setImpl(async () => []);
 
@@ -560,7 +560,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     const publicRegistry = makeRegistry();
     const { adapter: publicAdapter } = makeAdapter(publicRegistry, 2_100, {
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     publicRegistry.queryFilter.setImpl(async () => []);
 
@@ -591,7 +591,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const store = new MemoryRegistryScanCursorStore();
     const registry = makeRegistry();
     const { adapter } = makeAdapter(registry, 4_000, {
-      contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      ...registryCursorStores(store),
     });
     registry.queryFilter.setImpl(async () => []);
 

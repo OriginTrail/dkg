@@ -107,7 +107,7 @@ function createFakeAgent() {
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
     createArg?.chainEventCursorStore?.cursors?.db
-    ?? createArg?.contextGraphRegistryScanCursorStore?.store?.cursors?.db;
+    ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
   db?.close?.();
 }
 

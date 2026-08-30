@@ -577,39 +577,11 @@ export interface ContextGraphRegistryScanCursorKey {
   registryAddress: string;
 }
 
-/** Role-aware cursor key used only by explicitly configured role-aware persistence. */
-export interface ContextGraphRegistryRoleAwareScanCursorKey extends ContextGraphRegistryScanCursorKey {
-  cursorKind: 'historical' | 'tip';
-}
-
 /** Pre-role persistence contract. It receives the exact original three-field key. */
 export interface ContextGraphRegistryScanCursorStore {
   load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
 }
-
-/** Store whose durable identity includes the cursor role. */
-export interface ContextGraphRegistryRoleAwareScanCursorStore {
-  load(key: ContextGraphRegistryRoleAwareScanCursorKey): Promise<number | undefined>;
-  save(key: ContextGraphRegistryRoleAwareScanCursorKey, nextBlock: number): Promise<void>;
-}
-
-/** Explicit compatibility boundary for historical and independent tip progress. */
-export type ContextGraphRegistryScanCursorPersistence =
-  | {
-      kind: 'legacy';
-      historical: ContextGraphRegistryScanCursorStore;
-      tip?: ContextGraphRegistryScanCursorStore;
-    }
-  | {
-      kind: 'roleAware';
-      store: ContextGraphRegistryRoleAwareScanCursorStore;
-    };
-
-/** Single public configuration slot: original stores remain valid; new persistence is tagged. */
-export type ContextGraphRegistryScanCursorStoreConfig =
-  | ContextGraphRegistryScanCursorStore
-  | ContextGraphRegistryScanCursorPersistence;
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 

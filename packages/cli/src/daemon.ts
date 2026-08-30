@@ -19,6 +19,7 @@ export * from './daemon/openclaw.js';
 export * from './daemon/hermes.js';
 export * from './daemon/local-agents.js';
 export * from './daemon/lifecycle.js';
+export * from './daemon/chain-discovery-scan-runner.js';
 export * from './daemon/memory-tool-context.js';
 export * from './daemon/handle-request.js';
 export * from './daemon/shutdown.js';

@@ -32,14 +32,25 @@ type ScanRange = {
   degradedFromGenesis: boolean;
 };
 
-type PreparedScan = ScanRange & {
-  kind: ContextGraphRegistryScanPlan['kind'];
-  pageBudget?: number;
-  pageLimit: { kind: 'unbounded' } | { kind: 'defaultCapUnlessBudget' };
-  pageFailure: { kind: 'allOrError' } | { kind: 'partialAfterProgress' };
-  emptyRange: { kind: 'return' } | { kind: 'acknowledge' };
-  acknowledge(nextBlock: number): Promise<void>;
-};
+type PreparedScan =
+  | (ScanRange & {
+      kind: 'stateless';
+      acknowledge(nextBlock: number): Promise<void>;
+    })
+  | (ScanRange & {
+      kind: 'historicalIncremental';
+      pageBudget?: number;
+      acknowledge(nextBlock: number): Promise<void>;
+    })
+  | (ScanRange & {
+      kind: 'historicalSeed';
+      pageBudget?: number;
+      acknowledge(nextBlock: number): Promise<void>;
+    })
+  | (ScanRange & {
+      kind: 'tip';
+      acknowledge(nextBlock: number): Promise<void>;
+    });
 
 type RegistryScannerInput = {
   registry: Contract;
@@ -161,16 +172,17 @@ export class ContextGraphRegistryScanner {
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
     const eventFilter = this.input.registry.filters.NameClaimed();
     const prepared = await this.prepare(scanPlan);
-    const { start, head, scanProviders, degradedFromGenesis, pageBudget } = prepared;
+    const { start, head, scanProviders, degradedFromGenesis } = prepared;
+    const pageBudget = 'pageBudget' in prepared ? prepared.pageBudget : undefined;
     if (start > head) {
-      if (prepared.emptyRange.kind === 'acknowledge') await prepared.acknowledge(head + 1);
+      if (prepared.kind === 'historicalSeed') await prepared.acknowledge(head + 1);
       return;
     }
 
     const pages = Math.ceil((head - start + 1) / this.input.pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * this.input.pageSize;
     if (
-      prepared.pageLimit.kind === 'defaultCapUnlessBudget' &&
+      prepared.kind === 'historicalIncremental' &&
       pageBudget === undefined &&
       !degradedFromGenesis &&
       pages > CG_REGISTRY_MAX_SCAN_PAGES
@@ -219,7 +231,7 @@ export class ContextGraphRegistryScanner {
           });
         }
       } catch (err) {
-        if (prepared.pageFailure.kind === 'partialAfterProgress' && scannedAnyPage) {
+        if (prepared.kind !== 'stateless' && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
           throw new ContextGraphChainScanPartialError(
             `listContextGraphsFromChain: partial ContextGraphNameRegistry scan ` +
@@ -271,7 +283,7 @@ export class ContextGraphRegistryScanner {
     const historicalAcknowledge = (nextBlock: number) =>
       this.input.historicalCursor.saveWatermark(this.input.registryAddress, nextBlock);
     const tipAcknowledge = (nextBlock: number) =>
-      this.input.tipCursor.saveWatermarkStrict(this.input.registryAddress, nextBlock);
+      this.input.tipCursor.saveWatermark(this.input.registryAddress, nextBlock);
     const noAcknowledge = async () => {};
 
     switch (scanPlan.kind) {
@@ -286,9 +298,6 @@ export class ContextGraphRegistryScanner {
         return {
           kind: scanPlan.kind,
           ...range,
-          pageLimit: { kind: 'unbounded' },
-          pageFailure: { kind: 'allOrError' },
-          emptyRange: { kind: 'return' },
           acknowledge: noAcknowledge,
         };
       }
@@ -297,9 +306,6 @@ export class ContextGraphRegistryScanner {
           kind: scanPlan.kind,
           ...(await resolveHistoricalCursor()),
           pageBudget: scanPlan.pageBudget,
-          pageLimit: { kind: 'defaultCapUnlessBudget' },
-          pageFailure: { kind: 'partialAfterProgress' },
-          emptyRange: { kind: 'return' },
           acknowledge: historicalAcknowledge,
         };
       case 'historicalSeed': {
@@ -314,9 +320,6 @@ export class ContextGraphRegistryScanner {
           kind: scanPlan.kind,
           ...range,
           pageBudget: scanPlan.pageBudget,
-          pageLimit: { kind: 'unbounded' },
-          pageFailure: { kind: 'partialAfterProgress' },
-          emptyRange: { kind: 'acknowledge' },
           acknowledge: historicalAcknowledge,
         };
       }
@@ -338,7 +341,7 @@ export class ContextGraphRegistryScanner {
           : Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS);
         // Persist the conservative lower bound before the first query. Strict persistence makes a
         // configured-store failure observable; an in-process pending marker is retried here.
-        await this.input.tipCursor.saveWatermarkStrict(
+        await this.input.tipCursor.saveWatermark(
           this.input.registryAddress,
           watermark ?? Math.max(1, start),
         );
@@ -347,9 +350,6 @@ export class ContextGraphRegistryScanner {
           ...tip,
           start,
           degradedFromGenesis: false,
-          pageLimit: { kind: 'unbounded' },
-          pageFailure: { kind: 'partialAfterProgress' },
-          emptyRange: { kind: 'return' },
           acknowledge: tipAcknowledge,
         };
       }

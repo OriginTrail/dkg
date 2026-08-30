@@ -26,16 +26,18 @@ export class ContextGraphRegistryScanCursor {
       chainId: string;
       deploymentId: string;
       store?: ContextGraphRegistryScanCursorStore;
+      savePolicy?: 'bestEffort' | 'strict';
     },
   ) {}
 
   clearMemoryCache(): void {
     this.watermarks.clear();
-    this.pendingStrictWatermarks.clear();
   }
 
   getCachedWatermark(registryAddress: string): number | undefined {
-    return this.normalize(this.watermarks.get(this.cacheKey(registryAddress)));
+    const cacheKey = this.cacheKey(registryAddress);
+    return this.normalize(this.watermarks.get(cacheKey))
+      ?? this.normalize(this.pendingStrictWatermarks.get(cacheKey));
   }
 
   async loadWatermark(registryAddress: string): Promise<number | undefined> {
@@ -49,6 +51,10 @@ export class ContextGraphRegistryScanCursor {
     const cacheKey = this.cacheKey(registryAddress);
     const cached = this.normalize(this.watermarks.get(cacheKey));
     if (cached != null) return { status: 'loaded', watermark: cached };
+    // A failed strict write is a safety anchor, not ordinary disposable cache.
+    // Prefer it across Hub/cache invalidation until the store confirms it.
+    const pending = this.normalize(this.pendingStrictWatermarks.get(cacheKey));
+    if (pending != null) return { status: 'loaded', watermark: pending };
 
     if (!this.input.store) return { status: 'loaded' };
     try {
@@ -67,6 +73,14 @@ export class ContextGraphRegistryScanCursor {
   }
 
   async saveWatermark(registryAddress: string, nextBlock: number): Promise<void> {
+    if (this.input.savePolicy === 'strict') {
+      await this.saveStrict(registryAddress, nextBlock);
+      return;
+    }
+    await this.saveBestEffort(registryAddress, nextBlock);
+  }
+
+  private async saveBestEffort(registryAddress: string, nextBlock: number): Promise<void> {
     const normalized = this.normalize(nextBlock);
     if (normalized == null) return;
 
@@ -92,7 +106,7 @@ export class ContextGraphRegistryScanCursor {
    * restart anchor. The attempted value remains process-local after a failure,
    * and a retry of the same value re-attempts persistence before scanning.
    */
-  async saveWatermarkStrict(registryAddress: string, nextBlock: number): Promise<void> {
+  private async saveStrict(registryAddress: string, nextBlock: number): Promise<void> {
     const normalized = this.normalize(nextBlock);
     if (normalized == null) return;
 

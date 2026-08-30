@@ -6,8 +6,22 @@ import {
   createChainDiscoveryScanRunner,
   deriveChainFullScanEvery,
 } from '../src/daemon/chain-discovery-scan-runner.js';
+import {
+  CHAIN_FULL_SCAN_EVERY as BARREL_CHAIN_FULL_SCAN_EVERY,
+  chainDiscoveryScanOptions as barrelChainDiscoveryScanOptions,
+  createChainDiscoveryScanRunner as barrelCreateChainDiscoveryScanRunner,
+} from '../src/daemon.js';
 
 describe('chainDiscoveryScanOptions', () => {
+  it('preserves daemon barrel exports and the original run-based helper input', () => {
+    expect(BARREL_CHAIN_FULL_SCAN_EVERY).toBe(48);
+    expect(barrelCreateChainDiscoveryScanRunner).toBe(createChainDiscoveryScanRunner);
+    expect(barrelChainDiscoveryScanOptions({ watermarkSeeded: true, run: 1 })).toEqual({
+      mode: 'incremental',
+      pageBudget: 30,
+    });
+  });
+
   it('uses bounded cursor-resumable watermark seeding before a seed exists', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: false,

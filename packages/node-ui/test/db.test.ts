@@ -2214,17 +2214,17 @@ describe('DashboardDB — chain RPC cursor stores', () => {
 
   it('persists registry scan cursors by deployment key and ignores corrupt values', async () => {
     const store = new SqliteContextGraphRegistryScanCursorStore(db);
+    const tipStore = new SqliteContextGraphRegistryScanCursorStore(db, { cursorKind: 'tip' });
     const key = {
       chainId: 'evm:1',
       deploymentId: 'evm:1:hub=0xabc',
       registryAddress: '0x3333333333333333333333333333333333333333',
-      cursorKind: 'historical' as const,
     };
 
     await store.save(key, 5000);
-    await store.save({ ...key, cursorKind: 'tip' }, 9000);
+    await tipStore.save(key, 9000);
     expect(await store.load(key)).toBe(5000);
-    expect(await store.load({ ...key, cursorKind: 'tip' })).toBe(9000);
+    expect(await tipStore.load(key)).toBe(9000);
     const originalKey = {
       chainId: key.chainId,
       deploymentId: key.deploymentId,
@@ -2232,8 +2232,7 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     };
     await store.save(originalKey, 4000);
     expect(await store.load(originalKey)).toBe(4000);
-    expect(await store.load({ ...originalKey, cursorKind: 'historical' })).toBe(4000);
-    expect(await store.load({ ...originalKey, cursorKind: 'tip' })).toBeUndefined();
+    expect(await tipStore.load(originalKey)).toBeUndefined();
     expect(db.db.prepare(
       `SELECT value FROM runtime_cursors
        WHERE namespace = 'contextGraphRegistryScan.cursor'
@@ -2280,17 +2279,14 @@ describe('DashboardDB — chain RPC cursor stores', () => {
       Date.now(),
     );
     expect(await store.load({ ...key, registryAddress: legacyRuntimeAddress })).toBe(7000);
-    expect(await store.load({
-      ...key,
-      registryAddress: legacyRuntimeAddress,
-      cursorKind: 'tip',
-    })).toBeUndefined();
+    expect(await tipStore.load({ ...key, registryAddress: legacyRuntimeAddress })).toBeUndefined();
 
     db.close();
     db = new DashboardDB({ dataDir: dir });
     const reopened = new SqliteContextGraphRegistryScanCursorStore(db);
+    const reopenedTip = new SqliteContextGraphRegistryScanCursorStore(db, { cursorKind: 'tip' });
     expect(await reopened.load(key)).toBe(5000);
-    expect(await reopened.load({ ...key, cursorKind: 'tip' })).toBe(9000);
+    expect(await reopenedTip.load(key)).toBe(9000);
     expect(await reopened.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
     expect(await reopened.load({ ...key, registryAddress: legacyRuntimeAddress })).toBe(7000);
   });

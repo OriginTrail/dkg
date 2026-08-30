@@ -23,9 +23,6 @@ import type {
   OnChainPublishResult,
   PreBroadcastSignal,
   SignedTransactionEnvelope,
-  ContextGraphRegistryRoleAwareScanCursorStore,
-  ContextGraphRegistryScanCursorStore,
-  ContextGraphRegistryScanCursorStoreConfig,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
@@ -59,51 +56,6 @@ export {
   CG_REGISTRY_MAX_SCAN_PAGES,
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from './evm-adapter-constants.js';
-
-function bindRoleAwareRegistryCursorStore(
-  store: ContextGraphRegistryRoleAwareScanCursorStore,
-  cursorKind: 'historical' | 'tip',
-): ContextGraphRegistryScanCursorStore {
-  return {
-    load: (key) => store.load({ ...key, cursorKind }),
-    save: (key, nextBlock) => store.save({ ...key, cursorKind }, nextBlock),
-  };
-}
-
-function isRegistryCursorStore(value: unknown): value is ContextGraphRegistryScanCursorStore {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as { load?: unknown }).load === 'function' &&
-    typeof (value as { save?: unknown }).save === 'function'
-  );
-}
-
-function normalizeRegistryCursorStores(
-  config: ContextGraphRegistryScanCursorStoreConfig | undefined,
-): {
-  historical?: ContextGraphRegistryScanCursorStore;
-  tip?: ContextGraphRegistryScanCursorStore;
-} {
-  if (!config) return {};
-  // Structural legacy stores may expose unrelated metadata named `kind`.
-  // Recognize the original load/save contract positively before tagged forms.
-  if (isRegistryCursorStore(config)) return { historical: config };
-  if (
-    config.kind === 'legacy' &&
-    isRegistryCursorStore(config.historical) &&
-    (config.tip === undefined || isRegistryCursorStore(config.tip))
-  ) {
-    return { historical: config.historical, tip: config.tip };
-  }
-  if (config.kind === 'roleAware' && isRegistryCursorStore(config.store)) {
-    return {
-      historical: bindRoleAwareRegistryCursorStore(config.store, 'historical'),
-      tip: bindRoleAwareRegistryCursorStore(config.store, 'tip'),
-    };
-  }
-  throw new TypeError('Invalid ContextGraphNameRegistry cursor persistence configuration');
-}
 
 type ContractWriteSender = (
   contract: Contract,
@@ -1366,18 +1318,16 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
-    const registryCursorStores = normalizeRegistryCursorStores(
-      config.contextGraphRegistryScanCursorStore,
-    );
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
-      store: registryCursorStores.historical,
+      store: config.contextGraphRegistryScanCursorStore,
     });
     this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
-      store: registryCursorStores.tip,
+      store: config.contextGraphRegistryTipScanCursorStore,
+      savePolicy: 'strict',
     });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;

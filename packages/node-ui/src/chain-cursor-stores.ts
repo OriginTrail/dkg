@@ -6,9 +6,6 @@ type RegistryScanCursorKey = {
   deploymentId: string;
   registryAddress: string;
 };
-type RoleAwareRegistryScanCursorKey = RegistryScanCursorKey & {
-  cursorKind: 'historical' | 'tip';
-};
 
 function parsePositiveSafeInteger(value: number | string | undefined): number | undefined {
   if (value == null) return undefined;
@@ -100,44 +97,34 @@ export class SqliteChainEventCursorStore {
 export class SqliteContextGraphRegistryScanCursorStore {
   private readonly cursors: RuntimePositiveIntegerCursorStore;
   private readonly legacyCursors: SettingsPositiveIntegerCursorStore;
+  private readonly cursorKind: 'historical' | 'tip';
 
-  constructor(dashboard: DashboardDB) {
+  constructor(
+    dashboard: DashboardDB,
+    options: { cursorKind?: 'historical' | 'tip' } = {},
+  ) {
     this.cursors = new RuntimePositiveIntegerCursorStore(dashboard.db, 'contextGraphRegistryScan.cursor');
     this.legacyCursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
+    this.cursorKind = options.cursorKind ?? 'historical';
   }
 
-  async load(
-    key: RegistryScanCursorKey | RoleAwareRegistryScanCursorKey,
-  ): Promise<number | undefined> {
-    const cursorKind = this.cursorKind(key);
-    const current = this.cursors.load(this.scope(key), this.registryKey(key, cursorKind));
-    if (current !== undefined || cursorKind === 'tip') return current;
+  async load(key: RegistryScanCursorKey): Promise<number | undefined> {
+    const current = this.cursors.load(this.scope(key), this.registryKey(key));
+    if (current !== undefined || this.cursorKind === 'tip') return current;
     return this.cursors.load(this.scope(key), this.legacyRegistryKey(key))
       ?? this.legacyCursors.load(this.legacyKey(key));
   }
 
-  async save(
-    key: RegistryScanCursorKey | RoleAwareRegistryScanCursorKey,
-    nextBlock: number,
-  ): Promise<void> {
-    this.cursors.save(this.scope(key), this.registryKey(key, this.cursorKind(key)), nextBlock);
+  async save(key: RegistryScanCursorKey, nextBlock: number): Promise<void> {
+    this.cursors.save(this.scope(key), this.registryKey(key), nextBlock);
   }
 
   private scope(key: { chainId: string; deploymentId: string }): string {
     return `${key.chainId}:${key.deploymentId}`;
   }
 
-  private cursorKind(
-    key: RegistryScanCursorKey | RoleAwareRegistryScanCursorKey,
-  ): 'historical' | 'tip' {
-    return 'cursorKind' in key ? key.cursorKind : 'historical';
-  }
-
-  private registryKey(
-    key: { registryAddress: string },
-    cursorKind: 'historical' | 'tip',
-  ): string {
-    return `${cursorKind}:${key.registryAddress.toLowerCase()}`;
+  private registryKey(key: { registryAddress: string }): string {
+    return `${this.cursorKind}:${key.registryAddress.toLowerCase()}`;
   }
 
   private legacyRegistryKey(key: { registryAddress: string }): string {

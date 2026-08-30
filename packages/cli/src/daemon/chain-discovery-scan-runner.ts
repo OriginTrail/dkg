@@ -26,7 +26,7 @@ export type ChainDiscoveryStartupPhase =
   | 'startupFullRecovery'
   | 'complete';
 
-export function chainDiscoveryScanOptions(input: {
+export type ManagedChainDiscoveryScanOptionsInput = {
   watermarkSeeded: boolean;
   startupPhase: ChainDiscoveryStartupPhase;
   successfulScansInCycle: number;
@@ -34,11 +34,26 @@ export function chainDiscoveryScanOptions(input: {
   fullRecoveryRetryReady?: boolean;
   fullScanEvery?: number;
   pageBudget?: number;
-}):
+};
+
+/** Input retained for callers of the original daemon lifecycle helper. */
+export type LegacyChainDiscoveryScanOptionsInput = {
+  watermarkSeeded: boolean;
+  run?: number;
+  fullScanEvery?: number;
+  pageBudget?: number;
+};
+
+export type ChainDiscoveryScanOptions =
   | { mode: 'incremental'; throwOnChainScanFailure: true; pageBudget: number }
+  | { mode: 'incremental'; pageBudget: number }
   | { mode: 'tip' }
   | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
-  | { mode: 'seedFull'; throwOnChainScanFailure: true } {
+  | { mode: 'seedFull'; throwOnChainScanFailure: true };
+
+export function chainDiscoveryScanOptions(
+  input: ManagedChainDiscoveryScanOptionsInput | LegacyChainDiscoveryScanOptionsInput,
+): ChainDiscoveryScanOptions {
   const configuredFullScanEvery = input.fullScanEvery;
   let fullScanEvery = CHAIN_DISCOVERY_SCAN_SCHEDULE.fullScanEvery;
   if (
@@ -56,6 +71,18 @@ export function chainDiscoveryScanOptions(input: {
   )
     ? Math.floor(configuredPageBudget)
     : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
+
+  if (!('startupPhase' in input)) {
+    const run = input.run ?? 0;
+    const startupRecoveryScan = input.watermarkSeeded && run === 0;
+    const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
+    if (startupRecoveryScan || periodicFullResync) {
+      return { mode: 'seedFull', throwOnChainScanFailure: true };
+    }
+    return input.watermarkSeeded
+      ? { mode: 'incremental', pageBudget }
+      : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+  }
 
   if (input.startupPhase === 'undetermined') {
     return input.watermarkSeeded
@@ -105,7 +132,7 @@ export function createChainDiscoveryScanRunner(input: {
   agent: {
     hasContextGraphRegistryScanWatermark(): Promise<boolean>;
     discoverContextGraphsFromChain(
-      options: ReturnType<typeof chainDiscoveryScanOptions>,
+      options: ChainDiscoveryScanOptions,
     ): Promise<number>;
   };
   log: (msg: string) => void;

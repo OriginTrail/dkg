@@ -19,5 +19,6 @@ export * from './auto-update.js';
 export * from './openclaw.js';
 export * from './local-agents.js';
 export * from './lifecycle.js';
+export * from './chain-discovery-scan-runner.js';
 export * from './memory-tool-context.js';
 export * from './handle-request.js';
