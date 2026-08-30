@@ -248,6 +248,54 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it.each([
+      ['timeout', { timedOutPhases: 1 }],
+      ['phase failure', { failedPhases: 1 }],
+      ['denial', { deniedPhases: 1 }],
+      ['backpressure deferral', { deferredBackpressure: 1 }],
+    ] as const)('does not record a failed-only SWM %s as VM-recovery miss evidence', async (
+      failureKind,
+      failure,
+    ) => {
+      const agent = await DKGAgent.create({
+        name: `RuntimeVmRecoveryNo${failureKind.replace(/\s/g, '')}Evidence`,
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = agent.node.peerId;
+        (agent.node.libp2p as any).getConnections = () => [{ remotePeer } as any];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+          ...failure,
+        });
+
+        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(recovery.cleanMissPeerIds).toEqual([]);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
 
     it('does not count timed-out catchup rounds as peer success', async () => {
       const agent = await DKGAgent.create({

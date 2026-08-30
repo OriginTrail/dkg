@@ -36,10 +36,10 @@ function decodeTopology(encoded: string): DecodedTopology | null {
       !(raw.preferredPeerId === null || typeof raw.preferredPeerId === 'string')
       || typeof raw.privateOnly !== 'boolean'
       || !Array.isArray(raw.peers)
-      || !(raw.version === undefined || raw.version === 1 || raw.version === TOPOLOGY_VERSION)
+      || !(raw.version === undefined || raw.version === TOPOLOGY_VERSION)
     ) return null;
 
-    const isLegacy = raw.version === undefined || raw.version === 1;
+    const isLegacy = raw.version === undefined;
     const peers: unknown[] = [];
     if (isLegacy) {
       for (const [rank, candidate] of raw.peers.entries()) {

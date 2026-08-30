@@ -1693,4 +1693,62 @@ describe('DKGAgent sync fetch coalescing', () => {
       await agent.stop().catch(() => {});
     }
   });
+
+  it.each([
+    ['timeout', { timedOutPhases: 1 }],
+    ['phase failure', { failedPhases: 1 }],
+    ['denial', { deniedPhases: 1 }],
+    ['backpressure deferral', { deferredBackpressure: 1 }],
+  ] as const)('does not record a failed-only SWM %s continuation as miss evidence', async (
+    _failureKind,
+    continuationFailure,
+  ) => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+    const cleanMissPeerIds = new Set<string>();
+    let sharedCalls = 0;
+    const incompleteCoverage: SwmSnapshotCoverage = {
+      contextGraphId: 'coalesced-cg',
+      peerIdSuffix: PEER_A.slice(-8),
+      snapshotsResolved: 2,
+      snapshotsTotal: 3,
+      manifestComplete: true,
+      missingCount: 1,
+      missingSample: ['sha256:remaining'],
+      materializationFailures: 0,
+    };
+
+    try {
+      await agent.start();
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => {
+        sharedCalls += 1;
+        return {
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+          swmCoverage: { ...incompleteCoverage },
+          ...(sharedCalls === 1 ? { failedPhases: 1 } : continuationFailure),
+        };
+      };
+
+      const result = await (agent as any).runCatchupOverPeers(
+        'coalesced-cg',
+        true,
+        [remotePeer],
+        {
+          recordSharedMemoryCleanPeer: (peerId: string) => cleanMissPeerIds.add(peerId),
+          swmCatchupPassConfig: { budgetMs: 60_000, maxPasses: 2 },
+        },
+      );
+
+      expect(sharedCalls).toBe(2);
+      expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
+      expect([...cleanMissPeerIds]).toEqual([]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
 });

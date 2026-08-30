@@ -82,6 +82,21 @@ describe('VM reconcile negative SQLite adapter', () => {
     });
   });
 
+  it('rejects the unshipped intermediate version-1 topology encoding', () => {
+    const row = encodeVmReconcileNegativeRow(record(), 999);
+    row.peer_topology_key = JSON.stringify({
+      version: 1,
+      preferredPeerId: 'peer-a',
+      privateOnly: false,
+      peers: [
+        { rank: 0, peerId: 'peer-a', preferred: true, core: true },
+        { rank: 1, peerId: 'peer-b', preferred: false, core: false },
+      ],
+    });
+
+    expect(decodeVmReconcileNegativeRow(row)).toBeNull();
+  });
+
   it('fails open on malformed topology state', () => {
     const row = encodeVmReconcileNegativeRow(record(), 999);
     row.peer_topology_key = JSON.stringify({
