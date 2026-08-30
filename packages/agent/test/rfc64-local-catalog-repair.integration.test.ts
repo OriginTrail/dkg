@@ -11,6 +11,7 @@ import {
   computeSwmAuthorInventoryScopeDigestV1,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  createOperationContext,
   type AssertionSeal,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
@@ -349,24 +350,24 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         ]);
         vi.spyOn(startingAgent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
           .mockResolvedValue(null);
-        repairSpy = vi.spyOn(startingAgent, 'repairRfc64LocalPublicCatalogAuthorV1')
+        repairSpy = vi.spyOn(
+          startingAgent,
+          'reconcileRfc64PublicCatalogFromSwmInventoryV1',
+        )
           .mockRejectedValueOnce(new Error('simulated projection failure'))
           .mockResolvedValue({
-            outcome: 'reconciled',
-            reconciliation: {
-              status: 'existing',
-              appliedHead: {
-                catalogScopeDigest: catalogScopeDigestV1(),
-                authorAddress: AUTHOR,
-                currentCatalogHeadDigest: `0x${'92'.repeat(32)}` as Digest32V1,
-                appliedInventoryDigest: `0x${'93'.repeat(32)}` as Digest32V1,
-                catalogVersion: '1',
-                inventoryRowCount: '1',
-              },
-              successorsApplied: 0,
-              targetAssetCount: 1,
-              inventoryHeadObjectDigest,
+            status: 'existing',
+            appliedHead: {
+              catalogScopeDigest: catalogScopeDigestV1(),
+              authorAddress: AUTHOR,
+              currentCatalogHeadDigest: `0x${'92'.repeat(32)}` as Digest32V1,
+              appliedInventoryDigest: `0x${'93'.repeat(32)}` as Digest32V1,
+              catalogVersion: '1',
+              inventoryRowCount: '1',
             },
+            successorsApplied: 0,
+            targetAssetCount: 1,
+            inventoryHeadObjectDigest,
           });
       },
     });
@@ -392,7 +393,8 @@ describe('RFC-64 local SWM catalog projection repair', () => {
   }, 30_000);
 
   it('coalesces a live mutation burst into one latest-state follow-up pass', async () => {
-    const inventoryHeadObjectDigest = `0x${'94'.repeat(32)}` as Digest32V1;
+    const firstInventoryHeadObjectDigest = `0x${'94'.repeat(32)}` as Digest32V1;
+    const latestInventoryHeadObjectDigest = `0x${'97'.repeat(32)}` as Digest32V1;
     let markFirstRepairEntered!: () => void;
     let releaseFirstRepair!: () => void;
     const firstRepairEntered = new Promise<void>((resolve) => {
@@ -418,21 +420,20 @@ describe('RFC-64 local SWM catalog projection repair', () => {
               await firstRepairGate;
             }
             return {
-              outcome: 'reconciled',
-              reconciliation: {
-                status: 'existing',
-                appliedHead: {
-                  catalogScopeDigest: catalogScopeDigestV1(),
-                  authorAddress: AUTHOR,
-                  currentCatalogHeadDigest: `0x${'95'.repeat(32)}` as Digest32V1,
-                  appliedInventoryDigest: `0x${'96'.repeat(32)}` as Digest32V1,
-                  catalogVersion: String(call),
-                  inventoryRowCount: '1',
-                },
-                successorsApplied: 0,
-                targetAssetCount: 1,
-                inventoryHeadObjectDigest,
+              status: 'existing' as const,
+              appliedHead: {
+                catalogScopeDigest: catalogScopeDigestV1(),
+                authorAddress: AUTHOR,
+                currentCatalogHeadDigest: `0x${'95'.repeat(32)}` as Digest32V1,
+                appliedInventoryDigest: `0x${'96'.repeat(32)}` as Digest32V1,
+                catalogVersion: String(call),
+                inventoryRowCount: String(call),
               },
+              successorsApplied: 0,
+              targetAssetCount: call,
+              inventoryHeadObjectDigest: call === 1
+                ? firstInventoryHeadObjectDigest
+                : latestInventoryHeadObjectDigest,
             };
           });
       },
@@ -460,7 +461,13 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()).toEqual(
       expect.objectContaining({
         pass: 2,
-        repairs: [expect.objectContaining({ attempts: 2, outcome: 'reconciled' })],
+        repairs: [expect.objectContaining({
+          attempts: 2,
+          outcome: 'reconciled',
+          inventoryHeadObjectDigest: latestInventoryHeadObjectDigest,
+          catalogVersion: '2',
+          inventoryRowCount: '2',
+        })],
       }),
     );
     await agent.closeRfc64SwmCatalogProjectionSupervisorV1();
@@ -468,6 +475,82 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       contextGraphId: CONTEXT_GRAPH_ID,
       authorAddress: AUTHOR,
     })).toBe(false);
+  }, 30_000);
+
+  it('drains an admitted SWM observer before persistence closes and rejects late admission', async () => {
+    const autoPublish = {
+      peers: [],
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+    const agent = await startRepairAgentV1({
+      name: 'observer-lifecycle-drain',
+      autoPublish,
+    });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+      AUTHOR_WALLET.privateKey,
+    );
+    agent.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await seedInventoryAssetV1(agent, 'shutdown', 29n);
+
+    const originalRecord = agent.recordRfc64SwmAuthorInventoryShadowV1.bind(agent);
+    let markObserverEntered!: () => void;
+    let releaseObserver!: () => void;
+    const observerEntered = new Promise<void>((resolve) => {
+      markObserverEntered = resolve;
+    });
+    const observerGate = new Promise<void>((resolve) => {
+      releaseObserver = resolve;
+    });
+    const recordSpy = vi.spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockImplementation(async (params) => {
+        markObserverEntered();
+        await observerGate;
+        return originalRecord(params);
+      });
+    const persistenceCloseSpy = vi.spyOn(agent, 'closeRfc64PersistenceV1');
+    const schedule = (agent as unknown as {
+      scheduleRfc64SwmInventoryObserverV1(params: Readonly<{
+        contextGraphId: string;
+        assertionCoordinate: string;
+        lifecycleAgentAddress: string;
+        shareOperationId: string;
+        ctx: ReturnType<typeof createOperationContext>;
+      }>): void;
+    }).scheduleRfc64SwmInventoryObserverV1.bind(agent);
+    const observerParams = Object.freeze({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'repair-shutdown',
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: 'repair-operation-shutdown',
+      ctx: createOperationContext('share'),
+    });
+
+    schedule(observerParams);
+    await observerEntered;
+    let stopSettled = false;
+    const stopping = agent.stop().finally(() => { stopSettled = true; });
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
+    expect(persistenceCloseSpy).not.toHaveBeenCalled();
+
+    releaseObserver();
+    await expect(stopping).resolves.toBeUndefined();
+    agents.splice(agents.indexOf(agent), 1);
+    expect(recordSpy).toHaveBeenCalledOnce();
+    expect(persistenceCloseSpy).toHaveBeenCalledOnce();
+    expect(agent.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
+      failed: 0,
+      existingUpserts: 1,
+    });
+
+    schedule(observerParams);
+    await Promise.resolve();
+    expect(recordSpy).toHaveBeenCalledOnce();
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
   }, 30_000);
 
   it('reports missing inventory and unavailable projection distinctly', async () => {

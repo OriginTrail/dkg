@@ -68,7 +68,6 @@ interface MutableAuthorRepairStatusV1 {
   lastError: string | null;
   updatedAtMs: number | null;
   dirty: boolean;
-  liveAdmission: boolean;
 }
 
 interface ProjectionSupervisorStateV1 {
@@ -131,7 +130,6 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
             lastError: null,
             updatedAtMs: null,
             dirty: true,
-            liveAdmission: false,
           }];
         });
       },
@@ -233,12 +231,10 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
         lastError: null,
         updatedAtMs: null,
         dirty: true,
-        liveAdmission: true,
       };
       state.repairs.push(repair);
     } else {
       repair.dirty = true;
-      repair.liveAdmission = true;
     }
     if (state.timer !== null) {
       clearTimeout(state.timer);
@@ -259,11 +255,9 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       retryIntervalMs: state.retryIntervalMs ?? 0,
       lastPassStartedAtMs: state.lastPassStartedAtMs,
       lastPassCompletedAtMs: state.lastPassCompletedAtMs,
-      repairs: Object.freeze(state.repairs.map(({
-        dirty: _dirty,
-        liveAdmission: _liveAdmission,
-        ...repair
-      }) => Object.freeze(repair))),
+      repairs: Object.freeze(state.repairs.map(({ dirty: _dirty, ...repair }) => (
+        Object.freeze(repair)
+      ))),
     });
   }
 
@@ -363,23 +357,20 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   ): Promise<void> {
     repair.attempts += 1;
     try {
-      const result = repair.liveAdmission
-        ? await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
-          contextGraphId: repair.contextGraphId,
-          authorAddress: repair.authorAddress,
-          signal,
-        }).then((reconciliation) => reconciliation === null
-          ? Object.freeze({ outcome: 'no-inventory' as const })
-          : Object.freeze({ outcome: 'reconciled' as const, reconciliation }))
-        : await this.repairRfc64LocalPublicCatalogAuthorV1({
-          contextGraphId: repair.contextGraphId,
-          authorAddress: repair.authorAddress,
-          signal,
-        });
+      // Startup discovery proves local-author ownership before enqueueing;
+      // live mutations prove their own author seal and signing admission. Both
+      // boundaries therefore enqueue the same immutable scope and execute the
+      // same exact-state reconciliation operation here. A queued scope never
+      // changes policy based on which event most recently dirtied it.
+      const reconciliation = await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+        contextGraphId: repair.contextGraphId,
+        authorAddress: repair.authorAddress,
+        signal,
+      });
       if (signal.aborted) return;
-      if (result.outcome === 'inactive' || result.outcome === 'no-inventory') {
+      if (reconciliation === null) {
         Object.assign(repair, {
-          outcome: result.outcome,
+          outcome: 'no-inventory',
           inventoryHeadObjectDigest: null,
           catalogVersion: null,
           inventoryRowCount: null,
@@ -388,24 +379,13 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
         });
         return;
       }
-      if (result.outcome === 'unavailable') {
-        Object.assign(repair, {
-          outcome: 'unavailable',
-          inventoryHeadObjectDigest: null,
-          catalogVersion: null,
-          inventoryRowCount: null,
-          lastError: boundedErrorV1(result.error),
-          updatedAtMs: Date.now(),
-        });
-        return;
-      }
       Object.assign(repair, {
         outcome: 'reconciled',
-        inventoryHeadObjectDigest: result.reconciliation.inventoryHeadObjectDigest,
-        catalogVersion: result.reconciliation.appliedHead?.catalogVersion ?? null,
+        inventoryHeadObjectDigest: reconciliation.inventoryHeadObjectDigest,
+        catalogVersion: reconciliation.appliedHead?.catalogVersion ?? null,
         inventoryRowCount:
-          result.reconciliation.appliedHead?.inventoryRowCount
-          ?? String(result.reconciliation.targetAssetCount),
+          reconciliation.appliedHead?.inventoryRowCount
+          ?? String(reconciliation.targetAssetCount),
         lastError: null,
         updatedAtMs: Date.now(),
       });
