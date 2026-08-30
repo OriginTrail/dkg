@@ -8098,6 +8098,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
      * or a clean non-metadata-only empty completion.
      */
     peersSucceeded: number;
+    /** Peers whose shared-memory plane completed without failure in this run. */
+    sharedMemoryCleanPeerIds: string[];
     /** Context Graph admissions deferred by local scheduler pressure. */
     deferredBackpressure: number;
     dataSynced: number;
@@ -8302,6 +8304,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peersTried: number;
     peersResponded: number;
     peersSucceeded: number;
+    /** Peers whose shared-memory plane completed without failure in this run. */
+    sharedMemoryCleanPeerIds: string[];
     deferredBackpressure: number;
     dataSynced: number;
     sharedMemorySynced: number;
@@ -8503,6 +8507,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let cleanDurablePrivateOnlyCompletions = 0;
     let cleanSharedMemoryDataSynced = 0;
     const peersSucceeded = new Set<string>();
+    const sharedMemoryCleanPeerIds = new Set<string>();
     for (const [resultIndex, r] of results.entries()) {
       const remotePeerId = catchupPeers[resultIndex]!;
       // A peer "succeeded" when its sync round finished without a transport
@@ -8514,6 +8519,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         complete: r.durable.complete,
       });
       const sharedProgress = r.shared ? classifyDurableProgress(r.shared) : null;
+      if (sharedProgress?.completedWithoutFailure) {
+        sharedMemoryCleanPeerIds.add(remotePeerId);
+      }
       if (r.shared) {
         passTracker.recordPeerRound(
           remotePeerId,
@@ -8659,6 +8667,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       shared: SharedMemorySyncResult,
     ): void => {
       const progress = classifyDurableProgress(shared);
+      if (progress.completedWithoutFailure) {
+        sharedMemoryCleanPeerIds.add(remotePeerId);
+      }
       passTracker.recordPeerRound(
         remotePeerId,
         shared.swmCoverage,
@@ -8825,6 +8836,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peersTried,
       peersResponded: peersResponded.size,
       peersSucceeded: peersSucceeded.size,
+      sharedMemoryCleanPeerIds: [...sharedMemoryCleanPeerIds],
       deferredBackpressure,
       dataSynced,
       sharedMemorySynced,

@@ -1,47 +1,76 @@
 import { describe, expect, it } from 'vitest';
 import {
   canReuseVmReconcilePeerTopology,
-  decodeVmReconcilePeerTopology,
-  encodeVmReconcilePeerTopology,
-  type VmReconcilePeerTopology,
+  createVmReconcilePeerTopology,
+  isVmReconcilePeerTopology,
+  UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
 } from '../src/vm-reconcile-peer-topology.js';
+import type { VmReconcilePeerTopology } from '../src/dkg-agent-types.js';
 
 function topology(
-  peers: Array<{ peerId: string; preferred?: boolean; core?: boolean }>,
+  peers: Array<{ peerId: string; core?: boolean }>,
   preferredPeerId: string | null = null,
+  cleanMissPeerIds: string[] = [],
 ): VmReconcilePeerTopology {
-  return {
-    kind: 'readable',
+  return createVmReconcilePeerTopology({
     preferredPeerId,
     privateOnly: false,
     peers: peers.map((peer) => ({
       peerId: peer.peerId,
-      preferred: peer.preferred ?? false,
       core: peer.core ?? false,
     })),
-  };
+    cleanMissPeerIds,
+  });
 }
 
 describe('VM reconcile peer-topology compatibility', () => {
-  it('round-trips a validated readable topology at the durable boundary', () => {
-    const value = topology([
-      { peerId: 'preferred', preferred: true },
-      { peerId: 'core', core: true },
-    ], 'preferred');
-    expect(decodeVmReconcilePeerTopology(encodeVmReconcilePeerTopology(value))).toEqual(value);
+  it('constructs a canonical topology without redundant rank or preferred fields', () => {
+    const value = createVmReconcilePeerTopology({
+      preferredPeerId: 'preferred',
+      privateOnly: false,
+      peers: [
+        { peerId: 'preferred', core: false },
+        { peerId: 'preferred', core: true },
+        { peerId: 'core', core: true },
+      ],
+      cleanMissPeerIds: ['core', 'missing', 'core'],
+    });
+    expect(value).toEqual({
+      kind: 'readable',
+      preferredPeerId: 'preferred',
+      privateOnly: false,
+      peers: [
+        { peerId: 'preferred', core: false },
+        { peerId: 'core', core: true },
+      ],
+      cleanMissPeerIds: ['core'],
+    });
+    expect(isVmReconcilePeerTopology(value)).toBe(true);
   });
 
-  it('reuses exact topology and capability-preserving peer removal', () => {
-    const cached = topology([
-      { peerId: 'a' },
-      { peerId: 'b', core: true },
-      { peerId: 'c' },
-    ]);
+  it('reuses exact topology and removal of peers with clean-miss evidence', () => {
+    const cached = topology(
+      [{ peerId: 'a' }, { peerId: 'b', core: true }, { peerId: 'c' }],
+      null,
+      ['a', 'b', 'c'],
+    );
     expect(canReuseVmReconcilePeerTopology(cached, cached)).toBe(true);
-    expect(canReuseVmReconcilePeerTopology(cached, topology([
-      { peerId: 'a' },
-      { peerId: 'c' },
-    ]))).toBe(true);
+    expect(canReuseVmReconcilePeerTopology(
+      cached,
+      topology([{ peerId: 'a' }, { peerId: 'c' }]),
+    )).toBe(true);
+  });
+
+  it('rejects removal that exposes a previously unproven peer', () => {
+    const cached = topology(
+      [{ peerId: 'skipped' }, { peerId: 'clean' }],
+      null,
+      ['clean'],
+    );
+    expect(canReuseVmReconcilePeerTopology(
+      cached,
+      topology([{ peerId: 'skipped' }]),
+    )).toBe(false);
   });
 
   it('rejects peer additions, capability reclassification, and ordering changes', () => {
@@ -60,33 +89,19 @@ describe('VM reconcile peer-topology compatibility', () => {
     )).toBe(false);
   });
 
-  it('preserves explicit unreadable equality but rejects malformed durable state', () => {
+  it('preserves explicit unreadable equality and rejects malformed domain records', () => {
     const readable = topology([{ peerId: 'a' }]);
-    const unreadable = decodeVmReconcilePeerTopology('unreadable');
-    expect(unreadable).toEqual({ kind: 'unreadable' });
-    expect(canReuseVmReconcilePeerTopology(unreadable!, unreadable!)).toBe(true);
-    expect(canReuseVmReconcilePeerTopology(unreadable!, readable)).toBe(false);
-    expect(canReuseVmReconcilePeerTopology(readable, unreadable!)).toBe(false);
-
-    const invalidPayloads = [
-      '{',
-      JSON.stringify({ version: 2, preferredPeerId: null, privateOnly: false, peers: [] }),
-      JSON.stringify({ version: 1, preferredPeerId: null, privateOnly: false, peers: [{
-        rank: 1,
-        peerId: 'a',
-        preferred: false,
-        core: false,
-      }] }),
-      JSON.stringify({ version: 1, preferredPeerId: null, privateOnly: false, peers: [{
-        rank: 0,
-        peerId: 'a',
-        preferred: true,
-        core: false,
-      }] }),
-    ];
-    for (const payload of invalidPayloads) {
-      const decoded = decodeVmReconcilePeerTopology(payload);
-      expect(decoded).toBeNull();
-    }
+    expect(canReuseVmReconcilePeerTopology(
+      UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
+      UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
+    )).toBe(true);
+    expect(canReuseVmReconcilePeerTopology(
+      UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
+      readable,
+    )).toBe(false);
+    expect(isVmReconcilePeerTopology({
+      ...readable,
+      cleanMissPeerIds: ['unknown'],
+    })).toBe(false);
   });
 });

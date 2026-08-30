@@ -122,13 +122,14 @@ function stubNode(agent: DKGAgent): void {
   };
 }
 
-function emptyCatchupStats() {
+function emptyCatchupStats(sharedMemoryCleanPeerIds: string[] = []) {
   return {
     connectedPeers: 1,
     totalPeers: 1,
     syncCapablePeers: 1,
     peersTried: 1,
     peersSucceeded: 1,
+    sharedMemoryCleanPeerIds,
     dataSynced: 0,
     sharedMemorySynced: 0,
     denied: false,
@@ -1153,7 +1154,10 @@ describe('Phase D - VM reconcile damping', () => {
     (agent as any).node.libp2p.getConnections = () =>
       connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
 
-    const fetch = recorder(async () => emptyCatchupStats());
+    const provenPeers = ['peer-stable', 'peer-flaky'];
+    const fetch = recorder(async () => emptyCatchupStats([
+      provenPeers.shift() ?? 'peer-stable',
+    ]));
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
@@ -1173,6 +1177,38 @@ describe('Phase D - VM reconcile damping', () => {
     await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
     expect(expensiveScans).toBe(0);
+  });
+
+  it('rechecks a remaining peer that was skipped before another clean peer disappeared', async () => {
+    const internals = await boot();
+    const onChainCgId = 60n;
+    registerUnmatchedKC(internals.chain, 9020n, onChainCgId);
+
+    let connectedPeers = ['peer-skipped', 'peer-clean'];
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+    let fetchCalls = 0;
+    let snapshotAvailable = false;
+    const fetch = recorder(async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) return noProtocolCatchupStats();
+      if (fetchCalls === 2) return emptyCatchupStats(['peer-clean']);
+      snapshotAvailable = true;
+      return emptyCatchupStats(['peer-skipped']);
+    });
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+    (internals as any).getOrCreateFinalizationHandler = () => ({
+      handleChainReconciledKC: async () => snapshotAvailable ? 'promoted' : 'no-swm',
+    });
+
+    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(fetch.calls).toHaveLength(2);
+
+    connectedPeers = ['peer-skipped'];
+    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch.calls).toHaveLength(3);
   });
 
   it('reuses a negative cache entry when connected peers only reorder', async () => {

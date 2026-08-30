@@ -193,6 +193,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.peersTried).toBe(1);
         expect(result.dataSynced).toBe(5);
         expect(result.sharedMemorySynced).toBe(2);
+        expect(result.sharedMemoryCleanPeerIds).toEqual([remotePeer.toString()]);
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
@@ -360,6 +361,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(durableOnlyResponse.peersSucceeded).toBe(0);
         expect(durableOnlyResponse.diagnostics.durable.failedPeers).toBe(0);
         expect(durableOnlyResponse.diagnostics.sharedMemory.failedPeers).toBe(1);
+        expect(durableOnlyResponse.sharedMemoryCleanPeerIds).toEqual([]);
         expect(durableOnlyResponse.sharedMemorySynced).toBe(1);
         expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.sharedMemorySynced)
           .not.toBe(true);
@@ -834,6 +836,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.connectedPeers).toBe(1);
         expect(result.syncCapablePeers).toBe(0);
         expect(result.peersTried).toBe(0);
+        expect(result.sharedMemoryCleanPeerIds).toEqual([]);
         expect(result.diagnostics.noProtocolPeers).toBe(1);
       } finally {
         await agent.stop().catch(() => {});

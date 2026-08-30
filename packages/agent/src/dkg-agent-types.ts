@@ -778,6 +778,23 @@ export interface ContextGraphSubscriptionRecord {
   syncScoped: boolean;
 }
 
+export interface VmReconcilePeerTopologyPeer {
+  peerId: string;
+  core: boolean;
+}
+
+export type VmReconcilePeerTopology =
+  | { kind: 'unreadable' }
+  | {
+    kind: 'readable';
+    preferredPeerId: string | null;
+    privateOnly: boolean;
+    /** Ranked provider order; array position is the rank. */
+    peers: VmReconcilePeerTopologyPeer[];
+    /** Peers that completed a clean SWM round while the cached miss was recorded. */
+    cleanMissPeerIds: string[];
+  };
+
 export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
@@ -829,7 +846,7 @@ export interface VmReconcileNegativeRecord {
   nextRetryAt: number;
   swmGen: string;
   candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-  peerTopologyKey: string;
+  peerTopology: VmReconcilePeerTopology;
 }
 
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */

@@ -1,95 +1,75 @@
-export type VmReconcilePeerTopologyPeer = {
-  peerId: string;
-  preferred: boolean;
-  core: boolean;
-};
-
-export type VmReconcilePeerTopology =
-  | { kind: 'unreadable' }
-  | {
-    kind: 'readable';
-    preferredPeerId: string | null;
-    privateOnly: boolean;
-    peers: VmReconcilePeerTopologyPeer[];
-  };
+import type {
+  VmReconcilePeerTopology,
+  VmReconcilePeerTopologyPeer,
+} from './dkg-agent-types.js';
 
 export const UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY: VmReconcilePeerTopology = {
   kind: 'unreadable',
 };
-const VM_RECONCILE_PEER_TOPOLOGY_VERSION = 1;
-
-/** Serialize the typed process-local topology only when crossing the durable-store boundary. */
-export function encodeVmReconcilePeerTopology(topology: VmReconcilePeerTopology): string {
-  if (topology.kind === 'unreadable') return 'unreadable';
-  return JSON.stringify({
-    version: VM_RECONCILE_PEER_TOPOLOGY_VERSION,
-    preferredPeerId: topology.preferredPeerId,
-    privateOnly: topology.privateOnly,
-    peers: topology.peers.map((peer, rank) => ({ rank, ...peer })),
-  });
+export function createVmReconcilePeerTopology(input: {
+  preferredPeerId: string | null;
+  privateOnly: boolean;
+  peers: readonly VmReconcilePeerTopologyPeer[];
+  cleanMissPeerIds?: readonly string[];
+}): VmReconcilePeerTopology {
+  const seenPeerIds = new Set<string>();
+  const peers = input.peers.filter((peer) => {
+    if (!peer.peerId || seenPeerIds.has(peer.peerId)) return false;
+    seenPeerIds.add(peer.peerId);
+    return true;
+  }).map((peer) => ({ peerId: peer.peerId, core: peer.core }));
+  const cleanMissPeerIds = [...new Set(input.cleanMissPeerIds ?? [])]
+    .filter((peerId) => seenPeerIds.has(peerId));
+  return {
+    kind: 'readable',
+    preferredPeerId: input.preferredPeerId,
+    privateOnly: input.privateOnly,
+    peers,
+    cleanMissPeerIds,
+  };
 }
 
-/**
- * Decode and validate the legacy string persistence contract. The explicit unreadable
- * sentinel preserves exact-match behavior; malformed or unknown versions fail open.
- */
-export function decodeVmReconcilePeerTopology(encoded: string): VmReconcilePeerTopology | null {
-  if (encoded === 'unreadable') return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
-  try {
-    const value: unknown = JSON.parse(encoded);
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return null;
-    }
-    const record = value as Record<string, unknown>;
+/** Defensive guard for custom ContextGraphSubscriptionStore implementations. */
+export function isVmReconcilePeerTopology(value: unknown): value is VmReconcilePeerTopology {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const topology = value as Record<string, unknown>;
+  if (topology.kind === 'unreadable') return true;
+  if (
+    topology.kind !== 'readable'
+    || !(topology.preferredPeerId === null || typeof topology.preferredPeerId === 'string')
+    || typeof topology.privateOnly !== 'boolean'
+    || !Array.isArray(topology.peers)
+    || !Array.isArray(topology.cleanMissPeerIds)
+  ) return false;
+  const peerIds = new Set<string>();
+  for (const candidate of topology.peers) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+    const peer = candidate as Record<string, unknown>;
     if (
-      record.version !== VM_RECONCILE_PEER_TOPOLOGY_VERSION
-      || !(record.preferredPeerId === null || typeof record.preferredPeerId === 'string')
-      || typeof record.privateOnly !== 'boolean'
-      || !Array.isArray(record.peers)
-    ) {
-      return null;
-    }
-
-    const peers: VmReconcilePeerTopologyPeer[] = [];
-    const seenPeerIds = new Set<string>();
-    for (const [rank, candidate] of record.peers.entries()) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-        return null;
-      }
-      const peer = candidate as Record<string, unknown>;
-      if (
-        peer.rank !== rank
-        || typeof peer.peerId !== 'string'
-        || peer.peerId.length === 0
-        || typeof peer.preferred !== 'boolean'
-        || typeof peer.core !== 'boolean'
-        || peer.preferred !== (peer.peerId === record.preferredPeerId)
-        || seenPeerIds.has(peer.peerId)
-      ) {
-        return null;
-      }
-      seenPeerIds.add(peer.peerId);
-      peers.push({
-        peerId: peer.peerId,
-        preferred: peer.preferred,
-        core: peer.core,
-      });
-    }
-
-    return {
-      kind: 'readable',
-      preferredPeerId: record.preferredPeerId,
-      privateOnly: record.privateOnly,
-      peers,
-    };
-  } catch {
-    return null;
+      typeof peer.peerId !== 'string'
+      || peer.peerId.length === 0
+      || typeof peer.core !== 'boolean'
+      || peerIds.has(peer.peerId)
+    ) return false;
+    peerIds.add(peer.peerId);
   }
+  const cleanMisses = new Set<string>();
+  for (const peerId of topology.cleanMissPeerIds) {
+    if (
+      typeof peerId !== 'string'
+      || !peerIds.has(peerId)
+      || cleanMisses.has(peerId)
+    ) return false;
+    cleanMisses.add(peerId);
+  }
+  return true;
 }
 
 /**
- * A missing provider cannot make a prior clean miss fetchable. Reuse is therefore safe only
- * when the current ranked providers are a capability-preserving subsequence of those checked.
+ * Exact topology preserves the existing local-generation backoff. A smaller
+ * topology is reusable only when every remaining peer produced a clean SWM
+ * completion while the miss was recorded; a connected-but-skipped peer is not
+ * absence evidence.
  */
 export function canReuseVmReconcilePeerTopology(
   cached: VmReconcilePeerTopology,
@@ -105,6 +85,17 @@ export function canReuseVmReconcilePeerTopology(
     return false;
   }
 
+  const peersMatch = (
+    left: VmReconcilePeerTopologyPeer,
+    right: VmReconcilePeerTopologyPeer,
+  ): boolean => left.peerId === right.peerId && left.core === right.core;
+  if (
+    cached.peers.length === current.peers.length
+    && current.peers.every((peer, index) => peersMatch(cached.peers[index]!, peer))
+  ) {
+    return true;
+  }
+
   let cachedIndex = 0;
   for (const peer of current.peers) {
     while (
@@ -116,12 +107,12 @@ export function canReuseVmReconcilePeerTopology(
     const cachedPeer = cached.peers[cachedIndex];
     if (
       !cachedPeer
-      || cachedPeer.preferred !== peer.preferred
-      || cachedPeer.core !== peer.core
+      || !peersMatch(cachedPeer, peer)
     ) {
       return false;
     }
     cachedIndex += 1;
   }
-  return true;
+  const provenCleanMisses = new Set(cached.cleanMissPeerIds);
+  return current.peers.every((peer) => provenCleanMisses.has(peer.peerId));
 }
