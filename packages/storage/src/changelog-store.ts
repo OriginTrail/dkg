@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
+import {
+  createSortedUniqueStringCatalog,
+  filterSortedUniqueStringCatalog,
+  isSparqlUpdateOperation,
+} from '@origintrail-official/dkg-core';
+import type { SortedGraphCatalog, SortedGraphSetSource } from './graph-set-index-store.js';
 import {
   deleteByPatternWithoutCount,
   findTripleStoreCapability,
@@ -200,7 +205,7 @@ export interface ChangelogStoreOptions {
  * Write-path append-only change log. See the class-level docstring for the
  * crash-consistency and single-writer arguments.
  */
-export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
+export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, SortedGraphSetSource {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -211,6 +216,10 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
   private readonly eraGuard?: ChangelogEraGuard;
+  private visibleSortedGraphs: {
+    source: SortedGraphCatalog;
+    value: SortedGraphCatalog;
+  } | null = null;
 
   /** Last durably committed seq (0 = none). Next seq is `seq + 1`. */
   private seq = 0;
@@ -521,6 +530,22 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
   async listGraphs(options?: QueryOptions): Promise<string[]> {
     const graphs = await this.inner.listGraphs(options);
     return graphs.filter((g) => !this.isReservedGraph(g));
+  }
+
+  async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
+    // This decorator owns reserved-graph visibility, so it must explicitly
+    // compose the inner catalog rather than let callers discover through it.
+    const innerSorted = typeof (this.inner as Partial<SortedGraphSetSource>).listGraphsSorted
+      === 'function'
+      ? this.inner as TripleStore & SortedGraphSetSource
+      : null;
+    const source = innerSorted
+      ? await innerSorted.listGraphsSorted(options)
+      : createSortedUniqueStringCatalog(await this.inner.listGraphs(options));
+    if (this.visibleSortedGraphs?.source === source) return this.visibleSortedGraphs.value;
+    const value = filterSortedUniqueStringCatalog(source, (graph) => !this.isReservedGraph(graph));
+    this.visibleSortedGraphs = { source, value };
+    return value;
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {

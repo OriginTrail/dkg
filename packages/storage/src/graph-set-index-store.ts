@@ -1,5 +1,10 @@
 import { performance } from 'node:perf_hooks';
-import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
+import {
+  compareCodePoint,
+  createSortedUniqueStringCatalog,
+  isSparqlUpdateOperation,
+  type SortedUniqueStringCatalog,
+} from '@origintrail-official/dkg-core';
 import type {
   Quad,
   QueryOptions,
@@ -10,7 +15,7 @@ import type {
   TripleStoreDecorator,
   UpdateOptions,
 } from './triple-store.js';
-import { deleteByPatternWithoutCount, findTripleStoreCapability } from './triple-store.js';
+import { deleteByPatternWithoutCount } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
@@ -100,19 +105,21 @@ export interface GraphSetIndexStoreOptions {
 
 /** Immutable graph catalog maintained in Unicode code-point order. */
 export interface SortedGraphSetSource {
-  listGraphsSorted(options?: QueryOptions): Promise<readonly string[]>;
+  listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog>;
 }
 
-/** Resolve the sorted-catalog capability through the documented decorator chain. */
+export type SortedGraphCatalog = SortedUniqueStringCatalog;
+
+/**
+ * Resolve only at the public store boundary. Traversing through a decorator
+ * could bypass graph-visibility semantics owned by that decorator.
+ */
 export function asSortedGraphSetSource(store: unknown): SortedGraphSetSource | null {
-  return findTripleStoreCapability(
-    store,
-    (candidate): candidate is SortedGraphSetSource => (
-      typeof candidate === 'object'
-      && candidate !== null
-      && typeof (candidate as Partial<SortedGraphSetSource>).listGraphsSorted === 'function'
-    ),
-  );
+  return typeof store === 'object'
+    && store !== null
+    && typeof (store as Partial<SortedGraphSetSource>).listGraphsSorted === 'function'
+    ? store as SortedGraphSetSource
+    : null;
 }
 
 /** Internal/test-only observation seam; intentionally absent from the package API. */
@@ -224,9 +231,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   private readonly onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
 
   private graphs: Set<string> | null = null;
-  private sortedGraphs: readonly string[] | null = null;
-  /** Membership changes not yet merged into sortedGraphs. */
-  private readonly changedGraphs = new Set<string>();
+  private sortedGraphs: SortedGraphCatalog | null = null;
   private nextRevalidateAt = 0;
   private revalidateFailureCount = 0;
   private mutationGeneration = 0;
@@ -514,14 +519,12 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     return [...this.ensureSortedGraphs()];
   }
 
-  async listGraphsSorted(options?: QueryOptions): Promise<readonly string[]> {
+  async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
     if (!this.enabled) {
-      return Object.freeze(
-        [...new Set(
-          (await this.inner.listGraphs(options)).filter(
-            (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
-          ),
-        )].sort(compareCodePoint),
+      return createSortedUniqueStringCatalog(
+        (await this.inner.listGraphs(options)).filter(
+          (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
+        ),
       );
     }
     await this.ensureGraphSet(options);
@@ -727,7 +730,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   private clearIndex(): void {
     this.graphs = null;
     this.sortedGraphs = null;
-    this.changedGraphs.clear();
     this.resetRevalidationSchedule();
   }
 
@@ -736,8 +738,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     const added = [...next].filter((graph) => !previous.has(graph)).sort();
     const removed = [...previous].filter((graph) => !next.has(graph)).sort();
     this.graphs = next;
-    this.sortedGraphs = Object.freeze([...next].sort(compareCodePoint));
-    this.changedGraphs.clear();
+    if (added.length > 0 || removed.length > 0) this.sortedGraphs = null;
     this.revalidateFailureCount = 0;
     this.nextRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
@@ -773,7 +774,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     for (const graph of graphs) {
       if (!graph || isAtomicGraphReplaceStagingGraph(graph) || this.graphs.has(graph)) continue;
       this.graphs.add(graph);
-      this.changedGraphs.add(graph);
+      this.sortedGraphs = null;
       this.emit({ type: 'graph-added', graph, source });
     }
   }
@@ -782,32 +783,14 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     if (!this.graphs) return;
     for (const graph of graphs) {
       if (!graph || !this.graphs.delete(graph)) continue;
-      this.changedGraphs.add(graph);
+      this.sortedGraphs = null;
       this.emit({ type: 'graph-removed', graph, source });
     }
   }
 
-  /**
-   * Fold all writes since the last graph read into one O(n + k log k) merge.
-   * The previous implementation sorted the entire graph set after every
-   * responder invalidation; batching mutations here removes that O(n log n)
-   * work while preserving a stable immutable catalog for concurrent readers.
-   */
-  private ensureSortedGraphs(): readonly string[] {
-    if (!this.graphs) return Object.freeze([]);
-    if (!this.sortedGraphs) {
-      this.sortedGraphs = Object.freeze([...this.graphs].sort(compareCodePoint));
-      this.changedGraphs.clear();
-      return this.sortedGraphs;
-    }
-    if (this.changedGraphs.size === 0) return this.sortedGraphs;
-
-    const retained = this.sortedGraphs.filter((graph) => this.graphs!.has(graph));
-    const additions = [...this.changedGraphs]
-      .filter((graph) => this.graphs!.has(graph) && !containsSorted(this.sortedGraphs!, graph))
-      .sort(compareCodePoint);
-    this.sortedGraphs = Object.freeze(mergeSortedUnique(retained, additions));
-    this.changedGraphs.clear();
+  private ensureSortedGraphs(): SortedGraphCatalog {
+    if (!this.graphs) return createSortedUniqueStringCatalog([]);
+    this.sortedGraphs ??= createSortedUniqueStringCatalog(this.graphs);
     return this.sortedGraphs;
   }
 
@@ -838,20 +821,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 }
 
-function compareCodePoint(leftValue: string, rightValue: string): number {
-  let leftIndex = 0;
-  let rightIndex = 0;
-  while (leftIndex < leftValue.length && rightIndex < rightValue.length) {
-    const leftCodePoint = leftValue.codePointAt(leftIndex)!;
-    const rightCodePoint = rightValue.codePointAt(rightIndex)!;
-    const delta = leftCodePoint - rightCodePoint;
-    if (delta !== 0) return delta;
-    leftIndex += leftCodePoint > 0xFFFF ? 2 : 1;
-    rightIndex += rightCodePoint > 0xFFFF ? 2 : 1;
-  }
-  if (leftIndex < leftValue.length) return 1;
-  if (rightIndex < rightValue.length) return -1;
-  return 0;
+function namedGraphsFromQuads(quads: Quad[]): string[] {
+  return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
 }
 
 function lowerBound(values: readonly string[], target: string): number {
@@ -863,39 +834,6 @@ function lowerBound(values: readonly string[], target: string): number {
     else high = middle;
   }
   return low;
-}
-
-function containsSorted(values: readonly string[], target: string): boolean {
-  const index = lowerBound(values, target);
-  return index < values.length && values[index] === target;
-}
-
-function mergeSortedUnique(left: readonly string[], right: readonly string[]): string[] {
-  const merged: string[] = [];
-  let leftIndex = 0;
-  let rightIndex = 0;
-  while (leftIndex < left.length || rightIndex < right.length) {
-    const leftValue = left[leftIndex];
-    const rightValue = right[rightIndex];
-    if (rightValue === undefined || (
-      leftValue !== undefined && compareCodePoint(leftValue, rightValue) < 0
-    )) {
-      merged.push(leftValue!);
-      leftIndex += 1;
-    } else if (leftValue === undefined || compareCodePoint(leftValue, rightValue) > 0) {
-      merged.push(rightValue);
-      rightIndex += 1;
-    } else {
-      merged.push(leftValue);
-      leftIndex += 1;
-      rightIndex += 1;
-    }
-  }
-  return merged;
-}
-
-function namedGraphsFromQuads(quads: Quad[]): string[] {
-  return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
 }
 
 /** Filter falsy entries and de-duplicate a caller-supplied graph-URI hint list. */

@@ -90,6 +90,7 @@ export {
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
   type GraphSetMutationSource,
+  type SortedGraphCatalog,
   type SortedGraphSetSource,
 } from './graph-set-index-store.js';
 export {

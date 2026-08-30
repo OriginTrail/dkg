@@ -11,6 +11,7 @@ export * from './ka-content-scope.js';
 export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
+export * from './code-point-order.js';
 export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';

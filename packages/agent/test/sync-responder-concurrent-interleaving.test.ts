@@ -1,5 +1,10 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  ChangelogStore,
+  GraphSetIndexStore,
+  OxigraphStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -1652,6 +1657,30 @@ describe('sync responder pagination interleaving', () => {
     expect(duplicateListing).not.toBe(membershipChange);
     expect(duplicateListing.graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(calls).toBe(4);
+  });
+
+  it('uses the outer sorted catalog without exposing reserved decorator graphs', async () => {
+    const visible = 'did:dkg:context-graph:sorted-boundary/data';
+    const reserved = 'did:dkg:context-graph:sorted-boundary/internal';
+    const base = new OxigraphStore();
+    await base.insert([q(visible, 1), q(reserved, 2)]);
+    const indexed = new GraphSetIndexStore(base, { revalidateMs: 100_000 });
+    const store = new ChangelogStore(indexed, { reservedGraphs: [reserved] });
+    const listGraphs = vi.spyOn(store, 'listGraphs').mockRejectedValue(
+      new Error('unsorted graph enumeration must not be selected'),
+    );
+    const memo = createResponderGraphListMemo(store);
+
+    const initial = await memo.get({ refresh: true });
+    expect(initial.graphs).toContain(visible);
+    expect(initial.graphs).not.toContain(reserved);
+    expect(listGraphs).not.toHaveBeenCalled();
+
+    await store.insert([q(visible, 3)]);
+    const contentOnly = await memo.get({ refresh: true });
+    expect(contentOnly).toBe(initial);
+    expect(contentOnly.graphs).not.toContain(reserved);
+    expect(listGraphs).not.toHaveBeenCalled();
   });
 
   it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {

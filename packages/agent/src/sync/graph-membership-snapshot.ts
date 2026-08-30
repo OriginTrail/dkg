@@ -1,4 +1,8 @@
-import { compareCodePoint } from './code-point-order.js';
+import {
+  compareCodePoint,
+  createSortedUniqueStringCatalog,
+  type SortedUniqueStringCatalog,
+} from '@origintrail-official/dkg-core';
 
 export interface GraphMembershipSnapshot {
   /** Immutable, unique graph names in protocol code-point order. */
@@ -29,11 +33,20 @@ function lowerBound(graphs: readonly string[], target: string): number {
 
 export function createGraphMembershipSnapshot(
   sourceGraphs: readonly string[],
-  options: { sortedUnique?: boolean } = {},
 ): GraphMembershipSnapshot {
-  const graphs: readonly string[] = options.sortedUnique
-    ? (Object.isFrozen(sourceGraphs) ? sourceGraphs : Object.freeze([...sourceGraphs]))
-    : Object.freeze([...new Set(sourceGraphs)].sort(compareCodePoint));
+  return buildGraphMembershipSnapshot(createSortedUniqueStringCatalog(sourceGraphs));
+}
+
+/** No-copy path restricted to a catalog carrying the sorted/unique proof. */
+export function createGraphMembershipSnapshotFromSortedCatalog(
+  graphs: SortedUniqueStringCatalog,
+): GraphMembershipSnapshot {
+  return buildGraphMembershipSnapshot(graphs);
+}
+
+function buildGraphMembershipSnapshot(
+  graphs: SortedUniqueStringCatalog,
+): GraphMembershipSnapshot {
   const membershipIndex = new Map<string, number>();
   for (let index = 0; index < graphs.length; index += 1) {
     membershipIndex.set(graphs[index]!, index);

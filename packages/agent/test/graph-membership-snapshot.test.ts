@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { compareCodePoint } from '../src/sync/code-point-order.js';
-import { createGraphMembershipSnapshot } from '../src/sync/graph-membership-snapshot.js';
+import { createSortedUniqueStringCatalog } from '@origintrail-official/dkg-core';
+import {
+  createGraphMembershipSnapshot,
+  createGraphMembershipSnapshotFromSortedCatalog,
+} from '../src/sync/graph-membership-snapshot.js';
 
 describe('graph membership snapshot', () => {
   it('keeps one immutable sorted membership index', () => {
@@ -25,13 +29,25 @@ describe('graph membership snapshot', () => {
   });
 
   it('accepts a proven sorted catalog without reordering it', () => {
-    const sorted = Object.freeze(['urn:graph:a', 'urn:graph:b', 'urn:graph:𐀀']);
-    const snapshot = createGraphMembershipSnapshot(sorted, { sortedUnique: true });
+    const sorted = createSortedUniqueStringCatalog([
+      'urn:graph:a',
+      'urn:graph:b',
+      'urn:graph:𐀀',
+    ]);
+    const snapshot = createGraphMembershipSnapshotFromSortedCatalog(sorted);
 
     expect(snapshot.graphs).toEqual(sorted);
     expect(snapshot.graphs).toBe(sorted);
     expect(snapshot.matches([...sorted].reverse())).toBe(true);
     expect(snapshot.equalOrUnder('urn:graph:a')).toEqual(['urn:graph:a']);
+  });
+
+  it('normalizes malformed ordinary arrays instead of trusting caller flags', () => {
+    const source = Object.freeze(['urn:graph:z', 'urn:graph:a', 'urn:graph:a']);
+    const snapshot = createGraphMembershipSnapshot(source);
+
+    expect(snapshot.graphs).toEqual(['urn:graph:a', 'urn:graph:z']);
+    expect(snapshot.graphs).not.toBe(source);
   });
 
   it('selects only the exact graph and slash-delimited descendants', () => {

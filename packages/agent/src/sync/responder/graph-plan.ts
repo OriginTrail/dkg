@@ -18,6 +18,7 @@ import {
   type ChangelogReader,
   type ChangeOp,
   type GraphWriteRevision,
+  type SortedGraphCatalog,
 } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
@@ -39,9 +40,10 @@ import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
-import { compareCodePoint } from '../code-point-order.js';
+import { compareCodePoint } from '@origintrail-official/dkg-core';
 import {
   createGraphMembershipSnapshot,
+  createGraphMembershipSnapshotFromSortedCatalog,
   type GraphMembershipSnapshot,
 } from '../graph-membership-snapshot.js';
 
@@ -314,21 +316,31 @@ export function createResponderGraphListMemo(
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
       const graphOptions = syncResponderStoreOptions(undefined, 'sync.responder.listGraphs');
-      const load = (sortedGraphSetSource
-        ? sortedGraphSetSource.listGraphsSorted(graphOptions)
-        : store.listGraphs(graphOptions))
-        .then((graphs) => {
+      type GraphListing =
+        | { graphs: SortedGraphCatalog; sorted: true }
+        | { graphs: string[]; sorted: false };
+      const graphList: Promise<GraphListing> = sortedGraphSetSource
+        ? sortedGraphSetSource.listGraphsSorted(graphOptions).then((graphs) => ({
+          graphs,
+          sorted: true as const,
+        }))
+        : store.listGraphs(graphOptions).then((graphs) => ({
+          graphs,
+          sorted: false as const,
+        }));
+      const load = graphList
+        .then((listing) => {
           // Content writes advance the store revision even when named-graph
           // membership is unchanged. Reuse the immutable index in that case:
           // enumeration stays freshness-safe, while sorting, Set construction,
           // and every downstream membership index remain stable.
           const snapshot = (
-            lastSnapshot?.graphs === graphs || lastSnapshot?.matches(graphs)
+            lastSnapshot?.graphs === listing.graphs || lastSnapshot?.matches(listing.graphs)
           )
             ? lastSnapshot
-            : createGraphMembershipSnapshot(graphs, {
-              sortedUnique: sortedGraphSetSource !== null,
-            });
+            : listing.sorted
+              ? createGraphMembershipSnapshotFromSortedCatalog(listing.graphs)
+              : createGraphMembershipSnapshot(listing.graphs);
           lastSnapshot = snapshot;
           cached = {
             value: snapshot,
