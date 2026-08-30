@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -986,7 +986,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     } catch {
       // SPARQL DELETE WHERE may not be supported — delete quads manually
       const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
-      await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
+      await deleteByPatternWithoutCount(this.store, { graph: metaGraph, subject: subGraphUri });
     }
 
     const dataUri = gm.subGraphUri(contextGraphId, subGraphName);
@@ -1185,7 +1185,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   ): Promise<void> {
     const quads = buildTrustLevelQuads(subjects, level, graph) as Quad[];
     for (const quad of quads) {
-      await this.store.deleteByPattern({
+      await deleteByPatternWithoutCount(this.store, {
         graph: quad.graph,
         subject: quad.subject,
         predicate: TRUST_LEVEL_PREDICATE,

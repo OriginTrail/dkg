@@ -896,6 +896,20 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(removed).toBe(3);
   });
 
+  it('deleteByPatternWithoutCount sends one UPDATE and no COUNT queries', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+
+    await s.deleteByPatternWithoutCount({
+      graph: 'http://g',
+      subject: 'http://s',
+    });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(String(fetchCalls[0]?.[1]?.body)).toContain('DELETE');
+    expect(String(fetchCalls[0]?.[1]?.body)).not.toContain('SELECT');
+  });
+
   it('deleteByPattern count branch keyed on direct-POST SELECT body', async () => {
     // Guards the direct-POST migration: count queries are sent as a raw
     // SPARQL body starting with SELECT, not as `query=...` form data.

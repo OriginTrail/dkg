@@ -1,5 +1,8 @@
 import type { PublishResult } from './publisher.js';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import type {
   JournalKind,
   LiftJob,
@@ -942,7 +945,7 @@ export class AsyncLiftClaimCoordinator {
   }
 
   private async deleteWalletLock(walletId: string): Promise<void> {
-    await this.store.deleteByPattern({
+    await deleteByPatternWithoutCount(this.store, {
       subject: walletLockSubject(walletId),
       graph: this.config.walletLockGraphUri,
     });

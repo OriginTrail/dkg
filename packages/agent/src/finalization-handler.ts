@@ -19,6 +19,7 @@ import {
   sparqlString,
 } from '@origintrail-official/dkg-core';
 import {
+  deleteByPatternWithoutCount,
   GraphManager,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
@@ -3609,8 +3610,8 @@ export class FinalizationHandler {
     try {
       const quads: Quad[] = [];
       for (const [op, { root, digest }] of restamp) {
-        await this.store.deleteByPattern({ graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE });
-        await this.store.deleteByPattern({ graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE });
+        await deleteByPatternWithoutCount(this.store, { graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE });
+        await deleteByPatternWithoutCount(this.store, { graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE });
         quads.push(
           { subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: `"${root}"`, graph: wsMetaGraph },
           { subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE, object: `"${digest}"`, graph: wsMetaGraph },
@@ -3668,8 +3669,8 @@ export class FinalizationHandler {
       // The stamp no longer reflects the op's content — drop the whole (root, digest)
       // memo so the recompute scan re-evaluates and re-stamps it this pass.
       try {
-        await this.store.deleteByPattern({ graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE });
-        await this.store.deleteByPattern({ graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE });
+        await deleteByPatternWithoutCount(this.store, { graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE });
+        await deleteByPatternWithoutCount(this.store, { graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE });
       } catch { /* best-effort self-heal */ }
     }
     return null;
@@ -4127,13 +4128,13 @@ export class FinalizationHandler {
     );
     for (const rootEntity of rootEntities) {
       for (const g of swmGraphsForClear) {
-        await this.store.deleteByPattern({ graph: g, subject: rootEntity });
+        await deleteByPatternWithoutCount(this.store, { graph: g, subject: rootEntity });
         await this.store.deleteBySubjectPrefix(g, rootEntity + '/.well-known/genid/');
-        await this.store.deleteByPattern({
+        await deleteByPatternWithoutCount(this.store, {
           graph: g, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
         });
       }
-      await this.store.deleteByPattern({
+      await deleteByPatternWithoutCount(this.store, {
         graph: swmMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
       });
       await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
@@ -4200,7 +4201,7 @@ export class FinalizationHandler {
         ? Number(rawCount.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, ''))
         : NaN;
       if (countVal === 0) {
-        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+        await deleteByPatternWithoutCount(this.store, { graph: metaGraph, subject: op });
       }
     }
   }

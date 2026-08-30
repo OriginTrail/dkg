@@ -17,7 +17,10 @@
  * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md` (plan).
  */
 
-import { type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
@@ -693,7 +696,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   // All of a job's triples live under jobSubject(jobId) in the single control-plane
   // graph, so this provably cannot touch another job or another graph.
   private async deleteJob(jobId: string): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(jobId), graph: this.graphUri });
+    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri });
     await this.store.flush?.();
   }
 

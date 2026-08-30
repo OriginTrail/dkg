@@ -12,6 +12,7 @@ import type {
   TripleStore,
   TripleStoreDecorator,
 } from './triple-store.js';
+import { deleteByPatternWithoutCount } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
@@ -84,6 +85,20 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       removed += await this.inner.deleteByPattern(item, options);
     }
     return removed;
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    const translated = this.translateDeletePattern(pattern);
+    if (!Array.isArray(translated)) {
+      await deleteByPatternWithoutCount(this.inner, translated, options);
+      return;
+    }
+    for (const item of translated) {
+      await deleteByPatternWithoutCount(this.inner, item, options);
+    }
   }
 
   async replaceGraph(
