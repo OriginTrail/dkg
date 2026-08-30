@@ -72,7 +72,7 @@ interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
 }
 
-export type ResolvedRfc64CatalogAuthoringLaneV1 =
+type ResolvedRfc64CatalogAuthoringLaneV1 =
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'public';
     readonly workspaceVisibility: 'public-only';
@@ -121,7 +121,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   }
 
   /** Canonical selected-CG admission shared by inventory and projection. */
-  resolveRfc64CatalogAuthoringLaneV1(
+  protected resolveRfc64CatalogAuthoringLaneV1(
     this: DKGAgent,
     contextGraphId: string,
     subGraphName: string | null | undefined,

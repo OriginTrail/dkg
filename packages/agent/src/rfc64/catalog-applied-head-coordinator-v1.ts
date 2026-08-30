@@ -23,6 +23,7 @@ import type {
   Rfc64FinalizedVmAgentPrecommitTransactionV1,
 } from './finalized-vm-agent-precommit-v1.js';
 import type {
+  Rfc64CatalogAppliedHeadEvidenceV1,
   Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
 } from './catalog-applied-head-evidence-v1.js';
 import {
@@ -164,8 +165,9 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
         );
       }
       return Object.freeze({
+        kind: 'rfc64-catalog-applied-head-evidence-v1',
         finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts),
-      });
+      } satisfies Rfc64CatalogAppliedHeadEvidenceV1);
     },
   } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
 }

@@ -23,7 +23,19 @@ export type Rfc64CatalogSynchronizationEvidenceV1 = Readonly<
 export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   evidence: Readonly<Rfc64PublicCatalogNativeSynchronizationEvidenceV1>,
 ): Rfc64CatalogSynchronizationEvidenceV1 {
-  const receipts = evidence.finalizedSwmRetirementLifecycleReceipts ?? [];
+  const extension = evidence.postAppliedHeadExtension;
+  if (
+    extension !== undefined
+    && (
+      extension.kind !== 'rfc64-catalog-applied-head-evidence-v1'
+      || !Array.isArray(extension.finalizedSwmRetirementLifecycleReceipts)
+    )
+  ) {
+    throw new TypeError('RFC-64 catalog synchronization post-head evidence is invalid');
+  }
+  const receipts = (extension?.finalizedSwmRetirementLifecycleReceipts ?? []) as
+    readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[];
+  const { postAppliedHeadExtension: _postAppliedHeadExtension, ...baseEvidence } = evidence;
   const seenUals = new Set<string>();
   for (const receipt of receipts) {
     if (
@@ -42,7 +54,7 @@ export function snapshotRfc64CatalogSynchronizationEvidenceV1(
     seenUals.add(receipt.kaUal);
   }
   return Object.freeze({
-    ...evidence,
+    ...baseEvidence,
     finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts.map((receipt) =>
       Object.freeze({
         ...receipt,

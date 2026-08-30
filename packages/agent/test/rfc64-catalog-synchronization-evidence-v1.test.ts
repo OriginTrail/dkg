@@ -42,7 +42,10 @@ function evidence(receipts: readonly Rfc64FinalizedSwmRetirementLifecycleReceipt
     activatedTripleCount: 0 as const,
     stagedObjectCount: 3 as const,
     appliedHeadStatus: 'applied' as const,
-    finalizedSwmRetirementLifecycleReceipts: receipts,
+    postAppliedHeadExtension: {
+      kind: 'rfc64-catalog-applied-head-evidence-v1',
+      finalizedSwmRetirementLifecycleReceipts: receipts,
+    },
   };
 }
 

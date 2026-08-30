@@ -830,13 +830,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(Object.keys(
       (author as any).config.rfc64CatalogAuthoringPolicy.byContextGraph,
     )).toEqual([publicContextGraphId]);
-    expect(author.resolveRfc64CatalogAuthoringLaneV1(CONTEXT_GRAPH_ID, null)).toBeNull();
-    expect(author.resolveRfc64CatalogAuthoringLaneV1(publicContextGraphId, null))
-      .toMatchObject({
-        kind: 'public',
-        workspaceVisibility: 'public-only',
-        announcementPeers: [publicAnnouncementPeerId],
-      });
     const seal = assertionSealFromCanonical(await authorSeal(25n, PROJECTION_QUADS));
     await expect(author.recordRfc64PublicCatalogAssetV1({
       contextGraphId: publicContextGraphId,
@@ -888,12 +881,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
             announcementPeers: [providerPeerId],
           },
         },
-      });
-    expect(author.resolveRfc64CatalogAuthoringLaneV1(CONTEXT_GRAPH_ID, null))
-      .toMatchObject({
-        kind: 'private',
-        workspaceVisibility: 'restricted-only',
-        announcementPeers: [providerPeerId],
       });
     const assertionCoordinate = 'ordinary-private-swm';
     const shareOperationId = 'ordinary-private-swm-operation';

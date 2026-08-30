@@ -26,3 +26,10 @@ export interface Rfc64FinalizedSwmRetirementLifecycleReceiptV1 {
   readonly committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>;
   readonly swmReconciliationOutcome: FinalizedSwmTwinReconciliationOutcome;
 }
+
+/** Agent-layer result carried through the receiver's neutral post-head extension. */
+export interface Rfc64CatalogAppliedHeadEvidenceV1 {
+  readonly kind: 'rfc64-catalog-applied-head-evidence-v1';
+  readonly finalizedSwmRetirementLifecycleReceipts:
+    readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[];
+}

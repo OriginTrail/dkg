@@ -771,9 +771,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const evidence = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
       catalogHeadDigest,
     );
-    return evidence === undefined
-      ? null
-      : snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
+    return evidence ?? null;
   }
 
   /**

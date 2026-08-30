@@ -485,7 +485,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
     });
-    vi.spyOn(agent, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({} as never);
+    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({} as never);
     let active = 0;
     let maxActive = 0;
     let call = 0;

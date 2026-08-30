@@ -87,13 +87,7 @@ const authorityConfig: Pick<DKGAgentConfig, 'rfc64CatalogAccessPolicyAuthority'>
   rfc64CatalogAccessPolicyAuthority: authority,
 };
 
-const selectedCatalogLane = agent.resolveRfc64CatalogAuthoringLaneV1(
-  'package-consumer-context-graph',
-  null,
-);
-
 void accepted;
 void genesisResult;
 void successorResult;
 void authorityConfig;
-void selectedCatalogLane;
