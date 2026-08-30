@@ -200,6 +200,60 @@ describe('PeerResolver', () => {
     expect(out).toEqual([]);
   });
 
+  it('step 5: uses configured relay circuits when DHT only returns private addresses', async () => {
+    net.__findPeerImpl = async () => [
+      `/ip4/127.0.0.1/tcp/9090/p2p/${PEER_B}`,
+      `/ip4/192.168.0.20/tcp/9090/p2p/${PEER_B}`,
+      `/ip4/100.105.212.110/tcp/9090/p2p/${PEER_B}`,
+    ];
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(async () => null),
+      configuredRelayPeers: [RELAY_ADDR],
+    });
+
+    const out = await resolver.resolve(PEER_B);
+
+    expect(out).toContain(`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`);
+    expect(net.__addedAddresses).toContainEqual({
+      peerId: PEER_B,
+      addrs: [`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`],
+    });
+  });
+
+  it('step 5: does not add configured relay circuits when a public direct route exists', async () => {
+    const publicDirect = `/ip4/178.105.87.39/tcp/9090/p2p/${PEER_B}`;
+    net.__findPeerImpl = async () => [publicDirect];
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(async () => null),
+      configuredRelayPeers: [RELAY_ADDR],
+    });
+
+    const out = await resolver.resolve(PEER_B);
+
+    expect(out).toEqual([publicDirect]);
+  });
+
+  it('step 5: keeps a directory circuit but also adds configured relays for a relayed-only target', async () => {
+    const staleRelay =
+      '/ip4/178.104.98.10/tcp/9090/p2p/12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy';
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(async () => staleRelay),
+      configuredRelayPeers: [RELAY_ADDR],
+    });
+
+    const out = await resolver.resolve(PEER_B);
+
+    expect(out).toContain(`${staleRelay}/p2p-circuit/p2p/${PEER_B}`);
+    expect(out).toContain(`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`);
+    expect(out[0]).toBe(`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`);
+  });
+
   it('step 4: agents-CG throwing does not abort resolution', async () => {
     net.__findPeerImpl = async () => ['/ip4/1.2.3.4/tcp/9090'];
     const resolver = new PeerResolver({

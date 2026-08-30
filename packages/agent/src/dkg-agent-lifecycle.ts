@@ -2119,6 +2119,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const peerResolver = new PeerResolver({
       network,
       registry: new StubNetworkStateRegistry(),
+      configuredRelayPeers: this.config.relayPeers,
       agentDirectory: {
         // Wraps DiscoveryClient.findAgentByPeerId in the resolver's
         // minimal AgentDirectoryLookup shape so packages/core doesn't
@@ -9082,7 +9083,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peerId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<void> {
-    await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId, options);
+    const resolvedAddresses = await this.peerResolver.resolve(peerId, {
+      signal: options.signal,
+    });
+    await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId, {
+      ...options,
+      resolvedAddresses,
+    });
     if (await this.networkAdmissionCoordinator.ensureAdmitted(
       peerId,
       createOperationContext('connect'),

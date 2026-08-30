@@ -222,6 +222,37 @@ describe('abortable recovery connection helpers', () => {
     expect(merge.calls).toHaveLength(1);
   });
 
+  it('walks resolver-provided relay circuits without another directory lookup', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const circuitAddress = `${relayAddress}/p2p-circuit/p2p/${peerId}`;
+    const dial = recorder(async (target: any) => {
+      if (dial.calls.length === 1) throw new Error('stale peerStore route');
+      return undefined;
+    });
+    let discoveryCalled = false;
+
+    await ensurePeerConnected({
+      getConnections: () => dial.calls.length >= 3
+        ? [{ remotePeer: { toString: () => peerId } }]
+        : [],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, {
+      findAgentByPeerId: async () => {
+        discoveryCalled = true;
+        return undefined;
+      },
+    } as any, peerId, { resolvedAddresses: [circuitAddress] });
+
+    expect(dial.calls.map(([target]) => target.toString())).toEqual([
+      peerId,
+      relayAddress,
+      peerId,
+    ]);
+    expect(discoveryCalled).toBe(false);
+  });
+
   it('interrupts the real protocol-readiness delay', async () => {
     const controller = new AbortController();
     let reads = 0;
