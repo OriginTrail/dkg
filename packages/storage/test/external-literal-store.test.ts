@@ -433,6 +433,7 @@ function rfc64Input(subject: string, object: string): Rfc64AuthorCommitCasInputV
     subject: `urn:test:blob-race:${role}`,
     predicate: 'http://schema.org/value',
     expectedObject: null,
+    expectedQuads: null,
     quads: [quad(`urn:test:blob-race:${role}`, `"${role}-next"`, stateGraph)],
   });
   return {
@@ -446,6 +447,7 @@ function rfc64Input(subject: string, object: string): Rfc64AuthorCommitCasInputV
       subject: 'urn:test:blob-race:author',
       predicate: 'http://schema.org/value',
       expectedObject: null,
+      expectedQuads: null,
       quads: [quad(
         'urn:test:blob-race:author',
         'urn:test:blob-race:head:new',

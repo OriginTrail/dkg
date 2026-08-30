@@ -6,6 +6,10 @@ import type {
   Rfc64SharedProjectionStreamCapabilityV1,
 } from '../../src/rfc64-shared-projection-stream-capability.js';
 import { createRfc64SharedProjectionTestFixture } from './rfc64-shared-projection-fixture.js';
+import {
+  collectProjectionBytes as collect,
+  projectionByteStream as byteStream,
+} from './rfc64-projection-stream-test-io.js';
 
 const FIXTURE = createRfc64SharedProjectionTestFixture();
 const LINE_A = '<urn:a> <urn:p> "alpha" .\n';
@@ -127,30 +131,4 @@ function oneTripleOperation() {
     triples: [{ subject: 'urn:a', predicate: 'urn:p', object: '"alpha"' }],
   });
   return fixture.operation;
-}
-
-function byteStream(chunks: readonly string[]): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
-      controller.close();
-    },
-  });
-}
-
-async function collect(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for await (const chunk of source) {
-    chunks.push(chunk);
-    length += chunk.byteLength;
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
 }

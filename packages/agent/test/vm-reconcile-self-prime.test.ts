@@ -213,6 +213,52 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(internals.subscribedContextGraphs.get(selected)).toBe(passiveDiscoveryRow);
   });
 
+  it.each([false, true])(
+    'keeps catalog-selected VM reconciliation active without a member subscription (kill=%s)',
+    async (killSwitch) => {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({
+        name: `Rfc64CatalogVmSweep-${killSwitch}`,
+        chainAdapter: chain,
+      });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const selected = `rfc64-catalog-vm-${killSwitch}`;
+      const config = (internals as any).config;
+      config.syncContextGraphs = [];
+      config.rfc64CatalogRollout = {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        selectedPublicContextGraphs: [selected],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch,
+          contextGraphModes: { [selected]: 'catalog' },
+        },
+      };
+      config.rfc64CatalogBootstrap = {
+        acceptedPolicies: [{
+          policyEnvelope: { payload: { accessPolicy: 0, contextGraphId: selected } },
+          targets: [],
+        }],
+      };
+      internals.subscribedContextGraphs.clear();
+      const dispatch = vi.fn(async () => true);
+      internals.vmReconcileDispatcher = {
+        dispatch,
+        triggerLive: vi.fn(),
+        triggerPeriodic: vi.fn(),
+        tryTriggerPeriodic: vi.fn(() => true),
+      };
+
+      await internals.runVmReconcileSweep();
+
+      expect(dispatch).toHaveBeenCalledWith(selected, 'periodic');
+      expect(internals.subscribedContextGraphs.size).toBe(0);
+      expect(config.syncContextGraphs).toEqual([]);
+    },
+  );
+
   it('resolves a selected-only RFC-64 VM target from chain binding without persisting member intent', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'Rfc64SelectedVmTarget', chainAdapter: chain });

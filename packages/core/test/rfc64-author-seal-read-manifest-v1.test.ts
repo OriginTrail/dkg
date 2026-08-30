@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   RFC64_AUTHOR_SEAL_READ_QUERY_ID_V1,
+  Rfc64AuthorSealReadManifestErrorV1,
   compileRfc64AuthorSealReadOperationV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
@@ -55,5 +56,18 @@ describe('RFC-64 author-seal read manifest v1', () => {
     expect(() => compileRfc64AuthorSealReadOperationV1({ coordinate }))
       .toThrow(/invalid field set/u);
     expect(invoked).toBe(false);
+  });
+
+  it('classifies malformed canonical coordinate values as manifest errors', () => {
+    for (const coordinate of [
+      { ...COORDINATE, authorAddress: 'not-an-address' },
+      { ...COORDINATE, contextGraphId: '' },
+      { ...COORDINATE, assertionCoordinate: '' },
+    ]) {
+      expect(() => compileRfc64AuthorSealReadOperationV1({ coordinate }))
+        .toThrow(Rfc64AuthorSealReadManifestErrorV1);
+      expect(() => compileRfc64AuthorSealReadOperationV1({ coordinate }))
+        .toThrow(/author-seal coordinate is invalid/u);
+    }
   });
 });

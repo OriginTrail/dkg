@@ -16,6 +16,10 @@ import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import {
+  SyncSharedProjectionStoreV1,
+  createTripleStore,
+} from '@origintrail-official/dkg-storage';
 
 import {
   planManagedOxigraph,
@@ -645,9 +649,6 @@ describe('startManagedOxigraph (real download + real server)', () => {
           backend: 'sparql-http',
           options: {
             managedByDkg: true,
-            managedOxigraphRuntimeCapability: {
-              kind: 'dkg-managed-oxigraph-runtime-v1',
-            },
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
@@ -655,6 +656,12 @@ describe('startManagedOxigraph (real download + real server)', () => {
             onClientTimeout: expect.any(Function),
           },
         });
+        const runtimeStore = await createTripleStore(result!.storeConfig);
+        try {
+          expect(() => new SyncSharedProjectionStoreV1(runtimeStore)).not.toThrow();
+        } finally {
+          await runtimeStore.close();
+        }
         expect(result!.largeLiteralStorage.directory).toBe(join(dataDir, 'literal-blobs'));
 
         // The rewritten endpoint is served by a REAL oxigraph: a genuine

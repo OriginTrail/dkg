@@ -64,6 +64,30 @@ describe('RFC-64 SQL-1 durable applied-head CAS', () => {
     expect(inventory.readAppliedCatalogHeadV1(SCOPE, AUTHOR)).toEqual(
       expectedSnapshot(SUCCESSOR, SUCCESSOR_INVENTORY, '1', '1'),
     );
+    expect(inventory.listAppliedCatalogHeadsV1()).toEqual([
+      expectedSnapshot(SUCCESSOR, SUCCESSOR_INVENTORY, '1', '1'),
+    ]);
+    expect(() => inventory.deleteAppliedCatalogHeadV1({
+      catalogScopeDigest: SCOPE,
+      authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: LOSING_HEAD,
+    })).toThrowError(expect.objectContaining({ code: 'applied-head-cas-conflict' }));
+    inventory.deleteAppliedCatalogHeadV1({
+      catalogScopeDigest: SCOPE,
+      authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: SUCCESSOR,
+    });
+    expect(inventory.listAppliedCatalogHeadsV1()).toEqual([]);
+    inventory.deleteAppliedCatalogHeadV1({
+      catalogScopeDigest: SCOPE,
+      authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: SUCCESSOR,
+    });
+    inventory.close();
+    foundations.splice(foundations.indexOf(inventory), 1);
+    inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+    expect(inventory.readAppliedCatalogHeadV1(SCOPE, AUTHOR)).toBeNull();
   });
 
   it('migrates the exact prior v1 schema before accepting applied-head state', async () => {

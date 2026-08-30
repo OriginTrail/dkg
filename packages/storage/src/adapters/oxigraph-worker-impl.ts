@@ -21,6 +21,7 @@ parentPort!.on('message', async (msg: { id: number; method: string; args: unknow
     parentPort!.postMessage({
       id: msg.id,
       error: envelope.message,
+      errorName: envelope.name,
       ...(envelope.code === undefined ? {} : { errorCode: envelope.code }),
     });
   }
