@@ -38,6 +38,26 @@ import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from './rfc64/public-cat
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import { resolveRfc64CatalogAuthorityDecisionV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
+import {
+  raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
+  throwIfRfc64AbortedV1 as throwIfAbortedV1,
+} from './rfc64/abort-v1.js';
+import { Rfc64SerializedScopeRuntimeV1 } from
+  './rfc64/serialized-scope-runtime-v1.js';
+
+const rfc64AuthorCatalogMutationRuntimesV1 =
+  new WeakMap<DKGAgent, Rfc64SerializedScopeRuntimeV1>();
+
+function rfc64AuthorCatalogMutationRuntimeV1(
+  agent: DKGAgent,
+): Rfc64SerializedScopeRuntimeV1 {
+  let runtime = rfc64AuthorCatalogMutationRuntimesV1.get(agent);
+  if (runtime === undefined) {
+    runtime = new Rfc64SerializedScopeRuntimeV1('RFC-64 catalog mutation aborted');
+    rfc64AuthorCatalogMutationRuntimesV1.set(agent, runtime);
+  }
+  return runtime;
+}
 
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -58,6 +78,7 @@ export interface ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
   readonly peers: readonly string[];
   readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+  readonly signal?: AbortSignal;
 }
 
 export interface ReconcileRfc64PublicRootCatalogExactSetResultV1 {
@@ -147,6 +168,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
   ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
+    throwIfAbortedV1(params.signal);
     this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
       throw new Error('RFC-64 exact-set reconciliation requires the root catalog lane');
@@ -174,10 +196,14 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     const queueKey = `${catalogScopeDigest}\n${params.scope.authorAddress}`;
 
     return this.runSerializedRfc64AuthorCatalogMutationV1(queueKey, async () => {
-      let state = await this.readRfc64CatalogMutationStateV1(
-        persistence,
-        catalogScopeDigest,
-        params.scope.authorAddress,
+      throwIfAbortedV1(params.signal);
+      let state = await raceAgainstAbortV1(
+        this.readRfc64CatalogMutationStateV1(
+          persistence,
+          catalogScopeDigest,
+          params.scope.authorAddress,
+        ),
+        params.signal,
       );
       if (state === null && targetAssets.length === 0) {
         return Object.freeze({
@@ -188,6 +214,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         });
       }
       state ??= await this.createRfc64CatalogGenesisStateV1(params);
+      throwIfAbortedV1(params.signal);
       assertReplacementHistoryIsContiguousV1(state.assets, targetAssets);
       if (sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
         return Object.freeze({
@@ -201,6 +228,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       let successorsApplied = 0;
       const hardLimit = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
       while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
+        throwIfAbortedV1(params.signal);
         if (successorsApplied >= hardLimit) {
           throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
         }
@@ -211,6 +239,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           params,
           nextAssets,
           peers,
+          params.signal,
         );
         successorsApplied += 1;
         state = Object.freeze({
@@ -230,7 +259,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         successorsApplied,
         targetAssetCount: targetAssets.length,
       });
-    });
+    }, params.signal);
   }
 
   private assertRfc64CatalogAuthoringModeV1(
@@ -301,8 +330,10 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       author: Rfc64CatalogAuthorSignerV1;
       catalogIssuerDelegationEffectiveAt: TimestampMsV1;
       catalogIssuerDelegationExpiresAt: TimestampMsV1;
+      signal?: AbortSignal;
     }>,
   ): Promise<Rfc64CatalogMutationStateV1> {
+    throwIfAbortedV1(params.signal);
     const genesis = await this.publishAuthorCatalogGenesisV1({
       scope: params.scope,
       author: params.author,
@@ -311,6 +342,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       catalogIssuerDelegationEffectiveAt: params.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: params.catalogIssuerDelegationExpiresAt,
     });
+    throwIfAbortedV1(params.signal);
     return Object.freeze({
       current: null,
       previousHead: Object.freeze({
@@ -334,7 +366,9 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     }>,
     assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
     peers: readonly string[],
+    signal?: AbortSignal,
   ) {
+    throwIfAbortedV1(signal);
     const successor = await this.publishAuthorCatalogExactSetSuccessorV1({
       previousHead: state.previousHead,
       author: params.author,
@@ -344,6 +378,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       issuedAt: Date.now().toString() as TimestampMsV1,
       peers: [],
     });
+    throwIfAbortedV1(signal);
     const appliedInventoryDigest = computeRfc64AppliedInventoryDigestV1({
       catalogScopeDigest: successor.catalogScopeDigest,
       rows: successor.assets,
@@ -357,10 +392,13 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       inventoryRowCount: successor.signedBucketRowCount,
       expectedCurrentCatalogHeadDigest: state.expectedCurrentCatalogHeadDigest,
     }).snapshot;
-    await this.announceRfc64PublicCatalogHeadV1({
-      announcement: successor.announcement,
-      peers,
-    });
+    if (!signal?.aborted) {
+      await this.announceRfc64PublicCatalogHeadV1({
+        announcement: successor.announcement,
+        peers,
+        signal,
+      });
+    }
     return Object.freeze({ applied, successor });
   }
 
@@ -368,21 +406,9 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     key: string,
     operation: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
-    const predecessor = this.rfc64AuthorCatalogMutationQueuesV1.get(key);
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const tail = (predecessor ?? Promise.resolve()).catch(() => undefined).then(() => gate);
-    this.rfc64AuthorCatalogMutationQueuesV1.set(key, tail);
-    await predecessor?.catch(() => undefined);
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.rfc64AuthorCatalogMutationQueuesV1.get(key) === tail) {
-        this.rfc64AuthorCatalogMutationQueuesV1.delete(key);
-      }
-    }
+    return rfc64AuthorCatalogMutationRuntimeV1(this).run(key, operation, signal);
   }
 }
 
@@ -394,13 +420,14 @@ function assertReplacementHistoryIsContiguousV1(
   for (const targetAsset of target) {
     const currentAsset = currentByKaId.get(targetAsset.seal.reservedKaId);
     if (currentAsset === undefined || sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) continue;
+    const currentVersion = BigInt(currentAsset.seal.assertionVersion);
+    const targetVersion = BigInt(targetAsset.seal.assertionVersion);
     if (
       currentAsset.assertionCoordinate !== targetAsset.assertionCoordinate
-      || BigInt(targetAsset.seal.assertionVersion)
-        !== BigInt(currentAsset.seal.assertionVersion) + 1n
+      || targetVersion <= currentVersion
     ) {
       throw new Error(
-        `RFC-64 exact-set replacement for KA ${targetAsset.seal.reservedKaId} is not the next assertion version`,
+        `RFC-64 exact-set replacement for KA ${targetAsset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
       );
     }
   }
@@ -427,6 +454,15 @@ export function planNextRfc64CatalogExactSetV1(
       return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset);
     }
     if (!sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) {
+      if (
+        BigInt(targetAsset.seal.assertionVersion)
+          > BigInt(currentAsset.seal.assertionVersion) + 1n
+      ) {
+        // A durable inventory can advance more than once while catalog
+        // projection is unavailable. Remove the stale row first, then insert
+        // the independently verified latest row on the following successor.
+        return current.filter((_, index) => index !== currentIndex);
+      }
       const next = [...current];
       next[currentIndex] = targetAsset;
       return next;

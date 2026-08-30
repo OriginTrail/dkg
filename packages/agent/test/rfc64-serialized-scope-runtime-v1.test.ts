@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { describe, expect, it } from 'vitest';
+
+import { Rfc64SerializedScopeRuntimeV1 } from
+  '../src/rfc64/serialized-scope-runtime-v1.js';
+
+describe('RFC-64 serialized scope runtime', () => {
+  it('keeps an aborted queued slot behind its active predecessor', async () => {
+    const runtime = new Rfc64SerializedScopeRuntimeV1('test scope aborted');
+    let releaseFirst!: () => void;
+    let markFirstEntered!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+    let thirdEntered = false;
+
+    const first = runtime.run('scope', async () => {
+      markFirstEntered();
+      await firstGate;
+      return 'first';
+    });
+    await firstEntered;
+
+    const controller = new AbortController();
+    const second = runtime.run('scope', async () => 'second', controller.signal);
+    controller.abort(new Error('cancel second'));
+    await expect(second).rejects.toThrow('cancel second');
+
+    const third = runtime.run('scope', async () => {
+      thirdEntered = true;
+      return 'third';
+    });
+    await Promise.resolve();
+    expect(thirdEntered).toBe(false);
+    expect(runtime.activeScopeCount).toBe(1);
+
+    releaseFirst();
+    await expect(first).resolves.toBe('first');
+    await expect(third).resolves.toBe('third');
+    await Promise.resolve();
+    expect(runtime.activeScopeCount).toBe(0);
+  });
+});

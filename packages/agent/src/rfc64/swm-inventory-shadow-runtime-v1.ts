@@ -1,3 +1,5 @@
+import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
+
 export const RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 = 16;
 
 export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
@@ -43,7 +45,9 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   };
   readonly #inFlight = new Set<Promise<void>>();
   readonly #assetTails = new Map<string, Promise<void>>();
-  readonly #scopeTails = new Map<string, Promise<void>>();
+  readonly #scopeRuntime = new Rfc64SerializedScopeRuntimeV1(
+    'RFC-64 SWM inventory scope operation aborted',
+  );
   readonly #vmConfirmedVersions = new Map<string, Set<string>>();
   readonly #pendingExecutions: Array<() => void> = [];
   #activeExecutions = 0;
@@ -58,19 +62,12 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   }
 
   /** Serialize inventory mutations and catalog reads for one author/scope. */
-  async runScopeExclusive<T>(scopeKey: string, operation: () => Promise<T>): Promise<T> {
-    const predecessor = this.#scopeTails.get(scopeKey);
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const tail = (predecessor ?? Promise.resolve()).catch(() => undefined).then(() => gate);
-    this.#scopeTails.set(scopeKey, tail);
-    await predecessor?.catch(() => undefined);
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.#scopeTails.get(scopeKey) === tail) this.#scopeTails.delete(scopeKey);
-    }
+  runScopeExclusive<T>(
+    scopeKey: string,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.#scopeRuntime.run(scopeKey, operation, signal);
   }
 
   markVmConfirmed(assetKey: string, assertionVersion: string): void {
