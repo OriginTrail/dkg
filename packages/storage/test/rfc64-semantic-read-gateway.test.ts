@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
   Rfc64SemanticReadManifestErrorV1,
-  compileRfc64SemanticReadOperationV1,
+  compileRfc64SemanticReadOperationV2,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
   type ChainIdV1,
@@ -21,11 +21,13 @@ import {
 
 import {
   BlazegraphStore,
-  certifyRfc64SemanticReadStoreV1,
+  executeRfc64ExactBindingsReadCapabilityV1,
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   OxigraphStore,
   OxigraphWorkerStore,
   Rfc64SemanticReadCapabilityResultErrorV1,
+  createManagedOxigraphSparqlStoreV1,
+  SparqlHttpStore,
   Rfc64SemanticReadGatewayErrorV1,
   SyncSemanticStoreV1,
   type QueryOptions,
@@ -185,9 +187,9 @@ describe('SyncSemanticStoreV1', () => {
     expect(result.kind).toBe('record');
     if (result.kind === 'record') expect(result.decoded.record).toEqual(current.record);
     expect(requests).toHaveLength(1);
-    expect(requests[0].body).toBe(compileRfc64SemanticReadOperationV1({
-      coordinate: current.coordinate,
-    }).sparql);
+    expect(requests[0].body).toBe(
+      compileRfc64SemanticReadOperationV2(current.coordinate).sparql,
+    );
     expect(requests[0].signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -195,6 +197,8 @@ describe('SyncSemanticStoreV1', () => {
     const current = FIXTURES[0];
     const payloads: unknown[] = [
       { head: { vars: ['p', 'o'] }, results: { bindings: [] } },
+      { head: { vars: [] }, results: { bindings: [] } },
+      { head: {}, results: { bindings: [] } },
       {},
       { head: { vars: ['p', 'o'] } },
       { head: { vars: ['p', 'o'] }, results: {} },
@@ -257,6 +261,7 @@ describe('SyncSemanticStoreV1', () => {
 
     let getterInvoked = false;
     const getterBacked = { query: inner.query } as Record<string, unknown>;
+    getterBacked.rfc64SemanticReadCertifiedV1 = true;
     Object.defineProperty(getterBacked, 'rfc64SemanticReadV1', {
       get: () => {
         getterInvoked = true;
@@ -278,6 +283,46 @@ describe('SyncSemanticStoreV1', () => {
       { timeoutMs: 1_000 },
     )).resolves.toEqual({ kind: 'absent' });
     expect(legacyRead).toHaveBeenCalledOnce();
+  });
+
+  it('preserves legacy semantic adapter result-error classification', async () => {
+    const legacyError = new Rfc64SemanticReadCapabilityResultErrorV1('malformed result');
+    const legacyStore = {
+      rfc64SemanticReadV1: vi.fn(async () => {
+        throw legacyError;
+      }),
+    } as unknown as TripleStore;
+    const error = await rejected(new SyncSemanticStoreV1(legacyStore).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    ));
+    expectGatewayResultError(error);
+    expect((error as Error & { cause: unknown }).cause).toBe(legacyError);
+  });
+
+  it('certifies only DKG-managed Oxigraph HTTP stores', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      head: { vars: ['p', 'o'] },
+      results: { bindings: [] },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    }));
+    const managed = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
+    });
+    const decorated = { innerStore: managed } as unknown as TripleStore;
+    await expect(new SyncSemanticStoreV1(decorated).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    )).resolves.toEqual({ kind: 'absent' });
+
+    const generic = new SparqlHttpStore({
+      queryEndpoint: 'http://generic-sparql.test/query',
+    });
+    expect(() => new SyncSemanticStoreV1(generic)).toThrow(
+      /no certified RFC-64 semantic read capability/u,
+    );
   });
 
   it('uses the manifest compiler as the only request-validation boundary', async () => {
@@ -539,9 +584,15 @@ function requestOf(current: (typeof FIXTURES)[number]) {
 function certifiedStore(
   query: (sparql: string, options?: QueryOptions) => Promise<QueryResult>,
 ): TripleStore {
-  const store = { query } as unknown as TripleStore;
-  certifyRfc64SemanticReadStoreV1(store);
-  return store;
+  const store = {
+    query,
+    rfc64ExactBindingsReadCertifiedV1: true as const,
+    rfc64ExactBindingsReadV1(operation, options) {
+      return executeRfc64ExactBindingsReadCapabilityV1(store, operation, options);
+    },
+  } satisfies Pick<TripleStore, 'query' | 'rfc64ExactBindingsReadCertifiedV1'
+    | 'rfc64ExactBindingsReadV1'>;
+  return store as unknown as TripleStore;
 }
 
 async function rejected(promise: Promise<unknown>): Promise<unknown> {
