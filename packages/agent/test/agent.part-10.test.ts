@@ -213,18 +213,22 @@ decisions: []
       await agent.start();
       await agent.createContextGraph({ id: 'ops-missing-policy', name: 'Missing Policy' });
 
-      await expect(agent.approveCclPolicy({
+      const approveFailure = await agent.approveCclPolicy({
         contextGraphId: 'ops-missing-policy',
         policyUri: 'did:dkg:policy:missing',
-      })).rejects.toMatchObject({
+      }).catch((error: unknown) => error);
+      expect(approveFailure).toBeInstanceOf(CclResourceNotFoundError);
+      expect(approveFailure).toMatchObject({
         name: 'CclResourceNotFoundError',
         code: 'CCL_RESOURCE_NOT_FOUND',
         resource: 'policy',
       });
-      await expect(agent.revokeCclPolicy({
+      const revokeFailure = await agent.revokeCclPolicy({
         contextGraphId: 'ops-missing-policy',
         policyUri: 'did:dkg:policy:missing',
-      })).rejects.toMatchObject({
+      }).catch((error: unknown) => error);
+      expect(revokeFailure).toBeInstanceOf(CclResourceNotFoundError);
+      expect(revokeFailure).toMatchObject({
         name: 'CclResourceNotFoundError',
         code: 'CCL_RESOURCE_NOT_FOUND',
         resource: 'policy_binding',

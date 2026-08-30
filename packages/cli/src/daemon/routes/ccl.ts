@@ -1,4 +1,7 @@
-import { CclResourceNotFoundError } from '@origintrail-official/dkg-agent';
+import {
+  CclResourceNotFoundError,
+  ContextGraphPolicyAuthorizationError,
+} from '@origintrail-official/dkg-agent';
 import {
   jsonResponse,
   readBody,
@@ -47,21 +50,13 @@ async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
         error: 'Missing required fields: contextGraphId, policyUri',
       });
     }
-    try {
-      const result = await agent.approveCclPolicy({
-        contextGraphId,
-        policyUri,
-        contextType,
-        callerAgentAddress: requestAgentAddress,
-      });
-      return jsonResponse(res, 200, result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (/Only the contextGraph owner can manage policies/.test(message)) {
-        return jsonResponse(res, 403, { error: message });
-      }
-      throw err;
-    }
+    const result = await agent.approveCclPolicy({
+      contextGraphId,
+      policyUri,
+      contextType,
+      callerAgentAddress: requestAgentAddress,
+    });
+    return jsonResponse(res, 200, result);
   }
 
   if (req.method === 'POST' && path === '/api/ccl/policy/revoke') {
@@ -72,21 +67,13 @@ async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
         error: 'Missing required fields: contextGraphId, policyUri',
       });
     }
-    try {
-      const result = await agent.revokeCclPolicy({
-        contextGraphId,
-        policyUri,
-        contextType,
-        callerAgentAddress: requestAgentAddress,
-      });
-      return jsonResponse(res, 200, result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (/Only the contextGraph owner can manage policies/.test(message)) {
-        return jsonResponse(res, 403, { error: message });
-      }
-      throw err;
-    }
+    const result = await agent.revokeCclPolicy({
+      contextGraphId,
+      policyUri,
+      contextType,
+      callerAgentAddress: requestAgentAddress,
+    });
+    return jsonResponse(res, 200, result);
   }
 
   if (req.method === 'GET' && path === '/api/ccl/policy/list') {
@@ -188,11 +175,18 @@ export async function handleCclRoutes(ctx: RequestContext): Promise<void> {
   try {
     await dispatchCclRoutes(ctx);
   } catch (err) {
-    if (!(err instanceof CclResourceNotFoundError)) throw err;
-    jsonResponse(ctx.res, 404, {
-      error: err.message,
-      code: err.code,
-      resource: err.resource,
-    });
+    if (err instanceof ContextGraphPolicyAuthorizationError) {
+      jsonResponse(ctx.res, 403, { error: err.message });
+      return;
+    }
+    if (err instanceof CclResourceNotFoundError) {
+      jsonResponse(ctx.res, 404, {
+        error: err.message,
+        code: err.code,
+        resource: err.resource,
+      });
+      return;
+    }
+    throw err;
   }
 }

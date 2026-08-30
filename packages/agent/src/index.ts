@@ -160,6 +160,7 @@ export {
   type CclMissingResource,
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
+export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,

@@ -1,7 +1,10 @@
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CclResourceNotFoundError } from '@origintrail-official/dkg-agent';
+import {
+  CclResourceNotFoundError,
+  ContextGraphPolicyAuthorizationError,
+} from '@origintrail-official/dkg-agent';
 import {
   SparqlHttpResponseError,
   StoreOperationTimeoutError,
@@ -131,6 +134,25 @@ describe('/api/query request lifecycle', () => {
       code: 'CCL_RESOURCE_NOT_FOUND',
       resource,
     });
+  });
+
+  it.each([
+    ['/api/ccl/policy/approve', 'approveCclPolicy'],
+    ['/api/ccl/policy/revoke', 'revokeCclPolicy'],
+  ])('maps typed CCL policy authorization failure to 403 for %s', async (path, method) => {
+    const error = new ContextGraphPolicyAuthorizationError(
+      'Only the contextGraph owner can manage policies for "cg".',
+    );
+    const { ctx, res } = cclRouteContext(
+      path,
+      { contextGraphId: 'cg', policyUri: 'did:dkg:policy:one' },
+      { [method]: vi.fn(async () => { throw error; }) },
+    );
+
+    await handleCclRoutes(ctx);
+
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body)).toEqual({ error: error.message });
   });
 
   it('does not map an untyped error to 404 merely because its text says not found', async () => {
