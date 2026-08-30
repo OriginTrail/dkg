@@ -22,24 +22,13 @@ import { runInstallLayoutCheck } from './checks/install-layout.js';
 import { runVersionSkewCheck } from './checks/version-skew.js';
 import { runServedUiMismatchCheck } from './checks/served-ui-mismatch.js';
 import { runPluginRootCheck } from './checks/plugin-root.js';
+import { ALL_CHECK_IDS, type CheckId } from './policy.js';
 import type { DoctorDeps, DoctorReport, Finding, StateSummary } from './types.js';
 
 export type { DoctorDeps, DoctorReport, Finding, StateSummary } from './types.js';
 export { collectStateSummary } from './state-summary.js';
 
-/** Set of check IDs the orchestrator knows about. */
-export const ALL_CHECK_IDS = [
-  'orphan-repos',
-  'config-sanity',
-  'install-layout',
-  'version-skew',
-  'served-ui-mismatch',
-  'plugin-root',
-] as const;
-
-export type CheckId = (typeof ALL_CHECK_IDS)[number];
-
-export { UPDATE_PREFLIGHT_CHECKS } from './policy.js';
+export { ALL_CHECK_IDS, UPDATE_PREFLIGHT_CHECKS, type CheckId } from './policy.js';
 
 export interface RunDoctorOptions {
   /** Which checks to run; defaults to all six. */

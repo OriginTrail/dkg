@@ -1361,6 +1361,16 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.channel).toBe('testnet');
   });
 
+  it.each(['constructor', '__proto__'])(
+    'channel pin reports no-target for inherited Object property %s',
+    async (channel) => {
+      const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+      fetchImpl = async () => makeRegistryResponse({ latest: '9.5.0' });
+      const result = await checkForNpmVersionUpdate(() => {}, true, channel);
+      expect(result).toEqual({ status: 'no-target', channel });
+    },
+  );
+
   it('channel pin reports no-target when allowPrerelease=false rejects a prerelease tag', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({ testnet: '9.6.0-rc.1' });

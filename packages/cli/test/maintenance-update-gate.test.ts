@@ -11,9 +11,10 @@ import {
 import {
   fetchNpmDistTags,
   resolveExplicitNpmUpdateTarget,
+  resolveLatestNpmVersion,
   resolveNpmDistTag,
+  type NpmDistTagResult,
   type NpmRegistryFetch,
-  type NpmVersionResult,
 } from '../src/update/npm-registry.js';
 import { UPDATE_PREFLIGHT_CHECKS } from '../src/doctor/policy.js';
 import type { DoctorDeps, DoctorReport } from '../src/doctor/types.js';
@@ -25,11 +26,11 @@ import {
 } from '../src/config.js';
 
 describe('resolveExplicitNpmUpdateTarget', () => {
-  const resolverReturning = (result: NpmVersionResult) =>
+  const resolverReturning = (result: NpmDistTagResult) =>
     vi.fn(async () => result);
 
   it('allows an exact prerelease only when allowPrerelease=true', async () => {
-    const resolve = resolverReturning({ version: null });
+    const resolve = resolverReturning({ status: 'not-found' });
     expect(await resolveExplicitNpmUpdateTarget('10.1.0-rc.1', true, {
       resolveNpmDistTag: resolve,
     })).toEqual({ status: 'allowed', version: '10.1.0-rc.1' });
@@ -37,7 +38,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
   });
 
   it('allows an exact stable version without a registry lookup', async () => {
-    const resolve = resolverReturning({ version: null });
+    const resolve = resolverReturning({ status: 'not-found' });
     expect(await resolveExplicitNpmUpdateTarget('10.1.0', false, {
       resolveNpmDistTag: resolve,
     })).toEqual({ status: 'allowed', version: '10.1.0' });
@@ -50,7 +51,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
   });
 
   it('pins a stable dist-tag to the concrete version that passed policy', async () => {
-    const resolve = resolverReturning({ version: '10.0.0' });
+    const resolve = resolverReturning({ status: 'resolved', version: '10.0.0' });
     expect(await resolveExplicitNpmUpdateTarget('latest', false, {
       resolveNpmDistTag: resolve,
     })).toEqual({ status: 'allowed', version: '10.0.0' });
@@ -70,14 +71,14 @@ describe('resolveExplicitNpmUpdateTarget', () => {
   });
 
   it('pins a prerelease dist-tag when prereleases are explicitly allowed', async () => {
-    const resolve = resolverReturning({ version: '10.1.0-rc.1' });
+    const resolve = resolverReturning({ status: 'resolved', version: '10.1.0-rc.1' });
     expect(await resolveExplicitNpmUpdateTarget('next', true, {
       resolveNpmDistTag: resolve,
     })).toEqual({ status: 'allowed', version: '10.1.0-rc.1' });
   });
 
   it('rejects a dist-tag resolving to a prerelease on a stable-only node', async () => {
-    const resolve = resolverReturning({ version: '10.1.0-rc.1' });
+    const resolve = resolverReturning({ status: 'resolved', version: '10.1.0-rc.1' });
     const result = await resolveExplicitNpmUpdateTarget('latest', false, {
       resolveNpmDistTag: resolve,
     });
@@ -86,8 +87,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
 
   it('reports registry resolution errors separately and fails closed', async () => {
     const resolve = resolverReturning({
-      version: null,
-      error: true,
+      status: 'error',
       failure: { kind: 'http-error', status: 503 },
     });
     const result = await resolveExplicitNpmUpdateTarget('latest', false, {
@@ -99,7 +99,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
   it.each(['nonexistent-tag', '=10.1.0-rc.1', '^10.0.0', 'npm:other-package@10.0.0'])(
     'rejects unresolved or non-exact npm target %s',
     async (target) => {
-      const resolve = resolverReturning({ version: null });
+      const resolve = resolverReturning({ status: 'not-found' });
       const result = await resolveExplicitNpmUpdateTarget(target, false, {
         resolveNpmDistTag: resolve,
       });
@@ -134,7 +134,7 @@ describe('resolveNpmDistTag registry boundary', () => {
 
     await expect(resolveNpmDistTag('next', {
       fetchNpmDistTags,
-    })).resolves.toEqual({ version: '10.1.0-rc.1' });
+    })).resolves.toEqual({ status: 'resolved', version: '10.1.0-rc.1' });
     expect(fetchNpmDistTags).toHaveBeenCalledOnce();
   });
 
@@ -148,7 +148,7 @@ describe('resolveNpmDistTag registry boundary', () => {
 
       await expect(resolveNpmDistTag(tag, {
         fetchNpmDistTags,
-      })).resolves.toEqual({ version: null, error: false });
+      })).resolves.toEqual({ status: 'not-found' });
     },
   );
 
@@ -160,8 +160,25 @@ describe('resolveNpmDistTag registry boundary', () => {
 
     await expect(resolveNpmDistTag('latest', {
       fetchNpmDistTags,
-    })).resolves.toEqual({ version: null, error: false });
+    })).resolves.toEqual({ status: 'not-found' });
   });
+
+  it.each(['constructor', '__proto__'])(
+    'treats inherited Object property %s as a missing pinned channel',
+    async (channel) => {
+      const fetchNpmDistTags = vi.fn(async () => ({
+        status: 'ok' as const,
+        tags: { latest: '10.0.1' },
+      }));
+
+      await expect(resolveLatestNpmVersion(true, channel, {
+        fetchNpmDistTags,
+      })).resolves.toEqual({
+        status: 'no-target',
+        reason: { kind: 'missing-channel', channel },
+      });
+    },
+  );
 });
 
 describe('dkg update doctor adapter', () => {
@@ -237,10 +254,9 @@ describe('dkg update command stable-only wiring', () => {
     };
     const performNpmUpdate = vi.fn(async () => 'updated' as const);
     const performNpmUpdateEdge = vi.fn(async () => 'updated' as const);
-    const resolveTag = vi.fn(async (): Promise<NpmVersionResult> => ({
-      version: resolvedTag,
-      error: false,
-    }));
+    const resolveTag = vi.fn(async (): Promise<NpmDistTagResult> => resolvedTag === null
+      ? { status: 'not-found' }
+      : { status: 'resolved', version: resolvedTag });
     const deps: MaintenanceUpdateWorkflowDeps = {
       loadConfig: vi.fn(async () => config),
       loadNetworkConfig: vi.fn(async () => null),

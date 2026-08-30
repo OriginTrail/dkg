@@ -19,9 +19,14 @@ export type NpmRegistryFetch = (
 export type NpmRegistryDeps = { fetch?: NpmRegistryFetch };
 
 export type NpmVersionResult =
-  | { version: string; error?: false }
-  | { version: null; error: true; failure: NpmRegistryFailure }
-  | { version: null; error: false; reason?: NpmVersionNoTargetReason };
+  | { status: 'resolved'; version: string }
+  | { status: 'no-target'; reason: NpmVersionNoTargetReason }
+  | { status: 'error'; failure: NpmRegistryFailure };
+
+export type NpmDistTagResult =
+  | { status: 'resolved'; version: string }
+  | { status: 'not-found' }
+  | { status: 'error'; failure: NpmRegistryFailure };
 
 export type NpmVersionNoTargetReason =
   | { kind: 'missing-channel'; channel: string }
@@ -88,15 +93,15 @@ export async function resolveNpmDistTag(
   deps: NpmRegistryDeps & {
     fetchNpmDistTags?: () => Promise<NpmDistTagsResult>;
   } = {},
-): Promise<NpmVersionResult> {
+): Promise<NpmDistTagResult> {
   const result = await (deps.fetchNpmDistTags ?? (() => fetchNpmDistTags(deps)))();
   if (result.status === 'error') {
-    return { version: null, error: true, failure: result.failure };
+    return { status: 'error', failure: result.failure };
   }
   const version = Object.hasOwn(result.tags, tag) ? result.tags[tag] : null;
   return typeof version === 'string' && isValidSemver(version)
-    ? { version }
-    : { version: null, error: false };
+    ? { status: 'resolved', version }
+    : { status: 'not-found' };
 }
 
 /**
@@ -125,14 +130,14 @@ export async function resolveExplicitNpmUpdateTarget(
   const resolved = deps.resolveNpmDistTag
     ? await deps.resolveNpmDistTag(normalizedTarget)
     : await resolveNpmDistTag(normalizedTarget, deps);
-  if (resolved.error) {
+  if (resolved.status === 'error') {
     return {
       status: 'registry-error',
       reason: `could not resolve dist-tag "${normalizedTarget}" against the npm registry — retry or pass an explicit version`,
       failure: resolved.failure,
     };
   }
-  if (!resolved.version || !isValidSemver(resolved.version)) {
+  if (resolved.status === 'not-found') {
     return {
       status: 'rejected',
       reason: `target "${normalizedTarget}" is not an exact semantic version or a published npm dist-tag`,
@@ -157,38 +162,37 @@ export async function resolveLatestNpmVersion(
 ): Promise<NpmVersionResult> {
   const result = await (deps.fetchNpmDistTags ?? (() => fetchNpmDistTags(deps)))();
   if (result.status === 'error') {
-    return { version: null, error: true, failure: result.failure };
+    return { status: 'error', failure: result.failure };
   }
   const tags = result.tags;
 
   if (channel) {
-    const pinned = tags[channel] ?? null;
-    if (!pinned) {
-      return { version: null, error: false, reason: { kind: 'missing-channel', channel } };
+    const pinned = Object.hasOwn(tags, channel) ? tags[channel] : null;
+    if (typeof pinned !== 'string') {
+      return { status: 'no-target', reason: { kind: 'missing-channel', channel } };
     }
     if (!isValidSemver(pinned)) {
       return {
-        version: null,
-        error: false,
+        status: 'no-target',
         reason: { kind: 'invalid-channel-version', channel, version: pinned },
       };
     }
     if (!allowPrerelease && isPrerelease(pinned)) {
       return {
-        version: null,
-        error: false,
+        status: 'no-target',
         reason: { kind: 'prerelease-channel', channel, version: pinned },
       };
     }
-    return { version: pinned };
+    return { status: 'resolved', version: pinned };
   }
 
   const stable = tags.latest ?? null;
   if (!allowPrerelease) {
-    if (stable && isValidSemver(stable) && !isPrerelease(stable)) return { version: stable };
+    if (stable && isValidSemver(stable) && !isPrerelease(stable)) {
+      return { status: 'resolved', version: stable };
+    }
     return {
-      version: null,
-      error: false,
+      status: 'no-target',
       reason: { kind: 'unacceptable-latest', version: stable },
     };
   }
@@ -197,10 +201,10 @@ export async function resolveLatestNpmVersion(
     Boolean,
   ) as string[]).filter(isValidSemver);
   if (candidates.length === 0) {
-    return { version: null, error: false, reason: { kind: 'no-valid-candidates' } };
+    return { status: 'no-target', reason: { kind: 'no-valid-candidates' } };
   }
   candidates.sort((a, b) => compareSemver(b, a));
-  return { version: candidates[0] };
+  return { status: 'resolved', version: candidates[0] };
 }
 
 export function compareSemver(a: string, b: string): number {

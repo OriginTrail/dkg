@@ -86,6 +86,7 @@ export {
   resolveLatestNpmVersion,
   resolveNpmDistTag,
   type ExplicitNpmUpdateTargetDecision,
+  type NpmDistTagResult,
   type NpmDistTagsResult,
   type NpmRegistryDeps,
   type NpmRegistryFailure,
@@ -329,22 +330,28 @@ function logNpmRegistryFailure(
 
 function logNpmNoTarget(
   log: (message: string) => void,
-  reason: NpmVersionNoTargetReason | undefined,
+  reason: NpmVersionNoTargetReason,
 ): void {
-  if (!reason || reason.kind === 'no-valid-candidates') return;
-  if (reason.kind === 'missing-channel') {
-    log(`Auto-update (npm): channel "${reason.channel}" has no published version, skipping`);
-    return;
+  switch (reason.kind) {
+    case 'no-valid-candidates':
+      return;
+    case 'missing-channel':
+      log(`Auto-update (npm): channel "${reason.channel}" has no published version, skipping`);
+      return;
+    case 'invalid-channel-version':
+      log(`Auto-update (npm): channel "${reason.channel}" → "${reason.version}" is not a valid semver, skipping`);
+      return;
+    case 'prerelease-channel':
+      log(`Auto-update (npm): channel "${reason.channel}" points at a pre-release and allowPrerelease=false, skipping`);
+      return;
+    case 'unacceptable-latest':
+      log('Auto-update (npm): latest dist-tag is absent, invalid, or a pre-release while allowPrerelease=false, skipping');
+      return;
+    default: {
+      const exhaustive: never = reason;
+      void exhaustive;
+    }
   }
-  if (reason.kind === 'invalid-channel-version') {
-    log(`Auto-update (npm): channel "${reason.channel}" → "${reason.version}" is not a valid semver, skipping`);
-    return;
-  }
-  if (reason.kind === 'prerelease-channel') {
-    log(`Auto-update (npm): channel "${reason.channel}" points at a pre-release and allowPrerelease=false, skipping`);
-    return;
-  }
-  log('Auto-update (npm): latest dist-tag is absent, invalid, or a pre-release while allowPrerelease=false, skipping');
 }
 
 export type NpmVersionStatus = {
@@ -376,8 +383,8 @@ export async function checkForNpmVersionUpdate(
   const result = await resolveLatestNpmVersion(allowPrerelease, channel, {
     fetch: _autoUpdateIo.fetch,
   });
-  if (result.version === null) {
-    if (result.error) {
+  if (result.status !== 'resolved') {
+    if (result.status === 'error') {
       logNpmRegistryFailure(log, result.failure);
       return { status: "error" };
     }
@@ -390,22 +397,24 @@ export async function checkForNpmVersionUpdate(
     return { status: "up-to-date" };
   }
 
+  const { version } = result;
+
   // Never trust a non-semver target through the forward-only gate below
   // (compareSemver would return NaN, which is not <= 0). The channel path
   // already guards this upstream; this also covers the default tag set
   // without changing its candidate selection.
-  if (!isValidSemver(result.version)) {
+  if (!isValidSemver(version)) {
     log(
-      `Auto-update (npm): resolved version "${result.version}" is not valid semver, skipping`,
+      `Auto-update (npm): resolved version "${version}" is not valid semver, skipping`,
     );
     return channel ? { status: "no-target", channel } : { status: "up-to-date" };
   }
 
-  if (result.version === currentVersion) return { status: "up-to-date" };
-  if (compareSemver(result.version, currentVersion) <= 0)
+  if (version === currentVersion) return { status: "up-to-date" };
+  if (compareSemver(version, currentVersion) <= 0)
     return { status: "up-to-date" };
 
-  return { status: "available", version: result.version };
+  return { status: "available", version };
 }
 
 /**
