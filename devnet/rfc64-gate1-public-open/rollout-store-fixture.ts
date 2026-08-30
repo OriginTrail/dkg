@@ -1,22 +1,26 @@
-import { access, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
   BlazegraphNamespaceManager,
+  blazegraphNamespaceApiUrlFromSparqlEndpoint,
   createTripleStore,
   quadsToNQuads,
   readExactGraphPaged,
   type BlazegraphNamespaceLease,
   type Quad,
+  type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
 import blazegraphRuntimeContract from
   '@origintrail-official/dkg/blazegraph-runtime-contract';
 
 import {
   parseRolloutStoreBackend,
+  buildGate1RolloutStoreConfig,
   ROLLOUT_BLAZEGRAPH_URL_ENV,
   ROLLOUT_STORE_BACKEND_ENV,
+  ROLLOUT_STORE_SENTINEL_GRAPH_ENV,
   type RolloutStoreBackend,
 } from './rollout-store-config.js';
 
@@ -49,13 +53,17 @@ const DEFAULT_STORE_DATA_DIRS = Object.freeze({
   author: Object.freeze(['author']),
   receiver: Object.freeze(['receiver']),
 });
-const { renderBlazegraphNamespaceXml } = blazegraphRuntimeContract;
+const blazegraphNamespaceCodec = Object.freeze({
+  assertNamespace: blazegraphRuntimeContract.assertBlazegraphNamespace,
+  renderNamespaceXml: blazegraphRuntimeContract.renderBlazegraphNamespaceXml,
+});
 
 export async function createRolloutStoreFixture(
   options: RolloutStoreFixtureOptions = {},
 ): Promise<RolloutStoreFixture> {
   const backend = parseRolloutStoreBackend(options.backendInput);
-  if (backend === 'oxigraph') return new OxigraphRolloutStoreFixture();
+  const storeDataDirs = normalizeStoreDataDirs(options.storeDataDirs);
+  if (backend === 'oxigraph') return OxigraphRolloutStoreFixture.create(storeDataDirs);
   const configuredUrl = options.blazegraphTestUrl;
   if (configuredUrl === undefined || configuredUrl.length === 0) {
     throw new Error('Blazegraph rollout certification requires BLAZEGRAPH_TEST_URL');
@@ -65,7 +73,7 @@ export async function createRolloutStoreFixture(
     fetchImpl: options.fetchImpl ?? fetch,
     requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_MANAGEMENT_TIMEOUT_MS,
     signal: options.signal,
-    storeDataDirs: normalizeStoreDataDirs(options.storeDataDirs),
+    storeDataDirs,
   });
 }
 
@@ -89,8 +97,42 @@ export async function cleanupRolloutStoreFixture(
 class OxigraphRolloutStoreFixture implements RolloutStoreFixture {
   readonly backend = 'oxigraph' as const;
 
-  envForRole(_role: RolloutStoreRole, _dataDir: string): Readonly<Record<string, string>> {
-    return Object.freeze({ [ROLLOUT_STORE_BACKEND_ENV]: this.backend });
+  private constructor(
+    private readonly sentinelByStore: ReadonlyMap<string, string>,
+  ) {}
+
+  static async create(
+    storeDataDirs: Readonly<Record<RolloutStoreRole, readonly string[]>>,
+  ): Promise<OxigraphRolloutStoreFixture> {
+    const sentinelByStore = new Map<string, string>();
+    const nonce = fixtureNonce();
+    for (const role of ['author', 'receiver'] as const) {
+      for (const [index, dataDir] of storeDataDirs[role].entries()) {
+        await mkdir(dataDir, { recursive: true, mode: 0o700 });
+        const graph = sentinelGraph(nonce, role, index);
+        await seedStoreSentinel(
+          buildGate1RolloutStoreConfig({
+            backendInput: 'oxigraph',
+            blazegraphUrl: undefined,
+            dataDir,
+          }).tripleStore,
+          graph,
+        );
+        sentinelByStore.set(roleDataDirKey(role, dataDir), graph);
+      }
+    }
+    return new OxigraphRolloutStoreFixture(sentinelByStore);
+  }
+
+  envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>> {
+    const sentinelGraph = this.sentinelByStore.get(roleDataDirKey(role, dataDir));
+    if (sentinelGraph === undefined) {
+      throw new Error(`Oxigraph rollout fixture has no registered ${role} store for ${dataDir}`);
+    }
+    return Object.freeze({
+      [ROLLOUT_STORE_BACKEND_ENV]: this.backend,
+      [ROLLOUT_STORE_SENTINEL_GRAPH_ENV]: sentinelGraph,
+    });
   }
 
   async assertGraphExact(
@@ -124,6 +166,7 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
 
   private constructor(
     private readonly endpointByStore: ReadonlyMap<string, string>,
+    private readonly sentinelByStore: ReadonlyMap<string, string>,
     private readonly namespaceManager: BlazegraphNamespaceManager,
     private readonly namespaceLeases: readonly BlazegraphNamespaceLease[],
     private readonly requestTimeoutMs: number,
@@ -136,19 +179,26 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
     signal?: AbortSignal;
     storeDataDirs: Readonly<Record<RolloutStoreRole, readonly string[]>>;
   }>): Promise<BlazegraphRolloutStoreFixture> {
-    const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const nonce = fixtureNonce();
     const namespaceManager = new BlazegraphNamespaceManager({
-      serviceUrl: input.configuredUrl,
+      namespaceApiUrl: blazegraphNamespaceApiUrlFromSparqlEndpoint(input.configuredUrl),
       fetchImpl: input.fetchImpl,
-      renderNamespaceXml: renderBlazegraphNamespaceXml,
+      namespaceCodec: blazegraphNamespaceCodec,
       requestTimeoutMs: input.requestTimeoutMs,
     });
-    const plan: Array<Readonly<{ key: string; namespace: string }>> = [];
+    const plan: Array<Readonly<{
+      key: string;
+      namespace: string;
+      role: RolloutStoreRole;
+      roleIndex: number;
+    }>> = [];
     for (const role of ['author', 'receiver'] as const) {
       for (const [index, dataDir] of input.storeDataDirs[role].entries()) {
         plan.push(Object.freeze({
           key: roleDataDirKey(role, dataDir),
           namespace: `rfc64-rollout-${nonce}-${role}-${index}`,
+          role,
+          roleIndex: index,
         }));
       }
     }
@@ -157,11 +207,40 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       input.signal,
     );
     const endpointByStore = new Map<string, string>();
+    const sentinelByStore = new Map<string, string>();
     for (const [index, entry] of plan.entries()) {
-      endpointByStore.set(entry.key, leases[index].sparqlUrl);
+      const endpoint = leases[index]?.sparqlUrl;
+      if (endpoint === undefined) throw new Error(`missing namespace lease for ${entry.key}`);
+      endpointByStore.set(entry.key, endpoint);
+      const graph = sentinelGraph(nonce, entry.role, entry.roleIndex);
+      sentinelByStore.set(entry.key, graph);
+    }
+    try {
+      await Promise.all([...endpointByStore.entries()].map(async ([key, endpoint]) => {
+        const graph = sentinelByStore.get(key);
+        if (graph === undefined) throw new Error(`missing store sentinel for ${key}`);
+        await seedBlazegraphStoreSentinel(
+          endpoint,
+          graph,
+          input.fetchImpl,
+          input.requestTimeoutMs,
+          input.signal,
+        );
+      }));
+    } catch (cause) {
+      try {
+        await namespaceManager.disposeAll(leases, { reconcileAttempts: 3 });
+      } catch (cleanupCause) {
+        throw new AggregateError(
+          [cause, cleanupCause],
+          'Blazegraph rollout store sentinel setup and cleanup failed',
+        );
+      }
+      throw cause;
     }
     return new BlazegraphRolloutStoreFixture(
       endpointByStore,
+      sentinelByStore,
       namespaceManager,
       leases,
       input.requestTimeoutMs,
@@ -170,12 +249,14 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
 
   envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>> {
     const endpoint = this.endpointByStore.get(roleDataDirKey(role, dataDir));
-    if (endpoint === undefined) {
+    const sentinelGraph = this.sentinelByStore.get(roleDataDirKey(role, dataDir));
+    if (endpoint === undefined || sentinelGraph === undefined) {
       throw new Error(`Blazegraph rollout fixture has no registered ${role} store for ${dataDir}`);
     }
     return Object.freeze({
       [ROLLOUT_STORE_BACKEND_ENV]: this.backend,
       [ROLLOUT_BLAZEGRAPH_URL_ENV]: endpoint,
+      [ROLLOUT_STORE_SENTINEL_GRAPH_ENV]: sentinelGraph,
     });
   }
 
@@ -220,6 +301,59 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
 
   async dispose(): Promise<void> {
     await this.namespaceManager.disposeAll(this.namespaceLeases);
+  }
+}
+
+function fixtureNonce(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function sentinelGraph(nonce: string, role: RolloutStoreRole, index: number): string {
+  return `urn:dkg:rfc64:rollout-store-sentinel:${nonce}:${role}:${index}`;
+}
+
+async function seedStoreSentinel(
+  config: TripleStoreConfig,
+  graph: string,
+): Promise<void> {
+  const store = await createTripleStore(config);
+  try {
+    await store.insert([{
+      subject: `${graph}:subject`,
+      predicate: 'urn:dkg:rfc64:rollout-store-sentinel:ready',
+      object: '"true"',
+      graph,
+    }]);
+  } finally {
+    await store.close();
+  }
+}
+
+async function seedBlazegraphStoreSentinel(
+  endpoint: string,
+  graph: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+  callerSignal?: AbortSignal,
+): Promise<void> {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal = callerSignal === undefined
+    ? timeout
+    : AbortSignal.any([callerSignal, timeout]);
+  const body = quadsToNQuads([{
+    subject: `${graph}:subject`,
+    predicate: 'urn:dkg:rfc64:rollout-store-sentinel:ready',
+    object: '"true"',
+    graph,
+  }]);
+  const response = await fetchImpl(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'text/x-nquads' },
+    body,
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`failed to seed Blazegraph rollout store sentinel: HTTP ${response.status}`);
   }
 }
 

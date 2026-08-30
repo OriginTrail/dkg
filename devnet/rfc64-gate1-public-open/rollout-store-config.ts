@@ -6,6 +6,7 @@ export type RolloutStoreBackend = 'oxigraph' | 'blazegraph';
 
 export const ROLLOUT_STORE_BACKEND_ENV = 'DKG_RFC64_GATE1_STORE_BACKEND';
 export const ROLLOUT_BLAZEGRAPH_URL_ENV = 'DKG_RFC64_GATE1_BLAZEGRAPH_URL';
+export const ROLLOUT_STORE_SENTINEL_GRAPH_ENV = 'DKG_RFC64_GATE1_STORE_SENTINEL_GRAPH';
 
 export interface Gate1RolloutStoreConfig {
   readonly backend: RolloutStoreBackend;

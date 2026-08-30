@@ -150,6 +150,10 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
+export {
+  stageKnowledgeAssetSharedWorkingMemoryV1,
+  type StageKnowledgeAssetSharedWorkingMemoryInputV1,
+} from './dkg-agent-publish.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,

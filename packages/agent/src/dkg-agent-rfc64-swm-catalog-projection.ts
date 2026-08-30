@@ -151,7 +151,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       return Object.freeze({
         address: authorAddress,
         signMessage: (message: Uint8Array) => raceAgainstAbortV1(
-          wallet.signMessage(message),
+          () => wallet.signMessage(message),
           signal,
         ),
       });
@@ -162,11 +162,13 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       address: authorAddress,
       signMessage: async (message: Uint8Array) => {
         const compact = await raceAgainstAbortV1(
-          signMessageAs !== undefined
-            ? signMessageAs(authorAddress, message)
-            : signMessage !== undefined
-              ? signMessage(message)
-              : Promise.reject(new Error('RFC-64 configured chain has no message signer')),
+          () => (
+            signMessageAs !== undefined
+              ? signMessageAs(authorAddress, message)
+              : signMessage !== undefined
+                ? signMessage(message)
+                : Promise.reject(new Error('RFC-64 configured chain has no message signer'))
+          ),
           signal,
         );
         const signature = ethers.Signature.from({

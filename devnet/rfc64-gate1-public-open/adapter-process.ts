@@ -13,6 +13,7 @@ import {
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import {
   computeControlSignatureVariantDigestHex,
+  assertSafeIri,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -42,11 +43,11 @@ import {
   Gate1RolloutAdapterFixture,
   parseGate1RolloutAdapterConfig,
 } from './rollout-adapter-fixture.js';
-import { gate1RolloutCommandRole } from './rollout-process-protocol.js';
 import {
   buildGate1RolloutStoreConfig,
   ROLLOUT_BLAZEGRAPH_URL_ENV,
   ROLLOUT_STORE_BACKEND_ENV,
+  ROLLOUT_STORE_SENTINEL_GRAPH_ENV,
 } from './rollout-store-config.js';
 
 const roleInput = process.argv[2];
@@ -66,6 +67,11 @@ const storeConfig = buildGate1RolloutStoreConfig({
   dataDir,
 });
 const storeBackend = storeConfig.backend;
+const storeSentinelGraphInput = process.env[ROLLOUT_STORE_SENTINEL_GRAPH_ENV];
+if (storeSentinelGraphInput === undefined || storeSentinelGraphInput.length === 0) {
+  throw new Error(`${ROLLOUT_STORE_SENTINEL_GRAPH_ENV} is required`);
+}
+const storeSentinelGraph = assertSafeIri(storeSentinelGraphInput);
 const pinnedMasterKeyHex = masterKeyHex;
 const rolloutConfig = parseGate1RolloutAdapterConfig(process.env);
 const rolloutMode = rolloutConfig?.mode ?? null;
@@ -126,6 +132,11 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
   const store = await createTripleStore(storeConfig.tripleStore);
+  const storeSentinelVerified = await store.hasGraph(storeSentinelGraph);
+  if (!storeSentinelVerified) {
+    await store.close();
+    throw new Error(`selected store does not contain fixture sentinel ${storeSentinelGraph}`);
+  }
   rolloutFixture = rolloutConfig === null
     ? undefined
     : await Gate1RolloutAdapterFixture.create(rolloutConfig, role, store);
@@ -162,6 +173,7 @@ async function boot(): Promise<void> {
     rolloutKillSwitch,
     rolloutMode,
     storeBackend,
+    storeSentinelVerified,
     startupRepair: null,
   });
 }
@@ -172,7 +184,7 @@ async function handle(command: Command): Promise<void> {
   }
   const currentAgent = requireAgent();
   if (rolloutFixture?.supportsCommand(command.command) === true) {
-    requireRole(gate1RolloutCommandRole(command.command));
+    requireRole('receiver');
     emitOperationResult(command, await rolloutFixture.dispatch(
       currentAgent,
       command.command,

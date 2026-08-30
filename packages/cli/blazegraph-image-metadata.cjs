@@ -42,12 +42,21 @@ const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="UTF-8" 
 // conservative charset — anything needing escaping is rejected outright.
 const BLAZEGRAPH_NAMESPACE_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
-function renderBlazegraphNamespaceXml(namespace) {
-  if (typeof namespace !== 'string' || !BLAZEGRAPH_NAMESPACE_PATTERN.test(namespace)) {
+function assertBlazegraphNamespace(namespace) {
+  if (
+    typeof namespace !== 'string'
+    || !BLAZEGRAPH_NAMESPACE_PATTERN.test(namespace)
+    || namespace === '.'
+    || namespace === '..'
+  ) {
     throw new Error(
-      `Blazegraph namespace ${JSON.stringify(namespace)} is invalid: it is templated into XML, so it must match ${BLAZEGRAPH_NAMESPACE_PATTERN}`,
+      `Blazegraph namespace ${JSON.stringify(namespace)} is invalid: it must match ${BLAZEGRAPH_NAMESPACE_PATTERN} and cannot be a URL dot segment`,
     );
   }
+}
+
+function renderBlazegraphNamespaceXml(namespace) {
+  assertBlazegraphNamespace(namespace);
   return BLAZEGRAPH_NAMESPACE_XML_TEMPLATE.replace('{namespace}', namespace);
 }
 
@@ -107,6 +116,7 @@ function formatBlazegraphImageMetadata(metadata) {
 
 module.exports = {
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
+  assertBlazegraphNamespace,
   formatBlazegraphImageMetadata,
   parseBlazegraphImageMetadata,
   readBlazegraphImageMetadata,
