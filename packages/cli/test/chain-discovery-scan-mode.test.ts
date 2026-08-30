@@ -5,6 +5,9 @@ import {
   chainDiscoveryScanOptions,
   createChainDiscoveryScanRunner,
   deriveChainFullScanEvery,
+  resolveManagedChainDiscoveryScanAttempt,
+  transitionManagedChainDiscoveryScanState,
+  type ManagedChainDiscoveryScanState,
 } from '../src/daemon/chain-discovery-scan-runner.js';
 import {
   CHAIN_FULL_SCAN_EVERY as BARREL_CHAIN_FULL_SCAN_EVERY,
@@ -89,6 +92,61 @@ describe('chainDiscoveryScanOptions', () => {
     expect(deriveChainFullScanEvery(CHAIN_DISCOVERY_SCAN_SCHEDULE)).toBe(
       CHAIN_DISCOVERY_SCAN_SCHEDULE.fullScanEvery,
     );
+  });
+
+  it.each([
+    {
+      label: 'resumes a partially persisted cursor seed',
+      watermarks: [false, true],
+      outcomes: ['failure', 'success'] as const,
+      fullScanEvery: 48,
+      modes: ['seedFromCursor', 'incremental'],
+    },
+    {
+      label: 'interleaves tip and cursor recovery after two startup full failures',
+      watermarks: [true, true, true, true, true],
+      outcomes: ['failure', 'failure', 'success', 'success', 'success'] as const,
+      fullScanEvery: 48,
+      modes: ['seedFull', 'seedFull', 'tip', 'incremental', 'seedFull'],
+    },
+    {
+      label: 'interleaves recovery after a periodic full failure',
+      watermarks: [true, true, true, true, true, true],
+      outcomes: ['success', 'success', 'failure', 'success', 'success', 'success'] as const,
+      fullScanEvery: 2,
+      modes: ['seedFull', 'incremental', 'seedFull', 'tip', 'incremental', 'seedFull'],
+    },
+    {
+      label: 'retries full recovery after the interleaved incremental attempt fails',
+      watermarks: [true, true, true, true, true],
+      outcomes: ['failure', 'failure', 'success', 'failure', 'success'] as const,
+      fullScanEvery: 48,
+      modes: ['seedFull', 'seedFull', 'tip', 'incremental', 'seedFull'],
+    },
+  ])('$label through pure state transitions', ({
+    watermarks,
+    outcomes,
+    fullScanEvery,
+    modes,
+  }) => {
+    let state: ManagedChainDiscoveryScanState = { kind: 'undetermined' };
+    const actualModes: string[] = [];
+    for (let index = 0; index < outcomes.length; index += 1) {
+      const watermarkSeeded = watermarks[index]!;
+      const attempt = resolveManagedChainDiscoveryScanAttempt({
+        state,
+        watermarkSeeded,
+        fullScanEvery,
+      });
+      actualModes.push(attempt.options.mode);
+      state = transitionManagedChainDiscoveryScanState({
+        state: attempt.state,
+        watermarkSeeded,
+        outcome: outcomes[index]!,
+        fullScanEvery,
+      });
+    }
+    expect(actualModes).toEqual(modes);
   });
 
   it('serializes overlapping scheduled chain scans and resets after settle', async () => {
@@ -258,6 +316,34 @@ describe('chainDiscoveryScanOptions', () => {
       throwOnChainScanFailure: true,
       pageBudget: 30,
     });
+  });
+
+  it('retries full recovery after the interleaved incremental recovery attempt fails', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockRejectedValueOnce(new Error('old archive range unavailable'))
+        .mockRejectedValueOnce(new Error('old archive range still unavailable'))
+        .mockResolvedValueOnce(0)
+        .mockRejectedValueOnce(new Error('bounded cursor recovery failed'))
+        .mockResolvedValueOnce(0),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    await runner();
+    await runner();
+    await runner();
+    await runner();
+    await runner();
+
+    expect(agent.discoverContextGraphsFromChain.mock.calls.map(([options]) => options.mode)).toEqual([
+      'seedFull',
+      'seedFull',
+      'tip',
+      'incremental',
+      'seedFull',
+    ]);
   });
 
   it('interleaves tip recovery when fresh cursor bootstrap remains blocked', async () => {

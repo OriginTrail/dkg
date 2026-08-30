@@ -20,22 +20,19 @@ export const CHAIN_DISCOVERY_SCAN_SCHEDULE = Object.freeze({
 export const CHAIN_FULL_SCAN_EVERY = CHAIN_DISCOVERY_SCAN_SCHEDULE.fullScanEvery;
 export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
 
-export type ChainDiscoveryStartupPhase =
-  | 'undetermined'
-  | 'cursorSeed'
-  | 'startupFullRecovery'
-  | 'complete';
+export type ManagedChainDiscoveryScanState =
+  | { kind: 'undetermined' }
+  | { kind: 'cursorSeed'; failures: number }
+  | { kind: 'startupFullRecovery'; failures: number }
+  | { kind: 'steady'; successfulScansInCycle: number; cursorFailures: number }
+  | { kind: 'recoveryTip'; successfulScansInCycle: number }
+  | { kind: 'recoveryIncremental'; successfulScansInCycle: number }
+  | { kind: 'recoveryFull'; successfulScansInCycle: number };
 
-type ChainDiscoveryRecoveryStep = 'tip' | 'incremental' | 'full';
-
-type ManagedChainDiscoveryScanOptionsInput = {
-  watermarkSeeded: boolean;
-  startupPhase: ChainDiscoveryStartupPhase;
-  successfulScansInCycle: number;
-  recoveryStep?: ChainDiscoveryRecoveryStep;
-  fullScanEvery?: number;
-  pageBudget?: number;
-};
+type ActiveManagedChainDiscoveryScanState = Exclude<
+  ManagedChainDiscoveryScanState,
+  { kind: 'undetermined' }
+>;
 
 /** Input retained for callers of the original daemon lifecycle helper. */
 export type LegacyChainDiscoveryScanOptionsInput = {
@@ -91,41 +88,113 @@ export function chainDiscoveryScanOptions(
     : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
 }
 
-/** Outcome-aware policy used only by the managed daemon scan runner. */
-function managedChainDiscoveryScanOptions(
-  input: ManagedChainDiscoveryScanOptionsInput,
-): ChainDiscoveryScanOptions {
+export function resolveManagedChainDiscoveryScanAttempt(input: {
+  state: ManagedChainDiscoveryScanState;
+  watermarkSeeded: boolean;
+  fullScanEvery?: number;
+  pageBudget?: number;
+}): {
+  state: ActiveManagedChainDiscoveryScanState;
+  options: ChainDiscoveryScanOptions;
+} {
   const fullScanEvery = normalizeFullScanEvery(input.fullScanEvery);
   const pageBudget = normalizePageBudget(input.pageBudget);
+  const state: ActiveManagedChainDiscoveryScanState = input.state.kind === 'undetermined'
+    ? input.watermarkSeeded
+      ? { kind: 'startupFullRecovery', failures: 0 }
+      : { kind: 'cursorSeed', failures: 0 }
+    : input.state;
 
-  if (input.startupPhase === 'undetermined') {
-    return input.watermarkSeeded
-      ? { mode: 'seedFull', throwOnChainScanFailure: true }
-      : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+  switch (state.kind) {
+    case 'startupFullRecovery':
+    case 'recoveryFull':
+      return { state, options: { mode: 'seedFull', throwOnChainScanFailure: true } };
+    case 'recoveryTip':
+      return { state, options: { mode: 'tip' } };
+    case 'cursorSeed':
+    case 'recoveryIncremental':
+      return {
+        state,
+        options: input.watermarkSeeded
+          ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
+          : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget },
+      };
+    case 'steady':
+      if (input.watermarkSeeded && state.successfulScansInCycle >= fullScanEvery) {
+        return { state, options: { mode: 'seedFull', throwOnChainScanFailure: true } };
+      }
+      return {
+        state,
+        options: input.watermarkSeeded
+          ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
+          : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget },
+      };
   }
-  if (input.startupPhase === 'cursorSeed') {
-    return input.watermarkSeeded
-      ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
-      : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+}
+
+export function transitionManagedChainDiscoveryScanState(input: {
+  state: ActiveManagedChainDiscoveryScanState;
+  watermarkSeeded: boolean;
+  outcome: 'success' | 'failure';
+  fullScanEvery?: number;
+}): ManagedChainDiscoveryScanState {
+  const { state } = input;
+  const successes = 'successfulScansInCycle' in state
+    ? state.successfulScansInCycle
+    : 0;
+  const steadyFullAttempt = state.kind === 'steady'
+    && input.watermarkSeeded
+    && successes >= normalizeFullScanEvery(input.fullScanEvery);
+
+  if (input.outcome === 'failure') {
+    switch (state.kind) {
+      case 'startupFullRecovery':
+        return state.failures + 1 >= 2
+          ? { kind: 'recoveryTip', successfulScansInCycle: 0 }
+          : { ...state, failures: state.failures + 1 };
+      case 'cursorSeed':
+        return state.failures + 1 >= 2
+          ? { kind: 'recoveryTip', successfulScansInCycle: 0 }
+          : { ...state, failures: state.failures + 1 };
+      case 'recoveryTip':
+        return input.watermarkSeeded
+          ? { kind: 'recoveryIncremental', successfulScansInCycle: successes }
+          : { kind: 'recoveryFull', successfulScansInCycle: successes };
+      case 'recoveryIncremental':
+        return { kind: 'recoveryFull', successfulScansInCycle: successes };
+      case 'recoveryFull':
+        return { kind: 'recoveryTip', successfulScansInCycle: successes };
+      case 'steady':
+        if (steadyFullAttempt) {
+          return { kind: 'recoveryTip', successfulScansInCycle: successes };
+        }
+        return state.cursorFailures + 1 >= 2
+          ? { kind: 'recoveryTip', successfulScansInCycle: successes }
+          : { ...state, cursorFailures: state.cursorFailures + 1 };
+    }
   }
-  if (input.startupPhase === 'startupFullRecovery') {
-    return { mode: 'seedFull', throwOnChainScanFailure: true };
+
+  switch (state.kind) {
+    case 'startupFullRecovery':
+    case 'recoveryFull':
+      return { kind: 'steady', successfulScansInCycle: 1, cursorFailures: 0 };
+    case 'cursorSeed':
+      return { kind: 'steady', successfulScansInCycle: 1, cursorFailures: 0 };
+    case 'recoveryTip':
+      return input.watermarkSeeded
+        ? { kind: 'recoveryIncremental', successfulScansInCycle: successes }
+        : { kind: 'recoveryFull', successfulScansInCycle: successes };
+    case 'recoveryIncremental':
+      return { kind: 'recoveryFull', successfulScansInCycle: successes };
+    case 'steady':
+      return steadyFullAttempt
+        ? { kind: 'steady', successfulScansInCycle: 1, cursorFailures: 0 }
+        : {
+            kind: 'steady',
+            successfulScansInCycle: successes + 1,
+            cursorFailures: 0,
+          };
   }
-  if (input.recoveryStep === 'tip') return { mode: 'tip' };
-  if (input.recoveryStep === 'incremental') {
-    return input.watermarkSeeded
-      ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
-      : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
-  }
-  if (input.recoveryStep === 'full') {
-    return { mode: 'seedFull', throwOnChainScanFailure: true };
-  }
-  if (input.watermarkSeeded && input.successfulScansInCycle >= fullScanEvery) {
-    return { mode: 'seedFull', throwOnChainScanFailure: true };
-  }
-  return input.watermarkSeeded
-    ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
-    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
 }
 
 function safeLog(log: (message: string) => void, message: string): void {
@@ -157,11 +226,7 @@ export function createChainDiscoveryScanRunner(input: {
   pageBudget?: number;
   fullScanEvery?: number;
 }): () => Promise<void> {
-  let startupPhase: ChainDiscoveryStartupPhase = 'undetermined';
-  let startupFullFailures = 0;
-  let successfulScansInCycle = 0;
-  let recoveryStep: ChainDiscoveryRecoveryStep | undefined;
-  let cursorBackedFailures = 0;
+  let state: ManagedChainDiscoveryScanState = { kind: 'undetermined' };
   let inFlight = false;
 
   return async () => {
@@ -180,19 +245,14 @@ export function createChainDiscoveryScanRunner(input: {
         return;
       }
 
-      if (startupPhase === 'undetermined') {
-        startupPhase = watermarkSeeded ? 'startupFullRecovery' : 'cursorSeed';
-      }
-
-      const scheduledRecoveryStep = recoveryStep;
-      const options = managedChainDiscoveryScanOptions({
+      const attempt = resolveManagedChainDiscoveryScanAttempt({
+        state,
         watermarkSeeded,
-        startupPhase,
-        successfulScansInCycle,
-        recoveryStep: scheduledRecoveryStep,
         pageBudget: input.pageBudget,
         fullScanEvery: input.fullScanEvery,
       });
+      state = attempt.state;
+      const { options } = attempt;
 
       let found: number;
       try {
@@ -202,63 +262,21 @@ export function createChainDiscoveryScanRunner(input: {
           input.log,
           `Chain scan: ${options.mode} scan failed: ${safeErrorMessage(error)}`,
         );
-
-        if (startupPhase === 'startupFullRecovery') {
-          startupFullFailures += 1;
-          // Retry startup recovery once immediately. If the historical range remains unavailable,
-          // enter steady state and interleave tip discovery before each later full retry.
-          if (startupFullFailures >= 2) {
-            startupPhase = 'complete';
-            recoveryStep = 'tip';
-          }
-        } else if (options.mode === 'seedFull') {
-          recoveryStep = 'tip';
-        } else if (scheduledRecoveryStep === 'tip' && options.mode === 'tip') {
-          // A tip probe cannot fill a multi-page cursor-to-tip gap by itself. Whether the probe
-          // succeeds or fails, give the usable historical cursor one bounded catch-up turn.
-          recoveryStep = watermarkSeeded ? 'incremental' : 'full';
-        } else if (
-          scheduledRecoveryStep === 'incremental' &&
-          (options.mode === 'seedFromCursor' || options.mode === 'incremental')
-        ) {
-          recoveryStep = 'full';
-        } else if (options.mode === 'seedFromCursor' || options.mode === 'incremental') {
-          cursorBackedFailures += 1;
-          // A bounded retry absorbs transient RPC failures. Persistent cursor-backed failure means
-          // historical progress is blocked, so preserve that cursor and enter the same tip/full
-          // recovery alternation used for failed full scans.
-          if (cursorBackedFailures >= 2) {
-            startupPhase = 'complete';
-            recoveryStep = 'tip';
-            cursorBackedFailures = 0;
-          }
-        }
+        state = transitionManagedChainDiscoveryScanState({
+          state: attempt.state,
+          watermarkSeeded,
+          outcome: 'failure',
+          fullScanEvery: input.fullScanEvery,
+        });
         return;
       }
 
-      if (options.mode === 'seedFull') {
-        startupPhase = 'complete';
-        startupFullFailures = 0;
-        successfulScansInCycle = 1;
-        recoveryStep = undefined;
-        cursorBackedFailures = 0;
-      } else {
-        if (startupPhase === 'cursorSeed') startupPhase = 'complete';
-        if (options.mode === 'seedFromCursor' || options.mode === 'incremental') {
-          cursorBackedFailures = 0;
-        }
-        if (scheduledRecoveryStep === 'tip' && options.mode === 'tip') {
-          recoveryStep = watermarkSeeded ? 'incremental' : 'full';
-        } else if (
-          scheduledRecoveryStep === 'incremental' &&
-          (options.mode === 'seedFromCursor' || options.mode === 'incremental')
-        ) {
-          recoveryStep = 'full';
-        }
-        if (scheduledRecoveryStep === undefined) {
-          successfulScansInCycle += 1;
-        }
-      }
+      state = transitionManagedChainDiscoveryScanState({
+        state: attempt.state,
+        watermarkSeeded,
+        outcome: 'success',
+        fullScanEvery: input.fullScanEvery,
+      });
 
       if (found > 0) {
         safeLog(input.log, `Chain scan: discovered ${found} new context graph(s)`);
