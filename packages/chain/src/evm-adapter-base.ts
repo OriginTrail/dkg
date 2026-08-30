@@ -1320,11 +1320,13 @@ export class EVMChainAdapterBase {
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
+      cursorKind: 'historical',
       store: config.contextGraphRegistryScanCursorStore,
     });
     this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
-      deploymentId: `${this.deploymentId}:tip-recovery`,
+      deploymentId: this.deploymentId,
+      cursorKind: 'tip',
       store: config.contextGraphRegistryScanCursorStore,
     });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;

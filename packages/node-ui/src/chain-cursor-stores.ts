@@ -84,9 +84,9 @@ export class SqliteChainEventCursorStore {
  * SQLite-backed ContextGraphNameRegistry scan cursor.
  *
  * The value is the next unbuffered block after a successfully scanned
- * contiguous prefix. It is keyed by chain/deployment/registry address; corrupt
- * values are ignored by returning `undefined`, which fails closed to the
- * historical scan path.
+ * contiguous prefix. It is keyed by chain/deployment/registry address/cursor role;
+ * corrupt values are ignored by returning `undefined`. Historical loads retain
+ * fallbacks for role-less runtime rows and the original settings representation.
  */
 export class SqliteContextGraphRegistryScanCursorStore {
   private readonly cursors: RuntimePositiveIntegerCursorStore;
@@ -97,12 +97,14 @@ export class SqliteContextGraphRegistryScanCursorStore {
     this.legacyCursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
   }
 
-  async load(key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<number | undefined> {
-    return this.cursors.load(this.scope(key), this.registryKey(key))
+  async load(key: { chainId: string; deploymentId: string; registryAddress: string; cursorKind: 'historical' | 'tip' }): Promise<number | undefined> {
+    const current = this.cursors.load(this.scope(key), this.registryKey(key));
+    if (current !== undefined || key.cursorKind === 'tip') return current;
+    return this.cursors.load(this.scope(key), this.legacyRegistryKey(key))
       ?? this.legacyCursors.load(this.legacyKey(key));
   }
 
-  async save(key: { chainId: string; deploymentId: string; registryAddress: string }, nextBlock: number): Promise<void> {
+  async save(key: { chainId: string; deploymentId: string; registryAddress: string; cursorKind: 'historical' | 'tip' }, nextBlock: number): Promise<void> {
     this.cursors.save(this.scope(key), this.registryKey(key), nextBlock);
   }
 
@@ -110,7 +112,11 @@ export class SqliteContextGraphRegistryScanCursorStore {
     return `${key.chainId}:${key.deploymentId}`;
   }
 
-  private registryKey(key: { registryAddress: string }): string {
+  private registryKey(key: { registryAddress: string; cursorKind: 'historical' | 'tip' }): string {
+    return `${key.cursorKind}:${key.registryAddress.toLowerCase()}`;
+  }
+
+  private legacyRegistryKey(key: { registryAddress: string }): string {
     return key.registryAddress.toLowerCase();
   }
 

@@ -256,6 +256,34 @@ describe('chainDiscoveryScanOptions', () => {
     ]);
   });
 
+  it('interleaves tip recovery when fresh cursor bootstrap remains blocked', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi
+        .fn<() => Promise<boolean>>()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValue(true),
+      discoverContextGraphsFromChain: vi
+        .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
+        .mockRejectedValueOnce(new Error('bootstrap page unavailable'))
+        .mockRejectedValueOnce(new Error('persisted historical page unavailable'))
+        .mockResolvedValueOnce(1)
+        .mockRejectedValueOnce(new Error('historical recovery remains pending')),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    await runner();
+    await runner();
+    await runner();
+    await runner();
+
+    expect(agent.discoverContextGraphsFromChain.mock.calls.map(([options]) => options.mode)).toEqual([
+      'seedFromCursor',
+      'incremental',
+      'tip',
+      'seedFull',
+    ]);
+  });
+
   it('interleaves a tip probe after a failed periodic full resync', async () => {
     const agent = {
       hasContextGraphRegistryScanWatermark: vi.fn(async () => true),

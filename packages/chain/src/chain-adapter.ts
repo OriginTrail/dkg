@@ -574,6 +574,7 @@ export interface ContextGraphRegistryScanCursorKey {
   chainId: string;
   deploymentId: string;
   registryAddress: string;
+  cursorKind: 'historical' | 'tip';
 }
 
 export interface ContextGraphRegistryScanCursorStore {

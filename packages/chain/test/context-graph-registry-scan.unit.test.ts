@@ -65,20 +65,20 @@ class MemoryRegistryScanCursorStore {
   readonly loads: string[] = [];
   readonly saves: Array<{ key: string; nextBlock: number }> = [];
 
-  async load(key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<number | undefined> {
+  async load(key: { chainId: string; deploymentId: string; registryAddress: string; cursorKind: 'historical' | 'tip' }): Promise<number | undefined> {
     const encoded = this.key(key);
     this.loads.push(encoded);
     return this.values.get(encoded);
   }
 
-  async save(key: { chainId: string; deploymentId: string; registryAddress: string }, nextBlock: number): Promise<void> {
+  async save(key: { chainId: string; deploymentId: string; registryAddress: string; cursorKind: 'historical' | 'tip' }, nextBlock: number): Promise<void> {
     const encoded = this.key(key);
     this.saves.push({ key: encoded, nextBlock });
     this.values.set(encoded, nextBlock);
   }
 
-  private key(key: { chainId: string; deploymentId: string; registryAddress: string }): string {
-    return `${key.chainId}|${key.deploymentId}|${key.registryAddress.toLowerCase()}`;
+  private key(key: { chainId: string; deploymentId: string; registryAddress: string; cursorKind: 'historical' | 'tip' }): string {
+    return `${key.chainId}|${key.deploymentId}|${key.cursorKind}|${key.registryAddress.toLowerCase()}`;
   }
 }
 
@@ -306,6 +306,125 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       [2_000, 3_999],
     ]);
     expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
+  });
+
+  it('retains the first attempted tip range when its query fails before any acknowledgement', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const registry = makeRegistry({
+      queryFilter: seam(async () => {
+        throw new Error('first tip page unavailable');
+      }),
+    });
+    const { adapter } = makeAdapter(registry, 10_000, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+
+    await expect(collectRegistryScan(adapter, { mode: 'tip' }))
+      .rejects.toThrow('first tip page unavailable');
+    expect(store.saves.map((save) => save.nextBlock)).toEqual([8_001]);
+
+    const eventBlock = 10_001;
+    const head = 13_200;
+    registry.queryFilter.reset();
+    registry.queryFilter.setImpl(async (_filter: unknown, lo: number, hi: number) =>
+      lo <= eventBlock && eventBlock <= hi
+        ? [{ topics: [], data: '0x01', blockNumber: eventBlock }]
+        : [],
+    );
+    const { adapter: restarted } = makeAdapter(registry, head, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+
+    const recovered = await collectRegistryScan(restarted, { mode: 'tip' });
+
+    expect(recovered.map((cg) => cg.blockNumber)).toEqual([eventBlock]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [7_951, 9_950],
+      [9_951, 11_950],
+      [11_951, 13_200],
+    ]);
+    expect(await restarted.hasContextGraphRegistryScanWatermark()).toBe(false);
+  });
+
+  it('retains the first tip lower bound in process when durable cursor persistence fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = {
+      load: vi.fn(async () => undefined),
+      save: vi.fn(async () => {
+        throw new Error('tip cursor save failed');
+      }),
+    };
+    let head = 10_000;
+    let firstQuery = true;
+    const eventBlock = 10_001;
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) => {
+        if (firstQuery) {
+          firstQuery = false;
+          throw new Error('first tip page unavailable');
+        }
+        return lo <= eventBlock && eventBlock <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: eventBlock }]
+          : [];
+      }),
+    });
+    const { adapter, provider } = makeAdapter(registry, head, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+    provider.getBlockNumber.setImpl(async () => head);
+
+    try {
+      await expect(collectRegistryScan(adapter, { mode: 'tip' }))
+        .rejects.toThrow('first tip page unavailable');
+      expect((adapter as any).contextGraphRegistryTipScanCursor.getCachedWatermark(REGISTRY))
+        .toBe(8_001);
+
+      head = 13_200;
+      registry.queryFilter.clear();
+      const recovered = await collectRegistryScan(adapter, { mode: 'tip' });
+
+      expect(recovered.map((cg) => cg.blockNumber)).toEqual([eventBlock]);
+      expect(registry.queryFilter.calls[0]?.slice(1)).toEqual([7_951, 9_950]);
+      expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY))
+        .toBeUndefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('revisits a fetched tip page when local application never acknowledges it', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const eventBlock = 9_999;
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) =>
+        lo <= eventBlock && eventBlock <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: eventBlock }]
+          : [],
+      ),
+    });
+    const { adapter } = makeAdapter(registry, 10_000, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+    const iterator = adapter.scanContextGraphRegistryPages({ mode: 'tip' })[Symbol.asyncIterator]();
+
+    const fetched = await iterator.next();
+    expect(fetched.done).toBe(false);
+    expect(fetched.value?.contextGraphs.map((cg) => cg.blockNumber)).toEqual([eventBlock]);
+    await iterator.return?.();
+    expect(store.saves.map((save) => save.nextBlock)).toEqual([8_001]);
+
+    registry.queryFilter.clear();
+    const { adapter: restarted } = makeAdapter(registry, 10_000, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+    const retried = await collectRegistryScan(restarted, { mode: 'tip' });
+
+    expect(retried.map((cg) => cg.blockNumber)).toEqual([eventBlock]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [7_951, 9_950],
+      [9_951, 10_000],
+    ]);
+    expect(await restarted.hasContextGraphRegistryScanWatermark()).toBe(false);
   });
 
   it('does not advance the incremental watermark when parsing a later page fails', async () => {
@@ -687,6 +806,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       chainId: 'evm:31337',
       deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
       registryAddress: REGISTRY,
+      cursorKind: 'historical',
     }, 3_000);
 
     const registry = makeRegistry();
@@ -717,6 +837,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       chainId: 'evm:31337',
       deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
       registryAddress: REGISTRY,
+      cursorKind: 'historical',
     }, 3_000);
     const registry = makeRegistry({
       queryFilter: seam(async (_filter: unknown, lo: number, hi: number) =>

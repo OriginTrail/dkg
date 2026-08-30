@@ -19,6 +19,7 @@ export class ContextGraphRegistryScanCursor {
     private readonly input: {
       chainId: string;
       deploymentId: string;
+      cursorKind: ContextGraphRegistryScanCursorKey['cursorKind'];
       store?: ContextGraphRegistryScanCursorStore;
     },
   ) {}
@@ -80,6 +81,7 @@ export class ContextGraphRegistryScanCursor {
       chainId: this.input.chainId,
       deploymentId: this.input.deploymentId,
       registryAddress,
+      cursorKind: this.input.cursorKind,
     };
   }
 

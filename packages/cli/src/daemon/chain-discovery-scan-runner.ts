@@ -117,6 +117,7 @@ export function createChainDiscoveryScanRunner(input: {
   let successfulScansInCycle = 0;
   let fullRecoveryPending = false;
   let fullRecoveryRetryReady = false;
+  let cursorBackedFailures = 0;
   let inFlight = false;
 
   return async () => {
@@ -170,6 +171,17 @@ export function createChainDiscoveryScanRunner(input: {
         } else if (options.mode === 'seedFull') {
           fullRecoveryPending = true;
           fullRecoveryRetryReady = false;
+        } else if (options.mode === 'seedFromCursor' || options.mode === 'incremental') {
+          cursorBackedFailures += 1;
+          // A bounded retry absorbs transient RPC failures. Persistent cursor-backed failure means
+          // historical progress is blocked, so preserve that cursor and enter the same tip/full
+          // recovery alternation used for failed full scans.
+          if (cursorBackedFailures >= 2) {
+            startupPhase = 'complete';
+            fullRecoveryPending = true;
+            fullRecoveryRetryReady = false;
+            cursorBackedFailures = 0;
+          }
         } else if (fullRecoveryPending && options.mode === 'tip') {
           // One tip-discovery attempt, successful or not, prevents an unavailable historical range
           // from monopolizing the scheduler. The next invocation may retry full recovery.
@@ -184,8 +196,12 @@ export function createChainDiscoveryScanRunner(input: {
         successfulScansInCycle = 1;
         fullRecoveryPending = false;
         fullRecoveryRetryReady = false;
+        cursorBackedFailures = 0;
       } else {
         if (startupPhase === 'cursorSeed') startupPhase = 'complete';
+        if (options.mode === 'seedFromCursor' || options.mode === 'incremental') {
+          cursorBackedFailures = 0;
+        }
         successfulScansInCycle += 1;
         if (fullRecoveryPending && options.mode === 'tip') {
           fullRecoveryRetryReady = true;

@@ -2218,16 +2218,25 @@ describe('DashboardDB — chain RPC cursor stores', () => {
       chainId: 'evm:1',
       deploymentId: 'evm:1:hub=0xabc',
       registryAddress: '0x3333333333333333333333333333333333333333',
+      cursorKind: 'historical' as const,
     };
 
     await store.save(key, 5000);
+    await store.save({ ...key, cursorKind: 'tip' }, 9000);
     expect(await store.load(key)).toBe(5000);
+    expect(await store.load({ ...key, cursorKind: 'tip' })).toBe(9000);
     expect(db.db.prepare(
       `SELECT value FROM runtime_cursors
        WHERE namespace = 'contextGraphRegistryScan.cursor'
          AND scope = ?
          AND key = ?`,
-    ).get(`${key.chainId}:${key.deploymentId}`, key.registryAddress.toLowerCase())).toEqual({ value: 5000 });
+    ).get(`${key.chainId}:${key.deploymentId}`, `historical:${key.registryAddress.toLowerCase()}`)).toEqual({ value: 5000 });
+    expect(db.db.prepare(
+      `SELECT value FROM runtime_cursors
+       WHERE namespace = 'contextGraphRegistryScan.cursor'
+         AND scope = ?
+         AND key = ?`,
+    ).get(`${key.chainId}:${key.deploymentId}`, `tip:${key.registryAddress.toLowerCase()}`)).toEqual({ value: 9000 });
     await store.save(key, 0);
     await store.save(key, -1);
     await store.save(key, 1.5);
@@ -2250,11 +2259,31 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     );
     expect(await store.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
 
+    const legacyRuntimeAddress = '0x7777777777777777777777777777777777777777';
+    db.db.prepare(`
+      INSERT INTO runtime_cursors (namespace, scope, key, value, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      'contextGraphRegistryScan.cursor',
+      `${key.chainId}:${key.deploymentId}`,
+      legacyRuntimeAddress,
+      7000,
+      Date.now(),
+    );
+    expect(await store.load({ ...key, registryAddress: legacyRuntimeAddress })).toBe(7000);
+    expect(await store.load({
+      ...key,
+      registryAddress: legacyRuntimeAddress,
+      cursorKind: 'tip',
+    })).toBeUndefined();
+
     db.close();
     db = new DashboardDB({ dataDir: dir });
     const reopened = new SqliteContextGraphRegistryScanCursorStore(db);
     expect(await reopened.load(key)).toBe(5000);
+    expect(await reopened.load({ ...key, cursorKind: 'tip' })).toBe(9000);
     expect(await reopened.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
+    expect(await reopened.load({ ...key, registryAddress: legacyRuntimeAddress })).toBe(7000);
   });
 });
 
