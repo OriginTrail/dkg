@@ -191,6 +191,12 @@ export interface AppliedCatalogHeadCasResultV1 {
   readonly snapshot: AppliedCatalogHeadSnapshotV1;
 }
 
+export interface DeleteAppliedCatalogHeadInputV1 {
+  readonly catalogScopeDigest: Digest32V1;
+  readonly authorAddress: EvmAddressV1;
+  readonly expectedCurrentCatalogHeadDigest: Digest32V1;
+}
+
 /**
  * Precommit evidence for one exact live candidate row. Both fields are opaque,
  * process-local capabilities. This container proves neither catalog-head authority
@@ -300,6 +306,8 @@ export interface Rfc64InventoryV1CandidateApi
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
   ): AppliedCatalogHeadSnapshotV1 | null;
+  listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[];
+  deleteAppliedCatalogHeadV1(input: DeleteAppliedCatalogHeadInputV1): void;
   compareAndSwapAppliedCatalogHeadV1(
     input: CompareAndSwapAppliedCatalogHeadInputV1,
   ): AppliedCatalogHeadCasResultV1;
@@ -322,6 +330,8 @@ export type Rfc64InventoryV1OperationsV1 = Pick<
   | 'discardCandidateSessionBatch'
   | 'deleteCandidateBucket'
   | 'readAppliedCatalogHeadV1'
+  | 'listAppliedCatalogHeadsV1'
+  | 'deleteAppliedCatalogHeadV1'
   | 'compareAndSwapAppliedCatalogHeadV1'
 >;
 
@@ -362,6 +372,8 @@ export function createRfc64InventoryOperationsViewV1(
     ),
     deleteCandidateBucket: fence(inventory.deleteCandidateBucket.bind(inventory)),
     readAppliedCatalogHeadV1: fence(inventory.readAppliedCatalogHeadV1.bind(inventory)),
+    listAppliedCatalogHeadsV1: fence(inventory.listAppliedCatalogHeadsV1.bind(inventory)),
+    deleteAppliedCatalogHeadV1: fence(inventory.deleteAppliedCatalogHeadV1.bind(inventory)),
     compareAndSwapAppliedCatalogHeadV1: fence(
       inventory.compareAndSwapAppliedCatalogHeadV1.bind(inventory),
     ),
@@ -630,6 +642,64 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     this.assertOpen();
     const key = encodeAppliedHeadKey(catalogScopeDigest, authorAddress);
     return this.readTransaction(() => this.readAppliedHead(key));
+  }
+
+  listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[] {
+    this.assertOpen();
+    return this.readTransaction(() => {
+      const query = this.prepare(INVENTORY_V1_STATEMENT_SQL.listAppliedHeads);
+      const rows = this.statement(() => query.all() as SqlRowV1[]);
+      return Object.freeze(rows.map((row) => this.decodeAppliedHeadRow(row)));
+    });
+  }
+
+  deleteAppliedCatalogHeadV1(input: DeleteAppliedCatalogHeadInputV1): void {
+    this.assertOpen();
+    const key = encodeAppliedHeadKey(input.catalogScopeDigest, input.authorAddress);
+    const expected = encodeAppliedDigest(
+      input.expectedCurrentCatalogHeadDigest,
+      'expected current head',
+    );
+    this.writeTransaction('delete applied catalog head', () => {
+      const current = this.readAppliedHead(key);
+      if (current === null) return;
+      if (!sqlBlobsEqualV1(
+        digest32ToSqlBlobV1(current.currentCatalogHeadDigest),
+        expected,
+      )) {
+        throw appliedHeadCasConflict(
+          current.currentCatalogHeadDigest,
+          input.expectedCurrentCatalogHeadDigest,
+        );
+      }
+      const statement = this.prepare(INVENTORY_V1_STATEMENT_SQL.deleteAppliedHeadCas);
+      const result = this.statement(() => statement.run({
+        scope: key.scope,
+        author: key.author,
+        expectedHead: expected,
+      }));
+      if (Number(result.changes) !== 1 || this.readAppliedHead(key) !== null) {
+        throw new InventoryV1CandidateError(
+          'applied-head-database-corrupt',
+          'applied-head deletion did not remove exactly the expected row',
+        );
+      }
+    }, {
+      resolve: () => this.readAppliedHead(key) === null ? 'committed' : 'not-committed',
+      retry: () => {
+        const current = this.readAppliedHead(key);
+        if (current === null) return;
+        if (current.currentCatalogHeadDigest !== input.expectedCurrentCatalogHeadDigest) {
+          throw appliedHeadCasConflict(
+            current.currentCatalogHeadDigest,
+            input.expectedCurrentCatalogHeadDigest,
+          );
+        }
+        const statement = this.prepare(INVENTORY_V1_STATEMENT_SQL.deleteAppliedHeadCas);
+        statement.run({ scope: key.scope, author: key.author, expectedHead: expected });
+      },
+      resolvedCommittedResult: () => undefined,
+    });
   }
 
   compareAndSwapAppliedCatalogHeadV1(
@@ -1572,10 +1642,14 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       author: key.author,
     }) as SqlRowV1 | undefined);
     if (row === undefined) return null;
+    return this.decodeAppliedHeadRow({ ...row, ...key });
+  }
+
+  private decodeAppliedHeadRow(row: SqlRowV1): AppliedCatalogHeadSnapshotV1 {
     try {
       return Object.freeze({
-        catalogScopeDigest: sqlBlobToDigest32V1(key.scope),
-        authorAddress: sqlBlobToEvmAddressV1(key.author),
+        catalogScopeDigest: sqlBlobToDigest32V1(row.scope ?? row.catalog_scope_digest),
+        authorAddress: sqlBlobToEvmAddressV1(row.author ?? row.author_address),
         currentCatalogHeadDigest: sqlBlobToDigest32V1(row.current_catalog_head_digest),
         appliedInventoryDigest: sqlBlobToDigest32V1(row.applied_inventory_digest),
         catalogVersion: sqlBlobToDecimalU64V1(row.catalog_version_u64be),

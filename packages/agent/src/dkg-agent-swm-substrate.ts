@@ -385,6 +385,8 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { resolveRfc64CatalogAuthorityDecisionV1 } from
+  './rfc64/public-catalog-activation-config-v1.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
   subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: {
@@ -393,10 +395,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     deferSharedMemoryGossipSubscribe?: boolean;
     syncMode?: 'on-demand' | 'always-on';
   }): ContextGraphSub {
-    if (options?.trackSyncScope !== false) {
-      this.trackSyncContextGraph(contextGraphId);
-    }
-
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     // Opening an already durable graph must never silently downgrade it to a
     // process-local subscription. An explicit always-on request may promote an
@@ -409,6 +407,30 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
     });
     const persist = syncMode === 'on-demand' ? false : options?.persist;
+    const authority = resolveRfc64CatalogAuthorityDecisionV1(
+      this.config.rfc64CatalogRollout,
+      contextGraphId,
+    );
+    if (!authority.legacySyncAllowed) {
+      // Preserve the user's durable selection and VM intent without installing
+      // any legacy publish/update/finalization/SWM gossip authority. RFC-64 is
+      // the sole SWM lane for a catalog-authoritative selected CG.
+      const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
+      if (syncSet.delete(contextGraphId)) this.config.syncContextGraphs = [...syncSet];
+      return this.setContextGraphSubscription(
+        contextGraphId,
+        {
+          ...existing,
+          subscribed: true,
+          synced: existing?.synced ?? false,
+          syncMode,
+        },
+        { persist },
+      );
+    }
+    if (options?.trackSyncScope !== false) {
+      this.trackSyncContextGraph(contextGraphId);
+    }
 
     // SWM gossip subscribe runs `canReadContextGraph` against the local
     // `_meta` graph. On a fresh `join-approved` notification the curator
@@ -910,6 +932,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   public trackSyncContextGraph(this: DKGAgent, contextGraphId: string): boolean {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     if (systemContextGraphs.has(contextGraphId)) return false;
+    if (!resolveRfc64CatalogAuthorityDecisionV1(
+      this.config.rfc64CatalogRollout,
+      contextGraphId,
+    ).legacySyncAllowed) return false;
 
     const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
     if (syncSet.has(contextGraphId)) return false;

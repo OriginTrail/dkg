@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -86,10 +86,49 @@ describe('RFC-64 rollout authority integration', () => {
     const catalog = await startAgent('catalog', activation('catalog'));
     expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect(catalog.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+    catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect((catalog as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
 
     const stopped = await startAgent('kill-switch', activation('catalog', true));
     expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
+  });
+
+  it('leaves a persisted member row dormant under exclusive catalog authority', async () => {
+    const persisted = new Map<string, any>([[CONTEXT_GRAPH_ID, {
+      id: CONTEXT_GRAPH_ID,
+      name: 'persisted-before-rfc64',
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+      coreHosted: false,
+    }]]);
+    const catalog = await startAgent(
+      'catalog-rehydration-fence',
+      activation('catalog'),
+      undefined,
+      undefined,
+      undefined,
+      {
+        contextGraphSubscriptionStore: {
+          loadAll: async () => [...persisted.values()],
+          save: async (record) => { persisted.set(record.id, { ...record }); },
+          delete: async (contextGraphId) => { persisted.delete(contextGraphId); },
+        },
+      },
+    );
+    expect(catalog.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect((catalog as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(catalog.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 0,
+      dormant: 1,
+      dormantIds: [CONTEXT_GRAPH_ID],
+    });
+    expect(persisted.get(CONTEXT_GRAPH_ID)).toMatchObject({ subscribed: true });
   });
 
   it('keeps complete-provider recovery live when every selected CG is legacy-mode', async () => {
@@ -124,7 +163,9 @@ describe('RFC-64 rollout authority integration', () => {
     );
   });
 
-  it('fails closed across a persisted catalog-to-legacy restart', async () => {
+  it.each(['legacy', 'shadow'] as const)(
+    'semantically deactivates durable catalog authority before a %s restart',
+    async (nextMode) => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-transition-'));
     tempDirs.push(dataDir);
     const persistentStorePath = join(dataDir, 'oxigraph');
@@ -150,18 +191,113 @@ describe('RFC-64 rollout authority integration', () => {
     expect(applied).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
+    // Upgrade fixture: prior catalog state exists, but the newly introduced
+    // authority sidecar does not. Durable inventory must remain the truth.
+    await rm(join(
+      dataDir,
+      'rfc64-sync',
+      'rollout-authority-v1',
+      'state.json',
+    ));
 
     const producer = vi.spyOn(
       Rfc64PublicCatalogSuccessorProducerV1.prototype,
       'produceAndStageExactSet',
     );
-    await expect(startAgent(
-      'legacy-after-catalog',
-      activation('legacy'),
+    const restarted = await startAgent(
+      `${nextMode}-after-catalog`,
+      activation(nextMode),
       dataDir,
       persistentStorePath,
-    )).rejects.toThrow(/authority downgrade requires semantic deactivation/u);
+    );
+    expect(restarted.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(restarted.rfc64PublicCatalogStatsV1()).toEqual(
+      nextMode === 'shadow' ? expect.objectContaining({ started: true }) : null,
+    );
     expect(producer).not.toHaveBeenCalled();
+    },
+    30_000,
+  );
+
+  it('retains durable catalog authority for pre-activation standalone controls', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-standalone-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const author = await startAgent(
+      'standalone-author',
+      {
+        ...activation('catalog'),
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+      dataDir,
+      persistentStorePath,
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    const applied = await author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'rollout-standalone-compatibility' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealFromCanonical(await authorSeal(83n)),
+    });
+    expect(applied).not.toBeNull();
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+
+    const restarted = await startAgent(
+      'standalone-compatibility',
+      undefined,
+      dataDir,
+      persistentStorePath,
+      undefined,
+      {
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        rfc64PublicCatalogBootstrap: {
+          acceptedPublicPolicies: [{ policyEnvelope: policyEnvelope(), targets: [] }],
+        },
+      },
+    );
+    expect(restarted.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: applied?.currentCatalogHeadDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+  }, 30_000);
+
+  it('fails closed on malformed restart authority state', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-malformed-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const first = await startAgent(
+      'authority-state-writer',
+      activation('catalog'),
+      dataDir,
+      persistentStorePath,
+    );
+    await first.stop();
+    agents.splice(agents.indexOf(first), 1);
+    await writeFile(
+      join(dataDir, 'rfc64-sync', 'rollout-authority-v1', 'state.json'),
+      '{invalid-json',
+      'utf8',
+    );
+
+    await expect(startAgent(
+      'authority-state-reader',
+      activation('catalog'),
+      dataDir,
+      persistentStorePath,
+    )).rejects.toThrow('RFC-64 catalog authority state is not valid JSON');
   }, 30_000);
 
   it('cold-bootstraps a valid shadow head as staged-only with no applied head', async () => {
@@ -228,10 +364,11 @@ function policyEnvelope() {
 
 async function startAgent(
   name: string,
-  activationInput: Rfc64PublicCatalogActivationInputV1,
+  activationInput: Rfc64PublicCatalogActivationInputV1 | undefined,
   existingDataDir?: string,
   persistentStorePath?: string,
   beforeStart?: (agent: DKGAgent) => void | Promise<void>,
+  extraConfig: Partial<Parameters<typeof DKGAgent.create>[0]> = {},
 ): Promise<DKGAgent> {
   const dataDir = existingDataDir ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-${name}-`));
   if (existingDataDir === undefined) tempDirs.push(dataDir);
@@ -253,6 +390,7 @@ async function startAgent(
       chainId: NETWORK_ID,
     },
     rfc64PublicCatalogActivation: activationInput,
+    ...extraConfig,
   });
   agents.push(agent);
   await beforeStart?.(agent);

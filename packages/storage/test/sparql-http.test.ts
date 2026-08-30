@@ -3,9 +3,10 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   SparqlHttpStore,
+  createManagedOxigraphRuntimeStoreConfigV1,
+  createManagedOxigraphSparqlStoreV1,
   createTripleStore,
   getExternalStorePrioritySchedulerSnapshot,
-  issueManagedOxigraphRuntimeCapabilityV1,
   isSparqlHttpResponseError,
   tryReplaceGraphAtomically,
   tryReplaceSubjectAtomically,
@@ -13,9 +14,6 @@ import {
   type SparqlHttpResponseErrorLike,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
-
-const managedOxigraphRuntimeCapability = () =>
-  issueManagedOxigraphRuntimeCapabilityV1();
 
 let server: Server;
 let queryUrl: string;
@@ -454,9 +452,8 @@ describe('SparqlHttpStore (test server)', () => {
         );
       })) as typeof fetch;
     try {
-      const store = new SparqlHttpStore({
-        queryEndpoint: 'http://managed-oxigraph.test/query',
-        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
         timeout: 5,
         onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
@@ -506,10 +503,9 @@ describe('SparqlHttpStore (test server)', () => {
     }) as typeof fetch;
 
     try {
-      const managed = new SparqlHttpStore({
-        queryEndpoint: 'http://managed-oxigraph.test/query',
-        updateEndpoint: 'http://managed-oxigraph.test/update',
-        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
         timeout: 100,
         getRecoveryState: () => recovery,
         onClientTimeout: (operation) => {
@@ -573,10 +569,9 @@ describe('SparqlHttpStore (test server)', () => {
     })) as typeof fetch;
 
     try {
-      const managed = new SparqlHttpStore({
-        queryEndpoint: 'http://managed-oxigraph.test/query',
-        updateEndpoint: 'http://managed-oxigraph.test/update',
-        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
         timeout: 5_000,
         getRecoveryState: () => recovery,
       });
@@ -613,10 +608,8 @@ describe('SparqlHttpStore (test server)', () => {
       { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
     )) as typeof fetch;
     try {
-      const managed = new SparqlHttpStore({
-        queryEndpoint: 'http://managed-oxigraph.test/query',
-        managedByDkg: true,
-        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
         onClientTimeout,
       });
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
@@ -638,15 +631,14 @@ describe('SparqlHttpStore (test server)', () => {
       'query failed\nThe SPARQL operation has been cancelled',
       { status: 500 },
     )) as typeof fetch;
-    const managed = await createTripleStore({
+    const managed = await createTripleStore(createManagedOxigraphRuntimeStoreConfigV1({
       backend: 'sparql-http',
       options: {
-        queryEndpoint: 'http://managed-oxigraph.test/query',
+        queryEndpoint: 'http://127.0.0.1:7878/query',
         managedByDkg: true,
-        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
       },
       graphSetIndex: true,
-    });
+    }));
     try {
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
         code: 'STORE_OPERATION_TIMEOUT',
@@ -666,10 +658,8 @@ describe('SparqlHttpStore (test server)', () => {
       { status: 200, headers: { 'Content-Type': 'application/n-quads' } },
     )) as typeof fetch;
     try {
-      const managed = new SparqlHttpStore({
-        queryEndpoint: 'http://managed-oxigraph.test/query',
-        managedByDkg: true,
-        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
       });
       await expect(
         managed.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
@@ -692,10 +682,8 @@ describe('SparqlHttpStore (test server)', () => {
       { status: 500 },
     )) as typeof fetch;
     try {
-      const managed = new SparqlHttpStore({
-        queryEndpoint: 'http://managed-oxigraph.test/query',
-        managedByDkg: true,
-        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
       });
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
         code: 'STORE_OPERATION_TIMEOUT',
@@ -1220,11 +1208,9 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads).toHaveLength(0);
 
     // Daemon-owned endpoints are oxigraph-server (transactional) and keep it.
-    const managedStore = new SparqlHttpStore({
+    const managedStore = createManagedOxigraphSparqlStoreV1({
       queryEndpoint: queryUrl,
       updateEndpoint: updateUrl,
-      managedByDkg: true,
-      managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
     });
     await expect(tryReplaceGraphAtomically(managedStore, 'http://ex.org/g1', replacement))
       .resolves.toBe(true);
@@ -1275,11 +1261,9 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads).toHaveLength(0);
 
     // Daemon-owned endpoints are oxigraph-server (transactional) and keep it.
-    const managedStore = new SparqlHttpStore({
+    const managedStore = createManagedOxigraphSparqlStoreV1({
       queryEndpoint: queryUrl,
       updateEndpoint: updateUrl,
-      managedByDkg: true,
-      managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
     });
     await expect(tryReplaceSubjectAtomically(managedStore, 'http://ex.org/g1', 'http://ex.org/job', replacement))
       .resolves.toBe(true);
@@ -1542,10 +1526,9 @@ describe('SparqlHttpStore (test server)', () => {
     }) as typeof fetch;
     try {
       const graph = 'http://ex.org/not-started';
-      const recoveringStore = new SparqlHttpStore({
-        queryEndpoint: 'http://managed-oxigraph.test/query',
-        updateEndpoint: 'http://managed-oxigraph.test/update',
-        managedOxigraphRuntimeCapability: managedOxigraphRuntimeCapability(),
+      const recoveringStore = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
         getRecoveryState: () => ({ recovering: true, generation: 1 }),
       });
       const before = recoveringStore.getWriteRevision(graph);

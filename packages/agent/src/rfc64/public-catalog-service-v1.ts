@@ -98,8 +98,7 @@ import type {
   Rfc64PublicCatalogIssuerAuthorizationV1,
 } from './public-catalog-successor-producer-v1.js';
 import type {
-  Rfc64CatalogAuthorityDecisionV1,
-  Rfc64CatalogRolloutModeV1,
+  Rfc64CatalogAuthorityPolicyV1,
 } from './public-catalog-activation-config-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
@@ -145,17 +144,10 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
-  /** Immutable per-CG D17/D18 authority snapshot for this service lifetime. */
-  readonly resolveContextGraphMode?: (
-    contextGraphId: ContextGraphIdV1,
-  ) => Rfc64CatalogRolloutModeV1;
-  /** Canonical runtime capability resolver. Preferred over the compatibility mode resolver. */
+  /** Canonical immutable per-CG authority resolver for this service lifetime. */
   readonly resolveContextGraphAuthority?: (
     contextGraphId: ContextGraphIdV1,
-  ) => Pick<
-    Rfc64CatalogAuthorityDecisionV1,
-    'track2Enabled' | 'authoringAllowed' | 'reconciliationLane'
-  >;
+  ) => Rfc64CatalogAuthorityPolicyV1;
 }
 
 export type Rfc64PublicCatalogHeadFetchClientV1 = Pick<
@@ -312,10 +304,7 @@ export class Rfc64PublicCatalogServiceV1 {
     Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
   readonly #resolveContextGraphAuthority: (
     contextGraphId: ContextGraphIdV1,
-  ) => Pick<
-    Rfc64CatalogAuthorityDecisionV1,
-    'track2Enabled' | 'authoringAllowed' | 'reconciliationLane'
-  >;
+  ) => Rfc64CatalogAuthorityPolicyV1;
   #started = false;
   #closed = false;
 
@@ -327,16 +316,16 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#transportTimeoutMs = options.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
     this.#readNativeResourceStats = options.native?.readResourceStats ?? (() => null);
     this.#resolveContextGraphAuthority = options.resolveContextGraphAuthority
-      ?? ((contextGraphId) => {
-        const mode = options.resolveContextGraphMode?.(contextGraphId) ?? 'catalog';
-        return Object.freeze({
-          track2Enabled: mode !== 'legacy',
-          authoringAllowed: mode !== 'legacy',
-          reconciliationLane: mode === 'legacy'
-            ? 'legacy' as const
-            : mode === 'shadow' ? 'shadow-stage' as const : 'catalog-apply' as const,
-        });
-      });
+      ?? ((contextGraphId) => Object.freeze({
+        contextGraphId,
+        selected: false,
+        mode: 'catalog',
+        killSwitchActive: false,
+        legacySyncAllowed: true,
+        track2Enabled: true,
+        authoringAllowed: true,
+        reconciliationLane: 'catalog-apply',
+      }));
 
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,

@@ -104,8 +104,9 @@ then restarts the receiver through the exact operator sequence:
 3. `catalog` plus kill switch — Track 2 stays dormant without legacy fallback,
    while the applied head and semantic state remain durable;
 4. `catalog` re-enabled — the same head is replay-safe and remains exact;
-5. `legacy` — authority explicitly returns to the legacy scope without deleting
-   previously verified catalog state.
+5. `legacy` — startup re-verifies and semantically deactivates the catalog-owned
+   SWM projection, deletes its exact applied-head reference, and only then
+   returns authority to the legacy scope; finalized VM remains intact.
 
 Every phase also proves that finalized public VM inventory selection remains
 chain-based. The adapter reports only product readbacks: service/bootstrap

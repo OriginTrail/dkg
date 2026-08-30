@@ -9,7 +9,6 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
-  certifyRfc64ExactBindingsReadStoreV1,
   OxigraphStore,
   OxigraphWorkerStore,
   Rfc64AuthorSealReadGatewayErrorV1,
@@ -123,6 +122,18 @@ describe('SyncAuthorSealStoreV1', () => {
     }
   });
 
+  it('classifies malformed coordinate values as request errors without dispatch', async () => {
+    const read = vi.fn(async () => []);
+    const gateway = new SyncAuthorSealStoreV1(certifiedExactStore(read));
+    const error = await rejected(gateway.read(
+      { coordinate: { ...COORDINATE, authorAddress: 'not-an-address' } },
+      { timeoutMs: 1_000 },
+    ));
+    expect(error).toBeInstanceOf(Rfc64AuthorSealReadGatewayErrorV1);
+    expect(error).toMatchObject({ code: 'rfc64-author-seal-read-request' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it('rejects a conflicting duplicate predicate instead of hiding it behind LIMIT', async () => {
     const store = new OxigraphStore();
     try {
@@ -204,6 +215,27 @@ describe('SyncAuthorSealStoreV1', () => {
     }
   });
 
+  it('keeps the deadline authoritative when a blocking dispatch rejects late', async () => {
+    const backendError = new Error('backend rejected');
+    const capability = certifiedExactStore(async () => {
+      const end = performance.now() + 15;
+      while (performance.now() < end) { /* model a blocking embedded adapter */ }
+      throw backendError;
+    });
+    await expect(new SyncAuthorSealStoreV1(capability).read(
+      { coordinate: COORDINATE },
+      { timeoutMs: 5 },
+    )).rejects.toMatchObject({ name: 'TimeoutError' });
+
+    const earlyFailure = certifiedExactStore(async () => {
+      throw backendError;
+    });
+    await expect(new SyncAuthorSealStoreV1(earlyFailure).read(
+      { coordinate: COORDINATE },
+      { timeoutMs: 1_000 },
+    )).rejects.toBe(backendError);
+  });
+
   it('keeps the deadline authoritative after strict seal decoding', async () => {
     const rows = projectCanonicalGraphScopedAuthorSealStoreRowsV1(PAYLOAD, COORDINATE);
     vi.spyOn(performance, 'now')
@@ -239,9 +271,10 @@ describe('SyncAuthorSealStoreV1', () => {
 function certifiedExactStore(
   read: Rfc64ExactBindingsReadCapabilityV1['rfc64ExactBindingsReadV1'],
 ): TripleStore {
-  const store = {} as TripleStore;
-  certifyRfc64ExactBindingsReadStoreV1(store, read);
-  return store;
+  return {
+    rfc64ExactBindingsReadCertifiedV1: true,
+    rfc64ExactBindingsReadV1: read,
+  } as unknown as TripleStore;
 }
 
 async function rejected(promise: Promise<unknown>): Promise<unknown> {

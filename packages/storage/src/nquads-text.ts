@@ -1,5 +1,5 @@
 import type { Quad as DKGQuad } from './triple-store.js';
-import { decodeNTriplesUcharEscapes } from '@origintrail-official/dkg-rdf-utils';
+import { decodeNTriplesIriEscapesStrict } from '@origintrail-official/dkg-rdf-utils';
 
 export type NQuadLineScan =
   | { readonly line: string; readonly parsed: true; readonly quad: DKGQuad }
@@ -69,7 +69,5 @@ export function parseNQuadsTextTolerant(text: string): DKGQuad[] {
 
 function decodeIriTerm(term: string): string | null {
   if (!term.startsWith('<') || !term.endsWith('>')) return term;
-  return decodeNTriplesUcharEscapes(term.slice(1, -1), {
-    surrogatePolicy: 'combine',
-  });
+  return decodeNTriplesIriEscapesStrict(term.slice(1, -1));
 }

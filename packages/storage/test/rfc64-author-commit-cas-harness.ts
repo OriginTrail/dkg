@@ -43,6 +43,7 @@ export function authorCommitInput(
       subject: AUTHOR,
       predicate: P_HEAD,
       expectedObject: OLD_HEAD,
+      expectedQuads: [quad(AUTHOR, P_HEAD, OLD_HEAD, HEAD_GRAPH)],
       quads: [quad(AUTHOR, P_HEAD, NEW_HEAD, HEAD_GRAPH)],
     },
     subgraphMutationGeneration: {
@@ -50,6 +51,7 @@ export function authorCommitInput(
       subject: MUTATION,
       predicate: P_GENERATION,
       expectedObject: '"1"',
+      expectedQuads: [quad(MUTATION, P_GENERATION, '"1"', STATE_GRAPH)],
       quads: [quad(MUTATION, P_GENERATION, '"2"', STATE_GRAPH)],
     },
     contextGraphMutationGeneration: {
@@ -57,6 +59,7 @@ export function authorCommitInput(
       subject: CG_MUTATION,
       predicate: P_GENERATION,
       expectedObject: '"10"',
+      expectedQuads: [quad(CG_MUTATION, P_GENERATION, '"10"', STATE_GRAPH)],
       quads: [quad(CG_MUTATION, P_GENERATION, '"11"', STATE_GRAPH)],
     },
     appliedSet: {
@@ -64,6 +67,7 @@ export function authorCommitInput(
       subject: APPLIED_SET,
       predicate: P_APPLIED,
       expectedObject: OLD_HEAD,
+      expectedQuads: [quad(APPLIED_SET, P_APPLIED, OLD_HEAD, STATE_GRAPH)],
       quads: [quad(APPLIED_SET, P_APPLIED, NEW_HEAD, STATE_GRAPH)],
     },
     ...overrides,

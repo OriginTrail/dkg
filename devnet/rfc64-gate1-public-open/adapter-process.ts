@@ -49,6 +49,13 @@ import {
   ROLLOUT_BLAZEGRAPH_URL_ENV,
   ROLLOUT_STORE_BACKEND_ENV,
 } from './rollout-store-config.js';
+import {
+  isGate1RolloutCommand,
+  parseGate1RolloutCommandInput,
+  type Gate1RolloutCommand,
+  type Gate1RolloutCommandInput,
+  type Gate1RolloutCommandOutput,
+} from './rollout-process-protocol.js';
 
 const roleInput = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
@@ -183,6 +190,15 @@ async function handle(command: Command): Promise<void> {
     throw new Error('requestId is required');
   }
   const currentAgent = requireAgent();
+  if (isGate1RolloutCommand(command.command)) {
+    requireRole('receiver');
+    emitOperationResult(command, await dispatchGate1RolloutCommand(
+      currentAgent,
+      command.command,
+      command.input,
+    ));
+    return;
+  }
   switch (command.command) {
     case 'dial': {
       const input = plainRecord(command.input, 'dial input');
@@ -283,75 +299,6 @@ async function handle(command: Command): Promise<void> {
       emitOperationResult(command, currentAgent.rfc64PublicCatalogStatsV1()?.receiver ?? null);
       return;
     }
-    case 'rolloutStatus': {
-      requireRole('receiver');
-      const input = plainRecord(command.input, 'rolloutStatus input');
-      const contextGraphId = requiredString(
-        input.contextGraphId,
-        'rolloutStatus.contextGraphId',
-      );
-      const completeProviderPeerId = requiredString(
-        input.completeProviderPeerId,
-        'rolloutStatus.completeProviderPeerId',
-      );
-      const manualSwmPlan = await currentAgent.planSharedMemorySyncContextGraphs(
-        completeProviderPeerId,
-        [contextGraphId],
-        createOperationContext('sync'),
-        { requireCompleteProviderMatch: true },
-      );
-      emitOperationResult(command, {
-        bootstrapStarted: currentAgent.readRfc64PublicCatalogBootstrapStatusV1() !== null,
-        catalogServiceStarted: currentAgent.rfc64PublicCatalogStatsV1()?.started === true,
-        legacyConfiguredScope: currentAgent.getSyncContextGraphIds().includes(contextGraphId),
-        manualLegacySwmTargetCount: manualSwmPlan.targets.length,
-        vmChainInventorySelected:
-          currentAgent.isRfc64SelectedVmReconcileContextGraph(contextGraphId),
-      });
-      return;
-    }
-    case 'vmReconcile': {
-      requireRole('receiver');
-      const input = plainRecord(command.input, 'vmReconcile input');
-      const contextGraphId = requiredString(
-        input.contextGraphId,
-        'vmReconcile.contextGraphId',
-      );
-      if (rolloutFixture === undefined) {
-        throw new Error('rollout adapter fixture is unavailable');
-      }
-      emitOperationResult(command, await rolloutFixture.reconcileVm(currentAgent, contextGraphId));
-      return;
-    }
-    case 'seedVmSourceSwm': {
-      requireRole('receiver');
-      const input = plainRecord(command.input, 'seedVmSourceSwm input');
-      const contextGraphId = requiredString(
-        input.contextGraphId,
-        'seedVmSourceSwm.contextGraphId',
-      );
-      if (rolloutFixture === undefined) {
-        throw new Error('rollout adapter fixture is unavailable');
-      }
-      emitOperationResult(command, await rolloutFixture.seedVmSourceSwm(
-        currentAgent,
-        contextGraphId,
-      ));
-      return;
-    }
-    case 'stagedHeadReadback': {
-      requireRole('receiver');
-      const input = plainRecord(command.input, 'stagedHeadReadback input');
-      const output = await currentAgent.readRfc64StagedAuthorCatalogHeadV1({
-        objectDigest: requiredDigest(input.objectDigest, 'stagedHeadReadback.objectDigest'),
-        signatureVariantDigest: requiredDigest(
-          input.signatureVariantDigest,
-          'stagedHeadReadback.signatureVariantDigest',
-        ),
-      });
-      emitOperationResult(command, output);
-      return;
-    }
     case 'semanticGraphReadback': {
       requireRole('receiver');
       const input = plainRecord(command.input, 'semanticGraphReadback input');
@@ -420,6 +367,62 @@ async function handle(command: Command): Promise<void> {
     default:
       throw new Error(`unknown adapter command: ${command.command}`);
   }
+}
+
+type Gate1RolloutCommandHandlerMap = {
+  readonly [K in Gate1RolloutCommand]: (
+    currentAgent: DKGAgent,
+    input: Gate1RolloutCommandInput<K>,
+  ) => Promise<Gate1RolloutCommandOutput<K>>;
+};
+
+const GATE1_ROLLOUT_COMMAND_HANDLERS: Gate1RolloutCommandHandlerMap = Object.freeze({
+  rolloutStatus: async (currentAgent, input) => {
+    const manualSwmPlan = await currentAgent.planSharedMemorySyncContextGraphs(
+      input.completeProviderPeerId,
+      [input.contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    );
+    return Object.freeze({
+      bootstrapStarted: currentAgent.readRfc64PublicCatalogBootstrapStatusV1() !== null,
+      catalogServiceStarted: currentAgent.rfc64PublicCatalogStatsV1()?.started === true,
+      legacyConfiguredScope: currentAgent.getSyncContextGraphIds().includes(input.contextGraphId),
+      manualLegacySwmTargetCount: manualSwmPlan.targets.length,
+      vmChainInventorySelected:
+        currentAgent.isRfc64SelectedVmReconcileContextGraph(input.contextGraphId),
+    });
+  },
+  vmReconcile: async (currentAgent, input) => {
+    if (rolloutFixture === undefined) {
+      throw new Error('rollout adapter fixture is unavailable');
+    }
+    return rolloutFixture.reconcileVm(currentAgent, input.contextGraphId);
+  },
+  seedVmSourceSwm: async (currentAgent, input) => {
+    if (rolloutFixture === undefined) {
+      throw new Error('rollout adapter fixture is unavailable');
+    }
+    return rolloutFixture.seedVmSourceSwm(currentAgent, input.contextGraphId);
+  },
+  stagedHeadReadback: async (currentAgent, input) => (
+    currentAgent.readRfc64StagedAuthorCatalogHeadV1({
+      objectDigest: requiredDigest(input.objectDigest, 'stagedHeadReadback.objectDigest'),
+      signatureVariantDigest: requiredDigest(
+        input.signatureVariantDigest,
+        'stagedHeadReadback.signatureVariantDigest',
+      ),
+    })
+  ),
+});
+
+async function dispatchGate1RolloutCommand<K extends Gate1RolloutCommand>(
+  currentAgent: DKGAgent,
+  command: K,
+  rawInput: unknown,
+): Promise<Gate1RolloutCommandOutput<K>> {
+  const input = parseGate1RolloutCommandInput(command, rawInput);
+  return GATE1_ROLLOUT_COMMAND_HANDLERS[command](currentAgent, input);
 }
 
 function compareQuad(left: Quad, right: Quad): number {

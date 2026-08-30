@@ -93,48 +93,141 @@ export type Gate1RolloutCommandInput<K extends Gate1RolloutCommand> =
 export type Gate1RolloutCommandOutput<K extends Gate1RolloutCommand> =
   Gate1RolloutCommandMap[K]['output'];
 
-/** Parse the JSON process boundary once; scenario code consumes typed results. */
+type Gate1RolloutCommandDefinitionMap = {
+  readonly [K in Gate1RolloutCommand]: Readonly<{
+    parseInput(value: unknown): Gate1RolloutCommandInput<K>;
+    parseOutput(value: unknown): Gate1RolloutCommandOutput<K>;
+  }>;
+};
+
+const GATE1_ROLLOUT_COMMAND_DEFINITIONS: Gate1RolloutCommandDefinitionMap =
+  Object.freeze({
+    rolloutStatus: Object.freeze({
+      parseInput: parseRolloutStatusInput,
+      parseOutput: parseRolloutStatusOutput,
+    }),
+    vmReconcile: Object.freeze({
+      parseInput: parseContextGraphInput,
+      parseOutput: parseVmReconcileOutput,
+    }),
+    seedVmSourceSwm: Object.freeze({
+      parseInput: parseContextGraphInput,
+      parseOutput: parseSeedVmSourceSwmOutput,
+    }),
+    stagedHeadReadback: Object.freeze({
+      parseInput: parseStagedHeadReadbackInput,
+      parseOutput: parseStagedHeadReadbackOutput,
+    }),
+  });
+
+export const GATE1_ROLLOUT_COMMANDS = Object.freeze(
+  Object.keys(GATE1_ROLLOUT_COMMAND_DEFINITIONS) as Gate1RolloutCommand[],
+);
+
+export function isGate1RolloutCommand(value: string): value is Gate1RolloutCommand {
+  return Object.hasOwn(GATE1_ROLLOUT_COMMAND_DEFINITIONS, value);
+}
+
+/** Parse the JSON process boundary once; client and adapter share this registry. */
+export function parseGate1RolloutCommandInput<K extends Gate1RolloutCommand>(
+  command: K,
+  value: unknown,
+): Gate1RolloutCommandInput<K> {
+  return GATE1_ROLLOUT_COMMAND_DEFINITIONS[command].parseInput(value);
+}
+
 export function parseGate1RolloutCommandOutput<K extends Gate1RolloutCommand>(
   command: K,
   value: unknown,
 ): Gate1RolloutCommandOutput<K> {
-  if (command === 'stagedHeadReadback') {
-    if (value !== null && typeof value !== 'string') {
-      throw new TypeError('stagedHeadReadback output must be a digest or null');
-    }
-    return value as Gate1RolloutCommandOutput<K>;
-  }
-  const output = plainRecord(value, `${command} output`);
-  if (command === 'rolloutStatus') {
-    return Object.freeze({
-      bootstrapStarted: requiredBoolean(output.bootstrapStarted, 'rolloutStatus.bootstrapStarted'),
-      catalogServiceStarted: requiredBoolean(
-        output.catalogServiceStarted,
-        'rolloutStatus.catalogServiceStarted',
-      ),
-      legacyConfiguredScope: requiredBoolean(
-        output.legacyConfiguredScope,
-        'rolloutStatus.legacyConfiguredScope',
-      ),
-      manualLegacySwmTargetCount: requiredNonNegativeInteger(
-        output.manualLegacySwmTargetCount,
-        'rolloutStatus.manualLegacySwmTargetCount',
-      ),
-      vmChainInventorySelected: requiredBoolean(
-        output.vmChainInventorySelected,
-        'rolloutStatus.vmChainInventorySelected',
-      ),
-    }) as Gate1RolloutCommandOutput<K>;
-  }
-  if (command === 'seedVmSourceSwm') {
-    return Object.freeze({
-      swmGraph: requiredString(output.swmGraph, 'seedVmSourceSwm.swmGraph'),
-      tripleCount: requiredNonNegativeInteger(
-        output.tripleCount,
-        'seedVmSourceSwm.tripleCount',
-      ),
-    }) as Gate1RolloutCommandOutput<K>;
-  }
+  return GATE1_ROLLOUT_COMMAND_DEFINITIONS[command].parseOutput(value);
+}
+
+function parseRolloutStatusInput(
+  value: unknown,
+): Gate1RolloutCommandInput<'rolloutStatus'> {
+  const input = plainRecord(value, 'rolloutStatus input');
+  return Object.freeze({
+    contextGraphId: requiredString(input.contextGraphId, 'rolloutStatus.contextGraphId'),
+    completeProviderPeerId: requiredString(
+      input.completeProviderPeerId,
+      'rolloutStatus.completeProviderPeerId',
+    ),
+  });
+}
+
+function parseContextGraphInput(
+  value: unknown,
+): Gate1RolloutCommandInput<'vmReconcile' | 'seedVmSourceSwm'> {
+  const input = plainRecord(value, 'context-graph rollout input');
+  return Object.freeze({
+    contextGraphId: requiredString(input.contextGraphId, 'rollout contextGraphId'),
+  });
+}
+
+function parseStagedHeadReadbackInput(
+  value: unknown,
+): Gate1RolloutCommandInput<'stagedHeadReadback'> {
+  const input = plainRecord(value, 'stagedHeadReadback input');
+  return Object.freeze({
+    objectDigest: requiredDigest(input.objectDigest, 'stagedHeadReadback.objectDigest'),
+    signatureVariantDigest: requiredDigest(
+      input.signatureVariantDigest,
+      'stagedHeadReadback.signatureVariantDigest',
+    ),
+  });
+}
+
+function parseStagedHeadReadbackOutput(
+  value: unknown,
+): Gate1RolloutCommandOutput<'stagedHeadReadback'> {
+  return value === null
+    ? null
+    : requiredDigest(value, 'stagedHeadReadback output');
+}
+
+function parseRolloutStatusOutput(
+  value: unknown,
+): Gate1RolloutCommandOutput<'rolloutStatus'> {
+  const output = plainRecord(value, 'rolloutStatus output');
+  return Object.freeze({
+    bootstrapStarted: requiredBoolean(output.bootstrapStarted, 'rolloutStatus.bootstrapStarted'),
+    catalogServiceStarted: requiredBoolean(
+      output.catalogServiceStarted,
+      'rolloutStatus.catalogServiceStarted',
+    ),
+    legacyConfiguredScope: requiredBoolean(
+      output.legacyConfiguredScope,
+      'rolloutStatus.legacyConfiguredScope',
+    ),
+    manualLegacySwmTargetCount: requiredNonNegativeInteger(
+      output.manualLegacySwmTargetCount,
+      'rolloutStatus.manualLegacySwmTargetCount',
+    ),
+    vmChainInventorySelected: requiredBoolean(
+      output.vmChainInventorySelected,
+      'rolloutStatus.vmChainInventorySelected',
+    ),
+  });
+}
+
+function parseSeedVmSourceSwmOutput(
+  value: unknown,
+): Gate1RolloutCommandOutput<'seedVmSourceSwm'> {
+  const output = plainRecord(value, 'seedVmSourceSwm output');
+  return Object.freeze({
+    swmGraph: requiredString(output.swmGraph, 'seedVmSourceSwm.swmGraph'),
+    tripleCount: requiredNonNegativeInteger(
+      output.tripleCount,
+      'seedVmSourceSwm.tripleCount',
+    ),
+  });
+}
+
+function parseVmReconcileOutput(
+  value: unknown,
+): Gate1RolloutCommandOutput<'vmReconcile'> {
+  const output = plainRecord(value, 'vmReconcile output');
   const reads = plainRecord(output.chainReadDelta, 'vmReconcile.chainReadDelta');
   const chainReadDelta = Object.freeze(Object.fromEntries(
     GATE1_VM_CHAIN_READ_KEYS.map((key) => [
@@ -146,8 +239,7 @@ export function parseGate1RolloutCommandOutput<K extends Gate1RolloutCommand>(
   if (!Array.isArray(events)) throw new TypeError('vmReconcile.replicationEvents must be an array');
   const replicationEvents = Object.freeze(events.map(parseReplicationEvent));
   const result = parseContextGraphReconcileResult(output.result);
-  return Object.freeze({ chainReadDelta, replicationEvents, result }) as
-    Gate1RolloutCommandOutput<K>;
+  return Object.freeze({ chainReadDelta, replicationEvents, result });
 }
 
 function parseContextGraphReconcileResult(value: unknown): ContextGraphReconcileResult {
@@ -243,6 +335,14 @@ function requiredString(value: unknown, label: string): string {
     throw new TypeError(`${label} must be a non-empty string`);
   }
   return value;
+}
+
+function requiredDigest(value: unknown, label: string): string {
+  const digest = requiredString(value, label);
+  if (!/^0x[0-9a-f]{64}$/u.test(digest)) {
+    throw new TypeError(`${label} must be a lowercase 32-byte digest`);
+  }
+  return digest;
 }
 
 function requiredBoolean(value: unknown, label: string): boolean {

@@ -7,6 +7,7 @@ import {
 } from '../rfc64-persistence-lifecycle/process-lifecycle.js';
 import { GATE1_AGENT_EVENT_PREFIX } from './model.js';
 import {
+  parseGate1RolloutCommandInput,
   parseGate1RolloutCommandOutput,
   type Gate1RolloutCommand,
   type Gate1RolloutCommandInput,
@@ -145,7 +146,8 @@ export class Gate1AgentChild {
     requestId: string,
     input: Gate1RolloutCommandInput<K>,
   ): Promise<Gate1RolloutCommandOutput<K>> {
-    const event = await this.request(command, requestId, 'operation-completed', input);
+    const parsedInput = parseGate1RolloutCommandInput(command, input);
+    const event = await this.request(command, requestId, 'operation-completed', parsedInput);
     return parseGate1RolloutCommandOutput(command, event.output);
   }
 

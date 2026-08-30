@@ -94,6 +94,22 @@ describe('core cg-shared-v1 incremental verifier', () => {
     ))).toThrow(CgSharedProjectionError);
   });
 
+  it('rejects LF-terminated RDF that is not a canonical V10 fixed point', () => {
+    const canonical = [{
+      subject: 'urn:a',
+      predicate: 'urn:p',
+      object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    }];
+    const verifier = createVerifier({ triples: canonical });
+    const noncanonical = new TextEncoder().encode(
+      '<urn:a> <urn:p> "00000000000000000001"^^<http://www.w3.org/2001/XMLSchema#integer> .\n',
+    );
+
+    expect(() => verifier.pushCanonicalLine(noncanonical)).toThrow(
+      expect.objectContaining({ code: 'projection-literal' }),
+    );
+  });
+
   it('uses the same typed projection errors for ordered-stream failures', () => {
     const verifier = createVerifier();
     verifier.push(TRIPLES[1]);

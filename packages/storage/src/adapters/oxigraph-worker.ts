@@ -6,7 +6,8 @@ import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOpt
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
 import {
-  certifyRfc64ExactBindingsReadStoreV1,
+  RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
+  Rfc64ExactBindingsReadResultErrorV1,
   type Rfc64ExactBindingsReadOperationV1,
   type Rfc64ExactBindingsStoreRowV1,
 } from '../rfc64-exact-bindings-read-capability.js';
@@ -17,7 +18,6 @@ import {
 } from '../rfc64-author-commit-cas.js';
 import {
   deserializeWorkerErrorV1,
-  type WorkerErrorCodeV1,
 } from '../worker-error-protocol.js';
 
 /**
@@ -135,7 +135,6 @@ function waitForRespawnOrAbort(
     );
   });
 }
-
 /**
  * Side-effect-free read methods. ONLY these are bounded by the per-op timeout:
  * rejecting a read after the bound is a clean, determinate failure (nothing was
@@ -211,17 +210,29 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
 
   async rfc64ExactBindingsReadV1(
     operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
-    return this.callWithTimeout<readonly Rfc64ExactBindingsStoreRowV1[]>(
-      this.operationTimeoutMs,
-      options?.signal,
-      'rfc64ExactBindingsReadV1',
-      operation,
-    );
+    try {
+      return await this.callWithTimeout<readonly Rfc64ExactBindingsStoreRowV1[]>(
+        this.operationTimeoutMs,
+        options?.signal,
+        'rfc64ExactBindingsReadV1',
+        operation,
+      );
+    } catch (cause) {
+      if (
+        cause instanceof Error
+        && (cause as Error & { code?: unknown }).code
+          === RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1
+      ) {
+        throw new Rfc64ExactBindingsReadResultErrorV1(cause.message, { cause });
+      }
+      throw cause;
+    }
   }
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.
@@ -325,10 +336,6 @@ export class OxigraphWorkerStore implements TripleStore {
     this.workerPath = workerPath;
     this.persistPath = persistPath;
     this.spawnWorker();
-    certifyRfc64ExactBindingsReadStoreV1(
-      this,
-      this.rfc64ExactBindingsReadV1.bind(this),
-    );
   }
 
   /**
@@ -409,7 +416,8 @@ export class OxigraphWorkerStore implements TripleStore {
       id: number;
       result?: unknown;
       error?: string;
-      errorCode?: WorkerErrorCodeV1;
+      errorName?: string;
+      errorCode?: string;
     }) => {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the
@@ -420,6 +428,7 @@ export class OxigraphWorkerStore implements TripleStore {
       this.pending.delete(msg.id);
       if (msg.error) {
         p.reject(deserializeWorkerErrorV1({
+          name: msg.errorName ?? 'Error',
           message: msg.error,
           ...(msg.errorCode === undefined ? {} : { code: msg.errorCode }),
         }));

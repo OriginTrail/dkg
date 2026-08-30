@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   escapeRdfLiteral,
   decodeRdfLiteralBody,
+  decodeNTriplesIriEscapesPreservingLegacy,
+  decodeNTriplesIriEscapesStrict,
   decodeNTriplesUcharEscapes,
   formatCanonicalRdfLiteralTerm,
   isRdfTerm,
@@ -51,6 +53,16 @@ describe('N-Triples UCHAR decoding', () => {
       invalidEscape: 'preserve',
       surrogatePolicy: 'allow',
     })).toBe(`\\q/\uD800`);
+  });
+
+  it('preserves malformed prefixes without hiding a later valid legacy escape', () => {
+    expect(decodeNTriplesIriEscapesPreservingLegacy(String.raw`\u12\u0041`))
+      .toBe(String.raw`\u12A`);
+  });
+
+  it('combines only two short surrogate escapes in strict IRI mode', () => {
+    expect(decodeNTriplesIriEscapesStrict(String.raw`\uD83D\uDE00`)).toBe('😀');
+    expect(decodeNTriplesIriEscapesStrict(String.raw`\U0000D83D\uDE00`)).toBeNull();
   });
 });
 

@@ -54,6 +54,7 @@ import {
 } from './xsd-date-time.js';
 import {
   TypedRdfStoreRowErrorV1,
+  parseRenderedRdfStoreObjectV1,
   renderTypedRdfStoreRowV1,
   snapshotDenseTypedRdfStoreRowsV1,
   typedRdfLiteralV1,
@@ -573,17 +574,11 @@ export function renderCanonicalAuthorSealStoreRowV1(
       XSD_DATE_TIME_IRI,
     ]));
   } catch (cause) {
-    const code = cause instanceof TypedRdfStoreRowErrorV1 && cause.code === 'row-schema'
-      ? 'canonical-seal-row-schema'
-      : 'canonical-seal-row-term';
-    const message = cause instanceof TypedRdfStoreRowErrorV1
-      ? cause.message
-          .replace(' must be one bare safe IRI', ' must contain one bare safe IRI')
-          .replace('unsupported literal datatype', 'unsupported author-seal literal datatype')
-          .replace('typed RDF literal has an invalid field set', 'literal object has invalid fields')
-          .replace('kind must be an enumerable data property', 'kind must be a data property')
-      : 'invalid canonical author-seal typed RDF row';
-    fail(code, message, cause);
+    const translated = translateTypedAuthorSealRowFailure(
+      cause,
+      'invalid canonical author-seal typed RDF row',
+    );
+    fail(translated.code, translated.message, cause);
   }
 }
 
@@ -632,21 +627,11 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
   try {
     typedRows = snapshotDenseTypedRdfStoreRowsV1(rows, { allowedLengths: [14, 15] });
   } catch (cause) {
-    const code = cause instanceof TypedRdfStoreRowErrorV1
-      ? cause.code === 'row-cardinality'
-        ? 'canonical-seal-row-cardinality'
-        : cause.code === 'row-term'
-          ? 'canonical-seal-row-term'
-          : 'canonical-seal-row-schema'
-      : 'canonical-seal-row-schema';
-    const message = cause instanceof TypedRdfStoreRowErrorV1
-      ? cause.message
-          .replace(' must be one bare safe IRI', ' must contain one bare safe IRI')
-          .replace('unsupported literal datatype', 'unsupported author-seal literal datatype')
-          .replace('typed RDF literal has an invalid field set', 'literal object has invalid fields')
-          .replace('kind must be an enumerable data property', 'kind must be a data property')
-      : 'invalid canonical author-seal row collection';
-    fail(code, message, cause);
+    const translated = translateTypedAuthorSealRowFailure(
+      cause,
+      'invalid canonical author-seal row collection',
+    );
+    fail(translated.code, translated.message, cause);
   }
   const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1(coordinate);
   const byPredicate = new Map<string, CanonicalGraphScopedAuthorSealRowV1>();
@@ -762,6 +747,85 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
     placement,
     rows: projectedRows,
   };
+}
+
+/**
+ * Decode the flattened RDF rows returned by storage adapters through the same
+ * strict typed-row boundary as transferred catalog seals. This keeps RDF-term
+ * parsing, canonical projection, coordinate binding, and exact row-set checks
+ * in the protocol codec instead of duplicating them in storage callers.
+ */
+export function decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+  rows: readonly CanonicalGraphScopedAuthorSealRowV1[],
+  coordinate: CanonicalGraphScopedAuthorSealCoordinateV1,
+): DecodedCanonicalGraphScopedAuthorSealRowsV1 {
+  if (!Array.isArray(rows)) {
+    fail('canonical-seal-row-schema', 'rendered author-seal rows must be an array');
+  }
+  let typedRows: readonly CanonicalAuthorSealStoreRowV1[];
+  try {
+    typedRows = Object.freeze(rows.map((row, index) => {
+      const current = snapshotExactDataRecord(
+        row,
+        ['graph', 'object', 'predicate', 'subject'],
+        `rendered author-seal row ${index}`,
+      );
+      return Object.freeze({
+        graphIri: current.graph,
+        object: parseRenderedRdfStoreObjectV1(current.object),
+        predicateIri: current.predicate,
+        subjectIri: current.subject,
+      }) as CanonicalAuthorSealStoreRowV1;
+    }));
+  } catch (cause) {
+    if (cause instanceof CanonicalGraphScopedAuthorSealError) throw cause;
+    const translated = translateTypedAuthorSealRowFailure(
+      cause,
+      'invalid rendered canonical author-seal row collection',
+    );
+    fail(translated.code, translated.message, cause);
+  }
+  return decodeCanonicalGraphScopedAuthorSealRowsV1(typedRows, coordinate);
+}
+
+function translateTypedAuthorSealRowFailure(
+  cause: unknown,
+  fallbackMessage: string,
+): Readonly<{
+  readonly code: Extract<
+    CanonicalGraphScopedAuthorSealErrorCode,
+    'canonical-seal-row-schema' | 'canonical-seal-row-cardinality' | 'canonical-seal-row-term'
+  >;
+  readonly message: string;
+}> {
+  if (!(cause instanceof TypedRdfStoreRowErrorV1)) {
+    return Object.freeze({ code: 'canonical-seal-row-schema', message: fallbackMessage });
+  }
+  const code = cause.code === 'row-cardinality'
+    ? 'canonical-seal-row-cardinality'
+    : cause.code === 'row-term'
+      ? 'canonical-seal-row-term'
+      : 'canonical-seal-row-schema';
+  let message = cause.message;
+  switch (cause.reason.kind) {
+    case 'invalid-iri':
+      message = `${cause.reason.field} must contain one bare safe IRI`;
+      break;
+    case 'unsupported-literal-datatype':
+      message = `unsupported author-seal literal datatype ${cause.reason.datatypeIri}`;
+      break;
+    case 'invalid-field-set':
+      if (cause.reason.context === 'typed RDF literal') {
+        message = 'literal object has invalid fields';
+      }
+      break;
+    case 'non-data-property':
+      if (cause.reason.field === 'kind') message = 'kind must be a data property';
+      break;
+    case 'other':
+      break;
+  }
+  return Object.freeze({ code, message });
 }
 
 /**

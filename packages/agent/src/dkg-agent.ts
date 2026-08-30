@@ -433,8 +433,6 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
-import { persistRfc64CatalogAuthorityPlanV1 } from
-  './rfc64/catalog-rollout-authority-state-v1.js';
 import { snapshotRfc64CatalogBootstrapConfigV1 } from './rfc64/catalog-authority-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
@@ -1014,12 +1012,6 @@ export class DKGAgent extends DKGAgentBase {
         ? rfc64PublicCatalogBootstrap
         : undefined,
     );
-    if (config.dataDir) {
-      await persistRfc64CatalogAuthorityPlanV1(config.dataDir, {
-        selectedContextGraphs: catalogActivation.selectedContextGraphs,
-        rollout: catalogActivation.rollout,
-      });
-    }
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {

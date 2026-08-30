@@ -39,7 +39,7 @@
 
 import {
   decodeRdfLiteralBody,
-  decodeNTriplesUcharEscapes,
+  decodeNTriplesIriEscapesPreservingLegacy,
   parseRdfLiteralLexicalTerm,
   XSD_STRING_DATATYPE,
 } from '@origintrail-official/dkg-rdf-utils';
@@ -137,10 +137,7 @@ function normalizeEscaping(lex: string): string {
 // oxigraph does on parse. Out-of-range \U (> U+10FFFF) is left undecoded (oxigraph
 // would reject the literal; we must not throw).
 function decodeIriEscapes(iri: string): string {
-  return decodeNTriplesUcharEscapes(iri, {
-    invalidEscape: 'preserve',
-    surrogatePolicy: 'allow',
-  })!;
+  return decodeNTriplesIriEscapesPreservingLegacy(iri);
 }
 
 // OT-RFC-57: the UTC date of "midnight in the given tz" — the backend-independent
