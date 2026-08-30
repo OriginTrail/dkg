@@ -2034,7 +2034,7 @@ describe('DKGQueryEngine', () => {
     }
   });
 
-  it('does not reuse partition discovery after an in-flight count scan completes', async () => {
+  it('reuses completed partition discovery until the context-graph write generation changes', async () => {
     const codeSubGraph = `${GRAPH}/code`;
     const docsSubGraph = `${GRAPH}/docs`;
 
@@ -2059,6 +2059,13 @@ describe('DKGQueryEngine', () => {
       { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
     );
     expect(first.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
+    expect(partitionDiscoverySpy.calls).toHaveLength(1);
+
+    const unchanged = await engine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+    expect(unchanged.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
     expect(partitionDiscoverySpy.calls).toHaveLength(1);
 
     await store.insert([

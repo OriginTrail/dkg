@@ -1,4 +1,8 @@
-import { isSparqlHttpResponseError } from '@origintrail-official/dkg-storage';
+import {
+  asGraphWriteRevisionSource,
+  isSparqlHttpResponseError,
+  type GraphWriteRevisionSource,
+} from '@origintrail-official/dkg-storage';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -371,13 +375,24 @@ export function resolveViewGraphs(
 export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
-  // Collapse the dashboard's parallel WM/SWM/VM count scans without retaining
-  // a completed allow-list that could miss newly-created assertion graphs.
-  private readonly scopedContentGraphAllowListInFlight = new Map<string, Promise<string[]>>();
+  private readonly graphWriteRevisionSource: GraphWriteRevisionSource | null;
+  // Partition discovery is expensive (three SPARQL classifications plus a
+  // graph-family scan). Retain completed values only while the adapter proves
+  // no write touched the context-graph prefix; stores without that capability
+  // keep the previous in-flight-only behavior.
+  private readonly scopedContentGraphAllowListCache = new Map<
+    string,
+    { generation: number; value: string[] }
+  >();
+  private readonly scopedContentGraphAllowListInFlight = new Map<
+    string,
+    { generation: number | null; promise: Promise<string[]> }
+  >();
 
   constructor(store: TripleStore) {
     this.store = store;
     this.graphManager = new GraphManager(store);
+    this.graphWriteRevisionSource = asGraphWriteRevisionSource(store);
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -1070,19 +1085,55 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       subGraphName ?? null,
       reads.shared.cacheKey,
     ]);
-    const cached = this.scopedContentGraphAllowListInFlight.get(key);
-    if (cached) {
-      return raceAgainstCallerAbort(cached, reads.signal);
+    const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
+    const revision = this.graphWriteRevisionSource?.getWriteRevision(graphPrefix);
+    const completed = this.scopedContentGraphAllowListCache.get(key);
+    if (completed && revision?.stable && completed.generation === revision.generation) {
+      // Refresh insertion order so the bounded map behaves as an LRU.
+      this.scopedContentGraphAllowListCache.delete(key);
+      this.scopedContentGraphAllowListCache.set(key, completed);
+      return completed.value;
+    }
+    if (completed) this.scopedContentGraphAllowListCache.delete(key);
+
+    const pending = this.scopedContentGraphAllowListInFlight.get(key);
+    const generation = revision?.generation ?? null;
+    if (pending && (
+      this.graphWriteRevisionSource === null || pending.generation === generation
+    )) {
+      return raceAgainstCallerAbort(pending.promise, reads.signal);
     }
 
     const promise = this.discoverScopedContentGraphAllowList(
       contextGraphId,
       reads.shared,
       subGraphName,
-    );
-    this.scopedContentGraphAllowListInFlight.set(key, promise);
+    ).then((value) => {
+      const after = this.graphWriteRevisionSource?.getWriteRevision(graphPrefix);
+      if (
+        revision?.stable
+        && after?.stable
+        && after.generation === revision.generation
+      ) {
+        const immutable = Object.freeze([...value]) as string[];
+        this.scopedContentGraphAllowListCache.delete(key);
+        this.scopedContentGraphAllowListCache.set(key, {
+          generation: after.generation,
+          value: immutable,
+        });
+        while (this.scopedContentGraphAllowListCache.size > 256) {
+          const oldest = this.scopedContentGraphAllowListCache.keys().next().value;
+          if (oldest === undefined) break;
+          this.scopedContentGraphAllowListCache.delete(oldest);
+        }
+        return immutable;
+      }
+      return value;
+    });
+    const flight = { generation, promise };
+    this.scopedContentGraphAllowListInFlight.set(key, flight);
     void promise.finally(() => {
-      if (this.scopedContentGraphAllowListInFlight.get(key) === promise) {
+      if (this.scopedContentGraphAllowListInFlight.get(key) === flight) {
         this.scopedContentGraphAllowListInFlight.delete(key);
       }
     }).catch(() => undefined);
