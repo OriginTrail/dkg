@@ -255,6 +255,7 @@ const blockedRfc64Modules = [
   'swm-inventory-catalog-reconciler-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
   'abort-v1.js',
+  'catalog-mutation-runtime-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;

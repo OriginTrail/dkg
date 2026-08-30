@@ -42,6 +42,8 @@ import {
   raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
+import { rfc64SwmInventoryShadowRuntimeV1 } from
+  './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
 import { resolveRfc64CatalogAuthorityDecisionV1 } from
@@ -240,7 +242,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
     const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(inventoryScope);
-    return this.runRfc64SwmInventoryScopeExclusiveV1(
+    return rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
       `${inventoryScopeDigest}\n${params.authorAddress}`,
       async () => {
         const snapshot = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(

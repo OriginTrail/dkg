@@ -148,6 +148,12 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly resolveContextGraphAuthority?: (
     contextGraphId: ContextGraphIdV1,
   ) => Rfc64CatalogAuthorityPolicyV1;
+  /** Share one mutation boundary with local catalog authoring for this scope. */
+  readonly runCatalogMutationExclusive?: <T>(
+    scope: Readonly<AuthorCatalogScopeV1>,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ) => Promise<T>;
 }
 
 export type Rfc64PublicCatalogHeadFetchClientV1 = Pick<
@@ -408,9 +414,21 @@ export class Rfc64PublicCatalogServiceV1 {
           if (lane === 'legacy' || lane === 'disabled') {
             throw new Error('RFC-64 catalog reconciliation is disabled for legacy-mode CG');
           }
-          return lane === 'shadow-stage'
-            ? stagingReconciler.reconcileHead(remotePeerId, announcement, signal)
-            : nativeReconciler.reconcileHead(remotePeerId, announcement, signal);
+          if (lane === 'shadow-stage') {
+            return stagingReconciler.reconcileHead(remotePeerId, announcement, signal);
+          }
+          const reconcile = () => nativeReconciler.reconcileHead(
+            remotePeerId,
+            announcement,
+            signal,
+          );
+          return options.runCatalogMutationExclusive === undefined
+            ? reconcile()
+            : options.runCatalogMutationExclusive(
+              this.#resolveTrustedCatalogScope(announcement),
+              reconcile,
+              signal,
+            );
         },
       };
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);

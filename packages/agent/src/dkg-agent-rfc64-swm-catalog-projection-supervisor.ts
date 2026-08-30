@@ -86,6 +86,7 @@ interface ProjectionSupervisorStateV1 {
 }
 
 const STATES = new WeakMap<DKGAgent, ProjectionSupervisorStateV1>();
+const CLOSED = new WeakSet<DKGAgent>();
 
 export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   /** Seed bounded local-author projection work from selected catalog scopes. */
@@ -93,37 +94,62 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     this: DKGAgent,
     ctx: OperationContext,
   ): void {
-    if (STATES.has(this)) return;
     const config = this.resolveRuntimeRfc64ProjectionBootstrapConfigV1();
     if (config === undefined) return;
+    CLOSED.delete(this);
     const partition = partitionRfc64CatalogBootstrapV1(
       config,
       this.config.rfc64CatalogRollout,
     );
-    const localAuthors = new Set(
-      this.listLocalAgents().map(({ agentAddress }) => agentAddress.toLowerCase()),
+    const localAuthors = this.listLocalAgents().map(
+      ({ agentAddress }) => agentAddress.toLowerCase() as EvmAddressV1,
     );
-    const repairs = partition.track2Targets.flatMap(
-      ({ mode, scope }): MutableAuthorRepairStatusV1[] => {
-        if (mode !== 'catalog') return [];
-        const authorAddress = scope.authorAddress.toLowerCase() as EvmAddressV1;
-        if (!localAuthors.has(authorAddress)) return [];
-        return [{
-          contextGraphId: scope.contextGraphId as ContextGraphIdV1,
-          authorAddress,
-          outcome: 'pending',
-          attempts: 0,
-          inventoryHeadObjectDigest: null,
-          catalogVersion: null,
-          inventoryRowCount: null,
-          lastError: null,
-          updatedAtMs: null,
-          dirty: true,
-          liveAdmission: false,
-        }];
+    // Remote discovery targets are not a local-author inventory manifest.
+    // Derive the bounded restart plan from explicitly accepted catalog scopes
+    // crossed with the node's finite local-agent registry instead. A missing
+    // inventory is a cheap no-op, while an empty durable inventory must remain
+    // discoverable so a post-VM retraction can be repaired after restart.
+    const repairKeys = new Set<string>();
+    const repairs = partition.track2Policies.flatMap(
+      ({ policyEnvelope }): MutableAuthorRepairStatusV1[] => {
+        const contextGraphId = policyEnvelope.payload.contextGraphId as ContextGraphIdV1;
+        if (this.resolveRfc64AcceptedPublicRootLaneV1(contextGraphId, null) === null) {
+          return [];
+        }
+        return localAuthors.flatMap((authorAddress) => {
+          const key = `${contextGraphId}\n${authorAddress}`;
+          if (repairKeys.has(key)) return [];
+          repairKeys.add(key);
+          return [{
+            contextGraphId,
+            authorAddress,
+            outcome: 'pending',
+            attempts: 0,
+            inventoryHeadObjectDigest: null,
+            catalogVersion: null,
+            inventoryRowCount: null,
+            lastError: null,
+            updatedAtMs: null,
+            dirty: true,
+            liveAdmission: false,
+          }];
+        });
       },
     );
     if (repairs.length === 0) return;
+    const existing = STATES.get(this);
+    if (existing !== undefined) {
+      if (existing.closed) return;
+      for (const repair of repairs) {
+        if (existing.repairs.some((candidate) => (
+          candidate.contextGraphId === repair.contextGraphId
+          && candidate.authorAddress === repair.authorAddress
+        ))) continue;
+        existing.repairs.push(repair);
+      }
+      this.launchRfc64SwmCatalogProjectionPassV1(existing);
+      return;
+    }
     const state: ProjectionSupervisorStateV1 = {
       retryIntervalMs: partition.retryIntervalMs,
       repairs,
@@ -154,6 +180,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       readonly ctx?: OperationContext;
     }>,
   ): boolean {
+    if (CLOSED.has(this)) return false;
     assertContextGraphIdV1(params.contextGraphId, 'SWM catalog projection contextGraphId');
     const authorAddress = params.authorAddress.toLowerCase() as EvmAddressV1;
     assertCanonicalEvmAddress(authorAddress, 'SWM catalog projection authorAddress');
@@ -251,6 +278,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   }
 
   async closeRfc64SwmCatalogProjectionSupervisorV1(this: DKGAgent): Promise<void> {
+    CLOSED.add(this);
     const state = STATES.get(this);
     if (state === undefined) return;
     state.closed = true;

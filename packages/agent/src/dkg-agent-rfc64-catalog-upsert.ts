@@ -42,22 +42,8 @@ import {
   raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
-import { Rfc64SerializedScopeRuntimeV1 } from
-  './rfc64/serialized-scope-runtime-v1.js';
-
-const rfc64AuthorCatalogMutationRuntimesV1 =
-  new WeakMap<DKGAgent, Rfc64SerializedScopeRuntimeV1>();
-
-function rfc64AuthorCatalogMutationRuntimeV1(
-  agent: DKGAgent,
-): Rfc64SerializedScopeRuntimeV1 {
-  let runtime = rfc64AuthorCatalogMutationRuntimesV1.get(agent);
-  if (runtime === undefined) {
-    runtime = new Rfc64SerializedScopeRuntimeV1('RFC-64 catalog mutation aborted');
-    rfc64AuthorCatalogMutationRuntimesV1.set(agent, runtime);
-  }
-  return runtime;
-}
+import { runRfc64CatalogMutationExclusiveV1 } from
+  './rfc64/catalog-mutation-runtime-v1.js';
 
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -124,9 +110,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     }
     service.acceptedPolicySnapshotForCatalogScope(params.scope);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
-    const queueKey = `${catalogScopeDigest}\n${params.scope.authorAddress}`;
 
-    return this.runSerializedRfc64AuthorCatalogMutationV1(queueKey, async () => {
+    return runRfc64CatalogMutationExclusiveV1(this, params.scope, async () => {
       let state = await this.readRfc64CatalogMutationStateV1(
         persistence,
         catalogScopeDigest,
@@ -193,9 +178,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     }
     service.acceptedPolicySnapshotForCatalogScope(params.scope);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
-    const queueKey = `${catalogScopeDigest}\n${params.scope.authorAddress}`;
 
-    return this.runSerializedRfc64AuthorCatalogMutationV1(queueKey, async () => {
+    return runRfc64CatalogMutationExclusiveV1(this, params.scope, async () => {
       throwIfAbortedV1(params.signal);
       let state = await raceAgainstAbortV1(
         this.readRfc64CatalogMutationStateV1(
@@ -402,14 +386,6 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     return Object.freeze({ applied, successor });
   }
 
-  private async runSerializedRfc64AuthorCatalogMutationV1<T>(
-    this: DKGAgent,
-    key: string,
-    operation: () => Promise<T>,
-    signal?: AbortSignal,
-  ): Promise<T> {
-    return rfc64AuthorCatalogMutationRuntimeV1(this).run(key, operation, signal);
-  }
 }
 
 function assertReplacementHistoryIsContiguousV1(

@@ -198,3 +198,17 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     }
   }
 }
+
+const RUNTIMES_V1 = new WeakMap<object, Rfc64SwmInventoryShadowRuntimeV1>();
+
+/** One feature-owned inventory/projection runtime per agent instance. */
+export function rfc64SwmInventoryShadowRuntimeV1(
+  owner: object,
+): Rfc64SwmInventoryShadowRuntimeV1 {
+  let runtime = RUNTIMES_V1.get(owner);
+  if (runtime === undefined) {
+    runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    RUNTIMES_V1.set(owner, runtime);
+  }
+  return runtime;
+}

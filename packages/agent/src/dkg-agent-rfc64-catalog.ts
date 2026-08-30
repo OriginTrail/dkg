@@ -106,6 +106,8 @@ import {
   rfc64CatalogKillSwitchActiveV1,
   resolveRfc64CatalogAuthorityDecisionV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
+import { runRfc64CatalogMutationExclusiveV1 } from
+  './rfc64/catalog-mutation-runtime-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -322,6 +324,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           this.config.rfc64CatalogRollout,
           contextGraphId,
         ),
+      runCatalogMutationExclusive: (scope, operation, signal) =>
+        runRfc64CatalogMutationExclusiveV1(this, scope, operation, signal),
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -332,6 +336,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
+        onHeadApplied: (announcement) => {
+          const authorAddress = announcement.authorAddress.toLowerCase();
+          if (!this.listLocalAgents().some(
+            ({ agentAddress }) => agentAddress.toLowerCase() === authorAddress,
+          )) return;
+          this.requestRfc64SwmCatalogProjectionV1({
+            contextGraphId: announcement.contextGraphId,
+            authorAddress: authorAddress as EvmAddressV1,
+            ctx,
+          });
+        },
         onError: (announcement, error) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,

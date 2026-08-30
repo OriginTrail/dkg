@@ -37,6 +37,8 @@ import {
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import { mintRfc64CatalogNativeScopedReadCapabilityV1 } from
   '../src/rfc64/catalog-native-scoped-read-capability-v1-internal.js';
+import { runRfc64CatalogMutationExclusiveV1 } from
+  '../src/rfc64/catalog-mutation-runtime-v1.js';
 import {
   RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2,
   RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2,
@@ -1320,6 +1322,76 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(failure).toBeInstanceOf(Rfc64CatalogReconciliationTerminalErrorV1);
     expect(failure).toMatchObject({ outcome: 'closed', terminalReason: null });
     expect(reconcileHead).not.toHaveBeenCalled();
+  });
+
+  it('serializes remote apply before the local-author convergence it triggers', async () => {
+    const owner = {};
+    const events: string[] = [];
+    const remoteEntered = deferred<void>();
+    const releaseRemote = deferred<void>();
+    let localProjection: Promise<void> | undefined;
+    const catalogScope: AuthorCatalogScopeV1 = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    };
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      runCatalogMutationExclusive: (scope, operation, signal) =>
+        runRfc64CatalogMutationExclusiveV1(owner, scope, operation, signal),
+      receiver: {
+        retryBackoffMs: 0,
+        onHeadApplied: () => {
+          localProjection = runRfc64CatalogMutationExclusiveV1(
+            owner,
+            catalogScope,
+            async () => { events.push('local-converged'); },
+          );
+        },
+      },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead: async () => {
+          events.push('remote-enter');
+          remoteEntered.resolve(undefined);
+          await releaseRemote.promise;
+          events.push('remote-exit');
+          return 'applied';
+        },
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const current = announcement(policy.policyDigest);
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(Object.freeze({
+      announcement: current,
+      head: {} as never,
+    }));
+
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-a',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    });
+    await remoteEntered.promise;
+    expect(events).toEqual(['remote-enter']);
+    releaseRemote.resolve(undefined);
+    await synchronization;
+    await localProjection;
+    expect(events).toEqual(['remote-enter', 'remote-exit', 'local-converged']);
+    await service.close();
   });
 
   it('selects the highest exact head, retains all matching providers, and fails over', async () => {

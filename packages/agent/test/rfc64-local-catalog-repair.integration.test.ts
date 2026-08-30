@@ -148,6 +148,7 @@ function catalogScopeDigestV1(): Digest32V1 {
 
 function bootstrapConfigV1(
   retryIntervalMs?: number,
+  includeRemoteTarget = true,
 ): Rfc64PublicCatalogBootstrapConfigV1 {
   const policy = buildOpenOwnerContextGraphPolicyV1({
     networkId: NETWORK_ID,
@@ -157,10 +158,10 @@ function bootstrapConfigV1(
   return {
     acceptedPublicPolicies: [{
       policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-      targets: [{
+      targets: includeRemoteTarget ? [{
         authorAddress: AUTHOR,
         providers: ['12D3KooWRepairProvider'],
-      }],
+      }] : [],
     }],
     ...(retryIntervalMs === undefined ? {} : { retryIntervalMs }),
   };
@@ -462,6 +463,11 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         repairs: [expect.objectContaining({ attempts: 2, outcome: 'reconciled' })],
       }),
     );
+    await agent.closeRfc64SwmCatalogProjectionSupervisorV1();
+    expect(agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(false);
   }, 30_000);
 
   it('reports missing inventory and unavailable projection distinctly', async () => {
@@ -483,6 +489,12 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     await agent.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(agent.readRfc64PublicCatalogBootstrapStatusV1()?.authorRepairs)
       .toEqual([expect.objectContaining({ outcome: 'no-inventory', attempts: 1 })]);
+    const reconcile = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1');
+    await expect(agent.repairRfc64LocalPublicCatalogAuthorV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: REMOTE_AUTHOR,
+    })).resolves.toEqual({ outcome: 'inactive' });
+    expect(reconcile).not.toHaveBeenCalled();
     const service = (agent as any).rfc64PublicCatalogServiceV1;
     (agent as any).rfc64PublicCatalogServiceV1 = undefined;
     await expect(agent.repairRfc64LocalPublicCatalogAuthorV1({
@@ -549,7 +561,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     })).toBeNull();
   }, 30_000);
 
-  it('repairs durable additions and removals across consecutive restarts', async () => {
+  it('repairs durable additions and removals without remote author targets', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-restart-repair-'));
     tempDirs.push(dataDir);
     const storePath = join(dataDir, 'oxigraph');
@@ -578,7 +590,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       dataDir,
       storePath,
       autoPublish,
-      bootstrap: bootstrapConfigV1(),
+      bootstrap: bootstrapConfigV1(undefined, false),
       beforeStart: (agent) => {
         vi.spyOn(agent, 'listLocalAgents').mockReturnValue([
           { agentAddress: AUTHOR } as never,
@@ -610,7 +622,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       dataDir,
       storePath,
       autoPublish,
-      bootstrap: bootstrapConfigV1(),
+      bootstrap: bootstrapConfigV1(undefined, false),
       beforeStart: (agent) => {
         vi.spyOn(agent, 'listLocalAgents').mockReturnValue([
           { agentAddress: AUTHOR } as never,

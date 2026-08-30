@@ -50,7 +50,7 @@ import {
   removeRfc64SwmAuthorInventoryRowV1,
 } from './rfc64/swm-author-inventory-producer-v1.js';
 import {
-  Rfc64SwmInventoryShadowRuntimeV1,
+  rfc64SwmInventoryShadowRuntimeV1,
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
@@ -59,22 +59,6 @@ export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
   Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
-
-const rfc64SwmInventoryShadowRuntimesV1 = new WeakMap<
-  DKGAgent,
-  Rfc64SwmInventoryShadowRuntimeV1
->();
-
-function rfc64SwmInventoryShadowRuntimeV1(
-  agent: DKGAgent,
-): Rfc64SwmInventoryShadowRuntimeV1 {
-  let runtime = rfc64SwmInventoryShadowRuntimesV1.get(agent);
-  if (runtime === undefined) {
-    runtime = new Rfc64SwmInventoryShadowRuntimeV1();
-    rfc64SwmInventoryShadowRuntimesV1.set(agent, runtime);
-  }
-  return runtime;
-}
 
 function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
   contextGraphId: string;
@@ -214,20 +198,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   inFlightRfc64SwmInventoryObserverCountV1(this: DKGAgent): number {
     return rfc64SwmInventoryShadowRuntimeV1(this).inFlightCount;
-  }
-
-  /** Shared author-scope serialization boundary for inventory mutation and projection. */
-  runRfc64SwmInventoryScopeExclusiveV1<T>(
-    this: DKGAgent,
-    scopeKey: string,
-    operation: () => Promise<T>,
-    signal?: AbortSignal,
-  ): Promise<T> {
-    return rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
-      scopeKey,
-      operation,
-      signal,
-    );
   }
 
   private scheduleRfc64SwmInventoryObserverV1(
