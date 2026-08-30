@@ -754,7 +754,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       nextRetryAt: Date.now() + 60_000,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
     negativeKeysByCg.set(localCgId, new Set([recentKey]));
     fetchCooldown.set(localCgId, { startedAt: Date.now(), owner: Symbol(localCgId) });
@@ -1629,7 +1629,7 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).recordVmReconcileNegativeCache(keyA, '61', {
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: 'unreadable',
+      peerTopology: { kind: 'unreadable' },
     });
 
     await expect((internals as any).shouldDeferVmReconcileByNegativeCache(keyB, '62')).resolves.toBe(false);
@@ -1637,7 +1637,7 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).recordVmReconcileNegativeCache(keyB, '62', {
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: 'unreadable',
+      peerTopology: { kind: 'unreadable' },
     });
 
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(2);
@@ -1911,7 +1911,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: Date.now() + 60_000,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
     (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
       handleChainReconciledKC: recorder(async () => 'stale-target'),
@@ -1931,7 +1931,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: number;
       swmGen: string;
       candidateNamespaces: unknown[];
-      peerTopologyKey: string;
+      peerTopology: { kind: 'unreadable' };
     }>;
     const now = Date.now();
     const cacheKey = 'retry-history-key';
@@ -1942,7 +1942,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: now - 1,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     } as any);
 
     (internals as any).pruneVmReconcileState(now);
@@ -1952,7 +1952,7 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).recordVmReconcileNegativeCache(cacheKey, 'retry-cg', {
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
 
     expect(negativeCache.get(cacheKey)?.failures).toBe(2);
@@ -1997,7 +1997,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: number;
       swmGen: string;
       candidateNamespaces: unknown[];
-      peerTopologyKey: string;
+      peerTopology: { kind: 'unreadable' };
     }>;
     const fetchCooldown = (internals as any).vmReconcileFetchCooldowns as Map<
       string,
@@ -2017,7 +2017,7 @@ describe('Phase D - VM reconcile damping', () => {
         nextRetryAt: now + 60_000,
         swmGen: 'empty:0',
         candidateNamespaces: [],
-        peerTopologyKey: '',
+        peerTopology: { kind: 'unreadable' },
       });
     }
     fetchCooldown.set('expired-cg', {
@@ -2045,7 +2045,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: now + 60_000,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('cleanup-cg', 'cleanup-cache');
     (internals as any).markVmReconcileNegativeCacheHydrated('cleanup-hydrated', 'cleanup-cg');
@@ -2073,7 +2073,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: now + 60_000,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('hosted-cg', 'hosted-cache');
     (internals as any).markVmReconcileNegativeCacheHydrated('hosted-hydrated', 'hosted-cg');

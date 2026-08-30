@@ -28,6 +28,7 @@ import { ContextGraphMembershipPersistScheduler } from './context-graph-membersh
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
+import type { VmReconcilePeerTopology } from './vm-reconcile-peer-topology.js';
 import type {
   Rfc64AuthorizedSwmRecoveryPlanV1,
   Rfc64SwmRecoveryCoordinatorV1,
@@ -1064,7 +1065,11 @@ export class DKGAgentBase {
   /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
   protected coreHostRecordingGeneration = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
-  protected readonly vmReconcileNegativeCache = new Map<string, Omit<VmReconcileNegativeRecord, 'cacheKey'>>();
+  protected readonly vmReconcileNegativeCache = new Map<string,
+    Omit<VmReconcileNegativeRecord, 'cacheKey' | 'peerTopologyKey'> & {
+      peerTopology: VmReconcilePeerTopology;
+    }
+  >();
   /** Bounded access-ordered keys already consulted in the durable store. */
   protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();

@@ -368,13 +368,20 @@ type VmReconcileSwmCandidateNamespaces = { namespaces: VmReconcileSwmNamespace[]
 type VmReconcileSwmCandidateState = {
   swmGen: string | null;
   candidateNamespaces: VmReconcileSwmNamespace[];
-  peerTopologyKey: string;
+  peerTopology: VmReconcilePeerTopology;
 };
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
+import {
+  canReuseVmReconcilePeerTopology,
+  decodeVmReconcilePeerTopology,
+  encodeVmReconcilePeerTopology,
+  UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
+  type VmReconcilePeerTopology,
+} from './vm-reconcile-peer-topology.js';
 import {
   stripLiteral, jsonLdToQuads,
   type JsonLdContent,
@@ -4252,7 +4259,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return {
       candidateNamespaces: candidateNamespaces.namespaces,
       swmGen: await this.readVmReconcileSwmGen(candidateNamespaces.namespaces),
-      peerTopologyKey: await this.vmReconcilePeerTopologyKey(localCgId),
+      peerTopology: await this.vmReconcilePeerTopology(localCgId),
     };
   }
 
@@ -4292,13 +4299,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .join('\n');
   }
 
-  async vmReconcilePeerTopologyKey(this: DKGAgent, localCgId: string): Promise<string> {
+  async vmReconcilePeerTopology(
+    this: DKGAgent,
+    localCgId: string,
+  ): Promise<VmReconcilePeerTopology> {
     try {
       const preferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
       const isPrivateContextGraph = await this.isPrivateContextGraph(localCgId);
       const libp2p = (this.node as any)?.libp2p;
       const getConnections = libp2p?.getConnections;
-      if (typeof getConnections !== 'function') return 'unreadable';
+      if (typeof getConnections !== 'function') return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
       const peerIds = [...new Map(
         (getConnections.call(libp2p) as Array<{ remotePeer?: { toString(): string } }>)
           .map((connection) => [connection.remotePeer?.toString(), connection.remotePeer] as const)
@@ -4311,78 +4321,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
         preferredPeerId,
         isPrivateContextGraph,
       );
-      return JSON.stringify({
+      return {
+        kind: 'readable',
         preferredPeerId: preferredPeerId ?? null,
         privateOnly: isPrivateContextGraph,
-        peers: orderedPeers.map((peer, rank) => {
+        peers: orderedPeers.map((peer) => {
           const peerId = peer.toString();
           return {
-            rank,
             peerId,
             preferred: peerId === preferredPeerId,
             core: this.knownCorePeerIds.has(peerId),
           };
         }),
-      });
-    } catch {
-      return 'unreadable';
-    }
-  }
-
-  vmReconcilePeerTopologyCanReuse(this: DKGAgent,
-    cachedKey: string,
-    currentKey: string,
-  ): boolean {
-    if (cachedKey === currentKey) return true;
-    if (cachedKey === 'unreadable' || currentKey === 'unreadable') return false;
-    try {
-      type TopologyPeer = {
-        peerId: string;
-        preferred: boolean;
-        core: boolean;
       };
-      type Topology = {
-        preferredPeerId: string | null;
-        privateOnly: boolean;
-        peers: TopologyPeer[];
-      };
-      const cached = JSON.parse(cachedKey) as Topology;
-      const current = JSON.parse(currentKey) as Topology;
-      if (
-        cached.preferredPeerId !== current.preferredPeerId
-        || cached.privateOnly !== current.privateOnly
-        || !Array.isArray(cached.peers)
-        || !Array.isArray(current.peers)
-      ) {
-        return false;
-      }
-
-      // A provider disappearing cannot make an unchanged historical miss
-      // fetchable. Preserve the backoff when the current ranked providers are
-      // only a capability-preserving subsequence of those already checked.
-      // Additions, reclassification, or ranking changes still fail open to a
-      // fresh fetch so newly useful evidence is never hidden by this cache.
-      let cachedIndex = 0;
-      for (const peer of current.peers) {
-        while (
-          cachedIndex < cached.peers.length
-          && cached.peers[cachedIndex]?.peerId !== peer.peerId
-        ) {
-          cachedIndex++;
-        }
-        const cachedPeer = cached.peers[cachedIndex];
-        if (
-          !cachedPeer
-          || cachedPeer.preferred !== peer.preferred
-          || cachedPeer.core !== peer.core
-        ) {
-          return false;
-        }
-        cachedIndex++;
-      }
-      return true;
     } catch {
-      return false;
+      return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
     }
   }
 
@@ -4598,16 +4551,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
             await this.config.contextGraphSubscriptionStore
               ?.deleteVmReconcileNegative?.(cacheKey);
           } else {
-            cached = {
-              localCgId: durable.localCgId,
-              failures: durable.failures,
-              nextRetryAt: durable.nextRetryAt,
-              swmGen: durable.swmGen,
-              candidateNamespaces: durable.candidateNamespaces,
-              peerTopologyKey: durable.peerTopologyKey,
-            };
-            this.vmReconcileNegativeCache.set(cacheKey, cached);
-            this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
+            const peerTopology = decodeVmReconcilePeerTopology(durable.peerTopologyKey);
+            if (!peerTopology) {
+              await this.config.contextGraphSubscriptionStore
+                ?.deleteVmReconcileNegative?.(cacheKey);
+            } else {
+              cached = {
+                localCgId: durable.localCgId,
+                failures: durable.failures,
+                nextRetryAt: durable.nextRetryAt,
+                swmGen: durable.swmGen,
+                candidateNamespaces: durable.candidateNamespaces,
+                peerTopology,
+              };
+              this.vmReconcileNegativeCache.set(cacheKey, cached);
+              this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
+            }
           }
         }
       } catch {
@@ -4624,8 +4583,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Best effort only; an unchanged connection view can still honor the
         // cached miss until the backoff expires.
       }
-      const currentPeerTopologyKey = await this.vmReconcilePeerTopologyKey(localCgId);
-      if (!this.vmReconcilePeerTopologyCanReuse(cached.peerTopologyKey, currentPeerTopologyKey)) {
+      const currentPeerTopology = await this.vmReconcilePeerTopology(localCgId);
+      if (!canReuseVmReconcilePeerTopology(cached.peerTopology, currentPeerTopology)) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.clearVmReconcileActiveFetchCooldown(localCgId);
         return false;
@@ -4710,7 +4669,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       nextRetryAt: Date.now() + backoff,
       swmGen: state.swmGen,
       candidateNamespaces: state.candidateNamespaces,
-      peerTopologyKey: state.peerTopologyKey,
+      peerTopology: state.peerTopology,
     };
     this.vmReconcileNegativeCache.set(cacheKey, record);
     this.markVmReconcileNegativeCacheHydrated(cacheKey, localCgId);
@@ -4719,7 +4678,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.vmReconcileSwmGenSupportsDurableNegative(record.swmGen)) {
       void durableStore?.saveVmReconcileNegative?.({
         cacheKey,
-        ...record,
+        localCgId: record.localCgId,
+        failures: record.failures,
+        nextRetryAt: record.nextRetryAt,
+        swmGen: record.swmGen,
+        candidateNamespaces: record.candidateNamespaces,
+        peerTopologyKey: encodeVmReconcilePeerTopology(record.peerTopology),
       }).catch(() => {
         // Persistence is an accelerator only; the process-local gate still works.
       });
