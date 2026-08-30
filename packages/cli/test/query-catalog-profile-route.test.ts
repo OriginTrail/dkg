@@ -213,6 +213,28 @@ describe('/api/profile/query-catalog/read', () => {
     expect(agent.store.query).not.toHaveBeenCalled();
   });
 
+  it('keeps an auth-disabled agent principal behind the private-graph ACL', async () => {
+    const agentAddress = '0x1111111111111111111111111111111111111111';
+    const agent = fakeCatalogAgent();
+    agent.canReadContextGraph.mockResolvedValue(false);
+    const { context, response } = readContext(agent);
+    context.authentication = requestAuthentication({
+      kind: 'agent',
+      agentAddress,
+      mode: 'disabled',
+      token: 'agent-token',
+    });
+
+    await handleMemoryRoutes(context);
+
+    expect(response.statusCode).toBe(403);
+    expect(agent.canReadContextGraph).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: agentAddress,
+    });
+    expect(agent.query).not.toHaveBeenCalled();
+    expect(agent.store.query).not.toHaveBeenCalled();
+  });
+
   it('reads the registered meta subgraph through all Context Graph layers', async () => {
     const agent = fakeCatalogAgent();
     agent.canReadContextGraph.mockResolvedValue(false);

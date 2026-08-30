@@ -30,7 +30,7 @@ import {
   readContextGraphQueryCatalogBindings,
   writeContextGraphQueryCatalog,
 } from '../query-catalog-service.js';
-import { authenticatedAgentAddress, canAdministerNode } from '../../auth.js';
+import { authenticatedAgentAddress } from '../../auth.js';
 
 const QUERY_CATALOG_RESULT_LIMIT = 5_000;
 const QUERY_CATALOG_RESPONSE_BYTES = 1024 * 1024;
@@ -156,7 +156,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     if (!validateRequiredContextGraphId(contextGraphId, res)) return true;
 
     const callerAgentAddress = authenticatedAgentAddress(authentication);
-    const isNodeAdmin = canAdministerNode(authentication);
+    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
     if (
       !isNodeAdmin
       && !(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))
