@@ -569,10 +569,10 @@ describe('ProtocolRouter pooled overlay', () => {
   });
 
   it('primes peerResolver before pool dial (cold-peer recovery, Codex #560 round 1)', async () => {
-    const connectCalls: string[] = [];
+    const resolveCalls: string[] = [];
     const peerResolver = {
-      connect: async (peerIdStr: string) => {
-        connectCalls.push(peerIdStr);
+      resolve: async (peerIdStr: string) => {
+        resolveCalls.push(peerIdStr);
         return [];
       },
     } as unknown as import('../src/network/peer-resolver.js').PeerResolver;
@@ -581,8 +581,8 @@ describe('ProtocolRouter pooled overlay', () => {
       libp2p: {
         dialProtocol: async () => {
           dialCalls += 1;
-          // Assert canonical resolved-connect ran BEFORE the protocol dial.
-          expect(connectCalls.length).toBeGreaterThan(0);
+          // Assert canonical address discovery ran BEFORE the protocol dial.
+          expect(resolveCalls.length).toBeGreaterThan(0);
           const s = new FakeStream();
           return s as unknown as import('@libp2p/interface').Stream;
         },
@@ -606,7 +606,7 @@ describe('ProtocolRouter pooled overlay', () => {
     const pSend = router.send(PEER_NEW, '/dkg/10.0.1/message', new TextEncoder().encode('a'));
     pSend.catch(() => undefined);
     await flush();
-    expect(connectCalls).toEqual([PEER_NEW]);
+    expect(resolveCalls).toEqual([PEER_NEW]);
     expect(dialCalls).toBe(1);
     await router.closePooling();
   });

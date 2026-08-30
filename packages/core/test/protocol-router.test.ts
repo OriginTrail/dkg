@@ -769,7 +769,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
       await expect(
@@ -804,7 +804,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
       const sendPromise = router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 5000);
@@ -847,7 +847,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
       await expect(
@@ -1009,7 +1009,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
       (router as any).pooledByLogical.set(PROTOCOL_ID, {
         logicalProtocolId: PROTOCOL_ID,
@@ -1233,7 +1233,7 @@ describe('ProtocolRouter', () => {
         },
       } as unknown as DKGNode;
       const peerResolver = {
-        connect: async () => {
+        resolve: async () => {
           opts.onResolve();
           return [];
         },
@@ -1241,7 +1241,7 @@ describe('ProtocolRouter', () => {
       return new ProtocolRouter(node, { peerResolver });
     }
 
-    it('re-runs peerResolver.connect() on every retry attempt (was once-pre-loop)', async () => {
+    it('re-runs peerResolver.resolve() on every retry attempt (was once-pre-loop)', async () => {
       let resolveCalls = 0;
       let dialCalls = 0;
       const router = makeRouter({
@@ -1484,7 +1484,7 @@ describe('ProtocolRouter', () => {
         },
       } as unknown as DKGNode;
       const peerResolver = {
-        connect: async () => {
+        resolve: async () => {
           opts.onResolve?.();
           return [];
         },
@@ -1941,7 +1941,7 @@ describe('ProtocolRouter', () => {
         },
       } as unknown as DKGNode;
       const peerResolver = {
-        connect: async () => [],
+        resolve: async () => [],
       } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
@@ -2049,7 +2049,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
       const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
@@ -2089,7 +2089,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
       const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
@@ -2125,7 +2125,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
       await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
@@ -2267,7 +2267,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       return new ProtocolRouter(node, { peerResolver });
     }
 
@@ -2394,7 +2394,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
       const result = await router.send(FAKE_PEER_ID, '/dkg/10.0.1/test', new Uint8Array([1]), {
@@ -2431,7 +2431,7 @@ describe('ProtocolRouter', () => {
           peerStore: { get: async () => { throw new Error('NotFound'); } },
         },
       } as unknown as DKGNode;
-      const peerResolver = { connect: async () => [] } as unknown as PeerResolver;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
       const router = new ProtocolRouter(node, { peerResolver });
 
       const result = await router.send(FAKE_PEER_ID, '/dkg/10.0.1/test', new Uint8Array([1]), 5000);
