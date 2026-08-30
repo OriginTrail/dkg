@@ -4,6 +4,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
 import {
+  ORDINARY_SYNC_ON_CONNECT_POLICY,
   runSelectedSharedMemoryRetry,
   runSyncOnConnect,
 } from '../src/sync/on-connect/sync-on-connect.js';
@@ -277,11 +278,14 @@ describe('sync-on-connect churn gates', () => {
 
     // The third argument is the bounded admission origin (issue #2006): the
     // reconciler's queue pressure must be attributable to `reconcile`, not
-    // indistinguishable from sync-on-connect.
+    // indistinguishable from sync-on-connect. The fourth keeps reconciliation
+    // on the ordinary policy rather than silently inheriting after-selected
+    // retry ownership.
     expect(trySyncFromPeer.calls).toEqual([[
       PEER_A,
       expect.any(Function),
       'reconcile',
+      ORDINARY_SYNC_ON_CONNECT_POLICY.ordinary,
     ]]);
   });
 
