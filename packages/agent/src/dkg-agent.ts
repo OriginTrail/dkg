@@ -1005,12 +1005,18 @@ export class DKGAgent extends DKGAgentBase {
             activationPeerAgentBindings!.get(remotePeerId) ?? null
           ),
         }));
-    const rfc64PublicCatalogAutoPublishPolicy = catalogActivation.autoPublish === undefined
-      ? rfc64PublicCatalogControls.autoPublishPolicy
+    const rfc64CatalogAutoPublishControls = (
+      activations.selectedCatalogAutoPublish === undefined
+      && rfc64PublicCatalogControls.autoPublishPolicy === undefined
+    )
+      ? undefined
       : Object.freeze({
-        mode: 'selected-catalog' as const,
-        config: catalogActivation.autoPublish,
-        selectedContextGraphs: catalogActivation.selectedContextGraphs,
+        ...(activations.selectedCatalogAutoPublish === undefined
+          ? {}
+          : { selectedCatalog: activations.selectedCatalogAutoPublish }),
+        ...(rfc64PublicCatalogControls.autoPublishPolicy === undefined
+          ? {}
+          : { publicCatalog: rfc64PublicCatalogControls.autoPublishPolicy }),
       });
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
@@ -1106,7 +1112,7 @@ export class DKGAgent extends DKGAgentBase {
         selectedContextGraphs: catalogActivation.selectedContextGraphs,
         rollout: catalogActivation.rollout,
       }),
-      rfc64PublicCatalogAutoPublishPolicy,
+      rfc64CatalogAutoPublishControls,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       syncReconcilerTiming: resolveSyncReconcilerTiming(config),

@@ -37,7 +37,6 @@ import type {
 } from './dkg-agent-rfc64-catalog.js';
 import type { ReconcileRfc64PublicRootCatalogExactSetResultV1 } from
   './dkg-agent-rfc64-catalog-upsert.js';
-import type { Rfc64PublicCatalogAutoPublishConfigV1 } from './dkg-agent-types.js';
 import {
   raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
@@ -64,20 +63,31 @@ export interface ReconcileRfc64PublicCatalogFromSwmInventoryResultV1
   readonly inventoryHeadObjectDigest: Digest32V1;
 }
 
-export interface ResolvedRfc64AcceptedPublicRootLaneV1 {
+interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
   readonly networkId: NetworkIdV1;
-  readonly accessPolicy: 0 | 1;
   readonly service: Rfc64PublicCatalogServiceV1;
-  readonly autoPublishConfig: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
+  readonly announcementPeers: readonly string[];
+  readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
 }
 
-type Rfc64AcceptedPublicRootLaneDecisionV1 =
+export type ResolvedRfc64CatalogAuthoringLaneV1 =
+  | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
+    readonly kind: 'public';
+    readonly workspaceVisibility: 'public-only';
+  }>
+  | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
+    readonly kind: 'private';
+    readonly workspaceVisibility: 'restricted-only';
+  }>;
+
+type Rfc64CatalogAuthoringLaneDecisionV1 =
   | Readonly<{ readonly status: 'inactive' }>
   | Readonly<{ readonly status: 'unavailable'; readonly error: Error }>
   | Readonly<{
     readonly status: 'active';
-    readonly lane: ResolvedRfc64AcceptedPublicRootLaneV1;
+    readonly lane: ResolvedRfc64CatalogAuthoringLaneV1;
   }>;
 
 class Rfc64StaleSwmInventorySnapshotErrorV1 extends Error {
@@ -85,6 +95,15 @@ class Rfc64StaleSwmInventorySnapshotErrorV1 extends Error {
     super('RFC-64 SWM inventory snapshot changed before catalog mutation');
     this.name = 'Rfc64StaleSwmInventorySnapshotErrorV1';
   }
+}
+
+export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(
+  lane: ResolvedRfc64CatalogAuthoringLaneV1,
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined,
+): boolean {
+  return lane.workspaceVisibility === 'public-only'
+    ? accessPolicy === 'public'
+    : accessPolicy === 'ownerOnly' || accessPolicy === 'allowList';
 }
 
 export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
@@ -96,18 +115,18 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     assertContextGraphIdV1(params.contextGraphId, 'SWM catalog reconcile contextGraphId');
     assertCanonicalEvmAddress(params.authorAddress, 'SWM catalog reconcile authorAddress');
     throwIfAbortedV1(params.signal);
-    const lane = this.resolveRfc64AcceptedPublicRootLaneV1(params.contextGraphId, null);
+    const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
     if (lane === null) return null;
     return this.reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(lane, params);
   }
 
-  /** Canonical selected public-root admission shared by inventory and projection. */
-  resolveRfc64AcceptedPublicRootLaneV1(
+  /** Canonical selected-CG admission shared by inventory and projection. */
+  resolveRfc64CatalogAuthoringLaneV1(
     this: DKGAgent,
     contextGraphId: string,
     subGraphName: string | null | undefined,
-  ): ResolvedRfc64AcceptedPublicRootLaneV1 | null {
-    const decision = this.resolveRfc64AcceptedPublicRootLaneDecisionV1(
+  ): ResolvedRfc64CatalogAuthoringLaneV1 | null {
+    const decision = this.resolveRfc64CatalogAuthoringLaneDecisionV1(
       contextGraphId,
       subGraphName,
     );
@@ -190,7 +209,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
 
   private async reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(
     this: DKGAgent,
-    lane: ResolvedRfc64AcceptedPublicRootLaneV1,
+    lane: ResolvedRfc64CatalogAuthoringLaneV1,
     params: ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
   ): Promise<ReconcileRfc64PublicCatalogFromSwmInventoryResultV1 | null> {
     throwIfAbortedV1(params.signal);
@@ -225,7 +244,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
           params.contextGraphId,
           params.authorAddress,
-          lane.accessPolicy,
+          lane,
           row,
           params.signal,
         ),
@@ -245,12 +264,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           ),
           assets: prepared.assets,
           deployment,
-          peers: lane.autoPublishConfig.peers,
-          catalogIssuerDelegationEffectiveAt:
-            lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
-            ?? ('0' as TimestampMsV1),
-          catalogIssuerDelegationExpiresAt:
-            lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
+          peers: lane.announcementPeers,
+          catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
+          catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
           commitAppliedHeadIfInventoryCurrent: (commit) => (
             rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
               inventoryScopeKey,
@@ -281,32 +297,36 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }
   }
 
-  private resolveRfc64AcceptedPublicRootLaneDecisionV1(
+  private resolveRfc64CatalogAuthoringLaneDecisionV1(
     this: DKGAgent,
     contextGraphId: string,
     subGraphName: string | null | undefined,
-  ): Rfc64AcceptedPublicRootLaneDecisionV1 {
+  ): Rfc64CatalogAuthoringLaneDecisionV1 {
     const rollout = this.config.rfc64CatalogRollout;
     if (!resolveRfc64CatalogAuthorityDecisionV1(
       rollout,
       contextGraphId,
     ).authoringAllowed) return Object.freeze({ status: 'inactive' });
-    const policy = this.config.rfc64PublicCatalogAutoPublishPolicy;
+    const controls = this.config.rfc64CatalogAutoPublishControls;
+    const selectedCatalog = controls?.selectedCatalog;
+    const publicCatalog = controls?.publicCatalog;
+    const selectedByCatalog = selectedCatalog?.selectedContextGraphs.includes(contextGraphId)
+      ?? false;
+    const selectedByPublic = publicCatalog !== undefined && (
+      publicCatalog.mode === 'all-accepted-public'
+      || publicCatalog.selectedContextGraphs.includes(contextGraphId)
+    );
     if (
-      policy === undefined
+      (!selectedByCatalog && !selectedByPublic)
       || (subGraphName !== undefined && subGraphName !== null)
-      || (
-        policy.mode !== 'all-accepted-public'
-        && !policy.selectedContextGraphs.includes(contextGraphId)
-      )
     ) return Object.freeze({ status: 'inactive' });
-    assertContextGraphIdV1(contextGraphId, 'RFC-64 public-root contextGraphId');
+    assertContextGraphIdV1(contextGraphId, 'RFC-64 catalog authoring contextGraphId');
     const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.chain.chainId) as NetworkIdV1;
     if (networkId === 'none') {
       return Object.freeze({
         status: 'unavailable',
-        error: new Error('RFC-64 public-root activation requires a trusted deployment network'),
+        error: new Error('RFC-64 catalog authoring requires a trusted deployment network'),
       });
     }
     const service = this.rfc64PublicCatalogServiceV1;
@@ -321,49 +341,72 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       return Object.freeze({
         status: 'unavailable',
         error: new Error(
-          'RFC-64 public-root activation requires an independently accepted current public policy',
+          'RFC-64 catalog authoring requires an independently accepted current policy',
         ),
       });
     }
-    let autoPublishConfig = policy.config;
-    if (acceptedPolicy.policy.accessPolicy === 1) {
-      const acceptedPrivate = this.config.rfc64CatalogBootstrap?.acceptedPolicies.find(
-        ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
-      );
-      const completeProviders = acceptedPrivate?.completeSwmProviders;
-      if (completeProviders === undefined || completeProviders.length === 0) {
+    if (acceptedPolicy.policy.accessPolicy === 1 && !selectedByCatalog) {
+      // Compatibility and legacy public controls are incapable of selecting a
+      // private CG, even when its accepted policy is present in the union.
+      return Object.freeze({ status: 'inactive' });
+    }
+    const selectedAccepted = this.config.rfc64CatalogBootstrap?.acceptedPolicies.find(
+      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
+    );
+    const selectedCompleteProviders = selectedAccepted?.completeSwmProviders;
+    let announcementPeers: readonly string[];
+    let delegationConfig: Readonly<{
+      readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+      readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+    }>;
+    if (selectedByCatalog) {
+      if (selectedCompleteProviders === undefined || selectedCompleteProviders.length === 0) {
         return Object.freeze({
           status: 'unavailable',
           error: new Error(
-            'RFC-64 private root authoring requires graph-complete provider authority',
+            'RFC-64 selected-CG authoring requires graph-complete provider authority',
           ),
         });
       }
-      // Private V2 fan-out is never widened by the global public hint list.
-      // Its exact policy-bound complete-provider set is the only availability
-      // destination for this selected graph generation.
-      autoPublishConfig = Object.freeze({
-        ...policy.config,
-        peers: Object.freeze([...completeProviders]),
-      });
+      // Unified selected-CG authoring always uses the policy-bound complete
+      // provider set. It never inherits a global public hint list.
+      announcementPeers = selectedCompleteProviders;
+      delegationConfig = selectedCatalog!.config;
+    } else {
+      announcementPeers = publicCatalog!.config.peers;
+      delegationConfig = publicCatalog!.config;
     }
+    const commonLane = Object.freeze({
+      networkId,
+      service,
+      announcementPeers,
+      catalogIssuerDelegationEffectiveAt:
+        delegationConfig.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
+      catalogIssuerDelegationExpiresAt: delegationConfig.catalogIssuerDelegationExpiresAt,
+      scopeBase: Object.freeze({
+        networkId,
+        contextGraphId,
+        governanceChainId: acceptedPolicy.policy.governanceChainId,
+        governanceContractAddress: acceptedPolicy.policy.governanceContractAddress,
+        ownershipTransitionDigest: acceptedPolicy.policy.ownershipTransitionDigest,
+        subGraphName: null,
+        era: acceptedPolicy.policy.era,
+      }),
+    });
+    const lane: ResolvedRfc64CatalogAuthoringLaneV1 = acceptedPolicy.policy.accessPolicy === 0
+      ? Object.freeze({
+        ...commonLane,
+        kind: 'public',
+        workspaceVisibility: 'public-only',
+      })
+      : Object.freeze({
+        ...commonLane,
+        kind: 'private',
+        workspaceVisibility: 'restricted-only',
+      });
     return Object.freeze({
       status: 'active',
-      lane: Object.freeze({
-        networkId,
-        accessPolicy: acceptedPolicy.policy.accessPolicy,
-        service,
-        autoPublishConfig,
-        scopeBase: Object.freeze({
-          networkId,
-          contextGraphId,
-          governanceChainId: acceptedPolicy.policy.governanceChainId,
-          governanceContractAddress: acceptedPolicy.policy.governanceContractAddress,
-          ownershipTransitionDigest: acceptedPolicy.policy.ownershipTransitionDigest,
-          subGraphName: null,
-          era: acceptedPolicy.policy.era,
-        }),
-      }),
+      lane,
     });
   }
 
@@ -371,7 +414,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: ContextGraphIdV1,
     authorAddress: EvmAddressV1,
-    accessPolicy: 0 | 1,
+    lane: ResolvedRfc64CatalogAuthoringLaneV1,
     row: Readonly<SwmAuthorInventoryRowV1>,
     signal?: AbortSignal,
   ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
@@ -415,11 +458,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       || head.assertionVersion !== row.assertionVersion
       || head.publicTripleCount !== Number(row.publicTripleCount)
       || head.privateTripleCount !== Number(row.privateTripleCount)
-      || (
-        accessPolicy === 0
-          ? head.accessPolicy !== 'public'
-          : head.accessPolicy === 'public'
-      )
+      || !rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)
     ) {
       throw new Error(`durable SWM head differs from signed inventory row ${row.kaUal}`);
     }

@@ -114,7 +114,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     const repairs = partition.track2Policies.flatMap(
       ({ policyEnvelope }): MutableAuthorRepairStatusV1[] => {
         const contextGraphId = policyEnvelope.payload.contextGraphId as ContextGraphIdV1;
-        if (this.resolveRfc64AcceptedPublicRootLaneV1(contextGraphId, null) === null) {
+        if (this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null) === null) {
           return [];
         }
         return localAuthors.flatMap((authorAddress) => {
@@ -188,7 +188,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     // author seal and local signing capability. Startup discovery remains
     // restricted to registered local authors; live requests do not repeat a
     // registry check that can lag custodial author activation.
-    if (this.resolveRfc64AcceptedPublicRootLaneV1(params.contextGraphId, null) === null) {
+    if (this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null) === null) {
       return false;
     }
 

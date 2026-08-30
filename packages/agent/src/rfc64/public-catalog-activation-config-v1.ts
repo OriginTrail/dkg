@@ -11,12 +11,14 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import type {
+  Rfc64CatalogAutoPublishConfigV1,
   Rfc64CatalogBootstrapConfigV1,
   Rfc64PublicCatalogAutoPublishConfigV1,
   Rfc64PublicCatalogBootstrapConfigV1,
 } from '../dkg-agent-types.js';
 import {
   snapshotRfc64CatalogBootstrapConfigV1,
+  snapshotRfc64CatalogAutoPublishConfigV1,
   snapshotRfc64CatalogDeploymentProfileV1,
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
@@ -99,6 +101,7 @@ function assertRfc64CatalogActivationConfigV1(
  * DKGAgent runtime (which owns process-global scheduler observability).
  */
 export {
+  snapshotRfc64CatalogAutoPublishConfigV1,
   snapshotRfc64CatalogBootstrapConfigV1,
   snapshotRfc64CatalogDeploymentProfileV1,
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
@@ -122,7 +125,7 @@ export interface Rfc64CatalogActivationConfigV1 {
   readonly deploymentProfile?: CatalogSealDeploymentProfileV1;
   readonly accessPolicyAuthority?: Rfc64CatalogActivationAccessPolicyAuthorityV1;
   /** Ordinary selected-CG SWM authoring. Private fan-out is narrowed to complete providers. */
-  readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
+  readonly autoPublish?: Rfc64CatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64CatalogBootstrapConfigV1;
   readonly rollout?: Rfc64CatalogRolloutConfigV1;
 }
@@ -137,7 +140,7 @@ export interface ResolvedRfc64CatalogActivationConfigV1 {
     readonly localAgentAddress: EvmAddressV1;
     readonly peerAgentBindings: readonly Readonly<Rfc64CatalogPeerAgentBindingV1>[];
   }>;
-  readonly autoPublish?: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
+  readonly autoPublish?: Readonly<Rfc64CatalogAutoPublishConfigV1>;
   readonly bootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
   readonly rollout: ResolvedRfc64CatalogRolloutConfigV1;
 }
@@ -151,6 +154,11 @@ export interface ResolvedRfc64CatalogActivationsV1 {
   readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
   /** Compatibility projection used by the existing public status/producer path. */
   readonly publicCatalog: ResolvedRfc64PublicCatalogActivationConfigV1;
+  /** Exact unified-selection authoring scope before compatibility manifests are unioned. */
+  readonly selectedCatalogAutoPublish?: Readonly<{
+    readonly config: Readonly<Rfc64CatalogAutoPublishConfigV1>;
+    readonly selectedContextGraphs: readonly string[];
+  }>;
 }
 
 /**
@@ -188,12 +196,16 @@ export type ResolvedRfc64PublicCatalogAutoPublishPolicyV1 =
     mode: 'selected-public';
     config: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
     selectedContextGraphs: readonly string[];
-  }>
-  | Readonly<{
-    mode: 'selected-catalog';
-    config: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
-    selectedContextGraphs: readonly string[];
   }>;
+
+/** Independent authoring controls; public compatibility can never select private CGs. */
+export interface ResolvedRfc64CatalogAutoPublishControlsV1 {
+  readonly selectedCatalog?: Readonly<{
+    readonly config: Readonly<Rfc64CatalogAutoPublishConfigV1>;
+    readonly selectedContextGraphs: readonly string[];
+  }>;
+  readonly publicCatalog?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+}
 
 export interface Rfc64PublicCatalogControlInputsV1 {
   readonly activation?: ResolvedRfc64PublicCatalogActivationConfigV1;
@@ -430,7 +442,7 @@ export function resolveRfc64CatalogActivationConfigV1(
   const accessPolicyAuthority = snapshotRfc64CatalogActivationAccessPolicyAuthorityV1(
     activation.accessPolicyAuthority,
   );
-  const autoPublish = snapshotRfc64PublicCatalogAutoPublishConfigV1(
+  const autoPublish = snapshotRfc64CatalogAutoPublishConfigV1(
     activation.autoPublish,
   );
   validatePrivateActivationAuthorityV1(
@@ -535,8 +547,14 @@ export function resolveRfc64CatalogActivationsV1(
     input.publicCatalog,
     chainIdentity,
   );
+  const selectedCatalogAutoPublish = catalog.autoPublish === undefined
+    ? undefined
+    : Object.freeze({
+      config: catalog.autoPublish,
+      selectedContextGraphs: catalog.selectedContextGraphs,
+    });
   if (!catalog.enabled && !publicCatalog.enabled) {
-    return Object.freeze({ catalog, publicCatalog });
+    return Object.freeze({ catalog, publicCatalog, selectedCatalogAutoPublish });
   }
 
   const byGraph = new Map<string, Rfc64CatalogBootstrapConfigV1['acceptedPolicies'][number]>();
@@ -564,10 +582,6 @@ export function resolveRfc64CatalogActivationsV1(
   const deploymentProfile = mergeDeploymentProfilesV1(
     catalog.deploymentProfile,
     publicCatalog.deploymentProfile,
-  );
-  const autoPublish = mergeAutoPublishConfigsV1(
-    catalog.autoPublish,
-    publicCatalog.autoPublish,
   );
   const retryIntervals = [
     catalog.bootstrap?.retryIntervalMs,
@@ -610,11 +624,11 @@ export function resolveRfc64CatalogActivationsV1(
     selectedPrivateContextGraphs: Object.freeze(selectedPrivateContextGraphs),
     deploymentProfile,
     accessPolicyAuthority: catalog.accessPolicyAuthority,
-    autoPublish,
+    autoPublish: catalog.autoPublish,
     bootstrap: mergedBootstrap,
     rollout,
   });
-  return Object.freeze({ catalog: mergedCatalog, publicCatalog });
+  return Object.freeze({ catalog: mergedCatalog, publicCatalog, selectedCatalogAutoPublish });
 }
 
 function disabledRfc64CatalogActivationV1(): ResolvedRfc64CatalogActivationConfigV1 {
@@ -761,16 +775,6 @@ function mergeDeploymentProfilesV1(
 ): Readonly<CatalogSealDeploymentProfileV1> | undefined {
   if (left !== undefined && right !== undefined && JSON.stringify(left) !== JSON.stringify(right)) {
     throw new TypeError('rfc64Catalog and rfc64PublicCatalog deployment profiles conflict');
-  }
-  return left ?? right;
-}
-
-function mergeAutoPublishConfigsV1(
-  left: Readonly<Rfc64PublicCatalogAutoPublishConfigV1> | undefined,
-  right: Readonly<Rfc64PublicCatalogAutoPublishConfigV1> | undefined,
-): Readonly<Rfc64PublicCatalogAutoPublishConfigV1> | undefined {
-  if (left !== undefined && right !== undefined && JSON.stringify(left) !== JSON.stringify(right)) {
-    throw new TypeError('rfc64Catalog and rfc64PublicCatalog auto-publish controls conflict');
   }
   return left ?? right;
 }

@@ -281,25 +281,20 @@ describe('RFC-64 private catalog activation', () => {
     expect(Object.isFrozen(resolved.bootstrap?.acceptedPolicies[0]?.rosterEnvelope)).toBe(true);
   });
 
-  it('snapshots selected-catalog authoring and rejects conflicting compatibility controls', () => {
-    const peers = ['12D3KooAvailabilityHint'];
+  it('snapshots policy-neutral selected-catalog authoring independently from public controls', () => {
     const catalog = {
       ...privateActivation(),
       autoPublish: {
-        peers,
         catalogIssuerDelegationExpiresAt: '1893456000000',
       },
     } as const;
     const resolved = resolveRfc64CatalogActivationConfigV1(catalog, chainIdentity);
-    peers.push('12D3KooLateMutation');
 
     expect(resolved.autoPublish).toEqual({
-      peers: ['12D3KooAvailabilityHint'],
       catalogIssuerDelegationEffectiveAt: '0',
       catalogIssuerDelegationExpiresAt: '1893456000000',
     });
     expect(Object.isFrozen(resolved.autoPublish)).toBe(true);
-    expect(Object.isFrozen(resolved.autoPublish?.peers)).toBe(true);
 
     const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
     const publicBootstrap = {
@@ -309,20 +304,17 @@ describe('RFC-64 private catalog activation', () => {
     expect(resolveRfc64CatalogActivationsV1({
       catalog: resolved,
       publicCatalog: {
-        autoPublish: resolved.autoPublish,
-        bootstrap: publicBootstrap,
-      },
-    }, chainIdentity).catalog.autoPublish).toEqual(resolved.autoPublish);
-    expect(() => resolveRfc64CatalogActivationsV1({
-      catalog: resolved,
-      publicCatalog: {
         autoPublish: {
-          peers: ['12D3KooConflictingHint'],
+          peers: ['12D3KooPublicHint'],
           catalogIssuerDelegationExpiresAt: '1893456000000',
         },
         bootstrap: publicBootstrap,
       },
-    }, chainIdentity)).toThrow(/auto-publish controls conflict/u);
+    }, chainIdentity)).toMatchObject({
+      catalog: { autoPublish: resolved.autoPublish },
+      publicCatalog: { autoPublish: { peers: ['12D3KooPublicHint'] } },
+      selectedCatalogAutoPublish: { selectedContextGraphs: [PRIVATE_CG] },
+    });
   });
 
   it('resolves restart-stable per-CG rollout modes without changing omitted compatibility', () => {

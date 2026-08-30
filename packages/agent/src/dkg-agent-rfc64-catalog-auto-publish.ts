@@ -41,6 +41,8 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from
+  './dkg-agent-rfc64-swm-catalog-projection.js';
 import type {
   Rfc64CatalogSuccessorAssetInputV1,
 } from './dkg-agent-rfc64-catalog.js';
@@ -318,7 +320,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
     let kaUal: string | null = null;
     try {
-      const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
+      const lane = this.resolveRfc64CatalogAuthoringLaneV1(
         params.contextGraphId,
         params.subGraphName,
       );
@@ -397,11 +399,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       // Public catalogs never reveal restricted individual shares. A selected
       // private CG instead carries the same public projection only through its
       // roster-authenticated V2 catalog transport.
-      if (
-        lane.accessPolicy === 0
-          ? head.accessPolicy !== 'public'
-          : head.accessPolicy === 'public'
-      ) {
+      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)) {
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
           shadowResult('dormant', 'upsert', 0, null, null),
           params.contextGraphId,
@@ -482,7 +480,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
     let kaUal: string | null = null;
     try {
-      const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
+      const lane = this.resolveRfc64CatalogAuthoringLaneV1(
         params.contextGraphId,
         params.subGraphName,
       );
@@ -553,12 +551,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: RecordRfc64PublicCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
-    const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
+    const lane = this.resolveRfc64CatalogAuthoringLaneV1(
       params.contextGraphId,
       params.subGraphName,
     );
     if (lane === null) return null;
-    if (lane.accessPolicy !== 0) return null;
+    if (lane.kind !== 'public') return null;
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
     // V1 deliberately catalogs public-only KA projections. Private-bearing
     // assets require the reserved cg-shared-v1 anchor/hash statements in the
@@ -586,12 +584,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       author: this.createRfc64CatalogAuthorSignerV1(seal.authorAddress),
       asset,
       deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-      peers: lane.autoPublishConfig.peers,
-      catalogIssuerDelegationEffectiveAt:
-        lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
-        ?? ('0' as TimestampMsV1),
-      catalogIssuerDelegationExpiresAt:
-        lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
+      peers: lane.announcementPeers,
+      catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     });
   }
 

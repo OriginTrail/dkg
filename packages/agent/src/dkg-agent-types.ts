@@ -63,8 +63,8 @@ import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
+  ResolvedRfc64CatalogAutoPublishControlsV1,
   ResolvedRfc64CatalogActivationConfigV1,
-  ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
   SyncAdmissionConfig,
@@ -1332,6 +1332,15 @@ export interface Rfc64PublicCatalogAutoPublishConfigV1 {
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
 }
 
+/**
+ * Policy-neutral selected-CG authoring controls. Announcement destinations
+ * are deliberately absent: the accepted CG policy owns those per graph.
+ */
+export interface Rfc64CatalogAutoPublishConfigV1 {
+  readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}
+
 export interface Rfc64PublicCatalogBootstrapScopeV1 {
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: ContextGraphIdV1;
@@ -1902,6 +1911,6 @@ export type ResolvedDKGAgentConfig =
       ResolvedRfc64CatalogActivationConfigV1,
       'enabled' | 'selectedContextGraphs' | 'rollout'
     >;
-    rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+    rfc64CatalogAutoPublishControls?: ResolvedRfc64CatalogAutoPublishControlsV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

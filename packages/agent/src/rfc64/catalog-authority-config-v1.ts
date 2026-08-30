@@ -16,6 +16,7 @@ import {
 import { ethers } from 'ethers';
 
 import type {
+  Rfc64CatalogAutoPublishConfigV1,
   Rfc64CatalogBootstrapConfigV1,
   Rfc64CatalogBootstrapPolicyV1,
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
@@ -340,6 +341,48 @@ export function snapshotRfc64PublicCatalogAutoPublishConfigV1(
   });
 }
 
+/** Detach policy-neutral selected-CG authoring controls at create time. */
+export function snapshotRfc64CatalogAutoPublishConfigV1(
+  input: Rfc64CatalogAutoPublishConfigV1 | undefined,
+): Readonly<Rfc64CatalogAutoPublishConfigV1> | undefined {
+  if (input === undefined) return undefined;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('rfc64Catalog.autoPublish must be a plain object');
+  }
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('rfc64Catalog.autoPublish must be a plain object');
+  }
+  const keys = Object.keys(input).sort();
+  const allowed = new Set([
+    'catalogIssuerDelegationEffectiveAt',
+    'catalogIssuerDelegationExpiresAt',
+  ]);
+  if (
+    keys.some((key) => !allowed.has(key))
+    || !keys.includes('catalogIssuerDelegationExpiresAt')
+  ) {
+    throw new TypeError('rfc64Catalog.autoPublish has unknown or missing fields');
+  }
+  const effectiveAt = snapshotTimestamp(
+    input.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
+    'catalogIssuerDelegationEffectiveAt',
+    'rfc64Catalog.autoPublish',
+  );
+  const expiresAt = snapshotTimestamp(
+    input.catalogIssuerDelegationExpiresAt,
+    'catalogIssuerDelegationExpiresAt',
+    'rfc64Catalog.autoPublish',
+  );
+  if (BigInt(expiresAt) <= BigInt(effectiveAt)) {
+    throw new TypeError('rfc64Catalog.autoPublish delegation expiry must be after its effective time');
+  }
+  return Object.freeze({
+    catalogIssuerDelegationEffectiveAt: effectiveAt,
+    catalogIssuerDelegationExpiresAt: expiresAt,
+  });
+}
+
 /** Detach and validate the explicit public cold-start manifest. */
 export function snapshotRfc64PublicCatalogBootstrapConfigV1(
   input: Rfc64PublicCatalogBootstrapConfigV1 | undefined,
@@ -447,12 +490,16 @@ export function snapshotRfc64PublicCatalogBootstrapConfigV1(
   });
 }
 
-function snapshotTimestamp(value: unknown, label: string): TimestampMsV1 {
+function snapshotTimestamp(
+  value: unknown,
+  label: string,
+  rootLabel = 'rfc64PublicCatalogAutoPublish',
+): TimestampMsV1 {
   if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/u.test(value)) {
-    throw new TypeError(`rfc64PublicCatalogAutoPublish.${label} must be a canonical timestamp`);
+    throw new TypeError(`${rootLabel}.${label} must be a canonical timestamp`);
   }
   if (BigInt(value) > 18_446_744_073_709_551_615n) {
-    throw new TypeError(`rfc64PublicCatalogAutoPublish.${label} exceeds uint64`);
+    throw new TypeError(`${rootLabel}.${label} exceeds uint64`);
   }
   return value as TimestampMsV1;
 }
