@@ -10,7 +10,7 @@ function bar(log, label) {
  * @param {string} options.expectedNetworkId
  * @param {string} options.runId Fully resolved by the entry point.
  * @param {(message: string) => void} [options.log]
- * @returns {Promise<{exitCode: number, reason: string, resolvedCgId?: string | null, onChainId?: string | null}>}
+ * @returns {Promise<number>} Process exit code for the executable entry point.
  */
 export async function runPreflight({
   apiCall,
@@ -30,20 +30,20 @@ export async function runPreflight({
   const status = await apiCall('GET', '/api/status');
   if (!status.ok) {
     log(`status failed: HTTP ${status.status}`);
-    return { exitCode: 1, reason: 'status_failed' };
+    return 1;
   }
   const daemon = status.json;
   log(`name=${daemon.name} version=${daemon.version} role=${daemon.nodeRole} network=${daemon.networkName} identity=${daemon.identityId} (has=${daemon.hasIdentity}) peers=${daemon.connectedPeers}`);
   if (daemon.networkId !== expectedNetworkId) {
     log(`WARN: networkId=${daemon.networkId} expected ${expectedNetworkId} (DKG V10 Testnet). Aborting.`);
-    return { exitCode: 2, reason: 'network_mismatch' };
+    return 2;
   }
 
   bar(log, '2. Wallets');
   const wallets = await apiCall('GET', '/api/wallets/balances');
   if (!wallets.ok) {
     log(`wallets failed: HTTP ${wallets.status}`);
-    return { exitCode: 1, reason: 'wallets_failed' };
+    return 1;
   }
   for (const wallet of wallets.json.balances) {
     log(`  ${wallet.address}  ETH=${wallet.eth}  ${wallet.symbol}=${wallet.trac}`);
@@ -54,7 +54,7 @@ export async function runPreflight({
   log(`  RPC: ${wallets.json.rpcUrl}  chain=${wallets.json.chainId}`);
   if (tracTotal < 50) {
     log('ERROR: total TRAC < 50; cannot proceed. Top up the operational wallets.');
-    return { exitCode: 2, reason: 'insufficient_trac' };
+    return 2;
   }
 
   bar(log, '3. List existing context graphs');
@@ -90,12 +90,12 @@ export async function runPreflight({
     });
     if (!create.ok) {
       log(`create failed: HTTP ${create.status}: ${JSON.stringify(create.json).slice(0, 500)}`);
-      return { exitCode: 1, reason: 'create_failed' };
+      return 1;
     }
     if (create.json.registered === false) {
       log(`CG created LOCALLY only — on-chain register failed: ${create.json.registerError}`);
       log('Cannot publish without on-chain CG. Investigate before continuing.');
-      return { exitCode: 2, reason: 'registration_failed' };
+      return 2;
     }
     resolvedCgId = create.json.created;
     onChainId = create.json.onChainId;
@@ -113,10 +113,5 @@ export async function runPreflight({
   log('Next step:');
   log(`  CG_ID=${resolvedCgId} PHASE=calibrate node scripts/testnet-publish-stress/publish-loop.mjs`);
 
-  return {
-    exitCode: 0,
-    reason: 'ready',
-    resolvedCgId,
-    onChainId,
-  };
+  return 0;
 }

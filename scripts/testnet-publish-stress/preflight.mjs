@@ -50,9 +50,9 @@ async function apiCall(method, path, body) {
   return { ok: res.ok, status: res.status, json };
 }
 
-const outcome = await runPreflight({
+const exitCode = await runPreflight({
   apiCall,
   expectedNetworkId: TESTNET_NETWORK_ID,
   runId: RUN_ID,
 });
-process.exitCode = outcome.exitCode;
+process.exitCode = exitCode;

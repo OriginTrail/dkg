@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +15,80 @@ const REPO_ROOT = path.resolve(HERE, '../../..');
 async function networkIdFrom(relativePath) {
   const contents = await readFile(path.join(REPO_ROOT, relativePath), 'utf8');
   return JSON.parse(contents).networkId;
+}
+
+async function runEntrypointScenario(networkId) {
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    assert.equal(request.headers.authorization, 'Bearer test-token');
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/api/status') {
+      response.end(JSON.stringify({
+        name: 'test',
+        version: 'test',
+        nodeRole: 'edge',
+        networkName: 'testnet',
+        networkId,
+        identityId: 'test',
+        hasIdentity: true,
+        connectedPeers: 0,
+      }));
+      return;
+    }
+    if (request.url === '/api/wallets/balances') {
+      response.end(JSON.stringify({
+        balances: [{ address: '0x1', eth: '1', trac: '50', symbol: 'TRAC' }],
+        symbol: 'TRAC',
+        rpcUrl: 'http://unused.invalid',
+        chainId: 84532,
+      }));
+      return;
+    }
+    if (request.url === '/api/context-graph/list') {
+      response.end(JSON.stringify({
+        contextGraphs: [{
+          id: 'did:dkg:base:84532/test-agent/miles-publish-stress-test',
+          onChainId: '0x01',
+        }],
+      }));
+      return;
+    }
+    response.statusCode = 500;
+    response.end(JSON.stringify({ error: 'unexpected request' }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const tempDir = await mkdtemp(path.join(tmpdir(), 'dkg-preflight-test-'));
+  const tokenFile = path.join(tempDir, 'auth.token');
+  await writeFile(tokenFile, '# test\ntest-token\n');
+  const child = spawn(
+    process.execPath,
+    [path.join(REPO_ROOT, 'scripts/testnet-publish-stress/preflight.mjs')],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        DKG_HOST: `http://127.0.0.1:${address.port}`,
+        DKG_TOKEN_FILE: tokenFile,
+        STRESS_RUN_ID: 'test',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  try {
+    const [exitCode] = await once(child, 'close');
+    return { exitCode, requests, stderr };
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 async function runNetworkScenario(networkId, expectedNetworkId) {
@@ -73,14 +151,9 @@ async function runNetworkScenario(networkId, expectedNetworkId) {
 
 test('publish-stress preflight follows the canonical testnet network ID', async () => {
   const canonicalTestnetId = await networkIdFrom('network/testnet.json');
-  const result = await runNetworkScenario(canonicalTestnetId, canonicalTestnetId);
+  const result = await runEntrypointScenario(canonicalTestnetId);
 
-  assert.deepEqual(result.outcome, {
-    exitCode: 0,
-    reason: 'ready',
-    resolvedCgId: 'did:dkg:base:84532/test-agent/miles-publish-stress-test',
-    onChainId: '0x01',
-  });
+  assert.equal(result.exitCode, 0);
   assert.deepEqual(result.requests, [
     'GET /api/status',
     'GET /api/wallets/balances',
@@ -90,10 +163,9 @@ test('publish-stress preflight follows the canonical testnet network ID', async 
 
 test('publish-stress preflight rejects mainnet before balances or writes', async () => {
   const mainnetId = await networkIdFrom('network/mainnet-base.json');
-  const canonicalTestnetId = await networkIdFrom('network/testnet.json');
-  const result = await runNetworkScenario(mainnetId, canonicalTestnetId);
+  const result = await runEntrypointScenario(mainnetId);
 
-  assert.deepEqual(result.outcome, { exitCode: 2, reason: 'network_mismatch' });
+  assert.equal(result.exitCode, 2);
   assert.deepEqual(result.requests, ['GET /api/status']);
   assert.match(result.stderr, /Aborting\./);
 });
@@ -102,7 +174,7 @@ test('publish-stress preflight rejects unrelated networks before balances or wri
   const canonicalTestnetId = await networkIdFrom('network/testnet.json');
   const result = await runNetworkScenario('unrelated-test-network', canonicalTestnetId);
 
-  assert.deepEqual(result.outcome, { exitCode: 2, reason: 'network_mismatch' });
+  assert.equal(result.outcome, 2);
   assert.deepEqual(result.requests, ['GET /api/status']);
   assert.match(result.stderr, /Aborting\./);
 });
