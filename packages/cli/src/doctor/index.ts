@@ -39,11 +39,7 @@ export const ALL_CHECK_IDS = [
 
 export type CheckId = (typeof ALL_CHECK_IDS)[number];
 
-/**
- * Subset orchestration for `dkg update`'s pre-flight per §4.7.7
- * invocation pattern #3. Only `install-layout` + `version-skew` run.
- */
-export const UPDATE_PREFLIGHT_CHECKS = ['install-layout', 'version-skew'] as const satisfies readonly CheckId[];
+export { UPDATE_PREFLIGHT_CHECKS } from './policy.js';
 
 export interface RunDoctorOptions {
   /** Which checks to run; defaults to all six. */

@@ -73,6 +73,8 @@ import {
   compareSemver,
   isValidSemver,
   resolveLatestNpmVersion,
+  type NpmRegistryFailure,
+  type NpmVersionNoTargetReason,
 } from '../update/npm-registry.js';
 export {
   compareSemver,
@@ -85,7 +87,11 @@ export {
   resolveNpmDistTag,
   type ExplicitNpmUpdateTargetDecision,
   type NpmDistTagsResult,
+  type NpmRegistryDeps,
+  type NpmRegistryFailure,
+  type NpmRegistryFetch,
   type NpmVersionResult,
+  type NpmVersionNoTargetReason,
 } from '../update/npm-registry.js';
 
 const execAsync = promisify(exec);
@@ -306,6 +312,41 @@ export function getCurrentCliVersion(): string {
   }
 }
 
+function logNpmRegistryFailure(
+  log: (message: string) => void,
+  failure: NpmRegistryFailure,
+): void {
+  if (failure.kind === 'http-error') {
+    log(`Auto-update (npm): registry returned ${failure.status} for ${CLI_NPM_PACKAGE}`);
+    return;
+  }
+  if (failure.kind === 'invalid-response') {
+    log(`Auto-update (npm): registry returned malformed dist-tags for ${CLI_NPM_PACKAGE}`);
+    return;
+  }
+  log(`Auto-update (npm): registry check failed (${failure.message})`);
+}
+
+function logNpmNoTarget(
+  log: (message: string) => void,
+  reason: NpmVersionNoTargetReason | undefined,
+): void {
+  if (!reason || reason.kind === 'no-valid-candidates') return;
+  if (reason.kind === 'missing-channel') {
+    log(`Auto-update (npm): channel "${reason.channel}" has no published version, skipping`);
+    return;
+  }
+  if (reason.kind === 'invalid-channel-version') {
+    log(`Auto-update (npm): channel "${reason.channel}" → "${reason.version}" is not a valid semver, skipping`);
+    return;
+  }
+  if (reason.kind === 'prerelease-channel') {
+    log(`Auto-update (npm): channel "${reason.channel}" points at a pre-release and allowPrerelease=false, skipping`);
+    return;
+  }
+  log('Auto-update (npm): latest dist-tag is absent, invalid, or a pre-release while allowPrerelease=false, skipping');
+}
+
 export type NpmVersionStatus = {
   status: "available" | "up-to-date" | "error" | "no-target";
   version?: string;
@@ -332,9 +373,15 @@ export async function checkForNpmVersionUpdate(
     return { status: "error" };
   }
 
-  const result = await resolveLatestNpmVersion(log, allowPrerelease, channel);
+  const result = await resolveLatestNpmVersion(allowPrerelease, channel, {
+    fetch: _autoUpdateIo.fetch,
+  });
   if (result.version === null) {
-    if (result.error) return { status: "error" };
+    if (result.error) {
+      logNpmRegistryFailure(log, result.failure);
+      return { status: "error" };
+    }
+    logNpmNoTarget(log, result.reason);
     // A pinned channel with no acceptable target (tag missing / prerelease
     // rejected / non-semver) is NOT a clean "up-to-date" — surface it so a
     // misconfigured or unpublished channel (e.g. mainnet) is visible rather

@@ -45,7 +45,8 @@ import {
   decodeForcedExitCode,
 } from '../daemon.js';
 import { resolveExplicitNpmUpdateTarget } from '../update/npm-registry.js';
-import type { CheckId, RunDoctorOptions } from '../doctor/index.js';
+import { UPDATE_PREFLIGHT_CHECKS } from '../doctor/policy.js';
+import type { RunDoctorOptions } from '../doctor/index.js';
 import type { DoctorDeps, DoctorReport } from '../doctor/types.js';
 import {
   isLivenessProbeEnabled,
@@ -149,11 +150,6 @@ export type MaintenanceUpdateDoctorOps = {
   runDoctor: (deps: DoctorDeps, options?: RunDoctorOptions) => Promise<DoctorReport>;
 };
 
-const MAINTENANCE_UPDATE_PREFLIGHT_CHECKS = [
-  'install-layout',
-  'version-skew',
-] as const satisfies readonly CheckId[];
-
 async function loadMaintenanceUpdateDoctorOps(): Promise<MaintenanceUpdateDoctorOps> {
   const { createProductionDeps, runDoctor } = await import('../doctor/index.js');
   return {
@@ -170,7 +166,7 @@ export async function runDefaultUpdatePreflight(
     const ops = doctorOps ?? await loadMaintenanceUpdateDoctorOps();
     const preflightDeps = ops.createProductionDeps({ apiPort: config.apiPort ?? 9200 });
     const preflight = await ops.runDoctor(preflightDeps, {
-      checks: MAINTENANCE_UPDATE_PREFLIGHT_CHECKS,
+      checks: UPDATE_PREFLIGHT_CHECKS,
     });
     if (preflight.exitCode === 2) {
       const errors = preflight.findings.filter((finding) => finding.severity === 'error');
@@ -298,7 +294,7 @@ export async function runMaintenanceUpdateWorkflow(
     // An EXPLICIT target (version or dist-tag) must still honour the
     // stable-only policy.
     if (version) {
-      const gate = await deps.resolveExplicitNpmUpdateTarget(version, allowPre, log);
+      const gate = await deps.resolveExplicitNpmUpdateTarget(version, allowPre);
       if (gate.status !== 'allowed') {
         error(`[dkg update] Refusing to update: ${gate.reason}.`);
         return { exitCode: 1, stdout, stderr };

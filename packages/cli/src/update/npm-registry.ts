@@ -5,16 +5,34 @@ import {
 } from 'semver';
 
 import { CLI_NPM_PACKAGE } from '../config.js';
-import { _autoUpdateIo } from '../daemon/manifest.js';
+
+export type NpmRegistryFailure =
+  | { kind: 'http-error'; status: number }
+  | { kind: 'invalid-response' }
+  | { kind: 'transport-error'; message: string };
+
+export type NpmRegistryFetch = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<Pick<Response, 'ok' | 'status' | 'json'>>;
+
+export type NpmRegistryDeps = { fetch?: NpmRegistryFetch };
 
 export type NpmVersionResult =
   | { version: string; error?: false }
-  | { version: null; error: true }
-  | { version: null; error: false };
+  | { version: null; error: true; failure: NpmRegistryFailure }
+  | { version: null; error: false; reason?: NpmVersionNoTargetReason };
+
+export type NpmVersionNoTargetReason =
+  | { kind: 'missing-channel'; channel: string }
+  | { kind: 'invalid-channel-version'; channel: string; version: string }
+  | { kind: 'prerelease-channel'; channel: string; version: string }
+  | { kind: 'unacceptable-latest'; version: string | null }
+  | { kind: 'no-valid-candidates' };
 
 export type NpmDistTagsResult =
-  | { tags: Record<string, string>; error?: false }
-  | { tags: null; error: true };
+  | { status: 'ok'; tags: Record<string, string> }
+  | { status: 'error'; failure: NpmRegistryFailure };
 
 export function decodeNpmDistTags(value: unknown): Record<string, string> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -38,38 +56,43 @@ export function isPrerelease(value: string): boolean {
 export type ExplicitNpmUpdateTargetDecision =
   | { status: 'allowed'; version: string }
   | { status: 'rejected'; reason: string }
-  | { status: 'registry-error'; reason: string };
+  | { status: 'registry-error'; reason: string; failure: NpmRegistryFailure };
 
 /** Canonical npm-registry boundary shared by automatic and explicit updates. */
 export async function fetchNpmDistTags(
-  log: (message: string) => void,
+  deps: NpmRegistryDeps = {},
 ): Promise<NpmDistTagsResult> {
-  const { fetch } = _autoUpdateIo;
   const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
   try {
-    const response = await fetch(url, {
+    const response = await (deps.fetch ?? globalThis.fetch)(url, {
       headers: { Accept: 'application/vnd.npm.install-v1+json' },
       signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) {
-      log(`Auto-update (npm): registry returned ${response.status} for ${CLI_NPM_PACKAGE}`);
-      return { tags: null, error: true };
+      return { status: 'error', failure: { kind: 'http-error', status: response.status } };
     }
     const tags = decodeNpmDistTags(await response.json());
-    return tags ? { tags } : { tags: null, error: true };
+    return tags
+      ? { status: 'ok', tags }
+      : { status: 'error', failure: { kind: 'invalid-response' } };
   } catch (err: any) {
-    log(`Auto-update (npm): registry check failed (${err?.message ?? String(err)})`);
-    return { tags: null, error: true };
+    return {
+      status: 'error',
+      failure: { kind: 'transport-error', message: err?.message ?? String(err) },
+    };
   }
 }
 
 export async function resolveNpmDistTag(
   tag: string,
-  log: (message: string) => void,
-  deps: { fetchNpmDistTags?: typeof fetchNpmDistTags } = {},
+  deps: NpmRegistryDeps & {
+    fetchNpmDistTags?: () => Promise<NpmDistTagsResult>;
+  } = {},
 ): Promise<NpmVersionResult> {
-  const result = await (deps.fetchNpmDistTags ?? fetchNpmDistTags)(log);
-  if (result.error) return { version: null, error: true };
+  const result = await (deps.fetchNpmDistTags ?? (() => fetchNpmDistTags(deps)))();
+  if (result.status === 'error') {
+    return { version: null, error: true, failure: result.failure };
+  }
   const version = Object.hasOwn(result.tags, tag) ? result.tags[tag] : null;
   return typeof version === 'string' && isValidSemver(version)
     ? { version }
@@ -83,8 +106,9 @@ export async function resolveNpmDistTag(
 export async function resolveExplicitNpmUpdateTarget(
   target: string,
   allowPrerelease: boolean,
-  log: (message: string) => void,
-  deps: { resolveNpmDistTag?: typeof resolveNpmDistTag } = {},
+  deps: NpmRegistryDeps & {
+    resolveNpmDistTag?: typeof resolveNpmDistTag;
+  } = {},
 ): Promise<ExplicitNpmUpdateTargetDecision> {
   const normalizedTarget = target.trim().replace(/^v/, '');
   const exactVersion = validCanonicalSemver(normalizedTarget);
@@ -98,11 +122,14 @@ export async function resolveExplicitNpmUpdateTarget(
     return { status: 'allowed', version: normalizedTarget };
   }
 
-  const resolved = await (deps.resolveNpmDistTag ?? resolveNpmDistTag)(normalizedTarget, log);
+  const resolved = deps.resolveNpmDistTag
+    ? await deps.resolveNpmDistTag(normalizedTarget)
+    : await resolveNpmDistTag(normalizedTarget, deps);
   if (resolved.error) {
     return {
       status: 'registry-error',
       reason: `could not resolve dist-tag "${normalizedTarget}" against the npm registry — retry or pass an explicit version`,
+      failure: resolved.failure,
     };
   }
   if (!resolved.version || !isValidSemver(resolved.version)) {
@@ -122,48 +149,58 @@ export async function resolveExplicitNpmUpdateTarget(
 
 /** Select the version followed by automatic polling or an explicit channel pin. */
 export async function resolveLatestNpmVersion(
-  log: (message: string) => void,
   allowPrerelease = true,
   channel?: string,
+  deps: NpmRegistryDeps & {
+    fetchNpmDistTags?: () => Promise<NpmDistTagsResult>;
+  } = {},
 ): Promise<NpmVersionResult> {
-  const result = await fetchNpmDistTags(log);
-  if (result.error) return { version: null, error: true };
+  const result = await (deps.fetchNpmDistTags ?? (() => fetchNpmDistTags(deps)))();
+  if (result.status === 'error') {
+    return { version: null, error: true, failure: result.failure };
+  }
   const tags = result.tags;
 
-  try {
-    if (channel) {
-      const pinned = tags[channel] ?? null;
-      if (!pinned) {
-        log(`Auto-update (npm): channel "${channel}" has no published version, skipping`);
-        return { version: null, error: false };
-      }
-      if (!isValidSemver(pinned)) {
-        log(`Auto-update (npm): channel "${channel}" → "${pinned}" is not a valid semver, skipping`);
-        return { version: null, error: false };
-      }
-      if (!allowPrerelease && isPrerelease(pinned)) {
-        log(`Auto-update (npm): channel "${channel}" points at a pre-release and allowPrerelease=false, skipping`);
-        return { version: null, error: false };
-      }
-      return { version: pinned };
+  if (channel) {
+    const pinned = tags[channel] ?? null;
+    if (!pinned) {
+      return { version: null, error: false, reason: { kind: 'missing-channel', channel } };
     }
-
-    const stable = tags.latest ?? null;
-    if (!allowPrerelease) {
-      if (stable && isValidSemver(stable) && !isPrerelease(stable)) return { version: stable };
-      log('Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping');
-      return { version: null, error: false };
+    if (!isValidSemver(pinned)) {
+      return {
+        version: null,
+        error: false,
+        reason: { kind: 'invalid-channel-version', channel, version: pinned },
+      };
     }
-
-    const candidates = ([stable, tags.dev, tags.beta, tags.next].filter(
-      Boolean,
-    ) as string[]).filter(isValidSemver);
-    if (candidates.length === 0) return { version: null, error: false };
-    candidates.sort((a, b) => compareSemver(b, a));
-    return { version: candidates[0] };
-  } catch {
-    return { version: null, error: true };
+    if (!allowPrerelease && isPrerelease(pinned)) {
+      return {
+        version: null,
+        error: false,
+        reason: { kind: 'prerelease-channel', channel, version: pinned },
+      };
+    }
+    return { version: pinned };
   }
+
+  const stable = tags.latest ?? null;
+  if (!allowPrerelease) {
+    if (stable && isValidSemver(stable) && !isPrerelease(stable)) return { version: stable };
+    return {
+      version: null,
+      error: false,
+      reason: { kind: 'unacceptable-latest', version: stable },
+    };
+  }
+
+  const candidates = ([stable, tags.dev, tags.beta, tags.next].filter(
+    Boolean,
+  ) as string[]).filter(isValidSemver);
+  if (candidates.length === 0) {
+    return { version: null, error: false, reason: { kind: 'no-valid-candidates' } };
+  }
+  candidates.sort((a, b) => compareSemver(b, a));
+  return { version: candidates[0] };
 }
 
 export function compareSemver(a: string, b: string): number {

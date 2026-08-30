@@ -1299,7 +1299,8 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
       }),
     });
 
-    await expect(fetchNpmDistTags(() => undefined)).resolves.toEqual({
+    await expect(fetchNpmDistTags({ fetch: fetchImpl as any })).resolves.toEqual({
+      status: 'ok',
       tags: { beta: '9.0.0-beta.4' },
     });
   });
@@ -1311,9 +1312,9 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
       json: async () => ({ 'dist-tags': ['9.1.0'] }),
     });
 
-    await expect(fetchNpmDistTags(() => undefined)).resolves.toEqual({
-      tags: null,
-      error: true,
+    await expect(fetchNpmDistTags({ fetch: fetchImpl as any })).resolves.toEqual({
+      status: 'error',
+      failure: { kind: 'invalid-response' },
     });
   });
 
