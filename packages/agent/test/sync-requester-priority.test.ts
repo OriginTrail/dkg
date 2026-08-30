@@ -14,6 +14,7 @@ import {
 } from '../src/sync/backpressure.js';
 import { syncPriorityClass } from '../src/sync/policy.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
 
 const ctx = createOperationContext('sync');
 const noop = () => {};
@@ -177,27 +178,7 @@ describe('requester per-CG priority admission', () => {
 
   it('marks changelog admission pressure deferred without routing that graph to legacy', async () => {
     const admissions: string[] = [];
-    const emptyResult = {
-      insertedTriples: 0,
-      fetchedMetaTriples: 0,
-      fetchedDataTriples: 0,
-      insertedMetaTriples: 0,
-      insertedDataTriples: 0,
-      bytesReceived: 0,
-      resumedPhases: 0,
-      timedOutPhases: 0,
-      completedPhases: 0,
-      checkpointAdvances: 0,
-      emptyResponses: 0,
-      metaOnlyResponses: 0,
-      dataRejectedMissingMeta: 0,
-      rejectedKcs: 0,
-      failedPeers: 0,
-      failedPhases: 0,
-      deniedPhases: 0,
-      backoffWorthyFailures: 0,
-      deferredBackpressure: 0,
-    };
+    const emptyResult = createIncompleteDurableSyncResult();
     const agent = {
       config: { syncContextGraphPriorities: {} },
       getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
@@ -236,25 +217,8 @@ describe('requester per-CG priority admission', () => {
     const admissions: string[] = [];
     const changelogRuns: string[] = [];
     const emptyResult = {
-      insertedTriples: 0,
-      fetchedMetaTriples: 0,
-      fetchedDataTriples: 0,
-      insertedMetaTriples: 0,
-      insertedDataTriples: 0,
-      bytesReceived: 0,
-      resumedPhases: 0,
-      timedOutPhases: 0,
+      ...createIncompleteDurableSyncResult(),
       completedPhases: 1,
-      checkpointAdvances: 0,
-      emptyResponses: 0,
-      metaOnlyResponses: 0,
-      dataRejectedMissingMeta: 0,
-      rejectedKcs: 0,
-      failedPeers: 0,
-      failedPhases: 0,
-      deniedPhases: 0,
-      backoffWorthyFailures: 0,
-      deferredBackpressure: 0,
     };
     const agent = {
       config: { syncContextGraphPriorities: {} },

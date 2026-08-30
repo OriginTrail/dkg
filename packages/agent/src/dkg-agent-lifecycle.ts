@@ -34,7 +34,7 @@ import {
   decodeGossipEnvelope, type GossipEnvelopeMsg,
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
   Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
@@ -6593,11 +6593,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const legacyCgs: string[] = [];
     const work = [];
     for (const contextGraphId of contextGraphIds) {
-      // AGENTS is a continually growing phonebook graph. Changelog upserts are
-      // graph-atomic, so once the graph exceeds the frame cap every delta
-      // attempt transfers an oversized response before falling back anyway.
-      // Route it directly through the row-paged legacy lane.
-      if (contextGraphId === SYSTEM_CONTEXT_GRAPHS.AGENTS) {
+      // The agents phonebook already falls back to the legacy lane after an
+      // oversized graph-atomic changelog upsert. Divert it before that known
+      // failed transfer; this changes only lane selection, and deliberately
+      // retains the existing legacy merge semantics until the authenticated
+      // agent-record replay lane can make removals authoritative.
+      if (isAgentRegistryContextGraph(contextGraphId)) {
         legacyCgs.push(contextGraphId);
         continue;
       }
