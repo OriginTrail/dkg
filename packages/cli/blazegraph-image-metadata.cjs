@@ -7,9 +7,11 @@
  * CLI below (scripts/devnet.sh, scripts/devnet-blazegraph-native.sh,
  * scripts/ci/verify-blazegraph-image-contract.sh).
  *
- * Must stay dependency-free and buildless: shell callers run this file
- * straight from the repo checkout (or the packed tarball) with a bare `node`,
- * before any workspace build exists.
+ * TypeScript and workspace consumers import the declared public
+ * `@origintrail-official/dkg/blazegraph-runtime-contract` subpath, while shell
+ * callers run this file directly. It must therefore stay dependency-free and
+ * buildless so both the repo checkout and packed tarball work before any
+ * workspace build exists.
  */
 'use strict';
 

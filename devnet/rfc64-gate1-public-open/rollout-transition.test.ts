@@ -46,6 +46,8 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/rollout-transition';
+const AUTHOR_STORE_PROBE_GRAPH =
+  'did:dkg:context-graph:rfc64-rollout-author-store-probe';
 const children = new ChildProcessRegistry(20_000);
 const temporaryRoots: string[] = [];
 const STORE_BACKEND = parseRolloutStoreBackend(process.env[ROLLOUT_STORE_BACKEND_ENV]);
@@ -113,10 +115,29 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
       receiver: [receiverDataDir, inactiveDataDir, legacyDataDir],
     },
   });
-  const author = spawnAgent('author', authorDataDir, 'catalog');
-  const authorReady = await author.waitFor('ready');
+  let author = spawnAgent('author', authorDataDir, 'catalog');
+  let authorReady = await author.waitFor('ready');
   assertReady(authorReady, 'catalog', false);
   await acceptPolicy(author, 'author-policy');
+  const authorStoreProbe = output(await author.request(
+    'writeAuthorStoreProbe',
+    'author-store-probe',
+    'operation-completed',
+    { graphUri: AUTHOR_STORE_PROBE_GRAPH },
+  ));
+  assert.equal(authorStoreProbe.graphUri, AUTHOR_STORE_PROBE_GRAPH);
+  assert.equal(authorStoreProbe.tripleCount, PROJECTION_QUADS.length);
+  await author.stop('stop-author-store-probe');
+  await requireStoreFixture().assertGraphExact(
+    'author',
+    authorDataDir,
+    AUTHOR_STORE_PROBE_GRAPH,
+    PROJECTION_QUADS,
+  );
+  author = spawnAgent('author', authorDataDir, 'catalog');
+  authorReady = await author.waitFor('ready');
+  assertReady(authorReady, 'catalog', false);
+  await acceptPolicy(author, 'author-policy-after-store-probe');
 
   const genesis = output(await author.request(
     'publishGenesis',
