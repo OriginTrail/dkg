@@ -1290,6 +1290,34 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.status).toBe('error');
   });
 
+  it('normalizes only own string dist-tags at the registry gateway', async () => {
+    const { fetchNpmDistTags } = await import('../src/update/npm-registry.js');
+    fetchImpl = async () => ({
+      ok: true,
+      json: async () => ({
+        'dist-tags': { latest: 9_100_000, beta: '9.0.0-beta.4' },
+      }),
+    });
+
+    await expect(fetchNpmDistTags({ fetch: fetchImpl as any })).resolves.toEqual({
+      status: 'ok',
+      tags: { beta: '9.0.0-beta.4' },
+    });
+  });
+
+  it('rejects a malformed dist-tags container at the registry gateway', async () => {
+    const { fetchNpmDistTags } = await import('../src/update/npm-registry.js');
+    fetchImpl = async () => ({
+      ok: true,
+      json: async () => ({ 'dist-tags': ['9.1.0'] }),
+    });
+
+    await expect(fetchNpmDistTags({ fetch: fetchImpl as any })).resolves.toEqual({
+      status: 'error',
+      failure: { kind: 'invalid-response' },
+    });
+  });
+
   it('returns up-to-date when current version matches latest', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({
@@ -1333,6 +1361,16 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.channel).toBe('testnet');
   });
 
+  it.each(['constructor', '__proto__'])(
+    'channel pin reports no-target for inherited Object property %s',
+    async (channel) => {
+      const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+      fetchImpl = async () => makeRegistryResponse({ latest: '9.5.0' });
+      const result = await checkForNpmVersionUpdate(() => {}, true, channel);
+      expect(result).toEqual({ status: 'no-target', channel });
+    },
+  );
+
   it('channel pin reports no-target when allowPrerelease=false rejects a prerelease tag', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({ testnet: '9.6.0-rc.1' });
@@ -1375,11 +1413,60 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.version).toBe('10.0.0');
   });
 
+  it('preserves the exported legacy resolver arguments and stable-only result shape', async () => {
+    const { resolveLatestNpmVersion } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({
+      latest: '10.1.0-rc.1',
+      mainnet: '10.0.0',
+    });
+    const log = vi.fn();
+
+    await expect(resolveLatestNpmVersion(log, false, 'mainnet')).resolves.toEqual({
+      version: '10.0.0',
+    });
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('preserves the exported legacy resolver error shape and logging', async () => {
+    const { resolveLatestNpmVersion } = await import('../src/daemon.js');
+    fetchImpl = async () => ({ ok: false, status: 503 });
+    const log = vi.fn();
+
+    await expect(resolveLatestNpmVersion(log, false, 'mainnet')).resolves.toEqual({
+      version: null,
+      error: true,
+    });
+    expect(log).toHaveBeenCalledWith(
+      'Auto-update (npm): registry returned 503 for @origintrail-official/dkg',
+    );
+  });
+
   it('default path does NOT attempt an update to a non-semver latest', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({ latest: 'garbage' });
     const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('up-to-date'); // not 'available' on garbage
+  });
+
+  it('default path: a garbage `latest` must NOT mask a valid `beta` candidate', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({ latest: 'garbage', beta: '9.0.0-beta.4' });
+    const result = await checkForNpmVersionUpdate(() => {}, true);
+    // current is 9.0.0-beta.3 → the valid beta.4 must be selected, not dropped.
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.0.0-beta.4');
+  });
+
+  it('channel mainnet: a STABLE +build target is "available" over the current rc (not falsely up-to-date)', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    readFileImpl = async (p: any) => {
+      if (String(p).endsWith('.current-version')) return '10.0.0-rc.19';
+      throw new Error('ENOENT');
+    };
+    fetchImpl = async () => makeRegistryResponse({ mainnet: '10.0.0+mainnet-build.1' });
+    const result = await checkForNpmVersionUpdate(() => {}, false, 'mainnet');
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('10.0.0+mainnet-build.1');
   });
 });
 
@@ -1822,6 +1909,14 @@ describe('compareSemver', () => {
   it('ignores build metadata for ordering', () => {
     expect(compareSemver('1.2.3-alpha+1', '1.2.3-alpha+2')).toBe(0);
     expect(compareSemver('9.0.0+build.1', '9.0.0+build.2')).toBe(0);
+  });
+
+  it('treats HYPHENATED build metadata as stable, not prerelease (PR #1295 regression)', () => {
+    // The hyphen lives in +build metadata → 10.0.0+mainnet-build.1 is a STABLE
+    // 10.0.0 and must outrank 10.0.0-rc.19, not read as "not newer".
+    expect(compareSemver('10.0.0+mainnet-build.1', '10.0.0-rc.19')).toBeGreaterThan(0);
+    expect(compareSemver('10.0.0-rc.19', '10.0.0+mainnet-build.1')).toBeLessThan(0);
+    expect(compareSemver('10.0.0+mainnet-build.1', '10.0.0')).toBe(0);
   });
 
   it('handles dev suffix with numeric comparison', () => {
