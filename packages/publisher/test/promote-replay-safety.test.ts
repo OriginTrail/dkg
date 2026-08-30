@@ -8,7 +8,6 @@ import {
   classifyExactSwmGraphReplaceFailure,
   getPromoteReplaySafeErrorDiagnostic,
   isPromoteReplaySafeError,
-  unwrapPromoteReplaySafeError,
 } from '../src/promote-replay-safety.js';
 
 describe('promote replay safety', () => {
@@ -19,6 +18,7 @@ describe('promote replay safety', () => {
       outcome: 'indeterminate',
     });
 
+    expect(isPromoteReplaySafeError(replaceFailure)).toBe(false);
     const classified = classifyExactSwmGraphReplaceFailure(replaceFailure);
     expect(classified).toBe(replaceFailure);
     expect(isStoreOperationTimeoutError(classified)).toBe(true);
@@ -27,7 +27,6 @@ describe('promote replay safety', () => {
       name: 'PromoteReplaySafeError',
       code: 'PROMOTE_REPLAY_SAFE_FAILURE',
     });
-    expect(unwrapPromoteReplaySafeError(classified)).toBe(replaceFailure);
   });
 
   it.each([
@@ -41,7 +40,10 @@ describe('promote replay safety', () => {
       outcome,
     });
 
-    expect(classifyExactSwmGraphReplaceFailure(failure)).toBe(failure);
+    const classified = classifyExactSwmGraphReplaceFailure(failure);
+    expect(classified).toBe(failure);
+    expect(isPromoteReplaySafeError(classified)).toBe(false);
+    expect(getPromoteReplaySafeErrorDiagnostic(classified)).toBeUndefined();
   });
 
   it('rejects a structurally identical marker that did not originate at the producer boundary', () => {
@@ -57,7 +59,6 @@ describe('promote replay safety', () => {
     expect(isStoreOperationTimeoutError(forgedShape)).toBe(true);
     expect(isPromoteReplaySafeError(forgedShape)).toBe(false);
     expect(getPromoteReplaySafeErrorDiagnostic(forgedShape)).toBeUndefined();
-    expect(unwrapPromoteReplaySafeError(forgedShape)).toBe(forgedShape);
   });
 
   it.each([

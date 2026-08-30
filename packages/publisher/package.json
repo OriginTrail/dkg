@@ -10,15 +10,18 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./dist/promote-replay-safety.js": null,
+    "./dist/*": "./dist/*"
   },
   "scripts": {
-    "build": "tsc && pnpm run test:helper-types",
+    "build": "tsc && pnpm run test:helper-types && pnpm run test:package-exports",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
-    "test:helper-types": "tsc --project tsconfig.test-helpers.json"
+    "test:helper-types": "tsc --project tsconfig.test-helpers.json",
+    "test:package-exports": "node scripts/test-package-exports.mjs"
   },
   "dependencies": {
     "@multiformats/multiaddr": "^13.0.3",

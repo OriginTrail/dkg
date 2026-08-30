@@ -9,7 +9,7 @@ type ReplaySafeGuardIsPublic = AssertTrue<
 type ReplaySafeDiagnosticHelperIsPublic = AssertTrue<
   'getPromoteReplaySafeErrorDiagnostic' extends keyof PublisherApi ? true : false
 >;
-type ReplaySafeUnwrapperIsPublic = AssertTrue<
+type ReplaySafeUnwrapperStaysAbsent = AssertFalse<
   'unwrapPromoteReplaySafeError' extends keyof PublisherApi ? true : false
 >;
 type ReplaySafeCertifierStaysInternal = AssertFalse<
@@ -23,13 +23,16 @@ type ReplaySafeCodeStaysInternal = AssertFalse<
 >;
 // @ts-expect-error Producer certification must not be importable as a package subpath.
 type ReplaySafetyDeepModuleStaysClosed = typeof import('@origintrail-official/dkg-publisher/dist/promote-replay-safety.js');
+type LegacyWorkspaceResolutionSubpathRemainsAvailable =
+  typeof import('@origintrail-official/dkg-publisher/dist/workspace-resolution.js');
 
 export type {
   ReplaySafeGuardIsPublic,
   ReplaySafeDiagnosticHelperIsPublic,
-  ReplaySafeUnwrapperIsPublic,
+  ReplaySafeUnwrapperStaysAbsent,
   ReplaySafeCertifierStaysInternal,
   ReplaySafeConstructorStaysInternal,
   ReplaySafeCodeStaysInternal,
   ReplaySafetyDeepModuleStaysClosed,
+  LegacyWorkspaceResolutionSubpathRemainsAvailable,
 };

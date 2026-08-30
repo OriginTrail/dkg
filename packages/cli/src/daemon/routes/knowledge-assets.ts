@@ -26,7 +26,6 @@
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
-import { unwrapPromoteReplaySafeError } from "@origintrail-official/dkg-publisher";
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -93,21 +92,6 @@ import {
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 
 const PREFIX = "/api/knowledge-assets";
-
-function promoteStoreFailure(error: unknown): unknown {
-  return unwrapPromoteReplaySafeError(error);
-}
-
-function classifyPromoteStoreUnavailable(error: unknown) {
-  return classifyStoreUnavailable(promoteStoreFailure(error));
-}
-
-function respondIfPromoteStoreUnavailable(
-  res: RequestContext["res"],
-  error: unknown,
-) {
-  return respondIfStoreUnavailable(res, promoteStoreFailure(error));
-}
 
 type FinalizedPublishResult = Awaited<
   ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
@@ -1087,7 +1071,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         error: unknown,
         phase: 'swm-share' | 'vm-publish',
       ): boolean => {
-        const classified = classifyPromoteStoreUnavailable(error);
+        const classified = classifyStoreUnavailable(error);
         if (!classified) return false;
         jsonResponse(
           res,
@@ -1496,10 +1480,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
         });
       } catch (e: any) {
-        // Replay certification belongs to the promote workflow. Translate its
-        // typed store cause here instead of teaching the generic store helper
-        // about publisher-specific wrappers.
-        if (respondIfPromoteStoreUnavailable(res, e)) return;
+        if (respondIfStoreUnavailable(res, e)) return;
         // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
         // carries the recovery hint. Everything else (e.g. the curator-ack 503)
         // propagates to the outer handler unchanged.

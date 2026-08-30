@@ -31,7 +31,6 @@ import {
   generatedPrivateCatalogTripleKeys,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
-  unwrapPromoteReplaySafeError,
 } from '../src/index.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -563,7 +562,6 @@ describe('Working Memory Assertion Lifecycle', () => {
       expect(rejection).toBe(failure);
       expect(isStoreOperationTimeoutError(rejection)).toBe(true);
       expect(isPromoteReplaySafeError(rejection)).toBe(true);
-      expect(unwrapPromoteReplaySafeError(rejection)).toBe(failure);
       expect(injected).toBe(true);
       await expectExactSwmGraph(finalized.sharedGraphUri);
       expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(
