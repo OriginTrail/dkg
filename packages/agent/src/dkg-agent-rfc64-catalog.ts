@@ -781,10 +781,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     catalogHeadDigest: Digest32V1,
   ): readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[] {
-    const receipts = this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.get(
-      catalogHeadDigest,
-    ) ?? [];
-    return Object.freeze(receipts.map((receipt) => Object.freeze({ ...receipt })));
+    return this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.read(catalogHeadDigest);
   }
 
   /**
@@ -934,15 +931,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             retirement.kaUal,
           ),
           recordRetirementLifecycleReceipt: (receipt) => {
-            const previous = this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.get(
-              receipt.catalogHeadDigest,
-            ) ?? [];
-            const next = [...previous.filter(({ kaUal }) => kaUal !== receipt.kaUal), receipt]
-              .sort((left, right) => left.kaUal.localeCompare(right.kaUal));
-            this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.set(
-              receipt.catalogHeadDigest,
-              Object.freeze(next),
-            );
+            this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.record(receipt);
           },
           logInfo: (ctx, message) => this.log.info(ctx, message),
         });

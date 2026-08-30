@@ -58,6 +58,7 @@ import {
   rfc64CatalogSignatureVariantDigestV1,
   type Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
   type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
+  type Rfc64PublicCatalogNativeCommittedHeadTokenV1,
   type Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import { readVerifiedAuthorCatalogRowAuthorshipV1 } from '../src/rfc64/catalog-row-authorship.js';
@@ -83,7 +84,9 @@ import {
 
 function appliedHeadLifecycleV1(
   transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null,
-  afterAppliedHead: (() => void | Promise<void>) | null = null,
+  afterAppliedHead: ((
+    committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
+  ) => void | Promise<void>) | null = null,
 ): Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
   return Object.freeze({
     kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',

@@ -4189,6 +4189,29 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }
     await bootstrapIdle;
     expect(retirementClearCalls).toBe(1);
+    const appliedFinalizedHead = authorizedCold.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    });
+    expect(appliedFinalizedHead).not.toBeNull();
+    expect(authorizedCold.readRfc64FinalizedSwmRetirementLifecycleReceiptsV1(
+      successor.headObjectDigest,
+    )).toMatchObject([{
+      kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
+      catalogHeadDigest: successor.headObjectDigest,
+      inventoryDigest: appliedFinalizedHead!.appliedInventoryDigest,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: finalizedSeal.kaUal,
+      assertionVersion: finalizedSeal.assertionVersion,
+      vmGraphIri: preexistingTwin.vmGraph,
+      vmMaterializationStatus: 'existing',
+      committedHead: {
+        kind: 'rfc64-public-catalog-native-committed-head-token-v1',
+        catalogHeadDigest: successor.headObjectDigest,
+        inventoryDigest: appliedFinalizedHead!.appliedInventoryDigest,
+      },
+      swmReconciliationOutcome: 'retired',
+    }]);
     expect(await authorizedCold.store.countQuads(preexistingTwin.vmGraph))
       .toBe(PROJECTION_QUADS.length);
     expect(await authorizedCold.store.countQuads(preexistingTwin.swmGraph)).toBe(0);

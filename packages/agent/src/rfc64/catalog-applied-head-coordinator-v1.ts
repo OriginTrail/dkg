@@ -14,6 +14,7 @@ import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-poli
 import type {
   Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
+  Rfc64PublicCatalogNativeCommittedHeadTokenV1,
   Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from './public-catalog-native-receiver-v1.js';
@@ -31,9 +32,8 @@ const POST_HEAD_TWIN_RECONCILIATION_CONCURRENCY_V1 = 4;
 
 /**
  * Explicit per-KA proof of the only safe finalized-twin lifecycle:
- * verified VM post-read, VM transaction commit, durable applied-head
- * observation, then SWM retirement. Sequence values are scoped to one exact
- * catalog transition and are monotonic even when row cleanup is concurrent.
+ * verified VM post-read, VM transaction commit, durable applied-head token,
+ * then SWM retirement.
  */
 export interface Rfc64FinalizedSwmRetirementLifecycleReceiptV1 {
   readonly kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1';
@@ -46,9 +46,7 @@ export interface Rfc64FinalizedSwmRetirementLifecycleReceiptV1 {
   readonly vmGraphIri: string;
   readonly vmPostReadDigest: Digest32V1;
   readonly vmMaterializationStatus: 'materialized' | 'existing';
-  readonly vmCommitSequence: number;
-  readonly appliedHeadObservedSequence: number;
-  readonly swmReconciliationSequence: number;
+  readonly committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>;
   readonly swmReconciliationOutcome: FinalizedSwmTwinReconciliationOutcome;
 }
 
@@ -94,37 +92,39 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
     }
     const retirementAuthorized = accepted.policy.accessPolicy === 1
       && accepted.policy.source.kind === 'finalized-chain';
-    const catalogProjectionEvidence = retirementAuthorized
-      ? plan.rows.map((row) => {
-        const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
-        const subGraphName = plan.catalogScope.subGraphName ?? undefined;
-        return Object.freeze({
-          contextGraphId: plan.catalogScope.contextGraphId,
-          ...(subGraphName === undefined ? {} : { subGraphName }),
-          kaUal: binding.seal.kaUal,
-          assertionVersion: binding.seal.assertionVersion,
-          publicQuadsDigest: row.publicQuadsDigest,
-          publicQuadsCount: Number(binding.seal.publicTripleCount),
-          privateTripleCount: Number(binding.seal.privateTripleCount),
-          ...(binding.seal.privateMerkleRoot === null
-            ? {}
-            : { privateMerkleRoot: binding.seal.privateMerkleRoot }),
-          expectedMerkleRoot: binding.seal.assertionMerkleRoot,
-        });
-      })
-      : [];
-    const materializationReceipts = finalizedVmTransaction === null
-      ? new Map<string, never>()
-      : exactMaterializationReceiptsByUal(finalizedVmTransaction, plan);
-    let lifecycleSequence = 0;
-    let vmCommitSequence: number | null = null;
+    let catalogProjectionEvidence: readonly ReturnType<
+      typeof catalogProjectionEvidenceForRow
+    >[] = [];
+    let materializationReceipts: ReturnType<typeof exactMaterializationReceiptsByUal> =
+      new Map();
+    if (finalizedVmTransaction !== null) {
+      try {
+        catalogProjectionEvidence = plan.rows.map((row) =>
+          catalogProjectionEvidenceForRow(plan, row));
+        materializationReceipts = exactMaterializationReceiptsByUal(
+          finalizedVmTransaction,
+          plan,
+        );
+      } catch (cause) {
+        try {
+          await finalizedVmTransaction.rollback(cause);
+        } catch (rollbackCause) {
+          throw new AggregateError(
+            [cause, rollbackCause],
+            'finalized VM receipt validation and rollback both failed',
+          );
+        }
+        throw cause;
+      }
+    }
+    let vmTransactionCommitted = false;
     let transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null =
       primaryTransaction ?? null;
     if (retirementAuthorized && primaryTransaction !== undefined) {
       transaction = Object.freeze({
         commit: async () => {
           await primaryTransaction.commit();
-          vmCommitSequence = ++lifecycleSequence;
+          vmTransactionCommitted = true;
         },
         rollback: (cause?: unknown) => primaryTransaction.rollback(cause),
       });
@@ -132,14 +132,13 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
     return Object.freeze({
       kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
       transaction,
-      afterAppliedHead: retirementAuthorized ? async () => {
-        if (vmCommitSequence === null) {
+      afterAppliedHead: retirementAuthorized ? async (committedHead) => {
+        if (!vmTransactionCommitted) {
           throw new Error(
             'refusing finalized SWM retirement before the VM transaction commit',
           );
         }
-        const committedVmSequence = vmCommitSequence;
-        const appliedHeadObservedSequence = ++lifecycleSequence;
+        assertExactCommittedHeadTokenV1(committedHead, plan);
         const ctx = createOperationContext('sync');
         const receipts = await mapWithConcurrency(
           catalogProjectionEvidence,
@@ -170,9 +169,7 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
               vmGraphIri: materialization.vmGraphIri,
               vmPostReadDigest: materialization.postReadDigest,
               vmMaterializationStatus: materialization.status,
-              vmCommitSequence: committedVmSequence,
-              appliedHeadObservedSequence,
-              swmReconciliationSequence: ++lifecycleSequence,
+              committedHead: Object.freeze({ ...committedHead }),
               swmReconciliationOutcome,
             }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV1;
             options.recordRetirementLifecycleReceipt?.(receipt);
@@ -191,6 +188,42 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
       } : null,
     } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
   });
+}
+
+function catalogProjectionEvidenceForRow(
+  plan: Parameters<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1>[0],
+  row: Parameters<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1>[0]['rows'][number],
+) {
+  const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
+  const subGraphName = plan.catalogScope.subGraphName ?? undefined;
+  return Object.freeze({
+    contextGraphId: plan.catalogScope.contextGraphId,
+    ...(subGraphName === undefined ? {} : { subGraphName }),
+    kaUal: binding.seal.kaUal,
+    assertionVersion: binding.seal.assertionVersion,
+    publicQuadsDigest: row.publicQuadsDigest,
+    publicQuadsCount: Number(binding.seal.publicTripleCount),
+    privateTripleCount: Number(binding.seal.privateTripleCount),
+    ...(binding.seal.privateMerkleRoot === null
+      ? {}
+      : { privateMerkleRoot: binding.seal.privateMerkleRoot }),
+    expectedMerkleRoot: binding.seal.assertionMerkleRoot,
+  });
+}
+
+function assertExactCommittedHeadTokenV1(
+  committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
+  plan: Parameters<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1>[0],
+): void {
+  if (
+    committedHead?.kind !== 'rfc64-public-catalog-native-committed-head-token-v1'
+    || committedHead.catalogHeadDigest !== plan.catalogHeadDigest
+    || committedHead.inventoryDigest !== plan.inventoryDigest
+  ) {
+    throw new Error(
+      'refusing finalized SWM retirement without the exact durable applied-head token',
+    );
+  }
 }
 
 function exactMaterializationReceiptsByUal(

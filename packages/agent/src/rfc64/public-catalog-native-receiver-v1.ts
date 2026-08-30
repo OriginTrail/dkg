@@ -208,6 +208,16 @@ export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
   rollback(cause?: unknown): Promise<void>;
 }
 
+/**
+ * Exact durable-head evidence created by the receiver only after the target
+ * head and inventory digest survive their post-commit read.
+ */
+export interface Rfc64PublicCatalogNativeCommittedHeadTokenV1 {
+  readonly kind: 'rfc64-public-catalog-native-committed-head-token-v1';
+  readonly catalogHeadDigest: Digest32V1;
+  readonly inventoryDigest: Digest32V1;
+}
+
 /** A rollback-capable primary precommit, before any post-head coordination. */
 export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
   (
@@ -225,7 +235,9 @@ export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
 export interface Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
   readonly kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1';
   readonly transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
-  readonly afterAppliedHead: (() => void | Promise<void>) | null;
+  readonly afterAppliedHead: ((
+    committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
+  ) => void | Promise<void>) | null;
 }
 
 /** Backward-compatible root receiver result plus the explicit post-head lifecycle. */
@@ -393,11 +405,15 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     rollback?: (cause: unknown) => Promise<void>,
   ): Promise<Readonly<{
     transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
-    afterAppliedHead: (() => void | Promise<void>) | null;
+    afterAppliedHead: ((
+      committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
+    ) => void | Promise<void>) | null;
   }>> {
     const precommitSignal = signal ?? new AbortController().signal;
     let transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null;
-    let afterAppliedHead: (() => void | Promise<void>) | null = null;
+    let afterAppliedHead: ((
+      committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
+    ) => void | Promise<void>) | null = null;
     try {
       throwIfAborted(precommitSignal);
       const returned = await this.options.beforeAppliedHeadCommit?.(
@@ -734,7 +750,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       throw cause;
     }
     await precommitLifecycle.transaction?.commit();
-    await precommitLifecycle.afterAppliedHead?.();
+    await precommitLifecycle.afterAppliedHead?.(committedHeadTokenV1(
+      head.objectDigest as Digest32V1,
+      inventoryDigest,
+    ));
     return Object.freeze({
       inventoryDigest,
       catalogHeadDigest: head.objectDigest as Digest32V1,
@@ -1346,7 +1365,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     // the exact head and primary transaction are durable and the post-read has
     // succeeded. A cleanup failure is retryable by replay, never by restoring
     // the predecessor behind an already-committed head.
-    await precommitLifecycle.afterAppliedHead?.();
+    await precommitLifecycle.afterAppliedHead?.(committedHeadTokenV1(
+      head.objectDigest as Digest32V1,
+      completion.inventoryDigest,
+    ));
 
     if (activatedRows.length === 1) {
       const [only] = activatedRows;
@@ -2627,6 +2649,17 @@ function isAppliedHeadLifecycleV1(
   const lifecycle = value as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
   return (lifecycle.transaction === null || isPrecommitTransactionV1(lifecycle.transaction))
     && (lifecycle.afterAppliedHead === null || typeof lifecycle.afterAppliedHead === 'function');
+}
+
+function committedHeadTokenV1(
+  catalogHeadDigest: Digest32V1,
+  inventoryDigest: Digest32V1,
+): Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1> {
+  return Object.freeze({
+    kind: 'rfc64-public-catalog-native-committed-head-token-v1',
+    catalogHeadDigest,
+    inventoryDigest,
+  });
 }
 
 function fail(

@@ -22,7 +22,9 @@ import type { FinalizationRecoveryHealth } from './finalization-recovery-store.j
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
-import type { Rfc64FinalizedSwmRetirementLifecycleReceiptV1 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import {
+  Rfc64FinalizedSwmRetirementLifecycleReceiptRegistryV1,
+} from './rfc64/finalized-swm-retirement-lifecycle-receipt-registry-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
@@ -1183,7 +1185,7 @@ export class DKGAgentBase {
     new Map<string, Rfc64PublicCatalogNativeSynchronizationEvidenceV1>();
   /** Bounded process-local VM-commit-before-SWM-retirement evidence by applied head. */
   protected readonly rfc64FinalizedSwmRetirementLifecycleReceiptsV1 =
-    new Map<string, readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[]>();
+    new Rfc64FinalizedSwmRetirementLifecycleReceiptRegistryV1();
   /** Bounded process-local terminal receiver failures, keyed by announced head. */
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
