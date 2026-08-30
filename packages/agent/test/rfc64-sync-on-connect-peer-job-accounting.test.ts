@@ -59,6 +59,53 @@ describe('RFC-64 peer-job accounting and order', () => {
     expect(agent.trySyncFromPeer).toHaveBeenCalledOnce();
   });
 
+  it('preserves whole-job admission after selected consumes the supplied probe', async () => {
+    const agent = await createUnstartedAgent('Rfc64InitialProbeWholeJobAdmission');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.config.syncContextGraphs = ['selected-cg'];
+    agent.config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { contextGraphId: 'selected-cg', accessPolicy: 0 } },
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    agent.syncReconcilerBackoff.set(PEER_A, {
+      failures: 2,
+      nextRetryAt: Date.now() + 60_000,
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    const refreshedProbe = {
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: 'refreshed-connection',
+    };
+    agent.getSyncReconcilerProbe = vi.fn(async () => refreshedProbe);
+    const order: string[] = [];
+    agent.trySelectedSwmRetryFromPeer = vi.fn(async () => {
+      order.push('selected');
+      return 'not-started';
+    });
+    agent.trySyncFromPeer = vi.fn(async (_peerId, onSyncAccounting) => {
+      order.push('ordinary');
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      });
+      return 'synced';
+    });
+
+    expect(await agent.attemptSyncFromPeerWithReconcilerAccounting(
+      PEER_A,
+      { protocolsKey: PROTOCOL_SYNC, connectionKey: null },
+    )).toBe('synced');
+
+    expect(order).toEqual(['selected', 'ordinary']);
+    expect(agent.getSyncReconcilerProbe).toHaveBeenCalledOnce();
+    expect(agent.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+  });
+
   it('disables automatic selected SWM without blocking an explicit recovery plan', async () => {
     const agent = await createUnstartedAgent('Rfc64AutomaticSelectedSwitch');
     allowAllNetworkAdmission(agent);

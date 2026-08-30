@@ -4668,14 +4668,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     SyncReconcilerProbe
   > {
     const source = options.source ?? 'on-connect';
+    const jobAdmittedByInitialProbe = options.initialProbe !== undefined;
     const automaticSelectedContextGraphIds = syncOnConnectEnabled(this.config)
       && (this.config.syncSharedMemoryOnConnect ?? true)
       ? this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer)
       : [];
     return new ReconciledSyncOnConnectPeerJobRunner({
       acquireProbe: async () => {
-        const backoff = this.syncReconcilerBackoff.get(remotePeer);
-        if (backoff && Date.now() < backoff.nextRetryAt) return null;
+        // A supplied probe means the reconciler already admitted this whole
+        // peer-job transaction. Refresh later phase probes, but do not let the
+        // backoff that was explicitly bypassed suppress its invariant ordinary
+        // phase after optional selected work consumes the initial probe.
+        if (!jobAdmittedByInitialProbe) {
+          const backoff = this.syncReconcilerBackoff.get(remotePeer);
+          if (backoff && Date.now() < backoff.nextRetryAt) return null;
+        }
         return this.getSyncReconcilerProbe(remotePeer);
       },
       runSelected: (recoveryPlan) => captureSyncOnConnectAttempt(
