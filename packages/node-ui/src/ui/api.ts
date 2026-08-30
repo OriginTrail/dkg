@@ -9,6 +9,14 @@ import {
   put,
   del,
 } from './http.js';
+import type { GetView } from '@origintrail-official/dkg-core';
+import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
+import type {
+  PublicQueryQuad,
+  PublicQueryResponse,
+  PublicQueryResult,
+} from '@origintrail-official/dkg-core/query-result';
+import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
 // keep working (barrel), and the PCA client from its extracted module.
@@ -600,9 +608,56 @@ export async function importFile(
 // identical `/api/query` POSTs for the WM/SWM/VM fan-out against a
 // multi-GB Oxigraph store. Each duplicate adds seconds of wall time on
 // large stores. Inflight dedup collapses the dupes to one.
-const inflightQuery = new Map<string, Promise<{ result: any }>>();
+export type QueryExecutionResult = PublicQueryResult;
+export type QueryExecutionResponse = PublicQueryResponse;
 
-export function postQueryDeduped(body: Record<string, unknown>): Promise<{ result: any }> {
+export function normalizeQueryExecutionResponse(
+  response: unknown,
+  sparql: string,
+): QueryExecutionResponse {
+  const envelope = response && typeof response === 'object' && !Array.isArray(response)
+    ? response as Record<string, unknown>
+    : {};
+  const candidate = envelope.result ?? envelope.results;
+  const raw = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : {};
+
+  if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
+    return { result: { type: 'boolean', value: raw.value } };
+  }
+  if (raw.type === 'quads' && Array.isArray(raw.quads)) {
+    return { result: { type: 'quads', quads: raw.quads as PublicQueryQuad[] } };
+  }
+  if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
+    return { result: { type: 'bindings', bindings: raw.bindings as Array<Record<string, unknown>> } };
+  }
+
+  const operation = classifySparqlOperation(sparql);
+  const bindings = Array.isArray(raw.bindings)
+    ? raw.bindings as Array<Record<string, unknown>>
+    : [];
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const term = bindings[0]?.result;
+    const value = term && typeof term === 'object' && !Array.isArray(term)
+      ? (term as { value?: unknown }).value
+      : term;
+    return { result: { type: 'boolean', value: String(value).toLowerCase() === 'true' } };
+  }
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return {
+      result: {
+        type: 'quads',
+        quads: Array.isArray(raw.quads) ? raw.quads as PublicQueryQuad[] : [],
+      },
+    };
+  }
+  return { result: { type: 'bindings', bindings } };
+}
+
+const inflightQuery = new Map<string, Promise<QueryExecutionResponse>>();
+
+export function postQueryDeduped(body: Record<string, unknown>): Promise<QueryExecutionResponse> {
   const key = JSON.stringify(body);
   const existing = inflightQuery.get(key);
   if (existing) return existing;
@@ -617,7 +672,7 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
       const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
       throw new HttpError(res.status, msg, errBody);
     }
-    return res.json() as Promise<{ result: any }>;
+    return normalizeQueryExecutionResponse(await res.json(), String(body.sparql ?? ''));
   })().finally(() => {
     inflightQuery.delete(key);
   });
@@ -625,21 +680,23 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
   return promise;
 }
 
+export type QueryExecutionView = GetView;
+
+export interface QueryExecutionOptions {
+  contextGraphId?: string;
+  subGraphName?: string;
+  includeSharedMemory?: boolean;
+  graphSuffix?: '_shared_memory';
+  view?: QueryExecutionView;
+  /** Include assertion partitions for callers whose query constrains them. */
+  includeContextGraphPartitions?: boolean;
+}
+
 export const executeQuery = (
   sparql: string,
-  contextGraphId?: string,
-  includeSharedMemory?: boolean,
-  graphSuffix?: '_shared_memory',
-  view?: 'verified-memory' | 'shared-working-memory',
-  // Opt the CG-scoped allow-list into the assertion partitions. Without it the
-  // daemon restricts `GRAPH ?g { … }` to the static set
-  // { <cg>, <cg>/_meta, <cg>/_shared_memory_meta } (see the long note on
-  // `listWmAssertions`), so a `GRAPH ?g` enumeration of WM content comes back
-  // empty. Callers that read raw partition triples (e.g. the WM layer view)
-  // pass `true`.
-  includeContextGraphPartitions?: boolean,
+  options: QueryExecutionOptions = {},
 ) =>
-  postQueryDeduped({ sparql, contextGraphId, includeSharedMemory, graphSuffix, view, includeContextGraphPartitions });
+  postQueryDeduped({ sparql, ...options });
 
 /**
  * Map of assertion name → deterministic Option-1 UAL (`dkg:reservedUal`,
@@ -655,7 +712,7 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
           <http://dkg.io/ontology/reservedUal> ?ual .
     }
   }`;
-  const data = await executeQuery(sparql, contextGraphId);
+  const data = await executeQuery(sparql, { contextGraphId });
   const map: Record<string, string> = {};
   for (const b of (data?.result?.bindings ?? [])) {
     const name = typeof b.name === 'string' ? b.name : b.name?.value;
@@ -679,6 +736,13 @@ export const writeProfileQueryCatalog = (
   post<any>('/api/profile/query-catalog/write', {
     contextGraphId,
     quads,
+  });
+
+export type ProfileQueryCatalogReadResponse = QueryCatalogReadResponse;
+
+export const readProfileQueryCatalog = (contextGraphId: string) =>
+  post<ProfileQueryCatalogReadResponse>('/api/profile/query-catalog/read', {
+    contextGraphId,
   });
 
 // --- Knowledge Assets (OT-RFC-43 §10.5 — GitHub-shaped KA surface) ---
@@ -1154,7 +1218,11 @@ export interface AssertionInfo {
 export async function listAssertions(
   contextGraphId: string,
   layer: 'wm' | 'swm' = 'wm',
+  opts: { includeQueryCatalog?: boolean } = {},
 ): Promise<AssertionInfo[]> {
+  const includeQueryCatalog = opts.includeQueryCatalog ?? false;
+  const shouldIncludeMetaAssertion = (subGraph: string | undefined, name: string): boolean =>
+    subGraph !== 'meta' || (includeQueryCatalog && name.startsWith('query-catalog-'));
   if (layer === 'swm') {
     // SWM membership comes from the canonical `dkg:memoryLayer "SWM"` lifecycle
     // marker in `<cg>/_meta` (flipped from "WM" by promote) — NOT from
@@ -1176,14 +1244,17 @@ export async function listAssertions(
     // assertions would otherwise linger in the Shared-Memory list. The pointer
     // lives on the lifecycle-URN form; key the exclusion by (subGraph, name) so
     // the data-graph-URI marker row for the same assertion is dropped too.
+    const metaFilter = includeQueryCatalog
+      ? ''
+      : 'FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))';
     const sparql = `SELECT ?g ?vm WHERE {
       GRAPH <${metaGraph}> {
         ?g <http://dkg.io/ontology/memoryLayer> "SWM"
         OPTIONAL { ?g <http://dkg.io/ontology/vmCurrentAssertion> ?vm }
       }
-      FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))
+      ${metaFilter}
     }`;
-    const data = await executeQuery(sparql, contextGraphId);
+    const data = await executeQuery(sparql, { contextGraphId });
     const bindings: any[] = data?.result?.bindings ?? [];
     const published = new Set<string>();
     const rows: Array<{ key: string; name: string; subGraph?: string; g: string }> = [];
@@ -1216,7 +1287,7 @@ export async function listAssertions(
         continue;
       }
       if (!name) continue;
-      if (subGraph === 'meta') continue;
+      if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
       const key = `${subGraph ?? ''} ${name}`;
       rows.push({ key, name, subGraph, g });
       if (vm) published.add(key);
@@ -1309,7 +1380,9 @@ export async function listAssertions(
   // match would also drop a perfectly valid WM assertion whose *name* is
   // `_meta` (names may start with `_`). The parser below keys on the parsed
   // sub-graph segment (`=== 'meta'`), which is fully name-safe.
-  const metaFilter = `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
+  const metaFilter = includeQueryCatalog
+    ? ''
+    : `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
   const listSparql = `SELECT ?g WHERE {
     GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" }
     ${metaFilter}
@@ -1425,8 +1498,8 @@ export async function listAssertions(
     // is UI configuration, not user knowledge, and must never reach the
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
-    if (subGraph === 'meta') continue;
-    const key = `${subGraph ?? ''} ${name}`;
+    if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
+    const key = `${subGraph ?? ''}\0${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const cnt = countByGraph.get(g);
@@ -1817,6 +1890,11 @@ export interface LocalAgentChatResponse {
   correlationId: string;
   sessionId?: string;
   turnId?: string;
+  contextGraphId?: string;
+  profile?: string;
+  toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+  traceFile?: string;
+  readOnly?: boolean;
 }
 
 export interface LocalAgentChatFailurePersistenceOptions {
@@ -1877,6 +1955,10 @@ export type LocalAgentChannelTarget = 'bridge' | 'gateway';
 
 export interface LocalAgentHealthResponse {
   ok: boolean;
+  ready?: boolean;
+  reachable?: boolean;
+  offline?: boolean;
+  initialized?: boolean;
   target?: LocalAgentChannelTarget;
   error?: string;
   profile?: string;
@@ -1901,6 +1983,10 @@ export interface LocalAgentHealthResponse {
   turnState?: 'queued' | 'running';
   clientConnected?: boolean;
   clientDisconnectedAt?: string;
+  initFailure?: string;
+  readOnly?: boolean;
+  contextGraphId?: string;
+  traceFile?: string;
   bridge?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
   gateway?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
 }
@@ -2202,6 +2288,56 @@ export const streamPrimeAgentLocalChat = (
 export const fetchPrimeAgentLocalHealth = () =>
   get<LocalAgentHealthResponse>('/api/prime-agent-channel/health');
 
+interface LocalLlmChatWireResponse {
+  text: string;
+  sessionId: string;
+  contextGraphId?: string;
+  profile: string;
+  toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>;
+  traceFile?: string;
+  readOnly: true;
+}
+
+export const fetchLocalLlmHealth = () =>
+  get<LocalAgentHealthResponse>('/api/local-llm/health');
+
+export async function sendLocalLlmChat(
+  text: string,
+  opts?: LocalAgentChatRequestOptions,
+): Promise<LocalAgentChatResponse> {
+  const correlationId = opts?.correlationId ?? crypto.randomUUID();
+  const res = await fetch('/api/local-llm/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      message: text,
+      sessionId: 'local-llm:dkg-ui',
+      ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
+    }),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
+  }
+  const result = await res.json() as LocalLlmChatWireResponse;
+  return { ...result, correlationId, turnId: correlationId };
+}
+
+export async function streamLocalLlmChat(
+  text: string,
+  opts: LocalAgentChatRequestOptions & {
+    onEvent?: (event: OpenClawStreamEvent) => void;
+  } = {},
+): Promise<LocalAgentChatResponse> {
+  const result = await sendLocalLlmChat(text, opts);
+  opts.onEvent?.({ type: 'final', ...result });
+  return result;
+}
+
+export const clearLocalLlmSession = () =>
+  post<{ ok: true; sessionId: string; readOnly: true }>('/api/local-llm/session/clear', {});
+
 function formatLocalAgentError(body: unknown, fallback: string): string {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fallback;
   const record = body as Record<string, unknown>;
@@ -2378,6 +2514,14 @@ interface LocalAgentSurface {
 }
 
 const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
+  'local-llm': {
+    connectSupported: false,
+    chatSupported: true,
+    defaultSessionId: () => 'local-llm:dkg-ui',
+    resolveChatContext: () => ({}),
+    fetchHealth: fetchLocalLlmHealth,
+    streamChat: streamLocalLlmChat,
+  },
   openclaw: {
     connectSupported: true,
     chatSupported: true,
@@ -2666,8 +2810,10 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
   const chatReady = health?.ok === true && !degraded;
   const bridgeOnline = chatReady;
+  const daemonOwnedChat = id === 'local-llm' && configured && hasChatBridge;
   const persistentChat = configured && hasChatBridge && (
-    chatReady
+    daemonOwnedChat
+    || chatReady
     || runtimeStatus === 'connecting'
     || runtimeStatus === 'degraded'
     || record.runtime?.ready === true
@@ -2888,6 +3034,7 @@ export async function refreshLocalAgentIntegration(id: string): Promise<LocalAge
 }
 
 export async function fetchLocalAgentHealth(id: string) {
+  if (id === 'local-llm') return fetchLocalLlmHealth();
   if (id === 'openclaw') return fetchOpenClawLocalHealth();
   if (id === 'hermes') return fetchHermesLocalHealth();
   if (id === 'prime-agent') return fetchPrimeAgentLocalHealth();
@@ -2899,6 +3046,7 @@ export async function fetchLocalAgentHistory(
   limit = 50,
   opts: { sessionId?: string } = {},
 ): Promise<LocalAgentHistoryMessage[]> {
+  if (id.trim().toLowerCase() === 'local-llm') return [];
   const sessionId = resolveLocalAgentHistorySessionId(id, opts.sessionId);
   if (!sessionId) return [];
   return fetchLocalAgentHistoryBySessionId(sessionId, limit);

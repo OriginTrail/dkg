@@ -472,51 +472,44 @@ Use this decision order:
 5. If the user asks which saved queries exist, call `dkg_query_catalog_list`
    with the selected `context_graph_id` and present the useful candidates.
 6. If the user explicitly asks to run a saved query, call
-   `dkg_query_catalog_run` with the selected `context_graph_id` and the saved
-   query slug or exact display name. If the name is ambiguous, list first and
-   ask/choose by slug.
+   `dkg_query_catalog_run` with the selected `context_graph_id`, saved-query slug
+   or exact name, and declared runtime `parameters`. Ask for missing
+   required values; never use examples. If ambiguous, list first and ask/choose.
 7. If the user asks to save the current/query/SPARQL, call
    `dkg_query_catalog_save` with the selected `context_graph_id`, a concise
    `name`, optional `description`, and the exact read-only SPARQL text. If the
    SPARQL text is not present in the user message or turn context, ask for it;
    do not invent a query and save it as if it came from the user.
-8. If no query catalog tool is available, use `dkg_query` against the profile
-   graph (`did:dkg:context-graph:<id>/meta/query-catalog`) to read saved
-   queries, then run the selected `prof:sparqlQuery` with `dkg_query`.
+8. If no query catalog tool is available, query the Context Graph's registered
+   `meta` subgraph for `prof:SavedQuery` assertions, then run the selected
+   `prof:sparqlQuery` with `dkg_query`.
 9. Only write or change query catalog entries when the user explicitly asks to
    save/update catalog queries.
 
 OpenClaw tool path:
 
 - `dkg_query_catalog_list` input: `{ "context_graph_id": "<contextGraphId>" }`
-- `dkg_query_catalog_run` input:
-  `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>" }`
-- `dkg_query_catalog_save` input:
-  `{ "context_graph_id": "<contextGraphId>", "name": "<display-name>", "sparql": "<read-only-sparql>", "description"?: "...", "result_column"?: "uri" }`
+- `dkg_query_catalog_run` input: `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>", "parameters"?: { "<name>": "<runtime-value>" } }`
+- `dkg_query_catalog_save` input: `{ "context_graph_id": "<contextGraphId>", "name": "<display-name>", "sparql": "<read-only-sparql>", "description"?: "...", "result_column"?: "uri" }`
   Optional advanced fields: `sub_graph` (defaults to `__context_graph`),
-  `catalog_slug`, `catalog_name`, and `catalog_description`.
+  `catalog_slug`, `catalog_name`, `catalog_description`, `parameters`, `execution_view`.
 
 CLI fallback:
 
 ```bash
 dkg query-catalog list <context-graph>
-dkg query-catalog run <context-graph> <query-slug-or-exact-name>
+dkg query-catalog run <context-graph> <query-slug-or-exact-name> --param name=value [--param name=value]
 ```
 
 HTTP fallback:
 
-- `POST /api/profile/query-catalog/read`
-  Body: `{ "contextGraphId": "<contextGraphId>" }`
-  Returns bindings with `q`, `subGraph`, `catalog`, `name`, `description`,
-  `sparql`, `rank`, `catalogName`, `catalogDescription`, and `catalogRank`.
-- `POST /api/profile/query-catalog/write`
-  Body: `{ "contextGraphId": "<contextGraphId>", "quads": [...] }`
-  The daemon stores these triples in
-  `did:dkg:context-graph:<contextGraphId>/meta/query-catalog` regardless of
-  the incoming quad `graph` field. Prefer `dkg_query_catalog_save` for normal
-  user-requested saves. Raw writes append profile triples; prefer a new
-  saved-query URI for new saved queries and avoid overwriting unrelated
-  catalog/profile metadata.
+- `POST /api/profile/query-catalog/read`: body `{ "contextGraphId": "<contextGraphId>" }`;
+  returns `meta` catalog bindings across WM/SWM/VM with canonical `scopeGraph`.
+- `POST /api/profile/query-catalog/write`: body
+  `{ "contextGraphId": "<contextGraphId>", "quads": [...] }`.
+  Persists one content-addressed WM assertion in `meta`. Exact retries are
+  idempotent; mutation modes are rejected and RDF subjects are never replaced.
+  Prefer `dkg_query_catalog_save` for normal user-requested saves.
 
 Profile RDF shape for writes:
 
@@ -525,26 +518,31 @@ Profile RDF shape for writes:
 @prefix schema: <http://schema.org/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-
 <urn:dkg:profile:PROJECT:catalog:CATALOG> rdf:type prof:QueryCatalog ;
+  prof:scopeGraph <did:dkg:context-graph:CONTEXT_GRAPH_ID/SUBGRAPH> ;
   prof:forSubGraph "SUBGRAPH" ;
   prof:displayName "Catalog name" ;
   schema:description "Catalog description" ;
   prof:rank "50"^^xsd:integer .
-
 <urn:dkg:profile:PROJECT:query:QUERY> rdf:type prof:SavedQuery ;
+  prof:scopeGraph <did:dkg:context-graph:CONTEXT_GRAPH_ID/SUBGRAPH> ;
   prof:forSubGraph "SUBGRAPH" ;
   prof:inCatalog <urn:dkg:profile:PROJECT:catalog:CATALOG> ;
   prof:displayName "Saved query name" ;
   schema:description "What this query returns" ;
-  prof:sparqlQuery "SELECT ?uri WHERE { ?uri ?p ?o } LIMIT 50" ;
+  prof:sparqlQuery "SELECT ?uri WHERE { ?uri <urn:configuration> {{literal:configurationId}} }" ;
+  prof:queryParameters "[{\"name\":\"configurationId\",\"type\":\"string\",\"label\":\"Configuration ID\"}]" ;
+  prof:executionView "verifiable-memory" ;
   prof:resultColumn "uri" ;
   prof:rank "100"^^xsd:integer .
 ```
 
 When composing saved SPARQL, keep it read-only (`SELECT`, `ASK`, `CONSTRUCT`,
 or `DESCRIBE`). Prefer returning a stable `?uri` column when the result should
-feed entity-list UI surfaces.
+feed entity-list UI surfaces. A `{{literal:name}}` placeholder is one complete
+SPARQL term and must match `prof:queryParameters`. Renderers escape `string`
+values and validate `integer`, `number`, `boolean`, and `iri`; do not quote
+placeholders or interpolate parameter values yourself.
 
 ### Operational constraints
 

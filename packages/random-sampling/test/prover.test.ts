@@ -32,9 +32,16 @@ import {
   contextGraphMetaUri,
   hashTripleV10,
   structuredKARootV10,
+  tripleContentV10,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { InMemoryProverWal, RandomSamplingProver } from '../src/index.js';
+import {
+  createRandomSamplingRepairOperation,
+  InMemoryProverWal,
+  RandomSamplingProver,
+  startProverLoop,
+  type RandomSamplingRepairMaterial,
+} from '../src/index.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -99,7 +106,7 @@ interface KCFixture {
   publicTriples: { subject: string; predicate: string; object: string }[];
 }
 
-async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root: Uint8Array; leafCount: number }> {
+async function seedKCMetadata(store: OxigraphStore, fixture: KCFixture): Promise<void> {
   const cgIdStr = fixture.cgId.toString();
   // Mirror the agent's CG name → on-chain id mapping the extractor
   // looks up. `cg-<n>` is a synthetic name; in production the name is
@@ -114,7 +121,6 @@ async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root:
     },
   ]);
   const metaGraph = contextGraphMetaUri(cgName, cgIdStr);
-  const dataGraph = contextGraphDataUri(cgName, cgIdStr);
 
   const metaQuads: Quad[] = [
     { subject: fixture.ual, predicate: `${DKG}batchId`, object: `"${fixture.kaId}"^^<${XSD}integer>`, graph: metaGraph },
@@ -127,6 +133,13 @@ async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root:
     );
   }
   await store.insert(metaQuads);
+}
+
+async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root: Uint8Array; leafCount: number }> {
+  await seedKCMetadata(store, fixture);
+  const cgIdStr = fixture.cgId.toString();
+  const cgName = `cg-${cgIdStr}`;
+  const dataGraph = contextGraphDataUri(cgName, cgIdStr);
   await store.insert(fixture.publicTriples.map((t) => ({ ...t, graph: dataGraph })));
 
   // PUBLIC path is structured: hashPair(publicRoot, privateDataHash). The fixture
@@ -987,6 +1000,386 @@ describe('RandomSamplingProver — short-circuits', () => {
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
     const outcome = await prover.tick();
     expect(outcome).toMatchObject({ kind: 'kc-not-synced', kaId: 999n, cgId: 11n });
+    await prover.close();
+  });
+
+  it('repairs a missing challenged KA once and submits in the same tick', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 999n,
+      ual: 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/999',
+      rootEntities: ['urn:e:repair'],
+      publicTriples: [
+        { subject: 'urn:e:repair', predicate: 'urn:p:k', object: '"recovered"' },
+      ],
+    };
+    const leaves = fixture.publicTriples.map((triple) =>
+      hashTripleV10(triple.subject, triple.predicate, triple.object));
+    const { root, leafCount } = structuredKARootV10(leaves, []);
+    const submitProof = vi.fn(async () => ({
+      hash: '0xrepaired', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => ({
+        contents: fixture.publicTriples.map((triple) => tripleContentV10(
+          triple.subject,
+          triple.predicate,
+          triple.object,
+        )),
+        privateRoots: [],
+      })));
+    const wal = new InMemoryProverWal();
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      wal,
+      repairMissingKnowledgeAsset,
+    });
+
+    const outcome = await prover.tick();
+
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledWith({
+      kaId: fixture.kaId,
+      cgId: fixture.cgId,
+      expectedRoot: root,
+      expectedLeafCount: BigInt(leafCount),
+    });
+    expect(outcome).toMatchObject({
+      kind: 'submitted',
+      txHash: '0xrepaired',
+      kaId: fixture.kaId,
+      cgId: fixture.cgId,
+    });
+    expect((await wal.readAll()).map((entry) => entry.status)).toEqual([
+      'challenge', 'extracted', 'built', 'submitted',
+    ]);
+    await prover.close();
+  });
+
+  it('aborts and drains a stalled repair before closing prover resources', async () => {
+    const fixture = { cgId: 11n, kaId: 999n };
+    const submitProof = vi.fn(async () => ({
+      hash: '0xshould-not-submit', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: new Uint8Array(32),
+      expectedLeafCount: 1,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    let repairStarted!: () => void;
+    const started = new Promise<void>((resolve) => { repairStarted = resolve; });
+    let repairSignal: AbortSignal | undefined;
+    let repairSettled = false;
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation((signal) => {
+        repairSignal = signal;
+        repairStarted();
+        return new Promise<never>((_resolve, reject) => {
+          const rejectOnAbort = () => {
+            repairSettled = true;
+            reject(signal.reason);
+          };
+          if (signal.aborted) rejectOnAbort();
+          else signal.addEventListener('abort', rejectOnAbort, { once: true });
+        });
+      }));
+    const build = vi.fn();
+    const closeBuilder = vi.fn(async () => {
+      expect(repairSettled).toBe(true);
+    });
+    const onTick = vi.fn();
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+      builder: { build, close: closeBuilder },
+    });
+    const loop = startProverLoop({ prover, intervalMs: 60_000, onTick });
+    loop.start();
+    await started;
+
+    await loop.stop();
+
+    expect(repairSignal?.aborted).toBe(true);
+    expect(onTick).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'error',
+      error: expect.objectContaining({ name: 'AbortError' }),
+    }));
+    expect(build).not.toHaveBeenCalled();
+    expect(submitProof).not.toHaveBeenCalled();
+    expect(closeBuilder).toHaveBeenCalledOnce();
+  });
+
+  it('keeps close pending until an abort-ignoring repair physically settles', async () => {
+    const fixture = { cgId: 11n, kaId: 999n };
+    const submitProof = vi.fn(async () => ({
+      hash: '0xshould-not-submit', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: new Uint8Array(32),
+      expectedLeafCount: 1,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    let repairStarted!: () => void;
+    const started = new Promise<void>((resolve) => { repairStarted = resolve; });
+    let settleRepair!: (material: RandomSamplingRepairMaterial) => void;
+    let repairSignal: AbortSignal | undefined;
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation((signal) => {
+        repairSignal = signal;
+        repairStarted();
+        return new Promise<RandomSamplingRepairMaterial>((resolve) => {
+          settleRepair = resolve;
+        });
+      }));
+    const build = vi.fn();
+    const closeBuilder = vi.fn(async () => undefined);
+    const onTick = vi.fn();
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+      builder: { build, close: closeBuilder },
+    });
+    const loop = startProverLoop({ prover, intervalMs: 60_000, onTick });
+    loop.start();
+    await started;
+
+    const stopping = loop.stop();
+    await vi.waitFor(() => expect(repairSignal?.aborted).toBe(true));
+    await expect(Promise.race([
+      stopping.then(() => 'stopped'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 20)),
+    ])).resolves.toBe('pending');
+    expect(closeBuilder).not.toHaveBeenCalled();
+
+    settleRepair({ contents: [], privateRoots: [] });
+    await expect(stopping).resolves.toBeUndefined();
+    expect(onTick).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'error',
+      error: expect.objectContaining({ name: 'AbortError' }),
+    }));
+    expect(build).not.toHaveBeenCalled();
+    expect(submitProof).not.toHaveBeenCalled();
+    expect(closeBuilder).toHaveBeenCalledOnce();
+  });
+
+  it('proves an older pinned challenge ephemerally without downgrading live v2 state', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 999n,
+      ual: 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/999',
+      rootEntities: ['urn:e:historical'],
+      publicTriples: [
+        { subject: 'urn:e:historical', predicate: 'urn:p:version', object: '"v2"' },
+      ],
+    };
+    await seedKC(store, fixture);
+    const historical = {
+      subject: 'urn:e:historical',
+      predicate: 'urn:p:version',
+      object: '"v1"',
+    };
+    const historicalContents = [tripleContentV10(
+      historical.subject,
+      historical.predicate,
+      historical.object,
+    )];
+    const { root, leafCount } = structuredKARootV10(
+      [hashTripleV10(historical.subject, historical.predicate, historical.object)],
+      [],
+    );
+    const submitProof = vi.fn(async () => ({
+      hash: '0xhistorical', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => ({
+        contents: historicalContents,
+        privateRoots: [],
+      })));
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+    });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'submitted',
+      txHash: '0xhistorical',
+    });
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
+    const liveGraph = contextGraphDataUri(`cg-${fixture.cgId}`, fixture.cgId.toString());
+    await expect(store.query(`ASK { GRAPH <${liveGraph}> {
+      <urn:e:historical> <urn:p:version> "v2" .
+    } }`)).resolves.toEqual({ type: 'boolean', value: true });
+    await expect(store.query(`ASK { GRAPH <${liveGraph}> {
+      <urn:e:historical> <urn:p:version> "v1" .
+    } }`)).resolves.toEqual({ type: 'boolean', value: false });
+    await prover.close();
+  });
+
+  it('keeps a missing local asset unsynced when the explicit repair result rejects', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 999n,
+      ual: 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/999',
+      rootEntities: ['urn:e:repair-progress'],
+      publicTriples: [
+        { subject: 'urn:e:repair-progress', predicate: 'urn:p:k', object: '"recovered"' },
+      ],
+    };
+    const { root, leafCount } = structuredKARootV10(
+      fixture.publicTriples.map((triple) =>
+        hashTripleV10(triple.subject, triple.predicate, triple.object)),
+      [],
+    );
+    const submitProof = vi.fn(async () => ({
+      hash: '0xpartial-progress', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => {
+        throw new Error('terminal response timed out');
+      }));
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+      log,
+    });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'kc-not-synced',
+      kaId: fixture.kaId,
+      cgId: fixture.cgId,
+    });
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
+    expect(submitProof).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      'rs.tick.kc-repair-failed',
+      expect.objectContaining({ err: 'terminal response timed out' }),
+    );
+    await prover.close();
+  });
+
+  it('repairs a partially materialized KA whose metadata exists without payload data', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 999n,
+      ual: 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/999',
+      rootEntities: ['urn:e:partial'],
+      publicTriples: [
+        { subject: 'urn:e:partial', predicate: 'urn:p:k', object: '"completed"' },
+      ],
+    };
+    await seedKCMetadata(store, fixture);
+    const { root, leafCount } = structuredKARootV10(
+      fixture.publicTriples.map((triple) =>
+        hashTripleV10(triple.subject, triple.predicate, triple.object)),
+      [],
+    );
+    const submitProof = vi.fn(async () => ({
+      hash: '0xpartial-data', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => ({
+        contents: fixture.publicTriples.map((triple) => tripleContentV10(
+          triple.subject,
+          triple.predicate,
+          triple.object,
+        )),
+        privateRoots: [],
+      })));
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+    });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'submitted',
+      txHash: '0xpartial-data',
+    });
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
     await prover.close();
   });
 

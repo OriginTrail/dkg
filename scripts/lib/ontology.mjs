@@ -368,6 +368,7 @@ export const Profile = {
     appliesTo: NS.profile + 'appliesTo',         // Profile -> context graph id (IRI or literal)
     ofProfile: NS.profile + 'ofProfile',         // Binding/View -> Profile
     forSubGraph: NS.profile + 'forSubGraph',     // SubGraphBinding / FilterChip / SavedQuery -> sub-graph name
+    scopeGraph: NS.profile + 'scopeGraph',       // QueryCatalog / SavedQuery -> canonical Context Graph (sub)graph IRI
     forType: NS.profile + 'forType',             // EntityTypeBinding / FilterChip -> rdf:type IRI
     displayName: NS.profile + 'displayName',
     icon: NS.profile + 'icon',                   // emoji / short glyph

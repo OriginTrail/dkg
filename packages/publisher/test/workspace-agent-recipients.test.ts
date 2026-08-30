@@ -14,7 +14,12 @@ import {
   toAgentDid,
   workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
-import { resolveWorkspaceAgentRecipients } from '../src/index.js';
+import {
+  projectWorkspaceAgentRecipientFanout,
+  resolveWorkspaceAgentRecipients,
+  type WorkspaceAgentRecipient,
+  type WorkspaceAgentRecipientResolution,
+} from '../src/index.js';
 
 const CONTEXT_GRAPH_ID = 'workspace-agent-recipient-resolution';
 const DATA_GRAPH = contextGraphDataUri(CONTEXT_GRAPH_ID);
@@ -24,9 +29,36 @@ const DKG = 'https://dkg.network/ontology#';
 const DKG_PUBLIC_ENCRYPTION_KEY = `${DKG}publicEncryptionKey`;
 const DKG_ENCRYPTION_KEY_ALGORITHM = `${DKG}encryptionKeyAlgorithm`;
 const DKG_ENCRYPTION_KEY_PROOF = `${DKG}encryptionKeyProof`;
+const PEER_A = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const PEER_B = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const PROJECTION_AGENTS = Array.from(
+  { length: 6 },
+  (_unused, index) => ethers.getAddress(`0x${String(index + 1).padStart(40, '0')}`),
+);
 
 function agentUri(address: string): string {
   return `did:dkg:agent:${ethers.getAddress(address)}`;
+}
+
+function recipientFixture(agentAddress: string, peerId?: string): WorkspaceAgentRecipient {
+  return {
+    ...generateWorkspaceRecipientEncryptionKey(
+      agentUri(agentAddress),
+      `${agentUri(agentAddress)}#projection-x25519`,
+    ),
+    agentAddress,
+    peerId,
+  };
+}
+
+function inspectResolutionArm(resolution: WorkspaceAgentRecipientResolution): string | number {
+  if (resolution.requiresEncryption) {
+    const firstRecipient: WorkspaceAgentRecipient = resolution.recipients[0];
+    return firstRecipient.agentAddress;
+  }
+  const noRecipients: readonly [] = resolution.recipients;
+  return noRecipients.length;
 }
 
 async function insertAgentGate(
@@ -169,6 +201,90 @@ async function insertAgentEncryptionKeyRevocation(
   }
   await store.insert(quads);
 }
+
+describe('projectWorkspaceAgentRecipientFanout', () => {
+  it('projects the validated snapshot once, trimming, deduping, and excluding self', () => {
+    const resolution = {
+      requiresEncryption: true,
+      recipients: [
+        recipientFixture(PROJECTION_AGENTS[0]!, ` ${PEER_A} `),
+        recipientFixture(PROJECTION_AGENTS[1]!, PEER_A),
+        recipientFixture(PROJECTION_AGENTS[2]!, SELF_PEER),
+        recipientFixture(PROJECTION_AGENTS[3]!, '  '),
+        recipientFixture(PROJECTION_AGENTS[4]!),
+        recipientFixture(PROJECTION_AGENTS[5]!, PEER_B),
+      ],
+    } satisfies WorkspaceAgentRecipientResolution;
+
+    expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
+      source: 'agent-roster',
+      members: [PEER_A, PEER_B],
+      complete: false,
+    });
+  });
+
+  it('narrows both valid resolution arms without a refinement helper', () => {
+    const encrypted = {
+      requiresEncryption: true,
+      recipients: [recipientFixture(PROJECTION_AGENTS[0]!, PEER_A)],
+    } satisfies WorkspaceAgentRecipientResolution;
+    const plaintext = {
+      requiresEncryption: false,
+      recipients: [],
+    } satisfies WorkspaceAgentRecipientResolution;
+
+    expect(inspectResolutionArm(encrypted)).toBe(PROJECTION_AGENTS[0]);
+    expect(inspectResolutionArm(plaintext)).toBe(0);
+  });
+
+  it('marks a mixed authorized roster incomplete while retaining known peers', () => {
+    const resolution = {
+      requiresEncryption: true,
+      recipients: [
+        recipientFixture(PROJECTION_AGENTS[0]!, PEER_A),
+        recipientFixture(PROJECTION_AGENTS[1]!),
+      ],
+    } satisfies WorkspaceAgentRecipientResolution;
+
+    expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
+      source: 'agent-roster',
+      members: [PEER_A],
+      complete: false,
+    });
+  });
+
+  it('counts the local agent as covered without adding self to remote peers', () => {
+    const resolution = {
+      requiresEncryption: true,
+      recipients: [
+        recipientFixture(PROJECTION_AGENTS[0]!, SELF_PEER),
+        recipientFixture(PROJECTION_AGENTS[1]!, PEER_B),
+      ],
+    } satisfies WorkspaceAgentRecipientResolution;
+
+    expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
+      source: 'agent-roster',
+      members: [PEER_B],
+      complete: true,
+    });
+  });
+
+  it('rejects malformed profile peer IDs and keeps the fallback-required projection incomplete', () => {
+    const resolution = {
+      requiresEncryption: true,
+      recipients: [
+        recipientFixture(PROJECTION_AGENTS[0]!, PEER_A),
+        recipientFixture(PROJECTION_AGENTS[1]!, 'not-a-peer-id'),
+      ],
+    } satisfies WorkspaceAgentRecipientResolution;
+
+    expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
+      source: 'agent-roster',
+      members: [PEER_A],
+      complete: false,
+    });
+  });
+});
 
 describe('resolveWorkspaceAgentRecipients', () => {
   it.each([

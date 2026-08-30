@@ -10,8 +10,12 @@ import type {
   AsyncLiftRetryOutcome,
   AsyncPreparedPublishPayload,
   JournalReadResult,
-  LiftJob,
   LiftJobRetryProjection,
+  PersistedLiftJob,
+} from '@origintrail-official/dkg-publisher';
+import {
+  isSafeJobId,
+  SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import {
@@ -29,8 +33,27 @@ import type {
   CatchupStatusResponse,
   CatchupStatusWireResponse,
 } from './catchup-status.js';
+import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
+import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
+
+export interface PublisherJobResponse {
+  job: PersistedLiftJob;
+  retryState: LiftJobRetryProjection;
+}
+
+export interface PublisherJobPayloadResponse extends PublisherJobResponse {
+  /** Named lifecycle publish jobs have no raw prepared payload; the route serves null there. */
+  payload: AsyncPreparedPublishPayload | null;
+}
+
+type AssertFalse<T extends false> = T;
+type _PublisherCompatibilityBroadcastRequiresExplicitGuard = AssertFalse<
+  Extract<PublisherJobResponse['job'], { readonly status: 'broadcast' }> extends {
+    readonly broadcast: { readonly txHash: `0x${string}` };
+  } ? true : false
+>;
 
 export type ContextGraphJoinPolicyMode = 'manual' | 'open';
 
@@ -56,8 +79,10 @@ export type ContextGraphJoinPolicyUpdate =
     };
 
 export type QueryResult =
-  | { type: 'bindings'; bindings: Array<Record<string, string>> }
-  | { type: 'boolean'; value: boolean }
+  | PublicQueryResult<
+      Record<string, string>,
+      { subject: string; predicate: string; object: string; graph: string }
+    >
   | { type?: undefined; [key: string]: unknown };
 
 export interface PreSignedAuthorAttestationPayload {
@@ -1299,18 +1324,13 @@ export class ApiClient {
   // publisher's own exported types rather than `any`: these two routes serialize the queue's
   // persisted job and prepared-payload shapes verbatim, so a drift there should break the
   // build here instead of surfacing as an undefined field at runtime.
-  async publisherJob(jobId: string): Promise<{ job: LiftJob; retryState: LiftJobRetryProjection }> {
+  async publisherJob(jobId: string): Promise<PublisherJobResponse> {
     return this.get(`/api/publisher/job?id=${encodeURIComponent(jobId)}`);
   }
 
   async publisherJobPayload(
     jobId: string,
-  ): Promise<{
-    // Named lifecycle publish jobs have no raw prepared payload; the route serves null there.
-    job: LiftJob;
-    payload: AsyncPreparedPublishPayload | null;
-    retryState: LiftJobRetryProjection;
-  }> {
+  ): Promise<PublisherJobPayloadResponse> {
     return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
   }
 
@@ -1369,6 +1389,11 @@ export class ApiClient {
   // failed jobs the pass left alone (see AsyncLiftRetryOutcome).
   async publisherRetry(status: 'failed' = 'failed'): Promise<AsyncLiftRetryOutcome> {
     return this.post('/api/publisher/retry', { status });
+  }
+
+  async publisherRetryJob(jobId: string): Promise<AsyncLiftRetryOutcome> {
+    if (!isSafeJobId(jobId)) throw new Error(SAFE_JOB_ID_ERROR);
+    return this.post('/api/publisher/retry', { status: 'failed', jobId });
   }
 
   async publisherClear(status: 'failed' | 'finalized'): Promise<{ cleared: number; status: 'failed' | 'finalized' }> {
@@ -1522,7 +1547,7 @@ export class ApiClient {
     });
   }
 
-  async readQueryCatalog(contextGraphId: string): Promise<{ result: QueryResult }> {
+  async readQueryCatalog(contextGraphId: string): Promise<QueryCatalogReadResponse> {
     return this.post('/api/profile/query-catalog/read', { contextGraphId });
   }
 

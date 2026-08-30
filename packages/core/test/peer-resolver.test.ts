@@ -1,13 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   PeerResolver,
+  PeerConnectionUnresolvedError,
   StubNetworkStateRegistry,
   type Network,
+  type PeerConnectionNetwork,
   type NetworkStateRegistry,
   type AgentDirectoryLookup,
   type Address,
   type NodeIdentity,
 } from '../src/network/index.js';
+import { connectLibp2pPeer } from '../src/network/libp2p-peer-connect.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -20,23 +23,27 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
 
 const PEER_A = '12D3KooWA' + 'a'.repeat(43);
 const PEER_B = '12D3KooWB' + 'b'.repeat(43);
+const RELAY_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const RELAY_ADDR =
-  '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+  `/ip4/178.104.54.178/tcp/9090/p2p/${RELAY_PEER_ID}`;
+const TARGET_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 
 type FindPeerImpl = (
   peerId: NodeIdentity,
   opts?: { signal?: AbortSignal; timeoutMs?: number },
 ) => Promise<Address[]>;
 
-interface MockNetwork extends Network {
+interface MockNetwork extends PeerConnectionNetwork {
   __conns: Map<NodeIdentity, Array<{ remoteAddr: { toString(): string } }>>;
   __addedAddresses: Array<{ peerId: NodeIdentity; addrs: Address[] }>;
   __findPeerImpl: FindPeerImpl | null;
+  __connectCalls: Array<{ peerId: NodeIdentity; addrs: readonly Address[] }>;
 }
 
 function makeNetwork(): MockNetwork {
   const conns = new Map<NodeIdentity, Array<{ remoteAddr: { toString(): string } }>>();
   const added: Array<{ peerId: NodeIdentity; addrs: Address[] }> = [];
+  const connectCalls: Array<{ peerId: NodeIdentity; addrs: readonly Address[] }> = [];
   let findPeerImpl: FindPeerImpl | null = null;
   const net: Partial<MockNetwork> = {
     localId: PEER_A,
@@ -46,6 +53,9 @@ function makeNetwork(): MockNetwork {
     async stop() {},
     async dialProtocol() {
       throw new Error('not used in resolver tests');
+    },
+    async connectPeer(peerId: NodeIdentity, addrs: readonly Address[]) {
+      connectCalls.push({ peerId, addrs });
     },
     async handle() {},
     async unhandle() {},
@@ -62,6 +72,7 @@ function makeNetwork(): MockNetwork {
   };
   Object.defineProperty(net, '__conns', { value: conns, enumerable: false });
   Object.defineProperty(net, '__addedAddresses', { value: added, enumerable: false });
+  Object.defineProperty(net, '__connectCalls', { value: connectCalls, enumerable: false });
   Object.defineProperty(net, '__findPeerImpl', {
     get: () => findPeerImpl,
     set: (v) => {
@@ -85,6 +96,48 @@ describe('PeerResolver', () => {
   beforeEach(() => {
     net = makeNetwork();
     registry = new StubNetworkStateRegistry();
+  });
+
+  it('wraps libp2p no-address failures in the exact unresolved transport signal', async () => {
+    const noAddresses = new Error('The dial request has no valid addresses for peer');
+    noAddresses.name = 'NoValidAddressesError';
+    const host = {
+      getConnections: () => [],
+      dial: async () => { throw noAddresses; },
+      peerStore: { merge: async () => undefined },
+    };
+
+    await expect(connectLibp2pPeer(host, RELAY_PEER_ID, []))
+      .rejects.toMatchObject({
+        name: 'PeerConnectionUnresolvedError',
+        code: 'PEER_CONNECTION_UNRESOLVED',
+        cause: noAddresses,
+      });
+  });
+
+  it('keeps the base Network interface implementable but rejects a missing connection capability', async () => {
+    const legacyNetwork: Network = {
+      localId: PEER_A,
+      localAddresses: [],
+      isStarted: true,
+      start: async () => undefined,
+      stop: async () => undefined,
+      dialProtocol: async () => { throw new Error('not used'); },
+      handle: async () => undefined,
+      unhandle: async () => undefined,
+      getConnections: () => [],
+      addKnownAddresses: async () => undefined,
+    };
+
+    expect('connectPeer' in legacyNetwork).toBe(false);
+    const resolver = new PeerResolver({
+      network: legacyNetwork,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+    await expect(resolver.connect(PEER_B)).rejects.toThrow(
+      'Network transport does not implement the peer-connection capability',
+    );
   });
 
   it('step 1: returns live-conn remoteAddr and stops', async () => {
@@ -121,6 +174,135 @@ describe('PeerResolver', () => {
       peerId: PEER_B,
       addrs: ['/ip4/1.2.3.4/tcp/9090'],
     });
+  });
+
+  it('connect uses the same ordered resolver output at the Network boundary', async () => {
+    net.__findPeerImpl = async () => ['/ip4/1.2.3.4/tcp/9090/p2p/12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6'];
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    const outcome = await resolver.connect(PEER_B);
+
+    expect(outcome).toEqual({
+      status: 'connected',
+      resolvedAddresses: ['/ip4/1.2.3.4/tcp/9090/p2p/12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6'],
+    });
+    expect(net.__connectCalls).toEqual([{
+      peerId: PEER_B,
+      addrs: outcome.resolvedAddresses,
+    }]);
+  });
+
+  it('keeps transport-specific addresses opaque at the Network boundary', async () => {
+    const opaqueAddresses = [
+      'iroh-ticket:peer-under-test',
+      'quic://peer-under-test.example:443',
+    ];
+    net.__findPeerImpl = async () => opaqueAddresses;
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    const outcome = await resolver.connect(PEER_B);
+
+    expect(outcome).toEqual({ status: 'connected', resolvedAddresses: opaqueAddresses });
+    expect(net.__connectCalls).toEqual([{ peerId: PEER_B, addrs: opaqueAddresses }]);
+  });
+
+  it('connect tries the transport peer-store fallback after an empty resolution', async () => {
+    net.__findPeerImpl = async () => [];
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(PEER_B)).resolves.toEqual({
+      status: 'connected',
+      resolvedAddresses: [],
+    });
+    expect(net.__connectCalls).toEqual([{ peerId: PEER_B, addrs: [] }]);
+  });
+
+  it('reports an honest unresolved outcome when the empty peer-store fallback fails', async () => {
+    net.__findPeerImpl = async () => [];
+    net.connectPeer = async () => {
+      throw new PeerConnectionUnresolvedError('peer absent from peer store');
+    };
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(PEER_B)).resolves.toEqual({
+      status: 'unresolved',
+      resolvedAddresses: [],
+    });
+  });
+
+  it('propagates an operational transport failure after an empty resolution', async () => {
+    net.__findPeerImpl = async () => [];
+    net.connectPeer = async () => { throw new Error('libp2p is not started'); };
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(PEER_B)).rejects.toThrow('libp2p is not started');
+  });
+
+  it('does not collapse a configured-relay failure into an unresolved lookup', async () => {
+    const relayFailure = new Error('configured relay unavailable');
+    const noAddresses = Object.assign(new Error('no valid addresses'), {
+      name: 'NoValidAddressesError',
+    });
+    const host = {
+      getConnections: () => [],
+      dial: async (target: unknown) => {
+        const address = (target as { toString(): string }).toString();
+        throw address === TARGET_PEER_ID ? noAddresses : relayFailure;
+      },
+      peerStore: { merge: async () => undefined },
+    };
+    net.__findPeerImpl = async () => [];
+    net.connectPeer = async (peerId, addresses, opts) => connectLibp2pPeer(
+      host,
+      peerId,
+      addresses,
+      {
+        ...opts,
+        configuredRelayTargets: [{ peerId: RELAY_PEER_ID, addresses: [RELAY_ADDR] }],
+      },
+    );
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(TARGET_PEER_ID)).rejects.toBe(relayFailure);
+  });
+
+  it('connect propagates caller cancellation instead of reporting an empty lookup', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('caller deadline'));
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(PEER_B, { signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(net.__connectCalls).toEqual([]);
   });
 
   it('step 2: opts.skipDht bypasses findPeer entirely', async () => {

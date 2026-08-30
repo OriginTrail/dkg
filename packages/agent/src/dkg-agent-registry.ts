@@ -1974,18 +1974,45 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // caller's deadline by a wide margin. Using one signal threads the
     // remaining budget through both phases.
     this.log.info(ctx, `Resolving ${peerIdStr} via PeerResolver...`);
-    const addrs = await this.peerResolver.resolve(peerIdStr, {
-      signal,
-      perStepTimeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
-    });
-    if (addrs.length === 0) {
+    let outcome: Awaited<ReturnType<typeof this.peerResolver.connect>>;
+    try {
+      outcome = await this.peerResolver.connect(peerIdStr, {
+        signal,
+        perStepTimeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
+        log: (message) => this.log.info(ctx, message),
+      });
+    } catch (err: any) {
+      // Codex PR #499 round 5 (dkg-agent.ts:4096): the shared signal
+      // covers BOTH resolution and dial. If most of the budget went
+      // into resolve() and dial() then aborts on the same signal, we
+      // must classify that as CONNECT_TIMEOUT (504, retriable), not
+      // DIAL_FAILED (502, transport failure). Without this split, a
+      // peer that resolves right before the deadline gets misclassified
+      // and the UI's retry logic stops working.
+      //
+      // Only the caller-owned signal defines an overall timeout. A candidate
+      // can abort on its local cap without changing the API classification.
+      if (signal.aborted) {
+        const error = new Error(
+          `CONNECT_TIMEOUT: dial to ${peerIdStr} aborted after ` +
+            `${Date.now() - startedAt}ms of ${timeoutMs}ms budget ` +
+            `(resolution succeeded, dial timed out)`,
+        );
+        (error as any).code = 'CONNECT_TIMEOUT';
+        throw error;
+      }
+      const error = new Error(
+        `DIAL_FAILED: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      (error as any).code = 'DIAL_FAILED';
+      throw error;
+    }
+    if (outcome.status === 'unresolved') {
       // Codex PR #499 round 5: distinguish "abort/timeout swallowed by
       // best-effort resolver" from "genuine negative lookup". Without
       // this, transient routing failures (DHT timeout, network blip)
       // surface as 404 PEER_NOT_FOUND in /api/connect — which the UI
-      // treats as terminal. Mapping aborted-signal → CONNECT_TIMEOUT
-      // (504) preserves the retriable-vs-terminal distinction that
-      // PR #431's inline walk had.
+      // treats as terminal.
       if (signal.aborted) {
         const error = new Error(
           `CONNECT_TIMEOUT: PeerResolver did not return addresses for ${peerIdStr} ` +
@@ -2000,43 +2027,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'PEER_NOT_FOUND';
       throw error;
     }
-    this.log.info(ctx, `Resolved ${peerIdStr} → ${addrs.length} addr(s); dialling...`);
-
-    // peerStore is already primed by the resolver. dial(peerId) finds
-    // the addresses there and goes — same AbortSignal so the overall
-    // budget is honoured end-to-end.
-    try {
-      await this.node.libp2p.dial(peerId, { signal });
-    } catch (err: any) {
-      // Codex PR #499 round 5 (dkg-agent.ts:4096): the shared signal
-      // covers BOTH resolution and dial. If most of the budget went
-      // into resolve() and dial() then aborts on the same signal, we
-      // must classify that as CONNECT_TIMEOUT (504, retriable), not
-      // DIAL_FAILED (502, transport failure). Without this split, a
-      // peer that resolves right before the deadline gets misclassified
-      // and the UI's retry logic stops working.
-      //
-      // signal.aborted is the definitive check — it's our signal, so
-      // an abort means the timeout fired. Also accept AbortError-named
-      // errors (libp2p's transport layer surfaces those via DOMException
-      // when the dial is cancelled).
-      const isAbort =
-        signal.aborted ||
-        err?.name === 'AbortError' ||
-        err?.code === 'ABORT_ERR';
-      if (isAbort) {
-        const error = new Error(
-          `CONNECT_TIMEOUT: dial to ${peerIdStr} aborted after ` +
-            `${Date.now() - startedAt}ms of ${timeoutMs}ms budget ` +
-            `(resolution succeeded, dial timed out)`,
-        );
-        (error as any).code = 'CONNECT_TIMEOUT';
-        throw error;
-      }
-      const error = new Error(`DIAL_FAILED: ${err?.message ?? String(err)}`);
-      (error as any).code = 'DIAL_FAILED';
-      throw error;
-    }
+    this.log.info(
+      ctx,
+      `Resolved and connected to ${peerIdStr} via ${outcome.resolvedAddresses.length} addr(s)`,
+    );
     await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
       signal,
       timeoutMs: remainingTimeoutMs(),

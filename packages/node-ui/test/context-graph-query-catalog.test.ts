@@ -6,6 +6,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+const localStorageValues = new Map<string, string>();
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  value: {
+    clear: () => localStorageValues.clear(),
+    getItem: (key: string) => localStorageValues.get(key) ?? null,
+    key: (index: number) => [...localStorageValues.keys()][index] ?? null,
+    get length() { return localStorageValues.size; },
+    removeItem: (key: string) => localStorageValues.delete(key),
+    setItem: (key: string, value: string) => localStorageValues.set(key, value),
+  },
+});
 
 const apiMocks = vi.hoisted(() => ({
   executeQuery: vi.fn(),
@@ -148,6 +160,34 @@ describe('ContextGraphQueryView', () => {
     await act(async () => { root.unmount(); });
   });
 
+  it.each([true, false])('renders ASK %s results', async (value) => {
+    apiMocks.executeQuery.mockResolvedValueOnce({ result: { type: 'boolean', value } });
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, 'ASK result');
+    expect(container.querySelector('[aria-label="ASK result"]')?.textContent).toContain(String(value));
+    expect(container.textContent).not.toContain('No results for this query.');
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it('renders CONSTRUCT quads as graph-shaped results', async () => {
+    apiMocks.executeQuery.mockResolvedValueOnce({
+      result: {
+        type: 'quads',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
+      },
+    });
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, '1 quad');
+    expect(container.textContent).toContain('subject');
+    expect(container.textContent).toContain('urn:s');
+    expect(container.textContent).toContain('urn:g');
+
+    await act(async () => { root.unmount(); });
+  });
+
   it('groups saved queries and loads the selected query into the editor', async () => {
     const savedProfile = profile({
       queryCatalogs: [{
@@ -206,6 +246,7 @@ describe('ContextGraphQueryView', () => {
           sparql: 'SELECT ?doc WHERE { GRAPH ?g { ?doc <http://schema.org/name> ?name } } LIMIT 5',
           resultColumn: 'doc',
           rank: 1,
+          view: 'working-memory',
         }],
       }],
     });
@@ -239,6 +280,33 @@ describe('ContextGraphQueryView', () => {
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     expect(textarea.value).toContain('schema.org/name');
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('schema.org/name'),
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory' },
+    );
+
+    const runButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Run');
+    expect(runButton).toBeTruthy();
+
+    apiMocks.executeQuery.mockClear();
+    await act(async () => {
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('schema.org/name'),
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory' },
+    );
+
+    apiMocks.executeQuery.mockClear();
+    await act(async () => {
+      setFieldValue(textarea, `${textarea.value}\n# edited`);
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('# edited'),
+      { contextGraphId: 'cg-test', subGraphName: undefined, view: undefined },
+    );
 
     await act(async () => { root.unmount(); });
   });
@@ -258,6 +326,93 @@ describe('ContextGraphQueryView', () => {
     expect(emptyContainer.textContent).toContain('No saved queries yet.');
 
     await act(async () => { emptyRoot.unmount(); });
+  });
+
+  it('collects and safely renders runtime parameters before executing a catalog query', async () => {
+    const parameterizedProfile = profile({
+      queryCatalogs: [{
+        slug: 'kamstrup',
+        subGraph: 'docs',
+        name: 'Kamstrup',
+        rank: 1,
+        queries: [{
+          slug: 'configuration-trace',
+          subGraph: 'docs',
+          catalogSlug: 'kamstrup',
+          catalogName: 'Kamstrup',
+          catalogRank: 1,
+          name: 'Configuration trace',
+          sparql: 'SELECT ?record WHERE { ?record <urn:configuration> {{configurationId}} }',
+          resultColumn: 'record',
+          rank: 1,
+          view: 'verifiable-memory',
+          parameters: [{
+            name: 'configurationId',
+            type: 'string',
+            label: 'Configuration ID',
+            description: 'Configuration_ID to trace.',
+          }],
+        }],
+      }],
+    });
+    const { container, root } = await renderWithProfile(parameterizedProfile);
+    await waitForText(container, 'Configuration trace');
+    apiMocks.executeQuery.mockClear();
+
+    const catalogButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Configuration trace'));
+    await act(async () => {
+      catalogButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiMocks.executeQuery).not.toHaveBeenCalled();
+    const parameterInput = container.querySelector('input[aria-label="Configuration ID"]') as HTMLInputElement;
+    expect(parameterInput).toBeTruthy();
+    await act(async () => {
+      setFieldValue(parameterInput, '748387" } UNION { ?s ?p ?o');
+    });
+
+    const runButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Run');
+    await act(async () => {
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('"748387\\" } UNION { ?s ?p ?o"'),
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'verifiable-memory' },
+    );
+    await act(async () => {
+      setFieldValue(parameterInput, 'different configuration');
+    });
+    expect(container.textContent).toContain('Previous query results are hidden');
+    await act(async () => {
+      setFieldValue(parameterInput, '748387" } UNION { ?s ?p ?o');
+    });
+    const callsBeforeSave = apiMocks.executeQuery.mock.calls.length;
+
+    const saveButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save');
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const nameInput = container.querySelector('input[placeholder="Query name"]') as HTMLInputElement;
+    await act(async () => {
+      setFieldValue(nameInput, 'Reusable configuration trace');
+    });
+    const saveQueryButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save query');
+    await act(async () => {
+      saveQueryButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const writtenQuads = apiMocks.writeProfileQueryCatalog.mock.calls.at(-1)?.[1] as Array<{ predicate: string; object: string }>;
+    expect(writtenQuads.some(quad => quad.predicate.endsWith('/queryParameters'))).toBe(true);
+    expect(writtenQuads.some(quad => quad.predicate.endsWith('/executionView'))).toBe(true);
+    expect(writtenQuads.filter(quad => quad.predicate.endsWith('/forSubGraph')))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ object: '"docs"' })]));
+    expect(apiMocks.executeQuery).toHaveBeenCalledTimes(callsBeforeSave);
+    expect(apiMocks.executeQuery.mock.calls.some(([sparql]) => String(sparql).includes('{{'))).toBe(false);
+    await act(async () => { root.unmount(); });
   });
 
   it('shows profile errors without also implying an empty catalogue', async () => {

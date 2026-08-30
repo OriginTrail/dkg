@@ -92,6 +92,14 @@ describe('#1863 async-lift writeJob atomicity', () => {
             }).deleteByPattern(pattern, options);
           };
         }
+        if (prop === 'deleteByPatternWithoutCount') {
+          return async (pattern: { graph?: string }, options?: unknown) => {
+            if (pattern?.graph === DEFAULT_CONTROL_GRAPH_URI) jobGraphDeletes++;
+            return (target as unknown as {
+              deleteByPatternWithoutCount: (p: unknown, o?: unknown) => Promise<void>;
+            }).deleteByPatternWithoutCount(pattern, options);
+          };
+        }
         const value = Reflect.get(target, prop, target);
         return typeof value === 'function' ? value.bind(target) : value;
       },
@@ -136,6 +144,14 @@ describe('#1863 async-lift writeJob atomicity', () => {
             }).deleteByPattern(pattern, options);
           };
         }
+        if (prop === 'deleteByPatternWithoutCount') {
+          return async (pattern: { graph?: string }, options?: unknown) => {
+            if (pattern?.graph === DEFAULT_CONTROL_GRAPH_URI) jobGraphDeletes++;
+            return (target as unknown as {
+              deleteByPatternWithoutCount: (p: unknown, o?: unknown) => Promise<void>;
+            }).deleteByPatternWithoutCount(pattern, options);
+          };
+        }
         const value = Reflect.get(target, prop, target);
         return typeof value === 'function' ? value.bind(target) : value;
       },
@@ -172,6 +188,14 @@ describe('#1863 async-lift writeJob atomicity', () => {
             return (target as unknown as {
               deleteByPattern: (p: unknown, o?: unknown) => Promise<unknown>;
             }).deleteByPattern(pattern, options);
+          };
+        }
+        if (prop === 'deleteByPatternWithoutCount') {
+          return async (pattern: { graph?: string }, options?: unknown) => {
+            if (pattern?.graph === DEFAULT_CONTROL_GRAPH_URI) jobGraphDeletes++;
+            return (target as unknown as {
+              deleteByPatternWithoutCount: (p: unknown, o?: unknown) => Promise<void>;
+            }).deleteByPatternWithoutCount(pattern, options);
           };
         }
         const value = Reflect.get(target, prop, target);

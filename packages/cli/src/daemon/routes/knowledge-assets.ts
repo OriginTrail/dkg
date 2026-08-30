@@ -92,6 +92,7 @@ import {
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 
 const PREFIX = "/api/knowledge-assets";
+
 type FinalizedPublishResult = Awaited<
   ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
 > & {
@@ -1479,6 +1480,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
         });
       } catch (e: any) {
+        if (respondIfStoreUnavailable(res, e)) return;
         // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
         // carries the recovery hint. Everything else (e.g. the curator-ack 503)
         // propagates to the outer handler unchanged.

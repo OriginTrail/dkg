@@ -263,7 +263,10 @@ import {
   type VmRecoveryProviderAttempt,
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
-import { encodeExactAssetUals, MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
+import {
+  encodeExactAssetUals,
+  MAX_EXACT_SYNC_ASSETS,
+} from './sync/exact-assets.js';
 import {
   MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
   ExactAssetFetchLifecycleClosedError,
@@ -365,13 +368,24 @@ type VmReconcileSwmCandidateNamespaces = { namespaces: VmReconcileSwmNamespace[]
 type VmReconcileSwmCandidateState = {
   swmGen: string | null;
   candidateNamespaces: VmReconcileSwmNamespace[];
-  peerTopologyKey: string;
+  peerTopology: VmReconcilePeerTopology;
+  cleanMissPeerIds: string[];
 };
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
+import {
+  canReuseVmReconcilePeerTopology,
+  createVmReconcileCleanMissPeerIds,
+  createVmReconcilePeerTopology,
+  encodeLegacyVmReconcilePeerTopologyKey,
+  isVmReconcilePeerTopology,
+  parseLegacyVmReconcilePeerTopologyKey,
+  parseVmReconcileCleanMissPeerIds,
+  UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
+} from './vm-reconcile-peer-topology.js';
 import {
   stripLiteral, jsonLdToQuads,
   type JsonLdContent,
@@ -452,6 +466,7 @@ import {
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
+  type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
@@ -3407,11 +3422,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       target.cursor.scanOrdinal = workingCursor.scanOrdinal;
       const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
       this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
-      // Queue one trailing slice while this key is still active. The dispatcher
-      // places it behind already-waiting live CGs, so a large graph makes steady
-      // progress without monopolising the only VM worker.
-      const hasImmediateTrailingWork = result.hasMore || result.staleTarget;
-      if (isLifecycleCurrent() && hasImmediateTrailingWork) {
+      // The reconciler owns the continuation policy: productive slices, stale
+      // bindings, and explicit provider rotations continue immediately, while
+      // pending-only historical inventory yields to the periodic sweep.
+      if (isLifecycleCurrent() && result.shouldContinueImmediately) {
         this.vmReconcileDispatcher?.triggerLive(localCgId);
       } else if (isTargetCurrent()) {
         // RS heal is bounded, best-effort maintenance. Run it only after the
@@ -4245,12 +4259,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
   }
 
-  async collectVmReconcileSwmCandidateState(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmCandidateState> {
+  async collectVmReconcileSwmCandidateState(
+    this: DKGAgent,
+    localCgId: string,
+  ): Promise<VmReconcileSwmCandidateState> {
     const candidateNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
     return {
       candidateNamespaces: candidateNamespaces.namespaces,
       swmGen: await this.readVmReconcileSwmGen(candidateNamespaces.namespaces),
-      peerTopologyKey: await this.vmReconcilePeerTopologyKey(localCgId),
+      peerTopology: await this.vmReconcilePeerTopology(localCgId),
+      cleanMissPeerIds: [],
     };
   }
 
@@ -4290,13 +4308,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .join('\n');
   }
 
-  async vmReconcilePeerTopologyKey(this: DKGAgent, localCgId: string): Promise<string> {
+  async vmReconcilePeerTopology(
+    this: DKGAgent,
+    localCgId: string,
+  ): Promise<VmReconcilePeerTopology> {
     try {
       const preferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
       const isPrivateContextGraph = await this.isPrivateContextGraph(localCgId);
       const libp2p = (this.node as any)?.libp2p;
       const getConnections = libp2p?.getConnections;
-      if (typeof getConnections !== 'function') return 'unreadable';
+      if (typeof getConnections !== 'function') return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
       const peerIds = [...new Map(
         (getConnections.call(libp2p) as Array<{ remotePeer?: { toString(): string } }>)
           .map((connection) => [connection.remotePeer?.toString(), connection.remotePeer] as const)
@@ -4309,21 +4330,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
         preferredPeerId,
         isPrivateContextGraph,
       );
-      return JSON.stringify({
+      return createVmReconcilePeerTopology({
         preferredPeerId: preferredPeerId ?? null,
         privateOnly: isPrivateContextGraph,
-        peers: orderedPeers.map((peer, rank) => {
+        peers: orderedPeers.map((peer) => {
           const peerId = peer.toString();
           return {
-            rank,
             peerId,
-            preferred: peerId === preferredPeerId,
             core: this.knownCorePeerIds.has(peerId),
           };
         }),
       });
     } catch {
-      return 'unreadable';
+      return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
     }
   }
 
@@ -4523,6 +4542,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       try {
         const durable = await this.config.contextGraphSubscriptionStore
           ?.loadVmReconcileNegative?.(cacheKey);
+        const durablePeerTopology = durable
+          ? isVmReconcilePeerTopology(durable.peerTopology)
+            ? durable.peerTopology
+            : parseLegacyVmReconcilePeerTopologyKey(durable.peerTopologyKey)
+          : null;
+        const durableCleanMissPeerIds = durablePeerTopology
+          ? parseVmReconcileCleanMissPeerIds(
+            durable?.cleanMissPeerIds ?? [],
+            durablePeerTopology,
+          )
+          : null;
         if (
           durable &&
           durable.cacheKey === cacheKey &&
@@ -4533,7 +4563,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
           Array.isArray(durable.candidateNamespaces) &&
           durable.candidateNamespaces.every((item) =>
             typeof item?.metaGraph === 'string' && typeof item?.dataGraph === 'string') &&
-          typeof durable.peerTopologyKey === 'string'
+          durablePeerTopology !== null &&
+          durableCleanMissPeerIds !== null
         ) {
           if (!this.vmReconcileSwmGenSupportsDurableNegative(durable.swmGen)) {
             await this.config.contextGraphSubscriptionStore
@@ -4545,7 +4576,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
               nextRetryAt: durable.nextRetryAt,
               swmGen: durable.swmGen,
               candidateNamespaces: durable.candidateNamespaces,
-              peerTopologyKey: durable.peerTopologyKey,
+              peerTopology: durablePeerTopology,
+              cleanMissPeerIds: durableCleanMissPeerIds,
             };
             this.vmReconcileNegativeCache.set(cacheKey, cached);
             this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
@@ -4565,7 +4597,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Best effort only; an unchanged connection view can still honor the
         // cached miss until the backoff expires.
       }
-      if (await this.vmReconcilePeerTopologyKey(localCgId) !== cached.peerTopologyKey) {
+      const currentPeerTopology = await this.vmReconcilePeerTopology(localCgId);
+      if (!canReuseVmReconcilePeerTopology({
+        topology: cached.peerTopology,
+        cleanMissPeerIds: cached.cleanMissPeerIds,
+      }, currentPeerTopology)) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.clearVmReconcileActiveFetchCooldown(localCgId);
         return false;
@@ -4650,7 +4686,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       nextRetryAt: Date.now() + backoff,
       swmGen: state.swmGen,
       candidateNamespaces: state.candidateNamespaces,
-      peerTopologyKey: state.peerTopologyKey,
+      peerTopology: state.peerTopology,
+      cleanMissPeerIds: state.cleanMissPeerIds,
     };
     this.vmReconcileNegativeCache.set(cacheKey, record);
     this.markVmReconcileNegativeCacheHydrated(cacheKey, localCgId);
@@ -4659,7 +4696,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.vmReconcileSwmGenSupportsDurableNegative(record.swmGen)) {
       void durableStore?.saveVmReconcileNegative?.({
         cacheKey,
-        ...record,
+        localCgId: record.localCgId,
+        failures: record.failures,
+        nextRetryAt: record.nextRetryAt,
+        swmGen: record.swmGen,
+        candidateNamespaces: record.candidateNamespaces,
+        peerTopologyKey: encodeLegacyVmReconcilePeerTopologyKey(record.peerTopology),
+        peerTopology: record.peerTopology,
+        cleanMissPeerIds: record.cleanMissPeerIds,
       }).catch(() => {
         // Persistence is an accelerator only; the process-local gate still works.
       });
@@ -6243,6 +6287,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let swmState: VmReconcileSwmCandidateState | undefined;
     let activeFetchRan = false;
     let activeFetchHadUsableResponse = false;
+    const cleanMissPeerIds = new Set<string>();
     if (!(await targetMayMaterialize())) return { status: 'skip' };
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
@@ -6304,7 +6349,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             break;
           }
           try {
-            const fetchResult = await this.syncContextGraphFromConnectedPeers(localCgId, {
+            const recovery = await this.syncVmRecoveryFromConnectedPeers(localCgId, {
               includeSharedMemory: true,
               maxPeers: 1,
               peerRotationKey: localCgId,
@@ -6315,6 +6360,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               // selection and the coalescing key are all unchanged.
               sourceOverride: 'vm-recovery',
             });
+            const fetchResult = recovery.catchup;
             if (fixedMaxAttempts === undefined) {
               maxAttempts = Math.max(
                 maxAttempts,
@@ -6329,6 +6375,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
               continue;
             }
             activeFetchHadUsableResponse = true;
+            for (const peerId of recovery.cleanMissPeerIds) {
+              cleanMissPeerIds.add(peerId);
+            }
           } catch (err) {
             this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) failed: ${err instanceof Error ? err.message : String(err)}`);
             if (fixedMaxAttempts === undefined) {
@@ -6344,6 +6393,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
         if (outcome === 'no-swm') {
           swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
+          swmState.cleanMissPeerIds = createVmReconcileCleanMissPeerIds(
+            swmState.peerTopology,
+            [...cleanMissPeerIds],
+          );
         }
       } else {
         const reason = batchAllowsFetch ? 'per-CG cooldown' : 'per-batch fetch budget';

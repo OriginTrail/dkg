@@ -50,8 +50,46 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   const localShare = swmFx.share({ version: 1, operationId: 'op-local', marker: 'identity', ual: UAL3 });
   const curatorEquivalent = swmFx.share({ version: 1, operationId: 'storage-ack-x', marker: 'identity', ual: UAL3 });
   const curatorChanged = swmFx.share({ version: 1, operationId: 'storage-ack-y', marker: 'changed', ual: UAL3 });
+  const providerAShare = swmFx.share({
+    version: 1,
+    operationId: 'provider-a',
+    marker: 'provider-a',
+    ual: UAL3,
+  });
+  const providerBShare = swmFx.share({
+    version: 1,
+    operationId: 'provider-b',
+    marker: 'provider-b',
+    ual: UAL3,
+  });
+  const UAL4 = 'did:dkg:hardhat:31337/0xcccccccccccccccccccccccccccccccccccccccc/4';
+  const privateRoot = new Uint8Array(32).fill(0xab);
+  const localPrivateOnly = swmFx.share({
+    version: 1,
+    operationId: 'private-local',
+    marker: 'private-only',
+    ual: UAL4,
+    payloadCount: 0,
+    privateTripleCount: 1,
+    privateMerkleRoot: privateRoot,
+    accessPolicy: 'ownerOnly',
+  });
+  const curatorPrivateOnly = swmFx.share({
+    version: 1,
+    operationId: 'private-curator',
+    marker: 'private-only',
+    ual: UAL4,
+    payloadCount: 0,
+    privateTripleCount: 1,
+    privateMerkleRoot: privateRoot,
+    accessPolicy: 'ownerOnly',
+  });
 
-  function makeIdentityBaseDeps(store: OxigraphStore, curatorMeta: Quad[]) {
+  function makeIdentityBaseDeps(
+    store: OxigraphStore,
+    curatorMeta: Quad[],
+    writeLocks: Map<string, Promise<void>>,
+  ) {
     return {
       ctx,
       remotePeerId: 'peer-curator',
@@ -67,6 +105,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
         entityCreators: [],
         droppedDataTriples: 0,
       }),
+      writeLocks,
       store,
       publicSnapshotStore: identitySnapshotStore(),
       ensureContextGraph: async () => {},
@@ -78,7 +117,15 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   /** Pre-seeded with every fixture payload so any served ref is fetchable. */
   function identitySnapshotStore() {
     const snapshots = new Map<string, Quad[]>();
-    for (const share of [localShare, curatorEquivalent, curatorChanged]) {
+    for (const share of [
+      localShare,
+      curatorEquivalent,
+      curatorChanged,
+      providerAShare,
+      providerBShare,
+      localPrivateOnly,
+      curatorPrivateOnly,
+    ]) {
       snapshots.set(share.digest, share.payload.map((quad) => ({ ...quad })));
     }
     return {
@@ -92,17 +139,21 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     };
   }
 
-  function identityDeps(store: OxigraphStore, curatorMeta: Quad[]) {
+  function identityDeps(
+    store: OxigraphStore,
+    curatorMeta: Quad[],
+    writeLocks = new Map<string, Promise<void>>(),
+  ) {
     // ONE materializer instance owns skip, preserve AND canonical meta
     // replacement — the same single boundary the lifecycle wires; no
     // test-local shadow copies to drift from the code this suite exercises.
     const snapshotMaterializer = createSharedMemorySnapshotMaterializer({
       store,
-      writeLocks: new Map<string, Promise<void>>(),
+      writeLocks,
       invalidateListContextGraphsCache: () => {},
     });
     return {
-      ...makeIdentityBaseDeps(store, curatorMeta),
+      ...makeIdentityBaseDeps(store, curatorMeta, writeLocks),
       replaceMetaForGraphAssets: (assets: readonly GraphScopedSwmRecoveryDescriptor[]) =>
         snapshotMaterializer.replaceMetaForGraphAssets(assets),
       snapshotMaterializer,
@@ -126,6 +177,80 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     return result.type === 'boolean' && result.value;
   }
 
+  it('serializes competing complete providers before either can apply a mixed head', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const writeLocks = new Map<string, Promise<void>>();
+    let activeMetaFetches = 0;
+    let maxActiveMetaFetches = 0;
+    let signalProviderAEntered!: () => void;
+    const providerAEntered = new Promise<void>((resolve) => {
+      signalProviderAEntered = resolve;
+    });
+    let releaseProviderA!: () => void;
+    const providerAGate = new Promise<void>((resolve) => {
+      releaseProviderA = resolve;
+    });
+
+    const providerDeps = (
+      remotePeerId: string,
+      share: typeof providerAShare,
+      holdMetadata: boolean,
+    ) => {
+      const deps = identityDeps(store, [...share.meta], writeLocks);
+      return {
+        ...deps,
+        remotePeerId,
+        fetchSyncPages: async (
+          _c: OperationContext,
+          _p: string,
+          _cg: string,
+          _inc: boolean,
+          phase: 'data' | 'meta',
+        ): Promise<SyncPageResult> => {
+          if (phase !== 'meta') return page([]);
+          activeMetaFetches += 1;
+          maxActiveMetaFetches = Math.max(maxActiveMetaFetches, activeMetaFetches);
+          if (holdMetadata) {
+            signalProviderAEntered();
+            await providerAGate;
+          }
+          activeMetaFetches -= 1;
+          return page([...share.meta]);
+        },
+      };
+    };
+
+    const providerARecovery = recoverContextGraphSwm(
+      providerDeps('peer-provider-a', providerAShare, true),
+    );
+    await providerAEntered;
+    const providerBRecovery = recoverContextGraphSwm(
+      providerDeps('peer-provider-b', providerBShare, false),
+    );
+
+    // Provider B is queued on the same Context Graph lock, not admitted into
+    // the fetch/verify/apply transaction alongside A.
+    expect(maxActiveMetaFetches).toBe(1);
+    releaseProviderA();
+    await Promise.all([providerARecovery, providerBRecovery]);
+
+    expect(maxActiveMetaFetches).toBe(1);
+    expect(await headIds(store)).toEqual(['"provider-b"']);
+    const graph = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${providerBShare.assertionGraph}> { ?s ?p ?o } }`,
+    );
+    expect(graph.type).toBe('quads');
+    if (graph.type === 'quads') {
+      expect(graph.quads.map(({ subject, predicate, object }) => ({ subject, predicate, object })))
+        .toEqual(providerBShare.payload.map(({ subject, predicate, object }) => ({
+          subject,
+          predicate,
+          object,
+        })));
+    }
+  });
+
   it('preserves the local identity when the curator offers an equivalent operation id', async () => {
     const store = new OxigraphStore();
     stores.push(store);
@@ -145,6 +270,67 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     // The reported count is what actually reached the store: the payload
     // minus the ONE withheld curator head-id row.
     expect(result.insertedMetaQuads).toBe(curatorEquivalent.meta.length - 1);
+  });
+
+  it('does not treat an absent private-only control plane as a materialized empty graph', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: CG,
+      metaQuads: curatorPrivateOnly.meta,
+    })[0]!;
+    const deps = identityDeps(store, [...curatorPrivateOnly.meta]);
+
+    expect(await deps.snapshotMaterializer.readStoredHead(descriptor)).toEqual({
+      version: null,
+      needsRepair: false,
+      shareOperationId: null,
+    });
+    expect(await deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)).toBe(false);
+
+    const result = await recoverContextGraphSwm(deps);
+    expect(result.completed).toBe(true);
+    expect(await opSubjectExists(store, curatorPrivateOnly.operationSubject)).toBe(true);
+    const head = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${WS_META}> { `
+      + `<${curatorPrivateOnly.headSubject}> <${DKG}shareOperationId> ?op } }`,
+    );
+    expect(head.type === 'bindings' ? head.bindings.map((row) => String(row['op'])) : [])
+      .toEqual(['"private-curator"']);
+    expect(await deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+  });
+
+  it('preserves a healthy private-only asset with the canonical empty public projection', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedLocal(store, localPrivateOnly);
+
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: CG,
+      metaQuads: curatorPrivateOnly.meta,
+    })[0]!;
+    const materializer = identityDeps(store, curatorPrivateOnly.meta).snapshotMaterializer;
+    expect(await materializer.readStoredHead(descriptor)).toEqual({
+      version: '1',
+      needsRepair: false,
+      shareOperationId: 'private-local',
+    });
+    expect(await materializer.selectRepairIdentity(CG, descriptor)).not.toBeNull();
+    expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+
+    const result = await recoverContextGraphSwm(
+      identityDeps(store, [...curatorPrivateOnly.meta]),
+    );
+
+    expect(result.completed).toBe(true);
+    const head = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${WS_META}> { `
+      + `<${localPrivateOnly.headSubject}> <${DKG}shareOperationId> ?op } }`,
+    );
+    expect(head.type === 'bindings' ? head.bindings.map((row) => String(row['op'])) : [])
+      .toEqual(['"private-local"']);
+    expect(await opSubjectExists(store, localPrivateOnly.operationSubject)).toBe(true);
+    expect(await opSubjectExists(store, curatorPrivateOnly.operationSubject)).toBe(true);
   });
 
   it('a graph-backed REWRITE is meta-replaced, never preserved (rewrite marker)', async () => {
@@ -265,19 +451,29 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     expect(await headIds(store)).toEqual(['"op-local"']);
   });
 
-  it('still adopts the curator identity for a genuinely changed share (discriminator polarity)', async () => {
+  it('replaces stale equal-count content and adopts the curator identity for a changed share', async () => {
     const store = new OxigraphStore();
     stores.push(store);
     await seedLocal(store);
-    // Same version, different digest: the marker-only predicate still skips
-    // the graph (it is digest-blind — the pre-existing F2 weakness), but the
-    // preservation decision compares the OPERATION rows and must refuse:
-    // curator authority for genuine changes is today's behavior, and
-    // preserving here could mask a real policy or content change.
+    // Same version and triple count, but a different digest. The production
+    // recovery caller must pass the content guard through to the materializer
+    // so the stale assertion graph is replaced rather than marker-skipped.
     const result = await recoverContextGraphSwm(identityDeps(store, [...curatorChanged.meta]));
     expect(result.completed).toBe(true);
     expect(await headIds(store)).toEqual(['"storage-ack-y"']);
     expect(await opSubjectExists(store, localShare.operationSubject)).toBe(false);
+    const graph = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${curatorChanged.assertionGraph}> { ?s ?p ?o } }`,
+    );
+    expect(graph.type).toBe('quads');
+    if (graph.type === 'quads') {
+      expect(graph.quads.map(({ subject, predicate, object }) => ({ subject, predicate, object })))
+        .toEqual(curatorChanged.payload.map(({ subject, predicate, object }) => ({
+          subject,
+          predicate,
+          object,
+        })));
+    }
   });
 
   it('still installs the curator head when the local head is absent (G7 repair preserved)', async () => {

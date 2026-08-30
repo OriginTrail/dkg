@@ -50,6 +50,7 @@ export {
 } from './rfc64/recoverable-author-attestation-v1.js';
 export * from './rfc64/author-catalog-producer.js';
 export * from './rfc64/swm-author-inventory-producer-v1.js';
+export * from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
@@ -169,6 +170,14 @@ export type {
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
 } from './dkg-agent-rfc64-catalog.js';
+export type {
+  ReconcileRfc64PublicRootCatalogExactSetParamsV1,
+  ReconcileRfc64PublicRootCatalogExactSetResultV1,
+} from './dkg-agent-rfc64-catalog-upsert.js';
+export type {
+  ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
+  ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
+} from './dkg-agent-rfc64-catalog-auto-publish.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
@@ -291,6 +300,10 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type VmReconcileNegativeRecord,
+  type VmReconcilePeerTopology,
+  type VmReconcilePeerTopologyEvidence,
+  type VmReconcilePeerTopologyPeer,
   type SelectedVmReconcileCursorStore,
   type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
@@ -317,6 +330,9 @@ export {
 } from './imported-artifact.js';
 export {
   bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_ERROR_CODE,
+  stopRandomSamplingHandleWithin,
   type RandomSamplingBindOptions,
   type RandomSamplingDisabledReason,
   type RandomSamplingHandle,
@@ -387,6 +403,15 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
+export {
+  createVmReconcilePeerTopology,
+  createVmReconcileCleanMissPeerIds,
+  encodeLegacyVmReconcilePeerTopologyKey,
+  isVmReconcilePeerTopology,
+  parseLegacyVmReconcilePeerTopologyKey,
+  parseVmReconcileCleanMissPeerIds,
+  parseVmReconcilePeerTopology,
+} from './vm-reconcile-peer-topology.js';
 export {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   CATCHUP_STOP_ON_PROOF,

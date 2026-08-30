@@ -23,7 +23,7 @@ import {
   type V10UpdateKAParams,
 } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { buildUpdateSeal, mockSealCtx, withSeal } from './_helpers/seal.js';
 
@@ -45,6 +45,13 @@ const NONCE = 19;
 class SignalRecordingChain extends MockChainAdapter {
   sent = false;
   hookSettled = false;
+  /** r9 (3877850653) - order log for hook-vs-post-receipt-chain-op assertions. */
+  readonly order: string[] = [];
+
+  override async getLatestMerkleRootPublisher(kaId: bigint): Promise<string | null> {
+    this.order.push('post-receipt-chain-op');
+    return super.getLatestMerkleRootPublisher(kaId);
+  }
 
   constructor() {
     super('mock:31337', AUTHOR);
@@ -60,6 +67,7 @@ class SignalRecordingChain extends MockChainAdapter {
     await params.onBroadcastAccepted?.({ txHash: TX_HASH, nonce: NONCE });
     this.hookSettled = true;
     this.sent = true;
+    this.order.push('sent');
     return { success: true, hash: TX_HASH, blockNumber: 1 } as TxResult;
   }
 }
@@ -68,6 +76,7 @@ async function publisherOver(chain: SignalRecordingChain): Promise<{
   publisher: DKGPublisher;
   quads: Quad[];
   precomputedUpdateAttestation: Awaited<ReturnType<typeof buildUpdateSeal>>;
+  store: OxigraphStore;
 }> {
   const store = new OxigraphStore();
   const publisher = new DKGPublisher({
@@ -87,7 +96,7 @@ async function publisherOver(chain: SignalRecordingChain): Promise<{
     author: PRODUCER,
     ctx: mockSealCtx(),
   });
-  return { publisher, quads, precomputedUpdateAttestation };
+  return { publisher, quads, precomputedUpdateAttestation, store };
 }
 
 describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
@@ -104,6 +113,74 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
     });
 
     expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'update' }]);
+  });
+
+  it('a throwing onPublishConfirmed listener does not fail the update [GH#2359 r2]', async () => {
+    // The update dispatch is its own invocation site after the transaction already succeeded:
+    // its failure isolation needs its own regression row (r2 3877540275).
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+
+    const result = await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onPublishConfirmed: () => { throw new Error('listener exploded'); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+  });
+
+  it('an ASYNC-rejecting onPublishConfirmed listener does not fail the update or leak a rejection [GH#2359 r2]', async () => {
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+
+    const result = await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onPublishConfirmed: async () => { throw new Error('async listener exploded'); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+    // Give a detached rejection a macrotask to surface if it was going to.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
+  it('fires onPublishConfirmed once for an update, before its post-receipt store writes [GH#2359 r1]', async () => {
+    // Same contract as the publish path: one firing, the receipt hash the chain returned, and
+    // fired before the update writes its quads locally — the sync-query capture inside the
+    // listener is the timing oracle.
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation, store } = await publisherOver(chain);
+    const QUAD_QUERY = 'SELECT ?o WHERE { GRAPH ?g { ?s <http://schema.org/name> ?o } }';
+    const confirmations: Array<{ txHash: string; at: ReturnType<typeof store.query> }> = [];
+
+    await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onPublishConfirmed: (confirmation) => {
+        chain.order.push('confirmed');
+        confirmations.push({ txHash: confirmation.txHash, at: store.query(QUAD_QUERY) });
+      },
+    });
+
+    expect(confirmations.map((c) => c.txHash)).toEqual([TX_HASH]);
+    // r9 (3877850653) - the hook precedes the update path's first post-receipt chain
+    // operation (the latest-publisher lookup), anchored on the send marker (the lookups also
+    // run pre-broadcast).
+    const afterSend = chain.order.slice(chain.order.indexOf('sent') + 1);
+    expect(afterSend[0]).toBe('confirmed');
+    expect(afterSend).toContain('post-receipt-chain-op');
+    const before = await confirmations[0].at;
+    expect(before.type).toBe('bindings');
+    if (before.type === 'bindings') expect(before.bindings).toEqual([]);
+    const after = await store.query(QUAD_QUERY);
+    expect(after.type).toBe('bindings');
+    if (after.type === 'bindings') expect(after.bindings.length).toBeGreaterThanOrEqual(1);
   });
 
   it('delivers the adapter signal verbatim, before the send', async () => {
@@ -213,6 +290,13 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
  */
 class PublishSignalRecordingChain extends MockChainAdapter {
   sent = false;
+  /** r9 (3877850653) - order log for hook-vs-post-receipt-chain-op assertions. */
+  readonly order: string[] = [];
+
+  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    this.order.push('post-receipt-chain-op');
+    return super.getDKGKnowledgeAssetsAddress();
+  }
 
   constructor() {
     super('mock:31337', AUTHOR);
@@ -222,12 +306,18 @@ class PublishSignalRecordingChain extends MockChainAdapter {
     await params.onBroadcast?.({ txHash: TX_HASH, nonce: NONCE });
     await params.onBroadcastAccepted?.({ txHash: TX_HASH, nonce: NONCE });
     this.sent = true;
-    return super.createKnowledgeAssets(params);
+    // The marker lands AFTER the super call: the mock builds its result with its own internal
+    // address lookup, and the boundary under test is the RECEIPT RETURN, not the send.
+    const result = await super.createKnowledgeAssets(params);
+    this.order.push('sent');
+    return result;
   }
 }
 
-async function publishOver(chain: PublishSignalRecordingChain): Promise<DKGPublisher> {
-  const store = new OxigraphStore();
+async function publishOver(
+  chain: PublishSignalRecordingChain,
+  store: OxigraphStore = new OxigraphStore(),
+): Promise<DKGPublisher> {
   chain.minimumRequiredSignatures = 0;
   return new DKGPublisher({
     store,
@@ -270,6 +360,120 @@ describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () =>
     });
 
     expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'create' }]);
+  });
+
+  it('fires onPublishConfirmed once with the receipt hash the chain returned [GH#2359]', async () => {
+    // The receipt-confirmed scheduling hint: exactly one firing, carrying the on-chain
+    // result's transaction hash — the hash a reconciler must validate against persisted
+    // write-ahead evidence before proving the transaction itself.
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+    const confirmations: Array<{ txHash: string }> = [];
+
+    const result = await publisher.publish({
+      ...(await publishArgs()),
+      onPublishConfirmed: (confirmation) => { confirmations.push(confirmation); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(confirmations).toEqual([{ txHash: result.onChainResult?.txHash }]);
+  });
+
+  it('fires onPublishConfirmed BEFORE the local post-receipt store writes [GH#2359 r1]', async () => {
+    // The hook's whole value is timing: it must fire at the receipt, not after the local tail.
+    // OxigraphStore.query executes the native query synchronously before its first await, so a
+    // query promise captured INSIDE the listener reads the store as it stood at fire time —
+    // the published quad must not be there yet, and must be there once publish() returns.
+    const chain = new PublishSignalRecordingChain();
+    const store = new OxigraphStore();
+    const publisher = await publishOver(chain, store);
+    const QUAD_QUERY = 'SELECT ?o WHERE { GRAPH ?g { ?s <http://schema.org/name> ?o } }';
+    const atFire: Array<ReturnType<typeof store.query>> = [];
+
+    await publisher.publish({
+      ...(await publishArgs()),
+      onPublishConfirmed: () => {
+        chain.order.push('confirmed');
+        atFire.push(store.query(QUAD_QUERY));
+      },
+    });
+
+    expect(atFire).toHaveLength(1);
+    // r9 (3877850653) - the hook also precedes the FIRST post-receipt chain operation
+    // (the knowledge-assets address lookup): a regression parking the hint behind a slow RPC
+    // cannot stay green on store-order alone. The lookups also run pre-broadcast, so the
+    // ordering is anchored on the send marker.
+    const afterSend = chain.order.slice(chain.order.indexOf('sent') + 1);
+    expect(afterSend[0]).toBe('confirmed');
+    expect(afterSend).toContain('post-receipt-chain-op');
+    const before = await atFire[0];
+    expect(before.type).toBe('bindings');
+    if (before.type === 'bindings') expect(before.bindings).toEqual([]);
+    const after = await store.query(QUAD_QUERY);
+    expect(after.type).toBe('bindings');
+    if (after.type === 'bindings') expect(after.bindings.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('an ASYNC-rejecting onPublishConfirmed listener does not fail the publish or leak a rejection [GH#2359 r1]', async () => {
+    // An async listener is assignable to the hook; its rejection settles after the sync
+    // try/catch has exited, so the dispatch must consume it (r1 3877430465) — vitest turns any
+    // escaped unhandled rejection into a failure of this file.
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+
+    const result = await publisher.publish({
+      ...(await publishArgs()),
+      onPublishConfirmed: async () => { throw new Error('async listener exploded'); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+    // Give a detached rejection a macrotask to surface if it was going to.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
+  it('a throwing onPublishConfirmed listener does not fail the publish [GH#2359]', async () => {
+    // Scheduling-only and non-fail-closed: by the time the hint fires the transaction is
+    // already mined — a listener failure must never surface into the publish outcome.
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+
+    const result = await publisher.publish({
+      ...(await publishArgs()),
+      onPublishConfirmed: () => { throw new Error('listener exploded'); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+  });
+
+  it('publishFromSharedMemory forwards onPublishConfirmed to publish() as the same reference [GH#2359 r12]', async () => {
+    // r12 (3878010163) - this public entry point built its inner options field by field and
+    // silently dropped the new hook. The row pins FORWARDING IDENTITY at the publish() seam
+    // (the changed code): the inner call must receive the exact caller-supplied function.
+    // Firing-with-receipt semantics are already pinned by the publish()-level rows above, so
+    // publish() itself is spy-stubbed and the shared-memory read path is fed one staged quad.
+    const chain = new PublishSignalRecordingChain();
+    const store = new OxigraphStore();
+    const publisher = await publishOver(chain, store);
+    const gm = new GraphManager(store);
+    await store.insert([{
+      subject: 'urn:sm:entity',
+      predicate: 'http://schema.org/name',
+      object: '"from shared memory"',
+      graph: gm.sharedMemoryUri(CG_ID),
+    }]);
+
+    const hook = () => {};
+    let forwarded: unknown = 'unset';
+    (publisher as unknown as { publish: (o: { onPublishConfirmed?: unknown }) => Promise<unknown> }).publish =
+      async (options: { onPublishConfirmed?: unknown }) => {
+        forwarded = options.onPublishConfirmed;
+        return { status: 'confirmed', merkleRoot: new Uint8Array(32), kaManifest: [] };
+      };
+
+    await publisher.publishFromSharedMemory(CG_ID, 'all', { onPublishConfirmed: hook });
+    expect(forwarded).toBe(hook);
   });
 
   it('POSITIVE CONTROL: a plain publish reaches the chain and fires the signal', async () => {

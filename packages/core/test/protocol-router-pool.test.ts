@@ -581,7 +581,7 @@ describe('ProtocolRouter pooled overlay', () => {
       libp2p: {
         dialProtocol: async () => {
           dialCalls += 1;
-          // Assert the resolver ran BEFORE the dial.
+          // Assert canonical address discovery ran BEFORE the protocol dial.
           expect(resolveCalls.length).toBeGreaterThan(0);
           const s = new FakeStream();
           return s as unknown as import('@libp2p/interface').Stream;

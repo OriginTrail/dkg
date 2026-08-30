@@ -39,9 +39,10 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1",

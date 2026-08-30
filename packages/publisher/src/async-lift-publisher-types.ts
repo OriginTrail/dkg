@@ -2,8 +2,11 @@ import type {
   AdmissionJournalEntry,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
+  PersistedLiftJob,
   LiftJobBroadcast,
-  LiftJobFinalizationMetadata,
+  LiftJobClaimed,
+  LiftJobClaimMetadata,
+  LiftJobFinalizationInput,
   LiftJobIncluded,
   LiftJobInclusionMetadata,
   LiftJobHex,
@@ -18,6 +21,7 @@ import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { PublishTransactionObservation } from '@origintrail-official/dkg-chain';
 import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
@@ -56,6 +60,68 @@ export class LiftJobPendingChainProofError extends Error {
   }
 }
 
+/**
+ * The worker that started an execution no longer owns the persisted claim.
+ *
+ * A fresh claim token is written on every wallet acquisition. Recovery may
+ * legitimately expire and replace that claim while an older asynchronous
+ * frame is still unwinding. That frame must stop without changing the newer
+ * job; this typed error is the ownership-boundary signal consumed by
+ * `processNext()`.
+ */
+export class StaleLiftJobClaimError extends Error {
+  override readonly name = 'StaleLiftJobClaimError';
+
+  constructor(
+    readonly jobId: string,
+    reason: string,
+  ) {
+    super(`Stale LiftJob claim for ${jobId}: ${reason}`);
+  }
+}
+
+/**
+ * A newly acquired queue claim with ownership fields required at the type boundary.
+ *
+ * The persisted job shape keeps claim tokens optional for legacy records. A live worker must
+ * never operate on that broad shape: acquisition upgrades it to this handle, and every
+ * worker-side mutation carries the same immutable wallet/token pair back to the queue.
+ */
+export type ActiveLiftJobClaim = LiftJobClaimed & {
+  readonly claim: LiftJobClaimMetadata & {
+    readonly claimToken: string;
+    readonly claimLeaseExpiresAt: number;
+  };
+};
+
+/**
+ * The mutation authority for one acquired claim.
+ *
+ * Runtime workers retain this session rather than a bare job id. Every mutation is fenced by
+ * the immutable wallet/token pair in {@link claim}; a recovered or re-claimed job therefore
+ * rejects the stale session before it can change queue truth.
+ */
+export interface ActiveLiftJobClaimSession {
+  readonly claim: ActiveLiftJobClaim;
+  update(status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
+  recordPublishResult(
+    publishResult: PublishResult,
+    options?: { publicByteSize?: number },
+  ): Promise<LiftJob>;
+  recordExecutionFailure(failedFromState: LiftJobState, error: unknown): Promise<LiftJob>;
+}
+
+/** Explicit by-id compatibility surface for control-plane callers, never runtime workers. */
+export interface AsyncLiftAdministrativeMutations {
+  updateById(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
+  recordPublishResultById(
+    jobId: string,
+    publishResult: PublishResult,
+    options?: { publicByteSize?: number },
+  ): Promise<LiftJob>;
+  recordPublishFailureById(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
+}
+
 /** #1828 — the immutable facts a client retains to recover a lost VM-publish admission. */
 export interface IntentLookupInput {
   readonly contextGraphId: string;
@@ -76,9 +142,9 @@ export interface IntentLookupInput {
  */
 export type IntentLookupResult =
   | { readonly kind: 'none' }
-  | { readonly kind: 'active'; readonly job: LiftJob; readonly superseded: LiftJob[]; readonly exactIntentMatch?: boolean }
-  | { readonly kind: 'superseded'; readonly jobs: LiftJob[]; readonly exactIntentMatch?: boolean }
-  | { readonly kind: 'conflict'; readonly jobs: LiftJob[] };
+  | { readonly kind: 'active'; readonly job: PersistedLiftJob; readonly superseded: PersistedLiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'superseded'; readonly jobs: PersistedLiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'conflict'; readonly jobs: PersistedLiftJob[] };
 
 /**
  * Queue-layer facts about an admission, supplied alongside the operation request.
@@ -102,19 +168,93 @@ export interface AsyncLiftPublisher {
     request: KnowledgeAssetVmPublishRequest,
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string>;
+  /** Legacy acquisition shape; fenced workers narrow this on ClaimSessionAsyncLiftPublisher. */
   claimNext(walletId: string): Promise<LiftJob | null>;
+  /** Optional v10.0.15 worker-ownership capability; older structural implementations omit it. */
+  openClaimSession?(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
+  /** Optional v10.0.15 administrative capability; legacy by-id methods remain compatible. */
+  readonly administrative?: AsyncLiftAdministrativeMutations;
+  /**
+   * Administrative/compatibility mutation by exact job id. Runtime workers use the owned-claim
+   * session returned by {@link openClaimSession}, where the claim token is mandatory and
+   * revalidated on every write.
+   *
+   * @deprecated Prefer `administrative.updateById`; workers must use `openClaimSession`.
+   */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
-  getStatus(jobId: string): Promise<LiftJob | null>;
-  list(filter?: { status?: LiftJobState }): Promise<LiftJob[]>;
+  getStatus(jobId: string): Promise<PersistedLiftJob | null>;
+  list(filter?: { status?: LiftJobState }): Promise<PersistedLiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
-  processNext(walletId: string): Promise<LiftJob | null>;
+  processNext(walletId: string): Promise<PersistedLiftJob | null>;
+  /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
+  /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
+  /**
+   * Run one reconciliation pass and report how many jobs it settled.
+   *
+   * CONCURRENCY CONTRACT: safe to call at any time, including concurrently with any other
+   * in-flight pass. Every call performs its own pass over its own freshly read inventory —
+   * passes are never coalesced. Inventory ACQUISITION, however, is FIFO-ordered: a concurrent
+   * call's read starts only once the previous acquisition completes or exceeds its owner
+   * lease ({@link AsyncLiftPublisherConfig.reconciliationAcquisitionLeaseMs}), so added
+   * latency is bounded per predecessor and a hung read cannot block the seam indefinitely.
+   */
   recover(): Promise<number>;
-  /** Reconcile interrupted work without restarting the runner. Older implementations can omit it. */
+  /**
+   * Reconcile interrupted work without restarting the runner. Older implementations can omit
+   * it. Same concurrency contract as {@link recover}.
+   */
   reconcileTransactions?(): Promise<number>;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
+  /**
+   * Demand-driven reconciliation scheduling. ONE optional capability rather than independent
+   * optional methods, so a publisher cannot implement the wake-up without the outlook (or the
+   * reverse) — the incoherent halves are unrepresentable. Older implementations omit the whole
+   * capability and a caller that never subscribes loses nothing but latency.
+   */
+  readonly reconciliationScheduling?: {
+    /**
+     * EXCLUSIVE, ATOMIC attachment of the scheduling listeners — deliberately not pub/sub.
+     * Scheduling has exactly one owner (the runner driving this publisher), so attaching TAKES
+     * OVER both callbacks together: a later attachment supersedes the earlier one wholesale —
+     * the safe handover when a new runner incarnation starts while its predecessor is still
+     * stopping — and ownership can never be split between incarnations. The returned detach
+     * releases only the caller's OWN attachment (a stale detach from a superseded owner is a
+     * no-op).
+     *
+     * Both pokes are scheduling-only and establish nothing — the invited operation re-checks
+     * its own guards. `onReconciliationDemand` fires when a tx-bearing job stops being
+     * executor-owned (a detached receipt settles, or `processNext` hands back a live broadcast
+     * after an ambiguous send) — only once the work is visible to a
+     * {@link reconcileTransactions} pass. `onWalletRelease` fires with the wallet id the
+     * moment that wallet's lock is DELETED (job finalized, proven ineffective and reset, or
+     * swept as stale) — exactly when the wallet becomes claimable — so wallet turnover is
+     * bounded by chain time rather than by the claim poll.
+     */
+    attachScheduler(scheduler: {
+      onReconciliationDemand(): void;
+      onWalletRelease(walletId: string): void;
+    }): () => void;
+    /**
+     * Run one reconcile pass and report BOTH what it settled and whether actionable live work
+     * remains — one operation, one atomic answer, computed during the pass's own walk rather
+     * than by a second queue inventory. This is what the scheduling caller consumes per tick
+     * to pick its next cadence: a separate post-pass outlook query could fail after the pass
+     * succeeded and strand an already-served demand on the idle cadence. Identical pass
+     * semantics to {@link reconcileTransactions}, which stays the wire-stable numeric surface
+     * over the same pass.
+     */
+    reconcile(): Promise<{ reconciled: number; pendingWork: boolean }>;
+    /**
+     * Startup recovery with the same outcome shape: stale-wallet-lock sweep plus one reconcile
+     * pass, so a starting caller seeds its cadence from the pass it already ran instead of
+     * paying a second boot-time inventory. Identical recovery semantics to
+     * {@link AsyncLiftPublisher.recover}, the wire-stable numeric surface over the same pass.
+     */
+    recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
+  };
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -128,6 +268,13 @@ export interface AsyncLiftPublisher {
    */
   retry(filter?: { status?: 'failed' }): Promise<number>;
   clear(status: 'finalized' | 'failed'): Promise<number>;
+}
+
+/** Publisher with the fenced worker-session and explicit administrative capabilities. */
+export interface ClaimSessionAsyncLiftPublisher extends AsyncLiftPublisher {
+  claimNext(walletId: string): Promise<ActiveLiftJobClaim | null>;
+  openClaimSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
+  readonly administrative: AsyncLiftAdministrativeMutations;
 }
 
 /** GH#2270 — full disposition of one `retry()` pass. The three counts partition the failed set. */
@@ -144,13 +291,20 @@ export interface AsyncLiftRetryOutcome {
   readonly skipped: number;
 }
 
+/** Selection contract shared by bulk and exact failed-job retry callers. */
+export interface AsyncLiftRetryFilter {
+  readonly status?: 'failed';
+  /** When present, inspect and transition only this exact persisted job. */
+  readonly jobId?: string;
+}
+
 /**
  * GH#2270 — the reporting counterpart of `retry()`. Segregated off the base contract (like the
  * #1828/#1829/#1837 capabilities): the wire-stable count stays on `AsyncLiftPublisher`, and the
  * paths that report to an operator read the full disposition here.
  */
 export interface AsyncLiftDetailedRetrier {
-  retryDetailed(filter?: { status?: 'failed' }): Promise<AsyncLiftRetryOutcome>;
+  retryDetailed(filter?: AsyncLiftRetryFilter): Promise<AsyncLiftRetryOutcome>;
 }
 
 /**
@@ -167,7 +321,7 @@ export interface AsyncLiftDetailedRetrier {
  * that will never fire.
  */
 export interface AsyncLiftRetryStateReader {
-  describeConfiguredRetryState(job: LiftJob): LiftJobRetryProjection;
+  describeConfiguredRetryState(job: PersistedLiftJob): LiftJobRetryProjection;
 }
 
 /**
@@ -306,7 +460,7 @@ export interface CanonicalUpdateEvidence {
 
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
-  finalization: LiftJobFinalizationMetadata;
+  finalization: LiftJobFinalizationInput;
   /** Present exactly when the verdict came from canonical UPDATE recognition. */
   canonicalUpdate?: CanonicalUpdateEvidence;
 }
@@ -379,7 +533,7 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
    * had dropped, and cast. The boundary now takes the record as it is, and the facts a caller
    * needs about the transaction arrive separately and typed.
    */
-  readonly job: LiftJob;
+  readonly job: PersistedLiftJob;
   /**
    * GH#2270 PR-3 r3 — the transaction facts, typed, from whichever carrier the record has. The
    * consumer needs the queued tx hash to bind the resolved receipt to it, and a failed job held
@@ -427,17 +581,24 @@ export interface AsyncKnowledgeAssetVmPublishJobHandler {
  * guessing, which is why nothing may collapse into it that the chain actually answered.
  */
 export type AsyncLiftChainProofResolution =
-  /** The chain carries a publish, mapped to evidence this node can finalize with. */
+  /** The chain carries a publish, mapped to evidence this node can finalize with — the
+   *  publisher-side image of the chain contract's `confirmed`. */
   | { status: 'recovered'; recovery: AsyncLiftPublisherRecoveryResult }
-  /** Mined with a failure receipt: the transaction is accounted for and published nothing. */
-  | { status: 'reverted' }
-  /** Mined and successful, but carrying no publish the adapter recognizes. Not absence. */
-  | { status: 'unrecognized' }
-  /** The node holds the transaction and has not mined it. Never absence. */
-  | { status: 'pending' }
-  /** The node was asked for the TRANSACTION and does not have it: the only proven absence. */
+  /**
+   * The observation variants whose meaning is identical on both surfaces are the CHAIN
+   * contract's named sub-type, not a copy (r2 3879930, narrowed r7 3882283837): `reverted`,
+   * `unrecognized`, and both pending shapes pass through resolvers verbatim.
+   */
+  | PublishTransactionObservation
+  /**
+   * PROOF-QUALIFIED absence, publisher-owned (r7 3882283837 — deliberately NOT inherited from
+   * the chain contract's weaker `not-found`): the resolver may only answer this behind the
+   * finality-snapshot absence rules (nonce consumed, token unminted at a canonical pinned
+   * block), because the disposition table authorizes a CREATE resend on it. A chain adapter's
+   * bare "I have neither receipt nor transaction" is NOT this and must be mapped deliberately.
+   */
   | { status: 'not-found' }
-  /** Nothing was established. Never absence, never proof. */
+  /** Publisher-only: nothing was established. Never absence, never proof. */
   | { status: 'inconclusive' };
 
 /**
@@ -543,7 +704,7 @@ export type AsyncLiftPublisherRecoveryResolver = (
 ) => Promise<AsyncLiftChainProofResolution>;
 
 export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
-  job: LiftJob,
+  job: PersistedLiftJob,
   lookup: AsyncLiftChainProofLookup,
   /**
    * PR #2300 r2 — the dispatcher's verdict recovery, when this finalize follows one. For an
@@ -583,6 +744,8 @@ export interface AsyncLiftPublisherConfig {
   recoveryLookupTimeoutMs?: number;
   now?: () => number;
   idGenerator?: () => string;
+  /** Defaults to `crypto.randomUUID()`. Must return a fresh value for every wallet claim. */
+  claimTokenGenerator?: () => string;
   /** Jitter source, injectable for determinism exactly like `now`/`idGenerator`. Defaults to Math.random. */
   rand?: () => number;
   /**
@@ -609,6 +772,14 @@ export interface AsyncLiftPublisherConfig {
    * exhausts the budget stops and the remaining jobs are asked on the next cadence.
    */
   chainProofDispatchTimeBudgetMs?: number;
+  /**
+   * The owner LEASE on the serialized inventory-acquisition seam: how long one acquisition may
+   * execute (measured from its execution start) before the next queued acquisition is promoted
+   * past it. Acquisitions are FIFO-ordered; a queued burst therefore waits up to one lease per
+   * predecessor ahead of it, and one hung store read degrades ordering, never availability.
+   * Default 30s.
+   */
+  reconciliationAcquisitionLeaseMs?: number;
   /**
    * GH#2270 PR-3 r20 (🔴 3815617109) — can the chain-proof lane actually settle a job signed by
    * THIS wallet? A node may mix adapters, and the presence of a resolver is a node-wide fact while

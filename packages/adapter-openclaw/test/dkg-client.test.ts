@@ -175,6 +175,19 @@ describe('DkgDaemonClient', () => {
     expect(body.contextGraphId).toBe('agent-context');
   });
 
+  it('writeQueryCatalog sends catalog quads to the dedicated endpoint', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const quads = [{ subject: 'urn:q', predicate: 'urn:p', object: '"value"', graph: '' }];
+
+    await client.writeQueryCatalog('agent-context', quads);
+
+    expect(fetchCalls[0]?.[0]).toBe('http://localhost:9200/api/profile/query-catalog/write');
+    expect(JSON.parse(fetchCalls[0]?.[1]?.body as string)).toEqual({
+      contextGraphId: 'agent-context',
+      quads,
+    });
+  });
+
   it('query should forward view + agentAddress + assertionName for WM reads', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({}), { status: 200 }),

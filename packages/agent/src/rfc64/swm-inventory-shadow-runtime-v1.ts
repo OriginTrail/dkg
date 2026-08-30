@@ -43,6 +43,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   };
   readonly #inFlight = new Set<Promise<void>>();
   readonly #assetTails = new Map<string, Promise<void>>();
+  readonly #scopeTails = new Map<string, Promise<void>>();
   readonly #vmConfirmedVersions = new Map<string, Set<string>>();
   readonly #pendingExecutions: Array<() => void> = [];
   #activeExecutions = 0;
@@ -54,6 +55,22 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
 
   runExclusive(assetKey: string, observer: () => Promise<void>): Promise<void> {
     return this.enqueue(assetKey, observer, true);
+  }
+
+  /** Serialize inventory mutations and catalog reads for one author/scope. */
+  async runScopeExclusive<T>(scopeKey: string, operation: () => Promise<T>): Promise<T> {
+    const predecessor = this.#scopeTails.get(scopeKey);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = (predecessor ?? Promise.resolve()).catch(() => undefined).then(() => gate);
+    this.#scopeTails.set(scopeKey, tail);
+    await predecessor?.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.#scopeTails.get(scopeKey) === tail) this.#scopeTails.delete(scopeKey);
+    }
   }
 
   markVmConfirmed(assetKey: string, assertionVersion: string): void {

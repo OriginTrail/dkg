@@ -1,4 +1,7 @@
-import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 
 /**
  * WS-0.0: per-root REPLACE apply for SWM recovery.
@@ -64,7 +67,7 @@ export async function applySwmRecovery(params: {
     const key = `${dataGraph}\u0000${entity}`;
     if (cleared.has(key)) continue;
     cleared.add(key);
-    await params.store.deleteByPattern({ graph: dataGraph, subject: entity });
+    await deleteByPatternWithoutCount(params.store, { graph: dataGraph, subject: entity });
     await params.store.deleteBySubjectPrefix(dataGraph, `${entity}${SKOLEM_CHILD_INFIX}`);
   }
 

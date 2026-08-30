@@ -501,6 +501,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         })),
         droppedDataTriples: 0,
       }),
+      writeLocks: new Map<string, Promise<void>>(),
       store,
       ensureContextGraph: async () => {},
       setCheckpoint: () => {},
@@ -530,6 +531,40 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     ]));
     expect(result.insertedDataQuads).toBe(1);
     expect(await statusValues(store)).toEqual(['"v2"']);
+  });
+
+  it('keeps independent Context Graph recoveries concurrent', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const writeLocks = new Map<string, Promise<void>>();
+    let activeFetches = 0;
+    let maxActiveFetches = 0;
+    let signalBothEntered!: () => void;
+    const bothEntered = new Promise<void>((resolve) => { signalBothEntered = resolve; });
+    let releaseFetches!: () => void;
+    const fetchGate = new Promise<void>((resolve) => { releaseFetches = resolve; });
+    const base = makeDeps(store, []);
+    const recover = (contextGraphId: string) => recoverContextGraphSwm({
+      ...base,
+      contextGraphId,
+      remotePeerId: `peer-${contextGraphId}`,
+      writeLocks,
+      fetchSyncPages: async (): Promise<SyncPageResult> => {
+        activeFetches += 1;
+        maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
+        if (activeFetches === 2) signalBothEntered();
+        await fetchGate;
+        activeFetches -= 1;
+        return page([], false);
+      },
+    });
+
+    const first = recover('recovery-cg-a');
+    const second = recover('recovery-cg-b');
+    await bothEntered;
+    expect(maxActiveFetches).toBe(2);
+    releaseFetches();
+    await Promise.all([first, second]);
   });
 
   it('inserts verified meta and reports it', async () => {
@@ -644,6 +679,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         entityCreators: [],
         droppedDataTriples: 0,
       }),
+      writeLocks: new Map<string, Promise<void>>(),
       store,
       publicSnapshotStore: snapshotStore,
       ensureContextGraph: async () => {},
@@ -748,6 +784,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
         verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
       }),
+      writeLocks: new Map<string, Promise<void>>(),
       store,
       publicSnapshotStore: snapshotStore,
       ensureContextGraph: async () => {},
@@ -827,6 +864,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
         verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
       }),
+      writeLocks: new Map<string, Promise<void>>(),
       store,
       publicSnapshotStore: new MemorySnapshotStore(),
       ensureContextGraph: async () => {},

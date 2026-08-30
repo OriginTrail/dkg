@@ -145,8 +145,7 @@ describe('publisher runner ACK transport handoff', () => {
         store,
         keypair,
         chainBase: undefined,
-        pollIntervalMs: 10,
-        errorBackoffMs: 10,
+        runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
         ackTransportFactory,
       });
 

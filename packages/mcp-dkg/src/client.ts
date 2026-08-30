@@ -7,11 +7,18 @@
  */
 import type { DkgConfig } from './config.js';
 import {
+  classifySparqlOperation,
   serializeAgentListOptions,
   type AgentConnectionStatus,
   type AgentListFilters,
   type AgentListPageOptions,
+  type PublicQueryResponse,
+  type PublicQueryResult,
 } from '@origintrail-official/dkg-core';
+import type {
+  QueryCatalogReadResponse,
+  QueryCatalogWriteQuad,
+} from '@origintrail-official/dkg-core/query-catalog';
 
 export type { AgentListFilters, AgentListPageOptions } from '@origintrail-official/dkg-core';
 
@@ -24,14 +31,74 @@ export interface SparqlBinding {
   } | string; // some daemons flatten to strings; we normalise downstream
 }
 
-export interface SparqlResult {
-  head?: { vars?: string[] };
-  bindings: SparqlBinding[];
+export interface SparqlQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph?: string;
 }
 
-export interface QueryResponse {
-  result: SparqlResult;
-  phases?: Record<string, number>;
+export type SparqlResult = PublicQueryResult<SparqlBinding, SparqlQuad>;
+export type QueryResponse = PublicQueryResponse<SparqlBinding, SparqlQuad>;
+
+export interface QueryCatalogWriteResponse {
+  ok: true;
+  contextGraphId: string;
+  graph: string;
+  subGraphName: 'meta';
+  assertionName: string;
+  assertionUri: string;
+  scopeGraphs: string[];
+  scopeGraph?: string;
+  queryCount: number;
+  triplesWritten: number;
+  alreadyExists: boolean;
+}
+
+function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResult {
+  const raw = result && typeof result === 'object' && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : {};
+  const compatibilityBindings = Array.isArray(raw.bindings)
+    ? raw.bindings as SparqlBinding[]
+    : undefined;
+  if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
+    return {
+      type: 'boolean',
+      value: raw.value,
+      ...(compatibilityBindings ? { bindings: compatibilityBindings } : {}),
+    };
+  }
+  if (raw.type === 'quads' && Array.isArray(raw.quads)) {
+    return {
+      type: 'quads',
+      quads: raw.quads as SparqlQuad[],
+      ...(compatibilityBindings ? { bindings: compatibilityBindings } : {}),
+    };
+  }
+  if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
+    return { type: 'bindings', bindings: raw.bindings as SparqlBinding[] };
+  }
+
+  const operation = classifySparqlOperation(sparql);
+  const bindings = compatibilityBindings ?? [];
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const resultValue = bindings[0]?.result;
+    const flattened = typeof resultValue === 'string' ? resultValue : resultValue?.value;
+    return {
+      type: 'boolean',
+      value: String(flattened).toLowerCase() === 'true',
+      bindings,
+    };
+  }
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return {
+      type: 'quads',
+      quads: Array.isArray(raw.quads) ? raw.quads as SparqlQuad[] : [],
+      bindings,
+    };
+  }
+  return { type: 'bindings', bindings };
 }
 
 export interface ProjectRow {
@@ -445,20 +512,48 @@ export class DkgClient {
     if (args.agentAddress) body.agentAddress = args.agentAddress;
     if (args.minTrust != null) body.minTrust = args.minTrust;
 
-    const r = await this.request<QueryResponse>('POST', '/api/query', body);
-    return r.result ?? { bindings: [] };
+    const r = await this.request<{ result?: unknown }>('POST', '/api/query', body);
+    return normalizeDaemonQueryResult(r.result, args.sparql);
+  }
+
+  // ── Query catalog ────────────────────────────────────────────
+  /** Read the versioned/capability-bearing query-catalog DTO. */
+  async readQueryCatalog(contextGraphId: string): Promise<QueryCatalogReadResponse> {
+    return this.request<QueryCatalogReadResponse>(
+      'POST',
+      '/api/profile/query-catalog/read',
+      { contextGraphId: normalizeContextGraphId(contextGraphId) },
+    );
+  }
+
+  /**
+   * Write canonical catalog RDF through the daemon's guarded profile route.
+   * The daemon owns authorization, validation, and immutable assertion
+   * persistence; MCP deliberately does not write the store itself.
+   */
+  async writeQueryCatalog(args: {
+    contextGraphId: string;
+    quads: QueryCatalogWriteQuad[];
+  }): Promise<QueryCatalogWriteResponse> {
+    return this.request<QueryCatalogWriteResponse>(
+      'POST',
+      '/api/profile/query-catalog/write',
+      {
+        contextGraphId: normalizeContextGraphId(args.contextGraphId),
+        quads: args.quads,
+      },
+    );
   }
 
   /**
    * Fetch the daemon's default agent identity. Used by `dkg_memory_search`
-   * to resolve the agent address required for WM view routing — the
-   * daemon scopes WM assertion-graph URIs to the raw peer ID, so a
-   * memory-search call without it would silently route into a
-   * non-existent namespace and return zero hits.
+   * to resolve the agent address required for WM view routing. Modern WM
+   * assertion graphs are keyed by the daemon-resolved agent address (normally
+   * the default EVM wallet); peerId remains the legacy fallback for nodes that
+   * do not expose a default agent.
    *
-   * Returns `agentAddress` (DID-form, e.g. `did:dkg:agent:<peerId>`) and
-   * `peerId` (raw form). For WM view routing pass `peerId`; for
-   * provenance triples (e.g. `prov:wasAttributedTo`) pass `agentAddress`.
+   * Returns `agentAddress` (normally an EVM address), its DID projection in
+   * `agentDid`, and `peerId` (the legacy WM namespace fallback).
    */
   async getAgentIdentity(): Promise<{
     agentAddress?: string;

@@ -423,13 +423,13 @@ describe('durable sync lifecycle chain binding', () => {
       agentLike as any,
       '12D3KooWExactRecoveryPeer',
       '0x1111111111111111111111111111111111111111/blackbox',
-      [exactUal],
+      { kind: 'ual-only', assetUals: [exactUal] },
       { signal: controller.signal },
     );
 
     expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
-      exactAssetUals: [exactUal],
+      exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
       // The admission SOURCE is what makes this show up as `durable:vm-recovery`
@@ -461,10 +461,31 @@ describe('durable sync lifecycle chain binding', () => {
     expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledWith(
       '12D3KooWExactProjectionPeer',
       contextGraphId,
-      requestedAssetUals,
+      { kind: 'ual-only', assetUals: requestedAssetUals },
       {},
     );
     expect(projected).toBe(result);
+
+    const challengePinnedSelection = {
+      kind: 'challenge-pinned' as const,
+      commitments: [{
+        assetUal: ual,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 1n,
+      }],
+    };
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
+      { syncExactKnowledgeAssetsFromPeerDetailed } as any,
+      '12D3KooWExactProjectionPeer',
+      contextGraphId,
+      challengePinnedSelection,
+    );
+    expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenLastCalledWith(
+      '12D3KooWExactProjectionPeer',
+      contextGraphId,
+      expect.objectContaining({ kind: 'challenge-pinned' }),
+      {},
+    );
   });
 
   it.each([
@@ -597,7 +618,7 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       undefined,
       {
-        exactAssetUals: [exactUal],
+        exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
         totalTimeoutMs: 30_000,
       },
     );
@@ -616,7 +637,7 @@ describe('durable sync lifecycle chain binding', () => {
       agentLike,
       'peer-internal-exact-recovery',
       contextGraphId,
-      [exactUal],
+      { kind: 'ual-only', assetUals: [exactUal] },
     );
     expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(
@@ -658,7 +679,7 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       undefined,
       undefined,
-      { exactAssetUals: [exactUal] },
+      { exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] } },
     );
 
     expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(2);
@@ -1034,7 +1055,7 @@ describe('durable sync lifecycle chain binding', () => {
       publisher: { clearPublishedKnowledgeAssetSwm: vi.fn() },
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
       // Required once #2271's execution-boundary source fence is in the base.
-      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1047,9 +1068,7 @@ describe('durable sync lifecycle chain binding', () => {
       [contextGraphId],
       {
         sharedMemorySyncPlan: {
-          eligibleContextGraphIds: [contextGraphId],
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
+          targets: [{ contextGraphId, lane: 'selected-public' }],
         },
       },
     );
@@ -1124,7 +1143,7 @@ describe('durable sync lifecycle chain binding', () => {
       ) => work(),
       publisher: { clearPublishedKnowledgeAssetSwm },
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
-      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1137,9 +1156,7 @@ describe('durable sync lifecycle chain binding', () => {
       [contextGraphId],
       {
         sharedMemorySyncPlan: {
-          eligibleContextGraphIds: [contextGraphId],
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
+          targets: [{ contextGraphId, lane: 'selected-public' }],
         },
       },
     );

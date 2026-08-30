@@ -9,12 +9,19 @@ export interface RegisteredTool {
     title?: string;
     description?: string;
     inputSchema?: ZodRawShape;
+    annotations?: {
+      readOnlyHint?: boolean;
+      destructiveHint?: boolean;
+      idempotentHint?: boolean;
+      openWorldHint?: boolean;
+    };
   };
   handler: (...args: unknown[]) => Promise<ToolResult>;
 }
 
 export interface ToolResult {
   content: Array<{ type: 'text'; text: string }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
 
@@ -440,7 +447,33 @@ export class FakeClient {
     const view = String(args.view ?? 'working-memory');
     const key = `${cgId}::${view}`;
     const bindings = this.memoryFixtures.get(key) ?? [];
-    return { bindings };
+    return { type: 'bindings' as const, bindings };
+  }
+
+  async readQueryCatalog(contextGraphId: string) {
+    if (this.overrides.readQueryCatalog) {
+      return this.overrides.readQueryCatalog.call(this, contextGraphId);
+    }
+    throw new Error(`query-catalog fixture not configured for ${contextGraphId}`);
+  }
+
+  async writeQueryCatalog(args: Parameters<DkgClient['writeQueryCatalog']>[0]) {
+    if (this.overrides.writeQueryCatalog) {
+      return this.overrides.writeQueryCatalog.call(this, args);
+    }
+    return {
+      ok: true as const,
+      contextGraphId: args.contextGraphId,
+      graph: `did:dkg:context-graph:${args.contextGraphId}/meta`,
+      subGraphName: 'meta' as const,
+      assertionName: 'query-catalog-test',
+      assertionUri: `did:dkg:context-graph:${args.contextGraphId}/assertion/default/query-catalog-test`,
+      scopeGraphs: [`did:dkg:context-graph:${args.contextGraphId}`],
+      scopeGraph: `did:dkg:context-graph:${args.contextGraphId}`,
+      queryCount: 1,
+      triplesWritten: args.quads.length,
+      alreadyExists: false,
+    };
   }
 
   async getAgentIdentity() {

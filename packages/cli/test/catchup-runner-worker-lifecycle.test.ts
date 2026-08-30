@@ -192,7 +192,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
       },
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.selectedShared.push(args);
-        return { kind: 'selected-shared-memory', shared: {}, selectedScopeComplete: true };
+        return { kind: 'selected-shared-memory', shared: {}, scopeComplete: true };
       },
       ...overrides,
     };
@@ -432,10 +432,14 @@ describe('WorkerCatchupRunner agent bridge', () => {
     const { agent, calls } = bridgeAgent({
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.selectedShared.push(args);
+        const requestedScope = (args[2] as {
+          requestedScope: unknown;
+        }).requestedScope;
         return {
           kind: 'selected-shared-memory',
+          requestedScope,
           shared: { insertedDataTriples: 7 },
-          selectedScopeComplete: true,
+          scopeComplete: true,
         };
       },
     });
@@ -452,11 +456,19 @@ describe('WorkerCatchupRunner agent bridge', () => {
       priority: 2000,
       source: 'catchup-foreground',
       selectedSwmPriority: true,
+      requestedScope: {
+        kind: 'selected-public',
+        targets: [{ contextGraphId: 'cg-x', lane: 'selected-public' }],
+      },
     });
     expect(posted.result).toEqual({
       kind: 'selected-shared-memory',
+      requestedScope: {
+        kind: 'selected-public',
+        targets: [{ contextGraphId: 'cg-x', lane: 'selected-public' }],
+      },
       shared: { insertedDataTriples: 7 },
-      selectedScopeComplete: true,
+      scopeComplete: true,
     });
   });
 

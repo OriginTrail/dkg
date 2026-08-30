@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { readSwmDataPage } from '../src/sync/responder/graph-plan.js';
+import { createGraphMembershipSnapshot } from '../src/sync/graph-membership-snapshot.js';
 import { createResponderSyncRowListMemo } from '../src/sync/responder/snapshot-cache.js';
 
 /**
@@ -66,12 +67,13 @@ describe('sync responder tolerates a shared-memory graph larger than the spread 
     // No explicit budget still gets the hard 10k/32MiB build cap. Once crossed,
     // this session is remembered as store-paged and never retries a full load.
     const memo = createResponderSyncRowListMemo(120_000, 32, { phase: 'durable_data' });
+    const graphMembership = createGraphMembershipSnapshot([dataGraph, metaGraph]);
 
     let received = 0;
     for (let offset = 0; offset < rowCount; offset += 500) {
       const rows = await readSwmDataPage({
         store,
-        graphList: [dataGraph, metaGraph],
+        graphMembership,
         registeredSubGraphNames: [],
         contextGraphId: cg,
         cutoffIso: '2020-01-01T00:00:00.000Z',

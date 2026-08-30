@@ -824,6 +824,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
         return {
           contextGraphId,
+          accessPolicy: accepted?.policyEnvelope.payload.accessPolicy,
+          publishPolicy: accepted?.policyEnvelope.payload.publishPolicy,
           vmRequired:
             accepted?.policyEnvelope.payload.accessPolicy === 1
             && accepted.policyEnvelope.payload.source.kind === 'finalized-chain',
@@ -838,6 +840,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         .filter((accepted) => (accepted.completeSwmProviders?.length ?? 0) > 0)
         .map((accepted) => ({
           contextGraphId: accepted.policyEnvelope.payload.contextGraphId,
+          accessPolicy: accepted.policyEnvelope.payload.accessPolicy,
+          publishPolicy: accepted.policyEnvelope.payload.publishPolicy,
           providers: accepted.completeSwmProviders,
         }))
       : [];

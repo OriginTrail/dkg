@@ -8,6 +8,7 @@
 
 import {
   assertSubjectReplacementPayload,
+  deleteByPatternWithoutCount,
   tryReplaceSubjectAtomically,
   type Quad,
   type TripleStore,
@@ -51,6 +52,6 @@ export async function replaceSubjectAtomicallyOrFallback(
   assertSubjectReplacementPayload(graphUri, subject, quads);
   const replaced = await tryReplaceSubjectAtomically(store, graphUri, subject, quads, { source });
   if (replaced) return;
-  await store.deleteByPattern({ subject, graph: graphUri });
+  await deleteByPatternWithoutCount(store, { subject, graph: graphUri });
   await store.insert(quads);
 }

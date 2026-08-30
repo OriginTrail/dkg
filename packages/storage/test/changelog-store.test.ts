@@ -13,16 +13,19 @@
  *    reordering hole). Enforced by the in-process write mutex.
  *  - seq reseeds from the durable high-water mark on restart → no reuse/rollback.
  */
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import { StoreOperationTimeoutError } from '../src/store-operation-timeout.js';
 
 const G1 = 'http://ex.org/g1';
 const G2 = 'http://ex.org/g2';
@@ -61,6 +64,128 @@ class SpyStore implements TripleStore {
   countQuads(g?: string, options?: QueryOptions) { return this.inner.countQuads(g, options); }
   close() { return this.inner.close(); }
 }
+
+class NotStartedTimeoutAtomicReplaceStore extends SpyStore {
+  async replaceGraph(): Promise<void> {
+    throw this.notStarted('replaceGraph');
+  }
+
+  async replaceGraphAndSubject(): Promise<void> {
+    throw this.notStarted('replaceGraphAndSubject');
+  }
+
+  async replaceSubject(): Promise<void> {
+    throw this.notStarted('replaceSubject');
+  }
+
+  private notStarted(operation: string): StoreOperationTimeoutError {
+    return new StoreOperationTimeoutError({
+      backend: 'managed-test-store',
+      operation,
+      outcome: 'not_started',
+    });
+  }
+}
+
+describe('ChangelogStore — pre-execution atomic replace rejection', () => {
+  for (const adapter of [
+    {
+      name: 'BlazegraphStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new BlazegraphStore(
+        'http://blazegraph.test/sparql',
+        { scheduler, timeout: 1_000 },
+      ),
+    },
+    {
+      name: 'SparqlHttpStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new SparqlHttpStore({
+        queryEndpoint: 'http://sparql.test/query',
+        updateEndpoint: 'http://sparql.test/update',
+        atomicUpdates: true,
+        scheduler,
+        timeout: 1_000,
+      }),
+    },
+  ]) {
+    it(`does not request reconciliation for a real ${adapter.name} admission rejection`, async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        new Error('adapter closure must not dispatch'),
+      );
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 10,
+      });
+      const inner = adapter.create(scheduler);
+      const log = new ChangelogStore(inner);
+      let releaseBlocker!: () => void;
+      let blocker: Promise<void> | undefined;
+
+      try {
+        blocker = scheduler.run('normal', 'test.atomic-replace-blocker', async () => {
+          await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        });
+        await Promise.resolve();
+
+        for (const [storeOperation, work] of [
+          ['replaceGraph', () => log.replaceGraph(G1, [q('http://ex.org/a', G1)])],
+          ['replaceGraphAndSubject', () => log.replaceGraphAndSubject(
+            G1,
+            [q('http://ex.org/a', G1)],
+            G2,
+            'http://ex.org/meta',
+            [q('http://ex.org/meta', G2)],
+          )],
+          ['replaceSubject', () => log.replaceSubject(
+            G1,
+            'http://ex.org/a',
+            [q('http://ex.org/a', G1)],
+          )],
+        ] as const) {
+          await expect(work()).rejects.toMatchObject({
+            code: 'STORE_SCHEDULER_BUSY',
+            outcome: 'not_started',
+            storeOperation,
+          });
+        }
+
+        expect(log.needsReconcile).toBe(false);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        releaseBlocker?.();
+        if (blocker) await blocker;
+        await inner.close();
+        fetchSpy.mockRestore();
+      }
+    });
+  }
+
+  it('uses the shared not-started outcome for managed-store refusals', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(new NotStartedTimeoutAtomicReplaceStore(base));
+
+    await expect(log.replaceGraph(G1, [q('http://ex.org/a', G1)]))
+      .rejects.toMatchObject({ outcome: 'not_started', storeOperation: 'replaceGraph' });
+    await expect(log.replaceGraphAndSubject(
+      G1,
+      [q('http://ex.org/a', G1)],
+      G2,
+      'http://ex.org/meta',
+      [q('http://ex.org/meta', G2)],
+    )).rejects.toMatchObject({
+      outcome: 'not_started',
+      storeOperation: 'replaceGraphAndSubject',
+    });
+    await expect(log.replaceSubject(G1, 'http://ex.org/a', [q('http://ex.org/a', G1)]))
+      .rejects.toMatchObject({ outcome: 'not_started', storeOperation: 'replaceSubject' });
+
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+});
 
 describe('ChangelogStore — upsert marker atomicity', () => {
   it('appends the marker in the SAME inner.insert() call as the data (one transaction)', async () => {
@@ -338,8 +463,10 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     // aimed at it would erase or corrupt the log, so it is rejected outright.
     await expect(log.dropGraph(CHANGELOG_GRAPH)).rejects.toThrow(/reserved/i);
     await expect(log.deleteByPattern({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
     await expect(log.deleteBySubjectPrefix(CHANGELOG_GRAPH, 'x')).rejects.toThrow(/reserved/i);
     expect(spy.insertCalls.length).toBe(callsBefore); // nothing reached the store
+    expect(await log.headSeq()).toBe(1); // log intact
     await base.close();
   });
 
@@ -371,6 +498,8 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     await log.insert([q('http://ex.org/a', G1)]); // seq 1
     await expect(log.deleteByPattern({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
     await expect(log.deleteByPattern({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
     expect(await log.headSeq()).toBe(1); // log intact
     await base.close();
   });
@@ -445,6 +574,28 @@ describe('ChangelogStore — delete-path op attribution & reconcile', () => {
     expect(await log.deleteByPattern({ subject: 'http://ex.org/b', graph: G1 })).toBeGreaterThan(0);
     expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual(['upsert', 'upsert', 'drop']);
     expect(log.needsReconcile).toBe(false); // graph-hinted path is fully attributed
+  });
+
+  it('no-count deleteByPattern emits a conservative marker and preserves drop attribution', async () => {
+    await log.insert([q('http://ex.org/a', G1), q('http://ex.org/b', G1)]);
+
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/a', graph: G1 });
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/b', graph: G1 });
+
+    expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual([
+      'upsert',
+      'upsert',
+      'drop',
+    ]);
+    expect(log.needsReconcile).toBe(false);
+  });
+
+  it('no-count graph-less delete flags reconcile without requiring a count', async () => {
+    await log.insert([q('http://ex.org/s1', G1)]);
+
+    await log.deleteByPatternWithoutCount({ predicate: 'http://ex.org/p' });
+
+    expect(log.needsReconcile).toBe(true);
   });
 });
 

@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
-import { findTripleStoreCapability } from './triple-store.js';
+import {
+  deleteByPatternWithoutCount,
+  findTripleStoreCapability,
+} from './triple-store.js';
 import type {
   Quad,
   QueryOptions,
@@ -12,11 +15,9 @@ import type {
 } from './triple-store.js';
 import {
   UnsupportedTripleStoreCapabilityError,
-  isReplaceGraphAndSubjectCapabilityRefusal,
-  isReplaceGraphCapabilityRefusal,
-  isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -308,6 +309,32 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
     });
   }
 
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.enabled) {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      return;
+    }
+    if (pattern.graph) {
+      this.assertNotReserved(pattern.graph, 'deleteByPatternWithoutCount');
+    } else {
+      this.assertNoReservedTerm(pattern);
+    }
+    await this.runExclusive(async () => {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      if (pattern.graph) {
+        // No count is available to distinguish a no-op. Emitting a
+        // conservative post-mutation marker matches delete(quads) semantics
+        // and keeps every committed change discoverable.
+        await this.markPostMutation([pattern.graph], options);
+      } else {
+        this.flagReconcile('deleteByPatternWithoutCount(no-graph)');
+      }
+    });
+  }
+
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     if (!this.enabled) return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
     this.assertNotReserved(graphUri, 'deleteBySubjectPrefix');
@@ -346,9 +373,9 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
       try {
         await this.inner.replaceGraph!(graphUri, quads, options);
       } catch (err) {
-        if (isReplaceGraphCapabilityRefusal(err)) {
-          // A capability refusal is a clean preflight result: no mutation was
-          // started, so there is no gap to reconcile.
+        if (isAtomicReplaceOperationNotStarted(err, 'replaceGraph')) {
+          // A clean preflight or admission refusal explicitly bound to this
+          // replace means no mutation started, so there is no gap to reconcile.
           throw err;
         }
         // The replaceGraph contract allows a rejected call to have left either
@@ -402,7 +429,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
           options,
         );
       } catch (error) {
-        if (!isReplaceGraphAndSubjectCapabilityRefusal(error)) {
+        if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraphAndSubject')) {
           this.flagReconcile('replaceGraphAndSubject(indeterminate-failure)');
         }
         throw error;
@@ -431,8 +458,9 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
       try {
         await this.inner.replaceSubject!(graphUri, subject, quads, options);
       } catch (error) {
-        if (isReplaceSubjectCapabilityRefusal(error)) {
-          // Clean preflight refusal: no mutation started, nothing to reconcile.
+        if (isAtomicReplaceOperationNotStarted(error, 'replaceSubject')) {
+          // Clean preflight or replace-bound admission refusal: no mutation
+          // started, so there is nothing to reconcile.
           throw error;
         }
         this.flagReconcile('replaceSubject(indeterminate-failure)');
@@ -712,7 +740,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
 
   /** Replace the single `#era` marker in the reserved graph (delete-any + insert). */
   private async writeEra(era: string): Promise<void> {
-    await this.inner.deleteByPattern({
+    await deleteByPatternWithoutCount(this.inner, {
       subject: META_SUBJECT, predicate: P_ERA, graph: CHANGELOG_GRAPH,
     });
     await this.inner.insert([{

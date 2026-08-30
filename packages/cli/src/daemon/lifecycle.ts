@@ -164,6 +164,7 @@ import {
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
+import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
   createTelemetrySettings,
@@ -172,6 +173,10 @@ import {
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
+import {
+  decodeVmReconcileNegativeRow,
+  encodeVmReconcileNegativeRow,
+} from './vm-reconcile-negative-store-adapter.js';
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
@@ -1143,6 +1148,26 @@ export async function runDaemonInner(
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
 ): Promise<void> {
+  let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
+  try {
+    await runDaemonInnerWithStartupOwnership(
+      foreground,
+      config,
+      startedAt,
+      (cleanup) => { cleanupOwnedStartupResources = cleanup; },
+    );
+  } catch (error) {
+    await cleanupOwnedStartupResources?.();
+    throw error;
+  }
+}
+
+async function runDaemonInnerWithStartupOwnership(
+  foreground: boolean,
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  startedAt: number,
+  registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
+): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -1195,6 +1220,22 @@ export async function runDaemonInner(
     process.stderr.write = origStderrWrite as typeof process.stderr.write;
   };
 
+  let startupUncaughtExceptionHandler: NodeJS.UncaughtExceptionListener | undefined;
+  let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
+  registerStartupFailureCleanup(async () => {
+    // The graceful shutdown handlers are registered only after startup succeeds. A rejection
+    // before that boundary must still retire the writer it started; otherwise queued appends can
+    // outlive the failed boot and race the next startup (or test teardown) through DKG_HOME.
+    if (startupUncaughtExceptionHandler) {
+      process.removeListener("uncaughtException", startupUncaughtExceptionHandler);
+    }
+    if (startupUnhandledRejectionHandler) {
+      process.removeListener("unhandledRejection", startupUnhandledRejectionHandler);
+    }
+    detachDaemonLogTee();
+    await daemonLogFileWriter.shutdown();
+  });
+
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
@@ -1216,7 +1257,7 @@ export async function runDaemonInner(
     );
   }
 
-  process.on("uncaughtException", (err) => {
+  startupUncaughtExceptionHandler = (err) => {
     const msg = err?.message ?? String(err);
     if (
       msg.includes("Cannot write to a stream that is") ||
@@ -1238,9 +1279,10 @@ export async function runDaemonInner(
           },
         });
       });
-  });
+  };
+  process.on("uncaughtException", startupUncaughtExceptionHandler);
 
-  process.on("unhandledRejection", (reason) => {
+  startupUnhandledRejectionHandler = (reason) => {
     const msg = reason instanceof Error ? reason.message : String(reason);
     if (
       msg.includes("Cannot write to a stream that is") ||
@@ -1252,7 +1294,8 @@ export async function runDaemonInner(
     log(
       `[warn] Unhandled rejection: ${reason instanceof Error ? reason.stack : msg}`,
     );
-  });
+  };
+  process.on("unhandledRejection", startupUnhandledRejectionHandler);
 
   const role = config.nodeRole ?? "edge";
 
@@ -1934,37 +1977,15 @@ export async function runDaemonInner(
       loadVmReconcileNegative: async (cacheKey) => {
         const row = dashDb.getVmReconcileNegative(cacheKey);
         if (!row) return null;
-        try {
-          const candidateNamespaces = JSON.parse(row.candidate_namespaces) as Array<{
-            metaGraph: string;
-            dataGraph: string;
-          }>;
-          if (!Array.isArray(candidateNamespaces)) return null;
-          return {
-            cacheKey: row.cache_key,
-            localCgId: row.context_graph_id,
-            failures: row.failures,
-            nextRetryAt: row.next_retry_at,
-            swmGen: row.swm_gen,
-            candidateNamespaces,
-            peerTopologyKey: row.peer_topology_key,
-          };
-        } catch {
+        const decoded = decodeVmReconcileNegativeRow(row);
+        if (!decoded) {
           dashDb.deleteVmReconcileNegative(cacheKey);
           return null;
         }
+        return decoded;
       },
       saveVmReconcileNegative: async (record) => {
-        dashDb.upsertVmReconcileNegative({
-          cache_key: record.cacheKey,
-          context_graph_id: record.localCgId,
-          failures: record.failures,
-          next_retry_at: record.nextRetryAt,
-          swm_gen: record.swmGen,
-          candidate_namespaces: JSON.stringify(record.candidateNamespaces),
-          peer_topology_key: record.peerTopologyKey,
-          updated_at: Date.now(),
-        });
+        dashDb.upsertVmReconcileNegative(encodeVmReconcileNegativeRow(record, Date.now()));
       },
       deleteVmReconcileNegative: async (cacheKey) => {
         dashDb.deleteVmReconcileNegative(cacheKey);
@@ -3404,6 +3425,11 @@ export async function runDaemonInner(
   // (version counters or ETag-like compare-and-swap) to close the race
   // across processes — out of scope for Round 6.
   const assertionImportLocks = new Map<string, Promise<void>>();
+  const localLlm = createDaemonLocalLlmService({
+    dkgHome: dkgDir(),
+    cwd: process.cwd(),
+    stderr: (line) => log(`[dkg-mcp] ${line}`),
+  });
 
   // --- HTTP API ---
 
@@ -3661,6 +3687,7 @@ export async function runDaemonInner(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
+        localLlm,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3785,6 +3812,7 @@ export async function runDaemonInner(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             server,
+            closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,
             stopPublisherRuntime: async () => {

@@ -83,11 +83,21 @@ export interface JSONSchemaObject {
    * so legacy callers passing stringified numerics can pass
    * schema-validation on hosts that actually enforce the schema.
    */
-  properties: Record<
-    string,
-    { type: string | string[]; description?: string; items?: any; enum?: readonly string[]; minimum?: number }
-  >;
+  properties: Record<string, JSONSchemaProperty>;
   required?: string[];
+}
+
+export interface JSONSchemaProperty {
+  type: string | string[];
+  description?: string;
+  items?: JSONSchemaProperty;
+  // readonly: lets `as const` schema declarations (e.g. the agent-list
+  // boundary's canonical enum, derived from dkg-core) assign directly.
+  enum?: readonly string[];
+  minimum?: number;
+  properties?: Record<string, JSONSchemaProperty>;
+  required?: string[];
+  additionalProperties?: boolean | JSONSchemaProperty;
 }
 
 export interface OpenClawToolResult {

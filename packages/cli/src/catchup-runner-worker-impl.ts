@@ -138,7 +138,7 @@ function normalizeCatchupSharedMemoryResult(
   const progress = policy.selectedSchedulingRequested
     ? classifySharedMemoryFreshness(payload, {
       complete: policy.terminalBoundaryRequired
-        ? selected?.selectedScopeComplete === true
+        ? selected?.scopeComplete === true
         : true,
     })
     : classifyDurableProgress(payload);
@@ -147,7 +147,7 @@ function normalizeCatchupSharedMemoryResult(
     progress,
     terminalBoundaryRequired: policy.terminalBoundaryRequired,
     selectedScopeProven: policy.terminalBoundaryRequired
-      && selected?.selectedScopeComplete === true
+      && selected?.scopeComplete === true
       && progress.completedWithoutFailure,
     deferredBackpressure: payload.deferredBackpressure,
   };

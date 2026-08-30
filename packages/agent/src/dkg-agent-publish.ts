@@ -109,6 +109,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import {
+  deleteByPatternWithoutCount,
   GraphManager,
   PrivateContentStore,
   createTripleStore,
@@ -172,8 +173,12 @@ import {
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
+  createResolveCurrentWorkspaceGossipPayload,
+  parseEncodedWorkspaceGossipPayload,
+  type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
+import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
@@ -830,10 +835,41 @@ function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined)
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
+/** Normalize the deprecated raw-byte call and validate the typed publish seam. */
+function normalizeWorkspaceGossipPublishInput(
+  input: EncodedWorkspaceGossipPayload | Uint8Array,
+): EncodedWorkspaceGossipPayload {
+  if (input instanceof Uint8Array) {
+    return createResolveCurrentWorkspaceGossipPayload(input);
+  }
+  return parseEncodedWorkspaceGossipPayload(input);
+}
+
 export class PublishMethods extends DKGAgentBase {
-  async publishWorkspaceGossip(this: DKGAgent,
+  publishWorkspaceGossip(this: DKGAgent,
+    contextGraphId: string,
+    payload: EncodedWorkspaceGossipPayload,
+    ctx: OperationContext,
+    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    shareOperationId?: string,
+  ): Promise<void>;
+
+  /**
+   * @deprecated Pass EncodedWorkspaceGossipPayload so encoded bytes retain
+   * their captured fan-out snapshot. Raw bytes preserve the historical
+   * enumerator-based planning behavior during migration.
+   */
+  publishWorkspaceGossip(this: DKGAgent,
     contextGraphId: string,
     message: Uint8Array,
+    ctx: OperationContext,
+    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    shareOperationId?: string,
+  ): Promise<void>;
+
+  async publishWorkspaceGossip(this: DKGAgent,
+    contextGraphId: string,
+    payloadOrMessage: EncodedWorkspaceGossipPayload | Uint8Array,
     ctx: OperationContext,
     resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
     /**
@@ -853,6 +889,8 @@ export class PublishMethods extends DKGAgentBase {
      */
     shareOperationId?: string,
   ): Promise<void> {
+    const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
+    const message = payload.message;
     // OT-RFC-38 / LU-6 Phase B — derive the wire-form id ONCE at the
     // publish-side boundary and use it consistently across the topic,
     // envelope, and signing payload. The curator's local id stays
@@ -901,9 +939,9 @@ export class PublishMethods extends DKGAgentBase {
     // (PR-A) absorbs the resulting double-delivery cleanly and
     // PR-A's `swm.redundantApplies` gauge makes it observable.
     //
-    // Enumeration cost: at most one SPARQL query + one
-    // getSubscribers() call per CG per 60s window (enumerator
-    // caches). Independent of share rate.
+    // Canonical private shares carry the exact transport projection captured
+    // while wrapping their bytes. Public and deprecated raw calls resolve the
+    // current enumerator. Private agent rosters are never held in its TTL cache.
     //
     // Errors are intentionally NOT re-thrown — share() in the
     // caller already committed locally; transport failures here
@@ -922,21 +960,15 @@ export class PublishMethods extends DKGAgentBase {
     // contract. Wrap planning in the same swallow-and-log shell
     // as the gossip publish: on throw, fall back to a gossip-only
     // plan (exactly the pre-PR-C behaviour for this share). The
-    // next share to the same cgId pays the SPARQL retry; the
-    // 60s enumeration cache means a one-off blip is recovered on
-    // the next call.
+    // next share to the same cgId pays the planning retry.
     let plan: FanOutPlan;
     try {
-      const enumeration = await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
+      const enumeration = payload.fanout.kind === 'captured'
+        ? payload.fanout.snapshot
+        : await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
       plan = chooseFanOutTier({
         enumeration,
         maxSubstrateMembers: this.swmSubstrateMaxMembers,
-        // OT-RFC-49 WS-A — for a PRIVATE allowlist CG, this flips the gossip
-        // leg OFF so curated SWM ciphertext stays off the public mesh and
-        // reaches the roster over the reliable substrate only. Resolved on
-        // the same planning path that already runs `isPrivateContextGraph`
-        // for enumeration, so no extra store round-trip beyond its cache.
-        isPrivate: await this.isPrivateContextGraph(contextGraphId),
       });
     } catch (err) {
       const errClass = err instanceof Error
@@ -1010,14 +1042,10 @@ export class PublishMethods extends DKGAgentBase {
     // arithmetic is identical regardless of which transport
     // delivered first.
     //
-    // Three preconditions for tracking:
+    // Two preconditions for tracking:
     //   1. Caller supplied a shareOperationId (`share()` does;
     //      legacy callers don't).
-    //   2. The plan ran a gossip leg — SwmShareAck only covers
-    //      gossip-applied receivers. A hypothetical future
-    //      no-gossip / substrate-only plan would already cover
-    //      quorum via PR-C's substrate counters.
-    //   3. We have at least one ack-roundtrip-eligible peer
+    //   2. We have at least one ack-roundtrip-eligible peer
     //      (`plan.substrateMembers.length > 0`). PR-K change:
     //      pre-PR-K keyed off `plan.enumeratedMembers.length` to
     //      keep the gossip-only-too-many-subscribers branch
@@ -1059,8 +1087,13 @@ export class PublishMethods extends DKGAgentBase {
     // — the same class of bug the codex-RED note in
     // `enumerate-cg-members.ts` (`members` must not shrink
     // `expectedMembers`) was added to prevent.
+    // Substrate-only plans need the tracker too: delivered sends complete via
+    // the bookkeeper below, while retryable/queued/in-flight sends remain
+    // pending and are resent by the bounded watchdog using the exact wire
+    // payload. Without this, an encrypted private share that received the
+    // retryable sentinel had no second delivery attempt because no gossip ACK
+    // could ever arrive.
     const ackQuorumActive = !!shareOperationId
-      && plan.useGossip
       && plan.substrateMembers.length > 0;
     let trackedQuorum: SwmAckQuorum | null = null;
     if (ackQuorumActive && shareOperationId) {
@@ -1072,6 +1105,7 @@ export class PublishMethods extends DKGAgentBase {
         preAckedFromSubstrate: [],
         payload: wireMessage,
         enumerationSource: plan.enumerationSource,
+        ...(!plan.useGossip ? { quorumThreshold: 1 } : {}),
       });
     }
 
@@ -1102,12 +1136,15 @@ export class PublishMethods extends DKGAgentBase {
             substrate: this.messenger,
             bookkeeper: {
               recordOutcome: (cgId, record) => {
-                if (
-                  trackedQuorum
-                  && shareOperationId
-                  && record.outcome === 'delivered'
-                ) {
-                  trackedQuorum.onAck(shareOperationId, record.peerId);
+                if (trackedQuorum && shareOperationId) {
+                  if (record.outcome === 'delivered') {
+                    trackedQuorum.onAck(shareOperationId, record.peerId);
+                  } else if (
+                    !plan.useGossip
+                    && (record.outcome === 'rejected' || record.outcome === 'failed')
+                  ) {
+                    trackedQuorum.dropPeer(shareOperationId, record.peerId);
+                  }
                 }
                 // #1227 regression fix: only feed TERMINAL initial-fanout
                 // outcomes (delivered→good, failed/rejected→failed/
@@ -1553,10 +1590,10 @@ export class PublishMethods extends DKGAgentBase {
     if (!promoted.shareOperationId) {
       throw new Error(`publishAsync did not produce an immutable SWM snapshot for ${assertionName}`);
     }
-    if (!opts?.localOnly && promoted.gossipMessage) {
+    if (!opts?.localOnly && promoted.gossipPayload) {
       await this.publishWorkspaceGossip(
         contextGraphId,
-        promoted.gossipMessage,
+        promoted.gossipPayload,
         ctx,
         gossipSigner,
         promoted.shareOperationId,
@@ -1924,7 +1961,7 @@ export class PublishMethods extends DKGAgentBase {
           publishProjection: async (_id, quads, graph) => {
             const subjects = new Set(quads.map((q) => q.subject));
             for (const subject of subjects) {
-              await this.store.deleteByPattern({ graph, subject });
+              await deleteByPatternWithoutCount(this.store, { graph, subject });
             }
             await this.store.insert(quads);
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
@@ -1944,8 +1981,9 @@ export class PublishMethods extends DKGAgentBase {
 
   async update(this: DKGAgent,
     kaId: bigint, contextGraphId: string, quads: Quad[], privateQuads?: Quad[],
-    opts?: {
-      onPhase?: PhaseCallback;
+    // r12 (3878010410) — the lifecycle hooks come in through the ONE shared contract; a hook
+    // added to PublishLifecycleHooks flows through this boundary without editing this list.
+    opts?: PublishLifecycleHooks & {
       operationCtx?: OperationContext;
       precomputedUpdateAttestation?: PublishOptions['precomputedUpdateAttestation'];
       publisherOverride?: DKGPublisher;
@@ -1959,14 +1997,6 @@ export class PublishMethods extends DKGAgentBase {
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
       accessPolicy?: PublishOptions['accessPolicy'];
       allowedPeers?: PublishOptions['allowedPeers'];
-      /**
-       * GH#2270 PR-3 r3 — the durable pre-send write-ahead. It has to be threaded explicitly:
-       * this option bag is built field by field rather than spread, so anything not named here is
-       * silently dropped, and a dropped write-ahead means a KA update transaction goes out with
-       * nothing on disk recording it.
-       */
-      onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
-      onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
@@ -2265,9 +2295,10 @@ export class PublishMethods extends DKGAgentBase {
       publisherPeerId: this.node.peerId.toString(),
       publishContextGraphId: updateOnChainId ?? undefined,
       operationCtx: ctx,
-      onPhase,
-      onBeforeBroadcast: opts?.onBeforeBroadcast,
-      onBroadcastAccepted: opts?.onBroadcastAccepted,
+      // r10 (3877910013) — one-unit hook forwarding at the update boundary; the spread's
+      // required-keys type carries onPhase (= opts?.onPhase, the same value the local
+      // shorthand held), so no separate onPhase entry may precede it (TS2783).
+      ...pickPublishLifecycleHooks(opts ?? {}),
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -2362,7 +2393,7 @@ export class PublishMethods extends DKGAgentBase {
     // buildCuratorAckConfirmer). Undefined → legacy best-effort path.
     const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
 
-    const { shareOperationId, message } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
+    const { shareOperationId, gossipPayload } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       subGraphName: opts?.subGraphName,
@@ -2383,7 +2414,13 @@ export class PublishMethods extends DKGAgentBase {
       // holds this write; the fan-out here is the cross-version safety net
       // + propagation to the OTHER members. A redundant curator delivery is
       // idempotent — swm.redundantApplies.)
-      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner, shareOperationId);
+      await this.publishWorkspaceGossip(
+        contextGraphId,
+        gossipPayload,
+        ctx,
+        gossipSigner,
+        shareOperationId,
+      );
     }
     return { shareOperationId };
   }
@@ -2494,7 +2531,7 @@ export class PublishMethods extends DKGAgentBase {
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
     // Strict curator-ack gate — same seam as share() (both flow through _shareImpl).
     const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
-    const { shareOperationId, message } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
+    const { shareOperationId, gossipPayload } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
@@ -2509,7 +2546,13 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
     if (!opts?.localOnly) {
-      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner, shareOperationId);
+      await this.publishWorkspaceGossip(
+        contextGraphId,
+        gossipPayload,
+        ctx,
+        gossipSigner,
+        shareOperationId,
+      );
     }
     return { shareOperationId };
   }
@@ -2737,7 +2780,7 @@ export class PublishMethods extends DKGAgentBase {
       // version may need replacement, but a failure after its delete is safe:
       // the durable seal is written first and an idempotent finalize retry
       // repairs this row before returning.
-      await this.store.deleteByPattern({
+      await deleteByPatternWithoutCount(this.store, {
         graph: metaGraph,
         subject: lifecycleUri,
         predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
@@ -3924,12 +3967,6 @@ export class PublishMethods extends DKGAgentBase {
         `returned no agent recipients. Refusing to publish to avoid plaintext leak.`,
       );
     }
-    if (resolution.recipients.length === 0) {
-      throw new Error(
-        `${logPrefix}: curated CG ${contextGraphId}: no DKG agent recipients available — ` +
-        `add at least one allowed agent before publishing.`,
-      );
-    }
     const recipientSet = new Set(resolution.recipients.map((r) => r.agentAddress.toLowerCase()));
     if (!recipientSet.has(ethers.getAddress(senderAddress).toLowerCase())) {
       throw new Error(
@@ -4767,12 +4804,6 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    if (!liveSwmBare) {
-      throw stale(
-        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
-          `SWM pointer is none, queued seal is ${queuedSealBare}.`,
-      );
-    }
     if (!liveWmBare) {
       throw stale(
         `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
@@ -4820,6 +4851,14 @@ export class PublishMethods extends DKGAgentBase {
           'the immutable SWM access envelope no longer matches the queued request.',
       );
     }
+
+    // `_stampSwmPointer` is explicitly a best-effort post-commit projection.
+    // A managed-store restart can therefore leave this optional lifecycle row
+    // absent even though the complete-share marker and immutable graph-scoped
+    // head both committed. Absence alone is not proof that the queued content
+    // changed: the exact operation id, assertion version, access envelope and
+    // queued WM root above are the durable authority. A present-but-different
+    // SWM pointer remains terminally stale via the comparison above.
 
     if (history.kaNumber && request.kaNumber && history.kaNumber !== request.kaNumber) {
       throw stale(
@@ -5211,14 +5250,12 @@ export class PublishMethods extends DKGAgentBase {
     // write-ahead. One object, spread into both branches, makes "the branch dropped a hook" a
     // structural impossibility rather than a review item; computed per-branch fields stay
     // explicit where they are.
-    const executionHooks: {
-      readonly onPhase?: PhaseCallback;
-      readonly onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
-      readonly onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
-    } = {
+    // r10 (3877910013) — ONE typed extraction of the lifecycle hooks (adding a hook happens
+    // in the shared type + picker, never in per-boundary field lists); only the queued
+    // onPhase override precedence is applied on top.
+    const executionHooks: PublishLifecycleHooks = {
+      ...pickPublishLifecycleHooks(publishOptions),
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
-      onBeforeBroadcast: publishOptions.onBeforeBroadcast,
-      onBroadcastAccepted: publishOptions.onBroadcastAccepted,
     };
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
@@ -5681,7 +5718,7 @@ export class PublishMethods extends DKGAgentBase {
           : contextGraphWorkspaceMetaGraphUri(request.contextGraphId);
         const keepLiteral = `"${keepRootCopyOnLabel}"`;
         for (const root of rootEntities.filter(isSafeIri)) {
-          await this.store.deleteByPattern({
+          await deleteByPatternWithoutCount(this.store, {
             subject: root,
             predicate: KEEP_ROOT_COPY_PREDICATE,
             graph: wsMetaGraph,
@@ -6159,12 +6196,12 @@ export class PublishMethods extends DKGAgentBase {
         const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
         const STATE_PRED = 'http://dkg.io/ontology/state';
         for (const subj of [lifecycleUri, assertionUri]) {
-          await this.store.deleteByPattern({ subject: subj, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+          await deleteByPatternWithoutCount(this.store, { subject: subj, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
           await this.store.insert([
             { subject: subj, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
           ]);
         }
-        await this.store.deleteByPattern({ subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
+        await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
         await this.store.insert([
           { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
         ]);
@@ -6183,7 +6220,7 @@ export class PublishMethods extends DKGAgentBase {
         if (result.ual) {
           try {
             const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
-            await this.store.deleteByPattern({ subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
+            await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
             await this.store.insert([
               { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, object: `"${result.ual}"`, graph: metaGraph },
             ]);
@@ -6227,7 +6264,7 @@ export class PublishMethods extends DKGAgentBase {
             const vmAuthor = '0x' + (vmKaIdBig >> 96n).toString(16).padStart(40, '0');
             const vmNumber = vmKaIdBig & ((1n << 96n) - 1n);
             const vmGraph = contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, opts?.subGraphName);
-            await this.store.deleteByPattern({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
+            await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
             await this.store.insert([
               { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph },
             ]);
@@ -6247,7 +6284,7 @@ export class PublishMethods extends DKGAgentBase {
             // Any non-"WM" value short-circuits that guard, so "VM" keeps the
             // no-op witness AND tells the truth about the layer.
             const wmGraph = contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, vmAuthor, vmNumber, opts?.subGraphName);
-            await this.store.deleteByPattern({ subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+            await deleteByPatternWithoutCount(this.store, { subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
             await this.store.insert([
               { subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
             ]);
@@ -6405,7 +6442,7 @@ export class PublishMethods extends DKGAgentBase {
     metaGraph: string,
   ): Promise<void> {
     const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
-    await this.store.deleteByPattern({ subject: lifecycleUri, predicate: pred, graph: metaGraph });
+    await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
     await this.store.insert([
       { subject: lifecycleUri, predicate: pred, object: `"${bare}"`, graph: metaGraph },
     ]);
@@ -6443,7 +6480,7 @@ export class PublishMethods extends DKGAgentBase {
       // divergent row is not.
     }
     if (vmBare !== undefined && vmBare === bare) {
-      await this.store.deleteByPattern({ subject: lifecycleUri, predicate: pred, graph: metaGraph });
+      await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
       return;
     }
     await this._stampPointer(lifecycleUri, pred, bare, metaGraph);
@@ -6888,7 +6925,7 @@ export class PublishMethods extends DKGAgentBase {
           : contextGraphWorkspaceMetaGraphUri(contextGraphId);
         const keepLiteral = `"${keepRootCopyOnLabel}"`;
         for (const root of rootEntities.filter(isSafeIri)) {
-          await this.store.deleteByPattern({
+          await deleteByPatternWithoutCount(this.store, {
             subject: root,
             predicate: KEEP_ROOT_COPY_PREDICATE,
             graph: wsMetaGraph,

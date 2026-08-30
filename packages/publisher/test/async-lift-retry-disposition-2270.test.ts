@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { type LiftJob } from '../src/index.js';
 import {
   queuedLiftOperationKind,
@@ -97,6 +97,22 @@ describe('GH#2270 failed-job retry disposition', () => {
     expect(after?.retries.retryCount).toBe(0);
   });
 
+  it('rejects unsafe exact job IDs before any control-plane store access', async () => {
+    const publisher = createPublisher();
+    const query = vi.spyOn(h.store, 'query');
+    const insert = vi.spyOn(h.store, 'insert');
+    const deleteByPattern = vi.spyOn(h.store, 'deleteByPattern');
+
+    for (const jobId of ['bad>id', 'a'.repeat(257)]) {
+      expect(await publisher.retryDetailed({ jobId }))
+        .toEqual({ retried: 0, blockedPendingRecovery: 0, skipped: 0 });
+    }
+
+    expect(query).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    expect(deleteByPattern).not.toHaveBeenCalled();
+  });
+
   it('reaccepts a pre-send-safe failed job and partitions the rest into blocked and skipped', async () => {
     const publisher = createPublisher();
     const retryable = await failWithUnmetQuorum(publisher);
@@ -185,6 +201,8 @@ describe('GH#2270 failed-job retry disposition', () => {
       action: 'reset_to_accepted',
       recoveredFromStatus: 'included',
       txHashChecked: TX_HASH,
+      // The included carrier retains the same pre-send branch marker as broadcast recovery.
+      operationKind: 'create',
       // r23 — the signer travels from this origin too; an 'included' failure has broadcast
       // metadata, so there is an authoritative wallet to preserve.
       walletIdChecked: includedFailure.broadcast?.walletId,
@@ -366,6 +384,8 @@ describe('GH#2270 failed-job retry disposition', () => {
     await h.store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await h.store.insert(serializeJob(carriedInRecoveryOnly, DEFAULT_CONTROL_GRAPH_URI));
 
+    // Recovery may only reset the claim after its durable ownership lease expires.
+    h.advance(6 * 60_000);
     expect(await publisher.recover()).toBe(1);
 
     const reset = await publisher.getStatus(jobId);

@@ -2,17 +2,23 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  ChangelogStore,
+  BlazegraphStore,
   GraphSetIndexStore,
   OxigraphStore,
+  SparqlHttpStore,
+  StoreSchedulerBusyError,
   StorePriorityScheduler,
   createTripleStore,
   registerTripleStoreAdapter,
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
+  type Quad,
   type QueryOptions,
   type StoreWorkPriority,
+  type TripleStore,
 } from '../src/index.js';
 import {
   ControlledProbeStore,
@@ -27,6 +33,35 @@ class FailingMaintenanceStore extends CountingStore {
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     if (this.failHasGraph) throw new Error('hasGraph failed');
+    return super.hasGraph(graphUri, options);
+  }
+}
+
+class PostCommitProbeBusyStore extends CountingStore {
+  private rejectNextPresenceProbe = false;
+
+  async replaceGraph(
+    graphUri: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraph !== 'function') {
+      throw new Error('inner store does not support replaceGraph()');
+    }
+    await this.inner.replaceGraph(graphUri, quads, options);
+    this.rejectNextPresenceProbe = true;
+  }
+
+  override hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    if (this.rejectNextPresenceProbe) {
+      this.rejectNextPresenceProbe = false;
+      throw new StoreSchedulerBusyError(
+        'queue_wait_timeout',
+        'normal',
+        'sparql-http.hasGraph',
+        { storeOperation: 'hasGraph' },
+      );
+    }
     return super.hasGraph(graphUri, options);
   }
 }
@@ -82,6 +117,131 @@ async function exhaustTouchedGraphProbeRetries(
 }
 
 describe('GraphSetIndexStore', () => {
+  for (const adapter of [
+    {
+      name: 'BlazegraphStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new BlazegraphStore(
+        'http://blazegraph.test/sparql',
+        { scheduler, timeout: 1_000 },
+      ),
+    },
+    {
+      name: 'SparqlHttpStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new SparqlHttpStore({
+        queryEndpoint: 'http://sparql.test/query',
+        updateEndpoint: 'http://sparql.test/update',
+        atomicUpdates: true,
+        scheduler,
+        timeout: 1_000,
+      }),
+    },
+  ]) {
+    it(`keeps a warm index when the real ${adapter.name} boundary rejects before dispatch`, async () => {
+      const existing = 'did:dkg:context-graph:existing';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+        JSON.stringify({
+          head: { vars: ['g'] },
+          results: { bindings: [{ g: { type: 'uri', value: existing } }] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      ));
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 10,
+      });
+      const inner = adapter.create(scheduler);
+      const diagnostics: unknown[] = [];
+      const store = new GraphSetIndexStore(inner, {
+        revalidateMs: 100_000,
+        now: () => 1_000,
+        onDiagnostic: (event) => diagnostics.push(event),
+      } as GraphSetIndexStoreOptions);
+      let releaseBlocker!: () => void;
+      let blockerStarted = false;
+      let blocker: Promise<void> | undefined;
+
+      try {
+        await expect(store.listGraphs()).resolves.toEqual([existing]);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+        blocker = scheduler.run('normal', 'test.atomic-replace-blocker', async () => {
+          blockerStarted = true;
+          await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        });
+        await Promise.resolve();
+        expect(blockerStarted).toBe(true);
+
+        for (const [storeOperation, work] of [
+          ['replaceGraph', () => store.replaceGraph('urn:graph', [q('urn:graph')])],
+          ['replaceGraphAndSubject', () => store.replaceGraphAndSubject(
+            'urn:graph',
+            [q('urn:graph')],
+            'urn:meta',
+            'urn:subject',
+            [q('urn:meta', 'urn:subject')],
+          )],
+          ['replaceSubject', () => store.replaceSubject(
+            'urn:graph', 'urn:subject', [q('urn:graph', 'urn:subject')],
+          )],
+        ] as const) {
+          await expect(work()).rejects.toMatchObject({
+            code: 'STORE_SCHEDULER_BUSY',
+            outcome: 'not_started',
+            storeOperation,
+          });
+        }
+
+        for (const [storeOperation, read] of [
+          ['hasGraph', () => inner.hasGraph('urn:probe')],
+          ['listGraphs', () => inner.listGraphs()],
+          ['countQuads', () => inner.countQuads('urn:probe')],
+        ] as const) {
+          await expect(read()).rejects.toMatchObject({
+            code: 'STORE_SCHEDULER_BUSY',
+            outcome: 'not_started',
+            storeOperation,
+          });
+        }
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+        await expect(store.listGraphs()).resolves.toEqual([existing]);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(diagnostics).toEqual([]);
+      } finally {
+        releaseBlocker?.();
+        if (blocker) await blocker;
+        await inner.close();
+        fetchSpy.mockRestore();
+      }
+    });
+  }
+
+  it('dirties the index when a nested post-commit probe is rejected before dispatch', async () => {
+    const inner = new OxigraphStore();
+    await inner.insert([q('did:dkg:context-graph:existing')]);
+    const backend = new PostCommitProbeBusyStore(inner);
+    const changelog = new ChangelogStore(backend);
+    const store = new GraphSetIndexStore(changelog, { revalidateMs: 100_000 });
+
+    await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:existing']);
+    expect(backend.listGraphsCalls).toBe(1);
+
+    await expect(store.replaceGraph('urn:committed', [q('urn:committed')]))
+      .rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    expect(changelog.needsReconcile).toBe(true);
+
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([
+      'did:dkg:context-graph:existing',
+      'urn:committed',
+    ]));
+    expect(backend.listGraphsCalls).toBe(2);
+    await inner.close();
+  });
+
   it('seeds from one listGraphs scan and serves prefix lookups from memory', async () => {
     const inner = new OxigraphStore();
     await inner.insert([
@@ -285,6 +445,32 @@ describe('GraphSetIndexStore', () => {
       ],
       source: 'deleteByPattern',
     });
+  });
+
+  it('keeps graph membership correct after a no-count pattern delete', async () => {
+    const graph = 'did:dkg:context-graph:no-count-delete';
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q(graph)]);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+
+    await store.deleteByPatternWithoutCount({ graph, predicate: 'urn:p' });
+
+    await expect(store.listGraphs()).resolves.toEqual([]);
+  });
+
+  it('invalidates the full index after a graph-less no-count pattern delete', async () => {
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q('did:dkg:context-graph:no-count-one')]);
+    await expect(store.listGraphs()).resolves.toHaveLength(1);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await store.deleteByPatternWithoutCount({ predicate: 'urn:p' });
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(2);
   });
 
   it('preserves deferred mutation source when hasGraph reads before listGraphs', async () => {

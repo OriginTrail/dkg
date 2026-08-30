@@ -1245,14 +1245,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       throw new Error(`Cannot create SWM Sender Key epoch: no local custodial signing key for agent ${input.senderAgentAddress}`);
     }
 
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId: input.contextGraphId });
-    if (!resolution.requiresEncryption) {
-      return input.plaintext;
-    }
-    if (resolution.recipients.length === 0) {
-      throw new Error(`Context graph "${input.contextGraphId}" requires Sender Key SWM but has no DKG agent recipients`);
-    }
-
+    const resolution = input.resolution;
     const senderAddress = ethers.getAddress(sender.agentAddress);
     const recipientSet = new Set(resolution.recipients.map((recipient) => recipient.agentAddress.toLowerCase()));
     if (!recipientSet.has(senderAddress.toLowerCase())) {

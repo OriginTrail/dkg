@@ -227,7 +227,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     <LayerActionShell
       title="Share complete Knowledge Assets"
       footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
-      context={<>The displayed {noun} will be shared through their complete owning Knowledge Assets for collaborative review.</>}
+      context={<>{count} eligible {noun} will be shared through their complete owning Knowledge Assets for collaborative review.</>}
       result={result}
       error={error}
     >
@@ -335,10 +335,12 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
 
 // ─── Horizontal widget strip (stats + types + CTA) for the Entities tab ──
 
-export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, contextGraphId, onComplete }: {
+export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCount = entityCount, tripleCount, contextGraphId, onComplete }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
   entityCount: number;
+  /** Explicit bulk lifecycle scope; may be narrower than the visible entity set. */
+  actionEntityCount?: number;
   tripleCount: number;
   contextGraphId?: string;
   onComplete?: () => void;
@@ -382,11 +384,11 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
         <LayerStatsWidget entities={entities} entityCount={entityCount} triples={tripleCount} layer={layer} />
         <TypeBreakdownWidget entities={entities} />
       </div>
-      {(layer === 'wm' || layer === 'swm') && contextGraphId && (
+      {(layer === 'wm' || layer === 'swm') && contextGraphId && actionEntityCount > 0 && (
         <div className="v10-layer-widgets-strip-action">
           {layer === 'wm'
-            ? <PromoteWidget count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />
-            : <PublishVmWidget count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />}
+            ? <PromoteWidget count={actionEntityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />
+            : <PublishVmWidget count={actionEntityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />}
         </div>
       )}
     </div>

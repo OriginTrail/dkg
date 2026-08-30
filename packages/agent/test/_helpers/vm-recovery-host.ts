@@ -8,6 +8,7 @@ import type {
 } from '../../src/chain-reconciler.js';
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import { DKGAgent } from '../../src/index.js';
+import type { ExactAssetSelection } from '../../src/sync/exact-assets.js';
 import type {
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
@@ -81,7 +82,7 @@ export interface VmRecoveryHostInternals {
   syncExactKnowledgeAssetsFromPeerDetailed(
     peerId: string,
     contextGraphId: string,
-    uals: string[],
+    selection: ExactAssetSelection,
     options?: { signal?: AbortSignal; isCurrent?: () => boolean },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(

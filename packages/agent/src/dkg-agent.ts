@@ -89,7 +89,7 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
   isAllocatableKaAuthorV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -149,7 +149,13 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
-import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
+import {
+  bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  stopRandomSamplingHandleWithin,
+  type RandomSamplingHandle,
+  type RandomSamplingStatus,
+} from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
@@ -428,6 +434,10 @@ import {
 import { snapshotRfc64CatalogBootstrapConfigV1 } from './rfc64/catalog-authority-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
+import { Rfc64SwmRecoveryCoordinatorV1 } from
+  './rfc64/swm-recovery-coordinator-v1.js';
+import { resolveRfc64PeerSwmRecoveryPlanV1 } from
+  './rfc64/swm-recovery-plan-v1.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
 import { QueryMethods } from './dkg-agent-query.js';
@@ -792,6 +802,58 @@ export function mergeRfc64CatalogBootstrapsV1(
 }
 
 export class DKGAgent extends DKGAgentBase {
+  private constructor(
+    config: ResolvedDKGAgentConfig,
+    wallet: DKGAgentWallet,
+    node: DKGNode,
+    store: TripleStore,
+    publisher: DKGPublisher,
+    queryEngine: DKGQueryEngine,
+    eventBus: TypedEventBus,
+    chain: ChainAdapter,
+    workspaceOwnedEntities: Map<string, Map<string, string>>,
+    writeLocks: Map<string, Promise<void>>,
+    publicSnapshotStore?: WorkspacePublicSnapshotStore,
+  ) {
+    super(
+      config,
+      wallet,
+      node,
+      store,
+      publisher,
+      queryEngine,
+      eventBus,
+      chain,
+      workspaceOwnedEntities,
+      writeLocks,
+      publicSnapshotStore,
+    );
+    this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
+      admission: {
+        selectedPublicContextGraphIds: () => this.config.syncContextGraphs ?? [],
+        requestSelectedPublicAdmission: (peerId, contextGraphIds) =>
+          this.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds),
+        refreshSelectedPublicAdmission: (peerId, contextGraphIds, minimumTerminalAgeMs) =>
+          this.selectedSwmBootstrapAdmission.requestRefresh(
+            peerId,
+            contextGraphIds,
+            minimumTerminalAgeMs,
+          ),
+        selectedPublicAdmissionSnapshot: (peerId) =>
+          this.selectedSwmBootstrapAdmission.snapshot(peerId),
+        configuredRecoveryPlan: (peerId) => resolveRfc64PeerSwmRecoveryPlanV1(
+          this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+          peerId,
+        ),
+        isCatalogReady: (peerId) =>
+          this.isRfc64CatalogBootstrapSwmRecoveryReadyV1(peerId),
+        isPeerAccepted: (peerId) =>
+          this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
+        isStarted: () => this.started,
+      },
+    });
+  }
+
   private chainContextGraphScanFailure:
     | { signature: string; count: number }
     | undefined;
@@ -1744,7 +1806,7 @@ export class DKGAgent extends DKGAgentBase {
         // Keep this durable write before in-memory catalogue mutation: cursor
         // pages are acked after this function returns, and an in-memory onChainId
         // alone must not make a retry skip the RDF binding.
-        await this.store.deleteByPattern({
+        await deleteByPatternWithoutCount(this.store, {
           graph: ontoGraph,
           subject: cgUri,
           predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
@@ -2014,8 +2076,34 @@ export class DKGAgent extends DKGAgentBase {
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
     if (this.randomSamplingHandle) {
-      try { await this.randomSamplingHandle.stop(); } catch { /* swallow on shutdown */ }
-      this.randomSamplingHandle = null;
+      const handle = this.randomSamplingHandle;
+      try {
+        await stopRandomSamplingHandleWithin(
+          handle,
+          DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+        );
+      } catch (error) {
+        if (error instanceof RandomSamplingShutdownTimeoutError) {
+          // The loop still owns a live tick and will close its builder/WAL only
+          // after that tick retires. Preserve the handle and quarantine the
+          // network/store boundary so a later stop() retry can observe the same
+          // physical shutdown instead of leaving the tick on torn-down hosts.
+          this.log.warn(
+            createOperationContext('system'),
+            `DKGAgent.stop: Random Sampling prover did not physically retire within `
+              + `${error.timeoutMs}ms; store/network teardown is blocked until stop() is retried`,
+          );
+          throw error;
+        }
+        this.log.warn(
+          createOperationContext('system'),
+          `DKGAgent.stop: Random Sampling prover close failed during shutdown: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (this.randomSamplingHandle === handle) {
+        this.randomSamplingHandle = null;
+      }
     }
     // rc.9 PR-G codex follow-up #G3: drain background substrate
     // fan-outs spawned by `publishWorkspaceGossip` (G2's
@@ -2981,7 +3069,12 @@ export class DKGAgent extends DKGAgentBase {
           { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
           createOperationContext('share'),
         );
-        const { promotedCount, gossipMessage, promotedAllRoots, shareOperationId } = await agent.publisher.assertionPromote(
+        const {
+          promotedCount,
+          gossipPayload,
+          promotedAllRoots,
+          shareOperationId,
+        } = await agent.publisher.assertionPromote(
           contextGraphId, name, promoteAgentAddress,
           {
             ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
@@ -2990,7 +3083,7 @@ export class DKGAgent extends DKGAgentBase {
             confirmBeforeCommit,
           },
         );
-        if (gossipMessage) {
+        if (gossipPayload) {
           try {
             // Preserve the immutable operation id through the fan-out seam.
             // Direct share() already does this; assertion promotion previously
@@ -2998,7 +3091,7 @@ export class DKGAgent extends DKGAgentBase {
             // not be correlated for imported (including Markdown) KAs.
             await agent.publishWorkspaceGossip(
               contextGraphId,
-              gossipMessage,
+              gossipPayload,
               createOperationContext('share'),
               gossipSigner,
               shareOperationId,

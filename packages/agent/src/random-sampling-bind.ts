@@ -23,6 +23,7 @@ import {
   type ProofBuilder,
   type ProverLogger,
   type ProverLoopStatus,
+  type RandomSamplingProverDeps,
   type ProverWal,
   type TickOutcome,
 } from '@origintrail-official/dkg-random-sampling';
@@ -65,6 +66,8 @@ export interface RandomSamplingBindOptions {
    * by the hook are caught and logged so the prover stays running.
    */
   onTick?: (outcome: TickOutcome) => void;
+  /** Foreground exact-KA repair used by the prover's one-shot extraction retry. */
+  repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
 }
 
 /**
@@ -108,6 +111,44 @@ export interface RandomSamplingHandle {
   start(): void;
   stop(): Promise<void>;
   getStatus(): RandomSamplingStatus;
+}
+
+export const RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_ERROR_CODE =
+  'RandomSamplingShutdownTimeout';
+
+export class RandomSamplingShutdownTimeoutError extends Error {
+  readonly code = RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_ERROR_CODE;
+
+  constructor(readonly timeoutMs: number) {
+    super(`Random Sampling prover did not physically retire within ${timeoutMs}ms`);
+    this.name = 'RandomSamplingShutdownTimeoutError';
+  }
+}
+
+/**
+ * Agent-owned bounded wait around the handle's stable physical-close promise.
+ * Timing out never changes or replaces that promise, so a later lifecycle
+ * retry observes the same shutdown and can safely release host dependencies.
+ */
+export async function stopRandomSamplingHandleWithin(
+  handle: RandomSamplingHandle,
+  timeoutMs: number,
+): Promise<void> {
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      resolve();
+    }, timeoutMs);
+    timeoutHandle.unref?.();
+  });
+  try {
+    await Promise.race([handle.stop(), timeout]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+  if (timedOut) throw new RandomSamplingShutdownTimeoutError(timeoutMs);
 }
 
 const DEFAULT_TICK_INTERVAL_MS = 30_000;
@@ -169,6 +210,7 @@ export async function bindRandomSampling(
     builder,
     wal,
     log: opts.log,
+    repairMissingKnowledgeAsset: opts.repairMissingKnowledgeAsset,
   });
 
   const loop = startProverLoop({

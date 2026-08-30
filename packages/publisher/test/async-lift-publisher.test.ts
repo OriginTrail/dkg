@@ -1059,6 +1059,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
 
+    now += 6 * 60 * 1000;
     expect(await publisher.reconcileTransactions()).toBe(1);
     expect(await publisher.getStatus(jobId)).toMatchObject({
       jobId,
@@ -1306,6 +1307,38 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(finalized.status).toBe('finalized');
     expect(finalized.finalization?.ual).toBe('did:dkg:mock:31337/0xabc/1');
     expect(finalized.finalization?.batchId).toBe('7');
+  });
+
+  it('advances one transition scope through each multi-step publish-result state', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    const writtenStatuses: string[] = [];
+    const originalReplaceSubject = store.replaceSubject.bind(store);
+    store.replaceSubject = async (...args) => {
+      if (args[0] === DEFAULT_CONTROL_GRAPH_URI && args[1] === jobSubject(jobId)) {
+        const status = args[2].find((entry) => entry.predicate === CONTROL_STATUS)?.object;
+        if (status) writtenStatuses.push(status);
+      }
+      await originalReplaceSubject(...args);
+    };
+
+    await expect(publisher.recordPublishResult(jobId, confirmedPublishResult()))
+      .resolves.toMatchObject({ status: 'finalized' });
+    expect(writtenStatuses).toEqual([
+      literal('broadcast'),
+      literal('included'),
+      literal('finalized'),
+    ]);
   });
 
   it('rejects publish results whose tx differs from persisted broadcast tx', async () => {
@@ -1879,6 +1912,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       broadcast: { txHash: '0xbbb', walletId: 'wallet-2' },
     });
 
+    now += 6 * 60 * 1000;
     const recovered = await publisher.recover();
     const claimed = await publisher.getStatus(claimedId);
     const broadcast = await publisher.getStatus(broadcastId);
@@ -1910,7 +1944,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     const jobId = await publisher.seedLegacyRawLift(request());
-    await publisher.claimNext('wallet-1');
+    const claim = await publisher.claimNext('wallet-1');
+    expect(claim).not.toBeNull();
     await publisher.update(jobId, 'validated', {
       validation: {
         canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
@@ -1925,10 +1960,56 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
 
     await expect(Promise.all([
-      (publisher as any).recordRpcAccepted(jobId, { txHash, nonce: 4 }),
+      (publisher as any).recordRpcAccepted(claim, { txHash, nonce: 4 }),
       publisher.reconcileTransactions(),
     ])).resolves.toBeDefined();
     expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'finalized',
+      broadcast: { txHash },
+    });
+  });
+
+  it('treats exact RPC acceptance as a no-op after another instance reconciles finality', async () => {
+    const txHash = '0xbbb' as `0x${string}`;
+    const worker = createPublisher();
+    const reconciler = createPublisher({
+      chainProof: {
+        status: 'recovered',
+        recovery: {
+          inclusion: { txHash, blockNumber: 7 },
+          finalization: {
+            txHash,
+            ual: 'did:dkg:mock:31337/0xbbb/7',
+            batchId: '7',
+            startKAId: '7',
+            endKAId: '7',
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+          },
+        },
+      },
+    });
+    const jobId = await worker.seedLegacyRawLift(request());
+    const claim = await worker.claimNext('wallet-1');
+    if (!claim) throw new Error('expected claim');
+    await worker.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await worker.update(jobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1', nonce: 4 },
+    });
+
+    expect(await reconciler.reconcileTransactions()).toBe(1);
+    await expect(
+      (worker as any).recordRpcAccepted(claim, { txHash, nonce: 4 }),
+    ).resolves.toBeUndefined();
+    expect(await worker.getStatus(jobId)).toMatchObject({
       jobId,
       status: 'finalized',
       broadcast: { txHash },
@@ -2046,6 +2127,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
+    expect(job?.finalization?.batchId).toBeUndefined();
+    expect(job?.finalization?.opaqueIdentifiers?.batchId).toBe('batch-1');
     expect(job?.recovery?.action).toBe('finalized_from_chain');
     expect(job?.recovery?.recoveredFromStatus).toBe('broadcast');
     expect(job?.timestamps?.failedAt).toBeUndefined();
@@ -2105,6 +2188,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
+    expect(job?.finalization?.batchId).toBeUndefined();
+    expect(job?.finalization?.opaqueIdentifiers?.batchId).toBe('batch-2');
     expect(job?.recovery?.action).toBe('finalized_from_chain');
     expect(job?.recovery?.recoveredFromStatus).toBe('included');
     expect(job?.timestamps?.failedAt).toBeUndefined();

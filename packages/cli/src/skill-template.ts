@@ -13,11 +13,14 @@
  *   2. DELIVERED, as a standalone file copied into a client's skill directory
  *      by `dkg mcp setup` / `dkg hermes setup`. There is no node context there.
  *
- * The template carries named `{{token}}` values. Extracting this module out of
- * `manifest.ts` (a catch-all that had grown past 1,000 lines) gives the
- * subsystem an owner, and — more importantly — makes it impossible to reach the
- * raw template without choosing a render mode. Handing the raw file to a client
- * is what would ship `{{nodeVersion}}` into a user's skill directory.
+ * The template carries named `{{token}}` values. Content that must emit the
+ * same doubled-brace syntax for another language uses
+ * `{{literal:tokenName}}`; the renderer turns that into `{{tokenName}}`
+ * without re-scanning it. Extracting this module out of `manifest.ts` (a
+ * catch-all that had grown past 1,000 lines) gives the subsystem an owner, and
+ * — more importantly — makes it impossible to reach the raw template without
+ * choosing a render mode. Handing the raw file to a client is what would ship
+ * `{{nodeVersion}}` into a user's skill directory.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -113,13 +116,24 @@ export function unknownSkillTokens(template: string = loadSkillTemplate()): stri
 export function renderSkillTemplate(values: SkillTokenValues, template = loadSkillTemplate()): string {
   const unknown = new Set<string>();
   // Fresh regex per call — no shared lastIndex state.
-  const out = template.replace(/\{\{([a-zA-Z][a-zA-Z0-9]*)\}\}/g, (match, name: string) => {
-    if (Object.prototype.hasOwnProperty.call(values, name)) {
-      return values[name as keyof SkillTokenValues];
-    }
-    unknown.add(name);
-    return match;
-  });
+  const out = template.replace(
+    /\{\{literal:([a-zA-Z][a-zA-Z0-9_]*)\}\}|\{\{([a-zA-Z][a-zA-Z0-9]*)\}\}/g,
+    (match, literalName: string | undefined, name: string | undefined) => {
+      // Query-catalog SPARQL uses its own `{{name}}` parameter language. The
+      // explicit literal form keeps that syntax available in the rendered
+      // skill without making it an unknown node-metadata token here. Because
+      // this is a single replacement pass, the emitted placeholder cannot
+      // re-enter this renderer.
+      if (literalName !== undefined) return `{{${literalName}}}`;
+
+      const tokenName = name!;
+      if (Object.prototype.hasOwnProperty.call(values, tokenName)) {
+        return values[tokenName as keyof SkillTokenValues];
+      }
+      unknown.add(tokenName);
+      return match;
+    },
+  );
 
   // Fail loudly at the boundary rather than serving a half-rendered document:
   // adding `{{networkId}}` to SKILL.md without supplying it is a template bug,

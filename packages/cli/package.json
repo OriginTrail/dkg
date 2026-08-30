@@ -18,7 +18,7 @@
     }
   },
   "scripts": {
-    "prebuild": "pnpm -r --filter @origintrail-official/dkg-adapter-openclaw... --filter @origintrail-official/dkg-adapter-hermes... --filter @origintrail-official/dkg-adapter-prime-agent... --filter @origintrail-official/dkg-mcp... --filter @origintrail-official/dkg-okf... run build",
+    "prebuild": "pnpm -r --filter @origintrail-official/dkg-adapter-openclaw... --filter @origintrail-official/dkg-adapter-hermes... --filter @origintrail-official/dkg-adapter-prime-agent... --filter @origintrail-official/dkg-mcp... --filter @origintrail-official/dkg-local-llm... --filter @origintrail-official/dkg-okf... run build",
     "build": "tsc && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
@@ -41,6 +41,7 @@
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-local-llm": "workspace:*",
     "@origintrail-official/dkg-mcp": "workspace:*",
     "@origintrail-official/dkg-epcis": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",
@@ -48,6 +49,7 @@
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "@iarna/toml": "^2.2.5",
+    "@modelcontextprotocol/sdk": "^1",
     "commander": "^13",
     "better-sqlite3": "12.11.1",
     "ethers": "^6",

@@ -10,14 +10,13 @@ import type {
   TripleStoreDecorator,
   UpdateOptions,
 } from './triple-store.js';
+import { deleteByPatternWithoutCount } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
-  isReplaceGraphAndSubjectCapabilityRefusal,
-  isReplaceGraphCapabilityRefusal,
-  isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -282,6 +281,27 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     return removed;
   }
 
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.enabled) {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      return;
+    }
+    await deleteByPatternWithoutCount(this.inner, pattern, options);
+    const graph = pattern.graph;
+    if (graph) {
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
+    } else {
+      // Without an exact count, conservatively invalidate even when the
+      // pattern may have matched no rows. This preserves graph membership
+      // correctness without reintroducing count-before/count-after scans.
+      this.scheduleFullRefresh('deleteByPattern');
+    }
+  }
+
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     if (!this.enabled) {
       return this.inner.query(sparql, options);
@@ -385,8 +405,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // complete new graph (or dropped the old one). Serving the cached graph
       // set would then hide a committed KA graph from enumeration, so mark the
       // index dirty for a lazy rebuild — unless this was a clean preflight
-      // capability refusal, where nothing was mutated.
-      if (!isReplaceGraphCapabilityRefusal(error)) {
+      // capability refusal or an admission rejection explicitly bound to this
+      // replace dispatch. A nested post-commit probe can also be rejected by
+      // the scheduler, but its storeOperation does not match replaceGraph and
+      // therefore still dirties this index.
+      if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraph')) {
         this.scheduleFullRefresh('replaceGraph');
       }
       throw error;
@@ -419,7 +442,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         options,
       );
     } catch (error) {
-      if (!isReplaceGraphAndSubjectCapabilityRefusal(error)) {
+      if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraphAndSubject')) {
         this.scheduleFullRefresh('replaceGraphAndSubject');
       }
       throw error;
@@ -452,7 +475,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // A committed subject replace could add/remove the graph's first/last row;
       // dirty the index so a lazy rebuild re-derives membership — unless this was
       // a clean preflight capability refusal, where nothing was mutated.
-      if (!isReplaceSubjectCapabilityRefusal(error)) {
+      if (!isAtomicReplaceOperationNotStarted(error, 'replaceSubject')) {
         this.scheduleFullRefresh('replaceSubject');
       }
       throw error;

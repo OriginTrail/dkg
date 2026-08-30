@@ -12,6 +12,7 @@ export * from './ka-content-scope.js';
 export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
+export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
@@ -160,17 +161,29 @@ export {
 // deep-import it from `../src/node.js`.
 export {
   type Network,
+  type PeerConnectionNetwork,
   type NodeIdentity,
   type Address,
   type DialOpts,
+  type PeerConnectOpts,
   type ProtocolHandler,
   LibP2PNetwork,
+  canonicalPeerIdString,
+  tryCanonicalPeerIdString,
+  type CanonicalPeerId,
   type NetworkStateRegistry,
   StubNetworkStateRegistry,
   type AgentDirectoryLookup,
   type PeerResolverDeps,
+  type PeerConnectionOutcome,
+  connectLibp2pCandidate,
+  parseLibp2pConnectCandidate,
+  Libp2pConnectCandidateParseError,
+  type Libp2pConnectCandidate,
+  type Libp2pConnectHost,
   type PeerResolverLogger,
   type ResolveOpts,
+  type ConnectOpts,
   PeerResolver,
   dkgGossipMsgId,
   dkgGossipMsgIdRaw,
@@ -234,6 +247,7 @@ export {
   isAssertionEntityPredicate,
 } from './entity-predicate.js';
 export { withRetry, type RetryOptions } from './retry.js';
+export { resolveWithinAbort } from './abort-boundary.js';
 export {
   RetryQueue,
   type RetryEntry,
@@ -390,6 +404,7 @@ export {
   projectCanonicalGraphScopedAuthorSealRowsV1,
   projectCanonicalGraphScopedAuthorSealStoreRowsV1,
   renderCanonicalAuthorSealStoreRowV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   type Hex32V1,
@@ -415,3 +430,5 @@ export {
   assertNodeTimerDelayMs,
   resolveNodeTimerDelayMs,
 } from './node-timer.js';
+export * from './query-catalog-parameters.js';
+export * from './query-catalog.js';

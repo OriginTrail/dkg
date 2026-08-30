@@ -497,25 +497,23 @@ export class DkgDaemonClient {
   /**
    * Read saved profile query catalog entries for a context graph.
    *
-   * The daemon stores these as local profile metadata in
-   * `did:dkg:context-graph:<id>/meta/query-catalog`; callers usually run the
-   * returned `prof:sparqlQuery` text through `query()`.
+   * The daemon stores these as normal assertions in the Context Graph's
+   * registered `meta` subgraph; callers usually run the returned
+   * `prof:sparqlQuery` text through `query()`.
    */
   async readQueryCatalog(contextGraphId: string): Promise<Record<string, unknown>> {
     return this.post('/api/profile/query-catalog/read', { contextGraphId: normalizeContextGraphId(contextGraphId) });
   }
 
-  /**
-   * Append profile query catalog triples for a context graph.
-   *
-   * The daemon ignores caller-supplied graph names and writes into the
-   * context graph's local `meta/query-catalog` profile graph.
-   */
+  /** Write profile query/catalog subjects for a context graph. */
   async writeQueryCatalog(
     contextGraphId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
   ): Promise<Record<string, unknown>> {
-    return this.post('/api/profile/query-catalog/write', { contextGraphId: normalizeContextGraphId(contextGraphId), quads });
+    return this.post('/api/profile/query-catalog/write', {
+      contextGraphId: normalizeContextGraphId(contextGraphId),
+      quads,
+    });
   }
 
   // ---------------------------------------------------------------------------

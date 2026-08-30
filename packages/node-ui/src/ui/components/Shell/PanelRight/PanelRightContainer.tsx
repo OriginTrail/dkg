@@ -9,6 +9,7 @@ import {
   type LocalAgentStreamEvent,
   type MemorySession,
   connectLocalAgentIntegration,
+  clearLocalLlmSession,
   disconnectLocalAgentIntegration,
   fetchAgents,
   fetchConnections,
@@ -77,6 +78,7 @@ export function PanelRight() {
   const [connectNotice, setConnectNotice] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [refreshBusyId, setRefreshBusyId] = useState<string | null>(null);
+  const [clearBusyId, setClearBusyId] = useState<string | null>(null);
 
   const [localMessagesByConversation, setLocalMessagesByConversation] = useState<Record<string, LocalAgentMessage[]>>({});
   const [localInputByConversation, setLocalInputByConversation] = useState<Record<string, string>>({});
@@ -603,6 +605,11 @@ export function PanelRight() {
                 // consistent date+time timestamp format across all sources.
                 ts: formatLocalTimestamp(completedAt),
                 tsRaw: toIsoTimestamp(completedAt),
+                toolCalls: result.toolCalls,
+                traceFile: result.traceFile,
+                profile: result.profile,
+                contextGraphId: result.contextGraphId,
+                readOnly: result.readOnly,
               }
             : message,
         ),
@@ -833,6 +840,30 @@ export function PanelRight() {
     }
   }, [integrations, refreshBusyId, selectedIntegrationId, updateLocalMessages]);
 
+  const clearIntegrationSession = useCallback(async (integrationId: string) => {
+    if (integrationId !== 'local-llm' || clearBusyId) return;
+    setClearBusyId(integrationId);
+    setConnectError(null);
+    setConnectNotice(null);
+    try {
+      await clearLocalLlmSession();
+      const conversation = resolveLocalAgentConversation({
+        integrationId,
+        sessionId: getDefaultLocalAgentSessionId(integrationId),
+      });
+      setLocalMessagesByConversation((prev) => ({ ...prev, [conversation.stateKey]: [] }));
+      setLocalInputByConversation((prev) => ({ ...prev, [conversation.stateKey]: '' }));
+      setAttachmentDraftsByConversation((prev) => ({ ...prev, [conversation.stateKey]: [] }));
+      setLocalHistoryLoadedByConversation((prev) => ({ ...prev, [conversation.stateKey]: true }));
+      setConnectNotice('DKG Local LLM session cleared. You can now select a different Context Graph.');
+      await refreshLocalIntegrations();
+    } catch (err: any) {
+      setConnectError(err?.message ?? 'Failed to clear the local LLM session.');
+    } finally {
+      setClearBusyId(null);
+    }
+  }, [clearBusyId, refreshLocalIntegrations]);
+
   const openSession = useCallback((session: LocalAgentSessionSummary) => {
     setSelectedIntegration(session.integrationId, { sessionId: session.sessionId });
     setMode('agents');
@@ -887,8 +918,10 @@ export function PanelRight() {
           onConnectIntegration={connectIntegration}
           onDisconnectIntegration={disconnectIntegration}
           onRefreshIntegration={refreshIntegration}
+          onClearIntegrationSession={clearIntegrationSession}
           connectBusyId={connectBusyId}
           refreshBusyId={refreshBusyId}
+          clearBusyId={clearBusyId}
           connectNotice={connectNotice}
           connectError={connectError}
           localMessages={selectedLocalMessages}

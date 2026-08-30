@@ -437,7 +437,7 @@ describe('durable sync deadline budget', () => {
       fetchSyncPages,
       storeInsert,
       storeGraphScopedAsset,
-      exactAssetUalsFor: () => exactAssetUals,
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: exactAssetUals }),
     });
     await runDurableSync({
       ...legacyBase(true),
@@ -445,7 +445,7 @@ describe('durable sync deadline budget', () => {
       fetchSyncPages,
       storeInsert,
       storeGraphScopedAsset,
-      exactAssetUalsFor: () => exactAssetUals,
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: exactAssetUals }),
     });
 
     expect(createContextGraphSyncDeadline).toHaveBeenCalledTimes(2);

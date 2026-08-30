@@ -193,7 +193,6 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     for (const mismatch of [
       { currentCatalogHeadDigest: `0x${'aa'.repeat(32)}` as Digest32V1 },
       { catalogVersion: '2' },
-      { inventoryRowCount: '0' },
       { catalogScopeDigest: `0x${'bb'.repeat(32)}` as Digest32V1 },
       { authorAddress: '0xcccccccccccccccccccccccccccccccccccccccc' as EvmAddressV1 },
     ] satisfies Array<Partial<AppliedCatalogHeadSnapshotV1>>) {
@@ -286,6 +285,37 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
       resolveTrustedCatalogScope,
       resolveDeployment: async () => DEPLOYMENT,
     });
+    await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(false);
+  });
+
+  it('dedupes an exact zero-row successor with and without staged-head support', async () => {
+    const successor = announcement('2');
+    const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(successor, {
+      inventoryRowCount: '0',
+    }));
+    const readStagedCatalogHead = vi.fn(async () => stagedHead(successor, '0'));
+    const withStagedHead = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      readStagedCatalogHead,
+    });
+
+    await expect(withStagedHead.isHeadApplied(successor)).resolves.toBe(true);
+    expect(readStagedCatalogHead).toHaveBeenCalledWith(successor);
+
+    const legacyOnly = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+    });
+    await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(true);
+
+    readAppliedCatalogHeadV1.mockReturnValueOnce(snapshot(successor, {
+      inventoryRowCount: '2',
+    }));
     await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(false);
   });
 

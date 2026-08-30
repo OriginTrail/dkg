@@ -10,6 +10,7 @@ import {
   configureApiQueryPriority,
   createApiQueryRequestLifecycle,
   handleQueryRoutes,
+  normalizePublicApiQueryResult,
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
 import { respondIfStoreUnavailable } from '../src/daemon/http-utils.js';
@@ -70,6 +71,28 @@ function queryRouteContext(
 }
 
 describe('/api/query request lifecycle', () => {
+  it('normalizes prefixed SELECT, ASK, and graph results at the daemon boundary', () => {
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> SELECT ?s WHERE { ?s ex:p ?o }',
+      { bindings: [{ s: 'urn:s' }] },
+    )).toEqual({ type: 'bindings', bindings: [{ s: 'urn:s' }] });
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+      { bindings: [{ result: 'true' }] },
+    )).toEqual({ type: 'boolean', value: true, bindings: [{ result: 'true' }] });
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> DESCRIBE ?s WHERE { ?s ex:p ?o }',
+      {
+        bindings: [],
+        quads: [{ subject: 'urn:s', predicate: 'urn:ex:p', object: 'urn:o', graph: 'urn:g' }],
+      },
+    )).toEqual({
+      type: 'quads',
+      quads: [{ subject: 'urn:s', predicate: 'urn:ex:p', object: 'urn:o', graph: 'urn:g' }],
+      bindings: [],
+    });
+  });
+
   const originalPriority = process.env.DKG_API_QUERY_PRIORITY;
 
   afterEach(() => {

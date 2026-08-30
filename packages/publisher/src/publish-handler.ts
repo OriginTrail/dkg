@@ -1,5 +1,5 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
@@ -333,13 +333,13 @@ export class PublishHandler {
       const rootEntities = new Set(pending.dataQuads.map(q => q.subject));
       for (const rootEntity of rootEntities) {
         for (const g of swmGraphs) {
-          await this.store.deleteByPattern({ graph: g, subject: rootEntity });
+          await deleteByPatternWithoutCount(this.store, { graph: g, subject: rootEntity });
           await this.store.deleteBySubjectPrefix(g, rootEntity + '/.well-known/genid/');
-          await this.store.deleteByPattern({
+          await deleteByPatternWithoutCount(this.store, {
             graph: g, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
           });
         }
-        await this.store.deleteByPattern({
+        await deleteByPatternWithoutCount(this.store, {
           graph: swmMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
         });
       }
@@ -628,7 +628,7 @@ export class PublishHandler {
             { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
           );
         }
-        await this.store.deleteByPattern({ graph: metaGraph, subject: graphPublish.scope.ual });
+        await deleteByPatternWithoutCount(this.store, { graph: metaGraph, subject: graphPublish.scope.ual });
         await this.store.insert(metadataQuads);
         await writeMaterializedVersion(
           this.store,
@@ -921,7 +921,7 @@ export class PublishHandler {
         } else {
           const dataGraph = this.graphManager.dataGraphUri(pending.contextGraphId);
           for (const rootEntity of pending.rootEntities) {
-            await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
+            await deleteByPatternWithoutCount(this.store, { graph: dataGraph, subject: rootEntity });
             await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
           }
         }

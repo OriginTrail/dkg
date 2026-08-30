@@ -648,6 +648,9 @@ export class OxigraphWorkerStore implements TripleStore {
       () => this.call<number>('deleteByPattern', pattern),
     );
   }
+  async deleteByPatternWithoutCount(pattern: Partial<Quad>): Promise<void> {
+    await this.deleteByPattern(pattern);
+  }
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
