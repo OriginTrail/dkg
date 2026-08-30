@@ -228,6 +228,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     const firstFinishStarted = deferred();
     const releaseFirstFinish = deferred();
     const selectedPlans: string[] = [];
+    const accountingCommits: string[] = [];
     let jobCount = 0;
     const scheduler = new SyncOnConnectPeerScheduler<string>({
       createJob: () => {
@@ -244,8 +245,9 @@ describe('sync-on-connect per-peer scheduler', () => {
             ? async () => {
               firstFinishStarted.resolve();
               await releaseFirstFinish.promise;
+              accountingCommits.push('retry');
             }
-            : () => undefined,
+            : () => { accountingCommits.push('clear'); },
         };
       },
       onInternalError: () => undefined,
@@ -261,10 +263,14 @@ describe('sync-on-connect per-peer scheduler', () => {
       0,
       'during-finalize',
     )).toBe(true);
-    await vi.waitFor(() => expect(selectedPlans).toEqual(['during-finalize']));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(selectedPlans).toEqual([]);
+    expect(accountingCommits).toEqual([]);
 
     releaseFirstFinish.resolve();
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(selectedPlans).toEqual(['during-finalize']);
+    expect(accountingCommits).toEqual(['retry', 'clear']);
     expect(jobCount).toBe(2);
   });
 
