@@ -1728,11 +1728,9 @@ function assertNoLegacyRfc64ControlGraphs(
   verifiedMeta: readonly Quad[],
   verifiedGraphScopedDataGraphs: readonly string[],
 ): void {
-  const reject = (graph: unknown): void => {
-    // This boundary classifies only reserved graph IRIs. Structural quad
-    // validation remains owned by the verified-batch pipeline and store; a
-    // non-string test double or malformed value cannot name an RFC-64 graph.
-    if (typeof graph !== 'string') return;
+  const reject = (graph: string): void => {
+    // The verified worker result owns structural decoding. This boundary keeps
+    // that typed contract and classifies only reserved graph IRIs.
     if (!isRfc64SemanticControlGraphV1(graph, contextGraphId)) return;
     throw Object.assign(
       new Error(
