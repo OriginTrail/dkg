@@ -4,7 +4,7 @@ import type {
 } from '@origintrail-official/dkg-agent';
 
 export type Gate1RolloutMode = 'legacy' | 'shadow' | 'catalog';
-export type Gate1VmChainScenario = 'valid' | 'inactive' | 'private' | 'root-count-drift';
+export type Gate1VmChainScenario = 'valid' | 'inactive';
 
 export const GATE1_VM_CHAIN_READ_KEYS = Object.freeze([
   'accessPolicy',
