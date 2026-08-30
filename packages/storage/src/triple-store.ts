@@ -43,7 +43,12 @@ export interface AskResult {
 
 export type QueryResult = SelectResult | ConstructResult | AskResult;
 export type QueryCancellationMode = 'interruptible' | 'pre-dispatch';
-export const STORE_WORK_PRIORITIES = ['ack', 'health', 'normal', 'background'] as const;
+export const STORE_WORK_PRIORITIES = Object.freeze([
+  'ack',
+  'health',
+  'normal',
+  'background',
+] as const);
 export type StoreWorkPriority = (typeof STORE_WORK_PRIORITIES)[number];
 
 export function isStoreWorkPriority(value: unknown): value is StoreWorkPriority {

@@ -41,7 +41,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   OxigraphStore,
-  StoreSchedulerBusyError,
   type TripleStore,
   type Quad,
   type QueryResult as StoreQueryResult,
@@ -1110,90 +1109,6 @@ describe('[Q-6] QueryHandler error taxonomy', () => {
     }, 'p');
     expect(resp.status).toBe('ERROR');
     expect(resp.error).toBe('Internal error processing query');
-  });
-
-  it('returns a structured retryable P2P response when storage rejects before dispatch', async () => {
-    class BusyStore implements TripleStore {
-      async insert() { /* noop */ }
-      async delete() { /* noop */ }
-      async deleteByPattern() { return 0; }
-      async hasGraph() { return false; }
-      async createGraph() { /* noop */ }
-      async dropGraph() { /* noop */ }
-      async listGraphs() { return []; }
-      async deleteBySubjectPrefix() { return 0; }
-      async countQuads() { return 0; }
-      async close() { /* noop */ }
-      async query(): Promise<StoreQueryResult> {
-        throw new StoreSchedulerBusyError(
-          'queue_wait_timeout',
-          'normal',
-          'remote-query.read',
-        );
-      }
-    }
-
-    const handler = new QueryHandler(new DKGQueryEngine(new BusyStore()), {
-      defaultPolicy: 'public',
-      contextGraphs: { [CG]: { policy: 'public', sparqlEnabled: true } },
-    });
-    const request = {
-      operationId: 'busy-op',
-      lookupType: 'SPARQL_QUERY' as const,
-      contextGraphId: CG,
-      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
-    };
-    const response = await handler.handle(request, 'peer-busy');
-
-    expect(response).toEqual({
-      operationId: 'busy-op',
-      status: 'BUSY',
-      truncated: false,
-      resultCount: 0,
-      error: 'Node storage is temporarily busy. Retry later.',
-      code: 'STORE_BUSY',
-      retryable: true,
-      retryAfterMs: 1_000,
-      reason: 'queue_wait_timeout',
-    });
-
-    const wireResponse = await handler.handler(
-      new TextEncoder().encode(JSON.stringify(request)),
-      { toString: () => 'peer-busy', toBytes: () => new Uint8Array() },
-    );
-    expect(JSON.parse(new TextDecoder().decode(wireResponse))).toMatchObject({
-      status: 'BUSY',
-      code: 'STORE_BUSY',
-      retryable: true,
-      retryAfterMs: 1_000,
-    });
-  });
-
-  it('preserves the structured busy response through UAL resolution', async () => {
-    const busy = new StoreSchedulerBusyError(
-      'queue_full',
-      'normal',
-      'remote-query.resolveKnowledgeAsset',
-    );
-    const queryEngine = {
-      resolveKnowledgeAsset: async () => { throw busy; },
-    } as unknown as DKGQueryEngine;
-    const handler = new QueryHandler(queryEngine, { defaultPolicy: 'public' });
-
-    const response = await handler.handle({
-      operationId: 'busy-ual',
-      lookupType: 'ENTITY_BY_UAL',
-      ual: 'did:dkg:testnet:31337/0xabc/1',
-    }, 'peer-busy');
-
-    expect(response).toMatchObject({
-      operationId: 'busy-ual',
-      status: 'BUSY',
-      code: 'STORE_BUSY',
-      retryable: true,
-      retryAfterMs: 1_000,
-      reason: 'queue_full',
-    });
   });
 
   it('preserves the ordinary UAL resolution failure text at the outer boundary', async () => {

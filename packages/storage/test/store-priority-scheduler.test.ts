@@ -21,6 +21,46 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const mockedAvailableParallelism = vi.mocked(availableParallelism);
 
 describe('StorePriorityScheduler', () => {
+  it('keeps the exported canonical priority collection runtime-immutable', () => {
+    expect(Object.isFrozen(STORE_WORK_PRIORITIES)).toBe(true);
+    expect(() => {
+      (STORE_WORK_PRIORITIES as unknown as string[]).sort();
+    }).toThrow(TypeError);
+    expect(STORE_WORK_PRIORITIES).toEqual(['ack', 'health', 'normal', 'background']);
+  });
+
+  it('dispatches contending lanes in the stable canonical order', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueWaitTimeoutMs: 1_000,
+    });
+    let release!: () => void;
+    const blocker = scheduler.run('normal', 'priority-order.blocker', async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    const dispatched: string[] = [];
+    const background = scheduler.run('background', 'priority-order.background', async () => {
+      dispatched.push('background');
+    });
+    const normal = scheduler.run('normal', 'priority-order.normal', async () => {
+      dispatched.push('normal');
+    });
+    const health = scheduler.run('health', 'priority-order.health', async () => {
+      dispatched.push('health');
+    });
+    const ack = scheduler.run('ack', 'priority-order.ack', async () => {
+      dispatched.push('ack');
+    });
+
+    release();
+    await Promise.all([blocker, background, normal, health, ack]);
+
+    expect(dispatched).toEqual(['ack', 'health', 'normal', 'background']);
+  });
+
   it('caps only oversized process settings while preserving lower values and constructor overrides', () => {
     const previous = process.env.DKG_STORE_MAX_CONCURRENT;
     mockedAvailableParallelism.mockReturnValue(4);

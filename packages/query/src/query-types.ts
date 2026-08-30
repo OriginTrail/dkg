@@ -1,3 +1,5 @@
+import type { StoreSchedulerBusyReason } from '@origintrail-official/dkg-storage';
+
 export type LookupType =
   | 'ENTITY_BY_UAL'
   | 'ENTITIES_BY_TYPE'
@@ -53,7 +55,7 @@ export interface QueryBusyResponse extends QueryResponseBase {
   code: 'STORE_BUSY';
   retryable: true;
   retryAfterMs: number;
-  reason?: 'queue_full' | 'queue_wait_timeout';
+  reason: StoreSchedulerBusyReason;
   ntriples?: never;
   bindings?: never;
   entityUris?: never;
