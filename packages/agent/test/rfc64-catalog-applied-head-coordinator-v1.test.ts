@@ -14,14 +14,20 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
-import { createRfc64CatalogAppliedHeadCoordinatorV1 } from
-  '../src/rfc64/catalog-applied-head-coordinator-v1.js';
+import {
+  createRfc64CatalogAppliedHeadCoordinatorV1,
+  type Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+} from '../src/rfc64/catalog-applied-head-coordinator-v1.js';
 import {
   reconcileFinalizedSwmTwinFromCatalogProjection,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import type {
+  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import type {
+  Rfc64FinalizedVmAgentPrecommitTransactionV1,
+} from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   acceptedRfc64VmPolicySnapshot,
   rfc64FinalizedVmPrecommitPlan,
@@ -136,10 +142,35 @@ function transaction(events: string[] = []): Rfc64PublicCatalogNativePrecommitTr
   };
 }
 
+function finalizedTransaction(
+  plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+  events: string[] = [],
+): Rfc64FinalizedVmAgentPrecommitTransactionV1 {
+  const primary = transaction(events);
+  return Object.freeze({
+    kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+    materializationReceipts: Object.freeze(plan.rows.map((row, index) => {
+      const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
+      return Object.freeze({
+        kaId: binding.kaId,
+        ordinal: String(index) as never,
+        ual: binding.seal.kaUal,
+        status: 'materialized' as const,
+        vmGraphIri: `urn:rfc64:test:vm:${index}`,
+        tripleCount: binding.seal.publicTripleCount,
+        postReadDigest: binding.seal.assertionMerkleRoot,
+      });
+    })),
+    commit: primary.commit,
+    rollback: primary.rollback,
+  });
+}
+
 describe('RFC-64 catalog applied-head coordinator', () => {
   it('keeps transaction finalization separate from the post-head phase', async () => {
     const events: string[] = [];
-    const primary = transaction(events);
+    const plan = rfc64FinalizedVmPrecommitPlan();
+    const primary = finalizedTransaction(plan, events);
     const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
       acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
         acceptedRfc64VmPolicySnapshot().policy.source,
@@ -152,11 +183,11 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     });
 
     const lifecycle = await handler(
-      rfc64FinalizedVmPrecommitPlan(),
+      plan,
       new AbortController().signal,
     );
     expect(lifecycle.kind).toBe('rfc64-public-catalog-native-applied-head-lifecycle-v1');
-    expect(lifecycle.transaction).toBe(primary);
+    expect(lifecycle.transaction).not.toBe(primary);
     expect(events).toEqual([]);
     await lifecycle.transaction!.commit();
     expect(events).toEqual(['primary-commit']);
@@ -165,7 +196,8 @@ describe('RFC-64 catalog applied-head coordinator', () => {
   });
 
   it('forwards rollback causes through the production wrapper without retiring', async () => {
-    const primary = transaction();
+    const plan = rfc64FinalizedVmPrecommitPlan();
+    const primary = finalizedTransaction(plan);
     const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
       acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
         acceptedRfc64VmPolicySnapshot().policy.source,
@@ -177,13 +209,40 @@ describe('RFC-64 catalog applied-head coordinator', () => {
       retire: vi.fn(async () => {}),
     });
     const lifecycle = await handler(
-      rfc64FinalizedVmPrecommitPlan(),
+      plan,
       new AbortController().signal,
     );
     const cause = new Error('applied-head CAS rejected');
     await lifecycle.transaction!.rollback(cause);
 
     expect(primary.rollback).toHaveBeenCalledWith(cause);
+  });
+
+  it('refuses early SWM retirement before the finalized VM transaction commits', async () => {
+    const store = new OxigraphStore();
+    const staleTwin = await seedExactStaleTwin(store, { marker: 'early-retirement' });
+    const primary = finalizedTransaction(staleTwin.plan);
+    const retire = vi.fn(async ({ swmGraph }: { readonly swmGraph: string }) => {
+      await store.dropGraph(swmGraph);
+    });
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(async () => primary),
+      finalizedVmPrecommit: vi.fn(async () => primary),
+      store,
+      writeLocks: new Map(),
+      retire,
+    });
+    const lifecycle = await handler(staleTwin.plan, new AbortController().signal);
+
+    await expect(lifecycle.afterAppliedHead!()).rejects.toThrow(
+      'refusing finalized SWM retirement before the VM transaction commit',
+    );
+    expect(retire).not.toHaveBeenCalled();
+    await expect(store.hasGraph(staleTwin.swmGraph)).resolves.toBe(true);
+    await store.close();
   });
 
   it('reconciles independent post-head twins concurrently and waits for every row', async () => {
@@ -201,12 +260,18 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const completed: string[] = [];
+    const recorded: Rfc64FinalizedSwmRetirementLifecycleReceiptV1[] = [];
+    const combinedPlan = Object.freeze({
+      ...first.plan,
+      rows: Object.freeze([...first.plan.rows, ...second.plan.rows]),
+    });
+    const primary = finalizedTransaction(combinedPlan);
     const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
       acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
         acceptedRfc64VmPolicySnapshot().policy.source,
       ),
-      finalizedPolicyPrecommit: vi.fn(async () => transaction()),
-      finalizedVmPrecommit: vi.fn(async () => transaction()),
+      finalizedPolicyPrecommit: vi.fn(async () => primary),
+      finalizedVmPrecommit: vi.fn(async () => primary),
       store,
       writeLocks: new Map(),
       retire: vi.fn(async ({ swmGraph }) => {
@@ -216,11 +281,10 @@ describe('RFC-64 catalog applied-head coordinator', () => {
         }
         completed.push(swmGraph);
       }),
+      recordRetirementLifecycleReceipt: (receipt) => recorded.push(receipt),
     });
-    const lifecycle = await handler(Object.freeze({
-      ...first.plan,
-      rows: Object.freeze([...first.plan.rows, ...second.plan.rows]),
-    }), new AbortController().signal);
+    const lifecycle = await handler(combinedPlan, new AbortController().signal);
+    await lifecycle.transaction!.commit();
     const afterAppliedHead = lifecycle.afterAppliedHead!();
 
     try {
@@ -234,6 +298,18 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     }
     await afterAppliedHead;
     expect(completed).toEqual(expect.arrayContaining([first.swmGraph, second.swmGraph]));
+    expect(recorded).toHaveLength(2);
+    expect(recorded.map((receipt) => receipt.kaUal).sort()).toEqual(
+      combinedPlan.rows.map((row) => readVerifiedCatalogSealBindingV1(
+        row.sealBinding,
+      ).seal.kaUal).sort(),
+    );
+    for (const receipt of recorded) {
+      expect(receipt.vmCommitSequence).toBe(1);
+      expect(receipt.appliedHeadObservedSequence).toBe(2);
+      expect(receipt.swmReconciliationSequence).toBeGreaterThan(2);
+      expect(receipt.swmReconciliationOutcome).toBe('retired');
+    }
     await store.close();
   });
 

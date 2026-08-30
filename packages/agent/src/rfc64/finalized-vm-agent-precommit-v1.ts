@@ -17,6 +17,7 @@ import {
 } from './finalized-policy-agent-precommit-v1.js';
 import { createFinalizedVmRuntimeV1 } from './finalized-vm-runtime-v1.js';
 import type {
+  FinalizedVmMaterializationReceiptV1,
   FinalizedVmMaterializerV1,
   FinalizedVmTransactionalMaterializerV1,
 } from './finalized-vm-runtime-v1.js';
@@ -38,17 +39,37 @@ export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
 }
 
 /**
+ * Exact process-local proof carried from finalized VM materialization into the
+ * catalog applied-head coordinator. The coordinator deliberately refuses to
+ * retire an SWM twin without this typed transaction: a generic precommit says
+ * nothing about which VM rows were durably post-read.
+ */
+export interface Rfc64FinalizedVmAgentPrecommitTransactionV1
+  extends Rfc64PublicCatalogNativePrecommitTransactionV1 {
+  readonly kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1';
+  readonly materializationReceipts:
+    readonly Readonly<FinalizedVmMaterializationReceiptV1>[];
+}
+
+export interface Rfc64FinalizedVmAgentPrecommitHandlerV1 {
+  (
+    plan: Parameters<Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1>[0],
+    signal: AbortSignal,
+  ): Promise<void | Rfc64FinalizedVmAgentPrecommitTransactionV1>;
+}
+
+/**
  * Build the finalized-VM-specific implementation of the receiver's generic
  * pre-CAS barrier. The public catalog receiver owns synchronization ordering;
  * this service owns policy/RPC resolution and VM materialization only.
  */
 export function createRfc64FinalizedVmAgentPrecommitV1(
   options: Rfc64FinalizedVmAgentPrecommitOptionsV1,
-): Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
+): Rfc64FinalizedVmAgentPrecommitHandlerV1 {
   return Object.freeze(async (
     plan,
     signal,
-  ): Promise<void | Rfc64PublicCatalogNativePrecommitTransactionV1> => {
+  ): Promise<void | Rfc64FinalizedVmAgentPrecommitTransactionV1> => {
     const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
       options,
       plan,
@@ -121,7 +142,7 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
     // Runtime materialization owns rollback for failures in its own execution.
     // Only a failure after a successful runtime reaches this layer's rollback,
     // so each failed precommit has exactly one transaction cleanup owner.
-    await runtime({
+    const result = await runtime({
       catalogLane: Object.freeze({
         contextGraphId: plan.catalogScope.contextGraphId,
         subGraphName: plan.catalogScope.subGraphName,
@@ -156,9 +177,11 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
     }
     if (transaction === null) return;
     return Object.freeze({
+      kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+      materializationReceipts: result.receipts,
       commit: () => transaction.commit(),
       rollback: (cause?: unknown) => transaction.rollback(cause),
-    }) satisfies Rfc64PublicCatalogNativePrecommitTransactionV1;
+    }) satisfies Rfc64FinalizedVmAgentPrecommitTransactionV1;
   });
 }
 

@@ -83,7 +83,10 @@ import {
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
-import { createRfc64CatalogAppliedHeadCoordinatorV1 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import {
+  createRfc64CatalogAppliedHeadCoordinatorV1,
+  type Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+} from './rfc64/catalog-applied-head-coordinator-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
@@ -378,6 +381,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
       } finally {
         this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+        this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.clear();
         this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       }
     }
@@ -770,6 +774,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
+   * Read exact process-local proof that one finalized catalog transition
+   * committed VM before observing its applied head and reconciling SWM.
+   */
+  readRfc64FinalizedSwmRetirementLifecycleReceiptsV1(
+    this: DKGAgent,
+    catalogHeadDigest: Digest32V1,
+  ): readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[] {
+    const receipts = this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.get(
+      catalogHeadDigest,
+    ) ?? [];
+    return Object.freeze(receipts.map((receipt) => Object.freeze({ ...receipt })));
+  }
+
+  /**
    * Read the immutable process-local terminal failure for one announced head.
    * This is diagnostic evidence only; it is neither durable nor an input to
    * receiver retry, deduplication, reconciliation, or authorization decisions.
@@ -834,6 +852,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return undefined;
     }
     this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+    this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.clear();
     const resolveDeployment: Rfc64BoundedPublicRootCatalogDeploymentResolverV1 =
       (announcement, signal) => this.resolveRfc64CatalogDeploymentProfileV1(
         announcement.networkId,
@@ -914,6 +933,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             ctx,
             retirement.kaUal,
           ),
+          recordRetirementLifecycleReceipt: (receipt) => {
+            const previous = this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.get(
+              receipt.catalogHeadDigest,
+            ) ?? [];
+            const next = [...previous.filter(({ kaUal }) => kaUal !== receipt.kaUal), receipt]
+              .sort((left, right) => left.kaUal.localeCompare(right.kaUal));
+            this.rfc64FinalizedSwmRetirementLifecycleReceiptsV1.set(
+              receipt.catalogHeadDigest,
+              Object.freeze(next),
+            );
+          },
           logInfo: (ctx, message) => this.log.info(ctx, message),
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
