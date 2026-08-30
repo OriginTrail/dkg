@@ -318,11 +318,19 @@ export interface SelectedProviderSelectionAgent {
   closeSelectedSwmMetaTransfers: () => Promise<void>;
 }
 
-export const callTrySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer as unknown as (
+export async function callTrySyncFromPeer(
   this: SelectedProviderSelectionAgent,
   remotePeer: string,
   onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
-) => Promise<unknown>;
+): Promise<unknown> {
+  return LifecycleSyncMethods.prototype.trySyncFromPeerWithSelectedLaneAdmission.call(
+    this as never,
+    remotePeer,
+    onSyncAccounting as never,
+    'on-connect',
+    'admit',
+  );
+}
 
 export interface AdmissionProbe {
   readonly contextGraphId: string;

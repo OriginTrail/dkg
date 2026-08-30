@@ -764,12 +764,14 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.syncOnConnectPeerScheduler = null;
       queueAgent.getSyncOnConnectPeerScheduler =
         LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;
+      queueAgent.createSyncOnConnectPeerJobRunner = (peerId: string) => ({
+        runOrdinary: async () => undefined,
+        runSelected: async () => { queuedPeers.push(peerId); },
+        finish: () => undefined,
+      });
       queueAgent.syncReconcilerBackoff = new Map<string, unknown>();
       queueAgent.syncOnConnectDisconnectBoundary =
         LifecycleSyncMethods.prototype.syncOnConnectDisconnectBoundary;
-      queueAgent.runSelectedSwmRetryFromPeerOnConnect = async (peerId: string) => {
-        queuedPeers.push(peerId);
-      };
       expect(LifecycleSyncMethods.prototype.queueSyncFromPeerOnConnect.call(
         queueAgent as never,
         PEER,
