@@ -205,22 +205,32 @@ describe('integration commands (Commander layer, real wire)', () => {
     expect(inst.installed.map((r: { slug: string }) => r.slug)).toContain('gamma-tool');
   });
 
-  it('routes a detectable registry entry through real installed detection', async () => {
+  it('passes tier-filtered candidates to the command-level detector and renders its rows', async () => {
     registryRoutes.set('/index', {
       status: 200,
       body: JSON.stringify([alpha, svcEntry].map((entry) => ({ name: `${entry.slug}.json` }))),
     });
 
-    const parsed = JSON.parse(
-      await runCli(['integration', 'installed', '--json'], {
-        detection: { listGlobalNpm: async () => ({ '@acme/svc': '2.0.0' }) },
-      }),
-    );
+    const detectInstalled = vi.fn(async () => [{
+      slug: 'detector-marker',
+      kind: 'service',
+      state: 'installed' as const,
+      detail: 'recorded command boundary',
+    }]);
+    const parsed = JSON.parse(await runCli(
+      ['integration', 'installed', '--tier', 'verified', '--json'],
+      { detectInstalled },
+    ));
+    expect(detectInstalled).toHaveBeenCalledOnce();
+    expect(detectInstalled.mock.calls[0]?.[0].map((entry) => entry.slug)).toEqual([
+      'alpha-chat',
+      'svc-ok',
+    ]);
     expect(parsed.installed).toContainEqual({
-      slug: 'svc-ok',
+      slug: 'detector-marker',
       kind: 'service',
       state: 'installed',
-      detail: '@acme/svc@2.0.0',
+      detail: 'recorded command boundary',
     });
   });
 

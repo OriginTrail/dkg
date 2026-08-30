@@ -16,7 +16,7 @@
 // failing generically.
 
 import type { Command } from 'commander';
-import { detectInstalled, type DetectDeps } from './detect-installed.js';
+import { detectInstalled } from './detect-installed.js';
 import { installCli } from './install-cli.js';
 import { installMcp } from './install-mcp.js';
 import { installService } from './install-service.js';
@@ -32,8 +32,8 @@ function matchesKeyword(e: IntegrationEntry, needle: string): boolean {
 const TIER_RANK: Record<TrustTier, number> = { community: 0, verified: 1, featured: 2 };
 
 export interface IntegrationCommandDependencies {
-  /** Detection probes; injectable so the command layer can be tested without host I/O. */
-  detection?: DetectDeps;
+  /** Command-level detector operation; production defaults to real host detection. */
+  detectInstalled?: typeof detectInstalled;
 }
 
 export function registerIntegrationCommands(
@@ -137,7 +137,7 @@ export function registerIntegrationCommands(
         const { entries, failures } = await fetchAllEntries(cfg);
         const min = parseTier(opts.tier);
         const candidates = entries.filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[min]);
-        const rows = await detectInstalled(candidates, deps.detection);
+        const rows = await (deps.detectInstalled ?? detectInstalled)(candidates);
 
         if (opts.json) {
           console.log(JSON.stringify({ installed: rows, failures }, null, 2));
