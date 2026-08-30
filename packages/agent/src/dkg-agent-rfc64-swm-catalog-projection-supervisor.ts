@@ -30,8 +30,6 @@ const UTF8 = new TextEncoder();
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
   | 'pending'
-  | 'inactive'
-  | 'unavailable'
   | 'reconciled'
   | 'no-inventory'
   | 'failed';
