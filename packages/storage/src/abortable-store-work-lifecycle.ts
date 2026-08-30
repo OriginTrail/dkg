@@ -17,7 +17,6 @@ export function raceStoreWorkAgainstAbort<T>(
   signal: AbortSignal | undefined,
 ): Promise<T> {
   if (!signal) return work;
-  if (signal.aborted) return Promise.reject(normalizeAbortReason(signal.reason));
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const finish = (action: () => void) => {
@@ -28,14 +27,15 @@ export function raceStoreWorkAgainstAbort<T>(
     };
     const onAbort = () => finish(() => reject(normalizeAbortReason(signal.reason)));
     signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
+    // Attach both handlers before observing pre-abort so every started promise
+    // remains consumed even when cancellation wins the race immediately.
     work.then(
       (value) => finish(() => resolve(value)),
       (cause) => finish(() => reject(cause)),
     );
+    if (signal.aborted) {
+      onAbort();
+    }
   });
 }
 

@@ -70,7 +70,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { AbortableStoreWorkLifecycle, composeAbortSignals } from '../abortable-store-work-lifecycle.js';
+import {
+  AbortableStoreWorkLifecycle,
+  composeAbortSignals,
+  raceStoreWorkAgainstAbort,
+} from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
   isStoreOperationTimeoutError,
@@ -84,21 +88,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }
 
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
@@ -1061,7 +1050,7 @@ export class SparqlHttpStore implements TripleStore {
 
     const refreshOptions = options?.source ? { source: options.source } : undefined;
     const inFlight = this.listGraphsInFlight ?? this.refreshListGraphsCache(refreshOptions);
-    const graphs = await raceAgainstAbort(inFlight, options?.signal);
+    const graphs = await raceStoreWorkAgainstAbort(inFlight, options?.signal);
     return [...graphs];
   }
 
