@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -28,6 +27,7 @@ import {
   argsLessMcpEntry,
   baseIntegrationEntry,
 } from './_helpers/integration-entry-fixtures.js';
+import { createLocalRegistryStub } from './_helpers/local-registry-stub.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -199,42 +199,21 @@ describe('isGithubHost', () => {
 // is fixture DATA on a real wire; `seenAuth` records the Authorization header
 // the server REALLY received (the token-leak contract is proven on the
 // receiving end, not by inspecting an intercepted call).
-const registryRoutes = new Map<string, { status: number; body: string }>();
-const seenAuth: Array<string | null> = [];
-let registryServer: HttpServer;
-let registryBase = '';
+const registry = createLocalRegistryStub();
+const registryRoutes = registry.routes;
+const seenAuth = registry.seenAuthorizationHeaders;
 
-beforeAll(async () => {
-  registryServer = createHttpServer((req, res) => {
-    seenAuth.push(req.headers.authorization ?? null);
-    const route = registryRoutes.get(req.url ?? '');
-    if (!route) {
-      res.writeHead(500);
-      res.end('unconfigured route');
-      return;
-    }
-    res.writeHead(route.status, { 'Content-Type': 'application/json' });
-    res.end(route.body);
-  });
-  await new Promise<void>((resolve) => registryServer.listen(0, '127.0.0.1', resolve));
-  const addr = registryServer.address();
-  if (!addr || typeof addr === 'string') throw new Error('no addr');
-  registryBase = `http://127.0.0.1:${addr.port}`;
-});
-
-afterAll(async () => {
-  await new Promise<void>((resolve) => registryServer.close(() => resolve()));
-});
+beforeAll(() => registry.start());
+afterAll(() => registry.close());
 
 beforeEach(() => {
-  registryRoutes.clear();
-  seenAuth.length = 0;
+  registry.reset();
 });
 
 function localRegistryCfg(extraEnv: Record<string, string> = {}) {
   return resolveRegistryConfig({
-    DKG_REGISTRY_INDEX_URL: `${registryBase}/index`,
-    DKG_REGISTRY_RAW_BASE: `${registryBase}/raw`,
+    DKG_REGISTRY_INDEX_URL: `${registry.baseUrl}/index`,
+    DKG_REGISTRY_RAW_BASE: `${registry.baseUrl}/raw`,
     ...extraEnv,
   });
 }

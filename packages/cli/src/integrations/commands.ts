@@ -16,7 +16,7 @@
 // failing generically.
 
 import type { Command } from 'commander';
-import { detectInstalled } from './detect-installed.js';
+import { detectInstalled, type DetectDeps } from './detect-installed.js';
 import { installCli } from './install-cli.js';
 import { installMcp } from './install-mcp.js';
 import { installService } from './install-service.js';
@@ -31,7 +31,15 @@ function matchesKeyword(e: IntegrationEntry, needle: string): boolean {
 
 const TIER_RANK: Record<TrustTier, number> = { community: 0, verified: 1, featured: 2 };
 
-export function registerIntegrationCommands(program: Command): void {
+export interface IntegrationCommandDependencies {
+  /** Detection probes; injectable so the command layer can be tested without host I/O. */
+  detection?: DetectDeps;
+}
+
+export function registerIntegrationCommands(
+  program: Command,
+  deps: IntegrationCommandDependencies = {},
+): void {
   const integrationCmd = program
     .command('integration')
     .description('Install and inspect community DKG integrations from the registry');
@@ -129,7 +137,7 @@ export function registerIntegrationCommands(program: Command): void {
         const { entries, failures } = await fetchAllEntries(cfg);
         const min = parseTier(opts.tier);
         const candidates = entries.filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[min]);
-        const rows = await detectInstalled(candidates);
+        const rows = await detectInstalled(candidates, deps.detection);
 
         if (opts.json) {
           console.log(JSON.stringify({ installed: rows, failures }, null, 2));

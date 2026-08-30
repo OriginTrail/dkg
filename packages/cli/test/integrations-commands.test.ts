@@ -1,42 +1,23 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Command } from 'commander';
-import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
 
-import { registerIntegrationCommands } from '../src/integrations/commands.js';
+import {
+  registerIntegrationCommands,
+  type IntegrationCommandDependencies,
+} from '../src/integrations/commands.js';
 import type { IntegrationEntry } from '../src/integrations/schema.js';
 import {
   argsLessMcpEntry,
   baseIntegrationEntry,
 } from './_helpers/integration-entry-fixtures.js';
+import { createLocalRegistryStub } from './_helpers/local-registry-stub.js';
 
 const baseEntry: IntegrationEntry = baseIntegrationEntry;
-const registryRoutes = new Map<string, { status: number; body: string }>();
-let registryServer: HttpServer;
-let registryBase = '';
+const registry = createLocalRegistryStub();
+const registryRoutes = registry.routes;
 
-beforeAll(async () => {
-  registryServer = createHttpServer((req, res) => {
-    const route = registryRoutes.get(req.url ?? '');
-    if (!route) {
-      res.writeHead(500);
-      res.end('unconfigured route');
-      return;
-    }
-    res.writeHead(route.status, { 'Content-Type': 'application/json' });
-    res.end(route.body);
-  });
-  await new Promise<void>((resolve) => registryServer.listen(0, '127.0.0.1', resolve));
-  const address = registryServer.address();
-  if (!address || typeof address === 'string') throw new Error('no addr');
-  registryBase = `http://127.0.0.1:${address.port}`;
-});
-
-afterAll(async () => {
-  await new Promise<void>((resolve) => registryServer.close(() => resolve()));
-});
+beforeAll(() => registry.start());
+afterAll(() => registry.close());
 
 // ── Commander layer: the public `dkg integration …` contracts ──────────────
 // Everything above tests helpers. The wiring between them — argument parsing,
@@ -121,12 +102,13 @@ describe('integration commands (Commander layer, real wire)', () => {
   let savedRaw: string | undefined;
 
   beforeEach(() => {
+    registry.reset();
     savedIndex = process.env.DKG_REGISTRY_INDEX_URL;
     savedRaw = process.env.DKG_REGISTRY_RAW_BASE;
     // commands.ts calls resolveRegistryConfig() with no argument, so the
     // redirect has to happen through the real environment.
-    process.env.DKG_REGISTRY_INDEX_URL = `${registryBase}/index`;
-    process.env.DKG_REGISTRY_RAW_BASE = `${registryBase}/raw`;
+    process.env.DKG_REGISTRY_INDEX_URL = `${registry.baseUrl}/index`;
+    process.env.DKG_REGISTRY_RAW_BASE = `${registry.baseUrl}/raw`;
 
     for (const e of [
       alpha,
@@ -158,10 +140,13 @@ describe('integration commands (Commander layer, real wire)', () => {
   });
 
   /** Runs the real command tree and returns whatever it printed to stdout. */
-  async function runCli(argv: string[]): Promise<string> {
+  async function runCli(
+    argv: string[],
+    deps: IntegrationCommandDependencies = {},
+  ): Promise<string> {
     const program = new Command();
     program.exitOverride(); // never let a parse error kill the test runner
-    registerIntegrationCommands(program);
+    registerIntegrationCommands(program, deps);
     const out: string[] = [];
     const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
       out.push(args.map(String).join(' '));
@@ -221,41 +206,22 @@ describe('integration commands (Commander layer, real wire)', () => {
   });
 
   it('routes a detectable registry entry through real installed detection', async () => {
-    const fakeBin = await mkdtemp(join(tmpdir(), 'dkg-integration-npm-'));
-    const originalPath = process.env.PATH;
-    const npmResult = JSON.stringify({
-      dependencies: { '@acme/svc': { version: '2.0.0' } },
-    });
-    await writeFile(
-      join(fakeBin, 'npm'),
-      `#!/usr/bin/env node\nconst expected = ['ls', '--global', '--json', '--depth=0'];\nif (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected)) process.exit(64);\nprocess.stdout.write(${JSON.stringify(npmResult)});\n`,
-      'utf8',
-    );
-    await chmod(join(fakeBin, 'npm'), 0o755);
-    await writeFile(
-      join(fakeBin, 'npm.cmd'),
-      `@echo off\r\nif not "%*"=="ls --global --json --depth=0" exit /b 64\r\necho ${npmResult}\r\n`,
-      'utf8',
-    );
-    process.env.PATH = [fakeBin, originalPath].filter(Boolean).join(delimiter);
     registryRoutes.set('/index', {
       status: 200,
       body: JSON.stringify([alpha, svcEntry].map((entry) => ({ name: `${entry.slug}.json` }))),
     });
 
-    try {
-      const parsed = JSON.parse(await runCli(['integration', 'installed', '--json']));
-      expect(parsed.installed).toContainEqual({
-        slug: 'svc-ok',
-        kind: 'service',
-        state: 'installed',
-        detail: '@acme/svc@2.0.0',
-      });
-    } finally {
-      if (originalPath === undefined) delete process.env.PATH;
-      else process.env.PATH = originalPath;
-      await rm(fakeBin, { recursive: true, force: true });
-    }
+    const parsed = JSON.parse(
+      await runCli(['integration', 'installed', '--json'], {
+        detection: { listGlobalNpm: async () => ({ '@acme/svc': '2.0.0' }) },
+      }),
+    );
+    expect(parsed.installed).toContainEqual({
+      slug: 'svc-ok',
+      kind: 'service',
+      state: 'installed',
+      detail: '@acme/svc@2.0.0',
+    });
   });
 
   it('prints schema-valid MCP entries with no args through `info`', async () => {
