@@ -1400,6 +1400,11 @@ describe('SparqlHttpStore (test server)', () => {
         attempt: (store) => store.deleteByPattern({ subject, graph }),
       },
       {
+        name: 'deleteByPatternWithoutCount',
+        scope: graph,
+        attempt: (store) => store.deleteByPatternWithoutCount({ subject, graph }),
+      },
+      {
         name: 'deleteBySubjectPrefix',
         scope: graph,
         attempt: (store) => store.deleteBySubjectPrefix(graph, subject),
