@@ -371,6 +371,12 @@ export {
   type PromoteTerminalJobClearer,
 } from './async-promote-queue.js';
 export {
+  getPromoteReplaySafeErrorDiagnostic,
+  isPromoteReplaySafeError,
+  type PromoteReplaySafeErrorDiagnostic,
+} from './promote-replay-safety.js';
+export { type LegacyWmMigrationResult } from './legacy-wm-migration.js';
+export {
   AsyncLiftRunner,
   type AsyncLiftRunnerConfig,
 } from './async-lift-runner.js';

@@ -5,6 +5,28 @@ import { SyncOnConnectPeerScheduler } from
 
 const PEER = '12D3KooWSchedulerPeer';
 
+function createScheduler(callbacks: Readonly<{
+  runOrdinary: () => Promise<void>;
+  runSelected: (plan?: string) => Promise<void>;
+  cancel?: () => void;
+  finish?: () => void;
+  onInternalError?: (
+    peer: string,
+    error: unknown,
+    stage: 'lane-error-handler' | 'runner-finalizer' | 'scheduler-drain',
+  ) => void;
+}>): SyncOnConnectPeerScheduler<string> {
+  return new SyncOnConnectPeerScheduler<string>({
+    createJob: () => ({
+      runAutomaticSelectedThenOrdinary: async () => callbacks.runOrdinary(),
+      runSelected: async (plan) => callbacks.runSelected(plan),
+      cancel: callbacks.cancel ?? (() => undefined),
+      finish: callbacks.finish ?? (() => undefined),
+    }),
+    onInternalError: callbacks.onInternalError ?? (() => undefined),
+  });
+}
+
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => { resolve = done; });
@@ -14,9 +36,11 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 describe('sync-on-connect per-peer scheduler', () => {
   it('upgrades pending ordinary work and drains selected first', async () => {
     const ordering: string[] = [];
-    const scheduler = new SyncOnConnectPeerScheduler<string>({
-      runSelected: async (_peer, _onError, plan) => { ordering.push(`selected:${plan}`); },
-      runOrdinary: async (_peer, _onError, mode) => { ordering.push(`ordinary:${mode}`); },
+    const finish = vi.fn();
+    const scheduler = createScheduler({
+      runSelected: async (plan) => { ordering.push(`selected:${plan}`); },
+      runOrdinary: async () => { ordering.push('ordinary'); },
+      finish,
     });
     const onError = () => undefined;
 
@@ -26,15 +50,256 @@ describe('sync-on-connect per-peer scheduler', () => {
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
     expect(ordering).toEqual([
       'selected:exact-plan',
-      'ordinary:ordinary-after-selected',
+      'ordinary',
     ]);
+    expect(finish).toHaveBeenCalledOnce();
+  });
+
+  it('does not allocate a peer-job runner when cleared before the timer drains', () => {
+    const finish = vi.fn();
+    const createJob = vi.fn(() => ({
+      runAutomaticSelectedThenOrdinary: async () => undefined,
+      runSelected: async () => undefined,
+      cancel: () => undefined,
+      finish,
+    }));
+    const scheduler = new SyncOnConnectPeerScheduler<string>({
+      createJob,
+      onInternalError: () => undefined,
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, () => undefined, 60_000)).toBe(true);
+    scheduler.clear(PEER);
+
+    expect(scheduler.size).toBe(0);
+    expect(createJob).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
+  });
+
+  it('cleans up a construction failure, reports every accepted lane, and re-enqueues', async () => {
+    const constructionFailure = new Error('runner construction failed');
+    const ordinaryError = vi.fn();
+    const selectedError = vi.fn();
+    const runOrdinary = vi.fn(async () => undefined);
+    let createAttempts = 0;
+    const scheduler = new SyncOnConnectPeerScheduler<string>({
+      createJob: () => {
+        createAttempts += 1;
+        if (createAttempts === 1) throw constructionFailure;
+        return {
+          runAutomaticSelectedThenOrdinary: runOrdinary,
+          runSelected: async () => undefined,
+          cancel: () => undefined,
+          finish: () => undefined,
+        };
+      },
+      onInternalError: () => undefined,
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, ordinaryError, 0)).toBe(true);
+    expect(scheduler.enqueueSelected(PEER, selectedError, 0, 'exact-plan')).toBe(true);
+
+    await vi.waitFor(() => expect(selectedError).toHaveBeenCalledWith(
+      PEER,
+      constructionFailure,
+    ));
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(ordinaryError).toHaveBeenCalledWith(PEER, constructionFailure);
+    expect(ordinaryError).toHaveBeenCalledOnce();
+    expect(selectedError).toHaveBeenCalledOnce();
+
+    expect(scheduler.enqueueOrdinary(PEER, ordinaryError, 0)).toBe(true);
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(createAttempts).toBe(2);
+    expect(runOrdinary).toHaveBeenCalledOnce();
+  });
+
+  it('contains an error-handler rejection after timer ownership ends', async () => {
+    const phaseFailure = new Error('ordinary phase failed');
+    const consumerFailure = new Error('error consumer failed');
+    const diagnosticFailure = new Error('diagnostic sink failed');
+    const finish = vi.fn();
+    const onInternalError = vi.fn(async () => { throw diagnosticFailure; });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => { unhandled.push(error); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const scheduler = createScheduler({
+        runSelected: async () => undefined,
+        runOrdinary: async () => { throw phaseFailure; },
+        finish,
+        onInternalError,
+      });
+
+      expect(scheduler.enqueueOrdinary(
+        PEER,
+        async () => { throw consumerFailure; },
+        0,
+      )).toBe(true);
+      await vi.waitFor(() => expect(scheduler.size).toBe(0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(finish).toHaveBeenCalledOnce();
+      expect(onInternalError).toHaveBeenCalledWith(
+        PEER,
+        consumerFailure,
+        'lane-error-handler',
+      );
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('drains accepted follow-up work after a lane error handler throws', async () => {
+    const ordinary = deferred();
+    const ordinaryStarted = deferred();
+    const phaseFailure = new Error('ordinary phase failed');
+    const consumerFailure = new Error('ordinary error handler failed');
+    const selectedPlans: string[] = [];
+    const selectedError = vi.fn();
+    const onInternalError = vi.fn();
+    const scheduler = createScheduler({
+      runOrdinary: async () => {
+        ordinaryStarted.resolve();
+        await ordinary.promise;
+        throw phaseFailure;
+      },
+      runSelected: async (plan) => {
+        if (plan !== undefined) selectedPlans.push(plan);
+      },
+      onInternalError,
+    });
+
+    expect(scheduler.enqueueOrdinary(
+      PEER,
+      () => { throw consumerFailure; },
+      0,
+    )).toBe(true);
+    await ordinaryStarted.promise;
+    expect(scheduler.enqueueSelected(
+      PEER,
+      selectedError,
+      0,
+      'late-plan',
+    )).toBe(true);
+    ordinary.resolve();
+
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(selectedPlans).toEqual(['late-plan']);
+    expect(selectedError).not.toHaveBeenCalled();
+    expect(onInternalError).toHaveBeenCalledWith(
+      PEER,
+      consumerFailure,
+      'lane-error-handler',
+    );
+  });
+
+  it('contains a finalizer failure after cleaning up the peer job', async () => {
+    const finalizerFailure = new Error('runner finalizer failed');
+    const onInternalError = vi.fn();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => { unhandled.push(error); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const scheduler = createScheduler({
+        runSelected: async () => undefined,
+        runOrdinary: async () => undefined,
+        finish: () => { throw finalizerFailure; },
+        onInternalError,
+      });
+
+      expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
+      await vi.waitFor(() => expect(scheduler.size).toBe(0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(onInternalError).toHaveBeenCalledWith(
+        PEER,
+        finalizerFailure,
+        'runner-finalizer',
+      );
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('runs replacement work enqueued synchronously inside finish after commit', async () => {
+    const replacementAccepted = deferred();
+    const selectedPlans: string[] = [];
+    const accountingCommits: string[] = [];
+    let jobCount = 0;
+    let scheduler!: SyncOnConnectPeerScheduler<string>;
+    scheduler = new SyncOnConnectPeerScheduler<string>({
+      createJob: () => {
+        jobCount += 1;
+        const currentJob = jobCount;
+        return {
+          runAutomaticSelectedThenOrdinary: async () => 'synced',
+          runSelected: async (plan) => {
+            if (plan !== undefined) selectedPlans.push(plan);
+            return 'synced';
+          },
+          cancel: () => undefined,
+          finish: currentJob === 1
+            ? () => {
+              expect(scheduler.enqueueSelected(
+                PEER,
+                () => undefined,
+                0,
+                'reentrant-finalizer-plan',
+              )).toBe(true);
+              expect(selectedPlans).toEqual([]);
+              accountingCommits.push('retry');
+              replacementAccepted.resolve();
+            }
+            : () => { accountingCommits.push('clear'); },
+        };
+      },
+      onInternalError: () => undefined,
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
+    await replacementAccepted.promise;
+    expect(selectedPlans).toEqual([]);
+    expect(accountingCommits).toEqual(['retry']);
+
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(selectedPlans).toEqual(['reentrant-finalizer-plan']);
+    expect(accountingCommits).toEqual(['retry', 'clear']);
+    expect(jobCount).toBe(2);
+  });
+
+  it('finalizes an active peer job once when it is cleared during a phase', async () => {
+    const ordinary = deferred();
+    const ordinaryStarted = deferred();
+    const cancel = vi.fn();
+    const finish = vi.fn();
+    const scheduler = createScheduler({
+      runOrdinary: async () => {
+        ordinaryStarted.resolve();
+        await ordinary.promise;
+      },
+      runSelected: async () => undefined,
+      cancel,
+      finish,
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
+    await ordinaryStarted.promise;
+    scheduler.clear(PEER);
+    ordinary.resolve();
+
+    await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(scheduler.size).toBe(0);
   });
 
   it('retains an exact upgrade during ordinary work without reopening ordinary work', async () => {
     const ordinary = deferred();
     const selected = deferred();
     const ordering: string[] = [];
-    const scheduler = new SyncOnConnectPeerScheduler<string>({
+    const scheduler = createScheduler({
       runSelected: async () => {
         ordering.push('selected');
         await selected.promise;
@@ -60,14 +325,12 @@ describe('sync-on-connect per-peer scheduler', () => {
   it('adds owed ordinary work while selected recovery is running', async () => {
     const selected = deferred();
     const ordering: string[] = [];
-    const scheduler = new SyncOnConnectPeerScheduler<string>({
+    const scheduler = createScheduler({
       runSelected: async () => {
         ordering.push('selected');
         await selected.promise;
       },
-      runOrdinary: async (_peer, _onError, mode) => {
-        ordering.push(`ordinary:${mode}`);
-      },
+      runOrdinary: async () => { ordering.push('ordinary'); },
     });
     const onError = () => undefined;
 
@@ -77,20 +340,18 @@ describe('sync-on-connect per-peer scheduler', () => {
     selected.resolve();
 
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
-    expect(ordering).toEqual(['selected', 'ordinary:ordinary-after-selected']);
+    expect(ordering).toEqual(['selected', 'ordinary']);
   });
 
   it('drains a selected upgrade during selected work before owed ordinary work', async () => {
     const firstSelected = deferred();
     const ordering: string[] = [];
-    const scheduler = new SyncOnConnectPeerScheduler<string>({
-      runSelected: async (_peer, _onError, plan) => {
+    const scheduler = createScheduler({
+      runSelected: async (plan) => {
         ordering.push(`selected:${plan}`);
         if (plan === 'plan-a') await firstSelected.promise;
       },
-      runOrdinary: async (_peer, _onError, mode) => {
-        ordering.push(`ordinary:${mode}`);
-      },
+      runOrdinary: async () => { ordering.push('ordinary'); },
     });
     const onError = () => undefined;
 
@@ -104,7 +365,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(ordering).toEqual([
       'selected:plan-a',
       'selected:plan-b',
-      'ordinary:ordinary-after-selected',
+      'ordinary',
     ]);
   });
 
@@ -115,8 +376,9 @@ describe('sync-on-connect per-peer scheduler', () => {
     const firstErrors: unknown[] = [];
     const lateErrors: unknown[] = [];
     const selectedPlans: string[] = [];
-    const scheduler = new SyncOnConnectPeerScheduler<string>({
-      runSelected: async (_peer, _onError, plan) => {
+    const finish = vi.fn();
+    const scheduler = createScheduler({
+      runSelected: async (plan) => {
         if (plan !== undefined) selectedPlans.push(plan);
       },
       runOrdinary: async () => {
@@ -124,6 +386,7 @@ describe('sync-on-connect per-peer scheduler', () => {
         await ordinary.promise;
         throw ordinaryFailure;
       },
+      finish,
     });
 
     expect(scheduler.enqueueOrdinary(
@@ -144,5 +407,6 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(firstErrors).toEqual([ordinaryFailure]);
     expect(lateErrors).toEqual([]);
     expect(selectedPlans).toEqual(['late-plan']);
+    expect(finish).toHaveBeenCalledOnce();
   });
 });
