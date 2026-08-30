@@ -605,7 +605,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     res,
     agent,
     publisherControl,
-    config,
     startedAt,
     dashDb,
     opWallets,
@@ -622,26 +621,20 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     assertionImportLocks,
     vectorStore,
     embeddingProvider,
-    validTokens,
     apiHost,
     apiPortRef,
     url,
     path,
     requestToken,
     requestAgentAddress,
+    requestPrincipal,
     emitMemoryGraphChanged,
   } = ctx;
-  // Operator gate for the node-wide subscription endpoints. When auth is ENABLED,
-  // require a node-level admin token — a recognised token (in validTokens) that
-  // resolves to no agent (agent-scoped tokens resolve to an address; a
-  // missing/unrecognised token isn't in validTokens). When auth is DISABLED the
-  // daemon runs admin maintenance routes tokenless (trusted local), so don't 403.
-  const authEnabled = config.auth?.enabled !== false;
-  const isNodeAdminCaller = (): boolean =>
-    !authEnabled ||
-    (!!requestToken && validTokens.has(requestToken) && !agent.resolveAgentByToken(requestToken));
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
+  // Node-wide gates consume the principal established by authentication; route code must not
+  // reinterpret token storage or agent-token resolution.
+  const isNodeAdminCaller = (): boolean => requestPrincipal.kind === 'nodeOperator';
+  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
+    ? requestPrincipal.agentAddress
     : undefined;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,

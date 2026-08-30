@@ -9,7 +9,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DKGAgent, OpWalletsConfig } from '@origintrail-official/dkg-agent';
-import type { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
+import type { ExtractionPipelineRegistry, RequestPrincipal } from '@origintrail-official/dkg-core';
 import type {
   ChatMemoryManager,
   DashboardDB,
@@ -61,12 +61,6 @@ export interface NotificationSseEvent {
   type: string;
 }
 
-/** Authenticated request identity derived once before route dispatch. */
-export type RequestPrincipal =
-  | { readonly kind: 'agent'; readonly agentAddress: string }
-  | { readonly kind: 'nodeOperator' }
-  | { readonly kind: 'anonymous' };
-
 export interface RequestContext {
   req: IncomingMessage;
   res: ServerResponse;
@@ -115,6 +109,8 @@ export interface RequestContext {
   url: URL;
   path: string;
   requestToken: string | undefined;
+  /** True only when the canonical auth boundary accepted a real credential. */
+  requestCredentialAuthenticated: boolean;
   requestAgentAddress: string;
   requestPrincipal: RequestPrincipal;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;

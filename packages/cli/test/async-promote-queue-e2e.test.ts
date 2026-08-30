@@ -219,6 +219,9 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
           path: url.pathname,
           requestToken,
           requestAgentAddress: 'did:dkg:agent:test',
+          requestPrincipal: tokenAgentAddress
+            ? { kind: 'agent', agentAddress: tokenAgentAddress }
+            : { kind: 'anonymous' },
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

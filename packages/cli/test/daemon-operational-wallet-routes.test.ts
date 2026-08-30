@@ -47,6 +47,11 @@ function runCtx(
     config: { auth: { enabled: auth?.authEnabled ?? false } },
     requestToken: auth?.requestToken,
     validTokens: auth?.validTokens ?? new Set<string>(),
+    requestPrincipal: auth?.authEnabled
+      ? (auth.requestToken && agent.resolveAgentByToken?.(auth.requestToken)
+        ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(auth.requestToken) }
+        : { kind: 'nodeOperator' })
+      : { kind: 'nodeOperator' },
   } as unknown as RequestContext;
   return { res, done: handleOperationalWalletRoutes(ctx) };
 }

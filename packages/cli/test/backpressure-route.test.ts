@@ -58,6 +58,11 @@ describe('backpressure diagnostics route', () => {
         url,
         path: url.pathname,
         requestToken: options.requestToken,
+        requestPrincipal: options.authEnabled === false
+          ? { kind: 'nodeOperator' }
+          : (options.tokenAgentAddress
+            ? { kind: 'agent', agentAddress: options.tokenAgentAddress }
+            : { kind: 'nodeOperator' }),
       } as any);
       if (!res.writableEnded) {
         res.statusCode = 404;

@@ -441,9 +441,12 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
+    requestPrincipal,
   } = ctx;
+  const authenticatedAgentAddress = requestPrincipal.kind === 'agent'
+    ? requestPrincipal.agentAddress
+    : undefined;
 
 
   // POST /api/agent/register — register a new agent on this node
@@ -481,14 +484,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // routes (e.g. memory.ts, query.ts) already use for caller-vs-target
   // gating.
   function authorizeKeyManagementOnAddress(targetAddress: string): { ok: true } | { ok: false; status: number; body: Record<string, unknown> } {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (!tokenAgentAddress) return { ok: true };
-    if (tokenAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
+    if (!authenticatedAgentAddress) return { ok: true };
+    if (authenticatedAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
     return {
       ok: false,
       status: 403,
       body: {
-        error: `Agent token for ${tokenAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
+        error: `Agent token for ${authenticatedAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
           'Use a node-level admin token (~/.dkg/auth.token) to manage other agents on this node.',
       },
     };
@@ -601,8 +603,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // agent's; gating to admin avoids a non-default-agent token tricking
   // the daemon into republishing on demand for spam.
   if (req.method === "POST" && path === "/api/agent/publish-profile") {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (tokenAgentAddress) {
+    if (requestPrincipal.kind !== 'nodeOperator') {
       return jsonResponse(res, 403, {
         error: 'POST /api/agent/publish-profile requires a node-level admin token; agent-scoped tokens cannot trigger a profile republish.',
       });
@@ -942,10 +943,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     if (parsed.precomputedUpdateAttestation !== undefined && !precomputedUpdateAttestation) {
       return;
     }
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
     if (!authorizeAgentScopedAuthorClaim(
       res,
-      tokenAgentAddress,
+      authenticatedAgentAddress,
       precomputedUpdateAttestation?.authorAddress,
       "precomputedUpdateAttestation.authorAddress",
     )) {

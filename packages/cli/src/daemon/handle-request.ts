@@ -100,7 +100,6 @@ import {
   CLI_NPM_PACKAGE,
 } from '../config.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -313,7 +312,6 @@ import type {
   MemoryGraphChangedEvent,
   NotificationSseEvent,
   RequestContext,
-  RequestPrincipal,
 } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
@@ -342,53 +340,25 @@ export type HandleRequestInput = Omit<
   RequestContext,
   | 'url'
   | 'path'
-  | 'requestToken'
   | 'requestAgentAddress'
-  | 'requestPrincipal'
 >;
-
-export function resolveRequestPrincipal(input: {
-  readonly authEnabled: boolean;
-  readonly requestToken: string | undefined;
-  readonly validTokens: ReadonlySet<string>;
-  readonly resolveAgentByToken: (token: string) => string | undefined;
-}): RequestPrincipal {
-  if (!input.authEnabled) return { kind: 'nodeOperator' };
-  if (!input.requestToken || !input.validTokens.has(input.requestToken)) {
-    return { kind: 'anonymous' };
-  }
-  const agentAddress = input.resolveAgentByToken(input.requestToken);
-  return agentAddress
-    ? { kind: 'agent', agentAddress }
-    : { kind: 'nodeOperator' };
-}
 
 export async function handleRequest(input: HandleRequestInput): Promise<void> {
   const { req, res, agent } = input;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // Resolve the requesting agent's address from the Bearer token.
-  // Agent tokens (dkg_at_...) resolve to their specific agent; node-level tokens
-  // fall back to the default owner agent.
-  const requestToken = extractBearerToken(req.headers.authorization);
-  const requestPrincipal = resolveRequestPrincipal({
-    authEnabled: input.config.auth?.enabled !== false,
-    requestToken,
-    validTokens: input.validTokens,
-    resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
-  });
-  const requestAgentAddress = requestPrincipal.kind === 'agent'
-    ? requestPrincipal.agentAddress
-    : agent.resolveAgentAddress(requestToken);
+  // Authentication already established both the accepted credential and its principal. Routing
+  // only derives the compatibility address projection; it never re-authenticates the header.
+  const requestAgentAddress = input.requestPrincipal.kind === 'agent'
+    ? input.requestPrincipal.agentAddress
+    : agent.resolveAgentAddress(input.requestToken);
 
   const ctx: RequestContext = {
     ...input,
     url,
     path,
-    requestToken,
     requestAgentAddress,
-    requestPrincipal,
   };
 
   await handleStatusRoutes(ctx);

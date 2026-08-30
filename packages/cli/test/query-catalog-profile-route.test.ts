@@ -121,6 +121,7 @@ function requestContext(
       path: url.pathname,
       requestToken: undefined,
       requestAgentAddress: '',
+      requestPrincipal: { kind: 'nodeOperator' },
       validTokens: new Set<string>(),
     } as unknown as RequestContext,
     response,
@@ -196,6 +197,10 @@ describe('/api/profile/query-catalog/read', () => {
     const { context, response } = readContext(agent);
     context.requestToken = 'agent-token';
     context.requestAgentAddress = '0x1111111111111111111111111111111111111111';
+    context.requestPrincipal = {
+      kind: 'agent',
+      agentAddress: '0x1111111111111111111111111111111111111111',
+    };
     context.validTokens = new Set(['agent-token']);
 
     await handleMemoryRoutes(context);
@@ -213,6 +218,7 @@ describe('/api/profile/query-catalog/read', () => {
     agent.canReadContextGraph.mockResolvedValue(false);
     const { context, response } = readContext(agent);
     context.requestToken = 'node-admin-token';
+    context.requestPrincipal = { kind: 'nodeOperator' };
     context.validTokens = new Set(['node-admin-token']);
 
     await handleMemoryRoutes(context);

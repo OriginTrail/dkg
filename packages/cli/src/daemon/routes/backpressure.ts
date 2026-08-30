@@ -13,23 +13,13 @@ export async function handleBackpressureRoutes(ctx: RequestContext): Promise<voi
   const {
     req,
     res,
-    agent,
-    config,
-    validTokens,
     path,
-    requestToken,
+    requestPrincipal,
   } = ctx;
 
   if (req.method !== 'GET' || path !== '/api/diagnostics/backpressure') return;
 
-  const authEnabled = config.auth?.enabled !== false;
-  const isNodeAdminCaller =
-    !authEnabled
-    || (
-      !!requestToken
-      && validTokens.has(requestToken)
-      && !agent.resolveAgentByToken(requestToken)
-    );
+  const isNodeAdminCaller = requestPrincipal.kind === 'nodeOperator';
   if (!isNodeAdminCaller) {
     return jsonResponse(res, 403, {
       error:

@@ -219,12 +219,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const validated = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
 
     expect(await p.clearTerminalJob(validated, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(validated))?.status).toBe('validated');
 
     expect(await p.clearTerminalJob(validated, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(validated)).toBeNull();
   });
@@ -270,12 +270,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await p.update(broadcast, 'broadcast', { broadcast: bx });
 
     expect(await p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
 
     expect(await p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(broadcast)).toBeNull();
   });
@@ -300,7 +300,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await resolverEntered;
     let clearSettled = false;
     const clearing = p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     }).then((outcome) => {
       clearSettled = true;
       return outcome;
@@ -359,7 +359,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // The AUTHOR is not the enqueuer, so the author's token gets nothing — this is the exact
     // confusion the previous version had backwards.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: AUTHOR },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: AUTHOR },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
@@ -367,12 +367,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // sole entitlement, so the GH#1778 hint sitting in the request grants nothing — this is
     // what fails if ownership ever falls back to reading the payload.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: PAYLOAD_CALLER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: PAYLOAD_CALLER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });
@@ -390,7 +390,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
 
     // An unrelated agent token is still refused...
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
 
     // ...while the explicit node-operator principal may clear any job in this node's queue.
@@ -413,7 +413,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
 
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: PAYLOAD_CALLER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: PAYLOAD_CALLER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 

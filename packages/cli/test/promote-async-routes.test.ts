@@ -161,6 +161,9 @@ describe('async SWM-share queue daemon routes', () => {
           path: url.pathname,
           requestToken,
           requestAgentAddress: agent.resolveAgentByToken(requestToken) ?? 'did:dkg:agent:test',
+          requestPrincipal: agent.resolveAgentByToken(requestToken)
+            ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken) }
+            : { kind: 'anonymous' },
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

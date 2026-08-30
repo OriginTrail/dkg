@@ -42,6 +42,7 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
     vectorStore: { search: async () => [] },
     path: url.pathname,
     url,
+    requestPrincipal: { kind: 'anonymous' },
   } as unknown as RequestContext;
   return { ctx, res };
 }

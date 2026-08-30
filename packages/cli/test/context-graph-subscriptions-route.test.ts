@@ -92,6 +92,9 @@ describe('context graph subscription diagnostics route', () => {
         path: url.pathname,
         requestToken,
         requestAgentAddress: agent.resolveAgentByToken(requestToken),
+        requestPrincipal: agent.resolveAgentByToken(requestToken)
+          ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken)! }
+          : { kind: 'nodeOperator' },
       } as any);
       if (!res.writableEnded) {
         res.writeHead(404, { 'content-type': 'application/json' });

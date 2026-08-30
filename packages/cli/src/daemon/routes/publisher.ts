@@ -680,26 +680,10 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // query before `clearTerminalJob`'s safe-id guard ran, and decided ownership outside the claim
     // lock the clear then takes. Validation, the ownership decision and the delete now happen on
     // one record behind one boundary.
-    let pendingTransactionOverride: PendingTransactionClearOverride | undefined;
-    if (parsed.allowPendingTransaction === true) {
-      switch (requestPrincipal.kind) {
-        case 'agent':
-          pendingTransactionOverride = {
-            kind: 'agent',
-            requestedBy: requestPrincipal.agentAddress,
-          };
-          break;
-        case 'nodeOperator':
-          pendingTransactionOverride = { kind: 'nodeOperator' };
-          break;
-        case 'anonymous':
-          break;
-        default: {
-          const unhandledPrincipal: never = requestPrincipal;
-          return unhandledPrincipal;
-        }
-      }
-    }
+    const pendingTransactionOverride: PendingTransactionClearOverride | undefined =
+      parsed.allowPendingTransaction === true && requestPrincipal.kind !== 'anonymous'
+        ? requestPrincipal
+        : undefined;
     return respondTerminalClearOutcome(
       res,
       await publisherControl.clearTerminalJob(

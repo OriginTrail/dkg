@@ -14,6 +14,7 @@ import type {
   TripleStoreAsyncLiftPublisher,
 } from '../../src/index.js';
 import type { LiftJobTransaction } from '../../src/async-lift-claim-session.js';
+import type { RequestPrincipal } from '@origintrail-official/dkg-core';
 import {
   canonicalLiftJobPayload,
   type LiftJobPayloadDecodeResult,
@@ -27,7 +28,7 @@ declare const activeClaim: ActiveLiftJobClaim;
 
 const agentClearAuthority: PendingTransactionClearOverride = {
   kind: 'agent',
-  requestedBy: 'did:dkg:agent:owner',
+  agentAddress: 'did:dkg:agent:owner',
 };
 const nodeOperatorClearAuthority: PendingTransactionClearOverride = { kind: 'nodeOperator' };
 void agentClearAuthority;
@@ -36,12 +37,16 @@ void nodeOperatorClearAuthority;
 const emptyClearAuthority: PendingTransactionClearOverride = {};
 const contradictoryClearAuthority: PendingTransactionClearOverride = {
   kind: 'agent',
-  requestedBy: 'did:dkg:agent:owner',
+  agentAddress: 'did:dkg:agent:owner',
   // @ts-expect-error Agent and node-operator authority cannot coexist in one request.
-  requestedByNodeOperator: true,
+  nodeOperator: true,
 };
 void emptyClearAuthority;
 void contradictoryClearAuthority;
+const anonymousPrincipal: RequestPrincipal = { kind: 'anonymous' };
+// @ts-expect-error Anonymous requests cannot become a pending-transaction override.
+const anonymousClearAuthority: PendingTransactionClearOverride = anonymousPrincipal;
+void anonymousClearAuthority;
 
 const concreteCapability: ClaimSessionAsyncLiftPublisher = publisher;
 void concreteCapability;

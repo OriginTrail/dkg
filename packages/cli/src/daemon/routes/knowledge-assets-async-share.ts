@@ -60,9 +60,9 @@ import {
 // serves swm/share-async inline; this standalone faithful-port handler is kept in
 // lockstep so either entry point behaves identically.)
 export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: string): Promise<void> {
-  const { req, res, agent, requestToken } = ctx;
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
+  const { req, res, agent, requestPrincipal } = ctx;
+  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
+    ? requestPrincipal.agentAddress
     : undefined;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,

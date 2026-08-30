@@ -241,8 +241,8 @@ describe('GH#2270 failed-job retry disposition', () => {
       admission: { byAgentAddress: owner },
       request: { jobType: 'lift', lift: {} },
     } as unknown as LiftJob);
-    const override = (requestedBy: string) => ({
-      pendingTransactionOverride: { kind: 'agent' as const, requestedBy },
+    const override = (agentAddress: string) => ({
+      pendingTransactionOverride: { kind: 'agent' as const, agentAddress },
     });
 
     // EVM: case-insensitive, both directions.
@@ -335,10 +335,10 @@ describe('GH#2270 failed-job retry disposition', () => {
       failure: { ...admitted.failure, resolution: 'retry_recovery' },
     } as PersistedFailedJob;
     expect(isTargetedClearableLiftJob(heldAfterReset, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: ADMITTED_BY },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: ADMITTED_BY },
     })).toBe(true);
     expect(isTargetedClearableLiftJob(heldAfterReset, {
-      pendingTransactionOverride: { kind: 'agent', requestedBy: '0xBBbBBb00000000000000000000000000000000Bb' },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: '0xBBbBBb00000000000000000000000000000000Bb' },
     })).toBe(false);
     // ...and with no override at all, ownership alone never grants the clear.
     expect(isTargetedClearableLiftJob(heldAfterReset)).toBe(false);

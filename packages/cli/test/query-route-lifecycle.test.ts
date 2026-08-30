@@ -67,6 +67,7 @@ function queryRouteContext(
     path: '/api/query',
     requestToken: undefined,
     requestAgentAddress: '',
+    requestPrincipal: { kind: 'anonymous' },
   } as unknown as RequestContext;
 }
 

@@ -404,7 +404,7 @@ export function isTargetedClearableLiftJob(
   // for any job, including an unstamped pre-upgrade record.
   switch (override.kind) {
     case 'agent':
-      if (!ownsLiftJobAdmissionLane(job, override.requestedBy)) return false;
+      if (!ownsLiftJobAdmissionLane(job, override.agentAddress)) return false;
       break;
     case 'nodeOperator':
       break;

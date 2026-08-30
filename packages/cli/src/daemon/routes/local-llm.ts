@@ -29,12 +29,7 @@ function serviceErrorResponse(
 }
 
 function isNodeAdminCaller(ctx: RequestContext): boolean {
-  if (ctx.config.auth?.enabled === false) return true;
-  return Boolean(
-    ctx.requestToken
-    && ctx.validTokens.has(ctx.requestToken)
-    && !ctx.agent.resolveAgentByToken(ctx.requestToken),
-  );
+  return ctx.requestPrincipal.kind === 'nodeOperator';
 }
 
 async function readJsonObject(ctx: RequestContext): Promise<Record<string, unknown> | null> {

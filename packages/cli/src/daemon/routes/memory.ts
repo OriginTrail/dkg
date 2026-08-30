@@ -509,13 +509,13 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
+    requestPrincipal,
     emitMemoryGraphChanged,
     emitNotification,
   } = ctx;
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
+  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
+    ? requestPrincipal.agentAddress
     : undefined;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,

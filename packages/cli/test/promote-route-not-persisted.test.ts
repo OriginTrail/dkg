@@ -121,6 +121,7 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
           path: url.pathname,
           requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
+          requestPrincipal: { kind: 'anonymous' },
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

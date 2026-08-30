@@ -45,8 +45,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     res,
     agent,
     path,
-    requestToken,
-    validTokens,
+    requestPrincipal,
     emitMemoryGraphChanged,
   } = ctx;
 
@@ -62,8 +61,8 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
       return true;
     }
 
-    const callerAgentAddress = requestToken
-      ? agent.resolveAgentByToken(requestToken)
+    const callerAgentAddress = requestPrincipal.kind === 'agent'
+      ? requestPrincipal.agentAddress
       : undefined;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
@@ -157,12 +156,10 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     const contextGraphId = parsed.contextGraphId;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return true;
 
-    const callerAgentAddress = requestToken
-      ? agent.resolveAgentByToken(requestToken)
+    const callerAgentAddress = requestPrincipal.kind === 'agent'
+      ? requestPrincipal.agentAddress
       : undefined;
-    const isNodeAdmin = !!requestToken
-      && validTokens.has(requestToken)
-      && callerAgentAddress === undefined;
+    const isNodeAdmin = requestPrincipal.kind === 'nodeOperator';
     if (
       !isNodeAdmin
       && !(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))

@@ -679,7 +679,7 @@ describe('GH#2270 chain-proof cadence', () => {
       await publisher.recover(); // observed + installed, batch 0: never dispatched
       expect(schedule.retainedEntryCount()).toBe(1);
 
-      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'agent', requestedBy: 'operator' } });
+      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'agent', agentAddress: 'operator' } });
       await publisher.recover(); // empty held population: the sweep collects the residue
       expect(schedule.retainedEntryCount()).toBe(0);
     });
@@ -795,7 +795,7 @@ describe('GH#2270 chain-proof cadence', () => {
       while (asks === 0) await new Promise((resolve) => setTimeout(resolve, 5));
 
       // The real operator exit, serialized on the same claim lock the disposition uses.
-      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'agent', requestedBy: 'operator' } });
+      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'agent', agentAddress: 'operator' } });
 
       release();
       await firstPass;

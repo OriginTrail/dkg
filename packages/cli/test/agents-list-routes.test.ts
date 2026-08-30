@@ -392,6 +392,7 @@ async function getAgents(agent: any, qs = '') {
     validTokens: new Set<string>(),
     requestToken: undefined,
     requestAgentAddress: '',
+    requestPrincipal: { kind: 'nodeOperator' },
   } as unknown as RequestContext;
   await handleAgentChatRoutes(ctx);
   return { status: res.statusCode, body: JSON.parse(res.body) };

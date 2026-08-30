@@ -89,7 +89,7 @@ function respondKeyError(res: ServerResponse, err: unknown, address: string): vo
 }
 
 export async function handleOperationalWalletRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, path, opWallets, config, requestToken, validTokens } = ctx;
+  const { req, res, agent, path, opWallets, requestPrincipal } = ctx;
 
   if (!path.startsWith('/api/operational-wallets')) return;
 
@@ -99,10 +99,7 @@ export async function handleOperationalWalletRoutes(ctx: RequestContext): Promis
   // identity is an operator action: require a node-level admin token, not a
   // per-agent (dkg_at_) token (which the global guard would otherwise accept).
   // Mirrors isNodeAdminCaller in context-graph.ts. Reads are not gated here.
-  const authEnabled = config.auth?.enabled !== false;
-  const isNodeAdmin = (): boolean =>
-    !authEnabled ||
-    (!!requestToken && validTokens.has(requestToken) && !agent.resolveAgentByToken(requestToken));
+  const isNodeAdmin = (): boolean => requestPrincipal.kind === 'nodeOperator';
   const requireNodeAdmin = (): boolean => {
     if (isNodeAdmin()) return true;
     jsonResponse(res, 403, {

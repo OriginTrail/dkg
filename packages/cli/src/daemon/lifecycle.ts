@@ -187,7 +187,7 @@ import {
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
-import { loadTokens, httpAuthGuard } from '../auth.js';
+import { authenticateHttpRequest, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -3534,14 +3534,15 @@ async function runDaemonInnerWithStartupOwnership(
       }
 
       // Auth guard — rejects with 401 if token is invalid/missing
-      const authAllowed = await httpAuthGuard(
+      const authentication = await authenticateHttpRequest({
         req,
         res,
         authEnabled,
         validTokens,
-        resolveCorsOrigin(req, corsAllowed),
-      );
-      if (!authAllowed) return;
+        resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+        corsOrigin: resolveCorsOrigin(req, corsAllowed),
+      });
+      if (!authentication.allowed) return;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked
@@ -3660,6 +3661,9 @@ async function runDaemonInnerWithStartupOwnership(
       await handleRequest({
         req,
         res,
+        requestToken: authentication.requestToken,
+        requestCredentialAuthenticated: authentication.requestCredentialAuthenticated,
+        requestPrincipal: authentication.requestPrincipal,
         agent,
         publisherControl,
         publisherState,

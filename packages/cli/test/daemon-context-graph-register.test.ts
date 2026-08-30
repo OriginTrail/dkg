@@ -70,6 +70,7 @@ describe('POST /api/context-graph/register — effective publishPolicy resolutio
         validTokens: new Set(), apiHost: '127.0.0.1', apiPortRef: { value: 0 },
         routePlugins: [], url, path: url.pathname, requestToken: undefined,
         requestAgentAddress: '0x0000000000000000000000000000000000000001',
+        requestPrincipal: { kind: 'nodeOperator' },
       } as any);
       if (!res.writableEnded) { res.statusCode = 404; res.end(); }
     });

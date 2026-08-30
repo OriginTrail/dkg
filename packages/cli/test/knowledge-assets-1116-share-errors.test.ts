@@ -171,6 +171,9 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           path: url.pathname,
           requestToken: routeOverrides.requestToken,
           requestAgentAddress: routeOverrides.requestAgentAddress ?? 'did:dkg:agent:test',
+          requestPrincipal: routeOverrides.requestToken && agent.resolveAgentByToken(routeOverrides.requestToken)
+            ? { kind: 'agent', agentAddress: agent.resolveAgentByToken(routeOverrides.requestToken) }
+            : { kind: 'anonymous' },
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

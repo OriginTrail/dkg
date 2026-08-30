@@ -41,6 +41,7 @@ function runCtx(
   // sees the same bearer the test passed in.
   const requestToken = opts?.bearer;
   const requestAgentAddress = opts?.requestAgentAddress ?? '';
+  const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
   const ctx = {
     req: fakeReq(method, rawPath, opts),
     res,
@@ -49,6 +50,9 @@ function runCtx(
     url,
     requestToken,
     requestAgentAddress,
+    requestPrincipal: tokenAgentAddress
+      ? { kind: 'agent', agentAddress: tokenAgentAddress }
+      : { kind: 'nodeOperator' },
     validTokens: new Set<string>(),
   } as unknown as RequestContext;
   return { res, done: handleAgentChatRoutes(ctx) };

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Readable } from 'node:stream';
 import type { ServerResponse } from 'node:http';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
-import { resolveRequestPrincipal } from '../src/daemon/handle-request.js';
+import { authenticateHttpRequest } from '../src/auth.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import type {
   PendingTransactionClearOverride,
@@ -30,6 +30,7 @@ describe('clear-job pending-transaction override authorization', () => {
     requestToken?: string;
     tokenAgentAddress?: string;
     authEnabled?: boolean;
+    validTokens?: Set<string>;
   }) {
     const calls: Array<{
       jobId: string;
@@ -38,7 +39,12 @@ describe('clear-job pending-transaction override authorization', () => {
     const path = '/api/publisher/clear-job';
     const req = Readable.from([]);
     Object.assign(req, {
-      method: 'POST', url: path, headers: { host: '127.0.0.1' },
+      method: 'POST',
+      url: path,
+      headers: {
+        host: '127.0.0.1',
+        ...(caller.requestToken ? { authorization: `Bearer ${caller.requestToken}` } : {}),
+      },
       __dkgPrebufferedBody: Buffer.from(JSON.stringify(body), 'utf8'),
     });
     const res = {
@@ -69,30 +75,38 @@ describe('clear-job pending-transaction override authorization', () => {
         token === requestToken ? caller.tokenAgentAddress : undefined
       ),
     } as unknown as RequestContext['agent'];
-    const validTokens = new Set(requestToken ? [requestToken] : []);
+    const validTokens = caller.validTokens ?? new Set(requestToken ? [requestToken] : []);
     const authEnabled = caller.authEnabled ?? true;
-    const requestPrincipal = resolveRequestPrincipal({
-      authEnabled,
-      requestToken,
-      validTokens,
-      resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
-    });
 
-    const ctx = {
-      req: req as RequestContext['req'],
-      res: res as unknown as ServerResponse,
-      url: new URL(`http://127.0.0.1${path}`),
-      path,
-      requestToken,
-      requestAgentAddress: caller.requestAgentAddress,
-      requestPrincipal,
-      agent,
-      config: { auth: { enabled: authEnabled } },
-      validTokens,
-      publisherControl,
-    } as unknown as RequestContext;
-
-    return { run: () => handlePublisherRoutes(ctx), calls, res };
+    return {
+      run: async () => {
+        const authentication = await authenticateHttpRequest({
+          req: req as RequestContext['req'],
+          res: res as unknown as ServerResponse,
+          authEnabled,
+          validTokens,
+          resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+        });
+        if (!authentication.allowed) return;
+        const ctx = {
+          req: req as RequestContext['req'],
+          res: res as unknown as ServerResponse,
+          url: new URL(`http://127.0.0.1${path}`),
+          path,
+          requestToken: authentication.requestToken,
+          requestCredentialAuthenticated: authentication.requestCredentialAuthenticated,
+          requestAgentAddress: caller.requestAgentAddress,
+          requestPrincipal: authentication.requestPrincipal,
+          agent,
+          config: { auth: { enabled: authEnabled } },
+          validTokens,
+          publisherControl,
+        } as unknown as RequestContext;
+        await handlePublisherRoutes(ctx);
+      },
+      calls,
+      res,
+    };
   }
 
   it('does NOT grant the override to an agent that does not own the job', async () => {
@@ -110,7 +124,7 @@ describe('clear-job pending-transaction override authorization', () => {
     // about to delete. What matters here is that the caller's identity is not lost on the way.
     expect(calls).toEqual([{
       jobId: 'job-1',
-      authority: { kind: 'agent', requestedBy: OTHER },
+      authority: { kind: 'agent', agentAddress: OTHER },
     }]);
   });
 
@@ -127,7 +141,7 @@ describe('clear-job pending-transaction override authorization', () => {
     await run();
     expect(calls).toEqual([{
       jobId: 'job-1',
-      authority: { kind: 'agent', requestedBy: OWNER },
+      authority: { kind: 'agent', agentAddress: OWNER },
     }]);
   });
 
@@ -172,49 +186,19 @@ describe('clear-job pending-transaction override authorization', () => {
       authority: undefined,
     }]);
   });
-});
 
-describe('shared request-principal boundary', () => {
-  const AGENT_TOKEN = 'dkg_at_owner';
-  const NODE_TOKEN = 'node-admin-token';
-  const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
-  const validTokens = new Set([AGENT_TOKEN, NODE_TOKEN]);
-  const resolveAgentByToken = (token: string) => token === AGENT_TOKEN ? OWNER : undefined;
-
-  it('classifies a registered agent token as its agent principal', () => {
-    expect(resolveRequestPrincipal({
-      authEnabled: true,
-      requestToken: AGENT_TOKEN,
-      validTokens,
-      resolveAgentByToken,
-    })).toEqual({ kind: 'agent', agentAddress: OWNER });
-  });
-
-  it('classifies a valid non-agent token as the node operator', () => {
-    expect(resolveRequestPrincipal({
-      authEnabled: true,
-      requestToken: NODE_TOKEN,
-      validTokens,
-      resolveAgentByToken,
-    })).toEqual({ kind: 'nodeOperator' });
-  });
-
-  it('classifies a tokenless auth-disabled request as the node operator', () => {
-    expect(resolveRequestPrincipal({
-      authEnabled: false,
-      requestToken: undefined,
-      validTokens,
-      resolveAgentByToken,
-    })).toEqual({ kind: 'nodeOperator' });
-  });
-
-  it('fails closed for a request that has no authenticated principal', () => {
-    expect(resolveRequestPrincipal({
-      authEnabled: true,
-      requestToken: undefined,
-      validTokens,
-      resolveAgentByToken,
-    })).toEqual({ kind: 'anonymous' });
+  it('rejects an unrecognized bearer before routing any override authority', async () => {
+    const { run, calls, res } = post(
+      { jobId: 'job-1', allowPendingTransaction: true },
+      {
+        requestAgentAddress: DEFAULT_AGENT,
+        requestToken: 'forged-token',
+        validTokens: new Set(),
+      },
+    );
+    await run();
+    expect(res.statusCode).toBe(401);
+    expect(calls).toEqual([]);
   });
 });
 

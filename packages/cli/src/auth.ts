@@ -11,6 +11,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { RequestPrincipal } from '@origintrail-official/dkg-core';
 import { dkgDir } from './config.js';
 
 // ---------------------------------------------------------------------------
@@ -23,6 +24,23 @@ export interface AuthConfig {
   /** Pre-configured tokens. If empty, one is auto-generated on first start. */
   tokens?: string[];
 }
+
+export type HttpAuthenticationResult =
+  | { readonly allowed: false }
+  | {
+    readonly allowed: true;
+    readonly requestToken: string | undefined;
+    readonly requestPrincipal: RequestPrincipal;
+    readonly requestCredentialAuthenticated: boolean;
+  };
+
+type AcceptedHttpCredential = {
+  readonly mode: 'disabled' | 'public' | 'authenticated';
+  readonly requestToken: string | undefined;
+  readonly acceptedToken: string | undefined;
+};
+
+const acceptedHttpCredentials = new WeakMap<IncomingMessage, AcceptedHttpCredential>();
 
 // ---------------------------------------------------------------------------
 // Token file management
@@ -828,13 +846,32 @@ export function httpAuthGuard(
   validTokens: Set<string>,
   corsOrigin?: string | null,
 ): boolean | Promise<boolean> {
-  if (!authEnabled) return true;
-  if (req.method === 'OPTIONS') return true;
+  acceptedHttpCredentials.delete(req);
+  const headerToken = extractBearerToken(req.headers.authorization);
+  if (!authEnabled) {
+    const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
+    acceptedHttpCredentials.set(req, {
+      mode: 'disabled', requestToken: headerToken, acceptedToken,
+    });
+    return true;
+  }
+  if (req.method === 'OPTIONS') {
+    acceptedHttpCredentials.set(req, {
+      mode: 'public', requestToken: headerToken, acceptedToken: undefined,
+    });
+    return true;
+  }
 
   const pathname = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname;
-  if (isPublicPath(req.method ?? '', pathname)) return true;
+  if (isPublicPath(req.method ?? '', pathname)) {
+    const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
+    acceptedHttpCredentials.set(req, {
+      mode: 'public', requestToken: headerToken, acceptedToken,
+    });
+    return true;
+  }
 
-  const token = extractBearerToken(req.headers.authorization);
+  const token = headerToken;
   let acceptedToken: string | undefined;
   if (verifyToken(token, validTokens)) {
     acceptedToken = token;
@@ -849,6 +886,9 @@ export function httpAuthGuard(
   }
 
   if (acceptedToken) {
+    acceptedHttpCredentials.set(req, {
+      mode: 'authenticated', requestToken: acceptedToken, acceptedToken,
+    });
     const now = Date.now();
 
     // CLI-10: stale-timestamp gate. If the client opted into the
@@ -1115,6 +1155,59 @@ export function httpAuthGuard(
   });
   res.end(JSON.stringify({ error: 'Unauthorized — provide a valid Bearer token in the Authorization header' }));
   return false;
+}
+
+/**
+ * Canonical daemon authentication boundary. The guard decides credential acceptance once; this
+ * adapter turns that accepted credential into the principal passed to every route.
+ */
+export async function authenticateHttpRequest(input: {
+  readonly req: IncomingMessage;
+  readonly res: ServerResponse;
+  readonly authEnabled: boolean;
+  readonly validTokens: Set<string>;
+  readonly resolveAgentByToken: (token: string) => string | undefined;
+  readonly corsOrigin?: string | null;
+}): Promise<HttpAuthenticationResult> {
+  const allowed = await httpAuthGuard(
+    input.req,
+    input.res,
+    input.authEnabled,
+    input.validTokens,
+    input.corsOrigin,
+  );
+  if (!allowed) return { allowed: false };
+
+  const credential = acceptedHttpCredentials.get(input.req);
+  if (!credential) {
+    throw new Error('HTTP authentication succeeded without an accepted credential decision');
+  }
+  if (credential.mode === 'disabled' && !credential.acceptedToken) {
+    return {
+      allowed: true,
+      requestToken: credential.requestToken,
+      requestPrincipal: { kind: 'nodeOperator' },
+      requestCredentialAuthenticated: false,
+    };
+  }
+  if (!credential.acceptedToken) {
+    return {
+      allowed: true,
+      requestToken: credential.requestToken,
+      requestPrincipal: { kind: 'anonymous' },
+      requestCredentialAuthenticated: false,
+    };
+  }
+
+  const agentAddress = input.resolveAgentByToken(credential.acceptedToken);
+  return {
+    allowed: true,
+    requestToken: credential.requestToken,
+    requestPrincipal: agentAddress
+      ? { kind: 'agent', agentAddress }
+      : { kind: 'nodeOperator' },
+    requestCredentialAuthenticated: true,
+  };
 }
 
 /**

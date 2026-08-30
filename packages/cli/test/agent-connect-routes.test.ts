@@ -29,6 +29,7 @@ function runConnect(agent: any, body: unknown) {
     validTokens: new Set<string>(),
     requestToken: undefined,
     requestAgentAddress: '',
+    requestPrincipal: { kind: 'nodeOperator' },
   } as unknown as RequestContext;
   return { res, done: handleAgentChatRoutes(ctx) };
 }

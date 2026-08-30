@@ -731,7 +731,17 @@ function rejectSelectedAuthorOnCreate(
 }
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, publisherControl, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
+  const {
+    req,
+    res,
+    agent,
+    publisherControl,
+    path,
+    url,
+    requestAgentAddress,
+    requestPrincipal,
+    emitMemoryGraphChanged,
+  } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
   const method = req.method ?? "GET";
 
@@ -814,7 +824,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // Parity with the legacy assertion routes: resolve/validate the write
   // contextGraphId against the caller's known graphs before any mutation, so a
   // bad/foreign id is a 400 here rather than an opaque 500 from the engine.
-  const writePreflightCallerAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
+  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
+    ? requestPrincipal.agentAddress
+    : undefined;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,

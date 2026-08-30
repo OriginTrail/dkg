@@ -34,6 +34,11 @@ describe('daemon local LLM routes', () => {
         config: { auth: { enabled: auth.enabled ?? false } },
         validTokens: new Set(auth.validTokens ?? []),
         requestToken: auth.requestToken,
+        requestPrincipal: auth.enabled === false
+          ? { kind: 'nodeOperator' }
+          : (auth.requestToken && auth.agentTokens?.[auth.requestToken]
+            ? { kind: 'agent', agentAddress: auth.agentTokens[auth.requestToken] }
+            : { kind: 'nodeOperator' }),
         agent: {
           resolveAgentByToken: (token: string) => auth.agentTokens?.[token],
         },
@@ -151,6 +156,7 @@ describe('daemon local LLM routes', () => {
         config: { auth: { enabled: false } },
         validTokens: new Set(),
         requestToken: undefined,
+        requestPrincipal: { kind: 'nodeOperator' },
         agent: { resolveAgentByToken: () => undefined },
       } as any);
     });

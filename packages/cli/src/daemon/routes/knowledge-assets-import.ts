@@ -585,12 +585,19 @@ export async function handleKaImportArtifactReadMarkdown(ctx: RequestContext): P
 // POST /api/knowledge-assets/semantic-enrichment/write
 // Write model-derived semantic triples into the completed imported assertion with provenance.
 export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
+  const {
+    req,
+    res,
+    agent,
+    requestAgentAddress,
+    requestPrincipal,
+    emitMemoryGraphChanged,
+  } = ctx;
   // Mirror the legacy assertion-route preflight: resolve the caller agent
   // from the bearer token so `resolveRequiredWriteContextGraphId` validates
   // the write CG against the caller's known graphs before any mutation.
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
+  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
+    ? requestPrincipal.agentAddress
     : undefined;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
@@ -709,15 +716,15 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
     fileStore,
     extractionStatus,
     assertionImportLocks,
-    requestToken,
     requestAgentAddress,
+    requestPrincipal,
     emitMemoryGraphChanged,
   } = ctx;
   // Mirror the legacy assertion-route preflight: resolve the caller agent from
   // the bearer token so `resolveRequiredWriteContextGraphId` validates the write
   // CG against the caller's known graphs before any mutation.
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
+  const writePreflightCallerAgentAddress = requestPrincipal.kind === 'agent'
+    ? requestPrincipal.agentAddress
     : undefined;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
