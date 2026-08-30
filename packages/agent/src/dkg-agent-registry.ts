@@ -1974,9 +1974,9 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // caller's deadline by a wide margin. Using one signal threads the
     // remaining budget through both phases.
     this.log.info(ctx, `Resolving ${peerIdStr} via PeerResolver...`);
-    let addrs: string[];
+    let outcome: Awaited<ReturnType<typeof this.peerResolver.connect>>;
     try {
-      addrs = await this.peerResolver.connect(peerIdStr, {
+      outcome = await this.peerResolver.connect(peerIdStr, {
         signal,
         perStepTimeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
         log: (message) => this.log.info(ctx, message),
@@ -2007,7 +2007,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'DIAL_FAILED';
       throw error;
     }
-    if (addrs.length === 0) {
+    if (outcome.status === 'unresolved') {
       // Codex PR #499 round 5: distinguish "abort/timeout swallowed by
       // best-effort resolver" from "genuine negative lookup". Without
       // this, transient routing failures (DHT timeout, network blip)
@@ -2027,7 +2027,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'PEER_NOT_FOUND';
       throw error;
     }
-    this.log.info(ctx, `Resolved and connected to ${peerIdStr} via ${addrs.length} addr(s)`);
+    this.log.info(
+      ctx,
+      `Resolved and connected to ${peerIdStr} via ${outcome.resolvedAddresses.length} addr(s)`,
+    );
     await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
       signal,
       timeoutMs: remainingTimeoutMs(),

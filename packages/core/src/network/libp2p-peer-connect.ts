@@ -4,7 +4,7 @@ import { multiaddr, type Component, type Multiaddr } from '@multiformats/multiad
 import { isPublicLikeAddress } from './address-policy.js';
 import type { Address, NodeIdentity, PeerConnectOpts } from './network.js';
 
-interface Libp2pConnectHost {
+export interface Libp2pConnectHost {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
   dial(target: PeerId | Multiaddr, options?: { signal?: AbortSignal }): Promise<unknown>;
   peerStore: {
@@ -12,9 +12,16 @@ interface Libp2pConnectHost {
   };
 }
 
-type ConnectCandidate =
+export type Libp2pConnectCandidate =
   | { kind: 'direct'; address: string; targetPeerId?: string }
   | { kind: 'circuit'; address: string; relayAddress: string; targetPeerId: string };
+
+export class Libp2pConnectCandidateParseError extends Error {
+  constructor(message: string, readonly rawTarget?: string) {
+    super(message);
+    this.name = 'Libp2pConnectCandidateParseError';
+  }
+}
 
 const DEFAULT_CANDIDATE_TIMEOUT_MS = 5_000;
 const CONNECTION_OBSERVATION_INTERVAL_MS = 100;
@@ -28,7 +35,7 @@ function targetPeerId(components: readonly Component[], start = 0): string | und
     .at(-1);
 }
 
-function parseCandidate(raw: string): ConnectCandidate {
+export function parseLibp2pConnectCandidate(raw: string): Libp2pConnectCandidate {
   const parsed = multiaddr(raw);
   const components = parsed.getComponents();
   const circuitIndex = components.findIndex((component) => component.name === 'p2p-circuit');
@@ -38,19 +45,35 @@ function parseCandidate(raw: string): ConnectCandidate {
       ? {
         kind: 'direct',
         address: parsed.toString(),
-        targetPeerId: peerIdFromString(rawTarget).toString(),
+        targetPeerId: canonicalCandidatePeerId(rawTarget),
       }
       : { kind: 'direct', address: parsed.toString() };
   }
 
   const rawTarget = targetPeerId(components, circuitIndex + 1);
-  if (!rawTarget) throw new Error('Circuit multiaddr missing target peer id');
+  if (!rawTarget) {
+    throw new Libp2pConnectCandidateParseError(
+      'Circuit multiaddr missing target peer id',
+      '<missing>',
+    );
+  }
   return {
     kind: 'circuit',
     address: parsed.toString(),
     relayAddress: multiaddr(components.slice(0, circuitIndex)).toString(),
-    targetPeerId: peerIdFromString(rawTarget).toString(),
+    targetPeerId: canonicalCandidatePeerId(rawTarget),
   };
+}
+
+function canonicalCandidatePeerId(rawTarget: string): string {
+  try {
+    return peerIdFromString(rawTarget).toString();
+  } catch (error) {
+    throw new Libp2pConnectCandidateParseError(
+      error instanceof Error ? error.message : String(error),
+      rawTarget,
+    );
+  }
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -66,31 +89,75 @@ async function observeConnection(
     if (host.getConnections().some((connection) => connection.remotePeer.toString() === peerId)) {
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, CONNECTION_OBSERVATION_INTERVAL_MS));
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(done, CONNECTION_OBSERVATION_INTERVAL_MS);
+      function done(): void {
+        signal.removeEventListener('abort', aborted);
+        resolve();
+      }
+      function aborted(): void {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', aborted);
+        reject(new DOMException('Peer connection candidate timed out', 'AbortError'));
+      }
+      signal.addEventListener('abort', aborted, { once: true });
+      if (signal.aborted) aborted();
+    });
   }
   throw new DOMException('Peer connection candidate timed out', 'AbortError');
 }
 
-async function dialCandidate(
+export async function connectLibp2pCandidate(
   host: Libp2pConnectHost,
-  candidate: ConnectCandidate,
-  signal: AbortSignal,
-  log?: (message: string) => void,
+  candidate: Libp2pConnectCandidate,
+  options: {
+    expectedPeerId?: NodeIdentity;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    log?: (message: string) => void;
+  } = {},
 ): Promise<void> {
-  if (candidate.kind === 'direct') {
-    log?.(`Dialing resolved direct address: ${candidate.address}`);
-    await host.dial(multiaddr(candidate.address), { signal });
-    if (candidate.targetPeerId) await observeConnection(host, candidate.targetPeerId, signal);
-    return;
+  throwIfAborted(options.signal);
+  const expectedPeerId = options.expectedPeerId === undefined
+    ? candidate.targetPeerId
+    : peerIdFromString(options.expectedPeerId).toString();
+  if (
+    expectedPeerId !== undefined &&
+    candidate.targetPeerId !== undefined &&
+    candidate.targetPeerId !== expectedPeerId
+  ) {
+    throw new Error(
+      `Connection candidate targets ${candidate.targetPeerId}, not ${expectedPeerId}`,
+    );
   }
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(
+    () => timeoutController.abort(
+      new DOMException('Peer connection candidate timed out', 'TimeoutError'),
+    ),
+    options.timeoutMs ?? DEFAULT_CANDIDATE_TIMEOUT_MS,
+  );
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, timeoutController.signal])
+    : timeoutController.signal;
+  try {
+    if (candidate.kind === 'direct') {
+      options.log?.(`Dialing direct address: ${candidate.address}`);
+      await host.dial(multiaddr(candidate.address), { signal });
+      if (expectedPeerId) await observeConnection(host, expectedPeerId, signal);
+      return;
+    }
 
-  log?.(`Preconnecting resolved relay: ${candidate.relayAddress}`);
-  await host.dial(multiaddr(candidate.relayAddress), { signal });
-  const target = peerIdFromString(candidate.targetPeerId);
-  await host.peerStore.merge(target, { multiaddrs: [multiaddr(candidate.address)] });
-  log?.(`Dialing resolved circuit: ${candidate.address}`);
-  await host.dial(multiaddr(candidate.address), { signal });
-  await observeConnection(host, candidate.targetPeerId, signal);
+    options.log?.(`Preconnecting relay: ${candidate.relayAddress}`);
+    await host.dial(multiaddr(candidate.relayAddress), { signal });
+    const target = peerIdFromString(candidate.targetPeerId);
+    await host.peerStore.merge(target, { multiaddrs: [multiaddr(candidate.address)] });
+    options.log?.(`Dialing circuit: ${candidate.address}`);
+    await host.dial(multiaddr(candidate.address), { signal });
+    await observeConnection(host, expectedPeerId!, signal);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /**
@@ -105,15 +172,23 @@ export async function connectLibp2pPeer(
   options: PeerConnectOpts = {},
 ): Promise<void> {
   throwIfAborted(options.signal);
-  if (host.getConnections().some((connection) => connection.remotePeer.toString() === peerId)) {
+  const canonicalPeerId = peerIdFromString(peerId).toString();
+  if (
+    host.getConnections().some(
+      (connection) => connection.remotePeer.toString() === canonicalPeerId,
+    )
+  ) {
     return;
   }
 
-  const candidates: ConnectCandidate[] = [];
+  const candidates: Libp2pConnectCandidate[] = [];
   for (const address of resolvedAddresses) {
     try {
-      const candidate = parseCandidate(address);
-      if (candidate.targetPeerId !== undefined && candidate.targetPeerId !== peerId) continue;
+      const candidate = parseLibp2pConnectCandidate(address);
+      if (
+        candidate.targetPeerId !== undefined &&
+        candidate.targetPeerId !== canonicalPeerId
+      ) continue;
       if (candidate.kind === 'direct' && !isPublicLikeAddress(candidate.address)) continue;
       candidates.push(candidate);
     } catch {
@@ -125,14 +200,13 @@ export async function connectLibp2pPeer(
   let lastCandidateError: unknown;
   for (const candidate of candidates) {
     throwIfAborted(options.signal);
-    const candidateSignal = AbortSignal.timeout(
-      options.candidateTimeoutMs ?? DEFAULT_CANDIDATE_TIMEOUT_MS,
-    );
-    const signal = options.signal
-      ? AbortSignal.any([options.signal, candidateSignal])
-      : candidateSignal;
     try {
-      await dialCandidate(host, candidate, signal, options.log);
+      await connectLibp2pCandidate(host, candidate, {
+        expectedPeerId: canonicalPeerId,
+        signal: options.signal,
+        timeoutMs: options.candidateTimeoutMs,
+        log: options.log,
+      });
       return;
     } catch (error) {
       if (options.signal?.aborted) throw error;
@@ -142,7 +216,10 @@ export async function connectLibp2pPeer(
 
   throwIfAborted(options.signal);
   try {
-    await host.dial(peerIdFromString(peerId), options.signal ? { signal: options.signal } : undefined);
+    await host.dial(
+      peerIdFromString(canonicalPeerId),
+      options.signal ? { signal: options.signal } : undefined,
+    );
   } catch (error) {
     if (options.signal?.aborted) throw error;
     if (error instanceof Error && lastCandidateError !== undefined && error.cause === undefined) {

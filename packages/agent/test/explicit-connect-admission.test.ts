@@ -32,7 +32,10 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
       },
     },
     peerResolver: {
-      connect: vi.fn(async () => [DIRECT_MULTIADDR]),
+      connect: vi.fn(async () => ({
+        status: 'connected' as const,
+        resolvedAddresses: [DIRECT_MULTIADDR],
+      })),
     },
     networkAdmissionCoordinator: {
       enabled: true,
@@ -187,10 +190,10 @@ describe('explicit connect network admission', () => {
   it('delegates cold-peer connection policy to the canonical resolver boundary', async () => {
     const agent = makeAgent({
       peerResolver: {
-        connect: vi.fn(async () => [
-          DIRECT_MULTIADDR,
-          CIRCUIT_MULTIADDR,
-        ]),
+        connect: vi.fn(async () => ({
+          status: 'connected' as const,
+          resolvedAddresses: [DIRECT_MULTIADDR, CIRCUIT_MULTIADDR],
+        })),
       },
       networkAdmissionCoordinator: admittedCoordinator(PEER_ID),
     });
@@ -218,6 +221,21 @@ describe('explicit connect network admission', () => {
     await expect(
       AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
     ).rejects.toMatchObject({ code: 'DIAL_FAILED' });
+  });
+
+  it('preserves PEER_NOT_FOUND when resolution and peer-store fallback both miss', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async () => ({
+          status: 'unresolved' as const,
+          resolvedAddresses: [],
+        })),
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({ code: 'PEER_NOT_FOUND' });
   });
 
   it('classifies an abort from the caller-owned deadline as CONNECT_TIMEOUT', async () => {

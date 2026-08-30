@@ -194,6 +194,10 @@ export interface ConnectOpts extends ResolveOpts {
   log?: (message: string) => void;
 }
 
+export type PeerConnectionOutcome =
+  | { status: 'connected'; resolvedAddresses: Address[] }
+  | { status: 'unresolved'; resolvedAddresses: [] };
+
 const DEFAULT_PER_STEP_TIMEOUT_MS = 5_000;
 const DEFAULT_AGENT_DIRECTORY_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 const MAX_CONFIGURED_RELAY_FALLBACKS = 4;
@@ -504,21 +508,26 @@ export class PeerResolver {
    * Resolve and connect through one canonical boundary. Every production
    * resolver consumer uses this method so address ordering, relay preconnect,
    * cancellation, and identity fallback cannot drift between call sites.
-   * An empty result means resolution completed without finding an address;
-   * transport failures after a non-empty result are thrown.
+   * Even an empty resolver result reaches the Network boundary so libp2p can
+   * reuse peer-store identity information. The explicit outcome prevents a
+   * genuine miss from being mistaken for a successful connection.
    */
-  async connect(peerId: NodeIdentity, opts: ConnectOpts = {}): Promise<Address[]> {
+  async connect(peerId: NodeIdentity, opts: ConnectOpts = {}): Promise<PeerConnectionOutcome> {
     const addresses = await this.resolve(peerId, opts);
     if (opts.signal?.aborted) {
       throw new DOMException('Peer connection aborted', 'AbortError');
     }
-    if (addresses.length === 0) return addresses;
-    await this.network.connectPeer(peerId, addresses, {
-      signal: opts.signal,
-      candidateTimeoutMs: opts.candidateTimeoutMs,
-      log: opts.log,
-    });
-    return addresses;
+    try {
+      await this.network.connectPeer(peerId, addresses, {
+        signal: opts.signal,
+        candidateTimeoutMs: opts.candidateTimeoutMs,
+        log: opts.log,
+      });
+      return { status: 'connected', resolvedAddresses: addresses };
+    } catch (error) {
+      if (opts.signal?.aborted || addresses.length > 0) throw error;
+      return { status: 'unresolved', resolvedAddresses: [] };
+    }
   }
 }
 

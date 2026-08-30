@@ -6,6 +6,8 @@ const RELAY_A = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv
 const RELAY_B = '/ip4/49.12.4.64/tcp/9090/p2p/12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ';
 const CIRCUIT_A = `${RELAY_A}/p2p-circuit/p2p/${TARGET}`;
 const CIRCUIT_B = `${RELAY_B}/p2p-circuit/p2p/${TARGET}`;
+const TARGETLESS_DIRECT = '/ip4/178.105.87.39/tcp/9090';
+const WRONG_TARGET = '12D3KooWR5C8ajtPigVGnBwDGTZ4XAtCepRs2WCgfPuBPrgGqcNK';
 
 function targetString(target: unknown): string {
   return (target as { toString(): string }).toString();
@@ -55,6 +57,57 @@ describe('connectLibp2pPeer', () => {
     });
 
     expect(calls).toEqual([RELAY_A, CIRCUIT_A, RELAY_B, CIRCUIT_B]);
+  });
+
+  it('does not accept a targetless direct dial until the requested peer is observed', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const host = {
+        getConnections: () => calls.includes(CIRCUIT_B)
+          ? [{ remotePeer: { toString: () => TARGET } }]
+          : calls.includes(TARGETLESS_DIRECT)
+            ? [{ remotePeer: { toString: () => WRONG_TARGET } }]
+            : [],
+        dial: vi.fn(async (target: unknown) => { calls.push(targetString(target)); }),
+        peerStore: { merge: vi.fn(async () => undefined) },
+      };
+
+      const connection = connectLibp2pPeer(host, TARGET, [TARGETLESS_DIRECT, CIRCUIT_B], {
+        candidateTimeoutMs: 50,
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      await connection;
+
+      expect(calls).toEqual([TARGETLESS_DIRECT, RELAY_B, CIRCUIT_B]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caller cancellation interrupts post-dial observation without trying the next route', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const calls: string[] = [];
+      const host = {
+        getConnections: () => [],
+        dial: vi.fn(async (target: unknown) => { calls.push(targetString(target)); }),
+        peerStore: { merge: vi.fn(async () => undefined) },
+      };
+
+      const connection = connectLibp2pPeer(host, TARGET, [TARGETLESS_DIRECT, CIRCUIT_B], {
+        signal: controller.signal,
+        candidateTimeoutMs: 5_000,
+      });
+      await Promise.resolve();
+      controller.abort();
+
+      await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
+      expect(calls).toEqual([TARGETLESS_DIRECT]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('surfaces the final fallback failure instead of a candidate-local AbortError', async () => {

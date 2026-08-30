@@ -36,7 +36,12 @@ export function isPublicLikeAddress(addr: string): boolean {
   if (ipv6) {
     const ip = ipv6[1].toLowerCase();
     if (ip === '::' || ip === '::1') return false;
-    if (ip.startsWith('fe80')) return false;
+    const firstSegment = ip.split(':', 1)[0];
+    if (!/^[0-9a-f]{1,4}$/.test(firstSegment)) return false;
+    const firstHextet = Number.parseInt(firstSegment, 16);
+    // RFC 4291 link-local unicast is fe80::/10, i.e. first hextet
+    // fe80 through febf (not only the literal fe80 prefix).
+    if ((firstHextet & 0xffc0) === 0xfe80) return false;
     if (/^f[cd]/.test(ip)) return false;
     if (ip.startsWith('ff')) return false;
     return true;

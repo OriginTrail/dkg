@@ -141,9 +141,46 @@ describe('PeerResolver', () => {
       agentDirectory: makeAgentDir(),
     });
 
-    const addresses = await resolver.connect(PEER_B);
+    const outcome = await resolver.connect(PEER_B);
 
-    expect(net.__connectCalls).toEqual([{ peerId: PEER_B, addrs: addresses }]);
+    expect(outcome).toEqual({
+      status: 'connected',
+      resolvedAddresses: ['/ip4/1.2.3.4/tcp/9090/p2p/12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6'],
+    });
+    expect(net.__connectCalls).toEqual([{
+      peerId: PEER_B,
+      addrs: outcome.resolvedAddresses,
+    }]);
+  });
+
+  it('connect tries the transport peer-store fallback after an empty resolution', async () => {
+    net.__findPeerImpl = async () => [];
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(PEER_B)).resolves.toEqual({
+      status: 'connected',
+      resolvedAddresses: [],
+    });
+    expect(net.__connectCalls).toEqual([{ peerId: PEER_B, addrs: [] }]);
+  });
+
+  it('reports an honest unresolved outcome when the empty peer-store fallback fails', async () => {
+    net.__findPeerImpl = async () => [];
+    net.connectPeer = async () => { throw new Error('peer absent from peer store'); };
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(PEER_B)).resolves.toEqual({
+      status: 'unresolved',
+      resolvedAddresses: [],
+    });
   });
 
   it('connect propagates caller cancellation instead of reporting an empty lookup', async () => {
@@ -258,6 +295,20 @@ describe('PeerResolver', () => {
       peerId: PEER_B,
       addrs: [`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`],
     });
+  });
+
+  it('step 5: treats the whole IPv6 fe80::/10 range as private and adds a relay circuit', async () => {
+    net.__findPeerImpl = async () => [`/ip6/fe90::1/tcp/9090/p2p/${PEER_B}`];
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(async () => null),
+      configuredRelayTargets: RELAY_TARGET,
+    });
+
+    const out = await resolver.resolve(PEER_B);
+
+    expect(out).toContain(`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`);
   });
 
   it('step 5: does not add configured relay circuits when a public direct route exists', async () => {

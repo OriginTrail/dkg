@@ -123,10 +123,11 @@ describe('connectToMultiaddr', () => {
     });
 
     expect(dial.calls).toHaveLength(2);
-    expect(dial.calls.map(([, options]) => options?.signal)).toEqual([
-      controller.signal,
-      controller.signal,
-    ]);
+    const observedSignals = dial.calls.map(([, options]) => options?.signal);
+    expect(observedSignals[0]).toBe(observedSignals[1]);
+    expect(observedSignals[0]).not.toBe(controller.signal);
+    controller.abort();
+    expect(observedSignals[0]?.aborted).toBe(true);
   });
 
   it('aborts promptly while waiting to confirm an explicit circuit', async () => {
@@ -207,6 +208,15 @@ describe('abortable recovery connection helpers', () => {
     await expect(ensurePeerConnected({
       connect: async () => { throw new Error('unreachable'); },
     } as any, peerId)).resolves.toBeUndefined();
+  });
+
+  it('preserves a peer-store-only connection outcome with no resolved addresses', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const outcome = { status: 'connected' as const, resolvedAddresses: [] };
+
+    await expect(ensurePeerConnected({
+      connect: async () => outcome,
+    } as any, peerId)).resolves.toBe(outcome);
   });
 
   it('interrupts the real protocol-readiness delay', async () => {
