@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { type LiftJob } from '../src/index.js';
 import {
   queuedLiftOperationKind,
@@ -95,6 +95,22 @@ describe('GH#2270 failed-job retry disposition', () => {
     const after = await publisher.getStatus(failed.jobId);
     expect(after?.status).toBe('failed');
     expect(after?.retries.retryCount).toBe(0);
+  });
+
+  it('rejects unsafe exact job IDs before any control-plane store access', async () => {
+    const publisher = createPublisher();
+    const query = vi.spyOn(h.store, 'query');
+    const insert = vi.spyOn(h.store, 'insert');
+    const deleteByPattern = vi.spyOn(h.store, 'deleteByPattern');
+
+    for (const jobId of ['bad>id', 'a'.repeat(257)]) {
+      expect(await publisher.retryDetailed({ jobId }))
+        .toEqual({ retried: 0, blockedPendingRecovery: 0, skipped: 0 });
+    }
+
+    expect(query).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    expect(deleteByPattern).not.toHaveBeenCalled();
   });
 
   it('reaccepts a pre-send-safe failed job and partitions the rest into blocked and skipped', async () => {

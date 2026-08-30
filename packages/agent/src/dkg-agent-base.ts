@@ -119,7 +119,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -373,6 +373,7 @@ import {
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
+  type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
@@ -482,6 +483,13 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
+        () => markProjectionDirty?.(),
+      );
+    },
+    deleteByPatternWithoutCount(pattern, options) {
+      return invalidateAfterMutation(
+        () => deleteByPatternWithoutCount(innerStore, pattern, options),
+        () => true,
         () => markProjectionDirty?.(),
       );
     },
@@ -1065,7 +1073,16 @@ export class DKGAgentBase {
   /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
   protected coreHostRecordingGeneration = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
-  protected readonly vmReconcileNegativeCache = new Map<string, Omit<VmReconcileNegativeRecord, 'cacheKey'>>();
+  protected readonly vmReconcileNegativeCache = new Map<
+    string,
+    Omit<
+      VmReconcileNegativeRecord,
+      'cacheKey' | 'peerTopologyKey' | 'peerTopology' | 'cleanMissPeerIds'
+    > & {
+      peerTopology: VmReconcilePeerTopology;
+      cleanMissPeerIds: string[];
+    }
+  >();
   /** Bounded access-ordered keys already consulted in the durable store. */
   protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
@@ -1623,7 +1640,7 @@ export class DKGAgentBase {
   protected readonly skippedNoSyncPeers = new Set<string>();
   /**
    * Per-peer timestamp of the most recent successful run of sync-on-connect.
-   * Driven by `runSyncOnConnect.onPeerSynced`. Used by the periodic
+   * Driven by `runSyncOnConnect.onSyncAccounting`. Used by the periodic
    * reconciler to skip peers that have already synced recently — the
    * staleness threshold is intentionally larger than the reconciler
    * interval so a single missed tick doesn't immediately retry every
@@ -1646,7 +1663,7 @@ export class DKGAgentBase {
    * consecutive reconciler attempts that did NOT produce a successful
    * sync; `nextRetryAt` is the epoch-ms before which the reconciler
    * skips this peer. Reset on useful progress or a clean denial-only response
-   * (`onPeerSynced`) and pruned after stale disconnects. See
+   * (`onSyncAccounting`) and pruned after stale disconnects. See
    * `SYNC_BACKOFF_BASE_MS`.
    */
   protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();

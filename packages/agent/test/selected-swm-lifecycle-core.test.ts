@@ -65,6 +65,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       const accountingAgent = {
         lastSuccessfulSyncAt: new Map<string, number>(),
         lastSyncProgressAt: new Map<string, number>(),
+        skippedNoSyncPeers: new Set<string>(),
+        syncReconcilerBackoff: backoff,
+        applySyncOnConnectAccounting:
+          LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
         recordSyncReconcilerFailure: (peerId: string) => {
           backoff.set(peerId, { failures: 1 });
         },
@@ -82,7 +86,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
             getContextGraphIds: () => [privateCg],
             syncFromPeer: async () => recovery,
           },
-          onPeerSynced: (_peerId, outcome) => {
+          onSyncAccounting: (_peerId, outcome) => {
             if (outcome) onSyncAccounting(outcome);
           },
           logInfo: () => {},
@@ -351,6 +355,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       lastSuccessfulSyncAt: new Map<string, number>(),
       lastSyncProgressAt: new Map<string, number>(),
       syncReconcilerBackoff: new Map<string, unknown>(),
+      applySyncOnConnectAccounting:
+        LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
       rfc64SwmRecoveryCoordinatorV1: {
         admitSelectedPublic: (peerId, contextGraphIds) => (
@@ -448,6 +454,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       lastSuccessfulSyncAt: new Map<string, number>(),
       lastSyncProgressAt: new Map<string, number>(),
       syncReconcilerBackoff: new Map<string, unknown>(),
+      applySyncOnConnectAccounting:
+        LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
       rfc64SwmRecoveryCoordinatorV1: {
         admitSelectedPublic: (peerId, contextGraphIds) => (
@@ -488,9 +496,11 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
     expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     expect(agent.lastSuccessfulSyncAt.has(PEER)).toBe(false);
-    // No freshness/progress callback means the reconciler wrapper classifies
-    // this explicit incomplete result as a failed attempt and grows backoff.
-    expect(accounting).toEqual([]);
+    expect(accounting).toEqual([{
+      reconcilerDisposition: 'retry',
+      fresh: false,
+      progress: false,
+    }]);
   });
 
   it('continues a voluntary 672/905 public snapshot yield to 905/905 with fresh admission', async () => {
@@ -567,7 +577,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         { contextGraphId: publicCg, selected: true, priority: 2_000, event: 'end' },
       ]);
 
-      const onPeerSynced = vi.fn();
+      const onSyncAccounting = vi.fn();
       const outcome = await runSyncOnConnect({
         remotePeer: PEER,
         syncingPeers: new Set(),
@@ -585,11 +595,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         refreshMetaSyncedFlags: async () => undefined,
         discoverContextGraphsFromStore: async () => 0,
         syncSharedMemoryFromPeer: async () => summary,
-        onPeerSynced,
+        onSyncAccounting,
         logInfo: () => {},
       });
       expect(outcome).toBe('synced');
-      expect(onPeerSynced).toHaveBeenCalledWith(PEER, {
+      expect(onSyncAccounting).toHaveBeenCalledWith(PEER, {
+        reconcilerDisposition: 'clear',
         fresh: true,
         progress: false,
       });

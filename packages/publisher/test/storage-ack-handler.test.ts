@@ -1095,16 +1095,16 @@ describe('StorageACKHandler', () => {
       expect(unrelated).toMatchObject({ type: 'boolean', value: true });
     });
 
-    it('falls back to per-subject deleteByPattern when update() is unavailable', async () => {
+    it('falls back to per-subject no-count delete when update() is unavailable', async () => {
       const base = new OxigraphStore();
-      let deleteByPatternCalls = 0;
+      let deleteWithoutCountCalls = 0;
       const store = new Proxy(base as unknown as TripleStore, {
         get(target, prop, receiver) {
           if (prop === 'update') return undefined;
-          if (prop === 'deleteByPattern') {
-            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
-              deleteByPatternCalls += 1;
-              return target.deleteByPattern.call(target, ...args);
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
+              deleteWithoutCountCalls += 1;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
             };
           }
           const value = Reflect.get(target, prop, receiver);
@@ -1116,19 +1116,19 @@ describe('StorageACKHandler', () => {
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(false);
-      expect(deleteByPatternCalls).toBe(1);
+      expect(deleteWithoutCountCalls).toBe(1);
     });
 
     it('falls back through a decorator whose inner store does not support update()', async () => {
       const base = new OxigraphStore();
-      let deleteByPatternCalls = 0;
+      let deleteWithoutCountCalls = 0;
       const innerWithoutUpdate = new Proxy(base as unknown as TripleStore, {
         get(target, prop, receiver) {
           if (prop === 'update') return undefined;
-          if (prop === 'deleteByPattern') {
-            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
-              deleteByPatternCalls += 1;
-              return target.deleteByPattern.call(target, ...args);
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
+              deleteWithoutCountCalls += 1;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
             };
           }
           const value = Reflect.get(target, prop, receiver);
@@ -1142,7 +1142,7 @@ describe('StorageACKHandler', () => {
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(false);
-      expect(deleteByPatternCalls).toBe(1);
+      expect(deleteWithoutCountCalls).toBe(1);
       await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(catalogTriples.length);
     });
 
@@ -1166,15 +1166,15 @@ describe('StorageACKHandler', () => {
               return target.update!.call(target, ...args);
             };
           }
-          if (prop === 'deleteByPattern') {
-            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
               deletedPatterns.push(args[0]);
               // This regression targets the ACK routing policy. Blank-node
               // labels are operation-local, so the spy records the requested
-              // legacy delete without asking the embedded backend to resolve
+              // no-count delete without asking the embedded backend to resolve
               // that label in a separate operation.
-              if (args[0].subject?.startsWith('_:')) return 0;
-              return target.deleteByPattern.call(target, ...args);
+              if (args[0].subject?.startsWith('_:')) return;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
             };
           }
           const value = Reflect.get(target, prop, receiver);

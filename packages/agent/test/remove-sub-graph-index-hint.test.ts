@@ -77,7 +77,7 @@ describe('removeSubGraph graph-set maintenance', () => {
     expect(queryCalls[0]).toContain('DELETE WHERE');
   });
 
-  it('falls back to deleteByPattern() when the SPARQL update fails', async () => {
+  it('falls back to a no-count pattern delete when the SPARQL update fails', async () => {
     const inner = new OxigraphStore();
     const deletePatterns: Array<{ graph?: string; subject?: string }> = [];
     const store = new Proxy(inner, {
@@ -85,10 +85,9 @@ describe('removeSubGraph graph-set maintenance', () => {
         if (prop === 'update') {
           return async () => { throw new Error('update unsupported'); };
         }
-        if (prop === 'deleteByPattern') {
+        if (prop === 'deleteByPatternWithoutCount') {
           return async (pattern: { graph?: string; subject?: string }) => {
             deletePatterns.push(pattern);
-            return 0;
           };
         }
         const value = Reflect.get(target, prop, receiver);

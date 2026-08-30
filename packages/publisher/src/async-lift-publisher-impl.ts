@@ -9,7 +9,7 @@ import {
 } from './chain-proof-retry-schedule.js';
 import { ReconciliationSnapshotCoordinator } from './reconciliation-snapshot-coordinator.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
@@ -54,6 +54,7 @@ import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
+  AsyncLiftRetryFilter,
   AsyncLiftRetryOutcome,
   AsyncLiftRetryStateReader,
   IntentLookupInput,
@@ -2748,10 +2749,34 @@ export class TripleStoreAsyncLiftPublisher
    * {@link describeConfiguredRetryState} projects its reason from, so the counts an operator gets and
    * the reason shown per job are ONE partition rather than two orderings kept in step by hand.
    */
-  async retryDetailed(filter: { status?: 'failed' } = {}): Promise<AsyncLiftRetryOutcome> {
-    await this.ensureGraph();
+  async retryDetailed(filter: AsyncLiftRetryFilter = {}): Promise<AsyncLiftRetryOutcome> {
     if (filter.status && filter.status !== 'failed') {
       return { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
+    }
+
+    if (filter.jobId !== undefined) {
+      if (!isSafeJobId(filter.jobId)) {
+        return { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
+      }
+    }
+
+    await this.ensureGraph();
+
+    if (filter.jobId !== undefined) {
+      return this.claimCoordinator.runClaimJobTransaction(filter.jobId, async (transaction) => {
+        const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
+        if (transaction.kind === 'missing' || !isFailedJob(transaction.current)) return counts;
+        const action = classifyRetryAction(transaction.current);
+        if (action === 'reaccept') {
+          await this.reacceptFailedJobWithinScope(
+            transaction.current,
+            { kind: 'retry' },
+            transaction.scope,
+          );
+        }
+        counts[FAILED_JOB_RETRY_ACTION_COUNT[action]] += 1;
+        return counts;
+      });
     }
 
     // #1837 — reaccept (failed→accepted) is a terminal→active transition; it MUST be
@@ -3090,8 +3115,8 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async deleteJob(jobId: string): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(jobId), graph: this.graphUri });
-    await this.store.deleteByPattern({ subject: requestSubject(jobId), graph: this.graphUri });
+    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri });
+    await deleteByPatternWithoutCount(this.store, { subject: requestSubject(jobId), graph: this.graphUri });
   }
 
   // Scheduling-only — the claim attempt re-checks every guard — and it must never throw into
@@ -3456,36 +3481,39 @@ export class TripleStoreAsyncLiftPublisher
       if (!isFailedJob(current)) {
         throw new Error(`Only failed LiftJobs can be reaccepted. Current status: ${current.status}`);
       }
-      if (isHeldForChainProof(current)) {
-        throw new LiftJobPendingChainProofError(
-          `LiftJob ${current.jobId} failed as ${current.failure.code} after a transaction may have been submitted; `
-            + 'it cannot be republished until chain recovery proves the transaction absent',
-          current.jobId,
-          // PR #2300 r1 — per-job: does an automatic lane exist that can move THIS record, or is
-          // the operator's by-id clear its only exit? The HTTP boundary forwards the answer.
-          // r4 (3811993669) — record eligibility is only half of it: a publisher with no chain-proof
-          // resolver wired never touches the job, so promising a retry would send clients into a loop
-          // that cannot converge. The answer is the record AND this instance's configured capability.
-          this.automaticExitIsConfiguredFor(current),
-        );
-      }
-      const reset = resetFailedLiftJobToAccepted(current, this.now());
-      const retriedAt = this.now();
-      const reaccepted: LiftJobAccepted = {
-        ...reset,
-        retries: {
-          ...reset.retries,
-          retryCount: intent.kind === 'freshClientMandate' ? 0 : current.retries.retryCount + 1,
-          lastRetryReason: current.failure.code,
-        },
-        timestamps: {
-          ...reset.timestamps,
-          lastRetriedAt: retriedAt,
-          updatedAt: retriedAt,
-        },
-      };
-      return await scope.commitReaccept(reaccepted);
+      return await this.reacceptFailedJobWithinScope(current, intent, scope);
     });
+  }
+
+  private async reacceptFailedJobWithinScope(
+    current: PersistedFailedJob,
+    intent: ReacceptIntent,
+    scope: LiftJobRecoveryTransitionScope,
+  ): Promise<LiftJobAccepted> {
+    if (isHeldForChainProof(current)) {
+      throw new LiftJobPendingChainProofError(
+        `LiftJob ${current.jobId} failed as ${current.failure.code} after a transaction may have been submitted; `
+          + 'it cannot be republished until chain recovery proves the transaction absent',
+        current.jobId,
+        this.automaticExitIsConfiguredFor(current),
+      );
+    }
+    const reset = resetFailedLiftJobToAccepted(current, this.now());
+    const retriedAt = this.now();
+    const reaccepted: LiftJobAccepted = {
+      ...reset,
+      retries: {
+        ...reset.retries,
+        retryCount: intent.kind === 'freshClientMandate' ? 0 : current.retries.retryCount + 1,
+        lastRetryReason: current.failure.code,
+      },
+      timestamps: {
+        ...reset.timestamps,
+        lastRetriedAt: retriedAt,
+        updatedAt: retriedAt,
+      },
+    };
+    return await scope.commitReaccept(reaccepted);
   }
 
   /**

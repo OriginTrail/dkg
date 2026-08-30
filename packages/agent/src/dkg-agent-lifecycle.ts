@@ -100,7 +100,7 @@ import {
   withRetry,
 } from '@origintrail-official/dkg-core';
 import type { RandomSamplingRepairOperation } from '@origintrail-official/dkg-random-sampling';
-import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, deleteByPatternWithoutCount, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
@@ -2239,8 +2239,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       outboxStore,
       // PR feat/chain-agents-cg-phonebook: stall-recovery now routes
       // through the full PeerResolver instead of raw DHT findPeer.
-      // The dial fast-path (ProtocolRouter) already prefers
-      // PeerResolver.resolve() on every attempt, but the outbox
+      // The dial fast-path (ProtocolRouter) already uses the canonical
+      // PeerResolver.connect() boundary on every attempt, but the outbox
       // stall-walk (the Messenger peer-recovery scheduler) was hardcoded
       // to a DHT-only path — so an entry that timed out 5x because
       // its addresses were stale couldn't recover by consulting
@@ -2249,7 +2249,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // remains the step-2 DHT lookup inside resolve(), so we don't
       // lose any pre-existing recovery path.
       resolvePeer: async (peerId, { signal }) => {
-        await peerResolver.resolve(peerId, { signal }).catch(() => undefined);
+        await peerResolver.connect(peerId, { signal }).catch(() => undefined);
       },
     });
     // A remote join handler that aborts before persisting its decision can be
@@ -4818,12 +4818,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
-    let syncAccountingClearedBackoff = false;
+    let syncAccounting: SyncOnConnectPeerOutcome | undefined;
     try {
-      const onSyncAccounting = () => {
-        syncAccountingClearedBackoff = true;
+      const onSyncAccounting = (outcome: SyncOnConnectPeerOutcome) => {
+        syncAccounting = outcome;
       };
       const outcome = await attempt(onSyncAccounting);
+      if (syncAccounting) {
+        this.applySyncOnConnectAccounting(remotePeer, syncAccounting, probe);
+      }
       if (outcome === 'deferred-backpressure') {
         this.log.info(
           createOperationContext('sync'),
@@ -4835,7 +4838,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         outcome !== 'skipped-no-sync' &&
         outcome !== 'already-syncing' &&
         outcome !== 'not-started' &&
-        !syncAccountingClearedBackoff &&
+        !syncAccounting &&
         this.lastSuccessfulSyncAt.get(remotePeer) === lastOk &&
         this.lastSyncProgressAt.get(remotePeer) === lastProgress
       ) {
@@ -5062,25 +5065,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);
       },
-      onPeerSynced: (peerId, outcome) => {
+      onSyncAccounting: (peerId, outcome) => {
         const selectedRetryStillRequired = mode === 'ordinary-after-selected'
           && this.selectedSwmBootstrapAdmission.isRetryRequired(peerId);
-        const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        if (outcome?.progress) {
-          this.lastSyncProgressAt.set(peerId, progressAt);
-        }
-        if ((outcome?.fresh ?? true) && !selectedRetryStillRequired) {
-          this.lastSuccessfulSyncAt.set(peerId, progressAt);
-        }
-        this.skippedNoSyncPeers.delete(peerId);
-        // An owed ordinary replay may succeed after selected recovery reported
-        // an incomplete scope. Preserve that selected lane's retry/backoff;
-        // ordinary freshness must not consume its recovery ownership.
-        if (!selectedRetryStillRequired) {
-          this.syncReconcilerBackoff.delete(peerId);
-        }
-        if (outcome) {
-          onSyncAccounting?.(outcome);
+        const effectiveOutcome: SyncOnConnectPeerOutcome =
+          selectedRetryStillRequired && outcome.reconcilerDisposition === 'clear'
+            ? {
+                reconcilerDisposition: 'defer',
+                fresh: false,
+                progress: outcome.progress,
+              }
+            : outcome;
+        if (onSyncAccounting) {
+          onSyncAccounting(effectiveOutcome);
+        } else {
+          this.applySyncOnConnectAccounting(peerId, effectiveOutcome);
         }
       },
     });
@@ -5157,16 +5156,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);
       },
-      onPeerSynced: (peerId, outcome) => {
-        const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        if (outcome?.progress) {
-          this.lastSyncProgressAt.set(peerId, progressAt);
+      onSyncAccounting: (peerId, outcome) => {
+        if (onSyncAccounting) {
+          onSyncAccounting(outcome);
+        } else {
+          this.applySyncOnConnectAccounting(peerId, outcome);
         }
-        // A selected-only retry never stamps the whole peer fresh; durable and
-        // unrelated CG lanes were deliberately outside this invocation.
-        this.skippedNoSyncPeers.delete(peerId);
-        this.syncReconcilerBackoff.delete(peerId);
-        if (outcome) onSyncAccounting?.(outcome);
       },
     });
   }
@@ -5392,7 +5387,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.skippedNoSyncPeers.delete(peerId);
       this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
       setTimeout(() => {
-        this.trySyncFromPeer(peerId).catch((err: unknown) => {
+        void (async () => {
+          const probe = await this.getSyncReconcilerProbe(peerId);
+          await this.attemptSyncFromPeerWithReconcilerAccounting(
+            peerId,
+            probe,
+            'on-connect',
+          );
+        })().catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
         });
@@ -5545,13 +5547,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return backoff.protocolsKey !== probe.protocolsKey || backoff.connectionKey !== probe.connectionKey;
   }
 
+  /** Apply one coherent sync result to freshness, progress, and retry state. */
+  applySyncOnConnectAccounting(
+    this: DKGAgent,
+    peerId: string,
+    outcome: SyncOnConnectPeerOutcome,
+    probe?: SyncReconcilerProbe,
+  ): void {
+    const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
+    if (outcome.progress) {
+      this.lastSyncProgressAt.set(peerId, progressAt);
+    }
+    if (outcome.fresh) {
+      this.lastSuccessfulSyncAt.set(peerId, progressAt);
+    }
+    this.skippedNoSyncPeers.delete(peerId);
+
+    if (outcome.reconcilerDisposition === 'clear') {
+      this.syncReconcilerBackoff.delete(peerId);
+    } else if (outcome.reconcilerDisposition === 'retry' && probe) {
+      this.recordSyncReconcilerFailure(peerId, probe);
+    }
+  }
+
   /**
    * Grow the per-peer sync-reconciler backoff after an attempt that did
    * not produce a successful sync. `nextRetryAt` advances by
    * `SYNC_BACKOFF_BASE_MS * 2^(failures-1)` (capped at
    * `SYNC_BACKOFF_MAX_MS`) with ±`SYNC_BACKOFF_JITTER` randomisation to
    * de-correlate retries across peers. Reset to absent on successful
-   * progress / denial-only clean response (`onPeerSynced`). Disconnect
+   * progress / denial-only clean response (`reconcilerDisposition: clear`). Disconnect
    * no longer clears this immediately; stale disconnected entries are
    * pruned by `pruneSyncReconcilerState`.
    */
@@ -8217,48 +8242,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async syncContextGraphFromConnectedPeers(this: DKGAgent,
     contextGraphId: string,
     options?: ContextGraphCatchupOptions,
-  ): Promise<{
-    /** Ordered connected peers before optional maxPeers windowing. */
-    connectedPeers: number;
-    /** Ordered connected peers before optional maxPeers windowing. */
-    totalPeers: number;
-    /** Peers selected and evaluated after optional maxPeers windowing. */
-    selectedPeers: number;
-    syncCapablePeers: number;
-    peersTried: number;
-    /**
-     * Subset of `peersTried` whose sync-capable peer produced a non-transport-
-     * failed round. Denials, metadata-only rows, and timeout-after-response
-     * still count as responses; daemon status mapping uses this to avoid
-     * reporting reachable-but-failed peers as curator-offline.
-     */
-    peersResponded: number;
-    /**
-     * Subset of `peersTried` whose sync round finished without a transport
-     * failure, without an explicit ACL denial, and with either real progress
-     * or a clean non-metadata-only empty completion.
-     */
-    peersSucceeded: number;
-    /** Context Graph admissions deferred by local scheduler pressure. */
-    deferredBackpressure: number;
-    dataSynced: number;
-    sharedMemorySynced: number;
-    /** A selected peer completed a non-empty SWM snapshot without failure. */
-    sharedMemoryCompletedCleanly: boolean;
-    /**
-     * `true` iff at least one peer in this run explicitly denied the sync
-     * by emitting a denial sentinel (`syncDenied` marker raised from
-     * `sync/requester/page-fetch.ts`, rolled up via `deniedPhases`). Kept
-     * as a boolean for the subscribe job's terminal status mapping.
-     */
-    denied: boolean;
-    /**
-     * Number of peers that explicitly denied at least one durable/SWM phase
-     * during this context-graph catch-up run.
-     */
-    deniedPeers: number;
-    diagnostics: CatchupSyncDiagnostics;
-  }> {
+  ): Promise<ContextGraphCatchupResult> {
     const ctx = createOperationContext('sync');
     const includeSharedMemory = options?.includeSharedMemory ?? false;
     const mode = options?.mode ?? 'background';
@@ -8337,6 +8321,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       scope: 'context-graph',
       source: catchupAdmissionSource(mode, sourceOverride),
     });
+  }
+
+  /** Focused VM-recovery operation that returns clean per-peer miss evidence. */
+  async syncVmRecoveryFromConnectedPeers(
+    this: DKGAgent,
+    contextGraphId: string,
+    options?: ContextGraphCatchupOptions,
+  ): Promise<{ catchup: ContextGraphCatchupResult; cleanMissPeerIds: string[] }> {
+    const catchup = await this.syncContextGraphFromConnectedPeers(contextGraphId, options);
+    return {
+      catchup,
+      // Embedders may still override the catch-up method with the pre-evidence
+      // result shape. Treat that legacy shape as no proof; production results
+      // always carry the immutable field below.
+      cleanMissPeerIds: [...(catchup.cleanSharedMemoryPeerIds ?? [])],
+    };
   }
 
   selectCatchupPeerWindow(this: DKGAgent,
@@ -8448,6 +8448,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sharedMemorySynced: number;
     /** A selected peer completed a non-empty SWM snapshot without failure. */
     sharedMemoryCompletedCleanly: boolean;
+    /** Immutable evidence owned by this catch-up operation and its single-flight result. */
+    cleanSharedMemoryPeerIds: readonly string[];
     denied: boolean;
     deniedPeers: number;
     diagnostics: CatchupSyncDiagnostics;
@@ -8461,6 +8463,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let dataSynced = 0;
     let sharedMemorySynced = 0;
     let noProtocolPeers = 0;
+    const cleanSharedMemoryPeerIds = new Set<string>();
     const diagnostics: CatchupSyncDiagnostics = {
       noProtocolPeers: 0,
       durable: {
@@ -8655,6 +8658,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         complete: r.durable.complete,
       });
       const sharedProgress = r.shared ? classifyDurableProgress(r.shared) : null;
+      if (sharedProgress?.completedWithoutFailure) {
+        cleanSharedMemoryPeerIds.add(remotePeerId);
+      }
       if (r.shared) {
         passTracker.recordPeerRound(
           remotePeerId,
@@ -8800,6 +8806,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       shared: SharedMemorySyncResult,
     ): void => {
       const progress = classifyDurableProgress(shared);
+      if (progress.completedWithoutFailure) {
+        cleanSharedMemoryPeerIds.add(remotePeerId);
+      }
       passTracker.recordPeerRound(
         remotePeerId,
         shared.swmCoverage,
@@ -8970,6 +8979,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dataSynced,
       sharedMemorySynced,
       sharedMemoryCompletedCleanly,
+      cleanSharedMemoryPeerIds: Object.freeze([...cleanSharedMemoryPeerIds]),
       denied: accessDeniedPeers.size > 0,
       deniedPeers: accessDeniedPeers.size,
       diagnostics,
@@ -9223,7 +9233,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peerId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<void> {
-    await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId, options);
+    await ensurePeerConnectedAtom(this.peerResolver, peerId, options);
     if (await this.networkAdmissionCoordinator.ensureAdmitted(
       peerId,
       createOperationContext('connect'),
@@ -10871,7 +10881,8 @@ async function runRecoverContextGraphSwmFromPeer(
             const raw = remaining.type === 'bindings' ? remaining.bindings[0]?.['c'] : undefined;
             const countVal = raw ? parseInt(String(raw).match(/\d+/)?.[0] ?? '0', 10) : 0;
             if (countVal === 0) {
-              await dependencies.store.deleteByPattern(
+              await deleteByPatternWithoutCount(
+                dependencies.store,
                 { graph: metaGraph, subject: op },
                 {
                   priority: 'background',

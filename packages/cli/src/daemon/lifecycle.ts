@@ -173,6 +173,10 @@ import {
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
+import {
+  decodeVmReconcileNegativeRow,
+  encodeVmReconcileNegativeRow,
+} from './vm-reconcile-negative-store-adapter.js';
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
@@ -1973,37 +1977,15 @@ async function runDaemonInnerWithStartupOwnership(
       loadVmReconcileNegative: async (cacheKey) => {
         const row = dashDb.getVmReconcileNegative(cacheKey);
         if (!row) return null;
-        try {
-          const candidateNamespaces = JSON.parse(row.candidate_namespaces) as Array<{
-            metaGraph: string;
-            dataGraph: string;
-          }>;
-          if (!Array.isArray(candidateNamespaces)) return null;
-          return {
-            cacheKey: row.cache_key,
-            localCgId: row.context_graph_id,
-            failures: row.failures,
-            nextRetryAt: row.next_retry_at,
-            swmGen: row.swm_gen,
-            candidateNamespaces,
-            peerTopologyKey: row.peer_topology_key,
-          };
-        } catch {
+        const decoded = decodeVmReconcileNegativeRow(row);
+        if (!decoded) {
           dashDb.deleteVmReconcileNegative(cacheKey);
           return null;
         }
+        return decoded;
       },
       saveVmReconcileNegative: async (record) => {
-        dashDb.upsertVmReconcileNegative({
-          cache_key: record.cacheKey,
-          context_graph_id: record.localCgId,
-          failures: record.failures,
-          next_retry_at: record.nextRetryAt,
-          swm_gen: record.swmGen,
-          candidate_namespaces: JSON.stringify(record.candidateNamespaces),
-          peer_topology_key: record.peerTopologyKey,
-          updated_at: Date.now(),
-        });
+        dashDb.upsertVmReconcileNegative(encodeVmReconcileNegativeRow(record, Date.now()));
       },
       deleteVmReconcileNegative: async (cacheKey) => {
         dashDb.deleteVmReconcileNegative(cacheKey);

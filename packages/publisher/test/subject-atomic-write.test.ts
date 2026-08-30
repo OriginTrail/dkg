@@ -47,6 +47,7 @@ function countingStore(
   type RealStore = {
     replaceSubject: (g: string, s: string, q: unknown, o?: unknown) => Promise<void>;
     deleteByPattern: (p: unknown, o?: unknown) => Promise<unknown>;
+    deleteByPatternWithoutCount: (p: unknown, o?: unknown) => Promise<void>;
   };
   const store = new Proxy(inner, {
     get(target, prop) {
@@ -64,6 +65,12 @@ function countingStore(
         return async (pattern: { graph?: string }, o?: unknown) => {
           if (pattern?.graph === GRAPH) counts.graphDeletes++;
           return (target as unknown as RealStore).deleteByPattern(pattern, o);
+        };
+      }
+      if (prop === 'deleteByPatternWithoutCount') {
+        return async (pattern: { graph?: string }, o?: unknown) => {
+          if (pattern?.graph === GRAPH) counts.graphDeletes++;
+          return (target as unknown as RealStore).deleteByPatternWithoutCount(pattern, o);
         };
       }
       const value = Reflect.get(target, prop, target);

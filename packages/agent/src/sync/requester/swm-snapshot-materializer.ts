@@ -21,6 +21,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
+  deleteByPatternWithoutCount,
   invalidateSwmMaterializationWitness,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
@@ -593,7 +594,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       .map((quad) => quad.predicate === `${DKG}shareOperationId`
         ? { ...quad, object: JSON.stringify(winnerShareOperationId) }
         : { ...quad });
-    await deps.store.deleteByPattern(
+    await deleteByPatternWithoutCount(
+      deps.store,
       { graph: descriptor.metaGraph, subject: descriptor.headSubject },
       { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
     );
@@ -602,7 +604,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       source: 'agent.sharedMemorySync.snapshotMaterializer.writePreservedHead',
     });
     for (const operationSubject of loserSubjects) {
-      await deps.store.deleteByPattern(
+      await deleteByPatternWithoutCount(
+        deps.store,
         { graph: descriptor.metaGraph, subject: operationSubject },
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
       );
@@ -739,12 +742,14 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       const operationSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
         seed: [descriptor.operationSubject],
       });
-      await deps.store.deleteByPattern(
+      await deleteByPatternWithoutCount(
+        deps.store,
         { graph: descriptor.metaGraph, subject: descriptor.headSubject },
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
       );
       for (const operationSubject of operationSubjects) {
-        await deps.store.deleteByPattern(
+        await deleteByPatternWithoutCount(
+          deps.store,
           { graph: descriptor.metaGraph, subject: operationSubject },
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
         );
@@ -760,12 +765,14 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           asset,
           { seed: [asset.operationSubject] },
         );
-        await deps.store.deleteByPattern(
+        await deleteByPatternWithoutCount(
+          deps.store,
           { graph: asset.metaGraph, subject: asset.headSubject },
           { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead' },
         );
         for (const operationSubject of operationSubjects) {
-          await deps.store.deleteByPattern(
+          await deleteByPatternWithoutCount(
+            deps.store,
             { graph: asset.metaGraph, subject: operationSubject },
             { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation' },
           );
