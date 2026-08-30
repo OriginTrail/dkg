@@ -52,6 +52,7 @@ import type {
   NodeIdentity,
   Address,
 } from './network.js';
+import { PeerConnectionUnresolvedError } from './network.js';
 import type { NetworkStateRegistry } from './network-state-registry.js';
 import { isPublicLikeAddress } from './address-policy.js';
 import type { ConfiguredRelayTarget } from './relay-target.js';
@@ -537,8 +538,14 @@ export class PeerResolver {
       });
       return { status: 'connected', resolvedAddresses: addresses };
     } catch (error) {
-      if (opts.signal?.aborted || addresses.length > 0) throw error;
-      return { status: 'unresolved', resolvedAddresses: [] };
+      if (
+        !opts.signal?.aborted
+        && addresses.length === 0
+        && error instanceof PeerConnectionUnresolvedError
+      ) {
+        return { status: 'unresolved', resolvedAddresses: [] };
+      }
+      throw error;
     }
   }
 }

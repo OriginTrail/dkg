@@ -223,6 +223,23 @@ describe('explicit connect network admission', () => {
     ).rejects.toMatchObject({ code: 'DIAL_FAILED' });
   });
 
+  it('classifies an operational transport failure after an empty lookup as DIAL_FAILED', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async () => {
+          throw new Error('libp2p is not started');
+        }),
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({
+      code: 'DIAL_FAILED',
+      message: expect.stringContaining('libp2p is not started'),
+    });
+  });
+
   it('preserves PEER_NOT_FOUND when resolution and peer-store fallback both miss', async () => {
     const agent = makeAgent({
       peerResolver: {

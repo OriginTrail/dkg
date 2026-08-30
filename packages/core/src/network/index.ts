@@ -7,6 +7,7 @@ export type {
   PeerConnectOpts,
   ProtocolHandler,
 } from './network.js';
+export { PeerConnectionUnresolvedError } from './network.js';
 
 export { LibP2PNetwork } from './libp2p-network.js';
 export {

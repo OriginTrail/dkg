@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   PeerResolver,
+  PeerConnectionUnresolvedError,
   StubNetworkStateRegistry,
   type Network,
   type PeerConnectionNetwork,
@@ -9,6 +10,7 @@ import {
   type Address,
   type NodeIdentity,
 } from '../src/network/index.js';
+import { connectLibp2pPeer } from '../src/network/libp2p-peer-connect.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -98,7 +100,24 @@ describe('PeerResolver', () => {
     registry = new StubNetworkStateRegistry();
   });
 
-  it('keeps the base Network interface implementable without connection capability', async () => {
+  it('wraps libp2p no-address failures in the exact unresolved transport signal', async () => {
+    const noAddresses = new Error('The dial request has no valid addresses for peer');
+    noAddresses.name = 'NoValidAddressesError';
+    const host = {
+      getConnections: () => [],
+      dial: async () => { throw noAddresses; },
+      peerStore: { merge: async () => undefined },
+    };
+
+    await expect(connectLibp2pPeer(host, RELAY_TARGET[0].peerId, []))
+      .rejects.toMatchObject({
+        name: 'PeerConnectionUnresolvedError',
+        code: 'PEER_CONNECTION_UNRESOLVED',
+        cause: noAddresses,
+      });
+  });
+
+  it('keeps the base Network interface implementable but rejects a missing connection capability', async () => {
     const legacyNetwork: Network = {
       localId: PEER_A,
       localAddresses: [],
@@ -118,10 +137,9 @@ describe('PeerResolver', () => {
       registry,
       agentDirectory: makeAgentDir(),
     });
-    await expect(resolver.connect(PEER_B)).resolves.toEqual({
-      status: 'unresolved',
-      resolvedAddresses: [],
-    });
+    await expect(resolver.connect(PEER_B)).rejects.toThrow(
+      'Network transport does not implement the peer-connection capability',
+    );
   });
 
   it('step 1: returns live-conn remoteAddr and stops', async () => {
@@ -197,7 +215,9 @@ describe('PeerResolver', () => {
 
   it('reports an honest unresolved outcome when the empty peer-store fallback fails', async () => {
     net.__findPeerImpl = async () => [];
-    net.connectPeer = async () => { throw new Error('peer absent from peer store'); };
+    net.connectPeer = async () => {
+      throw new PeerConnectionUnresolvedError('peer absent from peer store');
+    };
     const resolver = new PeerResolver({
       network: net,
       registry,
@@ -208,6 +228,18 @@ describe('PeerResolver', () => {
       status: 'unresolved',
       resolvedAddresses: [],
     });
+  });
+
+  it('propagates an operational transport failure after an empty resolution', async () => {
+    net.__findPeerImpl = async () => [];
+    net.connectPeer = async () => { throw new Error('libp2p is not started'); };
+    const resolver = new PeerResolver({
+      network: net,
+      registry,
+      agentDirectory: makeAgentDir(),
+    });
+
+    await expect(resolver.connect(PEER_B)).rejects.toThrow('libp2p is not started');
   });
 
   it('connect propagates caller cancellation instead of reporting an empty lookup', async () => {

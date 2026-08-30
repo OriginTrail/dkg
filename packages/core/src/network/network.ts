@@ -160,3 +160,17 @@ export interface PeerConnectionNetwork extends Network {
     opts?: PeerConnectOpts,
   ): Promise<void>;
 }
+
+/**
+ * Exact transport signal that an identity-only dial had no usable address.
+ * PeerResolver maps only this failure to an `unresolved` outcome; lifecycle,
+ * capability, policy, timeout, and other transport failures stay exceptional.
+ */
+export class PeerConnectionUnresolvedError extends Error {
+  readonly code = 'PEER_CONNECTION_UNRESOLVED';
+
+  constructor(message = 'Peer connection has no valid addresses', cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = 'PeerConnectionUnresolvedError';
+  }
+}

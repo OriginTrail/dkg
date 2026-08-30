@@ -3,6 +3,7 @@ import type { PeerId } from '@libp2p/interface';
 import { multiaddr, type Component, type Multiaddr } from '@multiformats/multiaddr';
 import { isPublicLikeAddress } from './address-policy.js';
 import type { Address, NodeIdentity, PeerConnectOpts } from './network.js';
+import { PeerConnectionUnresolvedError } from './network.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface Libp2pConnectHost {
@@ -223,6 +224,9 @@ export async function connectLibp2pPeer(
     );
   } catch (error) {
     if (options.signal?.aborted) throw error;
+    if (error instanceof Error && error.name === 'NoValidAddressesError') {
+      throw new PeerConnectionUnresolvedError(error.message, error);
+    }
     if (error instanceof Error && lastCandidateError !== undefined && error.cause === undefined) {
       error.cause = lastCandidateError;
     }
