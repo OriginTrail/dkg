@@ -11,6 +11,7 @@ import {
   createUnstartedAgent,
   emptyDetailedSync,
   flushTimers,
+  installSyncOnConnectPeerJobStub,
   recorder,
 } from './_helpers/sync-on-connect-test-fixture.js';
 
@@ -148,9 +149,10 @@ describe('sync-on-connect churn gates', () => {
   it('dedupes repeated reconnect scheduling across a short relay flap', async () => {
     const agent = await createUnstartedAgent('SyncReconnectFlapDedup');
     const calls: string[] = [];
-    agent.runSyncFromPeerOnConnect = async (peerId: string) => {
+    const runOrdinary = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
 
     const handleSyncError = () => undefined;
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
@@ -168,9 +170,10 @@ describe('sync-on-connect churn gates', () => {
   it('allows reconnect catch-up after a meaningful offline gap', async () => {
     const agent = await createUnstartedAgent('SyncReconnectOfflineGap');
     const calls: string[] = [];
-    agent.runSyncFromPeerOnConnect = async (peerId: string) => {
+    const runOrdinary = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
 
     const lastDisconnected = Date.now() - SYNC_RECONNECT_FLAP_GRACE_MS - 100;
     const beforeDisconnect = lastDisconnected - 1;
@@ -226,14 +229,12 @@ describe('sync-on-connect churn gates', () => {
 
     // The third argument is the bounded admission origin (issue #2006): the
     // reconciler's queue pressure must be attributable to `reconcile`, not
-    // indistinguishable from sync-on-connect. The fourth keeps reconciliation
-    // on the ordinary policy rather than silently inheriting after-selected
-    // retry ownership.
+    // indistinguishable from sync-on-connect. Selected/ordinary phase history
+    // exists only inside a queued peer job.
     expect(trySyncFromPeer.calls).toEqual([[
       PEER_A,
       expect.any(Function),
       'reconcile',
-      'ordinary',
     ]]);
   });
 
@@ -488,9 +489,10 @@ describe('sync-on-connect churn gates', () => {
     expect(agent.syncReconcilerBackoff.get(PEER_A)?.failures).toBe(1);
 
     const calls: string[] = [];
-    agent.runSelectedSwmRetryFromPeerOnConnect = async (peerId: string) => {
+    const runSelected = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runSelected });
     const handleSyncError = () => undefined;
     expect(agent.queueSyncFromPeerOnConnect(
       PEER_A,
@@ -524,9 +526,10 @@ describe('sync-on-connect churn gates', () => {
       protocolsKey: null,
       connectionKey: null,
     });
-    agent.runSyncFromPeerOnConnect = async (peerId: string) => {
+    const runOrdinary = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
 
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
     expect(agent.queueSyncFromPeerOnConnect(PEER_B, () => undefined, 0)).toBe(true);
@@ -544,9 +547,10 @@ describe('sync-on-connect churn gates', () => {
       protocolsKey: null,
       connectionKey: null,
     });
-    agent.runSyncFromPeerOnConnect = async (peerId: string) => {
+    const runOrdinary = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
 
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
 
@@ -559,9 +563,10 @@ describe('sync-on-connect churn gates', () => {
     agent.config.syncOnConnectEnabled = false;
     agent.started = true;
     const calls: string[] = [];
-    agent.runSyncFromPeerOnConnect = async (peerId: string) => {
+    const runOrdinary = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
 
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
     expect(await agent.trySyncFromPeer(PEER_A)).toBe('not-started');

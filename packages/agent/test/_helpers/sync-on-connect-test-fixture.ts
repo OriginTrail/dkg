@@ -64,6 +64,30 @@ export function createRfc64CoordinatorStub(
   };
 }
 
+export function installSyncOnConnectPeerJobStub(
+  agent: SyncOnConnectTestAgent,
+  callbacks: Readonly<{
+    runOrdinary?: (
+      remotePeer: string,
+    ) => Promise<void>;
+    runSelected?: (
+      remotePeer: string,
+      recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
+    ) => Promise<void>;
+    finish?: (remotePeer: string) => void;
+  }>,
+): void {
+  agent.createSyncOnConnectPeerJobRunner = (remotePeer) => ({
+    runOrdinary: async () => {
+      await callbacks.runOrdinary?.(remotePeer);
+    },
+    runSelected: async (recoveryPlan) => {
+      await callbacks.runSelected?.(remotePeer, recoveryPlan);
+    },
+    finish: () => { callbacks.finish?.(remotePeer); },
+  });
+}
+
 export async function createUnstartedAgent(
   name: string,
   overrides: Partial<DKGAgentConfig> = {},

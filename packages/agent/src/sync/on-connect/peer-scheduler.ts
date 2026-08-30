@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export type SyncOnConnectErrorHandler = (remotePeer: string, error: unknown) => void;
-export type OrdinarySyncOnConnectTransition = 'ordinary' | 'after-selected';
-/** @deprecated Use OrdinarySyncOnConnectTransition for new scheduler integrations. */
-export type OrdinarySyncOnConnectMode = 'ordinary' | 'ordinary-after-selected';
 
 interface OrdinaryLane {
   readonly kind: 'ordinary';
   readonly handleSyncError: SyncOnConnectErrorHandler;
-  readonly transition: OrdinarySyncOnConnectTransition;
 }
 
 interface SelectedLane<SelectedPlan> {
@@ -24,20 +20,22 @@ interface PeerJob<SelectedPlan> {
   pendingSelected: SelectedLane<SelectedPlan> | null;
   pendingOrdinary: OrdinaryLane | null;
   ordinaryStarted: boolean;
+  readonly runner: SyncOnConnectPeerJobRunner<SelectedPlan>;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
+export interface SyncOnConnectPeerJobRunner<SelectedPlan> {
+  readonly runOrdinary: () => Promise<void>;
+  readonly runSelected: (recoveryPlan?: SelectedPlan) => Promise<void>;
+  /** Commit the job's combined reconciler accounting exactly once. */
+  readonly finish: () => void;
+}
+
 export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
-  readonly runOrdinary: (
+  /** One runner owns every phase and the combined outcome for one peer job. */
+  readonly createJob: (
     remotePeer: string,
-    handleSyncError: SyncOnConnectErrorHandler,
-    transition: OrdinarySyncOnConnectTransition,
-  ) => Promise<void>;
-  readonly runSelected: (
-    remotePeer: string,
-    handleSyncError: SyncOnConnectErrorHandler,
-    recoveryPlan?: SelectedPlan,
-  ) => Promise<void>;
+  ) => SyncOnConnectPeerJobRunner<SelectedPlan>;
 }
 
 /**
@@ -75,7 +73,6 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       this.schedule(remotePeer, {
         kind: 'ordinary',
         handleSyncError,
-        transition: 'ordinary',
       }, delayMs);
       return true;
     }
@@ -83,9 +80,6 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     existing.pendingOrdinary = {
       kind: 'ordinary',
       handleSyncError,
-      transition: existing.currentLane === 'selected' || existing.pendingSelected !== null
-        ? 'after-selected'
-        : 'ordinary',
     };
     return true;
   }
@@ -107,12 +101,6 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       return true;
     }
     existing.pendingSelected = lane;
-    if (existing.pendingOrdinary !== null) {
-      existing.pendingOrdinary = {
-        ...existing.pendingOrdinary,
-        transition: 'after-selected',
-      };
-    }
     return true;
   }
 
@@ -126,42 +114,41 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       pendingSelected: lane.kind === 'selected' ? lane : null,
       pendingOrdinary: lane.kind === 'ordinary' ? lane : null,
       ordinaryStarted: false,
+      runner: this.callbacks.createJob(remotePeer),
       timer: null,
     };
     this.jobs.set(remotePeer, job);
     job.timer = setTimeout(() => {
       job.timer = null;
-      this.drain(remotePeer, job).finally(() => {
-        if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
-      });
+      void this.drain(remotePeer, job);
     }, delayMs);
   }
 
   private async drain(remotePeer: string, job: PeerJob<SelectedPlan>): Promise<void> {
-    while (this.jobs.get(remotePeer) === job) {
-      const lane = this.claimNext(job);
-      if (lane === null) return;
-      try {
-        if (lane.kind === 'selected') {
-          await this.callbacks.runSelected(
-            remotePeer,
-            lane.handleSyncError,
-            lane.recoveryPlan,
-          );
-        } else {
-          await this.callbacks.runOrdinary(
-            remotePeer,
-            lane.handleSyncError,
-            lane.transition,
-          );
+    try {
+      while (this.jobs.get(remotePeer) === job) {
+        const lane = this.claimNext(job);
+        if (lane === null) return;
+        try {
+          if (lane.kind === 'selected') {
+            await job.runner.runSelected(lane.recoveryPlan);
+          } else {
+            await job.runner.runOrdinary();
+          }
+        } catch (error: unknown) {
+          // Error ownership belongs to the lane that actually failed. A later
+          // enqueue may replace a pending selected lane, but it must never
+          // redirect an already-running lane's rejection to the newer caller.
+          lane.handleSyncError(remotePeer, error);
+        } finally {
+          if (this.jobs.get(remotePeer) === job) job.currentLane = null;
         }
-      } catch (error: unknown) {
-        // Error ownership belongs to the lane that actually failed. A later
-        // enqueue may replace a pending selected lane, but it must never
-        // redirect an already-running lane's rejection to the newer caller.
-        lane.handleSyncError(remotePeer, error);
+      }
+    } finally {
+      try {
+        job.runner.finish();
       } finally {
-        if (this.jobs.get(remotePeer) === job) job.currentLane = null;
+        if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
       }
     }
   }

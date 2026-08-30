@@ -366,8 +366,7 @@ import {
 } from './sync/on-connect/sync-on-connect.js';
 import {
   SyncOnConnectPeerScheduler,
-  type OrdinarySyncOnConnectMode,
-  type OrdinarySyncOnConnectTransition,
+  type SyncOnConnectPeerJobRunner,
 } from './sync/on-connect/peer-scheduler.js';
 import type {
   SelectedPublicSharedMemoryTarget,
@@ -682,26 +681,6 @@ import {
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
-
-function ordinarySyncOnConnectSemantics(
-  transition: OrdinarySyncOnConnectTransition,
-): Readonly<{
-  bypassPeerBackoff: boolean;
-  includeSelectedPublicLane: boolean;
-  preserveSelectedRetryOwnership: boolean;
-}> {
-  return transition === 'after-selected'
-    ? {
-      bypassPeerBackoff: true,
-      includeSelectedPublicLane: false,
-      preserveSelectedRetryOwnership: true,
-    }
-    : {
-      bypassPeerBackoff: false,
-      includeSelectedPublicLane: true,
-      preserveSelectedRetryOwnership: false,
-    };
-}
 
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
@@ -1438,6 +1417,65 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 }
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
+
+interface SyncOnConnectPeerJobAccounting {
+  readonly outcomes: SyncOnConnectPeerOutcome[];
+  probe: SyncReconcilerProbe | null | undefined;
+  probePromise: Promise<SyncReconcilerProbe | null> | null;
+  selectedAttempted: boolean;
+}
+
+function combineSyncOnConnectPeerJobAccounting(
+  outcomes: readonly SyncOnConnectPeerOutcome[],
+): Readonly<{
+  outcome: SyncOnConnectPeerOutcome;
+  resetBackoffBeforeRetry: boolean;
+}> | null {
+  if (outcomes.length === 0) return null;
+  let disposition: SyncOnConnectPeerOutcome['reconcilerDisposition'] | undefined;
+  let progress = false;
+  let allFresh = true;
+  let effectiveClearBeforeRetry = false;
+  let resetBackoffBeforeRetry = false;
+  // Reduce in phase order. A retry/defer owner cannot be erased by a later
+  // ordinary clear, while a clear that happened before a later retry starts a
+  // new backoff generation instead of inheriting stale failures.
+  for (const outcome of outcomes) {
+    progress ||= outcome.progress;
+    allFresh &&= outcome.fresh;
+    if (outcome.reconcilerDisposition === 'retry') {
+      resetBackoffBeforeRetry ||= effectiveClearBeforeRetry;
+      disposition = 'retry';
+      continue;
+    }
+    if (outcome.reconcilerDisposition === 'defer') {
+      if (disposition !== 'retry') disposition = 'defer';
+      continue;
+    }
+    if (disposition === undefined || disposition === 'clear') {
+      disposition = 'clear';
+      effectiveClearBeforeRetry = true;
+    }
+  }
+  if (disposition === 'clear') {
+    return {
+      outcome: {
+        reconcilerDisposition: 'clear',
+        fresh: allFresh,
+        progress,
+      },
+      resetBackoffBeforeRetry: false,
+    };
+  }
+  return {
+    outcome: {
+      reconcilerDisposition: disposition ?? 'defer',
+      fresh: false,
+      progress,
+    },
+    resetBackoffBeforeRetry,
+  };
+}
 
 export interface ContextGraphCatchupOptions {
   includeSharedMemory?: boolean;
@@ -4639,16 +4677,106 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
   ): SyncOnConnectPeerScheduler<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
     this.syncOnConnectPeerScheduler ??= new SyncOnConnectPeerScheduler({
-      runOrdinary: (remotePeer, handleSyncError, policy) =>
-        this.runSyncFromPeerOnConnect(remotePeer, handleSyncError, policy),
-      runSelected: (remotePeer, handleSyncError, recoveryPlan) =>
-        this.runSelectedSwmRetryFromPeerOnConnect(
-          remotePeer,
-          handleSyncError,
-          recoveryPlan,
-        ),
+      createJob: (remotePeer) => this.createSyncOnConnectPeerJobRunner(remotePeer),
     });
     return this.syncOnConnectPeerScheduler;
+  }
+
+  createSyncOnConnectPeerJobRunner(
+    this: DKGAgent,
+    remotePeer: string,
+  ): SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
+    const job: SyncOnConnectPeerJobAccounting = {
+      outcomes: [],
+      probe: undefined,
+      probePromise: null,
+      selectedAttempted: false,
+    };
+    const ensureProbe = async (): Promise<SyncReconcilerProbe | null> => {
+      job.probePromise ??= (async () => {
+        const backoff = this.syncReconcilerBackoff.get(remotePeer);
+        if (backoff && Date.now() < backoff.nextRetryAt) return null;
+        return this.getSyncReconcilerProbe(remotePeer);
+      })();
+      job.probe = await job.probePromise;
+      return job.probe;
+    };
+    const attemptPhase = async (
+      attempt: (
+        onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
+      ) => Promise<SyncOnConnectOutcome | 'not-started'>,
+    ): Promise<void> => {
+      if (await ensureProbe() === null) return;
+      let syncAccounting: SyncOnConnectPeerOutcome | undefined;
+      try {
+        const outcome = await attempt((next) => { syncAccounting = next; });
+        if (syncAccounting !== undefined) {
+          job.outcomes.push(syncAccounting);
+        } else if (
+          outcome !== 'skipped-no-sync'
+          && outcome !== 'already-syncing'
+          && outcome !== 'not-started'
+          && outcome !== 'deferred-backpressure'
+        ) {
+          job.outcomes.push({
+            reconcilerDisposition: 'retry',
+            fresh: false,
+            progress: false,
+          });
+        }
+      } catch (err: unknown) {
+        const backpressureError = getSyncBackpressureBusyError(err);
+        if (backpressureError) {
+          this.log.info(
+            createOperationContext('sync'),
+            `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure: ${backpressureError.message}`,
+          );
+          return;
+        }
+        if (!(err instanceof SyncOnConnectPostSyncError) || err.backoffEligible) {
+          job.outcomes.push({
+            reconcilerDisposition: 'retry',
+            fresh: false,
+            progress: false,
+          });
+        }
+        throw err;
+      }
+    };
+    return {
+      runSelected: async (recoveryPlan) => {
+        job.selectedAttempted = true;
+        await attemptPhase((onSyncAccounting) => this.trySelectedSwmRetryFromPeer(
+          remotePeer,
+          onSyncAccounting,
+          'on-connect',
+          recoveryPlan,
+        ));
+      },
+      runOrdinary: async () => {
+        await attemptPhase((onSyncAccounting) => job.selectedAttempted
+          ? this.tryOrdinarySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect')
+          : this.trySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect'));
+      },
+      finish: () => {
+        const combined = combineSyncOnConnectPeerJobAccounting(job.outcomes);
+        if (combined === null || job.probe === null || job.probe === undefined) return;
+        const selectedRetryStillRequired = job.selectedAttempted
+          && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer);
+        const outcome: SyncOnConnectPeerOutcome = selectedRetryStillRequired
+          && combined.outcome.reconcilerDisposition === 'clear'
+          ? {
+              reconcilerDisposition: 'defer',
+              fresh: false,
+              progress: combined.outcome.progress,
+            }
+          : combined.outcome;
+        if (combined.resetBackoffBeforeRetry) {
+          this.syncReconcilerBackoff.delete(remotePeer);
+        }
+        this.applySyncOnConnectAccounting(remotePeer, outcome, job.probe);
+      },
+    };
   }
 
   queueSyncFromPeerOnConnect(
@@ -4740,17 +4868,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
-    transition: OrdinarySyncOnConnectTransition | OrdinarySyncOnConnectMode = 'ordinary',
   ): Promise<void> {
     if (!syncOnConnectEnabled(this.config)) return;
-    // Compatibility ends here: the scheduler and every downstream lifecycle
-    // stage use one canonical transition vocabulary.
-    const normalizedTransition: OrdinarySyncOnConnectTransition =
-      transition === 'ordinary-after-selected' ? 'after-selected' : transition;
     const now = Date.now();
     const backoff = this.syncReconcilerBackoff.get(remotePeer);
-    const semantics = ordinarySyncOnConnectSemantics(normalizedTransition);
-    if (!semantics.bypassPeerBackoff && backoff && now < backoff.nextRetryAt) return;
+    if (backoff && now < backoff.nextRetryAt) return;
 
     const probe = await this.getSyncReconcilerProbe(remotePeer);
     try {
@@ -4758,7 +4880,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         probe,
         'on-connect',
-        normalizedTransition,
       );
     } catch (err: unknown) {
       handleSyncError(remotePeer, err);
@@ -4797,7 +4918,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
-    transition: OrdinarySyncOnConnectTransition = 'ordinary',
   ): Promise<SyncReconcilerAttemptOutcome> {
     if (!syncOnConnectEnabled(this.config)) return 'not-started';
     return this.accountSyncAttemptWithReconciler(
@@ -4807,7 +4927,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         onSyncAccounting,
         source,
-        transition,
       ),
     );
   }
@@ -4902,14 +5021,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
-    transition: OrdinarySyncOnConnectTransition = 'ordinary',
+  ): Promise<SyncOnConnectOutcome | 'not-started'> {
+    return this.trySyncFromPeerWithSelectedLaneAdmission(
+      remotePeer,
+      onSyncAccounting,
+      source,
+      'admit',
+    );
+  }
+
+  async tryOrdinarySyncFromPeer(
+    this: DKGAgent,
+    remotePeer: string,
+    onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
+    source: SyncAdmissionSource = 'on-connect',
+  ): Promise<SyncOnConnectOutcome | 'not-started'> {
+    return this.trySyncFromPeerWithSelectedLaneAdmission(
+      remotePeer,
+      onSyncAccounting,
+      source,
+      'omit',
+    );
+  }
+
+  /** Shared implementation for the two stable automatic-sync phase APIs above. */
+  async trySyncFromPeerWithSelectedLaneAdmission(
+    this: DKGAgent,
+    remotePeer: string,
+    onSyncAccounting: ((outcome: SyncOnConnectPeerOutcome) => void) | undefined,
+    source: SyncAdmissionSource,
+    selectedLaneAdmission: 'admit' | 'omit',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
-    const transitionSemantics = ordinarySyncOnConnectSemantics(transition);
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
     const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
@@ -4982,7 +5129,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       ...(automaticPeerSweep
         && remotePeerIsCompleteSwmProvider
-        && transitionSemantics.includeSelectedPublicLane
+        && selectedLaneAdmission === 'admit'
         ? {
           selectedSharedMemoryLane: {
             admitWork: async (peerId: string) => {
@@ -5090,20 +5237,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.skippedNoSyncPeers.add(peerId);
       },
       onSyncAccounting: (peerId, outcome) => {
-        const selectedRetryStillRequired = transitionSemantics.preserveSelectedRetryOwnership
-          && this.selectedSwmBootstrapAdmission.isRetryRequired(peerId);
-        const effectiveOutcome: SyncOnConnectPeerOutcome =
-          selectedRetryStillRequired && outcome.reconcilerDisposition === 'clear'
-            ? {
-                reconcilerDisposition: 'defer',
-                fresh: false,
-                progress: outcome.progress,
-              }
-            : outcome;
         if (onSyncAccounting) {
-          onSyncAccounting(effectiveOutcome);
+          onSyncAccounting(outcome);
         } else {
-          this.applySyncOnConnectAccounting(peerId, effectiveOutcome);
+          this.applySyncOnConnectAccounting(peerId, outcome);
         }
       },
     });
