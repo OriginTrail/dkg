@@ -226,7 +226,7 @@ describe('abortable recovery connection helpers', () => {
     const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
     const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
     const circuitAddress = `${relayAddress}/p2p-circuit/p2p/${peerId}`;
-    const dial = recorder(async (target: any) => {
+    const dial = recorder(async (_target: any) => {
       if (dial.calls.length === 1) throw new Error('stale peerStore route');
       return undefined;
     });
