@@ -24,6 +24,7 @@ export type {
   ResolveOpts,
 } from './peer-resolver.js';
 export { PeerResolver } from './peer-resolver.js';
+export type { ConfiguredRelayTarget } from './relay-target.js';
 
 export type { DkgGossipMsgIdInput } from './gossip-msg-id.js';
 export {

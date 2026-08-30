@@ -35,8 +35,8 @@
  * step 5 has been removed.
  *
  * The operator-configured relay fallback added later is intentionally
- * different: `relayPeers` identifies relays on which this local edge already
- * seeks reservations. Appending `/p2p-circuit/p2p/<target>` constructs a route
+ * different: DKGNode exposes the canonical relay targets on which this local
+ * edge already seeks reservations. Appending `/p2p-circuit/p2p/<target>` constructs a route
  * to the requested target (when it has a reservation there); it never returns
  * the relay itself as though it were the target peer.
  *
@@ -48,7 +48,8 @@
  */
 import type { Network, NodeIdentity, Address } from './network.js';
 import type { NetworkStateRegistry } from './network-state-registry.js';
-import { isPublicLikeAddress } from '../node.js';
+import { isPublicLikeAddress } from './address-policy.js';
+import type { ConfiguredRelayTarget } from './relay-target.js';
 
 /**
  * Minimal interface PeerResolver needs from the agents-CG. Defined in
@@ -130,13 +131,14 @@ export interface PeerResolverDeps {
   registry: NetworkStateRegistry;
   agentDirectory: AgentDirectoryLookup;
   /**
-   * Public relay multiaddrs already trusted by the local operator config.
+   * Canonical relay targets already parsed, self-filtered, and de-duplicated
+   * by DKGNode from the local operator configuration.
    * When every direct address discovered for a target is private/non-routable,
    * the resolver synthesizes bounded circuit candidates through these relays.
    * Any agent-directory circuit is retained but does not suppress this
    * fallback because it can be stale or belong to another network.
    */
-  configuredRelayPeers?: Address[];
+  configuredRelayTargets?: readonly ConfiguredRelayTarget[];
   /** Optional logger; defaults to silent except for serious errors. */
   logger?: PeerResolverLogger;
   /**
@@ -208,7 +210,7 @@ export class PeerResolver {
   private readonly network: Network;
   private readonly registry: NetworkStateRegistry;
   private readonly agentDirectory: AgentDirectoryLookup;
-  private readonly configuredRelayPeers: Address[];
+  private readonly configuredRelayTargets: readonly ConfiguredRelayTarget[];
   private readonly logger: PeerResolverLogger;
   private readonly defaultPerStepTimeoutMs: number;
   private readonly agentDirectoryStaleThresholdMs: number;
@@ -217,7 +219,7 @@ export class PeerResolver {
     this.network = deps.network;
     this.registry = deps.registry;
     this.agentDirectory = deps.agentDirectory;
-    this.configuredRelayPeers = deps.configuredRelayPeers ?? [];
+    this.configuredRelayTargets = deps.configuredRelayTargets ?? [];
     this.logger = deps.logger ?? SILENT_LOGGER;
     const override = deps.defaultPerStepTimeoutMs;
     this.defaultPerStepTimeoutMs =
@@ -464,30 +466,16 @@ export class PeerResolver {
       )
     ) {
       const fallbackCircuits: Address[] = [];
-      for (const rawRelay of this.configuredRelayPeers) {
+      for (const target of this.configuredRelayTargets) {
         if (fallbackCircuits.length >= MAX_CONFIGURED_RELAY_FALLBACKS) break;
-        const relay = rawRelay.replace(/\/+$/, '');
-        if (
-          relay.includes('/p2p-circuit') ||
-          !isPublicLikeAddress(relay)
-        ) {
-          continue;
-        }
-        const relayPeerId = relay.match(/\/p2p\/([^/]+)$/)?.[1];
-        if (!relayPeerId || relayPeerId === peerId) continue;
+        if (target.peerId === peerId) continue;
+        const relay = target.addresses.find(
+          (address) => !address.includes('/p2p-circuit') && isPublicLikeAddress(address),
+        )?.replace(/\/+$/, '');
+        if (!relay) continue;
         fallbackCircuits.push(`${relay}/p2p-circuit/p2p/${peerId}`);
       }
       await primeAndAppend(fallbackCircuits, 'configured-relay fallback');
-      const configuredSet = new Set(fallbackCircuits);
-      const configuredFirst = accumulated.filter((addr) => configuredSet.has(addr));
-      if (configuredFirst.length > 0) {
-        accumulated.splice(
-          0,
-          accumulated.length,
-          ...configuredFirst,
-          ...accumulated.filter((addr) => !configuredSet.has(addr)),
-        );
-      }
     }
 
     return accumulated;

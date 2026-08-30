@@ -548,6 +548,11 @@ describe('Circuit Relay', () => {
     nodes.push(edge);
     await edge.start();
 
+    expect(edge.getConfiguredRelayTargets()).toEqual([{
+      peerId: relay.peerId,
+      addresses: [relayAddr],
+    }]);
+
     const dedupWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes('2 entries supplied')
@@ -639,6 +644,11 @@ describe('Circuit Relay', () => {
     nodes.push(edge);
     await edge.start();
 
+    expect(edge.getConfiguredRelayTargets()).toEqual([{
+      peerId: relay.peerId,
+      addresses: [relayAddr],
+    }]);
+
     const selfFilterWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes("pointing at this node's own peerId"),
@@ -728,6 +738,11 @@ describe('Circuit Relay', () => {
     nodes.push(edge);
     await edge.start();
 
+    expect(edge.getConfiguredRelayTargets()).toEqual([{
+      peerId: relayPid,
+      addresses: [realAddr, fakeAlternateAddr],
+    }]);
+
     const altInfo = logSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes('alternate addrs merged')
@@ -785,6 +800,8 @@ describe('Circuit Relay', () => {
     });
     nodes.push(edge);
     await edge.start();
+
+    expect(edge.getConfiguredRelayTargets()).toEqual([]);
 
     const usableWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string'

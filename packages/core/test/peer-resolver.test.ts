@@ -22,6 +22,10 @@ const PEER_A = '12D3KooWA' + 'a'.repeat(43);
 const PEER_B = '12D3KooWB' + 'b'.repeat(43);
 const RELAY_ADDR =
   '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const RELAY_TARGET = [{
+  peerId: '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M',
+  addresses: [RELAY_ADDR],
+}];
 
 type FindPeerImpl = (
   peerId: NodeIdentity,
@@ -210,7 +214,7 @@ describe('PeerResolver', () => {
       network: net,
       registry,
       agentDirectory: makeAgentDir(async () => null),
-      configuredRelayPeers: [RELAY_ADDR],
+      configuredRelayTargets: RELAY_TARGET,
     });
 
     const out = await resolver.resolve(PEER_B);
@@ -229,7 +233,7 @@ describe('PeerResolver', () => {
       network: net,
       registry,
       agentDirectory: makeAgentDir(async () => null),
-      configuredRelayPeers: [RELAY_ADDR],
+      configuredRelayTargets: RELAY_TARGET,
     });
 
     const out = await resolver.resolve(PEER_B);
@@ -244,14 +248,14 @@ describe('PeerResolver', () => {
       network: net,
       registry,
       agentDirectory: makeAgentDir(async () => staleRelay),
-      configuredRelayPeers: [RELAY_ADDR],
+      configuredRelayTargets: RELAY_TARGET,
     });
 
     const out = await resolver.resolve(PEER_B);
 
     expect(out).toContain(`${staleRelay}/p2p-circuit/p2p/${PEER_B}`);
     expect(out).toContain(`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`);
-    expect(out[0]).toBe(`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`);
+    expect(out[0]).toBe(`${staleRelay}/p2p-circuit/p2p/${PEER_B}`);
   });
 
   it('step 4: agents-CG throwing does not abort resolution', async () => {

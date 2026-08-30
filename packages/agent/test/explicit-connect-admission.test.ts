@@ -3,6 +3,7 @@ import { peerIdFromString } from '@libp2p/peer-id';
 
 const peerConnectMocks = vi.hoisted(() => ({
   connectToMultiaddr: vi.fn(async () => undefined),
+  dialResolvedPeer: vi.fn(async () => undefined),
   ensurePeerConnected: vi.fn(async () => undefined),
   primeCatchupConnections: vi.fn(async () => undefined),
 }));
@@ -68,6 +69,7 @@ function admittedCoordinator(peerId: string): NetworkAdmissionCoordinator {
 describe('explicit connect network admission', () => {
   beforeEach(() => {
     peerConnectMocks.connectToMultiaddr.mockClear();
+    peerConnectMocks.dialResolvedPeer.mockClear();
     peerConnectMocks.ensurePeerConnected.mockClear();
     peerConnectMocks.primeCatchupConnections.mockClear();
   });
@@ -143,7 +145,13 @@ describe('explicit connect network admission', () => {
       PEER_ID,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(agent.node.libp2p.dial).toHaveBeenCalledOnce();
+    expect(peerConnectMocks.dialResolvedPeer).toHaveBeenCalledWith(
+      agent.node.libp2p,
+      PEER_ID,
+      [DIRECT_MULTIADDR],
+      expect.any(Function),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(agent.networkAdmissionCoordinator.ensureExplicitConnectAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
@@ -200,13 +208,10 @@ describe('explicit connect network admission', () => {
       AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
     ).resolves.toBeUndefined();
 
-    expect(peerConnectMocks.connectToMultiaddr).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        kind: 'circuit',
-        multiaddress: CIRCUIT_MULTIADDR,
-        targetPeerId: PEER_ID,
-      }),
+    expect(peerConnectMocks.dialResolvedPeer).toHaveBeenCalledWith(
+      agent.node.libp2p,
+      PEER_ID,
+      [DIRECT_MULTIADDR, CIRCUIT_MULTIADDR],
       expect.any(Function),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );

@@ -3,6 +3,7 @@ import { peerIdFromString } from '@libp2p/peer-id';
 import { parseMultiaddrConnectTarget } from '../src/p2p/multiaddr-peer-target.js';
 import {
   connectToMultiaddr,
+  dialResolvedPeer,
   ensurePeerConnected,
   primeCatchupConnections,
 } from '../src/p2p/peer-connect.js';
@@ -64,7 +65,7 @@ describe('connectToMultiaddr', () => {
 
     expect(dial.calls).toHaveLength(2);
     expect(dial.calls[0]?.[0]?.toString()).toBe(relayAddress);
-    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(multiaddress);
     expect(merge.calls).toHaveLength(1);
     expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
@@ -87,7 +88,9 @@ describe('connectToMultiaddr', () => {
 
     expect(dial.calls).toHaveLength(2);
     expect(dial.calls[0]?.[0]?.toString()).toBe(`/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}`);
-    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(
+      parseMultiaddrConnectTarget(multiaddress).multiaddress,
+    );
     expect(merge.calls).toHaveLength(1);
     expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
@@ -103,6 +106,74 @@ describe('connectToMultiaddr', () => {
       dial,
       peerStore: { merge },
     }, parseMultiaddrConnectTarget(multiaddress))).rejects.toThrow('Circuit target peer 12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6 not observed before timeout');
+  });
+
+  it('forwards one cancellation signal to both real circuit dial stages', async () => {
+    const controller = new AbortController();
+    const relayPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const circuitAddress = `/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}/p2p-circuit/p2p/${targetPeerId}`;
+    const dial = recorder(async () => undefined);
+
+    await connectToMultiaddr({
+      getConnections: () => [{ remotePeer: { toString: () => targetPeerId } }],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, parseMultiaddrConnectTarget(circuitAddress), undefined, {
+      signal: controller.signal,
+    });
+
+    expect(dial.calls).toHaveLength(2);
+    expect(dial.calls.map(([, options]) => options?.signal)).toEqual([
+      controller.signal,
+      controller.signal,
+    ]);
+  });
+
+  it('aborts promptly while waiting to confirm an explicit circuit', async () => {
+    const controller = new AbortController();
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const circuitAddress = `/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M/p2p-circuit/p2p/${targetPeerId}`;
+    const dial = recorder(async () => undefined);
+    const connection = connectToMultiaddr({
+      getConnections: () => [],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, parseMultiaddrConnectTarget(circuitAddress), undefined, {
+      signal: controller.signal,
+    });
+
+    while (dial.calls.length < 2) await new Promise((resolve) => setTimeout(resolve, 1));
+    controller.abort();
+    await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('dialResolvedPeer', () => {
+  it('walks ordered explicit circuits and reaches the second after the first is stale', async () => {
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const relayA = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const relayB = '/ip4/49.12.4.64/tcp/9090/p2p/12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ';
+    const circuitA = `${relayA}/p2p-circuit/p2p/${targetPeerId}`;
+    const circuitB = `${relayB}/p2p-circuit/p2p/${targetPeerId}`;
+    const dial = recorder(async (target: any) => {
+      if (target.toString() === circuitA) throw new Error('stale first relay');
+    });
+
+    await dialResolvedPeer({
+      getConnections: () => dial.calls.some(([target]) => target.toString() === circuitB)
+        ? [{ remotePeer: { toString: () => targetPeerId } }]
+        : [],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, targetPeerId, [circuitA, circuitB]);
+
+    expect(dial.calls.map(([target]) => target.toString())).toEqual([
+      relayA,
+      circuitA,
+      relayB,
+      circuitB,
+    ]);
   });
 });
 
@@ -211,29 +282,36 @@ describe('abortable recovery connection helpers', () => {
 
     const controller = new AbortController();
     await ensurePeerConnected({
-      getConnections: () => [],
+      getConnections: () => dialAttempt >= 3
+        ? [{ remotePeer: { toString: () => peerId } }]
+        : [],
       dial,
       peerStore: { merge },
     }, {
       findAgentByPeerId: async () => ({ peerId, relayAddress }),
     } as any, peerId, { signal: controller.signal });
 
-    expect(dialSignals).toEqual([controller.signal, controller.signal]);
+    expect(dialSignals).toEqual([
+      controller.signal,
+      expect.any(AbortSignal),
+      expect.any(AbortSignal),
+    ]);
     expect(merge.calls).toHaveLength(1);
   });
 
   it('walks resolver-provided relay circuits without another directory lookup', async () => {
     const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
-    const circuitAddress = `${relayAddress}/p2p-circuit/p2p/${peerId}`;
-    const dial = recorder(async (_target: any) => {
-      if (dial.calls.length === 1) throw new Error('stale peerStore route');
-      return undefined;
+    const relayA = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const relayB = '/ip4/49.12.4.64/tcp/9090/p2p/12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ';
+    const circuitA = `${relayA}/p2p-circuit/p2p/${peerId}`;
+    const circuitB = `${relayB}/p2p-circuit/p2p/${peerId}`;
+    const dial = recorder(async (target: any) => {
+      if (target.toString() === circuitA) throw new Error('stale first circuit');
     });
     let discoveryCalled = false;
 
     await ensurePeerConnected({
-      getConnections: () => dial.calls.length >= 3
+      getConnections: () => dial.calls.some(([target]) => target.toString() === circuitB)
         ? [{ remotePeer: { toString: () => peerId } }]
         : [],
       dial,
@@ -243,12 +321,13 @@ describe('abortable recovery connection helpers', () => {
         discoveryCalled = true;
         return undefined;
       },
-    } as any, peerId, { resolvedAddresses: [circuitAddress] });
+    } as any, peerId, { resolvedAddresses: [circuitA, circuitB] });
 
     expect(dial.calls.map(([target]) => target.toString())).toEqual([
-      peerId,
-      relayAddress,
-      peerId,
+      relayA,
+      circuitA,
+      relayB,
+      circuitB,
     ]);
     expect(discoveryCalled).toBe(false);
   });
