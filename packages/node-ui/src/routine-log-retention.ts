@@ -44,25 +44,25 @@ export class RoutineLogRetention {
   }
 
   hasOverflow(): boolean {
-    return this.overflowCutoff() !== null;
+    return this.routineCount() > this.rowCap;
   }
 
   pruneOverflowBatch(): RoutineLogPruneBatch {
-    const cutoff = this.overflowCutoff();
-    if (cutoff === null) {
+    const overflowRows = this.routineCount() - this.rowCap;
+    if (overflowRows <= 0) {
       return { deleted: 0, hadOverflow: false, filledBatch: false };
     }
+    const deleteRows = Math.min(this.batchRows, overflowRows);
     const deleted = this.db.prepare(`
       DELETE FROM logs
       WHERE id IN (
         SELECT id
         FROM logs
-        WHERE id <= @cutoff
-          AND level NOT IN ('warn', 'error')
+        WHERE level NOT IN ('warn', 'error')
         ORDER BY id ASC
-        LIMIT @batchRows
+        LIMIT @deleteRows
       )
-    `).run({ cutoff, batchRows: this.batchRows }).changes;
+    `).run({ deleteRows }).changes;
     return {
       deleted,
       hadOverflow: true,
@@ -70,15 +70,13 @@ export class RoutineLogRetention {
     };
   }
 
-  private overflowCutoff(): number | null {
+  private routineCount(): number {
     const row = this.db.prepare(`
-      SELECT id
-      FROM logs
-      WHERE level NOT IN ('warn', 'error')
-      ORDER BY id DESC
-      LIMIT 1 OFFSET ?
-    `).get(this.rowCap) as { id: number } | undefined;
-    return row?.id ?? null;
+      SELECT routine_count AS count
+      FROM log_retention_state
+      WHERE singleton_id = 1
+    `).get() as { count: number } | undefined;
+    return row?.count ?? 0;
   }
 
   private isRoutineLevel(level: string): boolean {

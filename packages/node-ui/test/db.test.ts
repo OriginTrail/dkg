@@ -408,6 +408,45 @@ describe('DashboardDB — retention', () => {
     }
   });
 
+  it('tracks routine-log retention state transactionally and uses the partial id index', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-retention-index-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 10,
+      logVolumePruneBatchRows: 2,
+    });
+    try {
+      const insert = volumeDb.db.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'test', ?)`,
+      );
+      insert.run(1, 'info', 'routine-a');
+      insert.run(2, 'debug', 'routine-b');
+      insert.run(3, 'warn', 'protected');
+      expect(volumeDb.db.prepare(`
+        SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+      `).get()).toEqual({ routine_count: 2 });
+
+      volumeDb.db.prepare(`UPDATE logs SET level = 'error' WHERE message = 'routine-a'`).run();
+      volumeDb.db.prepare(`UPDATE logs SET level = 'info' WHERE message = 'protected'`).run();
+      volumeDb.db.prepare(`DELETE FROM logs WHERE message = 'routine-b'`).run();
+      expect(volumeDb.db.prepare(`
+        SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+      `).get()).toEqual({ routine_count: 1 });
+
+      const plan = volumeDb.db.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT id FROM logs
+        WHERE level NOT IN ('warn', 'error')
+        ORDER BY id ASC LIMIT 2
+      `).all() as Array<{ detail: string }>;
+      expect(plan.some(({ detail }) => detail.includes('idx_logs_routine_id'))).toBe(true);
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves ambiguous pre-upgrade compatibility rows below the public cap', () => {
     const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-legacy-compat-'));
     const dbPath = join(volumeDir, 'node-ui.db');
