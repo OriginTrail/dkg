@@ -547,6 +547,10 @@ export type ContextGraphRegistryScanOptions =
       pageBudget?: number;
     }
   | {
+      /** Probe only the page containing the current chain tip without reading or advancing the historical cursor. */
+      mode: 'tip';
+    }
+  | {
       mode: 'seedFull';
     }
   | {

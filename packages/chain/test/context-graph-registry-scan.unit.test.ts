@@ -237,6 +237,50 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.saves.map((s) => s.nextBlock)).toEqual([2_000]);
   });
 
+  it('probes the current tip independently while a middle historical page remains unavailable', async () => {
+    let head = 4_999;
+    const tipGraphBlock = 9_999;
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) => {
+        if (lo >= 2_000 && lo < 4_000) throw new Error('archive range unavailable');
+        return lo <= tipGraphBlock && tipGraphBlock <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: tipGraphBlock }]
+          : [];
+      }),
+    });
+    const { adapter, provider } = makeAdapter(registry, head);
+    provider.getBlockNumber.setImpl(async () => head);
+
+    const firstRecovery = await collectRegistryScan(adapter, {
+      mode: 'seedFull',
+    }).catch((err) => err);
+
+    expect(firstRecovery).toBeInstanceOf(ContextGraphChainScanPartialError);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
+
+    head = 10_000;
+    registry.queryFilter.clear();
+    const tipResults = await collectRegistryScan(adapter, { mode: 'tip' });
+
+    expect(tipResults.map((cg) => cg.blockNumber)).toEqual([tipGraphBlock]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [8_001, 10_000],
+    ]);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
+
+    registry.queryFilter.clear();
+    const secondRecovery = await collectRegistryScan(adapter, {
+      mode: 'seedFull',
+    }).catch((err) => err);
+
+    expect(secondRecovery).toBeInstanceOf(ContextGraphChainScanPartialError);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [0, 1_999],
+      [2_000, 3_999],
+    ]);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
+  });
+
   it('does not advance the incremental watermark when parsing a later page fails', async () => {
     const registry = makeRegistry({
       interface: {

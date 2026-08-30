@@ -52,14 +52,6 @@ import {
   CHAIN_DISCOVERY_SCAN_SCHEDULE,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan-runner.js';
-export {
-  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-  CHAIN_DISCOVERY_SCAN_SCHEDULE,
-  CHAIN_FULL_SCAN_EVERY,
-  chainDiscoveryScanOptions,
-  createChainDiscoveryScanRunner,
-  deriveChainFullScanEvery,
-} from './chain-discovery-scan-runner.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';

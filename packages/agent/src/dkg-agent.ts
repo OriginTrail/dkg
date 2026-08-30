@@ -536,7 +536,7 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 export type DiscoverContextGraphsFromChainOptions = {
   throwOnChainScanFailure?: boolean;
   pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor';
+  mode?: 'listAll' | 'incremental' | 'tip' | 'seedFull' | 'seedFromCursor';
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
   resumeFromCursor?: boolean;
@@ -545,6 +545,7 @@ export type DiscoverContextGraphsFromChainOptions = {
 type NormalizedContextGraphDiscoveryScan =
   | { mode: 'listAll' }
   | { mode: 'incremental'; pageBudget?: number }
+  | { mode: 'tip' }
   | { mode: 'seedFull' }
   | { mode: 'seedFromCursor'; pageBudget?: number };
 
@@ -558,6 +559,7 @@ function normalizeContextGraphDiscoveryScan(
         ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
       };
     }
+    if (options.mode === 'tip') return { mode: 'tip' };
     if (options.mode === 'seedFull') return { mode: 'seedFull' };
     if (options.mode === 'seedFromCursor') {
       return {

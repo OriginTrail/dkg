@@ -2392,6 +2392,7 @@ describe('discoverContextGraphsFromChain', () => {
     expect(await agent.discoverContextGraphsFromChain()).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({ mode: 'incremental' })).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({ mode: 'incremental', pageBudget: 7 })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ mode: 'tip' })).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({ mode: 'seedFull' })).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({
       mode: 'seedFromCursor',
@@ -2404,6 +2405,7 @@ describe('discoverContextGraphsFromChain', () => {
     expect(scanCalls).toEqual([
       { mode: 'incremental' },
       { mode: 'incremental', pageBudget: 7 },
+      { mode: 'tip' },
       { mode: 'seedFull' },
       { mode: 'seedFromCursor', pageBudget: 11 },
     ]);

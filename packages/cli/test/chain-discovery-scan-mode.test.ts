@@ -4,7 +4,7 @@ import {
   chainDiscoveryScanOptions,
   createChainDiscoveryScanRunner,
   deriveChainFullScanEvery,
-} from '../src/daemon/lifecycle.js';
+} from '../src/daemon/chain-discovery-scan-runner.js';
 
 describe('chainDiscoveryScanOptions', () => {
   it('uses bounded cursor-resumable watermark seeding before a seed exists', () => {
@@ -49,6 +49,16 @@ describe('chainDiscoveryScanOptions', () => {
       mode: 'seedFull',
       throwOnChainScanFailure: true,
     });
+  });
+
+  it('uses a cursor-independent tip probe while full-history recovery is pending', () => {
+    expect(chainDiscoveryScanOptions({
+      watermarkSeeded: true,
+      startupPhase: 'complete',
+      successfulScansInCycle: 48,
+      fullRecoveryPending: true,
+      fullRecoveryRetryReady: false,
+    })).toEqual({ mode: 'tip' });
   });
 
   it('does not force a full scan before the configured recovery cadence', () => {
@@ -241,12 +251,12 @@ describe('chainDiscoveryScanOptions', () => {
     expect(agent.discoverContextGraphsFromChain.mock.calls.map(([options]) => options.mode)).toEqual([
       'seedFull',
       'seedFull',
-      'incremental',
+      'tip',
       'seedFull',
     ]);
   });
 
-  it('interleaves an incremental attempt after a failed periodic full resync', async () => {
+  it('interleaves a tip probe after a failed periodic full resync', async () => {
     const agent = {
       hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
       discoverContextGraphsFromChain: vi
@@ -273,7 +283,7 @@ describe('chainDiscoveryScanOptions', () => {
       'seedFull',
       'incremental',
       'seedFull',
-      'incremental',
+      'tip',
       'seedFull',
     ]);
   });

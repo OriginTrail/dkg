@@ -39,6 +39,14 @@ type ContextGraphRegistryScanPlan =
       pageBudget?: number;
     }
   | {
+      mode: 'tip';
+      resumeFromWatermark: false;
+      persistProgress: false;
+      allowPartialFailure: false;
+      seedAtEnd: false;
+      pageBudget?: undefined;
+    }
+  | {
       mode: 'seedFull';
       resumeFromWatermark: false;
       persistProgress: true;
@@ -142,6 +150,16 @@ function buildCursorContextGraphRegistryScanPlan(
       allowPartialFailure: true,
       seedAtEnd: false,
       pageBudget: normalizePageBudget(options.pageBudget),
+    };
+  }
+
+  if (options.mode === 'tip') {
+    return {
+      mode: 'tip',
+      resumeFromWatermark: false,
+      persistProgress: false,
+      allowPartialFailure: false,
+      seedAtEnd: false,
     };
   }
 
@@ -312,6 +330,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     scanPlan: ContextGraphRegistryScanPlan,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
     const eventFilter = registry.filters.NameClaimed();
+    const pageSize = this.cgRegistryScanPageSize;
     const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
       ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
       : undefined;
@@ -320,6 +339,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       fromBlock === undefined
         ? canResumeFromWatermark
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
+          : scanPlan.mode === 'tip'
+            ? await this.resolveLogScanHead('listContextGraphsFromChain').then((tipScan) => ({
+              ...tipScan,
+              fromBlock: Math.max(0, tipScan.head - pageSize + 1),
+              degradedFromGenesis: false,
+            }))
           : await this.resolveContractDeployBlock(
               registryAddress,
               'listContextGraphsFromChain',
@@ -339,7 +364,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       return;
     }
 
-    const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
     if (scanPlan.mode === 'incremental' && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {

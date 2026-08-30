@@ -36,6 +36,7 @@ export function chainDiscoveryScanOptions(input: {
   pageBudget?: number;
 }):
   | { mode: 'incremental'; pageBudget: number }
+  | { mode: 'tip' }
   | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
   | { mode: 'seedFull'; throwOnChainScanFailure: true } {
   const configuredFullScanEvery = input.fullScanEvery;
@@ -72,7 +73,7 @@ export function chainDiscoveryScanOptions(input: {
   if (input.fullRecoveryPending) {
     return input.fullRecoveryRetryReady
       ? { mode: 'seedFull', throwOnChainScanFailure: true }
-      : { mode: 'incremental', pageBudget };
+      : { mode: 'tip' };
   }
   if (input.watermarkSeeded && input.successfulScansInCycle >= fullScanEvery) {
     return { mode: 'seedFull', throwOnChainScanFailure: true };
@@ -169,7 +170,7 @@ export function createChainDiscoveryScanRunner(input: {
         } else if (options.mode === 'seedFull') {
           fullRecoveryPending = true;
           fullRecoveryRetryReady = false;
-        } else if (fullRecoveryPending && options.mode === 'incremental') {
+        } else if (fullRecoveryPending && options.mode === 'tip') {
           // One tip-discovery attempt, successful or not, prevents an unavailable historical range
           // from monopolizing the scheduler. The next invocation may retry full recovery.
           fullRecoveryRetryReady = true;
@@ -186,7 +187,7 @@ export function createChainDiscoveryScanRunner(input: {
       } else {
         if (startupPhase === 'cursorSeed') startupPhase = 'complete';
         successfulScansInCycle += 1;
-        if (fullRecoveryPending && options.mode === 'incremental') {
+        if (fullRecoveryPending && options.mode === 'tip') {
           fullRecoveryRetryReady = true;
         }
       }
