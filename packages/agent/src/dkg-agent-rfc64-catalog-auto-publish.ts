@@ -159,7 +159,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * Background observer body; failures are contained and logged. A durable
-   * inventory mutation for a selected public CG requests its scope-owned exact
+   * inventory mutation for a selected CG requests its scope-owned exact
    * signed catalog target. Retrying an already-present row also re-requests a
    * catalog reconciliation that may have failed after the prior inventory
    * commit, without making the detached observer own projection lifetime.
@@ -224,7 +224,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   /**
    * Canonical post-confirmation observer for exact SWM-inventory removal.
    * Finalized VM is already inventoried by the chain. Remove its SWM row and
-   * enqueue selected-public catalog convergence so RFC-64 no longer advertises
+   * enqueue selected-catalog convergence so RFC-64 no longer advertises
    * the asset as SWM-only. The irreversible publish response never waits for
    * catalog signing, storage, or peer fan-out.
    */
@@ -309,7 +309,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * Observe an already-durable WM→SWM commit without participating in its outcome.
-   * Unsupported/private/unselected graphs are dormant; every attempted failure is
+   * Unsupported/unselected graphs are dormant; every attempted failure is
    * counted and logged, then returned instead of crossing back into the user write.
    */
   async recordRfc64SwmAuthorInventoryShadowV1(
@@ -394,10 +394,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         || head.publicTripleCount !== Number(canonicalSeal.publicTripleCount)
         || head.privateTripleCount !== Number(canonicalSeal.privateTripleCount)
       ) throw new Error('durable SWM head does not match the committed share and author seal');
-      // This inventory is a public-discovery artifact. A public Context Graph
-      // may still contain restricted individual shares, which must remain
-      // invisible to this lane rather than leaking their UAL or operation id.
-      if (head.accessPolicy !== 'public') {
+      // Public catalogs never reveal restricted individual shares. A selected
+      // private CG instead carries the same public projection only through its
+      // roster-authenticated V2 catalog transport.
+      if (
+        lane.accessPolicy === 0
+          ? head.accessPolicy !== 'public'
+          : head.accessPolicy === 'public'
+      ) {
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
           shadowResult('dormant', 'upsert', 0, null, null),
           params.contextGraphId,
@@ -554,6 +558,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       params.subGraphName,
     );
     if (lane === null) return null;
+    if (lane.accessPolicy !== 0) return null;
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
     // V1 deliberately catalogs public-only KA projections. Private-bearing
     // assets require the reserved cg-shared-v1 anchor/hash statements in the

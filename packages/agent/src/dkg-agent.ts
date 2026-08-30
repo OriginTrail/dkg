@@ -1005,8 +1005,13 @@ export class DKGAgent extends DKGAgentBase {
             activationPeerAgentBindings!.get(remotePeerId) ?? null
           ),
         }));
-    const rfc64PublicCatalogAutoPublishPolicy =
-      rfc64PublicCatalogControls.autoPublishPolicy;
+    const rfc64PublicCatalogAutoPublishPolicy = catalogActivation.autoPublish === undefined
+      ? rfc64PublicCatalogControls.autoPublishPolicy
+      : Object.freeze({
+        mode: 'selected-catalog' as const,
+        config: catalogActivation.autoPublish,
+        selectedContextGraphs: catalogActivation.selectedContextGraphs,
+      });
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
       catalogActivation.bootstrap,

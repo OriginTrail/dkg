@@ -55,6 +55,7 @@ const RFC64_PUBLIC_CATALOG_ACTIVATION_FIELDS_V1 = new Set([
 ]);
 const RFC64_CATALOG_ACTIVATION_FIELDS_V1 = new Set([
   'accessPolicyAuthority',
+  'autoPublish',
   'bootstrap',
   'deploymentProfile',
   'enabled',
@@ -120,6 +121,8 @@ export interface Rfc64CatalogActivationConfigV1 {
   readonly enabled?: boolean;
   readonly deploymentProfile?: CatalogSealDeploymentProfileV1;
   readonly accessPolicyAuthority?: Rfc64CatalogActivationAccessPolicyAuthorityV1;
+  /** Ordinary selected-CG SWM authoring. Private fan-out is narrowed to complete providers. */
+  readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64CatalogBootstrapConfigV1;
   readonly rollout?: Rfc64CatalogRolloutConfigV1;
 }
@@ -134,6 +137,7 @@ export interface ResolvedRfc64CatalogActivationConfigV1 {
     readonly localAgentAddress: EvmAddressV1;
     readonly peerAgentBindings: readonly Readonly<Rfc64CatalogPeerAgentBindingV1>[];
   }>;
+  readonly autoPublish?: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
   readonly bootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
   readonly rollout: ResolvedRfc64CatalogRolloutConfigV1;
 }
@@ -182,6 +186,11 @@ export type ResolvedRfc64PublicCatalogAutoPublishPolicyV1 =
   }>
   | Readonly<{
     mode: 'selected-public';
+    config: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
+    selectedContextGraphs: readonly string[];
+  }>
+  | Readonly<{
+    mode: 'selected-catalog';
     config: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
     selectedContextGraphs: readonly string[];
   }>;
@@ -421,6 +430,9 @@ export function resolveRfc64CatalogActivationConfigV1(
   const accessPolicyAuthority = snapshotRfc64CatalogActivationAccessPolicyAuthorityV1(
     activation.accessPolicyAuthority,
   );
+  const autoPublish = snapshotRfc64PublicCatalogAutoPublishConfigV1(
+    activation.autoPublish,
+  );
   validatePrivateActivationAuthorityV1(
     bootstrap,
     selectedPrivateContextGraphs,
@@ -442,6 +454,7 @@ export function resolveRfc64CatalogActivationConfigV1(
     selectedPrivateContextGraphs: Object.freeze(selectedPrivateContextGraphs),
     deploymentProfile,
     accessPolicyAuthority,
+    autoPublish,
     bootstrap,
     rollout,
   });
@@ -467,6 +480,7 @@ export function resolveRfc64CatalogActivationInputV1(
         || resolvedInput.bootstrap !== undefined
         || resolvedInput.deploymentProfile !== undefined
         || resolvedInput.accessPolicyAuthority !== undefined
+        || resolvedInput.autoPublish !== undefined
         || rollout.killSwitch
         || Object.keys(rollout.contextGraphModes).length !== 0
       ) {
@@ -478,6 +492,7 @@ export function resolveRfc64CatalogActivationInputV1(
       enabled: resolvedInput.enabled,
       deploymentProfile: resolvedInput.deploymentProfile,
       accessPolicyAuthority: resolvedInput.accessPolicyAuthority,
+      autoPublish: resolvedInput.autoPublish,
       bootstrap: resolvedInput.bootstrap,
       rollout: resolvedInput.rollout,
     }, chainIdentity);
@@ -550,6 +565,10 @@ export function resolveRfc64CatalogActivationsV1(
     catalog.deploymentProfile,
     publicCatalog.deploymentProfile,
   );
+  const autoPublish = mergeAutoPublishConfigsV1(
+    catalog.autoPublish,
+    publicCatalog.autoPublish,
+  );
   const retryIntervals = [
     catalog.bootstrap?.retryIntervalMs,
     publicCatalog.bootstrap?.retryIntervalMs,
@@ -591,6 +610,7 @@ export function resolveRfc64CatalogActivationsV1(
     selectedPrivateContextGraphs: Object.freeze(selectedPrivateContextGraphs),
     deploymentProfile,
     accessPolicyAuthority: catalog.accessPolicyAuthority,
+    autoPublish,
     bootstrap: mergedBootstrap,
     rollout,
   });
@@ -741,6 +761,16 @@ function mergeDeploymentProfilesV1(
 ): Readonly<CatalogSealDeploymentProfileV1> | undefined {
   if (left !== undefined && right !== undefined && JSON.stringify(left) !== JSON.stringify(right)) {
     throw new TypeError('rfc64Catalog and rfc64PublicCatalog deployment profiles conflict');
+  }
+  return left ?? right;
+}
+
+function mergeAutoPublishConfigsV1(
+  left: Readonly<Rfc64PublicCatalogAutoPublishConfigV1> | undefined,
+  right: Readonly<Rfc64PublicCatalogAutoPublishConfigV1> | undefined,
+): Readonly<Rfc64PublicCatalogAutoPublishConfigV1> | undefined {
+  if (left !== undefined && right !== undefined && JSON.stringify(left) !== JSON.stringify(right)) {
+    throw new TypeError('rfc64Catalog and rfc64PublicCatalog auto-publish controls conflict');
   }
   return left ?? right;
 }

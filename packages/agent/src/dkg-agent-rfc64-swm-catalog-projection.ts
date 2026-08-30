@@ -66,6 +66,7 @@ export interface ReconcileRfc64PublicCatalogFromSwmInventoryResultV1
 
 export interface ResolvedRfc64AcceptedPublicRootLaneV1 {
   readonly networkId: NetworkIdV1;
+  readonly accessPolicy: 0 | 1;
   readonly service: Rfc64PublicCatalogServiceV1;
   readonly autoPublishConfig: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
@@ -224,6 +225,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
           params.contextGraphId,
           params.authorAddress,
+          lane.accessPolicy,
           row,
           params.signal,
         ),
@@ -294,7 +296,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       policy === undefined
       || (subGraphName !== undefined && subGraphName !== null)
       || (
-        policy.mode === 'selected-public'
+        policy.mode !== 'all-accepted-public'
         && !policy.selectedContextGraphs.includes(contextGraphId)
       )
     ) return Object.freeze({ status: 'inactive' });
@@ -323,15 +325,35 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         ),
       });
     }
-    if (acceptedPolicy.policy.accessPolicy !== 0) {
-      return Object.freeze({ status: 'inactive' });
+    let autoPublishConfig = policy.config;
+    if (acceptedPolicy.policy.accessPolicy === 1) {
+      const acceptedPrivate = this.config.rfc64CatalogBootstrap?.acceptedPolicies.find(
+        ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
+      );
+      const completeProviders = acceptedPrivate?.completeSwmProviders;
+      if (completeProviders === undefined || completeProviders.length === 0) {
+        return Object.freeze({
+          status: 'unavailable',
+          error: new Error(
+            'RFC-64 private root authoring requires graph-complete provider authority',
+          ),
+        });
+      }
+      // Private V2 fan-out is never widened by the global public hint list.
+      // Its exact policy-bound complete-provider set is the only availability
+      // destination for this selected graph generation.
+      autoPublishConfig = Object.freeze({
+        ...policy.config,
+        peers: Object.freeze([...completeProviders]),
+      });
     }
     return Object.freeze({
       status: 'active',
       lane: Object.freeze({
         networkId,
+        accessPolicy: acceptedPolicy.policy.accessPolicy,
         service,
-        autoPublishConfig: policy.config,
+        autoPublishConfig,
         scopeBase: Object.freeze({
           networkId,
           contextGraphId,
@@ -349,6 +371,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: ContextGraphIdV1,
     authorAddress: EvmAddressV1,
+    accessPolicy: 0 | 1,
     row: Readonly<SwmAuthorInventoryRowV1>,
     signal?: AbortSignal,
   ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
@@ -392,7 +415,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       || head.assertionVersion !== row.assertionVersion
       || head.publicTripleCount !== Number(row.publicTripleCount)
       || head.privateTripleCount !== Number(row.privateTripleCount)
-      || head.accessPolicy !== 'public'
+      || (
+        accessPolicy === 0
+          ? head.accessPolicy !== 'public'
+          : head.accessPolicy === 'public'
+      )
     ) {
       throw new Error(`durable SWM head differs from signed inventory row ${row.kaUal}`);
     }
