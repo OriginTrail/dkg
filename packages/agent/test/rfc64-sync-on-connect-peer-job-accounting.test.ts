@@ -63,6 +63,60 @@ describe('RFC-64 peer-job accounting and order', () => {
     expect(agent.trySyncFromPeer).toHaveBeenCalledOnce();
   });
 
+  it('continues ordinary work after automatic selected rejection and commits retry', async () => {
+    const agent = await createUnstartedAgent('Rfc64AutomaticSelectedRejection');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    agent.config.syncContextGraphs = ['selected-cg'];
+    agent.config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { contextGraphId: 'selected-cg', accessPolicy: 0 } },
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    agent.getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+    const order: string[] = [];
+    const selectedFailure = new Error('automatic selected sync failed');
+    agent.trySelectedSwmRetryFromPeer = vi.fn(async () => {
+      order.push('selected');
+      throw selectedFailure;
+    });
+    agent.trySyncFromPeer = vi.fn(async (_peerId, onSyncAccounting) => {
+      order.push('ordinary');
+      onSyncAccounting?.({
+        reconcilerDisposition: 'clear',
+        fresh: true,
+        progress: true,
+      });
+      return 'synced';
+    });
+    const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
+    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+
+    await expect(runner.runOrdinary()).rejects.toBe(selectedFailure);
+    expect(order).toEqual(['selected', 'ordinary']);
+    runner.finish();
+
+    expect(applyJobAccounting).toHaveBeenCalledOnce();
+    expect(applyJobAccounting).toHaveBeenCalledWith(
+      PEER_A,
+      {
+        reconcilerDisposition: 'retry',
+        fresh: false,
+        progress: true,
+      },
+      expect.any(Object),
+    );
+    expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+  });
+
   it('replays the real ordinary lane past backoff without duplicating selected SWM', async () => {
     const agent = await createUnstartedAgent('Rfc64RealOrdinaryReplay');
     allowAllNetworkAdmission(agent);

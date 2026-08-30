@@ -374,7 +374,6 @@ import {
 import { ReconciledSyncOnConnectPeerJobRunner } from
   './sync/on-connect/peer-job-runner.js';
 import type {
-  SelectedPublicSharedMemoryTarget,
   SelectedSharedMemoryRequestedScope,
   SelectedSharedMemorySyncResult,
 } from './sync/shared-memory-freshness.js';
@@ -1367,40 +1366,16 @@ function sharedMemoryPlanTargets<Lane extends Rfc64SwmRecoveryTargetV1['lane']>(
   );
 }
 
-type SharedMemorySyncContextGraphPlanPartition = Readonly<{
-  readonly selectedPlan: Readonly<{
-    readonly targets: readonly SelectedPublicSharedMemoryTarget[];
-  }>;
-  readonly ordinaryPlan: SharedMemorySyncContextGraphPlan;
-}>;
-
-function isSelectedPublicSharedMemoryTarget(
-  target: Readonly<Rfc64SwmRecoveryTargetV1>,
-): target is SelectedPublicSharedMemoryTarget {
-  return target.lane === 'selected-public';
-}
-
-function partitionSharedMemorySyncContextGraphPlan(
+function ordinarySharedMemorySyncContextGraphPlan(
   plan: SharedMemorySyncContextGraphPlan,
   selectedPublicContextGraphIds: ReadonlySet<string>,
-): SharedMemorySyncContextGraphPlanPartition {
-  const selectedTargets: SelectedPublicSharedMemoryTarget[] = [];
-  const ordinaryTargets: Readonly<Rfc64SwmRecoveryTargetV1>[] = [];
-  for (const target of plan.targets) {
-    if (
-      isSelectedPublicSharedMemoryTarget(target)
-      && selectedPublicContextGraphIds.has(target.contextGraphId)
-    ) {
-      selectedTargets.push(target);
-    } else {
-      ordinaryTargets.push(target);
-    }
-  }
-  const frozenSelectedTargets = Object.freeze([...selectedTargets]);
-  const frozenOrdinaryTargets = Object.freeze([...ordinaryTargets]);
+): SharedMemorySyncContextGraphPlan {
+  const ordinaryTargets = plan.targets.filter((target) => !(
+    target.lane === 'selected-public'
+    && selectedPublicContextGraphIds.has(target.contextGraphId)
+  ));
   return Object.freeze({
-    selectedPlan: Object.freeze({ targets: frozenSelectedTargets }),
-    ordinaryPlan: Object.freeze({ targets: frozenOrdinaryTargets }),
+    targets: Object.freeze([...ordinaryTargets]),
   });
 }
 
@@ -4942,7 +4917,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const getPostDurableOrdinarySharedMemoryPlan = async (
       peerId: string,
     ): Promise<SharedMemorySyncContextGraphPlan> => (
-      partitionSharedMemorySyncContextGraphPlan(
+      ordinarySharedMemorySyncContextGraphPlan(
         await this.planSharedMemorySyncContextGraphs(
           peerId,
           sharedMemoryRecoveryContextGraphIds,
@@ -4951,7 +4926,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         selectedLaneOwnsPinnedPublicGraphs
           ? selectedPublicContextGraphIds
           : new Set<string>(),
-      ).ordinaryPlan
+      )
     );
     return runSyncOnConnect({
       remotePeer,
