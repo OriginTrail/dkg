@@ -63,9 +63,9 @@ interface Rfc64SyncAgentSeam {
   discoverContextGraphsFromStore: () => Promise<number>;
   syncSharedMemoryFromPeerDetailed: (...args: readonly unknown[]) => Promise<unknown>;
   syncSelectedSharedMemoryFromPeerDetailed: (...args: readonly unknown[]) => Promise<unknown>;
-  trySyncFromPeer: (
+  attemptSyncFromPeerWithReconcilerAccounting: (
     peerId: string,
-    onAccounting: undefined,
+    probe: Readonly<{ protocolsKey: string; connectionKey: null }>,
     source: 'reconcile',
   ) => Promise<string>;
 }
@@ -104,7 +104,11 @@ class Rfc64CatalogSwmOrderingHarness {
   }
 
   tryReconcile(peerId: string): Promise<string> {
-    return this.seam.trySyncFromPeer(peerId, undefined, 'reconcile');
+    return this.seam.attemptSyncFromPeerWithReconcilerAccounting(
+      peerId,
+      { protocolsKey: PROTOCOL_SYNC, connectionKey: null },
+      'reconcile',
+    );
   }
 }
 

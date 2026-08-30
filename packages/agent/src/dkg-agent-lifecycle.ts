@@ -4788,55 +4788,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       : scheduler.enqueueOrdinary(remotePeer, handleSyncError, delayMs);
   }
 
-  async runSyncFromPeerOnConnect(
-    this: DKGAgent,
-    remotePeer: string,
-    handleSyncError: (remotePeer: string, err: unknown) => void,
-  ): Promise<void> {
-    if (!syncOnConnectEnabled(this.config)) return;
-    const now = Date.now();
-    const backoff = this.syncReconcilerBackoff.get(remotePeer);
-    if (backoff && now < backoff.nextRetryAt) return;
-
-    const probe = await this.getSyncReconcilerProbe(remotePeer);
-    try {
-      await this.attemptSyncFromPeerWithReconcilerAccounting(
-        remotePeer,
-        probe,
-        'on-connect',
-      );
-    } catch (err: unknown) {
-      handleSyncError(remotePeer, err);
-    }
-  }
-
-  async runSelectedSwmRetryFromPeerOnConnect(
-    this: DKGAgent,
-    remotePeer: string,
-    handleSyncError: (remotePeer: string, err: unknown) => void,
-    recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-  ): Promise<void> {
-    if (
-      recoveryPlan === undefined
-      && !this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
-    ) return;
-    const now = Date.now();
-    const backoff = this.syncReconcilerBackoff.get(remotePeer);
-    if (backoff && now < backoff.nextRetryAt) return;
-
-    const probe = await this.getSyncReconcilerProbe(remotePeer);
-    try {
-      await this.attemptSelectedSwmRetryWithReconcilerAccounting(
-        remotePeer,
-        probe,
-        'on-connect',
-        recoveryPlan,
-      );
-    } catch (err: unknown) {
-      handleSyncError(remotePeer, err);
-    }
-  }
-
   async attemptSyncFromPeerWithReconcilerAccounting(
     this: DKGAgent,
     remotePeer: string,

@@ -271,7 +271,10 @@ describe('sync-on-connect churn gates', () => {
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
     agent.trySyncFromPeer = async () => 'synced';
 
-    await agent.runSyncFromPeerOnConnect(PEER_A, () => undefined);
+    await agent.attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
 
     const backoff = agent.syncReconcilerBackoff.get(PEER_A);
     expect(backoff?.failures).toBe(1);
@@ -317,7 +320,10 @@ describe('sync-on-connect churn gates', () => {
       connectionKey: null,
     });
 
-    await (agent as any).runSyncFromPeerOnConnect(PEER_A, () => undefined);
+    await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
 
     expect((agent as any).lastSyncProgressAt.get(PEER_A)).toBeGreaterThan(0);
     expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
