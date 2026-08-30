@@ -93,6 +93,22 @@ import {
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 
 const PREFIX = "/api/knowledge-assets";
+
+function promoteStoreFailure(error: unknown): unknown {
+  return isPromoteReplaySafeError(error) ? error.cause : error;
+}
+
+function classifyPromoteStoreUnavailable(error: unknown) {
+  return classifyStoreUnavailable(promoteStoreFailure(error));
+}
+
+function respondIfPromoteStoreUnavailable(
+  res: RequestContext["res"],
+  error: unknown,
+) {
+  return respondIfStoreUnavailable(res, promoteStoreFailure(error));
+}
+
 type FinalizedPublishResult = Awaited<
   ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
 > & {
@@ -1071,9 +1087,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         error: unknown,
         phase: 'swm-share' | 'vm-publish',
       ): boolean => {
-        const classified = classifyStoreUnavailable(
-          isPromoteReplaySafeError(error) ? error.cause : error,
-        );
+        const classified = classifyPromoteStoreUnavailable(error);
         if (!classified) return false;
         jsonResponse(
           res,
@@ -1485,10 +1499,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // Replay certification belongs to the promote workflow. Translate its
         // typed store cause here instead of teaching the generic store helper
         // about publisher-specific wrappers.
-        if (
-          isPromoteReplaySafeError(e)
-          && respondIfStoreUnavailable(res, e.cause)
-        ) return;
+        if (respondIfPromoteStoreUnavailable(res, e)) return;
         // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
         // carries the recovery hint. Everything else (e.g. the curator-ack 503)
         // propagates to the outer handler unchanged.

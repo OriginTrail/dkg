@@ -143,7 +143,26 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       try {
         runner = job.runner ??= this.callbacks.createJob(remotePeer);
       } catch (error: unknown) {
-        lane.handleSyncError(remotePeer, error);
+        // Construction owns the whole accepted peer job, not just the lane
+        // claimed first. Snapshot and fail every accepted lane before
+        // releasing the peer so no successful enqueue disappears silently.
+        const failedLanes: PendingLane<SelectedPlan>[] = [lane];
+        let pendingLane = this.claimNext(job);
+        while (pendingLane !== null) {
+          failedLanes.push(pendingLane);
+          pendingLane = this.claimNext(job);
+        }
+        // Release before invoking consumers: an error handler may immediately
+        // enqueue a replacement job, which the outer finalizer must not erase.
+        if (this.jobs.get(remotePeer) === job) this.jobs.delete(remotePeer);
+        for (const failedLane of failedLanes) {
+          try {
+            failedLane.handleSyncError(remotePeer, error);
+          } catch {
+            // Consumer failures are terminally contained by scheduler ownership;
+            // continue notifying the remaining accepted lanes.
+          }
+        }
         return;
       }
       while (this.jobs.get(remotePeer) === job) {

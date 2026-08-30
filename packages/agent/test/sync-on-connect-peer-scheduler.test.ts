@@ -67,7 +67,7 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(finish).not.toHaveBeenCalled();
   });
 
-  it('cleans up a construction failure, reports it to the claimed lane, and re-enqueues', async () => {
+  it('cleans up a construction failure, reports every accepted lane, and re-enqueues', async () => {
     const constructionFailure = new Error('runner construction failed');
     const ordinaryError = vi.fn();
     const selectedError = vi.fn();
@@ -94,7 +94,9 @@ describe('sync-on-connect per-peer scheduler', () => {
       constructionFailure,
     ));
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
-    expect(ordinaryError).not.toHaveBeenCalled();
+    expect(ordinaryError).toHaveBeenCalledWith(PEER, constructionFailure);
+    expect(ordinaryError).toHaveBeenCalledOnce();
+    expect(selectedError).toHaveBeenCalledOnce();
 
     expect(scheduler.enqueueOrdinary(PEER, ordinaryError, 0)).toBe(true);
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
