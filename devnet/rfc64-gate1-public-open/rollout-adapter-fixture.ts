@@ -1,6 +1,7 @@
 import {
   DKGAgent,
   buildOpenOwnerContextGraphPolicyV1,
+  stageKnowledgeAssetSharedWorkingMemoryV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
   type DKGAgentConfig,
   type ReplicationEvent,
@@ -14,22 +15,11 @@ import {
   assertUnsignedContextGraphPolicyEnvelopeV1,
   computeNetworkId,
   createOperationContext,
-  createGraphKnowledgeAssetScope,
-  knowledgeAssetLayerGraphUri,
-  MemoryLayer,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
-import {
-  GraphManager,
-  tryReplaceGraphAtomically,
-  type TripleStore,
-} from '@origintrail-official/dkg-storage';
-import {
-  storeKnowledgeAssetOperationPublicQuads,
-  storeKnowledgeAssetWorkspaceHead,
-} from '@origintrail-official/dkg-publisher';
+import { type TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 import {
@@ -344,8 +334,7 @@ export class Gate1VmChainAdapter extends MockChainAdapter {
 
   override async getMerkleRootCount(kaId: bigint): Promise<bigint> {
     this.#readCounts.rootCount += 1;
-    const count = await super.getMerkleRootCount(kaId);
-    return this.scenario === 'root-count-drift' ? count + 1n : count;
+    return super.getMerkleRootCount(kaId);
   }
 
   override async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
@@ -367,9 +356,7 @@ export class Gate1VmChainAdapter extends MockChainAdapter {
 
   override async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
     this.#readCounts.accessPolicy += 1;
-    return this.scenario === 'private'
-      ? 1
-      : super.getContextGraphAccessPolicy(contextGraphId);
+    return super.getContextGraphAccessPolicy(contextGraphId);
   }
 }
 
@@ -387,23 +374,9 @@ export async function seedGate1VmSourceSwm(
   store: TripleStore,
   contextGraphId: string,
 ): Promise<Readonly<{ swmGraph: string; tripleCount: number }>> {
-  const scope = createGraphKnowledgeAssetScope(GATE1_KA_UAL, '1');
-  const graphManager = new GraphManager(store);
-  const swmGraph = knowledgeAssetLayerGraphUri(
-    contextGraphId,
-    MemoryLayer.SharedWorkingMemory,
-    scope,
-  );
-  const replaced = await tryReplaceGraphAtomically(
-    store,
-    swmGraph,
-    GATE1_PROJECTION_QUADS.map((quad) => ({ ...quad, graph: swmGraph })),
-  );
-  if (!replaced) throw new Error('rollout store does not support atomic graph replacement');
   const shareOperationId = 'rfc64-rollout-vm-source-v1';
-  await storeKnowledgeAssetOperationPublicQuads({
+  return stageKnowledgeAssetSharedWorkingMemoryV1({
     store,
-    graphManager,
     contextGraphId,
     shareOperationId,
     kaUal: GATE1_KA_UAL,
@@ -415,15 +388,6 @@ export async function seedGate1VmSourceSwm(
     agentAddress: GATE1_AUTHOR_ADDRESS,
     timestamp: new Date('2026-07-19T12:34:56.789Z'),
   });
-  await storeKnowledgeAssetWorkspaceHead({
-    store,
-    graphManager,
-    contextGraphId,
-    kaUal: GATE1_KA_UAL,
-    assertionVersion: '1',
-    shareOperationId,
-  });
-  return Object.freeze({ swmGraph, tripleCount: GATE1_PROJECTION_QUADS.length });
 }
 
 function parseRolloutMode(input: string | undefined): Gate1RolloutMode | null {
@@ -434,9 +398,9 @@ function parseRolloutMode(input: string | undefined): Gate1RolloutMode | null {
 
 function parseVmChainScenario(input: string | undefined): Gate1VmChainScenario {
   if (input === undefined || input === '' || input === 'valid') return 'valid';
-  if (input === 'inactive' || input === 'private' || input === 'root-count-drift') return input;
+  if (input === 'inactive') return input;
   throw new Error(
-    'DKG_RFC64_ROLLOUT_VM_CHAIN_SCENARIO must be valid, inactive, private, or root-count-drift',
+    'DKG_RFC64_ROLLOUT_VM_CHAIN_SCENARIO must be valid or inactive',
   );
 }
 
