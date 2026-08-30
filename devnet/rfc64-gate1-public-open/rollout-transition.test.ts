@@ -22,8 +22,13 @@ import {
   GATE1_PROJECTION_NQUADS as PROJECTION_NQUADS,
   GATE1_ROLE_MASTER_KEYS as ROLE_KEYS,
   createGate1AuthorSealV1 as authorSeal,
+  createGate1CatalogScopeV1,
 } from './fixture.js';
-import type {
+import {
+  GATE1_ROLLOUT_COMMANDS,
+  GATE1_VM_CHAIN_READ_KEYS,
+  parseGate1RolloutCommandOutput,
+  type Gate1RolloutCommand,
   Gate1RolloutMode,
   Gate1RolloutStatusResult,
   Gate1VmChainScenario,
@@ -42,6 +47,46 @@ after(async () => {
       rm(path, { force: true, recursive: true })
     )));
   });
+});
+
+test('routes every registered rollout command through its own output decoder', () => {
+  const digest = `0x${'ab'.repeat(32)}`;
+  const outputs: Readonly<Record<Gate1RolloutCommand, unknown>> = Object.freeze({
+    rolloutStatus: Object.freeze({
+      bootstrapStarted: true,
+      catalogServiceStarted: true,
+      legacyConfiguredScope: false,
+      manualLegacySwmTargetCount: 0,
+      vmChainInventorySelected: true,
+    }),
+    vmReconcile: Object.freeze({
+      chainReadDelta: Object.freeze(Object.fromEntries(
+        GATE1_VM_CHAIN_READ_KEYS.map((key) => [key, 0]),
+      )),
+      replicationEvents: Object.freeze([]),
+      result: Object.freeze({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        onChainId: '1',
+        source: 'manual',
+        status: 'current',
+        attempted: true,
+        headOrdinal: 0,
+        watermarkBefore: 0,
+        watermarkAfter: 0,
+        reconciledOrdinals: 0,
+        unresolvedOrdinals: 0,
+      }),
+    }),
+    seedVmSourceSwm: Object.freeze({ swmGraph: 'did:dkg:context-graph:test', tripleCount: 0 }),
+    stagedHeadReadback: digest,
+  });
+  for (const command of GATE1_ROLLOUT_COMMANDS) {
+    assert.doesNotThrow(() => parseGate1RolloutCommandOutput(command, outputs[command]));
+    for (const otherCommand of GATE1_ROLLOUT_COMMANDS) {
+      if (otherCommand === command) continue;
+      assert.throws(() => parseGate1RolloutCommandOutput(command, outputs[otherCommand]));
+    }
+  }
 });
 
 test('certifies restart-stable shadow, catalog, kill, re-enable, and legacy authority', {
@@ -89,17 +134,9 @@ test('certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     successor.signatureVariantDigest,
     'successor signature variant digest',
   );
-  const catalogScopeDigest = computeAuthorCatalogScopeDigestV1({
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
-    subGraphName: null,
-    authorAddress: AUTHOR_ADDRESS,
-    era: '0',
-    bucketCount: '1',
-  } as never);
+  const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
+    createGate1CatalogScopeV1(CONTEXT_GRAPH_ID),
+  );
   const kaUal = string(successor.kaUal, 'successor KA UAL');
   const assetScope = createGraphKnowledgeAssetScope(kaUal, '1');
   const swmGraph = knowledgeAssetLayerGraphUri(
