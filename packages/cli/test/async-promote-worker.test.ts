@@ -20,11 +20,13 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
-  PromoteReplaySafeError,
   type AsyncPromoteQueue,
   type PromoteRequest,
   type PromoteTerminalJobClearer,
 } from '@origintrail-official/dkg-publisher';
+// Test-only deep import: production consumers receive only the closed guard
+// and unwrapping functions from the publisher package root.
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/dist/promote-replay-safety.js';
 import {
   classifyPromoteError,
   createPromoteWorkerSupervisor,
@@ -180,17 +182,22 @@ describe('classifyPromoteError', () => {
       classification: 'fatal',
       retryable: false,
     });
-    expect(classifyPromoteError(new PromoteReplaySafeError(
-      rawReplaceFailure,
-    ))).toEqual({ classification: 'transient', retryable: true });
-    expect(classifyPromoteError(new PromoteReplaySafeError(
-      new Error('payload too large while reading the indeterminate timeout response'),
+    expect(classifyPromoteError(
+      classifyExactSwmGraphReplaceFailure(rawReplaceFailure),
+    )).toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(classifyExactSwmGraphReplaceFailure(
+      new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'replaceGraph',
+        outcome: 'indeterminate',
+        message: 'payload too large while reading the indeterminate timeout response',
+      }),
     ))).toEqual({ classification: 'transient', retryable: true });
     expect(classifyPromoteError({
       code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       stage: 'atomic-exact-swm-graph-replacement',
       cause: rawReplaceFailure,
-    })).toEqual({ classification: 'transient', retryable: true });
+    })).toEqual({ classification: 'fatal', retryable: false });
     for (const malformed of [
       { code: 'PROMOTE_REPLAY_SAFE_FAILURE', cause: rawReplaceFailure },
       {

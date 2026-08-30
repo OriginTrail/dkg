@@ -11,7 +11,8 @@ import {
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
-import { PromoteReplaySafeError } from '@origintrail-official/dkg-publisher';
+// Test-only deep import: the producer constructor is not part of the package API.
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/dist/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -319,7 +320,7 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
           authorAddress: '0x0000000000000000000000000000000000000001',
         }),
         promote: async () => {
-          throw new PromoteReplaySafeError(timeout);
+          throw classifyExactSwmGraphReplaceFailure(timeout);
         },
       },
     });

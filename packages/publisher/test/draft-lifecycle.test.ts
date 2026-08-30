@@ -24,12 +24,13 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
-  PromoteReplaySafeError,
+  isPromoteReplaySafeError,
   assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  unwrapPromoteReplaySafeError,
 } from '../src/index.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -558,11 +559,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       } catch (error) {
         rejection = error;
       }
-      expect(rejection).toBeInstanceOf(PromoteReplaySafeError);
-      expect(rejection).toMatchObject({
-        stage: 'atomic-exact-swm-graph-replacement',
-        cause: failure,
-      });
+      expect(isPromoteReplaySafeError(rejection)).toBe(true);
+      expect(unwrapPromoteReplaySafeError(rejection)).toBe(failure);
       expect(injected).toBe(true);
       await expectExactSwmGraph(finalized.sharedGraphUri);
       expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(

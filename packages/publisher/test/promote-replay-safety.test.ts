@@ -4,8 +4,6 @@ import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import {
   classifyExactSwmGraphReplaceFailure,
   isPromoteReplaySafeError,
-  PROMOTE_REPLAY_SAFE_ERROR_CODE,
-  PromoteReplaySafeError,
   unwrapPromoteReplaySafeError,
 } from '../src/promote-replay-safety.js';
 
@@ -18,8 +16,8 @@ describe('promote replay safety', () => {
     });
 
     const classified = classifyExactSwmGraphReplaceFailure(replaceFailure);
-    expect(classified).toBeInstanceOf(PromoteReplaySafeError);
-    expect((classified as PromoteReplaySafeError).cause).toBe(replaceFailure);
+    expect(isPromoteReplaySafeError(classified)).toBe(true);
+    expect(unwrapPromoteReplaySafeError(classified)).toBe(replaceFailure);
   });
 
   it.each([
@@ -36,34 +34,32 @@ describe('promote replay safety', () => {
     expect(classifyExactSwmGraphReplaceFailure(failure)).toBe(failure);
   });
 
-  it('recognizes replay-safe certification without prototype identity', () => {
-    const crossRealmShape = Object.freeze({
-      code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
+  it('rejects a structurally identical marker that did not originate at the producer boundary', () => {
+    const forgedShape = Object.freeze({
+      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       stage: 'atomic-exact-swm-graph-replacement' as const,
       cause: new Error('indeterminate replacement'),
     });
 
-    expect(crossRealmShape).not.toBeInstanceOf(PromoteReplaySafeError);
-    expect(isPromoteReplaySafeError(crossRealmShape)).toBe(true);
-    expect(unwrapPromoteReplaySafeError(crossRealmShape))
-      .toBe(crossRealmShape.cause);
+    expect(isPromoteReplaySafeError(forgedShape)).toBe(false);
+    expect(unwrapPromoteReplaySafeError(forgedShape)).toBe(forgedShape);
   });
 
   it.each([
-    ['missing stage', { code: PROMOTE_REPLAY_SAFE_ERROR_CODE }],
+    ['missing stage', { code: 'PROMOTE_REPLAY_SAFE_FAILURE' }],
     ['missing cause', {
-      code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
+      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       stage: 'atomic-exact-swm-graph-replacement',
     }],
     ['unknown stage', {
-      code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
+      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       stage: 'other',
     }],
     ['misspelled stage', {
-      code: PROMOTE_REPLAY_SAFE_ERROR_CODE,
+      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       stage: 'atomic-exact-swm-graph-replacment',
     }],
-  ])('fails closed for a cross-realm shape with %s', (_label, malformed) => {
+  ])('fails closed for an untrusted marker with %s', (_label, malformed) => {
     expect(isPromoteReplaySafeError(malformed)).toBe(false);
   });
 });

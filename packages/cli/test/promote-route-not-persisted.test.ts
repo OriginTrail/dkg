@@ -24,8 +24,9 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { PromoteReplaySafeError } from '@origintrail-official/dkg-publisher';
 import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+// Test-only deep import: the producer constructor is not part of the package API.
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/dist/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 
 const CG_ID = 'issue-864-cg';
@@ -217,7 +218,7 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
 
   it('preserves the retryable 503 contract for a committed exact SWM replacement timeout', async () => {
     await startWithPromoteImpl(async () => {
-      throw new PromoteReplaySafeError(
+      throw classifyExactSwmGraphReplaceFailure(
         new StoreOperationTimeoutError({
           backend: 'managed-oxigraph',
           operation: 'replaceGraph',

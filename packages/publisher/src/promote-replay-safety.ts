@@ -1,20 +1,16 @@
 import { isStoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 
-export const PROMOTE_REPLAY_SAFE_ERROR_CODE = 'PROMOTE_REPLAY_SAFE_FAILURE';
+const PROMOTE_REPLAY_SAFE_ERROR_CODE = 'PROMOTE_REPLAY_SAFE_FAILURE';
 const EXACT_SWM_GRAPH_REPLACEMENT_STAGE =
   'atomic-exact-swm-graph-replacement' as const;
 
-export interface PromoteReplaySafeErrorLike {
-  readonly code: typeof PROMOTE_REPLAY_SAFE_ERROR_CODE;
-  readonly stage: typeof EXACT_SWM_GRAPH_REPLACEMENT_STAGE;
-  readonly cause: unknown;
-}
+const certifiedReplaySafeErrors = new WeakSet<object>();
 
 /**
  * Producer-owned proof that retrying the complete promote attempt converges.
  * Consumers must never infer this disposition from a low-level store operation.
  */
-export class PromoteReplaySafeError extends Error {
+class PromoteReplaySafeError extends Error {
   override readonly name = 'PromoteReplaySafeError';
   readonly code = PROMOTE_REPLAY_SAFE_ERROR_CODE;
   readonly stage = EXACT_SWM_GRAPH_REPLACEMENT_STAGE;
@@ -27,21 +23,20 @@ export class PromoteReplaySafeError extends Error {
       { cause },
     );
     this.cause = cause;
+    certifiedReplaySafeErrors.add(this);
   }
 }
 
-/** Accept replay-safe certification across package and worker realms. */
+/** Consume replay-safe certification without exposing a forgeable producer API. */
 export function isPromoteReplaySafeError(
   error: unknown,
-): error is PromoteReplaySafeErrorLike {
-  if (!error || typeof error !== 'object') return false;
-  const shaped = error as Partial<PromoteReplaySafeErrorLike>;
-  return shaped.code === PROMOTE_REPLAY_SAFE_ERROR_CODE
-    && shaped.stage === EXACT_SWM_GRAPH_REPLACEMENT_STAGE
-    && shaped.cause !== undefined;
+): error is Error & { readonly cause: unknown } {
+  return error !== null
+    && typeof error === 'object'
+    && certifiedReplaySafeErrors.has(error);
 }
 
-/** Unwrap producer-certified replay safety at a package/worker boundary. */
+/** Unwrap producer-certified replay safety at the publisher/consumer boundary. */
 export function unwrapPromoteReplaySafeError(error: unknown): unknown {
   return isPromoteReplaySafeError(error) ? error.cause : error;
 }
