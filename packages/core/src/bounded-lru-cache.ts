@@ -35,4 +35,8 @@ export class BoundedLruCache<K, V> {
     const oldest = this.entries.keys().next();
     if (!oldest.done) this.entries.delete(oldest.value);
   }
+
+  delete(key: K): boolean {
+    return this.entries.delete(key);
+  }
 }
