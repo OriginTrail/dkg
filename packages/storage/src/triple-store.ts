@@ -19,6 +19,10 @@ import {
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
+  Rfc64SemanticReadOperationV2,
+  Rfc64SemanticStoreRowV1,
+} from '@origintrail-official/dkg-core';
+import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
@@ -33,6 +37,8 @@ export interface Quad {
 export interface SelectResult {
   type: 'bindings';
   bindings: Array<Record<string, string>>;
+  /** SELECT projection reported by the backend when it exposes one. */
+  variables?: string[];
 }
 
 export interface ConstructResult {
@@ -120,6 +126,16 @@ export interface TripleStore {
    * reaching into a specific adapter's process-global scheduler.
    */
   getPressureSnapshot?(): StorePressureSnapshot | undefined;
+
+  /** Explicit opt-in for adapters covered by the RFC-64 semantic-read suite. */
+  readonly rfc64SemanticReadCertifiedV1?: boolean;
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<Readonly<{
+    variables: readonly string[];
+    rows: readonly Rfc64SemanticStoreRowV1[];
+  }>>;
 
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;

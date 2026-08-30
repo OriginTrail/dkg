@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
   Rfc64SemanticReadManifestErrorV1,
-  compileRfc64SemanticReadOperationV1,
+  compileRfc64SemanticReadOperationV2,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
   type ChainIdV1,
@@ -24,6 +24,7 @@ import {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   OxigraphStore,
   OxigraphWorkerStore,
+  SparqlHttpStore,
   Rfc64SemanticReadGatewayErrorV1,
   SyncSemanticStoreV1,
   type QueryOptions,
@@ -32,7 +33,7 @@ import {
 } from '../src/index.js';
 import {
   Rfc64SemanticReadCapabilityResultErrorV1,
-  certifyRfc64SemanticReadStoreV1,
+  executeRfc64SemanticReadCapabilityV1,
 } from '../src/rfc64-semantic-read-capability.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
@@ -187,9 +188,9 @@ describe('SyncSemanticStoreV1', () => {
     expect(result.kind).toBe('record');
     if (result.kind === 'record') expect(result.decoded.record).toEqual(current.record);
     expect(requests).toHaveLength(1);
-    expect(requests[0].body).toBe(compileRfc64SemanticReadOperationV1({
-      coordinate: current.coordinate,
-    }).sparql);
+    expect(requests[0].body).toBe(
+      compileRfc64SemanticReadOperationV2(current.coordinate).sparql,
+    );
     expect(requests[0].signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -197,6 +198,8 @@ describe('SyncSemanticStoreV1', () => {
     const current = FIXTURES[0];
     const payloads: unknown[] = [
       { head: { vars: ['p', 'o'] }, results: { bindings: [] } },
+      { head: { vars: [] }, results: { bindings: [] } },
+      { head: {}, results: { bindings: [] } },
       {},
       { head: { vars: ['p', 'o'] } },
       { head: { vars: ['p', 'o'] }, results: {} },
@@ -259,6 +262,7 @@ describe('SyncSemanticStoreV1', () => {
 
     let getterInvoked = false;
     const getterBacked = { query: inner.query } as Record<string, unknown>;
+    getterBacked.rfc64SemanticReadCertifiedV1 = true;
     Object.defineProperty(getterBacked, 'rfc64SemanticReadV1', {
       get: () => {
         getterInvoked = true;
@@ -268,6 +272,32 @@ describe('SyncSemanticStoreV1', () => {
     expect(() => new SyncSemanticStoreV1(getterBacked as unknown as TripleStore))
       .toThrow(/no certified RFC-64 semantic read capability/u);
     expect(getterInvoked).toBe(false);
+  });
+
+  it('certifies only DKG-managed Oxigraph HTTP stores', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      head: { vars: ['p', 'o'] },
+      results: { bindings: [] },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    }));
+    const managed = new SparqlHttpStore({
+      queryEndpoint: 'http://managed-oxigraph.test/query',
+      managedOxigraph: true,
+    });
+    const decorated = { innerStore: managed } as unknown as TripleStore;
+    await expect(new SyncSemanticStoreV1(decorated).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    )).resolves.toEqual({ kind: 'absent' });
+
+    const generic = new SparqlHttpStore({
+      queryEndpoint: 'http://generic-sparql.test/query',
+    });
+    expect(() => new SyncSemanticStoreV1(generic)).toThrow(
+      /no certified RFC-64 semantic read capability/u,
+    );
   });
 
   it('uses the manifest compiler as the only request-validation boundary', async () => {
@@ -529,9 +559,14 @@ function requestOf(current: (typeof FIXTURES)[number]) {
 function certifiedStore(
   query: (sparql: string, options?: QueryOptions) => Promise<QueryResult>,
 ): TripleStore {
-  const store = { query } as unknown as TripleStore;
-  certifyRfc64SemanticReadStoreV1(store);
-  return store;
+  const store = {
+    query,
+    rfc64SemanticReadCertifiedV1: true as const,
+    rfc64SemanticReadV1(operation, options) {
+      return executeRfc64SemanticReadCapabilityV1(store, operation, options, 'manifest');
+    },
+  } satisfies Pick<TripleStore, 'query' | 'rfc64SemanticReadCertifiedV1' | 'rfc64SemanticReadV1'>;
+  return store as unknown as TripleStore;
 }
 
 async function rejected(promise: Promise<unknown>): Promise<unknown> {

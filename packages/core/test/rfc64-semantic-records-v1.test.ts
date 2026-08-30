@@ -8,6 +8,7 @@ import {
   RFC64_SEMANTIC_PREDICATES_V1,
   Rfc64SemanticRecordErrorV1,
   decodeRfc64SemanticRecordStoreRowsV1,
+  parseRenderedRdfStoreObjectV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
   snapshotRfc64SemanticRecordV1,
@@ -121,6 +122,24 @@ const records: readonly Rfc64SemanticRecordV1[] = [
 ];
 
 describe('RFC-64 semantic record RDF codec v1', () => {
+  it('owns the inverse rendered RDF object boundary in core', () => {
+    expect(parseRenderedRdfStoreObjectV1('urn:test:node')).toEqual({
+      kind: 'named-node',
+      value: 'urn:test:node',
+    });
+    expect(parseRenderedRdfStoreObjectV1('"plain"')).toEqual({
+      kind: 'literal',
+      value: 'plain',
+      datatypeIri: 'http://www.w3.org/2001/XMLSchema#string',
+    });
+    expect(parseRenderedRdfStoreObjectV1('"7"^^<http://www.w3.org/2001/XMLSchema#integer>'))
+      .toEqual({
+        kind: 'literal',
+        value: '7',
+        datatypeIri: 'http://www.w3.org/2001/XMLSchema#integer',
+      });
+    expect(() => parseRenderedRdfStoreObjectV1('"bonjour"@fr')).toThrow(/language tag/u);
+  });
   it('round-trips all seven records independent of backend row order', () => {
     for (const record of records) {
       const rows = projectRfc64SemanticRecordStoreRowsV1(record);

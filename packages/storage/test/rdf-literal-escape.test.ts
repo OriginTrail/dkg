@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
-import { formatSparqlJsonBindings } from '../src/adapters/sparql-json-results.js';
+import {
+  SparqlJsonResultsShapeError,
+  formatSparqlJsonBindings,
+} from '../src/adapters/sparql-json-results.js';
 
 const lexical = 'line1\nline2\tcontrol:\u0001 del:\u007F quote:" slash:\\ café Δ';
 const escaped = 'line1\\nline2\\tcontrol:\\u0001 del:\\u007F quote:\\" slash:\\\\ café Δ';
@@ -52,6 +55,16 @@ describe('RDF binding literal escaping', () => {
       xsdString: expectedBindings[0].plain,
     }]);
     expect(() => formatSparqlJsonBindings({})).toThrow(/SPARQL JSON response\.head/u);
+  });
+
+  it.each([
+    [{ head: { vars: ['p'] }, results: { bindings: [null] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ p: null }] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ q: { type: 'uri', value: 'urn:q' } }] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'uri', value: 'urn:p', extra: true } }] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'literal', value: 'x', datatype: 'urn:d', 'xml:lang': 'en' } }] } }],
+  ])('rejects malformed SPARQL JSON rows and terms at one typed boundary', (payload) => {
+    expect(() => formatSparqlJsonBindings(payload)).toThrow(SparqlJsonResultsShapeError);
   });
 
   it('returns exact valid N-term bindings after an Oxigraph round trip', async () => {
