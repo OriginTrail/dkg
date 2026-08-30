@@ -4812,10 +4812,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
-    let syncAccountingClearedBackoff = false;
+    let syncAccounting: SyncOnConnectPeerOutcome | undefined;
     try {
-      const onSyncAccounting = () => {
-        syncAccountingClearedBackoff = true;
+      const onSyncAccounting = (outcome: SyncOnConnectPeerOutcome) => {
+        syncAccounting = outcome;
       };
       const outcome = await attempt(onSyncAccounting);
       if (outcome === 'deferred-backpressure') {
@@ -4825,11 +4825,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         return outcome;
       }
-      if (
+      if (syncAccounting?.retryBackoff) {
+        this.recordSyncReconcilerFailure(remotePeer, probe);
+      } else if (
         outcome !== 'skipped-no-sync' &&
         outcome !== 'already-syncing' &&
         outcome !== 'not-started' &&
-        !syncAccountingClearedBackoff &&
+        !syncAccounting &&
         this.lastSuccessfulSyncAt.get(remotePeer) === lastOk &&
         this.lastSyncProgressAt.get(remotePeer) === lastProgress
       ) {
@@ -5070,7 +5072,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // An owed ordinary replay may succeed after selected recovery reported
         // an incomplete scope. Preserve that selected lane's retry/backoff;
         // ordinary freshness must not consume its recovery ownership.
-        if (!selectedRetryStillRequired) {
+        if (!selectedRetryStillRequired && !outcome?.retryBackoff) {
           this.syncReconcilerBackoff.delete(peerId);
         }
         if (outcome) {

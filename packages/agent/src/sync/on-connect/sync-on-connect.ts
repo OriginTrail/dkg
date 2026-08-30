@@ -33,6 +33,11 @@ type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySync
 export interface SyncOnConnectPeerOutcome {
   fresh: boolean;
   progress?: boolean;
+  /**
+   * Useful progress was committed, but the same round also hit peer/transport
+   * pressure that must retain the reconciler retry backoff.
+   */
+  retryBackoff?: boolean;
 }
 
 interface SyncOnConnectContext {
@@ -352,12 +357,12 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       }
       return 'deferred-backpressure';
     }
-    const clearsPeerBackoff = madeProgress || (
+    const recordsPeerAccounting = madeProgress || (
       !sawBackoffWorthyFailure
       && !sawExplicitIncompleteSharedResult
       && (cleanDurableRound || sawDeniedPhase)
     );
-    if (clearsPeerBackoff) {
+    if (recordsPeerAccounting) {
       context.onPeerSynced?.(remotePeer, {
         fresh: !sawBackoffWorthyFailure
           && !sawDeniedPhase
@@ -365,6 +370,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
           && !sawExplicitIncompleteSharedResult
           && cleanDurableRound,
         progress: madeProgress,
+        retryBackoff: sawBackoffWorthyFailure,
       });
     }
     return 'synced';
