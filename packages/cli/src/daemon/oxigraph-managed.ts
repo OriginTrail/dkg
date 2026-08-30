@@ -24,7 +24,7 @@
  */
 import { join } from 'node:path';
 import { DEFAULT_SPARQL_HTTP_TIMEOUT_MS } from '@origintrail-official/dkg-storage';
-import { ensureOxigraphBinary } from './oxigraph-binary.js';
+import { ensureOxigraphBinary, OXIGRAPH_VERSION } from './oxigraph-binary.js';
 import {
   startOxigraphServer,
   type OxigraphServerHandle,
@@ -75,6 +75,14 @@ function clampNodeTimerMs(value: number): number {
   return Math.min(value, MAX_NODE_TIMER_MS);
 }
 
+function hasUnsafeNativeQueryTimeout(platform: NodeJS.Platform, version: string): boolean {
+  // Oxigraph 0.5.x on macOS retains one sleeping OS thread per completed
+  // query until --timeout-s expires. The managed HTTP deadline remains active
+  // and restarts the child when it fires, so omitting the native flag is the
+  // safe equivalent until the bundled Oxigraph implementation changes.
+  return platform === 'darwin' && version.startsWith('0.5.');
+}
+
 interface ManagedOxigraphDeadlines {
   queryTimeoutS?: number;
   clientTimeoutMs: number;
@@ -83,6 +91,7 @@ interface ManagedOxigraphDeadlines {
 /** Resolve the client deadline and an optional operator-requested native deadline. */
 function resolveManagedOxigraphDeadlines(
   options: Record<string, unknown> | undefined,
+  platform: NodeJS.Platform,
 ): ManagedOxigraphDeadlines {
   const configuredClientTimeoutMs = clampNodeTimerMs(
     resolvePositiveIntegerOption(options, 'clientTimeoutMs')
@@ -103,7 +112,9 @@ function resolveManagedOxigraphDeadlines(
     queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS,
   );
   return {
-    queryTimeoutS,
+    queryTimeoutS: hasUnsafeNativeQueryTimeout(platform, OXIGRAPH_VERSION)
+      ? undefined
+      : queryTimeoutS,
     clientTimeoutMs: configuredQueryTimeoutS !== undefined
       && configuredQueryTimeoutS > MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S
       ? MAX_NODE_TIMER_MS
@@ -200,6 +211,7 @@ export interface ManagedOxigraphPlan {
 export function planManagedOxigraph(
   config: ConfigLike,
   dataDir: string,
+  platform: NodeJS.Platform = process.platform,
 ): ManagedOxigraphPlan | null {
   if (config.store?.backend !== MANAGED_OXIGRAPH_BACKEND) return null;
 
@@ -211,7 +223,7 @@ export function planManagedOxigraph(
   // before they expire. Keep the native deadline opt-in; the HTTP adapter's
   // client deadline remains mandatory and onClientTimeout below restarts the
   // managed server so a timed-out evaluation cannot remain as a zombie.
-  const { queryTimeoutS, clientTimeoutMs } = resolveManagedOxigraphDeadlines(options);
+  const { queryTimeoutS, clientTimeoutMs } = resolveManagedOxigraphDeadlines(options, platform);
   const memoryLimits = normalizeOxigraphMemoryLimits({
     highMiB: options.memoryHighMiB,
     maxMiB: options.memoryMaxMiB,
@@ -312,7 +324,7 @@ export interface StartManagedOxigraphOptions {
 export async function startManagedOxigraph(
   opts: StartManagedOxigraphOptions,
 ): Promise<ManagedOxigraphResult | null> {
-  const plan = planManagedOxigraph(opts.config, opts.dataDir);
+  const plan = planManagedOxigraph(opts.config, opts.dataDir, opts.platform);
   if (!plan) return null;
   const log = opts.log ?? (() => {});
 

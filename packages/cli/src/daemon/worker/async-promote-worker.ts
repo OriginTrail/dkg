@@ -151,6 +151,10 @@ export interface PromoteWorkerCounters {
   interruptedAtShutdown: number;
 }
 
+const CLAIM_FAILURE_BACKOFF_BASE_MS = 250;
+const CLAIM_FAILURE_BACKOFF_MAX_MS = 30_000;
+const CLAIM_FAILURE_BACKOFF_JITTER_RATIO = 0.2;
+
 export type ClassifiedPromoteError = {
   classification: PromoteFailureClassification;
   retryable: boolean;
@@ -693,6 +697,30 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   let wakeLoop: Promise<void> | null = null;
   let lifecycleAbortController: AbortController | null = null;
   let counters: PromoteWorkerCounters = freshCounters();
+  let consecutiveClaimFailures = 0;
+  let nextClaimAttemptAt = 0;
+
+  function resetClaimFailureBackoff(): void {
+    consecutiveClaimFailures = 0;
+    nextClaimAttemptAt = 0;
+  }
+
+  function recordClaimFailure(): number {
+    consecutiveClaimFailures += 1;
+    const exponent = Math.min(consecutiveClaimFailures - 1, 30);
+    const cappedDelay = Math.min(
+      CLAIM_FAILURE_BACKOFF_MAX_MS,
+      CLAIM_FAILURE_BACKOFF_BASE_MS * (2 ** exponent),
+    );
+    const jitter = 1 - CLAIM_FAILURE_BACKOFF_JITTER_RATIO
+      + Math.random() * CLAIM_FAILURE_BACKOFF_JITTER_RATIO * 2;
+    const delayMs = Math.min(
+      CLAIM_FAILURE_BACKOFF_MAX_MS,
+      Math.max(1, Math.round(cappedDelay * jitter)),
+    );
+    nextClaimAttemptAt = now() + delayMs;
+    return delayMs;
+  }
 
   function freshCounters(): PromoteWorkerCounters {
     return {
@@ -707,13 +735,20 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
 
   async function tickSlot(slot: WorkerSlot): Promise<boolean> {
     if (shuttingDown || slot.inFlight) return false;
-    const claimed = await config.agent.promoteQueue.claimNext(slot.workerId).catch((err: unknown) => {
+    if (now() < nextClaimAttemptAt) return false;
+    let claimed: PromoteJob | null;
+    try {
+      claimed = await config.agent.promoteQueue.claimNext(slot.workerId);
+      resetClaimFailureBackoff();
+    } catch (err: unknown) {
+      const delayMs = recordClaimFailure();
       bestEffortLog(
         log,
-        `claimNext error on ${slot.workerId}: ${err instanceof Error ? err.message : String(err)}`,
+        `claimNext error on ${slot.workerId}; retrying in ${delayMs}ms: `
+          + `${err instanceof Error ? err.message : String(err)}`,
       );
-      return null;
-    });
+      return false;
+    }
     if (!claimed) return false;
 
     counters.attempted += 1;
@@ -872,6 +907,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       shuttingDown = false;
       lifecycleAbortController = new AbortController();
       counters = freshCounters();
+      resetClaimFailureBackoff();
       let recovering = true;
       try {
         const summary = await config.agent.promoteQueue.recoverOnStartup();

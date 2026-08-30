@@ -1125,6 +1125,51 @@ describe('createPromoteWorkerSupervisor', () => {
     expect(claimCalls).toBe(1);
   });
 
+  it('backs off repeated claim failures instead of polling the store continuously', async () => {
+    let now = 10_000;
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      throw new Error('store unavailable');
+    };
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      now: () => now,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'claim-backoff',
+    });
+
+    await sup.start();
+    for (let i = 0; i < 400; i += 1) await sup.tickOnce();
+    expect(claimCalls).toBe(1);
+
+    now += 249;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(1);
+    now += 1;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+
+    now += 499;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+    now += 1;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(3);
+    expect(logs.some((message) => message.includes('retrying in 500ms'))).toBe(true);
+
+    await sup.stop();
+    random.mockRestore();
+  });
+
   it('rejects a heartbeat interval that is not shorter than the queue lease', () => {
     expect(() =>
       createPromoteWorkerSupervisor({

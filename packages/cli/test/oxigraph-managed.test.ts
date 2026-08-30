@@ -130,7 +130,7 @@ describe('planManagedOxigraph', () => {
     expect(plan!.cacheDir).toBe('/mnt/oxi-bin');
   });
 
-  it('honours managed Oxigraph startup and native query timeout options', () => {
+  it('omits the unsafe native query timeout for bundled Oxigraph 0.5.x on macOS', () => {
     const plan = planManagedOxigraph(
       {
         store: {
@@ -139,11 +139,27 @@ describe('planManagedOxigraph', () => {
         },
       },
       '/data',
+      'darwin',
     );
     expect(plan!.readyTimeoutMs).toBe(180_000);
-    expect(plan!.queryTimeoutS).toBe(35);
+    expect(plan!.queryTimeoutS).toBeUndefined();
     expect(plan!.clientTimeoutMs).toBe(40_000);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
+  });
+
+  it('retains an explicitly configured native timeout on unaffected platforms', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { queryTimeoutS: 35 },
+        },
+      },
+      '/data',
+      'linux',
+    );
+    expect(plan!.queryTimeoutS).toBe(35);
+    expect(plan!.clientTimeoutMs).toBe(40_000);
   });
 
   it('uses a client-only deadline unless a native Oxigraph timeout is explicitly configured', () => {
@@ -155,6 +171,7 @@ describe('planManagedOxigraph', () => {
         },
       },
       '/data',
+      'linux',
     );
     expect(plan!.queryTimeoutS).toBeUndefined();
     expect(plan!.clientTimeoutMs).toBe(180_000);
@@ -170,6 +187,7 @@ describe('planManagedOxigraph', () => {
         },
       },
       '/data',
+      'linux',
     );
     expect(plan!.queryTimeoutS).toBe(35);
     expect(plan!.clientTimeoutMs).toBe(120_000);
@@ -185,6 +203,7 @@ describe('planManagedOxigraph', () => {
         },
       },
       '/data',
+      'linux',
     );
     expect(plan!.queryTimeoutS).toBe(35);
     expect(plan!.clientTimeoutMs).toBe(40_000);
@@ -200,6 +219,7 @@ describe('planManagedOxigraph', () => {
         },
       },
       '/data',
+      'linux',
     );
     expect(plan!.queryTimeoutS).toBeUndefined();
     expect(plan!.clientTimeoutMs).toBe(2_000);
@@ -252,6 +272,7 @@ describe('planManagedOxigraph', () => {
         },
       },
       '/data',
+      'linux',
     );
     expect(plan!.queryTimeoutS).toBe(2_147_478);
     expect(plan!.clientTimeoutMs).toBe(2_147_483_647);
