@@ -90,6 +90,32 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
       );
   });
 
+  it('snapshots catalog-lane data properties before encoding', () => {
+    let contextReads = 0;
+    let subgraphReads = 0;
+    const lane = new Proxy({
+      contextGraphId: 'safe',
+      subGraphName: null,
+    }, {
+      getOwnPropertyDescriptor(target, key) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+        if (key === 'contextGraphId') {
+          contextReads += 1;
+          return { ...descriptor!, value: contextReads === 1 ? 'safe' : '' };
+        }
+        if (key === 'subGraphName') {
+          subgraphReads += 1;
+          return { ...descriptor!, value: subgraphReads === 1 ? null : '' };
+        }
+        return descriptor;
+      },
+    }) as CatalogLaneV1;
+
+    expect(buildCatalogAssertionScopeV1(lane)).toBe('v1/root/safe');
+    expect(contextReads).toBe(1);
+    expect(subgraphReads).toBe(1);
+  });
+
   it('does not let JavaScript callers relax the catalog identifier ceiling', () => {
     const callFromJavaScript = iriComponentV1 as unknown as (
       value: string,

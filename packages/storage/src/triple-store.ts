@@ -24,7 +24,6 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import type {
   CanonicalAuthorSealStoreRowV1,
-  Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import type {
   Rfc64ExactBindingsReadOperationV1,
@@ -40,6 +39,8 @@ export interface Quad {
 export interface SelectResult {
   type: 'bindings';
   bindings: Array<Record<string, string>>;
+  /** SELECT projection reported by the backend when it exposes one. */
+  variables?: string[];
 }
 
 export interface ConstructResult {
@@ -133,13 +134,9 @@ export interface TripleStore {
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
   /** Execute one member of the certified closed RFC-64 exact-bindings union. */
+  readonly rfc64ExactBindingsReadCertifiedV1?: boolean;
   rfc64ExactBindingsReadV1?(
     operation: Rfc64ExactBindingsReadOperationV1,
-    options?: Pick<QueryOptions, 'signal'>,
-  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
-  /** @deprecated Use rfc64ExactBindingsReadV1. */
-  rfc64SemanticReadV1?(
-    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
 

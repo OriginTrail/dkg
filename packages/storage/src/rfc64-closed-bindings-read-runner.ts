@@ -56,10 +56,20 @@ export async function runRfc64ClosedBindingsReadV1<TRow, TDecoded>(
   const signalScope = composeAbortSignals(run.options.signal, deadlineSignal);
   try {
     assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
-    const rows = await waitForAbort(
-      run.dispatch(signalScope.signal),
-      signalScope.signal,
-    );
+    let rows: readonly TRow[];
+    try {
+      rows = await waitForAbort(
+        run.dispatch(signalScope.signal),
+        signalScope.signal,
+      );
+    } catch (cause) {
+      // A synchronous embedded adapter can block the event loop beyond the
+      // deadline and then reject before AbortSignal.timeout dispatches. Apply
+      // the same monotonic deadline fence to the rejection path so backend
+      // errors cannot escape after the caller-visible bound.
+      assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
+      throw cause;
+    }
     assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
     if (rows.length === 0) return undefined;
     const decoded = run.decode(rows);

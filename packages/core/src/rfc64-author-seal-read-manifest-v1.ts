@@ -92,7 +92,11 @@ function snapshotCoordinate(input: unknown): CanonicalGraphScopedAuthorSealCoord
     contextGraphId: value.contextGraphId,
     subGraphName: value.subGraphName,
   });
-  assertCanonicalGraphScopedAuthorSealCoordinateV1(coordinate);
+  try {
+    assertCanonicalGraphScopedAuthorSealCoordinateV1(coordinate);
+  } catch (cause) {
+    fail('author-seal coordinate is invalid', cause);
+  }
   return coordinate;
 }
 

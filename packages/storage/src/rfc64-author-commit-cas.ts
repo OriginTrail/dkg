@@ -22,6 +22,8 @@ export interface Rfc64AuthorCommitValueGuardV1 {
   readonly predicate: string;
   /** `null` requires the guarded value to be absent. */
   readonly expectedObject: string | null;
+  /** Complete expected subject for typed semantic commits; absent on legacy callers. */
+  readonly expectedQuads?: readonly Quad[] | null;
 }
 
 export interface Rfc64AuthorCommitSubjectReplacementV1 {
@@ -36,6 +38,8 @@ export interface Rfc64AuthorCommitStateTransitionV1 {
   readonly subject: string;
   readonly predicate: string;
   readonly expectedObject: string | null;
+  /** Complete predecessor subject, or null when the whole subject must be absent. */
+  readonly expectedQuads?: readonly Quad[] | null;
   readonly quads: readonly Quad[];
 }
 
@@ -247,6 +251,7 @@ function normalizeSemanticRfc64AuthorCommitCasV1(
     subject: transition.subject,
     predicate: transition.predicate,
     expectedObject: transition.expectedObject,
+    expectedQuads: transition.expectedQuads,
   })));
   const stateReplacements = Object.freeze(roles.map(([role, transition]) => ({
     role,
@@ -427,6 +432,16 @@ export async function mapRfc64AuthorCommitCasV1(
       graphUri: guard.graphUri,
       kind: 'expected',
     }),
+    expectedQuads: guard.expectedQuads === undefined
+      ? undefined
+      : guard.expectedQuads === null
+        ? null
+        : await Promise.all(guard.expectedQuads.map((quad) => mapper.mapQuad(quad, {
+          role: guard.role,
+          roleIndex: 0,
+          graphUri: guard.graphUri,
+          subject: guard.subject,
+        }))),
   })));
   const predicateReplacements = await Promise.all(
     manifest.predicateReplacements.map(async (replacement) => ({
@@ -451,6 +466,7 @@ export async function mapRfc64AuthorCommitCasV1(
       subject: replacement.subject,
       predicate: guard.predicate,
       expectedObject: guard.expectedObject,
+      expectedQuads: guard.expectedQuads,
       quads: replacement.quads,
     });
   };
@@ -616,6 +632,21 @@ function validateSemanticInput(
   const currentHeadReplacement = stateReplacements.find(({ role }) => role === 'currentHead');
   if (!currentHeadGuard || !currentHeadReplacement) {
     throw new Error('RFC-64 author commit requires one guarded current-head replacement');
+  }
+  for (const guard of stateGuards) {
+    if (guard.expectedQuads === undefined) {
+      throw new Error(`RFC-64 semantic ${guard.role} guard requires the complete predecessor subject`);
+    }
+    validateExactSubjectGuard(guard);
+  }
+  const predecessorQuadCount = stateGuards.reduce(
+    (count, guard) => count + (guard.expectedQuads?.length ?? 0),
+    0,
+  );
+  if (predecessorQuadCount > RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1) {
+    throw new Error(
+      `RFC-64 semantic predecessor payload exceeds ${RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1} quads`,
+    );
   }
   if (currentHeadReplacement.quads.length === 0) {
     throw new Error('RFC-64 author commit requires a non-empty current-head replacement');
@@ -812,6 +843,9 @@ function validateCommonRfc64AuthorCommitCasV1(
 function formatGuard(guard: Rfc64AuthorCommitValueGuardV1, index: number): string {
   const graphUri = assertSafeIri(guard.graphUri);
   const subject = assertNonBlankNodeIri(guard.subject, 'RFC-64 author commit guard subject');
+  if (guard.expectedQuads !== undefined) {
+    return formatExactSubjectGuard(graphUri, subject, guard.expectedQuads, index);
+  }
   const predicate = assertSafeIri(unwrapIri(guard.predicate));
   if (guard.expectedObject === null) {
     return `FILTER NOT EXISTS { GRAPH <${graphUri}> { <${subject}> <${predicate}> ?guard${index} . } }`;
@@ -820,6 +854,54 @@ function formatGuard(guard: Rfc64AuthorCommitValueGuardV1, index: number): strin
   return `GRAPH <${graphUri}> { <${subject}> <${predicate}> ${expected} . } ` +
     `FILTER NOT EXISTS { GRAPH <${graphUri}> { <${subject}> <${predicate}> ?other${index} . ` +
     `FILTER(!sameTerm(?other${index}, ${expected})) } }`;
+}
+
+function validateExactSubjectGuard(guard: Rfc64AuthorCommitValueGuardV1): void {
+  if (guard.expectedQuads === undefined) return;
+  if (guard.expectedQuads === null) {
+    if (guard.expectedObject !== null) {
+      throw new Error('RFC-64 absent semantic predecessor cannot carry a guard value');
+    }
+    return;
+  }
+  if (guard.expectedQuads.length === 0) {
+    throw new Error('RFC-64 semantic predecessor subject cannot be empty');
+  }
+  assertSubjectReplacementPayload(guard.graphUri, guard.subject, guard.expectedQuads);
+  const guardValues = guard.expectedQuads.filter(({ predicate }) =>
+    unwrapIri(predicate) === unwrapIri(guard.predicate));
+  if (guardValues.length !== 1 || guard.expectedObject === null) {
+    throw new Error('RFC-64 semantic predecessor must contain exactly one guard value');
+  }
+  if (
+    formatControlObject(guardValues[0]!.object, 'semantic predecessor guard value')
+      !== formatControlObject(guard.expectedObject, 'expected semantic predecessor guard value')
+  ) {
+    throw new Error('RFC-64 semantic predecessor guard value disagrees with its complete subject');
+  }
+}
+
+function formatExactSubjectGuard(
+  graphUri: string,
+  subject: string,
+  expectedQuads: readonly Quad[] | null,
+  index: number,
+): string {
+  if (expectedQuads === null) {
+    return `FILTER NOT EXISTS { GRAPH <${graphUri}> { <${subject}> ?guardP${index} ?guardO${index} . } }`;
+  }
+  const exactRows = expectedQuads.map(({ predicate, object }) => {
+    const expectedPredicate = assertSafeIri(unwrapIri(predicate));
+    const expectedObject = formatControlObject(object, 'expected semantic predecessor value');
+    return Object.freeze({ expectedPredicate, expectedObject });
+  });
+  const required = exactRows.map(({ expectedPredicate, expectedObject }) =>
+    `GRAPH <${graphUri}> { <${subject}> <${expectedPredicate}> ${expectedObject} . }`).join('\n  ');
+  const allowed = exactRows.map(({ expectedPredicate, expectedObject }) =>
+    `(sameTerm(?guardP${index}, <${expectedPredicate}>) && ` +
+    `sameTerm(?guardO${index}, ${expectedObject}))`).join(' || ');
+  return `${required}\n  FILTER NOT EXISTS { GRAPH <${graphUri}> { ` +
+    `<${subject}> ?guardP${index} ?guardO${index} . FILTER(!(${allowed})) } }`;
 }
 
 function formatGuardedGraphReplacement(

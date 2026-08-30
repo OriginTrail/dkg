@@ -1,8 +1,9 @@
 import {
-  compileRfc64SemanticReadOperationV1,
+  compileRfc64SemanticReadRequestV2,
   decodeRfc64SemanticRecordStoreRowsV1,
   Rfc64SemanticReadManifestErrorV1,
   type DecodedRfc64SemanticRecordV1,
+  type Rfc64SemanticReadOperationV2,
   type Rfc64SemanticRecordCoordinateV1,
 } from '@origintrail-official/dkg-core';
 
@@ -11,9 +12,9 @@ import {
   snapshotRfc64ClosedBindingsReadOptionsV1,
 } from './rfc64-closed-bindings-read-runner.js';
 import {
-  isRfc64ExactBindingsReadCapabilityV1,
-  isRfc64SemanticReadCapabilityV1,
-  Rfc64ExactBindingsReadResultErrorV1,
+  isRfc64SemanticReadCapabilitySourceV1,
+  resolveRfc64SemanticReadCapabilityV1,
+  Rfc64SemanticReadCapabilityResultErrorV1,
 } from './rfc64-exact-bindings-read-capability.js';
 import {
   findTripleStoreCapability,
@@ -32,9 +33,7 @@ export interface Rfc64SemanticReadOptionsV1 {
 }
 
 export type Rfc64SemanticReadResultV1 =
-  | {
-      readonly kind: 'absent';
-    }
+  | { readonly kind: 'absent' }
   | {
       readonly kind: 'record';
       readonly decoded: DecodedRfc64SemanticRecordV1;
@@ -64,33 +63,23 @@ export class Rfc64SemanticReadGatewayErrorV1 extends Error {
  */
 export class SyncSemanticStoreV1 {
   private readonly dispatch: (
-    operation: ReturnType<typeof compileRfc64SemanticReadOperationV1>,
+    operation: Rfc64SemanticReadOperationV2,
     signal: AbortSignal | undefined,
   ) => Promise<readonly import('@origintrail-official/dkg-core').Rfc64SemanticStoreRowV1[]>;
 
   constructor(store: TripleStore) {
-    const exactCapability = findTripleStoreCapability(
+    const capabilitySource = findTripleStoreCapability(
       store,
-      isRfc64ExactBindingsReadCapabilityV1,
+      isRfc64SemanticReadCapabilitySourceV1,
     );
-    if (exactCapability) {
-      this.dispatch = (operation, signal) => exactCapability.rfc64ExactBindingsReadV1(
-        operation,
-        { signal },
-      );
-      return;
-    }
-    const legacyCapability = findTripleStoreCapability(
-      store,
-      isRfc64SemanticReadCapabilityV1,
-    );
-    if (!legacyCapability) {
+    const capability = resolveRfc64SemanticReadCapabilityV1(capabilitySource);
+    if (!capability) {
       fail(
         'rfc64-semantic-read-capability',
         'triple store has no certified RFC-64 semantic read capability',
       );
     }
-    this.dispatch = (operation, signal) => legacyCapability.rfc64SemanticReadV1(
+    this.dispatch = (operation, signal) => capability.read(
       operation,
       { signal },
     );
@@ -100,9 +89,9 @@ export class SyncSemanticStoreV1 {
     input: unknown,
     options: Rfc64SemanticReadOptionsV1,
   ): Promise<Rfc64SemanticReadResultV1> {
-    let operation;
+    let operation: Rfc64SemanticReadOperationV2;
     try {
-      operation = compileRfc64SemanticReadOperationV1(input);
+      operation = compileRfc64SemanticReadRequestV2(input);
     } catch (cause) {
       if (cause instanceof Rfc64SemanticReadManifestErrorV1) {
         fail('rfc64-semantic-read-request', cause.message, cause);
@@ -124,7 +113,7 @@ export class SyncSemanticStoreV1 {
         ? Object.freeze({ kind: 'absent' })
         : Object.freeze({ kind: 'record', decoded });
     } catch (cause) {
-      if (cause instanceof Rfc64ExactBindingsReadResultErrorV1) {
+      if (cause instanceof Rfc64SemanticReadCapabilityResultErrorV1) {
         fail('rfc64-semantic-read-result', cause.message, cause);
       }
       throw cause;

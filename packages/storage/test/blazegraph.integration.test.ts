@@ -315,6 +315,7 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
           subject: author,
           predicate: pHead,
           expectedObject: oldHead,
+          expectedQuads: [{ subject: author, predicate: pHead, object: oldHead, graph: headGraph }],
           quads: [{ subject: author, predicate: pHead, object: newHead, graph: headGraph }],
         },
         subgraphMutationGeneration: {
@@ -322,6 +323,7 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
           subject: mutation,
           predicate: pGeneration,
           expectedObject: '"1"',
+          expectedQuads: [{ subject: mutation, predicate: pGeneration, object: '"1"', graph: stateGraph }],
           quads: [{ subject: mutation, predicate: pGeneration, object: '"2"', graph: stateGraph }],
         },
         contextGraphMutationGeneration: {
@@ -329,6 +331,7 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
           subject: cgMutation,
           predicate: pGeneration,
           expectedObject: '"10"',
+          expectedQuads: [{ subject: cgMutation, predicate: pGeneration, object: '"10"', graph: stateGraph }],
           quads: [{ subject: cgMutation, predicate: pGeneration, object: '"11"', graph: stateGraph }],
         },
         appliedSet: {
@@ -336,6 +339,7 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
           subject: appliedSet,
           predicate: pValue,
           expectedObject: oldHead,
+          expectedQuads: [{ subject: appliedSet, predicate: pValue, object: oldHead, graph: stateGraph }],
           quads: [{ subject: appliedSet, predicate: pValue, object: newHead, graph: stateGraph }],
         },
       };

@@ -400,6 +400,7 @@ export {
   renderCanonicalAuthorSealStoreRowV1,
   canonicalizeAuthorSealStoreRoundTripRowV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   type Hex32V1,
   type PositiveDecimalU64V1,
