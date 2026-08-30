@@ -967,8 +967,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })?.rows).toEqual([]);
 
     // Catalog work must not fence inventory mutation. A slow one-row snapshot
-    // may finish first, but the explicit catalog coordinator orders the later
-    // two-row reconciliation so the signed applied head still converges.
+    // that reaches the catalog coordinator after a newer two-row commit must
+    // be discarded and rebuilt from the current durable inventory.
     await restarted.store.insert(buildAssertionSealQuads({
       assertionUri,
       metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
@@ -1105,9 +1105,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       contextGraphId: CONTEXT_GRAPH_ID,
       authorAddress: AUTHOR,
     });
-    releaseStaleReconcile();
-    await expect(staleReconcile).resolves.toMatchObject({ targetAssetCount: 1 });
     await expect(currentReconcile).resolves.toMatchObject({
+      targetAssetCount: 2,
+      appliedHead: { inventoryRowCount: '2' },
+    });
+    releaseStaleReconcile();
+    await expect(staleReconcile).resolves.toMatchObject({
       targetAssetCount: 2,
       appliedHead: { inventoryRowCount: '2' },
     });

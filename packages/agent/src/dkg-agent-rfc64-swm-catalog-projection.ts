@@ -88,6 +88,13 @@ type Rfc64AcceptedPublicRootLaneDecisionV1 =
     readonly lane: ResolvedRfc64AcceptedPublicRootLaneV1;
   }>;
 
+class Rfc64StaleSwmInventorySnapshotErrorV1 extends Error {
+  constructor() {
+    super('RFC-64 SWM inventory snapshot changed before catalog mutation');
+    this.name = 'Rfc64StaleSwmInventorySnapshotErrorV1';
+  }
+}
+
 export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   /** Project the latest authenticated durable author inventory into its signed catalog. */
   async reconcileRfc64PublicCatalogFromSwmInventoryV1(
@@ -242,58 +249,82 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
     const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(inventoryScope);
+    const inventoryScopeKey = `${inventoryScopeDigest}\n${params.authorAddress}`;
     // Hold the inventory lock only long enough to take one immutable durable
     // snapshot. Catalog construction, signing, storage and peer fan-out are
     // intentionally outside this lock so a VM-confirmation removal never
     // waits for slow catalog delivery. Any mutation after this snapshot marks
     // the supervisor dirty and causes a latest-state follow-up pass.
-    const snapshot = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
-      `${inventoryScopeDigest}\n${params.authorAddress}`,
-      () => Promise.resolve(
-        persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
-          inventoryScopeDigest,
-          params.authorAddress,
+    while (true) {
+      const snapshot = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
+        inventoryScopeKey,
+        () => Promise.resolve(
+          persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
+            inventoryScopeDigest,
+            params.authorAddress,
+          ),
         ),
-      ),
-      params.signal,
-    );
-    if (snapshot === null) return null;
-    throwIfAbortedV1(params.signal);
-    const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
-      snapshot,
-      resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
-        params.contextGraphId,
-        params.authorAddress,
-        row,
         params.signal,
-      ),
-    });
-    throwIfAbortedV1(params.signal);
-    lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
-    const deployment = await this.resolveRfc64AutoPublishDeploymentProfileV1(
-      lane.networkId,
-    );
-    throwIfAbortedV1(params.signal);
-    const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
-      scope: prepared.catalogScope,
-      author: this.createRfc64CatalogAuthorSignerV1(
-        params.authorAddress,
-        params.signal,
-      ),
-      assets: prepared.assets,
-      deployment,
-      peers: lane.autoPublishConfig.peers,
-      catalogIssuerDelegationEffectiveAt:
-        lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
-        ?? ('0' as TimestampMsV1),
-      catalogIssuerDelegationExpiresAt:
-        lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
-      signal: params.signal,
-    });
-    return Object.freeze({
-      ...reconciled,
-      inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
-    });
+      );
+      if (snapshot === null) return null;
+      throwIfAbortedV1(params.signal);
+      const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
+        snapshot,
+        resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
+          params.contextGraphId,
+          params.authorAddress,
+          row,
+          params.signal,
+        ),
+      });
+      throwIfAbortedV1(params.signal);
+      lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
+      const deployment = await this.resolveRfc64AutoPublishDeploymentProfileV1(
+        lane.networkId,
+      );
+      throwIfAbortedV1(params.signal);
+      try {
+        const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
+          scope: prepared.catalogScope,
+          author: this.createRfc64CatalogAuthorSignerV1(
+            params.authorAddress,
+            params.signal,
+          ),
+          assets: prepared.assets,
+          deployment,
+          peers: lane.autoPublishConfig.peers,
+          catalogIssuerDelegationEffectiveAt:
+            lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
+            ?? ('0' as TimestampMsV1),
+          catalogIssuerDelegationExpiresAt:
+            lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
+          assertTargetCurrent: () => rfc64SwmInventoryShadowRuntimeV1(this)
+            .runScopeExclusive(
+              inventoryScopeKey,
+              () => {
+                const current = persistence.swmAuthorInventory
+                  .readSwmAuthorInventorySnapshotV1(
+                    inventoryScopeDigest,
+                    params.authorAddress,
+                  );
+                if (current?.head.objectDigest !== prepared.inventoryHeadObjectDigest) {
+                  throw new Rfc64StaleSwmInventorySnapshotErrorV1();
+                }
+                return Promise.resolve();
+              },
+              params.signal,
+            ),
+          signal: params.signal,
+        });
+        return Object.freeze({
+          ...reconciled,
+          inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
+        });
+      } catch (cause) {
+        if (!(cause instanceof Rfc64StaleSwmInventorySnapshotErrorV1)) throw cause;
+        throwIfAbortedV1(params.signal);
+      }
+    }
   }
 
   private resolveRfc64AcceptedPublicRootLaneDecisionV1(

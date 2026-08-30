@@ -62,6 +62,12 @@ export interface ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
   readonly peers: readonly string[];
   readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+  /**
+   * Optional source-owned freshness barrier executed inside the serialized
+   * catalog mutation, before any successor is staged. Inventory projection
+   * uses this to prevent an older snapshot from committing after a newer one.
+   */
+  readonly assertTargetCurrent?: () => Promise<void> | void;
   readonly signal?: AbortSignal;
 }
 
@@ -178,6 +184,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
 
     return this.rfc64CatalogMutationCoordinatorV1.run(params.scope, async () => {
+      throwIfAbortedV1(params.signal);
+      await params.assertTargetCurrent?.();
       throwIfAbortedV1(params.signal);
       let state = await raceAgainstAbortV1(
         this.readRfc64CatalogMutationStateV1(
