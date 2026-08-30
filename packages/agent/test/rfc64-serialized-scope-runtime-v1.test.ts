@@ -72,4 +72,32 @@ describe('RFC-64 serialized scope runtime', () => {
     await Promise.resolve();
     expect(runtime.activeScopeCount).toBe(0);
   });
+
+  it('fences admission and drains physical work after caller cancellation', async () => {
+    const runtime = new Rfc64SerializedScopeRuntimeV1('test scope aborted');
+    let release!: () => void;
+    let markEntered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const controller = new AbortController();
+    const caller = runtime.run('scope', async () => {
+      markEntered();
+      await gate;
+    }, controller.signal);
+    await entered;
+    controller.abort(new Error('cancel caller'));
+    await expect(caller).rejects.toThrow('cancel caller');
+
+    let drained = false;
+    const closing = runtime.closeAndDrain().then(() => { drained = true; });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    await expect(runtime.run('late', async () => undefined)).rejects.toThrow('runtime is closed');
+
+    release();
+    await closing;
+    expect(runtime.activeScopeCount).toBe(0);
+    runtime.reopen();
+    await expect(runtime.run('after-restart', async () => 'ok')).resolves.toBe('ok');
+  });
 });

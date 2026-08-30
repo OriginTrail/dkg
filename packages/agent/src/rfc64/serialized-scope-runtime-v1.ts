@@ -13,6 +13,7 @@ import {
 export class Rfc64SerializedScopeRuntimeV1 {
   readonly #tails = new Map<string, Promise<void>>();
   readonly #abortMessage: string;
+  #closed = false;
 
   constructor(abortMessage: string) {
     this.#abortMessage = abortMessage;
@@ -23,6 +24,7 @@ export class Rfc64SerializedScopeRuntimeV1 {
     operation: () => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
+    if (this.#closed) throw new Error(`${this.#abortMessage}: runtime is closed`);
     const predecessor = this.#tails.get(key)?.catch(() => undefined) ?? Promise.resolve();
     const work = predecessor.then(async () => {
       throwIfRfc64AbortedV1(signal, this.#abortMessage);
@@ -41,5 +43,26 @@ export class Rfc64SerializedScopeRuntimeV1 {
 
   get activeScopeCount(): number {
     return this.#tails.size;
+  }
+
+  /** Reopen a fully drained feature-owned runtime for same-instance restart. */
+  reopen(): void {
+    if (this.#tails.size > 0) {
+      throw new Error('RFC-64 serialized scope runtime cannot reopen before drain');
+    }
+    this.#closed = false;
+  }
+
+  /** Await the physical lifetime of every currently admitted scope operation. */
+  async drain(): Promise<void> {
+    while (this.#tails.size > 0) {
+      await Promise.allSettled(this.#tails.values());
+    }
+  }
+
+  /** Fence new operations, then await non-cooperative physical work. */
+  async closeAndDrain(): Promise<void> {
+    this.#closed = true;
+    await this.drain();
   }
 }

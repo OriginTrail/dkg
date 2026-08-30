@@ -2440,9 +2440,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // OT-RFC-64 Gate 1: wire the public author-catalog transport onto the
     // production router. Announce/fetch protocols are admission-gated like
     // every other node protocol. Dormant when no dataDir opened persistence.
+    this.openRfc64SwmInventoryObserversV1();
     this.startRfc64PublicCatalogServiceV1(ctx);
-    this.startRfc64PublicCatalogBootstrapV1(ctx);
-    this.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
+    this.startRfc64CatalogSupervisorsV1(ctx);
 
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);

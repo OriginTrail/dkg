@@ -19,8 +19,6 @@ import type {
   Rfc64PublicCatalogBootstrapConfigV1,
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
-import type { Rfc64PublicCatalogAuthorRepairStatusV1 } from
-  './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
@@ -70,7 +68,6 @@ export interface Rfc64PublicCatalogBootstrapStatusV1 {
   readonly lastPassStartedAtMs: number | null;
   readonly lastPassCompletedAtMs: number | null;
   readonly targets: readonly Rfc64PublicCatalogBootstrapTargetStatusV1[];
-  readonly authorRepairs: readonly Rfc64PublicCatalogAuthorRepairStatusV1[];
 }
 
 export function classifyRfc64CatalogBootstrapFailureV1(
@@ -264,9 +261,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       lastPassStartedAtMs: state.lastPassStartedAtMs,
       lastPassCompletedAtMs: state.lastPassCompletedAtMs,
       targets: Object.freeze(state.targets.map(snapshotTargetStatusV1)),
-      authorRepairs:
-        this.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs
-        ?? Object.freeze([]),
     });
   }
 
@@ -280,12 +274,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         if (state.run === current) break;
       }
     }
-    await this.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
   }
 
   /** Stop future retries and abort/drain the current pass before service close. */
   async closeRfc64PublicCatalogBootstrapV1(this: DKGAgent): Promise<void> {
-    await this.closeRfc64SwmCatalogProjectionSupervisorV1();
     const state = STATES.get(this);
     if (state === undefined) return;
     state.closed = true;

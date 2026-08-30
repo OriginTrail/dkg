@@ -42,8 +42,6 @@ import {
   raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
-import { runRfc64CatalogMutationExclusiveV1 } from
-  './rfc64/catalog-mutation-runtime-v1.js';
 
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -111,7 +109,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     service.acceptedPolicySnapshotForCatalogScope(params.scope);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
 
-    return runRfc64CatalogMutationExclusiveV1(this, params.scope, async () => {
+    return this.rfc64CatalogMutationCoordinatorV1.run(params.scope, async () => {
       let state = await this.readRfc64CatalogMutationStateV1(
         persistence,
         catalogScopeDigest,
@@ -179,7 +177,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     service.acceptedPolicySnapshotForCatalogScope(params.scope);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
 
-    return runRfc64CatalogMutationExclusiveV1(this, params.scope, async () => {
+    return this.rfc64CatalogMutationCoordinatorV1.run(params.scope, async () => {
       throwIfAbortedV1(params.signal);
       let state = await raceAgainstAbortV1(
         this.readRfc64CatalogMutationStateV1(

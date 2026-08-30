@@ -93,9 +93,11 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     this: DKGAgent,
     ctx: OperationContext,
   ): void {
+    // Same-instance restart reopens live admission even when no bootstrap
+    // manifest exists and the first scope will arrive through SHARE.
+    CLOSED.delete(this);
     const config = this.resolveRuntimeRfc64ProjectionBootstrapConfigV1();
     if (config === undefined) return;
-    CLOSED.delete(this);
     const partition = partitionRfc64CatalogBootstrapV1(
       config,
       this.config.rfc64CatalogRollout,

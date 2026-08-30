@@ -127,4 +127,17 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     expect(closed).toBe(true);
     expect(runtime.inFlightCount).toBe(0);
   });
+
+  it('reopens asset and scope admission after a complete restart drain', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    await runtime.closeAndDrain();
+    expect(runtime.schedule('closed', async () => undefined)).toBe(false);
+    await expect(runtime.runScopeExclusive('closed', async () => undefined))
+      .rejects.toThrow('runtime is closed');
+
+    runtime.reopen();
+    expect(runtime.schedule('asset', async () => undefined)).toBe(true);
+    await runtime.drain();
+    await expect(runtime.runScopeExclusive('scope', async () => 'ok')).resolves.toBe('ok');
+  });
 });

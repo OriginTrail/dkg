@@ -37,7 +37,7 @@ import {
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import { mintRfc64CatalogNativeScopedReadCapabilityV1 } from
   '../src/rfc64/catalog-native-scoped-read-capability-v1-internal.js';
-import { runRfc64CatalogMutationExclusiveV1 } from
+import { Rfc64CatalogMutationCoordinatorV1 } from
   '../src/rfc64/catalog-mutation-runtime-v1.js';
 import {
   RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2,
@@ -1325,7 +1325,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
   });
 
   it('serializes remote apply before the local-author convergence it triggers', async () => {
-    const owner = {};
+    const coordinator = new Rfc64CatalogMutationCoordinatorV1();
     const events: string[] = [];
     const remoteEntered = deferred<void>();
     const releaseRemote = deferred<void>();
@@ -1346,12 +1346,11 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       controlObjects: controlObjects(),
       accessPolicyAuthority: accessPolicyAuthority(),
       runCatalogMutationExclusive: (scope, operation, signal) =>
-        runRfc64CatalogMutationExclusiveV1(owner, scope, operation, signal),
+        coordinator.run(scope, operation, signal),
       receiver: {
         retryBackoffMs: 0,
         onHeadApplied: () => {
-          localProjection = runRfc64CatalogMutationExclusiveV1(
-            owner,
+          localProjection = coordinator.run(
             catalogScope,
             async () => { events.push('local-converged'); },
           );
@@ -1392,6 +1391,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await localProjection;
     expect(events).toEqual(['remote-enter', 'remote-exit', 'local-converged']);
     await service.close();
+    await coordinator.closeAndDrain();
   });
 
   it('selects the highest exact head, retains all matching providers, and fails over', async () => {

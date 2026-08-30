@@ -191,6 +191,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     await this.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
   }
 
+  /** Reopen the fully drained observer owner for same-instance restart. */
+  openRfc64SwmInventoryObserversV1(this: DKGAgent): void {
+    rfc64SwmInventoryShadowRuntimeV1(this).reopen();
+  }
+
   /** Fence detached inventory observers before projection and persistence close. */
   async closeRfc64SwmInventoryObserversV1(this: DKGAgent): Promise<void> {
     await rfc64SwmInventoryShadowRuntimeV1(this).closeAndDrain();

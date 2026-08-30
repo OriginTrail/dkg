@@ -23,6 +23,7 @@ import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
+import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
@@ -1173,6 +1174,9 @@ export class DKGAgentBase {
    * while dormant (no dataDir) or after `stop()`.
    */
   protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
+  /** One explicit serializer and physical drain boundary for every catalog mutation. */
+  protected readonly rfc64CatalogMutationCoordinatorV1 =
+    new Rfc64CatalogMutationCoordinatorV1();
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
     new Map<string, Rfc64PublicCatalogNativeSynchronizationEvidenceV1>();

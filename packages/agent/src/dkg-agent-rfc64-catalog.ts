@@ -106,8 +106,6 @@ import {
   rfc64CatalogKillSwitchActiveV1,
   resolveRfc64CatalogAuthorityDecisionV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
-import { runRfc64CatalogMutationExclusiveV1 } from
-  './rfc64/catalog-mutation-runtime-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -293,6 +291,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
+    this.rfc64CatalogMutationCoordinatorV1.reopen();
     if (rfc64CatalogKillSwitchActiveV1(this.config.rfc64CatalogRollout)) {
       this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
       return;
@@ -325,7 +324,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           contextGraphId,
         ),
       runCatalogMutationExclusive: (scope, operation, signal) =>
-        runRfc64CatalogMutationExclusiveV1(this, scope, operation, signal),
+        this.rfc64CatalogMutationCoordinatorV1.run(scope, operation, signal),
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -367,8 +366,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     try {
       await service?.close();
     } finally {
-      this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-      this.rfc64PublicCatalogReconciliationFailuresV1.clear();
+      try {
+        // Service close fences remote admission. The explicit coordinator then
+        // waits for any non-cooperative physical mutation that outlived an
+        // aborted caller before persistence can be released.
+        await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+      } finally {
+        this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+        this.rfc64PublicCatalogReconciliationFailuresV1.clear();
+      }
     }
   }
 

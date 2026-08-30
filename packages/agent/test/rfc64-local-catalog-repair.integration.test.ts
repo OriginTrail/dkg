@@ -373,7 +373,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     });
 
     await vi.waitFor(() => {
-      expect(agent.readRfc64PublicCatalogBootstrapStatusV1()?.authorRepairs)
+      expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
         .toEqual([expect.objectContaining({
           contextGraphId: CONTEXT_GRAPH_ID,
           authorAddress: AUTHOR,
@@ -389,7 +389,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR },
       { contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR },
     ]);
-    expect(agent.readRfc64PublicCatalogBootstrapStatusV1()?.authorRepairs).toHaveLength(1);
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs).toHaveLength(1);
   }, 30_000);
 
   it('coalesces a live mutation burst into one latest-state follow-up pass', async () => {
@@ -569,8 +569,8 @@ describe('RFC-64 local SWM catalog projection repair', () => {
           .mockResolvedValue(null);
       },
     });
-    await agent.whenRfc64PublicCatalogBootstrapIdleV1();
-    expect(agent.readRfc64PublicCatalogBootstrapStatusV1()?.authorRepairs)
+    await agent.whenRfc64CatalogSupervisorsIdleV1();
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
       .toEqual([expect.objectContaining({ outcome: 'no-inventory', attempts: 1 })]);
     const reconcile = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1');
     await expect(agent.repairRfc64LocalPublicCatalogAuthorV1({
@@ -590,7 +590,98 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     (agent as any).rfc64PublicCatalogServiceV1 = service;
   });
 
-  it('drains a repair blocked in non-cooperative signing during close', async () => {
+  it('reopens live-only inventory and projection admission on same-instance restart', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'same-instance-restart',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    const reconcile = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+      .mockResolvedValue(null);
+    const acceptPolicy = (): void => {
+      agent.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ownerAddress: AUTHOR,
+      });
+    };
+    acceptPolicy();
+    expect(agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(true);
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    await agent.stop();
+    expect(agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(false);
+    await agent.start();
+    acceptPolicy();
+    expect(agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(true);
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    const inventoryDigest = `0x${'a1'.repeat(32)}` as Digest32V1;
+    const record = vi.spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockResolvedValue({
+        status: 'existing',
+        action: 'upsert',
+        attempts: 1,
+        headObjectDigest: inventoryDigest,
+        error: null,
+      });
+    const schedule = (agent as unknown as {
+      scheduleRfc64SwmInventoryObserverV1(params: Readonly<{
+        contextGraphId: string;
+        assertionCoordinate: string;
+        lifecycleAgentAddress: string;
+        shareOperationId: string;
+        ctx: ReturnType<typeof createOperationContext>;
+      }>): void;
+    }).scheduleRfc64SwmInventoryObserverV1.bind(agent);
+    schedule({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'same-instance-share',
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: 'same-instance-operation',
+      ctx: createOperationContext('share'),
+    });
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(record).toHaveBeenCalledOnce();
+
+    const remove = vi.spyOn(agent, 'removeRfc64SwmAuthorInventoryShadowV1')
+      .mockResolvedValue({
+        status: 'absent',
+        action: 'remove',
+        attempts: 1,
+        headObjectDigest: inventoryDigest,
+        error: null,
+      });
+    const canonicalSeal = await authorSealV1(35n);
+    await agent.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'same-instance-share',
+      seal: assertionSealV1(canonicalSeal),
+      assertionUri: contextGraphAssertionUri(
+        CONTEXT_GRAPH_ID,
+        AUTHOR,
+        'same-instance-share',
+      ),
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(remove).toHaveBeenCalledOnce();
+    expect(reconcile.mock.calls.length).toBeGreaterThanOrEqual(4);
+  }, 30_000);
+
+  it('does not tear down persistence under a non-cooperative catalog read', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-cancel-repair-'));
     tempDirs.push(dataDir);
     const storePath = join(dataDir, 'oxigraph');
@@ -614,8 +705,14 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
 
-    let markSigningEntered!: () => void;
-    const signingEntered = new Promise<void>((resolve) => { markSigningEntered = resolve; });
+    let markCatalogReadEntered!: () => void;
+    let releaseCatalogRead!: () => void;
+    const catalogReadEntered = new Promise<void>((resolve) => {
+      markCatalogReadEntered = resolve;
+    });
+    const catalogReadGate = new Promise<void>((resolve) => {
+      releaseCatalogRead = resolve;
+    });
     const restarted = await startRepairAgentV1({
       name: 'cancel-restarted',
       dataDir,
@@ -626,22 +723,39 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         vi.spyOn(startingAgent, 'listLocalAgents').mockReturnValue([
           { agentAddress: AUTHOR } as never,
         ]);
-        (startingAgent as any).chain.signMessageAs = async () => {
-          markSigningEntered();
-          return new Promise<never>(() => undefined);
-        };
+        vi.spyOn(startingAgent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+        const originalQuery = startingAgent.store.query.bind(startingAgent.store);
+        let blockCatalogRead = true;
+        vi.spyOn(startingAgent.store, 'query').mockImplementation(
+          async (sparql: string, ...args: unknown[]) => {
+            const options = args[0] as Readonly<{ source?: string }> | undefined;
+            if (
+              blockCatalogRead
+              && options?.source === 'agent.rfc64.swmInventory.catalogReconcile.seal'
+            ) {
+              blockCatalogRead = false;
+              markCatalogReadEntered();
+              await catalogReadGate;
+            }
+            return originalQuery(sparql, ...args);
+          },
+        );
       },
     });
-    await signingEntered;
-    await expect(Promise.race([
-      restarted.closeRfc64PublicCatalogBootstrapV1().then(() => 'closed'),
-      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 1_000)),
-    ])).resolves.toBe('closed');
-    expect(restarted.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();
-    expect(restarted.readRfc64AppliedCatalogHeadV1({
-      catalogScopeDigest: catalogScopeDigestV1(),
-      authorAddress: AUTHOR,
-    })).toBeNull();
+    await catalogReadEntered;
+    const persistenceClose = vi.spyOn(restarted, 'closeRfc64PersistenceV1');
+    let stopped = false;
+    const stopping = restarted.stop().finally(() => { stopped = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    expect(stopped).toBe(false);
+    expect(persistenceClose).not.toHaveBeenCalled();
+
+    releaseCatalogRead();
+    await stopping;
+    agents.splice(agents.indexOf(restarted), 1);
+    expect(persistenceClose).toHaveBeenCalledOnce();
   }, 30_000);
 
   it('repairs durable additions and removals without remote author targets', async () => {
@@ -686,7 +800,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       },
     });
     await vi.waitFor(() => {
-      expect(additionRepair.readRfc64PublicCatalogBootstrapStatusV1()?.authorRepairs)
+      expect(additionRepair.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
         .toEqual([expect.objectContaining({
           outcome: 'reconciled',
           catalogVersion: '1',
@@ -718,7 +832,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       },
     });
     await vi.waitFor(() => {
-      expect(removalRepair.readRfc64PublicCatalogBootstrapStatusV1()?.authorRepairs)
+      expect(removalRepair.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
         .toEqual([expect.objectContaining({
           outcome: 'reconciled',
           catalogVersion: '2',

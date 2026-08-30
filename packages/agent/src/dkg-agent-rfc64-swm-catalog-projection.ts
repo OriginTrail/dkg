@@ -242,53 +242,58 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
     const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(inventoryScope);
-    return rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
+    // Hold the inventory lock only long enough to take one immutable durable
+    // snapshot. Catalog construction, signing, storage and peer fan-out are
+    // intentionally outside this lock so a VM-confirmation removal never
+    // waits for slow catalog delivery. Any mutation after this snapshot marks
+    // the supervisor dirty and causes a latest-state follow-up pass.
+    const snapshot = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
       `${inventoryScopeDigest}\n${params.authorAddress}`,
-      async () => {
-        const snapshot = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
+      () => Promise.resolve(
+        persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
           inventoryScopeDigest,
           params.authorAddress,
-        );
-        if (snapshot === null) return null;
-        throwIfAbortedV1(params.signal);
-        const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
-          snapshot,
-          resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
-            params.contextGraphId,
-            params.authorAddress,
-            row,
-            params.signal,
-          ),
-        });
-        throwIfAbortedV1(params.signal);
-        lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
-        const deployment = await this.resolveRfc64AutoPublishDeploymentProfileV1(
-          lane.networkId,
-        );
-        throwIfAbortedV1(params.signal);
-        const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
-          scope: prepared.catalogScope,
-          author: this.createRfc64CatalogAuthorSignerV1(
-            params.authorAddress,
-            params.signal,
-          ),
-          assets: prepared.assets,
-          deployment,
-          peers: lane.autoPublishConfig.peers,
-          catalogIssuerDelegationEffectiveAt:
-            lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
-            ?? ('0' as TimestampMsV1),
-          catalogIssuerDelegationExpiresAt:
-            lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
-          signal: params.signal,
-        });
-        return Object.freeze({
-          ...reconciled,
-          inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
-        });
-      },
+        ),
+      ),
       params.signal,
     );
+    if (snapshot === null) return null;
+    throwIfAbortedV1(params.signal);
+    const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
+      snapshot,
+      resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
+        params.contextGraphId,
+        params.authorAddress,
+        row,
+        params.signal,
+      ),
+    });
+    throwIfAbortedV1(params.signal);
+    lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
+    const deployment = await this.resolveRfc64AutoPublishDeploymentProfileV1(
+      lane.networkId,
+    );
+    throwIfAbortedV1(params.signal);
+    const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
+      scope: prepared.catalogScope,
+      author: this.createRfc64CatalogAuthorSignerV1(
+        params.authorAddress,
+        params.signal,
+      ),
+      assets: prepared.assets,
+      deployment,
+      peers: lane.autoPublishConfig.peers,
+      catalogIssuerDelegationEffectiveAt:
+        lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
+        ?? ('0' as TimestampMsV1),
+      catalogIssuerDelegationExpiresAt:
+        lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
+      signal: params.signal,
+    });
+    return Object.freeze({
+      ...reconciled,
+      inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
+    });
   }
 
   private resolveRfc64AcceptedPublicRootLaneDecisionV1(

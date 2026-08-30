@@ -96,6 +96,16 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   async closeAndDrain(): Promise<void> {
     this.#closed = true;
     await this.drain();
+    await this.#scopeRuntime.closeAndDrain();
+  }
+
+  /** Reopen the fully drained feature owner for same-instance restart. */
+  reopen(): void {
+    if (this.#inFlight.size > 0 || this.#pendingExecutions.length > 0) {
+      throw new Error('RFC-64 SWM inventory observer runtime cannot reopen before drain');
+    }
+    this.#scopeRuntime.reopen();
+    this.#closed = false;
   }
 
   get inFlightCount(): number {
