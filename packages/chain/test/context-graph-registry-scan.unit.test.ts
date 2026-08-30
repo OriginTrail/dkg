@@ -239,16 +239,20 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
   it('probes the current tip independently while a middle historical page remains unavailable', async () => {
     let head = 4_999;
+    const store = new MemoryRegistryScanCursorStore();
     const tipGraphBlock = 9_999;
+    const betweenTipProbesGraphBlock = 10_001;
     const registry = makeRegistry({
       queryFilter: seam(async (_filter: unknown, lo: number, hi: number) => {
         if (lo >= 2_000 && lo < 4_000) throw new Error('archive range unavailable');
-        return lo <= tipGraphBlock && tipGraphBlock <= hi
-          ? [{ topics: [], data: '0x01', blockNumber: tipGraphBlock }]
-          : [];
+        return [tipGraphBlock, betweenTipProbesGraphBlock]
+          .filter((blockNumber) => lo <= blockNumber && blockNumber <= hi)
+          .map((blockNumber) => ({ topics: [], data: '0x01', blockNumber }));
       }),
     });
-    const { adapter, provider } = makeAdapter(registry, head);
+    const { adapter, provider } = makeAdapter(registry, head, {
+      contextGraphRegistryScanCursorStore: store,
+    });
     provider.getBlockNumber.setImpl(async () => head);
 
     const firstRecovery = await collectRegistryScan(adapter, {
@@ -268,8 +272,31 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     ]);
     expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
 
+    // More than one configured page elapses before the next tip probe. Its independent cursor,
+    // with reorg overlap, closes the interval instead of jumping to only the newest page and
+    // permanently skipping the event immediately after the prior head.
+    head = 13_200;
+    const { adapter: restartedAdapter, provider: restartedProvider } = makeAdapter(registry, head, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+    restartedProvider.getBlockNumber.setImpl(async () => head);
     registry.queryFilter.clear();
-    const secondRecovery = await collectRegistryScan(adapter, {
+    const nextTipResults = await collectRegistryScan(restartedAdapter, { mode: 'tip' });
+
+    expect(nextTipResults.map((cg) => cg.blockNumber)).toEqual([
+      tipGraphBlock,
+      betweenTipProbesGraphBlock,
+    ]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [9_951, 11_950],
+      [11_951, 13_200],
+    ]);
+    expect((restartedAdapter as any).contextGraphRegistryTipScanCursor.getCachedWatermark(REGISTRY)).toBe(13_201);
+    expect(await restartedAdapter.hasContextGraphRegistryScanWatermark()).toBe(true);
+    expect((restartedAdapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
+
+    registry.queryFilter.clear();
+    const secondRecovery = await collectRegistryScan(restartedAdapter, {
       mode: 'seedFull',
     }).catch((err) => err);
 

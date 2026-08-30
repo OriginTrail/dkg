@@ -21,47 +21,22 @@ import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
-type ContextGraphRegistryScanPlan =
-  | {
-      mode: 'explicitFromBlock' | 'listAll';
-      resumeFromWatermark: false;
-      persistProgress: false;
-      allowPartialFailure: false;
-      seedAtEnd: false;
-      pageBudget?: undefined;
-    }
-  | {
-      mode: 'incremental';
-      resumeFromWatermark: true;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: false;
-      pageBudget?: number;
-    }
-  | {
-      mode: 'tip';
-      resumeFromWatermark: false;
-      persistProgress: false;
-      allowPartialFailure: false;
-      seedAtEnd: false;
-      pageBudget?: undefined;
-    }
-  | {
-      mode: 'seedFull';
-      resumeFromWatermark: false;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: true;
-      pageBudget?: undefined;
-    }
-  | {
-      mode: 'seedFromCursor';
-      resumeFromWatermark: true;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: true;
-      pageBudget?: number;
-    };
+type ContextGraphRegistryScanStart =
+  | { kind: 'explicit'; fromBlock: number }
+  | { kind: 'deployment' }
+  | { kind: 'historicalCursor' }
+  | { kind: 'tipCursor' };
+
+type ContextGraphRegistryScanProgress = 'none' | 'historical' | 'tip';
+
+interface ContextGraphRegistryScanPlan {
+  start: ContextGraphRegistryScanStart;
+  progress: ContextGraphRegistryScanProgress;
+  allowPartialFailure: boolean;
+  seedAtEnd: boolean;
+  enforceDefaultPageLimit: boolean;
+  pageBudget?: number;
+}
 
 function normalizePageBudget(value: number | undefined): number | undefined {
   return Number.isFinite(value) && (value ?? 0) >= 1
@@ -80,21 +55,21 @@ function buildPublicContextGraphRegistryScanPlan(
 
   if (fromBlock !== undefined) {
     return {
-      mode: 'explicitFromBlock',
-      resumeFromWatermark: false,
-      persistProgress: false,
+      start: { kind: 'explicit', fromBlock },
+      progress: 'none',
       allowPartialFailure: false,
       seedAtEnd: false,
+      enforceDefaultPageLimit: false,
     };
   }
 
   if (runtimeOptions && 'incremental' in runtimeOptions && runtimeOptions.incremental === true) {
     return {
-      mode: 'incremental',
-      resumeFromWatermark: true,
-      persistProgress: true,
+      start: { kind: 'historicalCursor' },
+      progress: 'historical',
       allowPartialFailure: true,
       seedAtEnd: false,
+      enforceDefaultPageLimit: true,
       pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
     };
   }
@@ -106,20 +81,20 @@ function buildPublicContextGraphRegistryScanPlan(
   ) {
     if (runtimeOptions.resumeFromCursor === true) {
       return {
-        mode: 'seedFromCursor',
-        resumeFromWatermark: true,
-        persistProgress: true,
+        start: { kind: 'historicalCursor' },
+        progress: 'historical',
         allowPartialFailure: true,
         seedAtEnd: true,
+        enforceDefaultPageLimit: false,
         pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
       };
     }
     return {
-      mode: 'seedFull',
-      resumeFromWatermark: false,
-      persistProgress: true,
+      start: { kind: 'deployment' },
+      progress: 'historical',
       allowPartialFailure: true,
       seedAtEnd: true,
+      enforceDefaultPageLimit: false,
     };
   }
 
@@ -131,11 +106,11 @@ function buildPublicContextGraphRegistryScanPlan(
   }
 
   return {
-    mode: 'listAll',
-    resumeFromWatermark: false,
-    persistProgress: false,
+    start: { kind: 'deployment' },
+    progress: 'none',
     allowPartialFailure: false,
     seedAtEnd: false,
+    enforceDefaultPageLimit: false,
   };
 }
 
@@ -144,42 +119,42 @@ function buildCursorContextGraphRegistryScanPlan(
 ): ContextGraphRegistryScanPlan {
   if (options.mode === 'incremental') {
     return {
-      mode: 'incremental',
-      resumeFromWatermark: true,
-      persistProgress: true,
+      start: { kind: 'historicalCursor' },
+      progress: 'historical',
       allowPartialFailure: true,
       seedAtEnd: false,
+      enforceDefaultPageLimit: true,
       pageBudget: normalizePageBudget(options.pageBudget),
     };
   }
 
   if (options.mode === 'tip') {
     return {
-      mode: 'tip',
-      resumeFromWatermark: false,
-      persistProgress: false,
-      allowPartialFailure: false,
+      start: { kind: 'tipCursor' },
+      progress: 'tip',
+      allowPartialFailure: true,
       seedAtEnd: false,
+      enforceDefaultPageLimit: false,
     };
   }
 
   if (options?.mode === 'seedFull') {
     return {
-      mode: 'seedFull',
-      resumeFromWatermark: false,
-      persistProgress: true,
+      start: { kind: 'deployment' },
+      progress: 'historical',
       allowPartialFailure: true,
       seedAtEnd: true,
+      enforceDefaultPageLimit: false,
     };
   }
 
   if (options?.mode === 'seedFromCursor') {
     return {
-      mode: 'seedFromCursor',
-      resumeFromWatermark: true,
-      persistProgress: true,
+      start: { kind: 'historicalCursor' },
+      progress: 'historical',
       allowPartialFailure: true,
       seedAtEnd: true,
+      enforceDefaultPageLimit: false,
       pageBudget: normalizePageBudget(options.pageBudget),
     };
   }
@@ -290,7 +265,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!registry) return [];
     const registryAddress = (await registry.getAddress()).toLowerCase();
     const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
-    return this._collectContextGraphRegistryScan(registry, registryAddress, fromBlock, scanPlan);
+    return this._collectContextGraphRegistryScan(registry, registryAddress, scanPlan);
   }
 
   async *scanContextGraphRegistryPages(
@@ -301,20 +276,18 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!registry) return;
     const registryAddress = (await registry.getAddress()).toLowerCase();
     const scanPlan = buildCursorContextGraphRegistryScanPlan(options);
-    yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, undefined, scanPlan);
+    yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, scanPlan);
   }
 
   private async _collectContextGraphRegistryScan(
     registry: Contract,
     registryAddress: string,
-    fromBlock: number | undefined,
     scanPlan: ContextGraphRegistryScanPlan,
   ): Promise<ContextGraphOnChain[]> {
     const results: ContextGraphOnChain[] = [];
     for await (const page of this._iterateContextGraphRegistryScanPages(
       registry,
       registryAddress,
-      fromBlock,
       scanPlan,
     )) {
       results.push(...page.contextGraphs);
@@ -323,50 +296,95 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     return results;
   }
 
+  private async _resolveContextGraphRegistryScanRange(
+    registryAddress: string,
+    startPolicy: ContextGraphRegistryScanStart,
+  ) {
+    const scanLabel = 'listContextGraphsFromChain';
+    if (startPolicy.kind === 'explicit') {
+      return {
+        start: startPolicy.fromBlock,
+        ...(await this.resolveLogScanHead(scanLabel)),
+        degradedFromGenesis: false,
+      };
+    }
+
+    if (startPolicy.kind === 'historicalCursor') {
+      const watermark = await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress);
+      if (watermark !== undefined) {
+        return {
+          start: Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS),
+          ...(await this.resolveLogScanHead(scanLabel)),
+          degradedFromGenesis: false,
+        };
+      }
+    }
+
+    if (startPolicy.kind === 'tipCursor') {
+      const tip = await this.resolveLogScanHead(scanLabel);
+      const watermark = await this.contextGraphRegistryTipScanCursor.loadWatermark(registryAddress);
+      return {
+        ...tip,
+        start: watermark === undefined
+          ? Math.max(0, tip.head - this.cgRegistryScanPageSize + 1)
+          : Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS),
+        degradedFromGenesis: false,
+      };
+    }
+
+    const deployment = await this.resolveContractDeployBlock(
+      registryAddress,
+      scanLabel,
+      'ContextGraphNameRegistry',
+    );
+    const { fromBlock, ...resolved } = deployment;
+    return { start: fromBlock, ...resolved };
+  }
+
+  private async _saveContextGraphRegistryScanProgress(
+    progress: ContextGraphRegistryScanProgress,
+    registryAddress: string,
+    nextBlock: number,
+  ): Promise<void> {
+    if (progress === 'historical') {
+      await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, nextBlock);
+    } else if (progress === 'tip') {
+      await this.contextGraphRegistryTipScanCursor.saveWatermark(registryAddress, nextBlock);
+    }
+  }
+
   private async *_iterateContextGraphRegistryScanPages(
     registry: Contract,
     registryAddress: string,
-    fromBlock: number | undefined,
     scanPlan: ContextGraphRegistryScanPlan,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
     const eventFilter = registry.filters.NameClaimed();
     const pageSize = this.cgRegistryScanPageSize;
-    const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
-      ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
-      : undefined;
-    const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
-    const scan =
-      fromBlock === undefined
-        ? canResumeFromWatermark
-          ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
-          : scanPlan.mode === 'tip'
-            ? await this.resolveLogScanHead('listContextGraphsFromChain').then((tipScan) => ({
-              ...tipScan,
-              fromBlock: Math.max(0, tipScan.head - pageSize + 1),
-              degradedFromGenesis: false,
-            }))
-          : await this.resolveContractDeployBlock(
-              registryAddress,
-              'listContextGraphsFromChain',
-              'ContextGraphNameRegistry',
-            )
-        : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
-    const { fromBlock: deployBlock, head, scanProviders, degradedFromGenesis = false } = scan;
-    const start = fromBlock ?? (
-      canResumeFromWatermark
-        ? Math.max(0, persistedWatermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
-        : deployBlock
-    );
+    // A full recovery deliberately starts at deployment, but loading existing historical progress
+    // first preserves the cursor store's monotonic-write behavior while those old pages are acked.
+    if (scanPlan.progress === 'historical' && scanPlan.start.kind === 'deployment') {
+      await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress);
+    }
+    const {
+      start,
+      head,
+      scanProviders,
+      degradedFromGenesis = false,
+    } = await this._resolveContextGraphRegistryScanRange(registryAddress, scanPlan.start);
     if (start > head) {
       if (scanPlan.seedAtEnd) {
-        await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
+        await this._saveContextGraphRegistryScanProgress(
+          scanPlan.progress,
+          registryAddress,
+          head + 1,
+        );
       }
       return;
     }
 
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (scanPlan.mode === 'incremental' && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    if (scanPlan.enforceDefaultPageLimit && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
         `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
@@ -433,9 +451,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       scannedAnyPage = true;
       yield {
         contextGraphs: pageResults,
-        ack: scanPlan.persistProgress
+        ack: scanPlan.progress !== 'none'
           ? async () => {
-              await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, hi + 1);
+              await this._saveContextGraphRegistryScanProgress(
+                scanPlan.progress,
+                registryAddress,
+                hi + 1,
+              );
             }
           : async () => {},
       };

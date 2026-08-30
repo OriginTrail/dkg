@@ -980,6 +980,11 @@ export class EVMChainAdapterBase {
   }
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
+  /**
+   * Independent recovery-tip progress. Keeping this cursor separate prevents a blocked historical
+   * recovery range from either rewinding tip discovery or being mistaken for current-chain progress.
+   */
+  protected readonly contextGraphRegistryTipScanCursor: ContextGraphRegistryScanCursor;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -1006,6 +1011,7 @@ export class EVMChainAdapterBase {
     this.cachedContractDeployBlocks.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
+    this.contextGraphRegistryTipScanCursor.clearMemoryCache();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -1314,6 +1320,11 @@ export class EVMChainAdapterBase {
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
+      store: config.contextGraphRegistryScanCursorStore,
+    });
+    this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryScanCursor({
+      chainId: this.chainId,
+      deploymentId: `${this.deploymentId}:tip-recovery`,
       store: config.contextGraphRegistryScanCursorStore,
     });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;

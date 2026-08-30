@@ -91,7 +91,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -536,7 +536,7 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 export type DiscoverContextGraphsFromChainOptions = {
   throwOnChainScanFailure?: boolean;
   pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'tip' | 'seedFull' | 'seedFromCursor';
+  mode?: 'listAll' | ContextGraphRegistryScanOptions['mode'];
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
   resumeFromCursor?: boolean;
@@ -544,10 +544,7 @@ export type DiscoverContextGraphsFromChainOptions = {
 
 type NormalizedContextGraphDiscoveryScan =
   | { mode: 'listAll' }
-  | { mode: 'incremental'; pageBudget?: number }
-  | { mode: 'tip' }
-  | { mode: 'seedFull' }
-  | { mode: 'seedFromCursor'; pageBudget?: number };
+  | ContextGraphRegistryScanOptions;
 
 function normalizeContextGraphDiscoveryScan(
   options: DiscoverContextGraphsFromChainOptions,

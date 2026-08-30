@@ -93,7 +93,7 @@ function safeLog(log: (message: string) => void, message: string): void {
 
 function safeErrorMessage(error: unknown): string {
   try {
-    return error instanceof Error ? error.message : String(error);
+    return error instanceof Error ? String(error.message) : String(error);
   } catch {
     // Promise rejection reasons are arbitrary values. Even property access or coercion can throw,
     // so error reporting must have a value-independent fallback inside the scan failure boundary.

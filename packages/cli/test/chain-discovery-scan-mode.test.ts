@@ -363,20 +363,22 @@ describe('chainDiscoveryScanOptions', () => {
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
   });
 
-  it('contains unformattable rejection reasons and remains reusable across both failure paths', async () => {
-    const hostileReason = {
+  it('contains errors with unformattable messages and remains reusable across both failure paths', async () => {
+    const hostileMessage = {
       toString() {
         throw new Error('format failed');
       },
     };
+    const hostileError = new Error('placeholder');
+    Object.defineProperty(hostileError, 'message', { value: hostileMessage });
     const agent = {
       hasContextGraphRegistryScanWatermark: vi
         .fn<() => Promise<boolean>>()
-        .mockRejectedValueOnce(hostileReason)
+        .mockRejectedValueOnce(hostileError)
         .mockResolvedValue(true),
       discoverContextGraphsFromChain: vi
         .fn<(options: ReturnType<typeof chainDiscoveryScanOptions>) => Promise<number>>()
-        .mockRejectedValueOnce(hostileReason)
+        .mockRejectedValueOnce(hostileError)
         .mockResolvedValueOnce(2),
     };
     const log = vi.fn();

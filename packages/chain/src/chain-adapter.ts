@@ -547,7 +547,10 @@ export type ContextGraphRegistryScanOptions =
       pageBudget?: number;
     }
   | {
-      /** Probe only the page containing the current chain tip without reading or advancing the historical cursor. */
+      /**
+       * Scan from independent tip progress through the current head without reading or advancing
+       * the historical cursor. The first probe is bounded to the current tip page.
+       */
       mode: 'tip';
     }
   | {
