@@ -354,8 +354,8 @@ export async function resolveNpmDistTag(
 ): Promise<NpmVersionResult> {
   const result = await (deps.fetchNpmDistTags ?? fetchNpmDistTags)(log);
   if (result.error) return { version: null, error: true };
-  const version = result.tags[tag] ?? null;
-  return version && isValidSemver(version)
+  const version = Object.hasOwn(result.tags, tag) ? result.tags[tag] : null;
+  return typeof version === 'string' && isValidSemver(version)
     ? { version }
     : { version: null, error: false };
 }

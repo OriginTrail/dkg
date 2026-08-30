@@ -91,6 +91,29 @@ describe('resolveNpmDistTag registry boundary', () => {
     })).resolves.toEqual({ version: '10.1.0-rc.1' });
     expect(fetchNpmDistTags).toHaveBeenCalledOnce();
   });
+
+  it.each(['constructor', '__proto__'])(
+    'rejects inherited Object property %s as an unknown tag',
+    async (tag) => {
+      const fetchNpmDistTags = vi.fn(async () => ({
+        tags: { latest: '10.0.1' },
+      }));
+
+      await expect(resolveNpmDistTag(tag, () => undefined, {
+        fetchNpmDistTags,
+      })).resolves.toEqual({ version: null, error: false });
+    },
+  );
+
+  it('rejects a non-string own dist-tag value', async () => {
+    const fetchNpmDistTags = vi.fn(async () => ({
+      tags: { latest: 10_000_001 } as unknown as Record<string, string>,
+    }));
+
+    await expect(resolveNpmDistTag('latest', () => undefined, {
+      fetchNpmDistTags,
+    })).resolves.toEqual({ version: null, error: false });
+  });
 });
 
 describe('dkg update command stable-only wiring', () => {

@@ -25,14 +25,6 @@ const SYSLOG_SEVERITY: Record<string, number> = {
 
 const FACILITY_LOCAL0 = 16;
 
-export type LogPushVersionStatus =
-  | 'latest'
-  | 'updating'
-  | 'behind'
-  | 'disabled'
-  | 'unknown'
-  | 'channel-missing';
-
 export interface LogPushWorkerOptions {
   /** Syslog host, e.g. loggly.origin-trail.network */
   host: string;
@@ -53,7 +45,7 @@ export interface LogPushWorkerOptions {
   /** Whether auto-update is enabled */
   autoUpdate?: boolean;
   /** Dynamic getter returning the daemon's current update status. */
-  versionStatus?: () => LogPushVersionStatus;
+  versionStatus?: () => string;
 }
 
 interface LogEntry {
@@ -85,7 +77,7 @@ export class LogPushWorker {
   private readonly commit: string;
   private readonly role: string;
   private readonly autoUpdate: string;
-  private readonly versionStatus: () => LogPushVersionStatus;
+  private readonly versionStatus: () => string;
 
   constructor(opts: LogPushWorkerOptions) {
     this.host = opts.host;
