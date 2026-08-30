@@ -274,6 +274,55 @@ describe('sync-on-connect per-peer scheduler', () => {
     expect(jobCount).toBe(2);
   });
 
+  it('barriers replacement work enqueued synchronously inside finish', async () => {
+    const replacementAccepted = deferred();
+    const releaseFirstFinish = deferred();
+    const selectedPlans: string[] = [];
+    const accountingCommits: string[] = [];
+    let jobCount = 0;
+    let scheduler!: SyncOnConnectPeerScheduler<string>;
+    scheduler = new SyncOnConnectPeerScheduler<string>({
+      createJob: () => {
+        jobCount += 1;
+        const currentJob = jobCount;
+        return {
+          runAutomaticSelectedThenOrdinary: async () => 'synced',
+          runSelected: async (plan) => {
+            if (plan !== undefined) selectedPlans.push(plan);
+            return 'synced';
+          },
+          cancel: () => undefined,
+          finish: currentJob === 1
+            ? async () => {
+              expect(scheduler.enqueueSelected(
+                PEER,
+                () => undefined,
+                0,
+                'reentrant-finalizer-plan',
+              )).toBe(true);
+              replacementAccepted.resolve();
+              await releaseFirstFinish.promise;
+              accountingCommits.push('retry');
+            }
+            : () => { accountingCommits.push('clear'); },
+        };
+      },
+      onInternalError: () => undefined,
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, () => undefined, 0)).toBe(true);
+    await replacementAccepted.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(selectedPlans).toEqual([]);
+    expect(accountingCommits).toEqual([]);
+
+    releaseFirstFinish.resolve();
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(selectedPlans).toEqual(['reentrant-finalizer-plan']);
+    expect(accountingCommits).toEqual(['retry', 'clear']);
+    expect(jobCount).toBe(2);
+  });
+
   it('finalizes an active peer job once when it is cleared during a phase', async () => {
     const ordinary = deferred();
     const ordinaryStarted = deferred();
