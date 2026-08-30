@@ -302,6 +302,7 @@ export {
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
   type VmReconcilePeerTopology,
+  type VmReconcilePeerTopologyEvidence,
   type VmReconcilePeerTopologyPeer,
   type SelectedVmReconcileCursorStore,
   type SelectedVmReconcileCursorRecord,
@@ -404,7 +405,10 @@ export {
 export { mapWithConcurrency } from './map-with-concurrency.js';
 export {
   createVmReconcilePeerTopology,
+  createVmReconcileCleanMissPeerIds,
   isVmReconcilePeerTopology,
+  parseVmReconcileCleanMissPeerIds,
+  parseVmReconcilePeerTopology,
 } from './vm-reconcile-peer-topology.js';
 export {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,

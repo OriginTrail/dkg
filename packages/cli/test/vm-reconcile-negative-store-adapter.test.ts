@@ -23,8 +23,8 @@ function record(): VmReconcileNegativeRecord {
         { peerId: 'peer-a', core: true },
         { peerId: 'peer-b', core: false },
       ],
-      cleanMissPeerIds: ['peer-b'],
     }),
+    cleanMissPeerIds: ['peer-b'],
   };
 }
 
@@ -50,16 +50,16 @@ describe('VM reconcile negative SQLite adapter', () => {
   it('round-trips the unreadable topology sentinel without JSON encoding', () => {
     const value = record();
     value.peerTopology = { kind: 'unreadable' };
+    value.cleanMissPeerIds = [];
     const row = encodeVmReconcileNegativeRow(value, 999);
 
     expect(row.peer_topology_key).toBe('unreadable');
     expect(decodeVmReconcileNegativeRow(row)).toEqual(value);
   });
 
-  it('migrates the previous redundant topology encoding without granting miss evidence', () => {
+  it('migrates the exact unversioned legacy encoding without granting miss evidence', () => {
     const row = encodeVmReconcileNegativeRow(record(), 999);
     row.peer_topology_key = JSON.stringify({
-      version: 1,
       preferredPeerId: 'peer-a',
       privateOnly: false,
       peers: [
@@ -68,14 +68,16 @@ describe('VM reconcile negative SQLite adapter', () => {
       ],
     });
 
-    expect(decodeVmReconcileNegativeRow(row)?.peerTopology).toEqual({
-      kind: 'readable',
-      preferredPeerId: 'peer-a',
-      privateOnly: false,
-      peers: [
-        { peerId: 'peer-a', core: true },
-        { peerId: 'peer-b', core: false },
-      ],
+    expect(decodeVmReconcileNegativeRow(row)).toMatchObject({
+      peerTopology: {
+        kind: 'readable',
+        preferredPeerId: 'peer-a',
+        privateOnly: false,
+        peers: [
+          { peerId: 'peer-a', core: true },
+          { peerId: 'peer-b', core: false },
+        ],
+      },
       cleanMissPeerIds: [],
     });
   });

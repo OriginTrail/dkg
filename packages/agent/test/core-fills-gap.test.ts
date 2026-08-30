@@ -122,14 +122,13 @@ function stubNode(agent: DKGAgent): void {
   };
 }
 
-function emptyCatchupStats(sharedMemoryCleanPeerIds: string[] = []) {
+function emptyCatchupStats() {
   return {
     connectedPeers: 1,
     totalPeers: 1,
     syncCapablePeers: 1,
     peersTried: 1,
     peersSucceeded: 1,
-    sharedMemoryCleanPeerIds,
     dataSynced: 0,
     sharedMemorySynced: 0,
     denied: false,
@@ -1155,10 +1154,11 @@ describe('Phase D - VM reconcile damping', () => {
       connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
 
     const provenPeers = ['peer-stable', 'peer-flaky'];
-    const fetch = recorder(async () => emptyCatchupStats([
-      provenPeers.shift() ?? 'peer-stable',
-    ]));
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+    const fetch = recorder(async () => ({
+      catchup: emptyCatchupStats(),
+      cleanMissPeerIds: [provenPeers.shift() ?? 'peer-stable'],
+    }));
+    (internals as any).syncVmRecoveryFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
     (internals.store as any).query = recorder(async (sparql: string) => {
@@ -1191,12 +1191,16 @@ describe('Phase D - VM reconcile damping', () => {
     let snapshotAvailable = false;
     const fetch = recorder(async () => {
       fetchCalls += 1;
-      if (fetchCalls === 1) return noProtocolCatchupStats();
-      if (fetchCalls === 2) return emptyCatchupStats(['peer-clean']);
+      if (fetchCalls === 1) {
+        return { catchup: noProtocolCatchupStats(), cleanMissPeerIds: [] };
+      }
+      if (fetchCalls === 2) {
+        return { catchup: emptyCatchupStats(), cleanMissPeerIds: ['peer-clean'] };
+      }
       snapshotAvailable = true;
-      return emptyCatchupStats(['peer-skipped']);
+      return { catchup: emptyCatchupStats(), cleanMissPeerIds: ['peer-skipped'] };
     });
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+    (internals as any).syncVmRecoveryFromConnectedPeers = fetch;
     (internals as any).getOrCreateFinalizationHandler = () => ({
       handleChainReconciledKC: async () => snapshotAvailable ? 'promoted' : 'no-swm',
     });

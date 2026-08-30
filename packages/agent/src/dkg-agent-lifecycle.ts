@@ -811,10 +811,47 @@ type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeer
 
 const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
 const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncSingleFlight>>();
+const vmRecoveryEvidenceSinksByAgent = new WeakMap<
+  DKGAgent,
+  Map<string, Set<(peerId: string) => void>>
+>();
 const syncPageSizeProfilesByAgent = new WeakMap<DKGAgent, SyncPageSizeProfileCache>();
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableRecoveryRunnersByAgent = new WeakMap<DKGAgent, DurableRecoveryRunner>();
+
+function registerVmRecoveryEvidenceSink(
+  agent: DKGAgent,
+  contextGraphId: string,
+  sink: (peerId: string) => void,
+): () => void {
+  let byGraph = vmRecoveryEvidenceSinksByAgent.get(agent);
+  if (!byGraph) {
+    byGraph = new Map();
+    vmRecoveryEvidenceSinksByAgent.set(agent, byGraph);
+  }
+  let sinks = byGraph.get(contextGraphId);
+  if (!sinks) {
+    sinks = new Set();
+    byGraph.set(contextGraphId, sinks);
+  }
+  sinks.add(sink);
+  return () => {
+    sinks?.delete(sink);
+    if (sinks?.size === 0) byGraph?.delete(contextGraphId);
+    if (byGraph?.size === 0) vmRecoveryEvidenceSinksByAgent.delete(agent);
+  };
+}
+
+function recordVmRecoveryCleanPeer(
+  agent: DKGAgent,
+  contextGraphId: string,
+  peerId: string,
+): void {
+  for (const sink of vmRecoveryEvidenceSinksByAgent.get(agent)?.get(contextGraphId) ?? []) {
+    sink(peerId);
+  }
+}
 
 function durableRecoveryRunnerFor(agent: DKGAgent): DurableRecoveryRunner {
   let runner = durableRecoveryRunnersByAgent.get(agent);
@@ -8076,50 +8113,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async syncContextGraphFromConnectedPeers(this: DKGAgent,
     contextGraphId: string,
     options?: ContextGraphCatchupOptions,
-  ): Promise<{
-    /** Ordered connected peers before optional maxPeers windowing. */
-    connectedPeers: number;
-    /** Ordered connected peers before optional maxPeers windowing. */
-    totalPeers: number;
-    /** Peers selected and evaluated after optional maxPeers windowing. */
-    selectedPeers: number;
-    syncCapablePeers: number;
-    peersTried: number;
-    /**
-     * Subset of `peersTried` whose sync-capable peer produced a non-transport-
-     * failed round. Denials, metadata-only rows, and timeout-after-response
-     * still count as responses; daemon status mapping uses this to avoid
-     * reporting reachable-but-failed peers as curator-offline.
-     */
-    peersResponded: number;
-    /**
-     * Subset of `peersTried` whose sync round finished without a transport
-     * failure, without an explicit ACL denial, and with either real progress
-     * or a clean non-metadata-only empty completion.
-     */
-    peersSucceeded: number;
-    /** Peers whose shared-memory plane completed without failure in this run. */
-    sharedMemoryCleanPeerIds: string[];
-    /** Context Graph admissions deferred by local scheduler pressure. */
-    deferredBackpressure: number;
-    dataSynced: number;
-    sharedMemorySynced: number;
-    /** A selected peer completed a non-empty SWM snapshot without failure. */
-    sharedMemoryCompletedCleanly: boolean;
-    /**
-     * `true` iff at least one peer in this run explicitly denied the sync
-     * by emitting a denial sentinel (`syncDenied` marker raised from
-     * `sync/requester/page-fetch.ts`, rolled up via `deniedPhases`). Kept
-     * as a boolean for the subscribe job's terminal status mapping.
-     */
-    denied: boolean;
-    /**
-     * Number of peers that explicitly denied at least one durable/SWM phase
-     * during this context-graph catch-up run.
-     */
-    deniedPeers: number;
-    diagnostics: CatchupSyncDiagnostics;
-  }> {
+  ): Promise<ContextGraphCatchupResult> {
     const ctx = createOperationContext('sync');
     const includeSharedMemory = options?.includeSharedMemory ?? false;
     const mode = options?.mode ?? 'background';
@@ -8193,11 +8187,33 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         totalPeers: orderedPeers.length,
         mode,
         sourceOverride,
+        recordSharedMemoryCleanPeer: (peerId) =>
+          recordVmRecoveryCleanPeer(this, contextGraphId, peerId),
       });
     }, {
       scope: 'context-graph',
       source: catchupAdmissionSource(mode, sourceOverride),
     });
+  }
+
+  /** Focused VM-recovery operation that returns clean per-peer miss evidence. */
+  async syncVmRecoveryFromConnectedPeers(
+    this: DKGAgent,
+    contextGraphId: string,
+    options?: ContextGraphCatchupOptions,
+  ): Promise<{ catchup: ContextGraphCatchupResult; cleanMissPeerIds: string[] }> {
+    const cleanMissPeerIds = new Set<string>();
+    const unregister = registerVmRecoveryEvidenceSink(
+      this,
+      contextGraphId,
+      (peerId) => cleanMissPeerIds.add(peerId),
+    );
+    try {
+      const catchup = await this.syncContextGraphFromConnectedPeers(contextGraphId, options);
+      return { catchup, cleanMissPeerIds: [...cleanMissPeerIds] };
+    } finally {
+      unregister();
+    }
   }
 
   selectCatchupPeerWindow(this: DKGAgent,
@@ -8292,6 +8308,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sourceOverride?: SyncAdmissionSource;
       /** Explicit test/embedding override; production resolves the operator env per job. */
       swmCatchupPassConfig?: CatchupPassConfig;
+      /** Internal evidence sink used only by the focused VM-recovery wrapper. */
+      recordSharedMemoryCleanPeer?: (peerId: string) => void;
     },
   ): Promise<{
     /** Ordered connected peers before optional caller windowing. */
@@ -8304,8 +8322,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peersTried: number;
     peersResponded: number;
     peersSucceeded: number;
-    /** Peers whose shared-memory plane completed without failure in this run. */
-    sharedMemoryCleanPeerIds: string[];
     deferredBackpressure: number;
     dataSynced: number;
     sharedMemorySynced: number;
@@ -8507,7 +8523,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let cleanDurablePrivateOnlyCompletions = 0;
     let cleanSharedMemoryDataSynced = 0;
     const peersSucceeded = new Set<string>();
-    const sharedMemoryCleanPeerIds = new Set<string>();
     for (const [resultIndex, r] of results.entries()) {
       const remotePeerId = catchupPeers[resultIndex]!;
       // A peer "succeeded" when its sync round finished without a transport
@@ -8520,7 +8535,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
       const sharedProgress = r.shared ? classifyDurableProgress(r.shared) : null;
       if (sharedProgress?.completedWithoutFailure) {
-        sharedMemoryCleanPeerIds.add(remotePeerId);
+        stats?.recordSharedMemoryCleanPeer?.(remotePeerId);
       }
       if (r.shared) {
         passTracker.recordPeerRound(
@@ -8668,7 +8683,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ): void => {
       const progress = classifyDurableProgress(shared);
       if (progress.completedWithoutFailure) {
-        sharedMemoryCleanPeerIds.add(remotePeerId);
+        stats?.recordSharedMemoryCleanPeer?.(remotePeerId);
       }
       passTracker.recordPeerRound(
         remotePeerId,
@@ -8836,7 +8851,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peersTried,
       peersResponded: peersResponded.size,
       peersSucceeded: peersSucceeded.size,
-      sharedMemoryCleanPeerIds: [...sharedMemoryCleanPeerIds],
       deferredBackpressure,
       dataSynced,
       sharedMemorySynced,

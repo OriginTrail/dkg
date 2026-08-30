@@ -161,9 +161,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         }));
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
 
-        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+        const recovery = await agent.syncVmRecoveryFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
         });
+        const result = recovery.catchup;
 
         expect(peerStoreReads).toBe(3);
         // Background catch-up carries no admission priority override, but it
@@ -193,7 +194,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.peersTried).toBe(1);
         expect(result.dataSynced).toBe(5);
         expect(result.sharedMemorySynced).toBe(2);
-        expect(result.sharedMemoryCleanPeerIds).toEqual([remotePeer.toString()]);
+        expect(recovery.cleanMissPeerIds).toEqual([remotePeer.toString()]);
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
@@ -201,6 +202,47 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: true,
           sharedMemorySynced: true,
         });
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
+    it('records clean empty SWM completion as VM-recovery miss evidence', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeVmRecoveryCleanEmptyEvidence',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = agent.node.peerId;
+        (agent.node.libp2p as any).getConnections = () => [{ remotePeer } as any];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+
+        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(recovery.catchup.sharedMemorySynced).toBe(0);
+        expect(recovery.cleanMissPeerIds).toEqual([remotePeer.toString()]);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -361,7 +403,6 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(durableOnlyResponse.peersSucceeded).toBe(0);
         expect(durableOnlyResponse.diagnostics.durable.failedPeers).toBe(0);
         expect(durableOnlyResponse.diagnostics.sharedMemory.failedPeers).toBe(1);
-        expect(durableOnlyResponse.sharedMemoryCleanPeerIds).toEqual([]);
         expect(durableOnlyResponse.sharedMemorySynced).toBe(1);
         expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.sharedMemorySynced)
           .not.toBe(true);
@@ -836,7 +877,6 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.connectedPeers).toBe(1);
         expect(result.syncCapablePeers).toBe(0);
         expect(result.peersTried).toBe(0);
-        expect(result.sharedMemoryCleanPeerIds).toEqual([]);
         expect(result.diagnostics.noProtocolPeers).toBe(1);
       } finally {
         await agent.stop().catch(() => {});

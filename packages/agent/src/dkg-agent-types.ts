@@ -791,9 +791,13 @@ export type VmReconcilePeerTopology =
     privateOnly: boolean;
     /** Ranked provider order; array position is the rank. */
     peers: VmReconcilePeerTopologyPeer[];
-    /** Peers that completed a clean SWM round while the cached miss was recorded. */
-    cleanMissPeerIds: string[];
   };
+
+/** Historical proof attached to a cached miss, separate from live topology. */
+export interface VmReconcilePeerTopologyEvidence {
+  topology: VmReconcilePeerTopology;
+  cleanMissPeerIds: string[];
+}
 
 export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
@@ -847,6 +851,8 @@ export interface VmReconcileNegativeRecord {
   swmGen: string;
   candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
   peerTopology: VmReconcilePeerTopology;
+  /** Peers that completed a clean SWM round while this miss was recorded. */
+  cleanMissPeerIds: string[];
 }
 
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */

@@ -1,5 +1,6 @@
 import type {
   VmReconcilePeerTopology,
+  VmReconcilePeerTopologyEvidence,
   VmReconcilePeerTopologyPeer,
 } from './dkg-agent-types.js';
 
@@ -10,7 +11,6 @@ export function createVmReconcilePeerTopology(input: {
   preferredPeerId: string | null;
   privateOnly: boolean;
   peers: readonly VmReconcilePeerTopologyPeer[];
-  cleanMissPeerIds?: readonly string[];
 }): VmReconcilePeerTopology {
   const seenPeerIds = new Set<string>();
   const peers = input.peers.filter((peer) => {
@@ -18,51 +18,74 @@ export function createVmReconcilePeerTopology(input: {
     seenPeerIds.add(peer.peerId);
     return true;
   }).map((peer) => ({ peerId: peer.peerId, core: peer.core }));
-  const cleanMissPeerIds = [...new Set(input.cleanMissPeerIds ?? [])]
-    .filter((peerId) => seenPeerIds.has(peerId));
   return {
     kind: 'readable',
     preferredPeerId: input.preferredPeerId,
     privateOnly: input.privateOnly,
     peers,
-    cleanMissPeerIds,
   };
 }
 
-/** Defensive guard for custom ContextGraphSubscriptionStore implementations. */
-export function isVmReconcilePeerTopology(value: unknown): value is VmReconcilePeerTopology {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+/** One agent-owned parser for live and persistence-adapter topology input. */
+export function parseVmReconcilePeerTopology(value: unknown): VmReconcilePeerTopology | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const topology = value as Record<string, unknown>;
-  if (topology.kind === 'unreadable') return true;
+  if (topology.kind === 'unreadable') return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
   if (
     topology.kind !== 'readable'
     || !(topology.preferredPeerId === null || typeof topology.preferredPeerId === 'string')
     || typeof topology.privateOnly !== 'boolean'
     || !Array.isArray(topology.peers)
-    || !Array.isArray(topology.cleanMissPeerIds)
-  ) return false;
+  ) return null;
   const peerIds = new Set<string>();
   for (const candidate of topology.peers) {
-    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
     const peer = candidate as Record<string, unknown>;
     if (
       typeof peer.peerId !== 'string'
       || peer.peerId.length === 0
       || typeof peer.core !== 'boolean'
       || peerIds.has(peer.peerId)
-    ) return false;
+    ) return null;
     peerIds.add(peer.peerId);
   }
-  const cleanMisses = new Set<string>();
-  for (const peerId of topology.cleanMissPeerIds) {
-    if (
-      typeof peerId !== 'string'
-      || !peerIds.has(peerId)
-      || cleanMisses.has(peerId)
-    ) return false;
-    cleanMisses.add(peerId);
+  return createVmReconcilePeerTopology({
+    preferredPeerId: topology.preferredPeerId,
+    privateOnly: topology.privateOnly,
+    peers: topology.peers as VmReconcilePeerTopologyPeer[],
+  });
+}
+
+/** Defensive guard for custom ContextGraphSubscriptionStore implementations. */
+export function isVmReconcilePeerTopology(value: unknown): value is VmReconcilePeerTopology {
+  return parseVmReconcilePeerTopology(value) !== null;
+}
+
+export function parseVmReconcileCleanMissPeerIds(
+  value: unknown,
+  topology: VmReconcilePeerTopology,
+): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const peers = topology.kind === 'readable'
+    ? new Set(topology.peers.map((peer) => peer.peerId))
+    : new Set<string>();
+  const seen = new Set<string>();
+  const cleanMissPeerIds: string[] = [];
+  for (const peerId of value) {
+    if (typeof peerId !== 'string' || !peers.has(peerId) || seen.has(peerId)) return null;
+    seen.add(peerId);
+    cleanMissPeerIds.push(peerId);
   }
-  return true;
+  return cleanMissPeerIds;
+}
+
+export function createVmReconcileCleanMissPeerIds(
+  topology: VmReconcilePeerTopology,
+  peerIds: readonly string[],
+): string[] {
+  if (topology.kind === 'unreadable') return [];
+  const topologyPeers = new Set(topology.peers.map((peer) => peer.peerId));
+  return [...new Set(peerIds)].filter((peerId) => topologyPeers.has(peerId));
 }
 
 /**
@@ -72,15 +95,16 @@ export function isVmReconcilePeerTopology(value: unknown): value is VmReconcileP
  * absence evidence.
  */
 export function canReuseVmReconcilePeerTopology(
-  cached: VmReconcilePeerTopology,
+  cached: VmReconcilePeerTopologyEvidence,
   current: VmReconcilePeerTopology,
 ): boolean {
-  if (cached.kind === 'unreadable' || current.kind === 'unreadable') {
-    return cached.kind === current.kind;
+  const cachedTopology = cached.topology;
+  if (cachedTopology.kind === 'unreadable' || current.kind === 'unreadable') {
+    return cachedTopology.kind === current.kind;
   }
   if (
-    cached.preferredPeerId !== current.preferredPeerId
-    || cached.privateOnly !== current.privateOnly
+    cachedTopology.preferredPeerId !== current.preferredPeerId
+    || cachedTopology.privateOnly !== current.privateOnly
   ) {
     return false;
   }
@@ -90,8 +114,8 @@ export function canReuseVmReconcilePeerTopology(
     right: VmReconcilePeerTopologyPeer,
   ): boolean => left.peerId === right.peerId && left.core === right.core;
   if (
-    cached.peers.length === current.peers.length
-    && current.peers.every((peer, index) => peersMatch(cached.peers[index]!, peer))
+    cachedTopology.peers.length === current.peers.length
+    && current.peers.every((peer, index) => peersMatch(cachedTopology.peers[index]!, peer))
   ) {
     return true;
   }
@@ -99,12 +123,12 @@ export function canReuseVmReconcilePeerTopology(
   let cachedIndex = 0;
   for (const peer of current.peers) {
     while (
-      cachedIndex < cached.peers.length
-      && cached.peers[cachedIndex]?.peerId !== peer.peerId
+      cachedIndex < cachedTopology.peers.length
+      && cachedTopology.peers[cachedIndex]?.peerId !== peer.peerId
     ) {
       cachedIndex += 1;
     }
-    const cachedPeer = cached.peers[cachedIndex];
+    const cachedPeer = cachedTopology.peers[cachedIndex];
     if (
       !cachedPeer
       || !peersMatch(cachedPeer, peer)

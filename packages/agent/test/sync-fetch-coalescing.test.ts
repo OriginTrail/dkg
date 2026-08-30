@@ -1672,20 +1672,23 @@ describe('DKGAgent sync fetch coalescing', () => {
         const resolved = sharedCalls.length === 1 ? 2 : 3;
         return {
           ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
           ...(resolved < 3 ? { failedPhases: 1, snapshotPlaneIncomplete: 1 } : {}),
           swmCoverage: coverage(resolved),
         };
       };
 
-      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
+      const recovery = await agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
+      const result = recovery.catchup;
 
       expect(durableCalls).toEqual([PEER_A]);
       expect(sharedCalls).toEqual([PEER_A, PEER_A]);
       expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(3));
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
       expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
+      expect(recovery.cleanMissPeerIds).toEqual([PEER_A]);
     } finally {
       await agent.stop().catch(() => {});
     }

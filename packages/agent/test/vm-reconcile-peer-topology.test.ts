@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   canReuseVmReconcilePeerTopology,
+  createVmReconcileCleanMissPeerIds,
   createVmReconcilePeerTopology,
   isVmReconcilePeerTopology,
+  parseVmReconcileCleanMissPeerIds,
   UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
 } from '../src/vm-reconcile-peer-topology.js';
 import type { VmReconcilePeerTopology } from '../src/dkg-agent-types.js';
@@ -10,7 +12,6 @@ import type { VmReconcilePeerTopology } from '../src/dkg-agent-types.js';
 function topology(
   peers: Array<{ peerId: string; core?: boolean }>,
   preferredPeerId: string | null = null,
-  cleanMissPeerIds: string[] = [],
 ): VmReconcilePeerTopology {
   return createVmReconcilePeerTopology({
     preferredPeerId,
@@ -19,8 +20,17 @@ function topology(
       peerId: peer.peerId,
       core: peer.core ?? false,
     })),
-    cleanMissPeerIds,
   });
+}
+
+function evidence(
+  value: VmReconcilePeerTopology,
+  cleanMissPeerIds: string[],
+) {
+  return {
+    topology: value,
+    cleanMissPeerIds: createVmReconcileCleanMissPeerIds(value, cleanMissPeerIds),
+  };
 }
 
 describe('VM reconcile peer-topology compatibility', () => {
@@ -33,7 +43,6 @@ describe('VM reconcile peer-topology compatibility', () => {
         { peerId: 'preferred', core: true },
         { peerId: 'core', core: true },
       ],
-      cleanMissPeerIds: ['core', 'missing', 'core'],
     });
     expect(value).toEqual({
       kind: 'readable',
@@ -43,18 +52,18 @@ describe('VM reconcile peer-topology compatibility', () => {
         { peerId: 'preferred', core: false },
         { peerId: 'core', core: true },
       ],
-      cleanMissPeerIds: ['core'],
     });
     expect(isVmReconcilePeerTopology(value)).toBe(true);
+    expect(createVmReconcileCleanMissPeerIds(value, ['core', 'missing', 'core']))
+      .toEqual(['core']);
   });
 
   it('reuses exact topology and removal of peers with clean-miss evidence', () => {
-    const cached = topology(
+    const cachedTopology = topology(
       [{ peerId: 'a' }, { peerId: 'b', core: true }, { peerId: 'c' }],
-      null,
-      ['a', 'b', 'c'],
     );
-    expect(canReuseVmReconcilePeerTopology(cached, cached)).toBe(true);
+    const cached = evidence(cachedTopology, ['a', 'b', 'c']);
+    expect(canReuseVmReconcilePeerTopology(cached, cachedTopology)).toBe(true);
     expect(canReuseVmReconcilePeerTopology(
       cached,
       topology([{ peerId: 'a' }, { peerId: 'c' }]),
@@ -62,11 +71,9 @@ describe('VM reconcile peer-topology compatibility', () => {
   });
 
   it('rejects removal that exposes a previously unproven peer', () => {
-    const cached = topology(
+    const cached = evidence(topology(
       [{ peerId: 'skipped' }, { peerId: 'clean' }],
-      null,
-      ['clean'],
-    );
+    ), ['clean']);
     expect(canReuseVmReconcilePeerTopology(
       cached,
       topology([{ peerId: 'skipped' }]),
@@ -74,7 +81,7 @@ describe('VM reconcile peer-topology compatibility', () => {
   });
 
   it('rejects peer additions, capability reclassification, and ordering changes', () => {
-    const cached = topology([{ peerId: 'a' }, { peerId: 'b' }]);
+    const cached = evidence(topology([{ peerId: 'a' }, { peerId: 'b' }]), []);
     expect(canReuseVmReconcilePeerTopology(
       cached,
       topology([{ peerId: 'a' }, { peerId: 'b' }, { peerId: 'c' }]),
@@ -92,16 +99,13 @@ describe('VM reconcile peer-topology compatibility', () => {
   it('preserves explicit unreadable equality and rejects malformed domain records', () => {
     const readable = topology([{ peerId: 'a' }]);
     expect(canReuseVmReconcilePeerTopology(
-      UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
+      evidence(UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY, []),
       UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
     )).toBe(true);
     expect(canReuseVmReconcilePeerTopology(
-      UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
+      evidence(UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY, []),
       readable,
     )).toBe(false);
-    expect(isVmReconcilePeerTopology({
-      ...readable,
-      cleanMissPeerIds: ['unknown'],
-    })).toBe(false);
+    expect(parseVmReconcileCleanMissPeerIds(['unknown'], readable)).toBeNull();
   });
 });

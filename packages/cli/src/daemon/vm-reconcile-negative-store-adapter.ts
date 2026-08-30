@@ -1,8 +1,8 @@
 import {
-  createVmReconcilePeerTopology,
+  parseVmReconcileCleanMissPeerIds,
+  parseVmReconcilePeerTopology,
   type VmReconcileNegativeRecord,
   type VmReconcilePeerTopology,
-  type VmReconcilePeerTopologyPeer,
 } from '@origintrail-official/dkg-agent';
 
 /** Raw SQLite-facing DTO. Encoding is intentionally confined to this adapter. */
@@ -19,8 +19,15 @@ export interface VmReconcileNegativePersistenceRow {
 
 const TOPOLOGY_VERSION = 2;
 
-function decodeTopology(encoded: string): VmReconcilePeerTopology | null {
-  if (encoded === 'unreadable') return { kind: 'unreadable' };
+type DecodedTopology = Pick<
+  VmReconcileNegativeRecord,
+  'peerTopology' | 'cleanMissPeerIds'
+>;
+
+function decodeTopology(encoded: string): DecodedTopology | null {
+  if (encoded === 'unreadable') {
+    return { peerTopology: { kind: 'unreadable' }, cleanMissPeerIds: [] };
+  }
   try {
     const value: unknown = JSON.parse(encoded);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -29,64 +36,53 @@ function decodeTopology(encoded: string): VmReconcilePeerTopology | null {
       !(raw.preferredPeerId === null || typeof raw.preferredPeerId === 'string')
       || typeof raw.privateOnly !== 'boolean'
       || !Array.isArray(raw.peers)
-      || (raw.version !== 1 && raw.version !== TOPOLOGY_VERSION)
+      || !(raw.version === undefined || raw.version === 1 || raw.version === TOPOLOGY_VERSION)
     ) return null;
 
-    const peers: VmReconcilePeerTopologyPeer[] = [];
-    const peerIds = new Set<string>();
-    for (const [rank, candidate] of raw.peers.entries()) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
-      const peer = candidate as Record<string, unknown>;
-      if (
-        typeof peer.peerId !== 'string'
-        || peer.peerId.length === 0
-        || typeof peer.core !== 'boolean'
-        || peerIds.has(peer.peerId)
-      ) return null;
-      if (
-        raw.version === 1
-        && (
+    const isLegacy = raw.version === undefined || raw.version === 1;
+    const peers: unknown[] = [];
+    if (isLegacy) {
+      for (const [rank, candidate] of raw.peers.entries()) {
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+        const peer = candidate as Record<string, unknown>;
+        if (
           peer.rank !== rank
           || typeof peer.preferred !== 'boolean'
           || peer.preferred !== (peer.peerId === raw.preferredPeerId)
-        )
-      ) return null;
-      peerIds.add(peer.peerId);
-      peers.push({ peerId: peer.peerId, core: peer.core });
+        ) return null;
+        peers.push({ peerId: peer.peerId, core: peer.core });
+      }
+    } else {
+      peers.push(...raw.peers);
     }
 
-    const rawCleanMissPeerIds = raw.version === 1 ? [] : raw.cleanMissPeerIds;
-    if (!Array.isArray(rawCleanMissPeerIds)) return null;
-    const cleanMissPeerIds: string[] = [];
-    const cleanMisses = new Set<string>();
-    for (const peerId of rawCleanMissPeerIds) {
-      if (
-        typeof peerId !== 'string'
-        || !peerIds.has(peerId)
-        || cleanMisses.has(peerId)
-      ) return null;
-      cleanMisses.add(peerId);
-      cleanMissPeerIds.push(peerId);
-    }
-    return createVmReconcilePeerTopology({
+    const peerTopology = parseVmReconcilePeerTopology({
+      kind: 'readable',
       preferredPeerId: raw.preferredPeerId,
       privateOnly: raw.privateOnly,
       peers,
-      cleanMissPeerIds,
     });
+    if (!peerTopology) return null;
+    const cleanMissPeerIds = isLegacy
+      ? []
+      : parseVmReconcileCleanMissPeerIds(raw.cleanMissPeerIds, peerTopology);
+    return cleanMissPeerIds === null ? null : { peerTopology, cleanMissPeerIds };
   } catch {
     return null;
   }
 }
 
-function encodeTopology(topology: VmReconcilePeerTopology): string {
+function encodeTopology(
+  topology: VmReconcilePeerTopology,
+  cleanMissPeerIds: readonly string[],
+): string {
   if (topology.kind === 'unreadable') return 'unreadable';
   return JSON.stringify({
     version: TOPOLOGY_VERSION,
     preferredPeerId: topology.preferredPeerId,
     privateOnly: topology.privateOnly,
     peers: topology.peers,
-    cleanMissPeerIds: topology.cleanMissPeerIds,
+    cleanMissPeerIds,
   });
 }
 
@@ -95,7 +91,7 @@ export function decodeVmReconcileNegativeRow(
 ): VmReconcileNegativeRecord | null {
   try {
     const candidateNamespaces: unknown = JSON.parse(row.candidate_namespaces);
-    const peerTopology = decodeTopology(row.peer_topology_key);
+    const topology = decodeTopology(row.peer_topology_key);
     if (
       !Number.isInteger(row.failures)
       || row.failures <= 0
@@ -107,7 +103,7 @@ export function decodeVmReconcileNegativeRow(
         && !Array.isArray(item)
         && typeof (item as Record<string, unknown>).metaGraph === 'string'
         && typeof (item as Record<string, unknown>).dataGraph === 'string')
-      || !peerTopology
+      || !topology
     ) return null;
     return {
       cacheKey: row.cache_key,
@@ -116,7 +112,8 @@ export function decodeVmReconcileNegativeRow(
       nextRetryAt: row.next_retry_at,
       swmGen: row.swm_gen,
       candidateNamespaces: candidateNamespaces as Array<{ metaGraph: string; dataGraph: string }>,
-      peerTopology,
+      peerTopology: topology.peerTopology,
+      cleanMissPeerIds: topology.cleanMissPeerIds,
     };
   } catch {
     return null;
@@ -134,7 +131,7 @@ export function encodeVmReconcileNegativeRow(
     next_retry_at: record.nextRetryAt,
     swm_gen: record.swmGen,
     candidate_namespaces: JSON.stringify(record.candidateNamespaces),
-    peer_topology_key: encodeTopology(record.peerTopology),
+    peer_topology_key: encodeTopology(record.peerTopology, record.cleanMissPeerIds),
     updated_at: updatedAt,
   };
 }
