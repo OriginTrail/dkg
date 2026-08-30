@@ -130,6 +130,8 @@ export default defineConfig({
       "test/rfc64-sync-on-connect-peer-job-accounting.test.ts",
       "test/rfc64-sync-on-connect-swm-lanes.test.ts",
       "test/rfc64-sync-on-connect-selected-retry.test.ts",
+      "test/sync-on-connect-attempt-accounting.test.ts",
+      "test/sync-on-connect-peer-job-runner.test.ts",
       "test/sync-on-connect-peer-scheduler.test.ts",
       "test/system-context-graph-policy.test.ts",
       "test/sync-requester-bailout.test.ts",

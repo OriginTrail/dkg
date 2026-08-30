@@ -4,6 +4,7 @@ import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import {
   allowAllNetworkAdmission,
+  createSyncOnConnectPeerJobRunnerForTest,
   createRfc64CoordinatorStub,
   createUnstartedAgent,
   emptyDetailedSync,
@@ -48,7 +49,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       });
       return 'synced';
     });
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runAutomaticSelectedThenOrdinary();
     runner.finish();
@@ -84,12 +85,12 @@ describe('RFC-64 peer-job accounting and order', () => {
       return 'synced';
     });
 
-    const automaticRunner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const automaticRunner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
     await automaticRunner.runAutomaticSelectedThenOrdinary();
     automaticRunner.finish();
     expect(order).toEqual(['ordinary']);
 
-    const explicitRunner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const explicitRunner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
     await explicitRunner.runSelected({
       kind: 'rfc64-authorized-swm-recovery-v1',
       providerPeerId: PEER_A,
@@ -300,7 +301,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       return 'synced';
     };
     const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runSelected();
     await runner.runAutomaticSelectedThenOrdinary();
@@ -343,7 +344,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       });
       return 'synced';
     };
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runSelected();
     await runner.runAutomaticSelectedThenOrdinary();
@@ -387,7 +388,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       });
       return 'synced';
     };
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runAutomaticSelectedThenOrdinary();
     await runner.runSelected();
@@ -510,7 +511,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       });
       return 'synced';
     };
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runAutomaticSelectedThenOrdinary();
     await runner.runSelected();
@@ -531,7 +532,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       throw new SyncBackpressureBusyError('sync queue full');
     };
     const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runSelected();
     runner.finish();
@@ -663,7 +664,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     };
     const ordinaryFailure = new Error('ordinary failed after reconnect');
     agent.trySyncFromPeer = async () => { throw ordinaryFailure; };
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runSelected();
     await expect(runner.runAutomaticSelectedThenOrdinary()).rejects.toBe(ordinaryFailure);
@@ -703,7 +704,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       });
       return 'synced';
     };
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await expect(runner.runSelected()).rejects.toBe(selectedFailure);
     await runner.runAutomaticSelectedThenOrdinary();
@@ -746,7 +747,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       return 'synced';
     };
     const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runSelected();
     await runner.runAutomaticSelectedThenOrdinary();
@@ -782,7 +783,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       return 'synced';
     };
     const applyJobAccounting = vi.spyOn(agent, 'applySyncOnConnectAccounting');
-    const runner = agent.createSyncOnConnectPeerJobRunner(PEER_A);
+    const runner = createSyncOnConnectPeerJobRunnerForTest(agent, PEER_A);
 
     await runner.runSelected();
     runner.finish();

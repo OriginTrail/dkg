@@ -9,6 +9,7 @@ import {
   captureSyncOnConnectAttempt,
   executeSyncOnConnectAttempt,
 } from '../src/sync/on-connect/attempt-accounting.js';
+import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import {
@@ -765,15 +766,20 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
       queueAgent.catchupOnConnectAt = new Map<string, number>();
       queueAgent.rfc64ExactCatchupOnConnectAt = new Map<string, number>();
-      queueAgent.syncOnConnectPeerScheduler = null;
+      queueAgent.syncOnConnectPeerScheduler = new SyncOnConnectPeerScheduler({
+        createJob: (peerId) => ({
+          runAutomaticSelectedThenOrdinary: async () => 'not-started',
+          runSelected: async () => {
+            queuedPeers.push(peerId);
+            return 'not-started';
+          },
+          cancel: () => undefined,
+          finish: () => undefined,
+        }),
+        onInternalError: () => undefined,
+      });
       queueAgent.getSyncOnConnectPeerScheduler =
         LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;
-      queueAgent.createSyncOnConnectPeerJobRunner = (peerId: string) => ({
-        runAutomaticSelectedThenOrdinary: async () => undefined,
-        runSelected: async () => { queuedPeers.push(peerId); },
-        cancel: () => undefined,
-        finish: () => undefined,
-      });
       queueAgent.syncReconcilerBackoff = new Map<string, unknown>();
       queueAgent.syncOnConnectDisconnectBoundary =
         LifecycleSyncMethods.prototype.syncOnConnectDisconnectBoundary;

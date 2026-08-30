@@ -5,7 +5,10 @@ import type { ContextGraphSub, SyncReconcilerBackoff } from '../../src/dkg-agent
 import type { Rfc64SwmRecoveryCoordinatorV1 } from '../../src/rfc64/swm-recovery-coordinator-v1.js';
 import type { Rfc64AuthorizedSwmRecoveryPlanV1 } from '../../src/rfc64/swm-recovery-plan-v1.js';
 import type { SelectedSwmBootstrapAdmission } from '../../src/sync/selected-swm-bootstrap-admission.js';
-import type { SyncOnConnectPeerScheduler } from '../../src/sync/on-connect/peer-scheduler.js';
+import {
+  SyncOnConnectPeerScheduler,
+  type SyncOnConnectPeerJobRunner,
+} from '../../src/sync/on-connect/peer-scheduler.js';
 
 type Rfc64CoordinatorTestPort = Pick<
   Rfc64SwmRecoveryCoordinatorV1,
@@ -36,7 +39,7 @@ interface SyncOnConnectPrivateSeam {
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   syncOnConnectPeerScheduler: SyncOnConnectPeerScheduler<
     Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>
-  >;
+  > | null;
   rfc64SwmRecoveryCoordinatorV1: Rfc64CoordinatorTestPort;
 }
 
@@ -50,6 +53,18 @@ export type SyncOnConnectTestAgent = Omit<
 /** The only cast boundary for private sync-on-connect lifecycle collaborators. */
 export function asSyncOnConnectTestAgent(agent: DKGAgent): SyncOnConnectTestAgent {
   return agent as unknown as SyncOnConnectTestAgent;
+}
+
+export function createSyncOnConnectPeerJobRunnerForTest(
+  agent: SyncOnConnectTestAgent,
+  remotePeer: string,
+): SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
+  const internalAgent = agent as unknown as {
+    createSyncOnConnectPeerJobRunner: (
+      peerId: string,
+    ) => SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>;
+  };
+  return internalAgent.createSyncOnConnectPeerJobRunner(remotePeer);
 }
 
 export function createRfc64CoordinatorStub(
@@ -78,17 +93,20 @@ export function installSyncOnConnectPeerJobStub(
     finish?: (remotePeer: string) => void;
   }>,
 ): void {
-  agent.createSyncOnConnectPeerJobRunner = (remotePeer) => ({
-    runAutomaticSelectedThenOrdinary: async () => {
-      await callbacks.runOrdinary?.(remotePeer);
-      return 'not-started' as const;
-    },
-    runSelected: async (recoveryPlan) => {
-      await callbacks.runSelected?.(remotePeer, recoveryPlan);
-      return 'not-started' as const;
-    },
-    cancel: () => { callbacks.cancel?.(remotePeer); },
-    finish: () => { callbacks.finish?.(remotePeer); },
+  agent.syncOnConnectPeerScheduler = new SyncOnConnectPeerScheduler({
+    createJob: (remotePeer) => ({
+      runAutomaticSelectedThenOrdinary: async () => {
+        await callbacks.runOrdinary?.(remotePeer);
+        return 'not-started' as const;
+      },
+      runSelected: async (recoveryPlan) => {
+        await callbacks.runSelected?.(remotePeer, recoveryPlan);
+        return 'not-started' as const;
+      },
+      cancel: () => { callbacks.cancel?.(remotePeer); },
+      finish: () => { callbacks.finish?.(remotePeer); },
+    }),
+    onInternalError: () => undefined,
   });
 }
 

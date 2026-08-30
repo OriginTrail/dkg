@@ -349,10 +349,22 @@ export async function callTrySyncFromPeer(
       outcome: Parameters<typeof onSyncAccounting>[0],
     ) => { onSyncAccounting(outcome); };
   }
-  const runner = LifecycleSyncMethods.prototype.createSyncOnConnectPeerJobRunner.call(
-    agent as never,
-    remotePeer,
-  );
+  const runner = (
+    LifecycleSyncMethods.prototype as unknown as {
+      createSyncOnConnectPeerJobRunner: (
+        this: SelectedProviderSelectionAgent,
+        peerId: string,
+        options: {
+          initialProbe: { protocolsKey: string | null; connectionKey: string | null };
+        },
+      ) => {
+        runAutomaticSelectedThenOrdinary: () => Promise<unknown>;
+        finish: () => void;
+      };
+    }
+  ).createSyncOnConnectPeerJobRunner.call(agent, remotePeer, {
+    initialProbe: { protocolsKey: null, connectionKey: null },
+  });
   try {
     return await runner.runAutomaticSelectedThenOrdinary();
   } finally {

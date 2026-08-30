@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
+import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import {
   allowAllNetworkAdmission,
+  createSyncOnConnectPeerJobRunnerForTest,
   createRfc64CoordinatorStub,
   createUnstartedAgent,
   emptyDetailedSync,
@@ -184,17 +186,19 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       };
     });
     agent.syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
-    const createPeerJob = agent.createSyncOnConnectPeerJobRunner.bind(agent);
     const ordinaryRun = vi.fn(async () => { ordering.push('ordinary'); });
-    agent.createSyncOnConnectPeerJobRunner = (remotePeer) => {
-      const runner = createPeerJob(remotePeer);
-      return {
-        runSelected: (recoveryPlan) => runner.runSelected(recoveryPlan),
-        runAutomaticSelectedThenOrdinary: ordinaryRun,
-        cancel: () => { runner.cancel(); },
-        finish: () => { runner.finish(); },
-      };
-    };
+    agent.syncOnConnectPeerScheduler = new SyncOnConnectPeerScheduler({
+      createJob: (remotePeer) => {
+        const runner = createSyncOnConnectPeerJobRunnerForTest(agent, remotePeer);
+        return {
+          runSelected: (recoveryPlan) => runner.runSelected(recoveryPlan),
+          runAutomaticSelectedThenOrdinary: ordinaryRun,
+          cancel: () => { runner.cancel(); },
+          finish: () => { runner.finish(); },
+        };
+      },
+      onInternalError: () => undefined,
+    });
     const errors: unknown[] = [];
     const handleSyncError = (_peerId: string, error: unknown) => { errors.push(error); };
 

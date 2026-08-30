@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   allowAllNetworkAdmission,
   createRfc64CoordinatorStub,
@@ -78,8 +77,7 @@ describe('RFC-64 SWM lane partition and admission', () => {
       .toBe(true);
     await flushTimers();
     expect(queuedRun).toHaveBeenCalledOnce();
-    agent.createSyncOnConnectPeerJobRunner =
-      LifecycleSyncMethods.prototype.createSyncOnConnectPeerJobRunner as typeof agent.createSyncOnConnectPeerJobRunner;
+    agent.syncOnConnectPeerScheduler = null;
 
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
     agent.planSharedMemorySyncContextGraphs = async () => ({

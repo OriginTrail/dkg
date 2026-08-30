@@ -4656,7 +4656,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return this.syncOnConnectPeerScheduler;
   }
 
-  createSyncOnConnectPeerJobRunner(
+  protected createSyncOnConnectPeerJobRunner(
     this: DKGAgent,
     remotePeer: string,
     options: Readonly<{
