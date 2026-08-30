@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
+import { Command } from 'commander';
 import {
+  registerUpdateCommand,
+  runDefaultUpdatePreflight,
   runMaintenanceUpdateWorkflow,
+  type MaintenanceUpdateDoctorOps,
   type MaintenanceUpdatePreflightResult,
   type MaintenanceUpdateWorkflowDeps,
 } from '../src/commands/maintenance.js';
@@ -8,7 +12,8 @@ import {
   resolveExplicitNpmUpdateTarget,
   resolveNpmDistTag,
   type NpmVersionResult,
-} from '../src/daemon/auto-update.js';
+} from '../src/update/npm-registry.js';
+import type { DoctorDeps, DoctorReport } from '../src/doctor/types.js';
 import {
   loadProjectConfig,
   resolveAutoUpdateConfig,
@@ -121,6 +126,63 @@ describe('resolveNpmDistTag registry boundary', () => {
   });
 });
 
+describe('dkg update doctor adapter', () => {
+  const preflightDeps = {} as DoctorDeps;
+
+  function doctorOps(
+    runDoctor: MaintenanceUpdateDoctorOps['runDoctor'],
+  ): MaintenanceUpdateDoctorOps {
+    return {
+      createProductionDeps: vi.fn(() => preflightDeps),
+      runDoctor,
+    };
+  }
+
+  it('runs exactly the update checks and maps doctor errors to a blocked preflight', async () => {
+    const report = {
+      exitCode: 2,
+      findings: [
+        {
+          check: 'version-skew',
+          severity: 'error',
+          message: 'daemon and CLI differ',
+          advisory: 'restart from the updated CLI',
+        },
+        { check: 'version-skew', severity: 'warning', message: 'secondary warning' },
+      ],
+    } as DoctorReport;
+    const ops = doctorOps(vi.fn(async () => report));
+    const config = { apiPort: 9321 } as DkgConfig;
+
+    await expect(runDefaultUpdatePreflight(config, ops)).resolves.toEqual({
+      status: 'blocked',
+      findings: [{
+        check: 'version-skew',
+        message: 'daemon and CLI differ',
+        advisory: 'restart from the updated CLI',
+      }],
+    });
+    expect(ops.createProductionDeps).toHaveBeenCalledWith({ apiPort: 9321 });
+    expect(ops.runDoctor).toHaveBeenCalledWith(preflightDeps, {
+      checks: ['install-layout', 'version-skew'],
+    });
+  });
+
+  it('returns the documented warning when doctor orchestration throws', async () => {
+    const ops = doctorOps(vi.fn(async () => {
+      throw new Error('doctor exploded');
+    }));
+
+    await expect(runDefaultUpdatePreflight({ apiPort: 9200 } as DkgConfig, ops))
+      .resolves.toEqual({
+        status: 'ok',
+        warnings: [
+          '[dkg update] WARNING: pre-flight doctor check crashed (doctor exploded); continuing without it.',
+        ],
+      });
+  });
+});
+
 describe('dkg update command stable-only wiring', () => {
   function commandHarness(
     resolvedTag: string | null = null,
@@ -203,11 +265,21 @@ describe('dkg update command stable-only wiring', () => {
       .toBeLessThan(harness.performNpmUpdateEdge.mock.invocationCallOrder[0]);
   });
 
-  it('returns the preflight exit code and blocks installer dispatch', async () => {
-    const runPreflight = vi.fn(async (): Promise<MaintenanceUpdatePreflightResult> => ({
-      status: 'blocked',
-      findings: [{ check: 'install-layout', message: 'layout mismatch' }],
-    }));
+  it('returns the real doctor adapter exit code and blocks installer dispatch', async () => {
+    const preflightDeps = {} as DoctorDeps;
+    const doctorOps: MaintenanceUpdateDoctorOps = {
+      createProductionDeps: vi.fn(() => preflightDeps),
+      runDoctor: vi.fn(async () => ({
+        exitCode: 2,
+        findings: [{
+          check: 'install-layout',
+          severity: 'error',
+          message: 'layout mismatch',
+        }],
+      } as DoctorReport)),
+    };
+    const runPreflight = vi.fn((config: DkgConfig) =>
+      runDefaultUpdatePreflight(config, doctorOps));
     const harness = commandHarness(null, runPreflight);
 
     const outcome = await runMaintenanceUpdateWorkflow({
@@ -218,6 +290,49 @@ describe('dkg update command stable-only wiring', () => {
     expect(runPreflight).toHaveBeenCalledWith(harness.config);
     expect(harness.performNpmUpdate).not.toHaveBeenCalled();
     expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
+  });
+
+  it('streams progress before a pending installer resolves', async () => {
+    const harness = commandHarness();
+    let finishInstall!: (status: 'updated') => void;
+    const pendingInstall = new Promise<'updated'>((resolve) => {
+      finishInstall = resolve;
+    });
+    const installer = vi.fn(() => pendingInstall);
+    harness.deps.performNpmUpdateEdge = installer;
+    const writeStdout = vi.fn();
+
+    const update = runMaintenanceUpdateWorkflow({
+      versionOrRef: '10.0.1',
+    }, harness.deps, { writeStdout });
+
+    await vi.waitFor(() => expect(installer).toHaveBeenCalledOnce());
+    expect(writeStdout).toHaveBeenCalledWith(
+      'Updating to 10.0.1 via NPM (global npm install)...',
+    );
+    finishInstall('updated');
+    await expect(update).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it('emits failure diagnostics before setting the command exit code', async () => {
+    const harness = commandHarness();
+    harness.deps.performNpmUpdateEdge = vi.fn(async () => 'failed' as const);
+    const writeStdout = vi.fn();
+    const writeStderr = vi.fn();
+    const setExitCode = vi.fn();
+    const program = new Command().name('dkg');
+    registerUpdateCommand(program, harness.deps, {
+      writeStdout,
+      writeStderr,
+      setExitCode,
+    });
+
+    await program.parseAsync(['node', 'dkg', 'update', '10.0.1']);
+
+    expect(writeStderr).toHaveBeenCalledWith('Update failed. Check logs and retry.');
+    expect(setExitCode).toHaveBeenCalledWith(1);
+    expect(writeStderr.mock.invocationCallOrder.at(-1))
+      .toBeLessThan(setExitCode.mock.invocationCallOrder[0]);
   });
 
   it('lets --allow-prerelease override stable-only config through installer dispatch', async () => {

@@ -37,7 +37,6 @@ import { batchEntityQuads } from '../batching.js';
 import {
   runDaemon,
   checkForNpmVersionUpdate,
-  resolveExplicitNpmUpdateTarget,
   performNpmUpdate,
   performNpmUpdateEdge,
   getCurrentCliVersion,
@@ -45,6 +44,9 @@ import {
   resolveStandaloneInstall,
   decodeForcedExitCode,
 } from '../daemon.js';
+import { resolveExplicitNpmUpdateTarget } from '../update/npm-registry.js';
+import type { CheckId, RunDoctorOptions } from '../doctor/index.js';
+import type { DoctorDeps, DoctorReport } from '../doctor/types.js';
 import {
   isLivenessProbeEnabled,
   startLivenessWatcher,
@@ -131,20 +133,45 @@ export type MaintenanceUpdateWorkflowOptions = {
   allowPrerelease?: boolean;
 };
 
+export type MaintenanceUpdateWorkflowOutput = {
+  writeStdout?: (message: string) => void;
+  writeStderr?: (message: string) => void;
+};
+
 export type MaintenanceUpdateWorkflowOutcome = {
   exitCode: 0 | 1 | 2;
   stdout: string[];
   stderr: string[];
 };
 
-async function runDefaultUpdatePreflight(
+export type MaintenanceUpdateDoctorOps = {
+  createProductionDeps: (options?: { apiPort?: number }) => DoctorDeps;
+  runDoctor: (deps: DoctorDeps, options?: RunDoctorOptions) => Promise<DoctorReport>;
+};
+
+const MAINTENANCE_UPDATE_PREFLIGHT_CHECKS = [
+  'install-layout',
+  'version-skew',
+] as const satisfies readonly CheckId[];
+
+async function loadMaintenanceUpdateDoctorOps(): Promise<MaintenanceUpdateDoctorOps> {
+  const { createProductionDeps, runDoctor } = await import('../doctor/index.js');
+  return {
+    createProductionDeps,
+    runDoctor,
+  };
+}
+
+export async function runDefaultUpdatePreflight(
   config: Awaited<ReturnType<typeof loadConfig>>,
+  doctorOps?: MaintenanceUpdateDoctorOps,
 ): Promise<MaintenanceUpdatePreflightResult> {
   try {
-    const { createProductionDeps, runDoctor, UPDATE_PREFLIGHT_CHECKS } =
-      await import('../doctor/index.js');
-    const preflightDeps = createProductionDeps({ apiPort: config.apiPort ?? 9200 });
-    const preflight = await runDoctor(preflightDeps, { checks: UPDATE_PREFLIGHT_CHECKS });
+    const ops = doctorOps ?? await loadMaintenanceUpdateDoctorOps();
+    const preflightDeps = ops.createProductionDeps({ apiPort: config.apiPort ?? 9200 });
+    const preflight = await ops.runDoctor(preflightDeps, {
+      checks: MAINTENANCE_UPDATE_PREFLIGHT_CHECKS,
+    });
     if (preflight.exitCode === 2) {
       const errors = preflight.findings.filter((finding) => finding.severity === 'error');
       return {
@@ -189,11 +216,18 @@ function createMaintenanceUpdateWorkflowDeps(): MaintenanceUpdateWorkflowDeps {
 export async function runMaintenanceUpdateWorkflow(
   options: MaintenanceUpdateWorkflowOptions,
   deps: MaintenanceUpdateWorkflowDeps = createMaintenanceUpdateWorkflowDeps(),
+  output: MaintenanceUpdateWorkflowOutput = {},
 ): Promise<MaintenanceUpdateWorkflowOutcome> {
   const stdout: string[] = [];
   const stderr: string[] = [];
-  const log = (message: string) => stdout.push(message);
-  const error = (message: string) => stderr.push(message);
+  const log = (message: string) => {
+    stdout.push(message);
+    output.writeStdout?.(message);
+  };
+  const error = (message: string) => {
+    stderr.push(message);
+    output.writeStderr?.(message);
+  };
   const config = await deps.loadConfig();
   const { network: net } = await deps.loadResolvedNetworkConfig(
     config,
@@ -336,6 +370,15 @@ export async function runMaintenanceUpdateWorkflow(
 export function registerUpdateCommand(
   program: Command,
   deps?: MaintenanceUpdateWorkflowDeps,
+  runtime: {
+    writeStdout: (message: string) => void;
+    writeStderr: (message: string) => void;
+    setExitCode: (code: 1 | 2) => void;
+  } = {
+    writeStdout: (message) => console.log(message),
+    writeStderr: (message) => console.error(message),
+    setExitCode: (code) => { process.exitCode = code; },
+  },
 ): void {
 // ─── dkg update ──────────────────────────────────────────────────────
 //
@@ -358,10 +401,11 @@ program
       versionOrRef,
       check: opts.check,
       allowPrerelease: opts.allowPrerelease,
-    }, deps);
-    for (const message of outcome.stdout) console.log(message);
-    for (const message of outcome.stderr) console.error(message);
-    if (outcome.exitCode !== 0) process.exit(outcome.exitCode);
+    }, deps, {
+      writeStdout: runtime.writeStdout,
+      writeStderr: runtime.writeStderr,
+    });
+    if (outcome.exitCode !== 0) runtime.setExitCode(outcome.exitCode);
   });
 }
 

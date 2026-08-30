@@ -30,12 +30,6 @@ import { createRequire } from 'node:module';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
-  compare as compareCanonicalSemver,
-  prerelease as canonicalPrerelease,
-  valid as validCanonicalSemver,
-} from 'semver';
-
-import {
   dkgDir,
   releasesDir,
   activeSlot,
@@ -75,6 +69,24 @@ import {
   nodeUiStaticIndexPath,
   runtimeBuildCommandFromPackageJson,
 } from '../node-ui-static.js';
+import {
+  compareSemver,
+  isValidSemver,
+  resolveLatestNpmVersion,
+} from '../update/npm-registry.js';
+export {
+  compareSemver,
+  decodeNpmDistTags,
+  fetchNpmDistTags,
+  isPrerelease,
+  isValidSemver,
+  resolveExplicitNpmUpdateTarget,
+  resolveLatestNpmVersion,
+  resolveNpmDistTag,
+  type ExplicitNpmUpdateTargetDecision,
+  type NpmDistTagsResult,
+  type NpmVersionResult,
+} from '../update/npm-registry.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -281,210 +293,6 @@ export async function writePendingUpdateState(
 }
 
 // ─── NPM-based auto-update helpers ──────────────────────────────────
-
-/**
- * Query the NPM registry for the latest published version of the CLI package.
- * Uses `dist-tags.latest` by default; when `allowPrerelease` is true, also
- * checks `beta` / `next` tags and picks the highest semver. When `channel`
- * is set, follows ONLY that dist-tag instead (still honouring `allowPrerelease`).
- */
-export type NpmVersionResult =
-  | { version: string; error?: false }
-  | { version: null; error: true }
-  | { version: null; error: false };
-
-export type NpmDistTagsResult =
-  | { tags: Record<string, string>; error?: false }
-  | { tags: null; error: true };
-
-/** Validate and normalize the untrusted npm registry response once at ingress. */
-export function decodeNpmDistTags(value: unknown): Record<string, string> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const distTags = (value as Record<string, unknown>)['dist-tags'];
-  if (!distTags || typeof distTags !== 'object' || Array.isArray(distTags)) return null;
-  return Object.fromEntries(
-    Object.entries(distTags).filter((entry): entry is [string, string] =>
-      typeof entry[1] === 'string'),
-  );
-}
-
-/** True when `v` is a valid semver string. */
-export function isValidSemver(v: string): boolean {
-  const candidate = v.trim();
-  return !candidate.startsWith('v') && validCanonicalSemver(candidate) !== null;
-}
-
-/**
- * True when `v` carries a prerelease component (the `-…` segment) — build
- * metadata (`+…`) is NOT a prerelease, so `1.0.0+mainnet-build.1` is stable
- * even though it contains a hyphen. Used for the `allowPrerelease` gate.
- */
-export function isPrerelease(v: string): boolean {
-  return canonicalPrerelease(v.trim()) !== null;
-}
-
-export type ExplicitNpmUpdateTargetDecision =
-  | { status: 'allowed'; version: string }
-  | { status: 'rejected'; reason: string }
-  | { status: 'registry-error'; reason: string };
-
-/** Canonical npm-registry boundary shared by automatic and explicit updates. */
-export async function fetchNpmDistTags(
-  log: (message: string) => void,
-): Promise<NpmDistTagsResult> {
-  const { fetch } = _autoUpdateIo;
-  const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
-  try {
-    const response = await fetch(url, {
-      headers: { Accept: "application/vnd.npm.install-v1+json" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!response.ok) {
-      log(
-        `Auto-update (npm): registry returned ${response.status} for ${CLI_NPM_PACKAGE}`,
-      );
-      return { tags: null, error: true };
-    }
-    const tags = decodeNpmDistTags(await response.json());
-    return tags ? { tags } : { tags: null, error: true };
-  } catch (err: any) {
-    log(
-      `Auto-update (npm): registry check failed (${err?.message ?? String(err)})`,
-    );
-    return { tags: null, error: true };
-  }
-}
-
-/** Resolve exactly one npm dist-tag without applying auto-update selection policy. */
-export async function resolveNpmDistTag(
-  tag: string,
-  log: (message: string) => void,
-  deps: { fetchNpmDistTags?: typeof fetchNpmDistTags } = {},
-): Promise<NpmVersionResult> {
-  const result = await (deps.fetchNpmDistTags ?? fetchNpmDistTags)(log);
-  if (result.error) return { version: null, error: true };
-  const version = Object.hasOwn(result.tags, tag) ? result.tags[tag] : null;
-  return typeof version === 'string' && isValidSemver(version)
-    ? { version }
-    : { version: null, error: false };
-}
-
-/**
- * Classify an explicit `dkg update <target>` against the npm update policy.
- * Exact versions stay exact; dist-tags are resolved once and returned as the
- * concrete version that the installer must use. Ranges, aliases, unknown tags,
- * and registry failures never fall through to npm as unvalidated input.
- */
-export async function resolveExplicitNpmUpdateTarget(
-  target: string,
-  allowPrerelease: boolean,
-  log: (message: string) => void,
-  deps: {
-    resolveNpmDistTag?: typeof resolveNpmDistTag;
-  } = {},
-): Promise<ExplicitNpmUpdateTargetDecision> {
-  const normalizedTarget = target.trim().replace(/^v/, '');
-  const exactVersion = validCanonicalSemver(normalizedTarget);
-  if (exactVersion !== null) {
-    if (!allowPrerelease && canonicalPrerelease(normalizedTarget) !== null) {
-      return {
-        status: 'rejected',
-        reason: `target "${normalizedTarget}" is a pre-release and this node has allowPrerelease=false — re-run with --allow-prerelease to override`,
-      };
-    }
-    return { status: 'allowed', version: normalizedTarget };
-  }
-
-  const resolveTarget = deps.resolveNpmDistTag ?? resolveNpmDistTag;
-  const resolved = await resolveTarget(normalizedTarget, log);
-  if (resolved.error) {
-    return {
-      status: 'registry-error',
-      reason: `could not resolve dist-tag "${normalizedTarget}" against the npm registry — retry or pass an explicit version`,
-    };
-  }
-  if (!resolved.version || !isValidSemver(resolved.version)) {
-    return {
-      status: 'rejected',
-      reason: `target "${normalizedTarget}" is not an exact semantic version or a published npm dist-tag`,
-    };
-  }
-  if (!allowPrerelease && isPrerelease(resolved.version)) {
-    return {
-      status: 'rejected',
-      reason: `dist-tag "${normalizedTarget}" resolves to pre-release "${resolved.version}" and this node has allowPrerelease=false — re-run with --allow-prerelease to override`,
-    };
-  }
-  return { status: 'allowed', version: resolved.version };
-}
-
-export async function resolveLatestNpmVersion(
-  log: (msg: string) => void,
-  allowPrerelease = true,
-  channel?: string,
-): Promise<NpmVersionResult> {
-  const result = await fetchNpmDistTags(log);
-  if (result.error) return { version: null, error: true };
-  const tags = result.tags;
-
-  try {
-    // Channel pin: follow ONLY this dist-tag (e.g. "testnet"), ignoring the
-    // default latest/dev/beta/next set. Lets a cohort track its own release
-    // line without being captured by whatever `latest` points at.
-    if (channel) {
-      const pinned = tags[channel] ?? null;
-      if (!pinned) {
-        log(
-          `Auto-update (npm): channel "${channel}" has no published version, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      if (!isValidSemver(pinned)) {
-        log(
-          `Auto-update (npm): channel "${channel}" → "${pinned}" is not a valid semver, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      if (!allowPrerelease && isPrerelease(pinned)) {
-        log(
-          `Auto-update (npm): channel "${channel}" points at a pre-release and allowPrerelease=false, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      return { version: pinned };
-    }
-
-    const stable = tags.latest ?? null;
-    if (!allowPrerelease) {
-      if (stable && isValidSemver(stable) && !isPrerelease(stable)) return { version: stable };
-      log(
-        "Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping",
-      );
-      return { version: null, error: false };
-    }
-
-    // Filter to VALID semver BEFORE sorting: a single malformed tag (e.g.
-    // latest="garbage") must not sort ahead of and mask a valid candidate
-    // (e.g. beta="9.0.0-beta.4") — compareSemver on garbage returns NaN, which
-    // makes the sort order undefined. Filtering invalid values never changes
-    // selection among valid ones.
-    const candidates = ([stable, tags.dev, tags.beta, tags.next].filter(
-      Boolean,
-    ) as string[]).filter(isValidSemver);
-    if (candidates.length === 0) return { version: null, error: false };
-    candidates.sort((a, b) => compareSemver(b, a));
-    return { version: candidates[0] };
-  } catch {
-    return { version: null, error: true };
-  }
-}
-
-export function compareSemver(a: string, b: string): number {
-  const validA = validCanonicalSemver(a.trim());
-  const validB = validCanonicalSemver(b.trim());
-  if (validA === null || validB === null) return Number.NaN;
-  return compareCanonicalSemver(validA, validB);
-}
 
 export function getCurrentCliVersion(): string {
   const { readFileSync } = _autoUpdateIo;
