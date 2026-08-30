@@ -2164,8 +2164,13 @@ export class DKGAgent extends DKGAgentBase {
     // router, node, and control-object store are all still live — before
     // node.stop() below and before closeRfc64PersistenceV1() releases the store.
     try {
-      await this.closeRfc64CatalogSupervisorsV1();
+      // Fence and drain every projection producer while projection admission
+      // and authoring transports remain live. Receiver close then proves that
+      // no later applied-head callback can enqueue work. Only after both
+      // producer classes are quiet may the projection owner drain and close.
       await this.closeRfc64SwmInventoryObserversV1();
+      await this.closeRfc64PublicCatalogReceiverAdmissionV1();
+      await this.closeRfc64CatalogSupervisorsV1();
       await this.closeRfc64PublicCatalogServiceV1();
     } catch (err) {
       this.log.warn(

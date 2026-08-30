@@ -39,7 +39,6 @@ import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import { resolveRfc64CatalogAuthorityDecisionV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import {
-  raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
 
@@ -62,13 +61,25 @@ export interface ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
   readonly peers: readonly string[];
   readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
-  /**
-   * Optional source-owned freshness barrier executed inside the serialized
-   * catalog mutation, before any successor is staged. Inventory projection
-   * uses this to prevent an older snapshot from committing after a newer one.
-   */
-  readonly assertTargetCurrent?: () => Promise<void> | void;
   readonly signal?: AbortSignal;
+}
+
+interface ReconcileRfc64SwmInventoryCatalogExactSetParamsV1
+  extends ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
+  /**
+   * Projection-owned atomic boundary: verify the expected inventory head while
+   * holding its scope lock, then execute the synchronous applied-head CAS
+   * before releasing that lock.
+   */
+  readonly commitAppliedHeadIfInventoryCurrent: (
+    commit: () => AppliedCatalogHeadSnapshotV1,
+  ) => Promise<AppliedCatalogHeadSnapshotV1>;
+}
+
+interface Rfc64CatalogExactSetMutationOptionsV1 {
+  readonly commitAppliedHead?: (
+    commit: () => AppliedCatalogHeadSnapshotV1,
+  ) => Promise<AppliedCatalogHeadSnapshotV1>;
 }
 
 export interface ReconcileRfc64PublicRootCatalogExactSetResultV1 {
@@ -157,6 +168,24 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
   ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
+    return this.reconcileRfc64PublicRootCatalogExactSetCoreV1(params);
+  }
+
+  /** Typed projection boundary; direct exact-set callers remain source-neutral. */
+  async reconcileRfc64SwmInventoryCatalogExactSetV1(
+    this: DKGAgent,
+    params: ReconcileRfc64SwmInventoryCatalogExactSetParamsV1,
+  ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
+    return this.reconcileRfc64PublicRootCatalogExactSetCoreV1(params, {
+      commitAppliedHead: params.commitAppliedHeadIfInventoryCurrent,
+    });
+  }
+
+  private async reconcileRfc64PublicRootCatalogExactSetCoreV1(
+    this: DKGAgent,
+    params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
+    options: Readonly<Rfc64CatalogExactSetMutationOptionsV1> = {},
+  ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
     throwIfAbortedV1(params.signal);
     this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
@@ -185,16 +214,15 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
 
     return this.rfc64CatalogMutationCoordinatorV1.run(params.scope, async () => {
       throwIfAbortedV1(params.signal);
-      await params.assertTargetCurrent?.();
-      throwIfAbortedV1(params.signal);
-      let state = await raceAgainstAbortV1(
-        this.readRfc64CatalogMutationStateV1(
-          persistence,
-          catalogScopeDigest,
-          params.scope.authorAddress,
-        ),
-        params.signal,
+      // The coordinator tail follows this physical read. Caller cancellation
+      // remains prompt through the coordinator's outer race, but persistence
+      // cannot close until a non-cooperative read actually settles.
+      let state = await this.readRfc64CatalogMutationStateV1(
+        persistence,
+        catalogScopeDigest,
+        params.scope.authorAddress,
       );
+      throwIfAbortedV1(params.signal);
       if (state === null && targetAssets.length === 0) {
         return Object.freeze({
           status: 'empty' as const,
@@ -230,6 +258,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           nextAssets,
           peers,
           params.signal,
+          options.commitAppliedHead,
         );
         successorsApplied += 1;
         state = Object.freeze({
@@ -357,6 +386,9 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
     peers: readonly string[],
     signal?: AbortSignal,
+    commitAppliedHead?: (
+      commit: () => AppliedCatalogHeadSnapshotV1,
+    ) => Promise<AppliedCatalogHeadSnapshotV1>,
   ) {
     throwIfAbortedV1(signal);
     const successor = await this.publishAuthorCatalogExactSetSuccessorV1({
@@ -373,15 +405,20 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       catalogScopeDigest: successor.catalogScopeDigest,
       rows: successor.assets,
     });
-    const applied = persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
-      catalogScopeDigest: successor.catalogScopeDigest,
-      authorAddress: params.scope.authorAddress,
-      currentCatalogHeadDigest: successor.headObjectDigest,
-      appliedInventoryDigest,
-      catalogVersion: successor.announcement.catalogVersion,
-      inventoryRowCount: successor.signedBucketRowCount,
-      expectedCurrentCatalogHeadDigest: state.expectedCurrentCatalogHeadDigest,
-    }).snapshot;
+    const commit = (): AppliedCatalogHeadSnapshotV1 => (
+      persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+        catalogScopeDigest: successor.catalogScopeDigest,
+        authorAddress: params.scope.authorAddress,
+        currentCatalogHeadDigest: successor.headObjectDigest,
+        appliedInventoryDigest,
+        catalogVersion: successor.announcement.catalogVersion,
+        inventoryRowCount: successor.signedBucketRowCount,
+        expectedCurrentCatalogHeadDigest: state.expectedCurrentCatalogHeadDigest,
+      }).snapshot
+    );
+    const applied = commitAppliedHead === undefined
+      ? commit()
+      : await commitAppliedHead(commit);
     if (!signal?.aborted) {
       await this.announceRfc64PublicCatalogHeadV1({
         announcement: successor.announcement,

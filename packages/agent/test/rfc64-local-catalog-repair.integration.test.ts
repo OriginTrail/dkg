@@ -477,6 +477,61 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     })).toBe(false);
   }, 30_000);
 
+  it('bounds distinct repair scopes to four concurrent reconciliations', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'bounded-distinct-repairs',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    vi.spyOn(agent, 'resolveRfc64AcceptedPublicRootLaneV1').mockReturnValue({} as never);
+    let active = 0;
+    let maxActive = 0;
+    let call = 0;
+    let markFirstEntered!: () => void;
+    let releaseFirst!: () => void;
+    let markFourEntered!: () => void;
+    let releaseRepairs!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const fourEntered = new Promise<void>((resolve) => { markFourEntered = resolve; });
+    const repairGate = new Promise<void>((resolve) => { releaseRepairs = resolve; });
+    const reconcile = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+      .mockImplementation(async () => {
+        call += 1;
+        if (call === 1) {
+          markFirstEntered();
+          await firstGate;
+          return null;
+        }
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        if (active === 4) markFourEntered();
+        await repairGate;
+        active -= 1;
+        return null;
+      });
+    const contextGraphIds = Array.from({ length: 6 }, (_, index) => (
+      `0x1111111111111111111111111111111111111111/bounded-${index}` as ContextGraphIdV1
+    ));
+    for (const contextGraphId of contextGraphIds) {
+      expect(agent.requestRfc64SwmCatalogProjectionV1({
+        contextGraphId,
+        authorAddress: AUTHOR,
+      })).toBe(true);
+    }
+    await firstEntered;
+    releaseFirst();
+    await fourEntered;
+    expect(reconcile).toHaveBeenCalledTimes(5);
+    expect(maxActive).toBe(4);
+    releaseRepairs();
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(reconcile).toHaveBeenCalledTimes(6);
+    expect(maxActive).toBe(4);
+  }, 30_000);
+
   it('drains an admitted SWM observer before persistence closes and rejects late admission', async () => {
     const autoPublish = {
       peers: [],
@@ -511,6 +566,20 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         await observerGate;
         return originalRecord(params);
       });
+    let markProjectionEntered!: () => void;
+    let releaseProjection!: () => void;
+    const projectionEntered = new Promise<void>((resolve) => {
+      markProjectionEntered = resolve;
+    });
+    const projectionGate = new Promise<void>((resolve) => {
+      releaseProjection = resolve;
+    });
+    vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+      .mockImplementation(async () => {
+        markProjectionEntered();
+        await projectionGate;
+        return null;
+      });
     const persistenceCloseSpy = vi.spyOn(agent, 'closeRfc64PersistenceV1');
     const schedule = (agent as unknown as {
       scheduleRfc64SwmInventoryObserverV1(params: Readonly<{
@@ -538,6 +607,11 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     expect(persistenceCloseSpy).not.toHaveBeenCalled();
 
     releaseObserver();
+    await projectionEntered;
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
+    expect(persistenceCloseSpy).not.toHaveBeenCalled();
+    releaseProjection();
     await expect(stopping).resolves.toBeUndefined();
     agents.splice(agents.indexOf(agent), 1);
     expect(recordSpy).toHaveBeenCalledOnce();
@@ -553,7 +627,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
   }, 30_000);
 
-  it('reports missing inventory and unavailable projection distinctly', async () => {
+  it('reports missing inventory through the canonical supervisor path', async () => {
     const agent = await startRepairAgentV1({
       name: 'no-inventory',
       autoPublish: {
@@ -572,22 +646,6 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     await agent.whenRfc64CatalogSupervisorsIdleV1();
     expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
       .toEqual([expect.objectContaining({ outcome: 'no-inventory', attempts: 1 })]);
-    const reconcile = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1');
-    await expect(agent.repairRfc64LocalPublicCatalogAuthorV1({
-      contextGraphId: CONTEXT_GRAPH_ID,
-      authorAddress: REMOTE_AUTHOR,
-    })).resolves.toEqual({ outcome: 'inactive' });
-    expect(reconcile).not.toHaveBeenCalled();
-    const service = (agent as any).rfc64PublicCatalogServiceV1;
-    (agent as any).rfc64PublicCatalogServiceV1 = undefined;
-    await expect(agent.repairRfc64LocalPublicCatalogAuthorV1({
-      contextGraphId: CONTEXT_GRAPH_ID,
-      authorAddress: AUTHOR,
-    })).resolves.toEqual({
-      outcome: 'unavailable',
-      error: 'RFC-64 public catalog service is unavailable',
-    });
-    (agent as any).rfc64PublicCatalogServiceV1 = service;
   });
 
   it('reopens live-only inventory and projection admission on same-instance restart', async () => {

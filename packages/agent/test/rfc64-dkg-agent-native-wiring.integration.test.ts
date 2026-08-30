@@ -2313,6 +2313,139 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   }, 60_000);
 
+  it('rejects an SWM projection whose inventory changes before the applied-head CAS', async () => {
+    const author = await startNativeAgent('r1-3-commit-freshness-author');
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const asset = Object.freeze({
+      assertionCoordinate: 'r1-3-commit-freshness' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(73n),
+    });
+    const originalPublish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
+    let markSuccessorStaged!: () => void;
+    let releaseSuccessor!: () => void;
+    const successorStaged = new Promise<void>((resolve) => {
+      markSuccessorStaged = resolve;
+    });
+    const successorGate = new Promise<void>((resolve) => {
+      releaseSuccessor = resolve;
+    });
+    let staleHeadDigest: Digest32V1 | null = null;
+    vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1')
+      .mockImplementationOnce(async (params) => {
+        const successor = await originalPublish(params);
+        staleHeadDigest = successor.headObjectDigest;
+        markSuccessorStaged();
+        await successorGate;
+        return successor;
+      });
+    let currentInventoryHead = `0x${'a1'.repeat(32)}` as Digest32V1;
+    const expectedInventoryHead = currentInventoryHead;
+    const reconciliation = author.reconcileRfc64SwmInventoryCatalogExactSetV1({
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      },
+      author: AUTHOR_WALLET,
+      assets: [asset],
+      deployment: NATIVE_DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      commitAppliedHeadIfInventoryCurrent: async (commit) => {
+        if (currentInventoryHead !== expectedInventoryHead) {
+          throw new Error('simulated stale SWM inventory head');
+        }
+        return commit();
+      },
+    });
+    await successorStaged;
+    currentInventoryHead = `0x${'a2'.repeat(32)}` as Digest32V1;
+    releaseSuccessor();
+    await expect(reconciliation).rejects.toThrow('simulated stale SWM inventory head');
+    expect(staleHeadDigest).not.toBeNull();
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  }, 60_000);
+
+  it('keeps a canceled successor mutation attached to service shutdown', async () => {
+    const author = await startNativeAgent('r1-3-canceled-successor-author');
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const originalPublish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
+    let markSuccessorEntered!: () => void;
+    let releaseSuccessor!: () => void;
+    const successorEntered = new Promise<void>((resolve) => {
+      markSuccessorEntered = resolve;
+    });
+    const successorGate = new Promise<void>((resolve) => {
+      releaseSuccessor = resolve;
+    });
+    vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1')
+      .mockImplementationOnce(async (params) => {
+        markSuccessorEntered();
+        await successorGate;
+        return originalPublish(params);
+      });
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    const abortController = new AbortController();
+    const reconciliation = author.reconcileRfc64PublicRootCatalogExactSetV1({
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      },
+      author: AUTHOR_WALLET,
+      assets: [{
+        assertionCoordinate: 'r1-3-canceled-successor' as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(74n),
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      signal: abortController.signal,
+    });
+    await successorEntered;
+    abortController.abort(new Error('test cancellation'));
+    await expect(reconciliation).rejects.toThrow(/test cancellation|aborted/u);
+    let serviceClosed = false;
+    const closing = author.closeRfc64PublicCatalogServiceV1()
+      .finally(() => { serviceClosed = true; });
+    await Promise.resolve();
+    expect(serviceClosed).toBe(false);
+    releaseSuccessor();
+    await expect(closing).resolves.toBeUndefined();
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(announce).not.toHaveBeenCalled();
+  }, 60_000);
+
   registerM0RecoveryScenario('cold-restart', rfc64M0RecoveryTitle('cold-restart'), async () => {
     const author = await startNativeAgentWithOptions({
       name: 'bootstrap-author',

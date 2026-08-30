@@ -513,6 +513,11 @@ export class Rfc64PublicCatalogServiceV1 {
     }
   }
 
+  /** Fence receiver scheduling and drain applied-head callbacks; keep authoring live. */
+  async closeReceiverAdmissionAndDrain(): Promise<void> {
+    await this.#receiver.close();
+  }
+
   /** Stop serving, drain in-flight receiver work, then release. Idempotent. */
   async close(): Promise<void> {
     if (this.#closed) return;
@@ -521,7 +526,7 @@ export class Rfc64PublicCatalogServiceV1 {
     try {
       // Keep both outbound transports live until the scheduler has drained.
       // Post-close availability callbacks are harmless: schedule() rejects them.
-      await this.#receiver.close();
+      await this.closeReceiverAdmissionAndDrain();
     } finally {
       this.#transport.stop();
       this.#currentHeadDiscoveryTransport?.stop();

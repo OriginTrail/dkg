@@ -64,15 +64,6 @@ export interface ReconcileRfc64PublicCatalogFromSwmInventoryResultV1
   readonly inventoryHeadObjectDigest: Digest32V1;
 }
 
-export type Rfc64LocalPublicCatalogAuthorRepairResultV1 =
-  | Readonly<{ readonly outcome: 'inactive' }>
-  | Readonly<{ readonly outcome: 'unavailable'; readonly error: string }>
-  | Readonly<{ readonly outcome: 'no-inventory' }>
-  | Readonly<{
-    readonly outcome: 'reconciled';
-    readonly reconciliation: ReconcileRfc64PublicCatalogFromSwmInventoryResultV1;
-  }>;
-
 export interface ResolvedRfc64AcceptedPublicRootLaneV1 {
   readonly networkId: NetworkIdV1;
   readonly service: Rfc64PublicCatalogServiceV1;
@@ -107,46 +98,6 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const lane = this.resolveRfc64AcceptedPublicRootLaneV1(params.contextGraphId, null);
     if (lane === null) return null;
     return this.reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(lane, params);
-  }
-
-  /** One restart/periodic repair attempt for a bounded graph and local author. */
-  async repairRfc64LocalPublicCatalogAuthorV1(
-    this: DKGAgent,
-    params: Readonly<{
-      contextGraphId: string;
-      authorAddress: string;
-      signal?: AbortSignal;
-    }>,
-  ): Promise<Rfc64LocalPublicCatalogAuthorRepairResultV1> {
-    throwIfAbortedV1(params.signal);
-    assertContextGraphIdV1(params.contextGraphId, 'SWM catalog repair contextGraphId');
-    const authorAddress = params.authorAddress.toLowerCase() as EvmAddressV1;
-    assertCanonicalEvmAddress(authorAddress, 'SWM catalog repair authorAddress');
-    if (!this.listLocalAgents().some(
-      ({ agentAddress }) => agentAddress.toLowerCase() === authorAddress,
-    )) return Object.freeze({ outcome: 'inactive' });
-    const laneDecision = this.resolveRfc64AcceptedPublicRootLaneDecisionV1(
-      params.contextGraphId,
-      null,
-    );
-    if (laneDecision.status === 'inactive') return Object.freeze({ outcome: 'inactive' });
-    if (laneDecision.status === 'unavailable') {
-      return Object.freeze({
-        outcome: 'unavailable',
-        error: laneDecision.error.message,
-      });
-    }
-    const reconciliation = await this.reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(
-      laneDecision.lane,
-      {
-        contextGraphId: params.contextGraphId as ContextGraphIdV1,
-        authorAddress,
-        signal: params.signal,
-      },
-    );
-    return reconciliation === null
-      ? Object.freeze({ outcome: 'no-inventory' })
-      : Object.freeze({ outcome: 'reconciled', reconciliation });
   }
 
   /** Canonical selected public-root admission shared by inventory and projection. */
@@ -284,7 +235,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       );
       throwIfAbortedV1(params.signal);
       try {
-        const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
+        const reconciled = await this.reconcileRfc64SwmInventoryCatalogExactSetV1({
           scope: prepared.catalogScope,
           author: this.createRfc64CatalogAuthorSignerV1(
             params.authorAddress,
@@ -298,8 +249,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
             ?? ('0' as TimestampMsV1),
           catalogIssuerDelegationExpiresAt:
             lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
-          assertTargetCurrent: () => rfc64SwmInventoryShadowRuntimeV1(this)
-            .runScopeExclusive(
+          commitAppliedHeadIfInventoryCurrent: (commit) => (
+            rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
               inventoryScopeKey,
               () => {
                 const current = persistence.swmAuthorInventory
@@ -310,10 +261,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
                 if (current?.head.objectDigest !== prepared.inventoryHeadObjectDigest) {
                   throw new Rfc64StaleSwmInventorySnapshotErrorV1();
                 }
-                return Promise.resolve();
+                return Promise.resolve(commit());
               },
               params.signal,
-            ),
+            )
+          ),
           signal: params.signal,
         });
         return Object.freeze({

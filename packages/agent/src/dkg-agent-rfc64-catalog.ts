@@ -359,6 +359,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this.log.info(ctx, 'RFC-64 public author-catalog transport started');
   }
 
+  /** Fence receiver admission while keeping local authoring transports live. */
+  async closeRfc64PublicCatalogReceiverAdmissionV1(this: DKGAgent): Promise<void> {
+    await this.rfc64PublicCatalogServiceV1?.closeReceiverAdmissionAndDrain();
+  }
+
   /** Stop serving and drain in-flight receiver work. Idempotent + undefined-safe. */
   async closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
     const service = this.rfc64PublicCatalogServiceV1;
