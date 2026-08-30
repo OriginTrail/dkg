@@ -216,6 +216,30 @@ describe('clear-job pending-transaction override authorization', () => {
     expect(calls[0]?.authority).toEqual({ kind: 'nodeOperator' });
   });
 
+  it('ignores a resolver-known token that is no longer accepted', async () => {
+    const { run, calls } = post(
+      { jobId: 'legacy-revoked-token-job', allowPendingTransaction: true },
+      {
+        requestAgentAddress: DEFAULT_AGENT,
+        requestToken: 'revoked-agent-token',
+        tokenAgentAddress: OWNER,
+        validTokens: new Set(),
+        authEnabled: false,
+      },
+    );
+    const authentication = await run();
+
+    expect(authentication).toMatchObject({
+      allowed: true,
+      mode: 'disabled',
+      presentedToken: 'revoked-agent-token',
+      acceptedToken: undefined,
+      principal: { kind: 'anonymous' },
+    });
+    expect(authentication.allowed && canAdministerNode(authentication)).toBe(true);
+    expect(calls[0]?.authority).toEqual({ kind: 'nodeOperator' });
+  });
+
   it('keeps a valid node token identified as the operator when auth is disabled', async () => {
     const { run, calls } = post(
       { jobId: 'legacy-node-token-job', allowPendingTransaction: true },
