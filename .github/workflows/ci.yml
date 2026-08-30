@@ -140,10 +140,6 @@ jobs:
             --sample-key "${SAMPLE_KEY}" \
             --github-output "${GITHUB_OUTPUT}" \
             --summary "${GITHUB_STEP_SUMMARY}"
-      # Always-on and dependency-free: documentation-only PRs intentionally skip the shared Node
-      # build, but tracked Markdown/config/source files still need the same literal-NUL gate.
-      - name: Reject NUL bytes in tracked text files
-        run: node candidate/scripts/ci/check-tracked-text-nul.mjs
       # Package README files are documentation for routing purposes, but they
       # are also npm metadata. Candidate code runs only after the trusted plan
       # has finalized its outputs, so it cannot influence test selection.

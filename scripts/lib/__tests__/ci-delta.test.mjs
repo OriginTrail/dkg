@@ -226,10 +226,10 @@ test('documentation-only PRs select no test lane or shared build', () => {
   assert.deepEqual(plan.evmScopes, []);
 
   const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
-  assert.match(
+  assert.doesNotMatch(
     workflowJobBlock(workflow, 'changes'),
-    /run: node candidate\/scripts\/ci\/check-tracked-text-nul\.mjs/,
-    'the always-run planning job must guard docs-only text changes',
+    /candidate\/scripts\/ci\/check-tracked-text-nul\.mjs/,
+    'an untrusted candidate must never supply its own security gate',
   );
 });
 

@@ -4,23 +4,26 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
-  findTrackedTextFilesWithNul,
+  findTrackedFilesWithNul,
   runTrackedTextNulCheck,
-  TRACKED_TEXT_PATHS,
+  TRACKED_BINARY_PATHS,
 } from '../../ci/check-tracked-text-nul.mjs';
+
+const CHECKER_PATH = fileURLToPath(new URL('../../ci/check-tracked-text-nul.mjs', import.meta.url));
 
 function result(status, stdout = Buffer.alloc(0), stderr = Buffer.alloc(0)) {
   return { status, stdout, stderr, error: undefined, signal: null };
 }
 
-test('enumerates tracked text once and classifies file buffers', () => {
+test('enumerates every tracked path once and classifies file buffers', () => {
   const calls = [];
   const files = new Map([
     [Buffer.from('/repo/clean.ts').toString('hex'), Buffer.from('const clean = true;')],
     [Buffer.from('/repo/broken.md').toString('hex'), Buffer.from([0x23, 0x20, 0x00, 0x62])],
   ]);
-  const offenders = findTrackedTextFilesWithNul({
+  const offenders = findTrackedFilesWithNul({
     repoRoot: '/repo',
     spawnProcess(command, args) {
       calls.push([command, args]);
@@ -34,13 +37,13 @@ test('enumerates tracked text once and classifies file buffers', () => {
 
   assert.deepEqual(offenders, [Buffer.from('broken.md')]);
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0][1].slice(0, 3), ['ls-files', '-z', '--']);
+  assert.deepEqual(calls[0][1], ['ls-files', '-z']);
 });
 
 test('preserves invalid UTF-8 pathname bytes through file lookup', () => {
   const invalidPath = Buffer.from([0xff, 0x2e, 0x74, 0x73]);
   let openedPath;
-  const offenders = findTrackedTextFilesWithNul({
+  const offenders = findTrackedFilesWithNul({
     repoRoot: '/repo',
     spawnProcess() {
       return result(0, Buffer.concat([invalidPath, Buffer.from([0])]));
@@ -56,7 +59,7 @@ test('preserves invalid UTF-8 pathname bytes through file lookup', () => {
   assert.deepEqual(offenders, [invalidPath]);
 });
 
-test('real Git checkout fails for tracked NUL files and passes after cleanup', (t) => {
+test('real Git checkout checks unknown formats and exempts only explicit binaries', (t) => {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-text-nul-'));
   t.after(() => fs.rmSync(repoRoot, { recursive: true, force: true }));
   const git = (...args) => {
@@ -67,6 +70,8 @@ test('real Git checkout fails for tracked NUL files and passes after cleanup', (
   fs.mkdirSync(path.join(repoRoot, 'docs'));
   fs.writeFileSync(path.join(repoRoot, 'broken.mjs'), Buffer.from([0x61, 0x00, 0x62]));
   fs.writeFileSync(path.join(repoRoot, 'docs', 'readme.md'), Buffer.from([0x23, 0x00, 0x20]));
+  fs.writeFileSync(path.join(repoRoot, 'future-source.cts'), Buffer.from([0x61, 0x00, 0x62]));
+  fs.writeFileSync(path.join(repoRoot, 'image.png'), Buffer.from([0x89, 0x50, 0x00, 0x47]));
   git('add', '--all');
 
   const errors = [];
@@ -77,16 +82,41 @@ test('real Git checkout fails for tracked NUL files and passes after cleanup', (
   }), 1);
   assert.match(errors.join('\n'), /broken\.mjs/);
   assert.match(errors.join('\n'), /docs\/readme\.md/);
+  assert.match(errors.join('\n'), /future-source\.cts/);
+  assert.doesNotMatch(errors.join('\n'), /image\.png/);
 
   fs.writeFileSync(path.join(repoRoot, 'broken.mjs'), 'export const clean = true;\n');
   fs.writeFileSync(path.join(repoRoot, 'docs', 'readme.md'), '# clean\n');
+  fs.writeFileSync(path.join(repoRoot, 'future-source.cts'), 'export const clean = true;\n');
   assert.equal(runTrackedTextNulCheck({ repoRoot, log() {}, logError() {} }), 0);
 });
 
-test('the allowlist covers source text but excludes known binary artifact extensions', () => {
-  assert.equal(TRACKED_TEXT_PATHS.includes('*.ts'), true);
-  assert.equal(TRACKED_TEXT_PATHS.includes('*.md'), true);
-  assert.equal(TRACKED_TEXT_PATHS.includes('*.png'), false);
-  assert.equal(TRACKED_TEXT_PATHS.includes('*.pdf'), false);
-  assert.equal(TRACKED_TEXT_PATHS.includes('*.zip'), false);
+test('the binary exception inventory is narrow and explicit', () => {
+  assert.equal(TRACKED_BINARY_PATHS.suffixes.includes('.png'), true);
+  assert.equal(TRACKED_BINARY_PATHS.suffixes.includes('.zip'), true);
+  assert.equal(TRACKED_BINARY_PATHS.suffixes.includes('.ts'), false);
+  assert.equal(TRACKED_BINARY_PATHS.suffixes.includes('.cts'), false);
+});
+
+test('the trusted CLI ignores a candidate-owned checker implementation', (t) => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-untrusted-text-nul-'));
+  t.after(() => fs.rmSync(repoRoot, { recursive: true, force: true }));
+  const git = (...args) => {
+    const invocation = spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8' });
+    assert.equal(invocation.status, 0, invocation.stderr);
+  };
+  git('init', '--quiet');
+  fs.mkdirSync(path.join(repoRoot, 'scripts', 'ci'), { recursive: true });
+  fs.writeFileSync(
+    path.join(repoRoot, 'scripts', 'ci', 'check-tracked-text-nul.mjs'),
+    'process.exitCode = 0;\n',
+  );
+  fs.writeFileSync(path.join(repoRoot, 'unrecognized-source'), Buffer.from([0x61, 0x00, 0x62]));
+  git('add', '--all');
+
+  const invocation = spawnSync(process.execPath, [CHECKER_PATH, '--repo', repoRoot], {
+    encoding: 'utf8',
+  });
+  assert.equal(invocation.status, 1);
+  assert.match(invocation.stderr, /unrecognized-source/);
 });

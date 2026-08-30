@@ -7,52 +7,17 @@ import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-// Deliberately allowlisted: binary fixtures and packaged executables are valid tracked files.
-// Keep this to source/config/document formats where a NUL makes grep-based tooling silently skip
-// code. A basename pattern has no slash, so Git applies it at every repository depth.
-export const TRACKED_TEXT_PATHS = Object.freeze([
-  '*.alloy',
-  '*.ccl',
-  '*.cjs',
-  '*.css',
-  '*.ebnf',
-  '*.example',
-  '*.gitignore',
-  '*.gitkeep',
-  '*.html',
-  '*.ini',
-  '*.js',
-  '*.json',
-  '*.jsonc',
-  '*.jsonl',
-  '*.lock',
-  '*.log',
-  '*.md',
-  '*.mdc',
-  '*.mjs',
-  '*.mts',
-  '*.npmrc',
-  '*.nq',
-  '*.nt',
-  '*.nvmrc',
-  '*.patch',
-  '*.py',
-  '*.service',
-  '*.sh',
-  '*.snap',
-  '*.sol',
-  '*.solhintignore',
-  '*.svg',
-  '*.toml',
-  '*.ts',
-  '*.tsx',
-  '*.ttl',
-  '*.txt',
-  '*.yaml',
-  '*.yml',
-  'CODEOWNERS',
-  'LICENSE',
-]);
+// Every tracked file is inspected unless it is explicitly classified as an intentional binary.
+// Keep this policy beside the scanner so a future CI controller can pin both together; never read
+// an exclusion policy from the untrusted candidate checkout.
+export const TRACKED_BINARY_PATHS = Object.freeze({
+  suffixes: Object.freeze(['.docx', '.jpeg', '.jpg', '.png', '.zip']),
+  basenames: Object.freeze(['.DS_Store']),
+  exact: Object.freeze([
+    'packages/evm-module/utils/converters/darwin-evm-contract-into-substrate-address',
+    'packages/evm-module/utils/converters/linux-evm-contract-into-substrate-address',
+  ]),
+});
 
 function nulSeparatedPathBuffers(buffer) {
   const paths = [];
@@ -92,24 +57,29 @@ function runGit(spawnProcess, args, repoRoot) {
   return result;
 }
 
-/** Return tracked text paths containing at least one literal NUL byte. */
-export function findTrackedTextFilesWithNul({
+function isExplicitBinaryPath(filePath) {
+  const diagnosticPath = filePath.toString('utf8');
+  const basename = path.posix.basename(diagnosticPath);
+  return TRACKED_BINARY_PATHS.exact.includes(diagnosticPath)
+    || TRACKED_BINARY_PATHS.basenames.includes(basename)
+    || TRACKED_BINARY_PATHS.suffixes.some((suffix) => diagnosticPath.endsWith(suffix));
+}
+
+/** Return non-binary tracked paths containing at least one literal NUL byte. */
+export function findTrackedFilesWithNul({
   repoRoot = REPO_ROOT,
   spawnProcess = spawnSync,
   readFile = fs.readFileSync,
 } = {}) {
-  // One portable path on every platform: Git applies the text allowlist, emits raw NUL-delimited
-  // pathname bytes, and Node inspects the working-tree file as bytes. Do not decode a pathname
-  // before opening it: Git permits non-UTF-8 names and fs.readFileSync accepts a Buffer path.
-  const listing = runGit(
-    spawnProcess,
-    ['ls-files', '-z', '--', ...TRACKED_TEXT_PATHS],
-    repoRoot,
-  );
+  // Git emits raw NUL-delimited pathname bytes and Node inspects working-tree files as bytes. Do
+  // not decode a pathname before opening it: Git permits non-UTF-8 names and fs accepts Buffer
+  // paths. Invalid UTF-8 cannot match an explicit binary exception and therefore fails closed.
+  const listing = runGit(spawnProcess, ['ls-files', '-z'], repoRoot);
   if (listing.status !== 0) throw commandFailure('git ls-files', listing);
 
   const offenders = [];
   for (const filePath of nulSeparatedPathBuffers(listing.stdout)) {
+    if (isExplicitBinaryPath(filePath)) continue;
     try {
       if (readFile(absolutePathBuffer(repoRoot, filePath)).includes(0)) offenders.push(filePath);
     } catch (error) {
@@ -126,23 +96,35 @@ export function runTrackedTextNulCheck({
   logError = console.error,
   ...scanOptions
 } = {}) {
-  const offenders = findTrackedTextFilesWithNul(scanOptions);
+  const offenders = findTrackedFilesWithNul(scanOptions);
   if (offenders.length === 0) {
-    log('Tracked text NUL-byte check passed.');
+    log('Tracked non-binary NUL-byte check passed.');
     return 0;
   }
-  logError('Literal NUL byte(s) found in tracked text files:');
+  logError('Literal NUL byte(s) found in tracked non-binary files:');
   for (const filePath of offenders) {
     // Decode only for human diagnostics; file lookup above always uses the original bytes.
     logError(`  ${JSON.stringify(filePath.toString('utf8'))}`);
   }
-  logError('Remove the NUL bytes from these source/config/document files.');
+  logError('Remove the NUL bytes or explicitly classify an intentional binary in the trusted scanner.');
   return 1;
+}
+
+export function parseTrackedTextNulArguments(args) {
+  let repoRoot = REPO_ROOT;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== '--repo' || !args[index + 1]) {
+      throw new Error(`Usage: ${path.basename(process.argv[1] ?? 'check-tracked-text-nul.mjs')} [--repo PATH]`);
+    }
+    repoRoot = path.resolve(args[index + 1]);
+    index += 1;
+  }
+  return { repoRoot };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    process.exitCode = runTrackedTextNulCheck();
+    process.exitCode = runTrackedTextNulCheck(parseTrackedTextNulArguments(process.argv.slice(2)));
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
