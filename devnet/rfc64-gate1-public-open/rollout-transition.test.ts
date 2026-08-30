@@ -212,20 +212,51 @@ test('certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertSemanticExact(await semanticGraph(reenabled.child, swmGraph, 'reenabled'), swmGraph);
   await reenabled.child.stop('stop-reenabled');
 
-  const unsafeLegacy = spawnAgent(
-    'receiver',
-    receiverDataDir,
+  const transitionedLegacy = await startReceiver(
     'legacy',
     false,
+    receiverDataDir,
+    author,
+    authorReady,
+    false,
+  );
+  assert.deepEqual(await rolloutStatus(
+    transitionedLegacy.child,
     authorReady.peerId as string,
+    'transitioned-legacy',
+  ), expectedStatus({
+    service: false,
+    legacy: true,
+    manualTargets: 1,
+    bootstrap: true,
+  }));
+  assert.equal(
+    await appliedHead(transitionedLegacy.child, catalogScopeDigest, 'transitioned-legacy'),
+    null,
   );
-  const unsafeLegacyFailure = await unsafeLegacy.waitFor('boot-failed');
-  assert.match(
-    String(unsafeLegacyFailure.message),
-    /catalog authority downgrade requires semantic deactivation/u,
+  assert.equal(
+    (await semanticGraph(
+      transitionedLegacy.child,
+      swmGraph,
+      'transitioned-legacy-swm',
+    )).activatedQuadCount,
+    0,
   );
-  const unsafeLegacyExit = await unsafeLegacy.tracked.closed;
-  assert.equal(unsafeLegacyExit.code, 1);
+  const transitionedLegacyVm = await reconcileVm(
+    transitionedLegacy.child,
+    'transitioned-legacy',
+  );
+  assertVmChainRead(transitionedLegacyVm, 'transitioned-legacy');
+  assertVmReconciled(transitionedLegacyVm, 'transitioned-legacy');
+  assertSemanticExact(
+    await semanticGraph(
+      transitionedLegacy.child,
+      vmGraph,
+      'transitioned-legacy-vm',
+    ),
+    vmGraph,
+  );
+  await transitionedLegacy.child.stop('stop-transitioned-legacy');
 
   const inactiveDataDir = await makeTemp('inactive-chain');
   const inactive = await startReceiver(
