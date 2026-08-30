@@ -59,7 +59,12 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSafeJobId, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import {
+  findReservedSubjectPrefix,
+  isSafeJobId,
+  isSkolemizedUri,
+  SAFE_JOB_ID_ERROR,
+} from '@origintrail-official/dkg-publisher';
 import type { AsyncPreparedPublishPayload, LiftJobRetryProjection, PersistedLiftJob } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -614,7 +619,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     const jobId = parsed.jobId;
     if (jobId !== undefined && (typeof jobId !== "string" || !isSafeJobId(jobId))) {
       return jsonResponse(res, 400, {
-        error: "jobId must be a non-empty string when supplied",
+        error: SAFE_JOB_ID_ERROR,
       });
     }
     // GH#2270 — `retried` keeps its exact pre-#2270 meaning (jobs reaccepted), so an

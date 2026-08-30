@@ -2750,7 +2750,6 @@ export class TripleStoreAsyncLiftPublisher
    * the reason shown per job are ONE partition rather than two orderings kept in step by hand.
    */
   async retryDetailed(filter: AsyncLiftRetryFilter = {}): Promise<AsyncLiftRetryOutcome> {
-    await this.ensureGraph();
     if (filter.status && filter.status !== 'failed') {
       return { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
     }
@@ -2759,6 +2758,11 @@ export class TripleStoreAsyncLiftPublisher
       if (!isSafeJobId(filter.jobId)) {
         return { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
       }
+    }
+
+    await this.ensureGraph();
+
+    if (filter.jobId !== undefined) {
       return this.claimCoordinator.runClaimJobTransaction(filter.jobId, async (transaction) => {
         const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
         if (transaction.kind === 'missing' || !isFailedJob(transaction.current)) return counts;

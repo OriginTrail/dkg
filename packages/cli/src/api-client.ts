@@ -13,6 +13,10 @@ import type {
   LiftJobRetryProjection,
   PersistedLiftJob,
 } from '@origintrail-official/dkg-publisher';
+import {
+  isSafeJobId,
+  SAFE_JOB_ID_ERROR,
+} from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -1376,7 +1380,7 @@ export class ApiClient {
   }
 
   async publisherRetryJob(jobId: string): Promise<AsyncLiftRetryOutcome> {
-    if (!jobId) throw new Error('jobId must be a non-empty string');
+    if (!isSafeJobId(jobId)) throw new Error(SAFE_JOB_ID_ERROR);
     return this.post('/api/publisher/retry', { status: 'failed', jobId });
   }
 
