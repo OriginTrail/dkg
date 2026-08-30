@@ -74,14 +74,28 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     });
 
     expect(forged.rfc64SharedProjectionStreamV1).toBeUndefined();
-    expect(() => createManagedOxigraphRuntimeStoreConfigV1({
-      backend: 'sparql-http',
-      options: {
+    const invalidOptions = [
+      [{
         queryEndpoint: 'https://remote.example/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+        managedByDkg: true,
+      }, /queryEndpoint/u],
+      [{
+        queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'https://remote.example/update',
         managedByDkg: true,
-      },
-    })).toThrow(/loopback HTTP URL/u);
+      }, /updateEndpoint/u],
+      [{
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+      }, /owned by the DKG daemon/u],
+    ] as const;
+    for (const [options, message] of invalidOptions) {
+      expect(() => createManagedOxigraphRuntimeStoreConfigV1({
+        backend: 'sparql-http',
+        options,
+      })).toThrow(message);
+    }
   });
 
   it('uses the frozen exact CONSTRUCT and exposes sorted canonical line bytes', async () => {
