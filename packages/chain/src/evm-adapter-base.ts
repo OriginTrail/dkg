@@ -55,7 +55,10 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 
-export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
+export {
+  CG_REGISTRY_MAX_SCAN_PAGES,
+  CG_REGISTRY_REORG_BUFFER_BLOCKS,
+} from './evm-adapter-constants.js';
 
 function bindRoleAwareRegistryCursorStore(
   store: ContextGraphRegistryRoleAwareScanCursorStore,
@@ -67,6 +70,15 @@ function bindRoleAwareRegistryCursorStore(
   };
 }
 
+function isRegistryCursorStore(value: unknown): value is ContextGraphRegistryScanCursorStore {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { load?: unknown }).load === 'function' &&
+    typeof (value as { save?: unknown }).save === 'function'
+  );
+}
+
 function normalizeRegistryCursorStores(
   config: ContextGraphRegistryScanCursorStoreConfig | undefined,
 ): {
@@ -74,14 +86,23 @@ function normalizeRegistryCursorStores(
   tip?: ContextGraphRegistryScanCursorStore;
 } {
   if (!config) return {};
-  if (!('kind' in config)) return { historical: config };
-  if (config.kind === 'legacy') {
+  // Structural legacy stores may expose unrelated metadata named `kind`.
+  // Recognize the original load/save contract positively before tagged forms.
+  if (isRegistryCursorStore(config)) return { historical: config };
+  if (
+    config.kind === 'legacy' &&
+    isRegistryCursorStore(config.historical) &&
+    (config.tip === undefined || isRegistryCursorStore(config.tip))
+  ) {
     return { historical: config.historical, tip: config.tip };
   }
-  return {
-    historical: bindRoleAwareRegistryCursorStore(config.store, 'historical'),
-    tip: bindRoleAwareRegistryCursorStore(config.store, 'tip'),
-  };
+  if (config.kind === 'roleAware' && isRegistryCursorStore(config.store)) {
+    return {
+      historical: bindRoleAwareRegistryCursorStore(config.store, 'historical'),
+      tip: bindRoleAwareRegistryCursorStore(config.store, 'tip'),
+    };
+  }
+  throw new TypeError('Invalid ContextGraphNameRegistry cursor persistence configuration');
 }
 
 type ContractWriteSender = (
@@ -313,8 +334,6 @@ const KA_HIGH_WATER_MAX_SCAN_PAGES = 1_500;
 
 /** Default pre-10.0.4 fallback eth_getLogs window — the smallest common cap. */
 const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
-
-export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
 
 // Keep generic Hub binding invalidation responsive for read paths while still
 // replacing four hidden ethers subscription pollers with one owned log poller.

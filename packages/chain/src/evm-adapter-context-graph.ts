@@ -6,147 +6,22 @@
  * Mixin holder extracted from evm-adapter.ts. `extends EVMChainAdapterBase`
  * for shared state (providers, signers, caches) reached via `this`. Bodies
  * are a 1:1 move — no behaviour change. Mixed into the concrete EVMChainAdapter
- * via applyMixins(); see evm-adapter.ts for the assembly.
+ * via applyMixins(); see evm-adapter.ts for the assembly. Registry discovery
+ * delegates to the focused planner/executor in context-graph-registry-scanner.
  */
 
-import {
-  EVMChainAdapterBase,
-  CG_REGISTRY_MAX_SCAN_PAGES,
-  CG_REGISTRY_REORG_BUFFER_BLOCKS,
-} from './evm-adapter-base.js';
+import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
-import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ethers, Contract } from 'ethers';
+import { type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
-
-type StatelessContextGraphRegistryScanStart =
-  | { kind: 'explicit'; fromBlock: number }
-  | { kind: 'deployment' };
-
-type ContextGraphRegistryScanPlan =
-  | {
-      kind: 'stateless';
-      start: StatelessContextGraphRegistryScanStart;
-    }
-  | {
-      kind: 'historicalIncremental';
-      pageBudget?: number;
-    }
-  | {
-      kind: 'historicalSeed';
-      start: 'deployment' | 'cursor';
-      pageBudget?: number;
-    }
-  | {
-      kind: 'tip';
-    };
-
-type PreparedContextGraphRegistryScan = {
-  start: number;
-  head: number;
-  scanProviders: ReadonlyArray<{ provider: JsonRpcProvider; backendHead: number }>;
-  degradedFromGenesis: boolean;
-  pageBudget?: number;
-  enforceDefaultPageLimit: boolean;
-  partialFailures: boolean;
-  advanceOnEmpty: boolean;
-  acknowledge(nextBlock: number): Promise<void>;
-};
-
-function normalizePageBudget(value: number | undefined): number | undefined {
-  return Number.isFinite(value) && (value ?? 0) >= 1
-    ? Math.floor(value ?? 0)
-    : undefined;
-}
-
-function buildPublicContextGraphRegistryScanPlan(
-  fromBlock: number | undefined,
-  options: ContextGraphChainScanOptions | undefined,
-): ContextGraphRegistryScanPlan {
-  const runtimeOptions = options as
-    | (ContextGraphChainScanOptions & { mode?: string })
-    | undefined;
-  const mode = runtimeOptions?.mode;
-
-  if (fromBlock !== undefined) {
-    return {
-      kind: 'stateless',
-      start: { kind: 'explicit', fromBlock },
-    };
-  }
-
-  if (runtimeOptions && 'incremental' in runtimeOptions && runtimeOptions.incremental === true) {
-    return {
-      kind: 'historicalIncremental',
-      pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
-    };
-  }
-
-  if (
-    runtimeOptions &&
-    'seedIncrementalWatermark' in runtimeOptions &&
-    runtimeOptions.seedIncrementalWatermark === true
-  ) {
-    if (runtimeOptions.resumeFromCursor === true) {
-      return {
-        kind: 'historicalSeed',
-        start: 'cursor',
-        pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
-      };
-    }
-    return {
-      kind: 'historicalSeed',
-      start: 'deployment',
-    };
-  }
-
-  if (mode !== undefined && mode !== 'listAll') {
-    throw new Error(
-      'listContextGraphsFromChain accepts only listAll or legacy boolean scan options; ' +
-      'use scanContextGraphRegistryPages for cursor-backed daemon scans.',
-    );
-  }
-
-  return {
-    kind: 'stateless',
-    start: { kind: 'deployment' },
-  };
-}
-
-function buildCursorContextGraphRegistryScanPlan(
-  options: ContextGraphRegistryScanOptions,
-): ContextGraphRegistryScanPlan {
-  if (options.mode === 'incremental') {
-    return {
-      kind: 'historicalIncremental',
-      pageBudget: normalizePageBudget(options.pageBudget),
-    };
-  }
-
-  if (options.mode === 'tip') {
-    return { kind: 'tip' };
-  }
-
-  if (options?.mode === 'seedFull') {
-    return {
-      kind: 'historicalSeed',
-      start: 'deployment',
-    };
-  }
-
-  if (options?.mode === 'seedFromCursor') {
-    return {
-      kind: 'historicalSeed',
-      start: 'cursor',
-      pageBudget: normalizePageBudget(options.pageBudget),
-    };
-  }
-
-  const exhaustive: never = options;
-  throw new Error(`Unsupported ContextGraphNameRegistry scan mode: ${JSON.stringify(exhaustive)}`);
-}
+import {
+  ContextGraphRegistryScanner,
+  buildCursorContextGraphRegistryScanPlan,
+  buildPublicContextGraphRegistryScanPlan,
+} from './context-graph-registry-scanner.js';
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
@@ -249,8 +124,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return [];
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
-    return this._collectContextGraphRegistryScan(registry, registryAddress, scanPlan);
+    return this._contextGraphRegistryScanner(registry, registryAddress).collect(
+      buildPublicContextGraphRegistryScanPlan(fromBlock, options),
+    );
   }
 
   async *scanContextGraphRegistryPages(
@@ -260,247 +136,41 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return;
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const scanPlan = buildCursorContextGraphRegistryScanPlan(options);
-    yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, scanPlan);
+    yield* this._contextGraphRegistryScanner(registry, registryAddress).pages(
+      buildCursorContextGraphRegistryScanPlan(options),
+    );
   }
 
-  private async _collectContextGraphRegistryScan(
+  private _contextGraphRegistryScanner(
     registry: Contract,
     registryAddress: string,
-    scanPlan: ContextGraphRegistryScanPlan,
-  ): Promise<ContextGraphOnChain[]> {
-    const results: ContextGraphOnChain[] = [];
-    for await (const page of this._iterateContextGraphRegistryScanPages(
+  ): ContextGraphRegistryScanner {
+    const scanLabel = 'listContextGraphsFromChain';
+    return new ContextGraphRegistryScanner({
       registry,
       registryAddress,
-      scanPlan,
-    )) {
-      results.push(...page.contextGraphs);
-      await page.ack();
-    }
-    return results;
-  }
-
-  private async _prepareContextGraphRegistryScan(
-    registryAddress: string,
-    scanPlan: ContextGraphRegistryScanPlan,
-  ): Promise<PreparedContextGraphRegistryScan> {
-    const scanLabel = 'listContextGraphsFromChain';
-    const resolveDeployment = async () => {
-      const deployment = await this.resolveContractDeployBlock(
+      pageSize: this.cgRegistryScanPageSize,
+      historicalCursor: this.contextGraphRegistryScanCursor,
+      tipCursor: this.contextGraphRegistryTipScanCursor,
+      resolveDeployment: () => this.resolveContractDeployBlock(
         registryAddress,
         scanLabel,
         'ContextGraphNameRegistry',
-      );
-      const { fromBlock, ...resolved } = deployment;
-      return { start: fromBlock, ...resolved };
-    };
-    const resolveHistoricalCursor = async () => {
-      const watermark = await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress);
-      if (watermark !== undefined) {
-        return {
-          start: Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS),
-          ...(await this.resolveLogScanHead(scanLabel)),
-          degradedFromGenesis: false,
-        };
-      }
-      return resolveDeployment();
-    };
-    const historicalAcknowledge = (nextBlock: number) =>
-      this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, nextBlock);
-    const tipAcknowledge = (nextBlock: number) =>
-      this.contextGraphRegistryTipScanCursor.saveWatermark(registryAddress, nextBlock);
-    const noAcknowledge = async () => {};
-
-    switch (scanPlan.kind) {
-      case 'stateless': {
-        const range = scanPlan.start.kind === 'explicit'
-          ? {
-              start: scanPlan.start.fromBlock,
-              ...(await this.resolveLogScanHead(scanLabel)),
-              degradedFromGenesis: false,
-            }
-          : await resolveDeployment();
-        return {
-          ...range,
-          degradedFromGenesis: range.degradedFromGenesis ?? false,
-          enforceDefaultPageLimit: false,
-          partialFailures: false,
-          advanceOnEmpty: false,
-          acknowledge: noAcknowledge,
-        };
-      }
-      case 'historicalIncremental': {
-        const range = await resolveHistoricalCursor();
-        return {
-          ...range,
-          degradedFromGenesis: range.degradedFromGenesis ?? false,
-          pageBudget: scanPlan.pageBudget,
-          enforceDefaultPageLimit: true,
-          partialFailures: true,
-          advanceOnEmpty: false,
-          acknowledge: historicalAcknowledge,
-        };
-      }
-      case 'historicalSeed': {
-        if (scanPlan.start === 'deployment') {
-          // Preserve monotonic store behavior while a full recovery replays old pages.
-          await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress);
-        }
-        const range = await (scanPlan.start === 'cursor'
-          ? resolveHistoricalCursor()
-          : resolveDeployment());
-        return {
-          ...range,
-          degradedFromGenesis: range.degradedFromGenesis ?? false,
-          pageBudget: scanPlan.pageBudget,
-          enforceDefaultPageLimit: false,
-          partialFailures: true,
-          advanceOnEmpty: true,
-          acknowledge: historicalAcknowledge,
-        };
-      }
-      case 'tip': {
-        const tip = await this.resolveLogScanHead(scanLabel);
-        const loaded = await this.contextGraphRegistryTipScanCursor.loadWatermarkResult(
-          registryAddress,
-        );
-        if (loaded.status === 'failed') {
-          throw new Error(
-            'listContextGraphsFromChain: tip cursor load failed; refusing to initialize from ' +
-              'the current head because persisted progress may exist',
-            { cause: loaded.error },
-          );
-        }
-        const watermark = loaded.watermark;
-        const start = watermark === undefined
-          ? Math.max(0, tip.head - this.cgRegistryScanPageSize + 1)
-          : Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS);
-        if (watermark === undefined) {
-          // Persist the conservative lower bound before the first query. A failed first page then
-          // restarts from this attempted range rather than jumping to a newer tip page.
-          // Cursor storage uses positive integers; marker 1 still replays block 0 through overlap.
-          await this.contextGraphRegistryTipScanCursor.saveWatermark(
-            registryAddress,
-            Math.max(1, start),
-          );
-        }
-        return {
-          ...tip,
-          start,
-          degradedFromGenesis: false,
-          enforceDefaultPageLimit: false,
-          partialFailures: true,
-          advanceOnEmpty: false,
-          acknowledge: tipAcknowledge,
-        };
-      }
-      default: {
-        const exhaustive: never = scanPlan;
-        throw new Error(`Unsupported ContextGraphNameRegistry scan plan: ${JSON.stringify(exhaustive)}`);
-      }
-    }
-  }
-
-  private async *_iterateContextGraphRegistryScanPages(
-    registry: Contract,
-    registryAddress: string,
-    scanPlan: ContextGraphRegistryScanPlan,
-  ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
-    const eventFilter = registry.filters.NameClaimed();
-    const pageSize = this.cgRegistryScanPageSize;
-    const {
-      start,
-      head,
-      scanProviders,
-      degradedFromGenesis,
-      pageBudget,
-      enforceDefaultPageLimit,
-      partialFailures,
-      advanceOnEmpty,
-      acknowledge,
-    } = await this._prepareContextGraphRegistryScan(registryAddress, scanPlan);
-    if (start > head) {
-      if (advanceOnEmpty) await acknowledge(head + 1);
-      return;
-    }
-
-    const pages = Math.ceil((head - start + 1) / pageSize);
-    const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (enforceDefaultPageLimit && pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
-      throw new Error(
-        `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
-          `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
-          `${pageSize}-block window (budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages / ` +
-          `${blockBudget} blocks). ` +
-          `Use an RPC that can anchor the registry deploy block and serve the ` +
-          `requested log range, or increase cgRegistryScanPageSize for an RPC ` +
-          `known to support larger ranges.`,
-      );
-    }
-
-    const results: ContextGraphOnChain[] = [];
-    const connected = new Map<JsonRpcProvider, Contract>();
-    let preferred: JsonRpcProvider | undefined;
-    let scannedAnyPage = false;
-
-    // Daemon scans can resume from the scanned prefix after a later page
-    // failure. Public list-all calls should remain all-or-error.
-    for (let lo = start; lo <= head; lo += pageSize) {
-      const hi = Math.min(lo + pageSize - 1, head);
-      let pageResults: ContextGraphOnChain[];
-      try {
-        const page = await this.queryEventLogsPage(
+      ),
+      resolveHead: () => this.resolveLogScanHead(scanLabel),
+      queryPage: (filter, lo, hi, scanProviders, connected, preferred) =>
+        this.queryEventLogsPage(
           registry,
-          eventFilter,
+          filter,
           lo,
           hi,
           scanProviders,
           connected,
           'listContextGraphsFromChain NameClaimed',
           preferred,
-        );
-        preferred = page.provider;
-        pageResults = [];
-        for (const log of page.logs) {
-          const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
-          if (!parsed || parsed.name !== 'NameClaimed') continue;
-          pageResults.push({
-            contextGraphId: String(parsed.args.nameHash),
-            creator: String(parsed.args.creator),
-            accessPolicy: Number(parsed.args.accessPolicy),
-            blockNumber: log.blockNumber,
-            metadataRevealed: false,
-          });
-        }
-      } catch (err) {
-        if (partialFailures && scannedAnyPage) {
-          const message = err instanceof Error ? err.message : String(err);
-          throw new ContextGraphChainScanPartialError(
-            `listContextGraphsFromChain: partial ContextGraphNameRegistry scan ` +
-              `stopped after block ${lo - 1}; failed page [${lo}, ${hi}]: ${message}`,
-            {
-              partialResults: results,
-              scannedToBlock: lo - 1,
-              failedFromBlock: lo,
-              failedToBlock: hi,
-              cause: err,
-            },
-          );
-        }
-        throw err;
-      }
-      results.push(...pageResults);
-      scannedAnyPage = true;
-      yield {
-        contextGraphs: pageResults,
-        ack: () => acknowledge(hi + 1),
-      };
-      const scannedPages = Math.floor((hi - start) / pageSize) + 1;
-      if (pageBudget !== undefined && scannedPages >= pageBudget && hi < head) return;
-    }
+        ),
+    });
   }
-
   // =====================================================================
   // On-Chain Context Graphs (ContextGraphs contract)
   // =====================================================================

@@ -18,6 +18,8 @@ export type ContextGraphRegistryScanCursorLoadResult =
  */
 export class ContextGraphRegistryScanCursor {
   private readonly watermarks: Map<string, number> = new Map();
+  /** Strict writes retained in memory until the configured store confirms them. */
+  private readonly pendingStrictWatermarks: Map<string, number> = new Map();
 
   constructor(
     private readonly input: {
@@ -29,6 +31,7 @@ export class ContextGraphRegistryScanCursor {
 
   clearMemoryCache(): void {
     this.watermarks.clear();
+    this.pendingStrictWatermarks.clear();
   }
 
   getCachedWatermark(registryAddress: string): number | undefined {
@@ -79,6 +82,40 @@ export class ContextGraphRegistryScanCursor {
       console.warn(
         `[chain] ContextGraphNameRegistry scan cursor save failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  /**
+   * Save a watermark without hiding configured-store failures.
+   *
+   * Tip discovery uses this path because its initial lower bound is the durable
+   * restart anchor. The attempted value remains process-local after a failure,
+   * and a retry of the same value re-attempts persistence before scanning.
+   */
+  async saveWatermarkStrict(registryAddress: string, nextBlock: number): Promise<void> {
+    const normalized = this.normalize(nextBlock);
+    if (normalized == null) return;
+
+    const cacheKey = this.cacheKey(registryAddress);
+    const existing = this.normalize(this.watermarks.get(cacheKey));
+    const pending = this.normalize(this.pendingStrictWatermarks.get(cacheKey));
+    if (existing != null && existing >= normalized && pending == null) return;
+
+    const target = Math.max(existing ?? 0, pending ?? 0, normalized);
+    this.watermarks.set(cacheKey, target);
+    if (!this.input.store) return;
+
+    this.pendingStrictWatermarks.set(cacheKey, target);
+    try {
+      await this.input.store.save(this.cursorKey(cacheKey), target);
+      if (this.pendingStrictWatermarks.get(cacheKey) === target) {
+        this.pendingStrictWatermarks.delete(cacheKey);
+      }
+    } catch (err) {
+      console.warn(
+        `[chain] ContextGraphNameRegistry scan cursor strict save failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
     }
   }
 

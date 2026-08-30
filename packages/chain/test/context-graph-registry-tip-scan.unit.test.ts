@@ -41,6 +41,10 @@ class JsonLegacyRegistryScanCursorStore implements ContextGraphRegistryScanCurso
   }
 }
 
+class KindedJsonLegacyRegistryScanCursorStore extends JsonLegacyRegistryScanCursorStore {
+  readonly kind = 'sqlite';
+}
+
 describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
   it('probes the current tip independently while a middle historical page remains unavailable', async () => {
     let head = 4_999;
@@ -147,8 +151,8 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
     expect(await restarted.hasContextGraphRegistryScanWatermark()).toBe(false);
   });
 
-  it('retains the exact v1 key shape when loading a legacy historical cursor', async () => {
-    const historical = new JsonLegacyRegistryScanCursorStore();
+  it('retains exact v1 read/write keys for a legacy store with unrelated kind metadata', async () => {
+    const historical = new KindedJsonLegacyRegistryScanCursorStore();
     historical.seed(LEGACY_KEY, 2_000);
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 5_000, {
@@ -170,6 +174,21 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
       'registryAddress',
     ]);
     expect(registry.queryFilter.calls[0]?.slice(1)).toEqual([1_950, 2_949]);
+    expect(historical.saves).toEqual([{ key: LEGACY_KEY, nextBlock: 2_950 }]);
+    expect(Object.keys(historical.saves[0]?.key ?? {}).sort()).toEqual([
+      'chainId',
+      'deploymentId',
+      'registryAddress',
+    ]);
+
+    registry.queryFilter.clear();
+    const { adapter: restarted } = makeAdapter(registry, 5_000, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: historical,
+    });
+    await collectRegistryScan(restarted, { mode: 'seedFromCursor', pageBudget: 1 });
+
+    expect(registry.queryFilter.calls[0]?.slice(1)).toEqual([2_900, 3_899]);
   });
 
   it('keeps tip progress in memory when only the original legacy store is configured', async () => {
@@ -236,27 +255,27 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
     expect(tip.loads.every((key) => !('cursorKind' in key))).toBe(true);
   });
 
-  it('retains the first tip lower bound in process when durable cursor persistence fails', async () => {
+  it('fails closed on marker and acknowledgement saves without skipping the attempted tip range', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let persisted: number | undefined;
+    let saveAttempt = 0;
     const store = {
-      load: vi.fn(async () => undefined),
-      save: vi.fn(async () => {
-        throw new Error('tip cursor save failed');
+      load: vi.fn(async () => persisted),
+      save: vi.fn(async (_key: unknown, nextBlock: number) => {
+        saveAttempt += 1;
+        if (saveAttempt === 1) throw new Error('tip marker save failed');
+        if (saveAttempt === 3) throw new Error('tip acknowledgement save failed');
+        persisted = nextBlock;
       }),
     };
     let head = 10_000;
-    let firstQuery = true;
     const eventBlock = 10_001;
     const registry = makeRegistry({
-      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) => {
-        if (firstQuery) {
-          firstQuery = false;
-          throw new Error('first tip page unavailable');
-        }
-        return lo <= eventBlock && eventBlock <= hi
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) =>
+        lo <= eventBlock && eventBlock <= hi
           ? [{ topics: [], data: '0x01', blockNumber: eventBlock }]
-          : [];
-      }),
+          : [],
+      ),
     });
     const { adapter, provider } = makeAdapter(registry, head, {
       contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
@@ -265,17 +284,26 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
 
     try {
       await expect(collectRegistryScan(adapter, { mode: 'tip' }))
-        .rejects.toThrow('first tip page unavailable');
+        .rejects.toThrow('tip marker save failed');
+      expect(registry.queryFilter.calls).toEqual([]);
       expect((adapter as any).contextGraphRegistryTipScanCursor.getCachedWatermark(REGISTRY))
         .toBe(8_001);
 
+      await expect(collectRegistryScan(adapter, { mode: 'tip' }))
+        .rejects.toThrow('tip acknowledgement save failed');
+      expect(persisted).toBe(8_001);
+
       head = 13_200;
       registry.queryFilter.clear();
-      const recovered = await collectRegistryScan(adapter, { mode: 'tip' });
+      const { adapter: restarted, provider: restartedProvider } = makeAdapter(registry, head, {
+        contextGraphRegistryScanCursorStore: roleAwareRegistryCursorPersistence(store),
+      });
+      restartedProvider.getBlockNumber.setImpl(async () => head);
+      const recovered = await collectRegistryScan(restarted, { mode: 'tip' });
 
       expect(recovered.map((cg) => cg.blockNumber)).toEqual([eventBlock]);
       expect(registry.queryFilter.calls[0]?.slice(1)).toEqual([7_951, 9_950]);
-      expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY))
+      expect((restarted as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY))
         .toBeUndefined();
     } finally {
       warnSpy.mockRestore();

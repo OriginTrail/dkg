@@ -59,6 +59,9 @@ export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
   CG_REGISTRY_DEFAULT_PAGE_SIZE,
 );
 
+/** Re-read overlap used by resumable registry scans to tolerate short reorgs. */
+export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+
 /**
  * TTL (ms) for the `RpcFailoverClient` endpoint-stickiness "primary re-probe"
  * cadence (Mechanism B, #1340 retry residual + #1337 policy-read fail-close).
