@@ -880,9 +880,12 @@ export class SparqlHttpStore implements TripleStore {
     storeOperation?: StoreOperation,
   ): Promise<QueryResult> {
     const trimmed = sparql.trim();
-    const upper = trimmed.toUpperCase();
-    const isAsk = upper.startsWith('ASK');
-    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    // PREFIX / BASE prologues precede the query form. Use the shared scanner
+    // so graph-producing queries negotiate N-Quads instead of SPARQL JSON.
+    const operation = classifySparqlOperation(trimmed);
+    const isAsk = operation.kind === 'read' && operation.form === 'ASK';
+    const isConstruct = operation.kind === 'read'
+      && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
     return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {

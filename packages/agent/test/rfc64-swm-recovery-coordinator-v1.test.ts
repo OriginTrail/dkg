@@ -45,7 +45,7 @@ function dependencies(
 }
 
 describe('RFC-64 SWM recovery authorization', () => {
-  it('admits one immutable mixed-provider plan', () => {
+  it('keeps raw-plan authorization on the ordinary admission path', () => {
     const deps = dependencies();
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
 
@@ -57,54 +57,109 @@ describe('RFC-64 SWM recovery authorization', () => {
         { contextGraphId: PUBLIC, lane: 'selected-public' },
       ],
     });
-    expect(deps.admission.requestSelectedPublicAdmission).toHaveBeenCalledOnce();
     expect(deps.admission.requestSelectedPublicAdmission).toHaveBeenCalledWith(
       PROVIDER,
       [PUBLIC],
     );
+    expect(deps.admission.requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(deps.admission.refreshSelectedPublicAdmission).not.toHaveBeenCalled();
   });
 
-  it('blocks every recovery authorization until the catalog phase is ready', () => {
-    let catalogReady = false;
-    const requestSelectedPublicAdmission = vi.fn(() => true);
-    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
-      isCatalogReady: () => catalogReady,
-      requestSelectedPublicAdmission,
-    }));
+  it('authorizes one immutable mixed-provider catalog plan', () => {
+    const deps = dependencies();
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
 
-    expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(false);
-    expect(coordinator.authorize(mixedPlan())).toBeNull();
-    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
-    catalogReady = true;
-    expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(true);
-    expect(requestSelectedPublicAdmission).toHaveBeenCalledOnce();
-    expect(requestSelectedPublicAdmission).toHaveBeenCalledWith(PROVIDER, [PUBLIC]);
-    expect(coordinator.authorize(mixedPlan())).not.toBeNull();
-    expect(requestSelectedPublicAdmission).toHaveBeenCalledTimes(2);
-  });
-
-  it('gates anti-entropy refresh on catalog readiness', () => {
-    let catalogReady = false;
-    const refreshSelectedPublicAdmission = vi.fn(() => true);
-    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
-      isCatalogReady: () => catalogReady,
-      refreshSelectedPublicAdmission,
-    }));
-
-    expect(coordinator.refreshSelectedPublic(PROVIDER, [PUBLIC], 10_000)).toBe(false);
-    expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
-    catalogReady = true;
-    expect(coordinator.refreshSelectedPublic(PROVIDER, [PUBLIC], 10_000)).toBe(true);
-    expect(refreshSelectedPublicAdmission).toHaveBeenCalledWith(
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toEqual({
+      kind: 'rfc64-authorized-swm-recovery-v1',
+      providerPeerId: PROVIDER,
+      targets: [
+        { contextGraphId: PRIVATE, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC, lane: 'selected-public' },
+      ],
+    });
+    expect(deps.admission.refreshSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(deps.admission.refreshSelectedPublicAdmission).toHaveBeenCalledWith(
       PROVIDER,
       [PUBLIC],
       10_000,
     );
   });
 
-  it('drops a terminal public scope while retaining the same provider private lane', () => {
+  it('blocks every recovery authorization until the catalog phase is ready', () => {
+    let catalogReady = false;
+    const requestSelectedPublicAdmission = vi.fn(() => true);
+    const refreshSelectedPublicAdmission = vi.fn(() => true);
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
-      requestSelectedPublicAdmission: vi.fn(() => false),
+      isCatalogReady: () => catalogReady,
+      requestSelectedPublicAdmission,
+      refreshSelectedPublicAdmission,
+    }));
+
+    expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(false);
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toBeNull();
+    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
+    expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
+    catalogReady = true;
+    expect(coordinator.admitSelectedPublic(PROVIDER, [PUBLIC])).toBe(true);
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledWith(PROVIDER, [PUBLIC]);
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).not.toBeNull();
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(refreshSelectedPublicAdmission).toHaveBeenCalledOnce();
+  });
+
+  it('combines catalog-pass refresh and mixed-plan authorization behind catalog readiness', () => {
+    let catalogReady = false;
+    const refreshSelectedPublicAdmission = vi.fn(() => true);
+    const requestSelectedPublicAdmission = vi.fn(() => {
+      throw new Error('catalog-pass authorization must not perform a second admission mutation');
+    });
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      isCatalogReady: () => catalogReady,
+      refreshSelectedPublicAdmission,
+      requestSelectedPublicAdmission,
+    }));
+
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toBeNull();
+    expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
+    catalogReady = true;
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toEqual({
+      kind: 'rfc64-authorized-swm-recovery-v1',
+      providerPeerId: PROVIDER,
+      targets: [
+        { contextGraphId: PRIVATE, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC, lane: 'selected-public' },
+      ],
+    });
+    expect(refreshSelectedPublicAdmission).toHaveBeenCalledWith(
+      PROVIDER,
+      [PUBLIC],
+      10_000,
+    );
+    expect(refreshSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
+  });
+
+  it('retains an ordinary-private target when catalog-pass public refresh is suppressed', () => {
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      refreshSelectedPublicAdmission: vi.fn(() => false),
+    }));
+
+    expect(coordinator.authorizeForCatalogPass(mixedPlan(), 10_000)).toEqual({
+      kind: 'rfc64-authorized-swm-recovery-v1',
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    });
+  });
+
+  it('retains private work when raw-plan public admission is denied', () => {
+    const requestSelectedPublicAdmission = vi.fn(() => false);
+    const refreshSelectedPublicAdmission = vi.fn(() => {
+      throw new Error('raw-plan authorization must not refresh catalog admission');
+    });
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      requestSelectedPublicAdmission,
+      refreshSelectedPublicAdmission,
     }));
 
     expect(coordinator.authorize(mixedPlan())).toEqual({
@@ -112,39 +167,42 @@ describe('RFC-64 SWM recovery authorization', () => {
       providerPeerId: PROVIDER,
       targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
     });
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(requestSelectedPublicAdmission).toHaveBeenCalledWith(PROVIDER, [PUBLIC]);
+    expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
   });
 
   it('rejects an unselected public plan without mutating public admission', () => {
-    const requestSelectedPublicAdmission = vi.fn(() => true);
+    const refreshSelectedPublicAdmission = vi.fn(() => true);
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
-      requestSelectedPublicAdmission,
+      refreshSelectedPublicAdmission,
       selectedPublicContextGraphIds: () => [],
     }));
 
-    expect(coordinator.authorize({
+    expect(coordinator.authorizeForCatalogPass({
       providerPeerId: PROVIDER,
       targets: [{ contextGraphId: PUBLIC, lane: 'selected-public' }],
-    })).toBeNull();
-    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
+    }, 10_000)).toBeNull();
+    expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
   });
 
   it('rejects a private target not owned by the configured provider', () => {
-    const requestSelectedPublicAdmission = vi.fn(() => true);
+    const refreshSelectedPublicAdmission = vi.fn(() => true);
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
-      requestSelectedPublicAdmission,
+      refreshSelectedPublicAdmission,
       configuredRecoveryPlan: (providerPeerId) => ({ providerPeerId, targets: [] }),
     }));
 
-    expect(coordinator.authorize({
+    expect(coordinator.authorizeForCatalogPass({
       providerPeerId: PROVIDER,
       targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
-    })).toBeNull();
-    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
+    }, 10_000)).toBeNull();
+    expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
   });
 
   it('revalidates one authorized mixed plan against current configuration', () => {
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies());
-    const authorized = coordinator.authorize(mixedPlan());
+    const authorized = coordinator.authorizeForCatalogPass(mixedPlan(), 10_000);
     expect(authorized).not.toBeNull();
 
     expect(coordinator.revalidate(authorized!)).toEqual({
@@ -175,10 +233,10 @@ describe('RFC-64 SWM recovery authorization', () => {
         targets: publicTargets,
       }),
     }));
-    const authorized = coordinator.authorize({
+    const authorized = coordinator.authorizeForCatalogPass({
       providerPeerId: PROVIDER,
       targets: publicTargets,
-    });
+    }, 10_000);
 
     expect(authorized).not.toBeNull();
     expect(() => coordinator.revalidate(authorized!)).not.toThrow();
@@ -189,7 +247,7 @@ describe('RFC-64 SWM recovery authorization', () => {
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
       isPeerAccepted: () => accepted,
     }));
-    const authorized = coordinator.authorize(mixedPlan());
+    const authorized = coordinator.authorizeForCatalogPass(mixedPlan(), 10_000);
     expect(authorized).not.toBeNull();
     accepted = false;
 
@@ -203,7 +261,7 @@ describe('RFC-64 SWM recovery authorization', () => {
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
       isCatalogReady: () => catalogReady,
     }));
-    const authorized = coordinator.authorize(mixedPlan());
+    const authorized = coordinator.authorizeForCatalogPass(mixedPlan(), 10_000);
     expect(authorized).not.toBeNull();
     catalogReady = false;
 

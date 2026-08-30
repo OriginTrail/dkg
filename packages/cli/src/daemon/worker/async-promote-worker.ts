@@ -41,7 +41,9 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
+  getPromoteReplaySafeErrorDiagnostic,
   PromoteJobLeaseError,
+  isPromoteReplaySafeError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteFailureClassification,
@@ -245,6 +247,7 @@ function logPromoteAttemptFailure(input: {
   log: PromoteWorkerLogger;
 }): void {
   try {
+    const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(input.err);
     bestEffortLog(
       input.log,
       `[async-promote-worker] ${JSON.stringify({
@@ -258,8 +261,12 @@ function logPromoteAttemptFailure(input: {
         stage: diagnosticPromoteStage(input.message),
         classification: input.classified.classification,
         retryable: input.classified.retryable,
-        errorName: safeErrorIdentity(input.err, 'name', SAFE_ERROR_NAMES) ?? 'unknown',
-        errorCode: safeErrorIdentity(input.err, 'code', SAFE_ERROR_CODES) ?? 'unknown',
+        errorName: replaySafeDiagnostic?.name
+          ?? safeErrorIdentity(input.err, 'name', SAFE_ERROR_NAMES)
+          ?? 'unknown',
+        errorCode: replaySafeDiagnostic?.code
+          ?? safeErrorIdentity(input.err, 'code', SAFE_ERROR_CODES)
+          ?? 'unknown',
       })}`,
     );
   } catch {
@@ -279,6 +286,13 @@ function logPromoteAttemptFailure(input: {
  * the worker.
  */
 export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
+  // Workflow-level replay safety is a typed producer disposition. It is more
+  // authoritative than diagnostic prose inherited from the wrapped cause,
+  // including incidental cap-like wording.
+  if (isPromoteReplaySafeError(err)) {
+    return { classification: 'transient', retryable: true };
+  }
+
   const raw = err instanceof Error ? err.message : String(err);
   // #1464 — strip a leading diagnostic "[promote:<step>] " tag (added by the publisher's
   // promote step-tagging) BEFORE substring-classifying, so a step LABEL can never inject a
@@ -311,10 +325,9 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   }
 
   // Managed-store recovery can declare the exact operation outcome. A request
-  // rejected before dispatch is safe to retry. Interrupted reads cannot have
-  // mutated WM/SWM. The one safe mutation is atomic exact-graph replacement:
-  // replaying the same frozen promote payload converges from either permitted
-  // old-or-new outcome. Every other interrupted write remains fail-closed.
+  // rejected before dispatch is safe to retry, and interrupted reads cannot
+  // have mutated WM/SWM. Every interrupted write remains fail-closed unless
+  // the promotion producer supplied the typed replay-safe disposition above.
   if (isStoreOperationTimeoutError(err)) {
     if (
       err.outcome === 'not_started' ||
@@ -323,10 +336,6 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
         err.storeOperation !== undefined &&
         (
           isReadOnlyStoreOperation(err.storeOperation)
-          // Promote replaces the complete UAL-derived SWM graph through the
-          // atomic replaceGraph capability. Replaying the same frozen payload
-          // converges from either permitted old-or-new outcome.
-          || err.storeOperation === 'replaceGraph'
         )
       )
     ) {

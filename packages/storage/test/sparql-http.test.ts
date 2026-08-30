@@ -172,6 +172,40 @@ describe('SparqlHttpStore (test server)', () => {
     expect(updateReq?.contentType).toBe('application/sparql-update; charset=utf-8');
   });
 
+  it.each([
+    [
+      'CONSTRUCT',
+      'PREFIX schema: <http://schema.org/>\nCONSTRUCT { ?s schema:name ?name } WHERE { ?s schema:name ?name }',
+    ],
+    [
+      'DESCRIBE',
+      'PREFIX schema: <http://schema.org/>\nDESCRIBE ?s WHERE { ?s schema:name ?name }',
+    ],
+  ])('uses an N-Quads Accept header for a PREFIX-prefixed %s query', async (
+    _form,
+    sparql,
+  ) => {
+    const originalFetch = globalThis.fetch;
+    let accept = '';
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      accept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? '';
+      return new Response(
+        '<http://ex.org/s> <http://schema.org/name> "Alice" .\n',
+        { status: 200, headers: { 'Content-Type': 'application/n-quads' } },
+      );
+    }) as typeof fetch;
+    try {
+      const prefixedStore = new SparqlHttpStore({
+        queryEndpoint: 'http://prefixed-construct.test/query',
+      });
+      const result = await prefixedStore.query(sparql);
+      expect(result.type).toBe('quads');
+      expect(accept).toBe('application/n-quads, text/n-quads');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('rejects RDF literals above the Java MUTF-8 hard limit before update POST', async () => {
     insertedQuads.length = 0;
     await expect(store.insert([{

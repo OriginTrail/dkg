@@ -13,6 +13,7 @@ import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skole
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
+import { classifyExactSwmGraphReplaceFailure } from './promote-replay-safety.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
   assertTrustedCatalogTriplesAreGeneratedFloor,
@@ -8823,11 +8824,15 @@ export class DKGPublisher implements Publisher {
     // The UAL-derived graph is the ownership boundary. Replace the complete
     // graph; never inspect, claim, skip, or delete individual RDF subjects.
     const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
-    await this.replaceExactKnowledgeAssetGraph(
-      swmGraphUri,
-      swmQuads,
-      'Knowledge Asset WM-to-SWM promotion',
-    );
+    try {
+      await this.replaceExactKnowledgeAssetGraph(
+        swmGraphUri,
+        swmQuads,
+        'Knowledge Asset WM-to-SWM promotion',
+      );
+    } catch (error) {
+      throw classifyExactSwmGraphReplaceFailure(error);
+    }
     // #2079: the SIXTH replace site. Same graph the catch-up witness keys on,
     // so the memo now describes content that is gone — and a replace leaves the
     // quad count intact, which is exactly what the count gate cannot see.
