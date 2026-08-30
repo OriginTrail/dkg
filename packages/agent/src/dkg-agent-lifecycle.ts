@@ -368,6 +368,11 @@ import {
   SyncOnConnectPeerScheduler,
   type SyncOnConnectPeerJobRunner,
 } from './sync/on-connect/peer-scheduler.js';
+import {
+  classifySyncOnConnectAttempt,
+  SyncOnConnectPeerAccountingAccumulator,
+  type SyncReconcilerAttemptOutcome,
+} from './sync/on-connect/attempt-accounting.js';
 import type {
   SelectedPublicSharedMemoryTarget,
   SelectedSharedMemoryRequestedScope,
@@ -1451,67 +1456,6 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   ensureOwnedMap: RecoverContextGraphSwmOptions['ensureOwnedMap'];
   logInfo: NonNullable<RecoverContextGraphSwmOptions['logInfo']>;
   logWarn: NonNullable<RecoverContextGraphSwmOptions['logWarn']>;
-}
-
-type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
-
-interface SyncOnConnectPeerJobAccounting {
-  readonly outcomes: SyncOnConnectPeerOutcome[];
-  probe: SyncReconcilerProbe | null | undefined;
-  probePromise: Promise<SyncReconcilerProbe | null> | null;
-  selectedAttempted: boolean;
-}
-
-function combineSyncOnConnectPeerJobAccounting(
-  outcomes: readonly SyncOnConnectPeerOutcome[],
-): Readonly<{
-  outcome: SyncOnConnectPeerOutcome;
-  resetBackoffBeforeRetry: boolean;
-}> | null {
-  if (outcomes.length === 0) return null;
-  let disposition: SyncOnConnectPeerOutcome['reconcilerDisposition'] | undefined;
-  let progress = false;
-  let anyFresh = false;
-  let effectiveClearBeforeRetry = false;
-  let resetBackoffBeforeRetry = false;
-  // Reduce in phase order. A retry/defer owner cannot be erased by a later
-  // ordinary clear, while a clear that happened before a later retry starts a
-  // new backoff generation instead of inheriting stale failures.
-  for (const outcome of outcomes) {
-    progress ||= outcome.progress;
-    anyFresh ||= outcome.fresh;
-    if (outcome.reconcilerDisposition === 'retry') {
-      resetBackoffBeforeRetry ||= effectiveClearBeforeRetry;
-      disposition = 'retry';
-      continue;
-    }
-    if (outcome.reconcilerDisposition === 'defer') {
-      if (disposition !== 'retry') disposition = 'defer';
-      continue;
-    }
-    if (disposition === undefined || disposition === 'clear') {
-      disposition = 'clear';
-      effectiveClearBeforeRetry = true;
-    }
-  }
-  if (disposition === 'clear') {
-    return {
-      outcome: {
-        reconcilerDisposition: 'clear',
-        fresh: anyFresh,
-        progress,
-      },
-      resetBackoffBeforeRetry: false,
-    };
-  }
-  return {
-    outcome: {
-      reconcilerDisposition: disposition ?? 'defer',
-      fresh: false,
-      progress,
-    },
-    resetBackoffBeforeRetry,
-  };
 }
 
 export interface ContextGraphCatchupOptions {
@@ -4723,21 +4667,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
   ): SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
-    let cancelled = false;
-    const job: SyncOnConnectPeerJobAccounting = {
-      outcomes: [],
-      probe: undefined,
-      probePromise: null,
-      selectedAttempted: false,
-    };
+    const accounting = new SyncOnConnectPeerAccountingAccumulator();
+    let probe: SyncReconcilerProbe | null | undefined;
+    let probePromise: Promise<SyncReconcilerProbe | null> | null = null;
+    let selectedAttempted = false;
     const ensureProbe = async (): Promise<SyncReconcilerProbe | null> => {
-      job.probePromise ??= (async () => {
+      probePromise ??= (async () => {
         const backoff = this.syncReconcilerBackoff.get(remotePeer);
         if (backoff && Date.now() < backoff.nextRetryAt) return null;
         return this.getSyncReconcilerProbe(remotePeer);
       })();
-      job.probe = await job.probePromise;
-      return job.probe;
+      probe = await probePromise;
+      return probe;
     };
     const attemptPhase = async (
       attempt: (
@@ -4745,45 +4686,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ) => Promise<SyncOnConnectOutcome | 'not-started'>,
     ): Promise<void> => {
       if (await ensureProbe() === null) return;
-      let syncAccounting: SyncOnConnectPeerOutcome | undefined;
-      try {
-        const outcome = await attempt((next) => { syncAccounting = next; });
-        if (syncAccounting !== undefined) {
-          job.outcomes.push(syncAccounting);
-        } else if (
-          outcome !== 'skipped-no-sync'
-          && outcome !== 'already-syncing'
-          && outcome !== 'not-started'
-          && outcome !== 'deferred-backpressure'
-        ) {
-          job.outcomes.push({
-            reconcilerDisposition: 'retry',
-            fresh: false,
-            progress: false,
-          });
-        }
-      } catch (err: unknown) {
-        const backpressureError = getSyncBackpressureBusyError(err);
-        if (backpressureError) {
-          this.log.info(
-            createOperationContext('sync'),
-            `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure: ${backpressureError.message}`,
-          );
-          return;
-        }
-        if (!(err instanceof SyncOnConnectPostSyncError) || err.backoffEligible) {
-          job.outcomes.push({
-            reconcilerDisposition: 'retry',
-            fresh: false,
-            progress: false,
-          });
-        }
-        throw err;
+      const classified = await classifySyncOnConnectAttempt(attempt);
+      accounting.record(classified.accounting);
+      if (
+        classified.execution.state === 'completed'
+        && classified.execution.outcome === 'deferred-backpressure'
+      ) {
+        const detail = classified.execution.backpressureDetail === undefined
+          ? ''
+          : `: ${classified.execution.backpressureDetail}`;
+        this.log.info(
+          createOperationContext('sync'),
+          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure${detail}`,
+        );
+      } else if (classified.execution.state === 'failed') {
+        throw classified.execution.error;
       }
     };
     return {
       runSelected: async (recoveryPlan) => {
-        job.selectedAttempted = true;
+        selectedAttempted = true;
         await attemptPhase((onSyncAccounting) => this.trySelectedSwmRetryFromPeer(
           remotePeer,
           onSyncAccounting,
@@ -4792,19 +4714,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ));
       },
       runOrdinary: async () => {
-        await attemptPhase((onSyncAccounting) => job.selectedAttempted
+        await attemptPhase((onSyncAccounting) => selectedAttempted
           ? this.tryOrdinarySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect')
           : this.trySyncFromPeer(remotePeer, onSyncAccounting, 'on-connect'));
       },
-      cancel: () => {
-        cancelled = true;
-        job.outcomes.length = 0;
-      },
+      cancel: () => { accounting.cancel(); },
       finish: () => {
-        if (cancelled) return;
-        const combined = combineSyncOnConnectPeerJobAccounting(job.outcomes);
-        if (combined === null || job.probe === null || job.probe === undefined) return;
-        const selectedRetryStillRequired = job.selectedAttempted
+        const combined = accounting.combine();
+        if (combined === null || probe === null || probe === undefined) return;
+        const selectedRetryStillRequired = selectedAttempted
           && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer);
         const outcome: SyncOnConnectPeerOutcome = selectedRetryStillRequired
           && combined.outcome.reconcilerDisposition === 'clear'
@@ -4817,7 +4735,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         if (combined.resetBackoffBeforeRetry) {
           this.syncReconcilerBackoff.delete(remotePeer);
         }
-        this.applySyncOnConnectAccounting(remotePeer, outcome, job.probe);
+        this.applySyncOnConnectAccounting(remotePeer, outcome, probe);
       },
     };
   }
@@ -5007,51 +4925,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
-    let syncAccounting: SyncOnConnectPeerOutcome | undefined;
-    try {
-      const onSyncAccounting = (outcome: SyncOnConnectPeerOutcome) => {
-        syncAccounting = outcome;
-      };
-      const outcome = await attempt(onSyncAccounting);
-      if (syncAccounting) {
-        this.applySyncOnConnectAccounting(remotePeer, syncAccounting, probe);
-      }
-      if (outcome === 'deferred-backpressure') {
-        this.log.info(
-          createOperationContext('sync'),
-          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure`,
-        );
-        return outcome;
-      }
-      if (
-        outcome !== 'skipped-no-sync' &&
-        outcome !== 'already-syncing' &&
-        outcome !== 'not-started' &&
-        !syncAccounting &&
-        this.lastSuccessfulSyncAt.get(remotePeer) === lastOk &&
-        this.lastSyncProgressAt.get(remotePeer) === lastProgress
-      ) {
-        this.recordSyncReconcilerFailure(remotePeer, probe);
-      }
-      return outcome;
-    } catch (err: unknown) {
-      const backpressureError = getSyncBackpressureBusyError(err);
-      if (backpressureError) {
-        this.log.info(
-          createOperationContext('sync'),
-          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure: ${backpressureError.message}`,
-        );
-        return 'deferred-backpressure';
-      }
-      if (err instanceof SyncOnConnectPostSyncError) {
-        if (err.backoffEligible) {
-          this.recordSyncReconcilerFailure(remotePeer, probe);
-        }
-      } else {
-        this.recordSyncReconcilerFailure(remotePeer, probe);
-      }
-      throw err;
+    const classified = await classifySyncOnConnectAttempt(attempt, {
+      hasExternalAccountingEvidence: () => (
+        this.lastSuccessfulSyncAt.get(remotePeer) !== lastOk
+        || this.lastSyncProgressAt.get(remotePeer) !== lastProgress
+      ),
+    });
+    if (classified.accounting !== undefined) {
+      this.applySyncOnConnectAccounting(remotePeer, classified.accounting, probe);
     }
+    if (classified.execution.state === 'completed') {
+      if (classified.execution.outcome === 'deferred-backpressure') {
+        const detail = classified.execution.backpressureDetail === undefined
+          ? ''
+          : `: ${classified.execution.backpressureDetail}`;
+        this.log.info(
+          createOperationContext('sync'),
+          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure${detail}`,
+        );
+      }
+      return classified.execution.outcome;
+    }
+    throw classified.execution.error;
   }
 
   /**
