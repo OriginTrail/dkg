@@ -871,6 +871,33 @@ describe('sync-on-connect churn gates', () => {
     expect(sources).toEqual(['on-connect']);
   });
 
+  it('coalesces a reconcile race with the same ordinary on-connect attempt', async () => {
+    const agent = await createUnstartedAgent('SyncAttemptRaceCoalescing');
+    (agent as any).started = true;
+    let release!: (outcome: 'synced') => void;
+    const gate = new Promise<'synced'>((resolve) => { release = resolve; });
+    const trySyncFromPeer = recorder(async () => gate);
+    (agent as any).trySyncFromPeer = trySyncFromPeer;
+    const probe = { connected: true, hasSyncProtocol: true };
+
+    const onConnect = (agent as any).attemptSyncFromPeerWithReconcilerAccounting(
+      PEER_A,
+      probe,
+      'on-connect',
+    );
+    const reconcile = (agent as any).attemptSyncFromPeerWithReconcilerAccounting(
+      PEER_A,
+      probe,
+      'reconcile',
+    );
+    await Promise.resolve();
+
+    expect(trySyncFromPeer.calls).toHaveLength(1);
+    release('synced');
+    await expect(Promise.all([onConnect, reconcile])).resolves.toEqual(['synced', 'synced']);
+    expect(trySyncFromPeer.calls).toHaveLength(1);
+  });
+
   it('reconciler still retries stale connected peers', async () => {
     const agent = await createUnstartedAgent('SyncReconcilerStillRetries');
     (agent as any).started = true;

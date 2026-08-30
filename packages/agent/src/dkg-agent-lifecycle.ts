@@ -1417,6 +1417,26 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
 
+// The connection listener and periodic reconciler can both clear their
+// freshness checks before runSyncOnConnect marks the peer active. Share the
+// complete ordinary attempt (including its accounting) across that window so
+// one peer cannot consume two sync admission slots or grow backoff twice.
+const ordinarySyncAttemptFlights = new WeakMap<
+  DKGAgent,
+  Map<string, Promise<SyncReconcilerAttemptOutcome>>
+>();
+
+function ordinarySyncFlightsFor(
+  agent: DKGAgent,
+): Map<string, Promise<SyncReconcilerAttemptOutcome>> {
+  let flights = ordinarySyncAttemptFlights.get(agent);
+  if (!flights) {
+    flights = new Map();
+    ordinarySyncAttemptFlights.set(agent, flights);
+  }
+  return flights;
+}
+
 export interface ContextGraphCatchupOptions {
   includeSharedMemory?: boolean;
   maxPeers?: number;
@@ -4767,7 +4787,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     mode: OrdinarySyncOnConnectMode = 'ordinary',
   ): Promise<SyncReconcilerAttemptOutcome> {
     if (!syncOnConnectEnabled(this.config)) return 'not-started';
-    return this.accountSyncAttemptWithReconciler(
+    const flights = ordinarySyncFlightsFor(this);
+    // Keep the post-selected ordinary lane distinct: it is intentionally
+    // sequenced after selected recovery and must not join a pre-selected sweep.
+    const flightKey = `${remotePeer}\u0000${mode}`;
+    const existing = flights.get(flightKey);
+    if (existing) return existing;
+
+    const attempt = this.accountSyncAttemptWithReconciler(
       remotePeer,
       probe,
       (onSyncAccounting) => this.trySyncFromPeer(
@@ -4777,6 +4804,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         mode,
       ),
     );
+    flights.set(flightKey, attempt);
+    try {
+      return await attempt;
+    } finally {
+      if (flights.get(flightKey) === attempt) flights.delete(flightKey);
+      if (flights.size === 0) ordinarySyncAttemptFlights.delete(this);
+    }
   }
 
   async attemptSelectedSwmRetryWithReconcilerAccounting(
