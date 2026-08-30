@@ -43,10 +43,10 @@ export const DEFAULT_OXIGRAPH_PORT = 7878;
 
 const MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS = 5_000;
 // Oxigraph 0.5.x closes HTTP requests at 60 seconds when --timeout-s is
-// omitted, without cancelling evaluation. Start recovery slightly below that
-// boundary so a response/transport failure at the server deadline cannot
-// leave a zombie query behind.
-const MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS = 55_000;
+// omitted, without cancelling evaluation. Make the existing HTTP-client
+// deadline authoritative just before that boundary so the adapter uses its
+// normal typed timeout/restart path instead of guessing from a late error.
+const MANAGED_OXIGRAPH_IMPLICIT_HTTP_DEADLINE_GUARD_MS = 55_000;
 // Node timers (and AbortSignal.timeout) coerce any delay above 2^31-1 ms to 1ms
 // with a TimeoutOverflowWarning — aborting the request almost immediately, the
 // opposite of a long timeout. Cap the derived client timeout so an absurd
@@ -82,16 +82,15 @@ function clampNodeTimerMs(value: number): number {
 
 function hasUnsafeNativeQueryTimeout(platform: NodeJS.Platform, version: string): boolean {
   // Oxigraph 0.5.x on macOS retains one sleeping OS thread per completed
-  // query until --timeout-s expires. The managed HTTP deadline remains active
-  // and restarts the child when it fires, so omitting the native flag is the
-  // safe equivalent until the bundled Oxigraph implementation changes.
+  // query until --timeout-s expires. The single managed HTTP client deadline
+  // remains active and restarts the child when it fires, so omitting the native
+  // flag is the safe equivalent until the bundled implementation changes.
   return platform === 'darwin' && version.startsWith('0.5.');
 }
 
 interface ManagedOxigraphDeadlines {
   queryTimeoutS?: number;
   clientTimeoutMs: number;
-  serverTimeoutRecoveryAfterMs?: number;
 }
 
 /** Resolve the client deadline and an optional operator-requested native deadline. */
@@ -107,11 +106,10 @@ function resolveManagedOxigraphDeadlines(
   if (configuredQueryTimeoutS === undefined) {
     return {
       queryTimeoutS: undefined,
-      clientTimeoutMs: configuredClientTimeoutMs,
-      serverTimeoutRecoveryAfterMs:
-        configuredClientTimeoutMs > MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS
-          ? MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS
-          : undefined,
+      clientTimeoutMs: Math.min(
+        configuredClientTimeoutMs,
+        MANAGED_OXIGRAPH_IMPLICIT_HTTP_DEADLINE_GUARD_MS,
+      ),
     };
   }
   const queryTimeoutS = Math.min(
@@ -126,15 +124,16 @@ function resolveManagedOxigraphDeadlines(
       && configuredQueryTimeoutS > MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S
       ? MAX_NODE_TIMER_MS
       : Math.max(configuredClientTimeoutMs, minimumClientTimeoutMs);
-  return {
-    queryTimeoutS: nativeTimeoutUnsafe ? undefined : queryTimeoutS,
-    clientTimeoutMs: resolvedClientTimeoutMs,
-    serverTimeoutRecoveryAfterMs:
-      nativeTimeoutUnsafe
-      && resolvedClientTimeoutMs > MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS
-        ? MANAGED_OXIGRAPH_SERVER_TIMEOUT_RECOVERY_AFTER_MS
-        : undefined,
-  };
+  if (nativeTimeoutUnsafe) {
+    return {
+      queryTimeoutS: undefined,
+      clientTimeoutMs: Math.min(
+        resolvedClientTimeoutMs,
+        MANAGED_OXIGRAPH_IMPLICIT_HTTP_DEADLINE_GUARD_MS,
+      ),
+    };
+  }
+  return { queryTimeoutS, clientTimeoutMs: resolvedClientTimeoutMs };
 }
 
 interface StoreConfigLike {
@@ -204,10 +203,8 @@ export interface ManagedOxigraphPlan {
   readyTimeoutMs?: number;
   /** Optional native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
   queryTimeoutS?: number;
-  /** SPARQL HTTP client deadline; kept after Oxigraph's native timeout when both exist. */
+  /** Authoritative SPARQL HTTP client deadline; kept after a safe native timeout when both exist. */
   clientTimeoutMs: number;
-  /** Earlier unmanaged Oxigraph HTTP deadline that must trigger child recovery. */
-  serverTimeoutRecoveryAfterMs?: number;
   /** Finite limits applied to an isolated systemd user scope. */
   memoryLimits?: OxigraphMemoryLimits;
   /**
@@ -243,7 +240,6 @@ export function planManagedOxigraph(
   const {
     queryTimeoutS,
     clientTimeoutMs,
-    serverTimeoutRecoveryAfterMs,
   } = resolveManagedOxigraphDeadlines(options, platform);
   const memoryLimits = normalizeOxigraphMemoryLimits({
     highMiB: options.memoryHighMiB,
@@ -293,9 +289,6 @@ export function planManagedOxigraph(
       timeout: clientTimeoutMs,
     },
   };
-  if (serverTimeoutRecoveryAfterMs !== undefined) {
-    storeConfigTemplate.options.serverTimeoutRecoveryAfterMs = serverTimeoutRecoveryAfterMs;
-  }
   if (graphSetIndex !== undefined) {
     storeConfigTemplate.graphSetIndex = graphSetIndex;
   }
@@ -309,7 +302,6 @@ export function planManagedOxigraph(
     readyTimeoutMs,
     queryTimeoutS,
     clientTimeoutMs,
-    serverTimeoutRecoveryAfterMs,
     memoryLimits,
     sharedMemoryPublicSnapshotStorage,
   };

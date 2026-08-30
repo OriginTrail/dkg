@@ -73,6 +73,16 @@ describe('claim failure backoff', () => {
     expect(backoff.isDue()).toBe(true);
     expect(backoff.recordFailure()).toBe(250);
   });
+
+  it('applies both ±20% jitter bounds while retaining the absolute cap', () => {
+    const low = createClaimFailureBackoff({ now: () => 0, random: () => 0 });
+    const high = createClaimFailureBackoff({ now: () => 0, random: () => 1 });
+
+    expect(low.recordFailure()).toBe(200);
+    expect(high.recordFailure()).toBe(300);
+    for (let i = 0; i < 10; i += 1) high.recordFailure();
+    expect(high.recordFailure()).toBe(30_000);
+  });
 });
 
 function deferred<T = void>(): {

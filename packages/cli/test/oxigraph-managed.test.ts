@@ -147,7 +147,7 @@ describe('planManagedOxigraph', () => {
     expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
   });
 
-  it('recovers from the earlier Oxigraph HTTP timeout for long macOS deadlines', () => {
+  it('uses one client deadline before the implicit 60s server cutoff on macOS', () => {
     const plan = planManagedOxigraph(
       {
         store: {
@@ -159,9 +159,12 @@ describe('planManagedOxigraph', () => {
       'darwin',
     );
     expect(plan!.queryTimeoutS).toBeUndefined();
-    expect(plan!.clientTimeoutMs).toBe(125_000);
-    expect(plan!.serverTimeoutRecoveryAfterMs).toBe(55_000);
-    expect(plan!.storeConfigTemplate.options.serverTimeoutRecoveryAfterMs).toBe(55_000);
+    expect(plan!.clientTimeoutMs).toBe(55_000);
+    expect(plan!.storeConfigTemplate.options).toEqual({
+      managedByDkg: true,
+      managedOxigraph: true,
+      timeout: 55_000,
+    });
   });
 
   it('retains an explicitly configured native timeout on unaffected platforms', () => {
@@ -179,7 +182,7 @@ describe('planManagedOxigraph', () => {
     expect(plan!.clientTimeoutMs).toBe(40_000);
   });
 
-  it('uses a client-only deadline unless a native Oxigraph timeout is explicitly configured', () => {
+  it('preempts the implicit 60s server cutoff when no native timeout is configured', () => {
     const plan = planManagedOxigraph(
       {
         store: {
@@ -191,8 +194,8 @@ describe('planManagedOxigraph', () => {
       'linux',
     );
     expect(plan!.queryTimeoutS).toBeUndefined();
-    expect(plan!.clientTimeoutMs).toBe(180_000);
-    expect(plan!.storeConfigTemplate.options.timeout).toBe(180_000);
+    expect(plan!.clientTimeoutMs).toBe(55_000);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(55_000);
   });
 
   it('lets an explicit HTTP client timeout override the native-timeout-derived deadline', () => {
@@ -301,12 +304,13 @@ describe('planManagedOxigraph', () => {
       {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { clientTimeoutMs: 4_294_967_000 },
+          options: { queryTimeoutS: 35, clientTimeoutMs: 4_294_967_000 },
         },
       },
       '/data',
+      'linux',
     );
-    expect(plan!.queryTimeoutS).toBeUndefined();
+    expect(plan!.queryTimeoutS).toBe(35);
     expect(plan!.clientTimeoutMs).toBe(2_147_483_647);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(2_147_483_647);
   });
@@ -545,7 +549,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
     }
   });
 
-  it('does not derive a native timeout from a configured client deadline', async () => {
+  it('guards the implicit server cutoff without deriving a native timeout', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
     const port = await freePort();
 
@@ -562,7 +566,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
     });
     try {
       expect(result).not.toBeNull();
-      expect(result!.storeConfig.options.timeout).toBe(180_000);
+      expect(result!.storeConfig.options.timeout).toBe(55_000);
       const args = await fetchManagedArgs(port);
       const timeoutIndex = args.indexOf('--timeout-s');
       expect(timeoutIndex).toBe(-1);

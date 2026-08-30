@@ -505,7 +505,7 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
-  it('restarts managed Oxigraph when its earlier HTTP deadline wins', async () => {
+  it('does not relabel a late managed-server response as a timeout', async () => {
     const originalFetch = globalThis.fetch;
     let now = 0;
     const timedOutOperations: string[] = [];
@@ -518,19 +518,49 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://managed-oxigraph.test/query',
         managedOxigraph: true,
         timeout: 125_000,
-        serverTimeoutRecoveryAfterMs: 55_000,
         slowQueryThresholdMs: 0,
         now: () => now,
         onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
 
       await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
-        code: 'STORE_OPERATION_TIMEOUT',
-        backend: 'oxigraph-server',
+        code: 'SPARQL_HTTP_RESPONSE',
         operation: 'query',
-        timeoutMs: 55_000,
       });
-      expect(timedOutOperations).toEqual(['query']);
+      expect(timedOutOperations).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('preserves a caller abort after the former server-timeout threshold', async () => {
+    const originalFetch = globalThis.fetch;
+    let now = 0;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      })) as typeof fetch;
+    try {
+      const caller = new AbortController();
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedOxigraph: true,
+        timeout: 125_000,
+        slowQueryThresholdMs: 0,
+        now: () => now,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      });
+      const query = store.query(
+        'SELECT ?s WHERE { ?s ?p ?o }',
+        { signal: caller.signal },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      now = 56_000;
+      caller.abort(new Error('caller aborted after 56 seconds'));
+
+      await expect(query).rejects.toThrow('caller aborted after 56 seconds');
+      expect(timedOutOperations).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
     }
