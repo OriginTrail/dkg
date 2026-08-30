@@ -249,20 +249,21 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         );
         if (snapshot === null) return null;
         throwIfAbortedV1(params.signal);
-        const prepared = await raceAgainstAbortV1(
-          prepareRfc64SwmInventoryCatalogTargetV1({
-            snapshot,
-            resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
-              params.contextGraphId,
-              params.authorAddress,
-              row,
-              params.signal,
-            ),
-          }),
-          params.signal,
-        );
+        const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
+          snapshot,
+          resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
+            params.contextGraphId,
+            params.authorAddress,
+            row,
+            params.signal,
+          ),
+        });
         throwIfAbortedV1(params.signal);
         lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
+        const deployment = await this.resolveRfc64AutoPublishDeploymentProfileV1(
+          lane.networkId,
+        );
+        throwIfAbortedV1(params.signal);
         const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
           scope: prepared.catalogScope,
           author: this.createRfc64CatalogAuthorSignerV1(
@@ -270,10 +271,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
             params.signal,
           ),
           assets: prepared.assets,
-          deployment: await raceAgainstAbortV1(
-            this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-            params.signal,
-          ),
+          deployment,
           peers: lane.autoPublishConfig.peers,
           catalogIssuerDelegationEffectiveAt:
             lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
@@ -391,15 +389,13 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
     const graphManager = new GraphManager(this.store);
-    const head = await raceAgainstAbortV1(
-      resolvePublishedKnowledgeAssetWorkspaceHead({
-        store: this.store,
-        graphManager,
-        contextGraphId,
-        kaUal: row.kaUal,
-      }),
-      signal,
-    );
+    const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager,
+      contextGraphId,
+      kaUal: row.kaUal,
+    });
+    throwIfAbortedV1(signal);
     if (
       head === undefined
       || head.shareOperationId !== row.shareOperationId
@@ -410,18 +406,16 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     ) {
       throw new Error(`durable SWM head differs from signed inventory row ${row.kaUal}`);
     }
-    const snapshot = await raceAgainstAbortV1(
-      resolveKnowledgeAssetOperationPublicQuads({
-        store: this.store,
-        graphManager,
-        contextGraphId,
-        shareOperationId: row.shareOperationId,
-        kaUal: row.kaUal,
-        assertionVersion: row.assertionVersion,
-        publicSnapshotStore: this.publicSnapshotStore,
-      }),
-      signal,
-    );
+    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: this.store,
+      graphManager,
+      contextGraphId,
+      shareOperationId: row.shareOperationId,
+      kaUal: row.kaUal,
+      assertionVersion: row.assertionVersion,
+      publicSnapshotStore: this.publicSnapshotStore,
+    });
+    throwIfAbortedV1(signal);
     return Object.freeze({
       assertionCoordinate: row.assertionCoordinate,
       projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads),

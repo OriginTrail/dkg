@@ -849,7 +849,23 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
-    await restarted.observeRfc64ConfirmedVmV1({
+    const originalReconcile = restarted
+      .reconcileRfc64PublicCatalogFromSwmInventoryV1.bind(restarted);
+    let releaseConfirmationProjection!: () => void;
+    let markConfirmationProjectionEntered!: () => void;
+    const confirmationProjectionGate = new Promise<void>((resolve) => {
+      releaseConfirmationProjection = resolve;
+    });
+    const confirmationProjectionEntered = new Promise<void>((resolve) => {
+      markConfirmationProjectionEntered = resolve;
+    });
+    const repairSpy = vi.spyOn(restarted, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+      .mockImplementationOnce(async (params) => {
+        markConfirmationProjectionEntered();
+        await confirmationProjectionGate;
+        return originalReconcile(params);
+      });
+    const confirmation = restarted.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
       seal,
@@ -857,6 +873,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       ctx: createOperationContext('publish'),
       publicationLabel: 'publish',
     });
+    await confirmationProjectionEntered;
+    await expect(Promise.race([
+      confirmation.then(() => 'confirmed'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ])).resolves.toBe('confirmed');
     expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
@@ -864,6 +885,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       head: { payload: { version: '1', totalRows: '0' } },
       rows: [],
     });
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    releaseConfirmationProjection();
+    await restarted.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    repairSpy.mockRestore();
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,

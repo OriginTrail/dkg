@@ -175,10 +175,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * Background observer body; failures are contained and logged. A durable
-   * inventory mutation for a selected public CG immediately drives the exact
-   * signed catalog target. Retrying an already-present row also retries a
+   * inventory mutation for a selected public CG requests its scope-owned exact
+   * signed catalog target. Retrying an already-present row also re-requests a
    * catalog reconciliation that may have failed after the prior inventory
-   * commit.
+   * commit, without making the detached observer own projection lifetime.
    */
   async observeRfc64DurableSwmPromotionV1(
     this: DKGAgent,
@@ -187,9 +187,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     try {
       const result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
       if (result.status === 'applied' || result.status === 'existing') {
-        await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+        this.requestRfc64SwmCatalogProjectionV1({
           contextGraphId: params.contextGraphId as ContextGraphIdV1,
           authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
+          ctx: params.ctx,
         });
       }
     } catch (cause) {
@@ -203,6 +204,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   /** Await a point-in-time observer snapshot for tests and controlled drains. */
   async awaitInFlightRfc64SwmInventoryObserversV1(this: DKGAgent): Promise<void> {
     await rfc64SwmInventoryShadowRuntimeV1(this).drain();
+    await this.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  }
+
+  /** Fence detached inventory observers before projection and persistence close. */
+  async closeRfc64SwmInventoryObserversV1(this: DKGAgent): Promise<void> {
+    await rfc64SwmInventoryShadowRuntimeV1(this).closeAndDrain();
   }
 
   inFlightRfc64SwmInventoryObserverCountV1(this: DKGAgent): number {
@@ -242,8 +249,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   /**
    * Canonical post-confirmation observer for exact SWM-inventory removal.
    * Finalized VM is already inventoried by the chain. Remove its SWM row and
-   * reconcile the selected public catalog so RFC-64 no longer advertises the
-   * asset as SWM-only.
+   * enqueue selected-public catalog convergence so RFC-64 no longer advertises
+   * the asset as SWM-only. The irreversible publish response never waits for
+   * catalog signing, storage, or peer fan-out.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
@@ -288,9 +296,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             seal: params.seal,
           });
           if (result.status === 'applied' || result.status === 'absent') {
-            await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+            this.requestRfc64SwmCatalogProjectionV1({
               contextGraphId: contextGraphId as ContextGraphIdV1,
               authorAddress: confirmedSeal.authorAddress,
+              ctx: params.ctx,
             });
           }
         },

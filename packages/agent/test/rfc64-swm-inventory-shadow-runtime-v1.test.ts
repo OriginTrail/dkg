@@ -101,4 +101,30 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     await expect(second).resolves.toBe(2);
     expect(events).toEqual(['first-enter', 'unrelated', 'first-exit', 'second']);
   });
+
+  it('fences new observers and drains admitted work before close completes', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    let release!: () => void;
+    let markEntered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    expect(runtime.schedule('asset', async () => {
+      markEntered();
+      await gate;
+    })).toBe(true);
+    await entered;
+
+    let closed = false;
+    const close = runtime.closeAndDrain().then(() => { closed = true; });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    expect(runtime.schedule('late', async () => undefined)).toBe(false);
+    await expect(runtime.runExclusive('late', async () => undefined))
+      .rejects.toThrow('observer runtime is closed');
+
+    release();
+    await close;
+    expect(closed).toBe(true);
+    expect(runtime.inFlightCount).toBe(0);
+  });
 });

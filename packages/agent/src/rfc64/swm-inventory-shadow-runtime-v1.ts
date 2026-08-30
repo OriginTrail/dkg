@@ -51,13 +51,18 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   readonly #vmConfirmedVersions = new Map<string, Set<string>>();
   readonly #pendingExecutions: Array<() => void> = [];
   #activeExecutions = 0;
+  #closed = false;
 
   schedule(assetKey: string, observer: () => Promise<void>): boolean {
+    if (this.#closed) return false;
     this.enqueue(assetKey, observer, false);
     return true;
   }
 
   runExclusive(assetKey: string, observer: () => Promise<void>): Promise<void> {
+    if (this.#closed) {
+      return Promise.reject(new Error('RFC-64 SWM inventory observer runtime is closed'));
+    }
     return this.enqueue(assetKey, observer, true);
   }
 
@@ -85,6 +90,12 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
 
   async drain(): Promise<void> {
     await Promise.allSettled([...this.#inFlight]);
+  }
+
+  /** Fence new observers, then drain every already-admitted asset mutation. */
+  async closeAndDrain(): Promise<void> {
+    this.#closed = true;
+    await this.drain();
   }
 
   get inFlightCount(): number {

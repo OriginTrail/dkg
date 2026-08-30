@@ -390,6 +390,80 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     expect(agent.readRfc64PublicCatalogBootstrapStatusV1()?.authorRepairs).toHaveLength(1);
   }, 30_000);
 
+  it('coalesces a live mutation burst into one latest-state follow-up pass', async () => {
+    const inventoryHeadObjectDigest = `0x${'94'.repeat(32)}` as Digest32V1;
+    let markFirstRepairEntered!: () => void;
+    let releaseFirstRepair!: () => void;
+    const firstRepairEntered = new Promise<void>((resolve) => {
+      markFirstRepairEntered = resolve;
+    });
+    const firstRepairGate = new Promise<void>((resolve) => {
+      releaseFirstRepair = resolve;
+    });
+    let repairSpy!: ReturnType<typeof vi.spyOn>;
+    const agent = await startRepairAgentV1({
+      name: 'coalesced-live-burst',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+      beforeStart: (startingAgent) => {
+        let call = 0;
+        repairSpy = vi.spyOn(startingAgent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+          .mockImplementation(async () => {
+            call += 1;
+            if (call === 1) {
+              markFirstRepairEntered();
+              await firstRepairGate;
+            }
+            return {
+              outcome: 'reconciled',
+              reconciliation: {
+                status: 'existing',
+                appliedHead: {
+                  catalogScopeDigest: catalogScopeDigestV1(),
+                  authorAddress: AUTHOR,
+                  currentCatalogHeadDigest: `0x${'95'.repeat(32)}` as Digest32V1,
+                  appliedInventoryDigest: `0x${'96'.repeat(32)}` as Digest32V1,
+                  catalogVersion: String(call),
+                  inventoryRowCount: '1',
+                },
+                successorsApplied: 0,
+                targetAssetCount: 1,
+                inventoryHeadObjectDigest,
+              },
+            };
+          });
+      },
+    });
+
+    agent.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    expect(agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(true);
+    await firstRepairEntered;
+    for (let index = 0; index < 16; index += 1) {
+      expect(agent.requestRfc64SwmCatalogProjectionV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+      })).toBe(true);
+    }
+    releaseFirstRepair();
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repairSpy).toHaveBeenCalledTimes(2);
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()).toEqual(
+      expect.objectContaining({
+        pass: 2,
+        repairs: [expect.objectContaining({ attempts: 2, outcome: 'reconciled' })],
+      }),
+    );
+  }, 30_000);
+
   it('reports missing inventory and unavailable projection distinctly', async () => {
     const agent = await startRepairAgentV1({
       name: 'no-inventory',

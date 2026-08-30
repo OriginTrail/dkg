@@ -3,6 +3,8 @@
 /** Restart-safe local SWM-inventory to catalog projection supervisor. */
 
 import {
+  assertCanonicalEvmAddress,
+  assertContextGraphIdV1,
   createOperationContext,
   type ContextGraphIdV1,
   type Digest32V1,
@@ -65,6 +67,8 @@ interface MutableAuthorRepairStatusV1 {
   inventoryRowCount: string | null;
   lastError: string | null;
   updatedAtMs: number | null;
+  dirty: boolean;
+  liveAdmission: boolean;
 }
 
 interface ProjectionSupervisorStateV1 {
@@ -114,6 +118,8 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
           inventoryRowCount: null,
           lastError: null,
           updatedAtMs: null,
+          dirty: true,
+          liveAdmission: false,
         }];
       },
     );
@@ -135,6 +141,86 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     this.launchRfc64SwmCatalogProjectionPassV1(state);
   }
 
+  /**
+   * Enqueue one already-admitted local author scope without waiting for catalog
+   * signing, storage, or peer fan-out. Repeated requests coalesce onto the
+   * latest durable inventory snapshot owned by this supervisor.
+   */
+  requestRfc64SwmCatalogProjectionV1(
+    this: DKGAgent,
+    params: Readonly<{
+      readonly contextGraphId: ContextGraphIdV1;
+      readonly authorAddress: EvmAddressV1;
+      readonly ctx?: OperationContext;
+    }>,
+  ): boolean {
+    assertContextGraphIdV1(params.contextGraphId, 'SWM catalog projection contextGraphId');
+    const authorAddress = params.authorAddress.toLowerCase() as EvmAddressV1;
+    assertCanonicalEvmAddress(authorAddress, 'SWM catalog projection authorAddress');
+    // This entry point is internal to a mutation that already proved the
+    // author seal and local signing capability. Startup discovery remains
+    // restricted to registered local authors; live requests do not repeat a
+    // registry check that can lag custodial author activation.
+    if (this.resolveRfc64AcceptedPublicRootLaneV1(params.contextGraphId, null) === null) {
+      return false;
+    }
+
+    let state = STATES.get(this);
+    if (state === undefined) {
+      const config = this.resolveRuntimeRfc64ProjectionBootstrapConfigV1();
+      const retryIntervalMs = config === undefined
+        ? undefined
+        : partitionRfc64CatalogBootstrapV1(
+          config,
+          this.config.rfc64CatalogRollout,
+        ).retryIntervalMs;
+      state = {
+        retryIntervalMs,
+        repairs: [],
+        ctx: params.ctx ?? createOperationContext('system'),
+        closed: false,
+        running: false,
+        pass: 0,
+        lastPassStartedAtMs: null,
+        lastPassCompletedAtMs: null,
+        timer: null,
+        abortController: null,
+        run: null,
+      };
+      STATES.set(this, state);
+    }
+    if (state.closed) return false;
+    let repair = state.repairs.find(
+      (candidate) => candidate.contextGraphId === params.contextGraphId
+        && candidate.authorAddress === authorAddress,
+    );
+    if (repair === undefined) {
+      repair = {
+        contextGraphId: params.contextGraphId,
+        authorAddress,
+        outcome: 'pending',
+        attempts: 0,
+        inventoryHeadObjectDigest: null,
+        catalogVersion: null,
+        inventoryRowCount: null,
+        lastError: null,
+        updatedAtMs: null,
+        dirty: true,
+        liveAdmission: true,
+      };
+      state.repairs.push(repair);
+    } else {
+      repair.dirty = true;
+      repair.liveAdmission = true;
+    }
+    if (state.timer !== null) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    this.launchRfc64SwmCatalogProjectionPassV1(state);
+    return true;
+  }
+
   readRfc64SwmCatalogProjectionSupervisorStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64SwmCatalogProjectionSupervisorStatusV1> | null {
@@ -146,7 +232,11 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       retryIntervalMs: state.retryIntervalMs ?? 0,
       lastPassStartedAtMs: state.lastPassStartedAtMs,
       lastPassCompletedAtMs: state.lastPassCompletedAtMs,
-      repairs: Object.freeze(state.repairs.map((repair) => Object.freeze({ ...repair }))),
+      repairs: Object.freeze(state.repairs.map(({
+        dirty: _dirty,
+        liveAdmission: _liveAdmission,
+        ...repair
+      }) => Object.freeze(repair))),
     });
   }
 
@@ -187,10 +277,15 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       })
       .finally(() => {
         if (state.run === run) state.run = null;
+        if (!state.closed && state.repairs.some((repair) => repair.dirty)) {
+          this.launchRfc64SwmCatalogProjectionPassV1(state);
+          return;
+        }
         const retryIntervalMs = state.retryIntervalMs ?? 0;
         if (!state.closed && retryIntervalMs > 0) {
           state.timer = setTimeout(() => {
             state.timer = null;
+            for (const repair of state.repairs) repair.dirty = true;
             this.launchRfc64SwmCatalogProjectionPassV1(state);
           }, retryIntervalMs);
           state.timer.unref?.();
@@ -204,22 +299,28 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     state: ProjectionSupervisorStateV1,
   ): Promise<void> {
     state.running = true;
-    state.pass += 1;
-    state.lastPassStartedAtMs = Date.now();
     const abortController = new AbortController();
     state.abortController = abortController;
     try {
-      await mapWithConcurrency(
-        state.repairs,
-        MAX_CONCURRENT_REPAIRS_V1,
-        async (repair) => {
-          if (state.closed || abortController.signal.aborted) return;
-          await this.reconcileRfc64LocalSwmCatalogProjectionV1(
-            repair,
-            abortController.signal,
-          );
-        },
-      );
+      while (!state.closed && !abortController.signal.aborted) {
+        const pending = state.repairs.filter((repair) => repair.dirty);
+        if (pending.length === 0) break;
+        for (const repair of pending) repair.dirty = false;
+        state.pass += 1;
+        state.lastPassStartedAtMs = Date.now();
+        await mapWithConcurrency(
+          pending,
+          MAX_CONCURRENT_REPAIRS_V1,
+          async (repair) => {
+            if (state.closed || abortController.signal.aborted) return;
+            await this.reconcileRfc64LocalSwmCatalogProjectionV1(
+              repair,
+              abortController.signal,
+            );
+          },
+        );
+        state.lastPassCompletedAtMs = Date.now();
+      }
     } finally {
       if (state.abortController === abortController) state.abortController = null;
       state.running = false;
@@ -234,11 +335,19 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   ): Promise<void> {
     repair.attempts += 1;
     try {
-      const result = await this.repairRfc64LocalPublicCatalogAuthorV1({
-        contextGraphId: repair.contextGraphId,
-        authorAddress: repair.authorAddress,
-        signal,
-      });
+      const result = repair.liveAdmission
+        ? await this.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+          contextGraphId: repair.contextGraphId,
+          authorAddress: repair.authorAddress,
+          signal,
+        }).then((reconciliation) => reconciliation === null
+          ? Object.freeze({ outcome: 'no-inventory' as const })
+          : Object.freeze({ outcome: 'reconciled' as const, reconciliation }))
+        : await this.repairRfc64LocalPublicCatalogAuthorV1({
+          contextGraphId: repair.contextGraphId,
+          authorAddress: repair.authorAddress,
+          signal,
+        });
       if (signal.aborted) return;
       if (result.outcome === 'inactive' || result.outcome === 'no-inventory') {
         Object.assign(repair, {

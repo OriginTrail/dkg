@@ -24,20 +24,19 @@ export class Rfc64SerializedScopeRuntimeV1 {
     signal?: AbortSignal,
   ): Promise<T> {
     const predecessor = this.#tails.get(key)?.catch(() => undefined) ?? Promise.resolve();
-    let release!: () => void;
-    const slot = new Promise<void>((resolve) => { release = resolve; });
-    const tail = predecessor.then(() => slot);
+    const work = predecessor.then(async () => {
+      throwIfRfc64AbortedV1(signal, this.#abortMessage);
+      return operation();
+    });
+    // The queue tail follows the real operation lifetime, not the caller's
+    // abort race. A canceled caller returns promptly, while a non-cooperative
+    // operation still owns the scope until it actually settles.
+    const tail = work.then(() => undefined, () => undefined);
     this.#tails.set(key, tail);
     void tail.then(() => {
       if (this.#tails.get(key) === tail) this.#tails.delete(key);
     });
-    try {
-      await raceRfc64AgainstAbortV1(predecessor, signal, this.#abortMessage);
-      throwIfRfc64AbortedV1(signal, this.#abortMessage);
-      return await operation();
-    } finally {
-      release();
-    }
+    return raceRfc64AgainstAbortV1(work, signal, this.#abortMessage);
   }
 
   get activeScopeCount(): number {

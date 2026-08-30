@@ -40,4 +40,36 @@ describe('RFC-64 serialized scope runtime', () => {
     await Promise.resolve();
     expect(runtime.activeScopeCount).toBe(0);
   });
+
+  it('keeps an aborted active scope until non-cooperative work settles', async () => {
+    const runtime = new Rfc64SerializedScopeRuntimeV1('test scope aborted');
+    let releaseFirst!: () => void;
+    let markFirstEntered!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+    let secondEntered = false;
+
+    const controller = new AbortController();
+    const first = runtime.run('scope', async () => {
+      markFirstEntered();
+      await firstGate;
+      return 'first';
+    }, controller.signal);
+    await firstEntered;
+    controller.abort(new Error('cancel active'));
+    await expect(first).rejects.toThrow('cancel active');
+
+    const second = runtime.run('scope', async () => {
+      secondEntered = true;
+      return 'second';
+    });
+    await Promise.resolve();
+    expect(secondEntered).toBe(false);
+    expect(runtime.activeScopeCount).toBe(1);
+
+    releaseFirst();
+    await expect(second).resolves.toBe('second');
+    await Promise.resolve();
+    expect(runtime.activeScopeCount).toBe(0);
+  });
 });
