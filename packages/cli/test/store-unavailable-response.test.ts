@@ -4,7 +4,6 @@ import {
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
-import { PromoteReplaySafeError } from '@origintrail-official/dkg-publisher';
 import {
   classifyStoreUnavailable,
   respondIfStoreUnavailable,
@@ -114,31 +113,6 @@ describe('respondIfStoreUnavailable', () => {
       code: 'STORE_OPERATION_TIMEOUT',
       retryable: true,
       outcome: 'indeterminate',
-    });
-  });
-
-  it('maps a producer-certified promote replacement timeout through the same 503 contract', () => {
-    const res = mockResponse();
-    const timeout = new StoreOperationTimeoutError({
-      backend: 'managed-oxigraph',
-      operation: 'replaceGraph',
-      timeoutMs: 30_000,
-      outcome: 'indeterminate',
-    });
-
-    expect(respondIfStoreUnavailable(res, new PromoteReplaySafeError(
-      'atomic-exact-swm-graph-replacement',
-      timeout,
-    ))).toBe('indeterminate');
-    expect(res.statusCode).toBe(503);
-    expect(res.headers['Retry-After']).toBe('1');
-    expect(JSON.parse(res.body ?? '{}')).toMatchObject({
-      code: 'STORE_OPERATION_TIMEOUT',
-      retryable: true,
-      outcome: 'indeterminate',
-      backend: 'managed-oxigraph',
-      operation: 'replaceGraph',
-      timeoutMs: 30_000,
     });
   });
 

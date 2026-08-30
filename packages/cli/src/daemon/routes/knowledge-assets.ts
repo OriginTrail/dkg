@@ -26,6 +26,7 @@
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
+import { isPromoteReplaySafeError } from "@origintrail-official/dkg-publisher";
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -1070,7 +1071,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         error: unknown,
         phase: 'swm-share' | 'vm-publish',
       ): boolean => {
-        const classified = classifyStoreUnavailable(error);
+        const classified = classifyStoreUnavailable(
+          isPromoteReplaySafeError(error) ? error.cause : error,
+        );
         if (!classified) return false;
         jsonResponse(
           res,
@@ -1479,6 +1482,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
         });
       } catch (e: any) {
+        // Replay certification belongs to the promote workflow. Translate its
+        // typed store cause here instead of teaching the generic store helper
+        // about publisher-specific wrappers.
+        if (
+          isPromoteReplaySafeError(e)
+          && respondIfStoreUnavailable(res, e.cause)
+        ) return;
         // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
         // carries the recovery hint. Everything else (e.g. the curator-ack 503)
         // propagates to the outer handler unchanged.

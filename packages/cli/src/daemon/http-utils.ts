@@ -24,7 +24,6 @@ import {
   StoreSchedulerBusyError,
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
-import { isPromoteReplaySafeError } from '@origintrail-official/dkg-publisher';
 import type { DkgConfig } from '../config.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
@@ -79,40 +78,34 @@ export interface StoreUnavailableClassification {
 export function classifyStoreUnavailable(
   err: unknown,
 ): StoreUnavailableClassification | null {
-  // A synchronous promote preserves replay safety by wrapping the exact SWM
-  // replacement failure. Keep that producer-owned certification for async
-  // retries while exposing the typed store cause to the existing HTTP 503
-  // contract. The guard is fail-closed on the exact code + stage pair.
-  const storeError = isPromoteReplaySafeError(err) ? err.cause : err;
-
-  if (storeError instanceof StoreSchedulerBusyError) {
+  if (err instanceof StoreSchedulerBusyError) {
     return {
       outcome: 'not_started',
       body: {
-        error: storeError.message,
-        code: storeError.code,
-        reason: storeError.reason,
-        priority: storeError.priority,
+        error: err.message,
+        code: err.code,
+        reason: err.reason,
+        priority: err.priority,
         retryable: true,
         outcome: 'not_started',
       },
     };
   }
 
-  if (!isStoreOperationTimeoutError(storeError)) return null;
-  const outcome = storeError.outcome ?? 'indeterminate';
+  if (!isStoreOperationTimeoutError(err)) return null;
+  const outcome = err.outcome ?? 'indeterminate';
   return {
     outcome,
     body: {
-      error: typeof storeError.message === 'string'
-        ? storeError.message
+      error: typeof err.message === 'string'
+        ? err.message
         : 'Triple-store operation exceeded its deadline',
       code: STORE_OPERATION_TIMEOUT_CODE,
       retryable: true,
       outcome,
-      ...(typeof storeError.backend === 'string' ? { backend: storeError.backend } : {}),
-      ...(typeof storeError.operation === 'string' ? { operation: storeError.operation } : {}),
-      ...(typeof storeError.timeoutMs === 'number' ? { timeoutMs: storeError.timeoutMs } : {}),
+      ...(typeof err.backend === 'string' ? { backend: err.backend } : {}),
+      ...(typeof err.operation === 'string' ? { operation: err.operation } : {}),
+      ...(typeof err.timeoutMs === 'number' ? { timeoutMs: err.timeoutMs } : {}),
     },
   };
 }
