@@ -458,6 +458,44 @@ describe('createChainDiscoveryScanRunner (GH#2323)', () => {
     expect(window.at(-1)).toBe('seedFull');
   });
 
+  // The overdue debt must age even on ticks whose probe FAILS — otherwise
+  // four consecutive probe failures postpone the probe-independent resync
+  // forever, in exactly the store outage it exists to recover from.
+  it('a failing probe cannot postpone the overdue resync past its cadence', async () => {
+    const modes: string[] = [];
+    let probeHealthy = true;
+    let probeCalls = 0;
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => {
+        probeCalls += 1;
+        if (!probeHealthy) throw new Error('registry store unavailable');
+        return true;
+      }),
+      discoverContextGraphsFromChain: vi.fn(
+        async (options: ReturnType<typeof chainDiscoveryScanOptions>) => {
+          modes.push(options.mode);
+          if (options.mode === 'seedFull' && probeHealthy === false) return 0;
+          if (options.mode === 'seedFull') throw new Error('flaky RPC');
+          return 0;
+        },
+      ),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    // Exhaust the startup seedFull, recording the overdue debt.
+    for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner();
+    // The probe now fails on EVERY tick. Ticks 1..3 skip but must age the
+    // debt; the 4th tick is due — and a due resync needs no probe at all.
+    probeHealthy = false;
+    const probeCallsAtOutage = probeCalls;
+    for (let i = 1; i < OVERDUE_FULL_RESYNC_RETRY_EVERY; i++) await runner();
+    expect(modes.filter((m) => m === 'incremental')).toHaveLength(0);
+    await runner();
+    expect(modes.at(-1)).toBe('seedFull');
+    // The due tick executed WITHOUT probing.
+    expect(probeCalls).toBe(probeCallsAtOutage + OVERDUE_FULL_RESYNC_RETRY_EVERY - 1);
+  });
+
   // A rejection VALUE is arbitrary: `Object.create(null)` has no toString
   // and a poisoned toString throws during formatting. The lifecycle hands
   // this runner to a timer with no rejection handler, so a throw escaping

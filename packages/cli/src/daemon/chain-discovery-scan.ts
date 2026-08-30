@@ -137,7 +137,18 @@ export interface ScanPlan {
  */
 export type ScanPlanStep =
   | { readonly kind: 'ready'; readonly plan: ScanPlan }
-  | { readonly kind: 'needsWatermark'; readonly complete: (watermarkSeeded: boolean) => ScanPlan };
+  | {
+      readonly kind: 'needsWatermark';
+      /**
+       * The scheduler state with this tick's accounting (overdue aging)
+       * already applied. A caller whose probe FAILS must commit this state —
+       * discarding it would let a persistently failing probe postpone the
+       * overdue resync forever, in exactly the store-outage scenario the
+       * resync exists to recover from.
+       */
+      readonly agedState: ScanSchedulerState;
+      readonly complete: (watermarkSeeded: boolean) => ScanPlan;
+    };
 
 /**
  * Pure: choose this tick's scan and account for overdue-cadence time.
@@ -176,6 +187,7 @@ export function planScan(
   const planned = state;
   return {
     kind: 'needsWatermark',
+    agedState: planned,
     complete: (watermarkSeeded: boolean): ScanPlan => ({
       scan: chainDiscoveryScanOptions({
         run: planned.run,
@@ -332,8 +344,11 @@ export function createChainDiscoveryScanRunner(input: {
         } catch (err) {
           // Scoped to the probe call alone, so nothing else — least of all a
           // throwing log line — can be misclassified as a probe failure. The
-          // tick planned nothing, so state (overdue aging included) is
-          // untouched: the debt ages only on ticks that actually plan.
+          // tick's ACCOUNTING is kept even though no scan ran: the overdue
+          // debt must keep aging under a failing probe, or four consecutive
+          // probe failures would postpone the probe-independent resync
+          // forever. The run does not advance and nothing is pinned.
+          state = step.agedState;
           safeLog(
             `Chain scan run ${state.run} skipped (watermark probe failed; retrying next tick): ` +
               `${describeError(err)}`,
