@@ -23,6 +23,8 @@ import {
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
+  readMaterializedVersion,
+  writeMaterializedVersion,
   computePrivateRootV10,
   generateAssertionCreatedMetadata,
   generateGraphKnowledgeAssetMetadata,
@@ -476,6 +478,91 @@ describe('graph-scoped finalization handler', () => {
       subject: UAL,
     });
   }
+
+  /**
+   * ADR-W2R-8 (#2435) — an INSPECTION must not advance the version stamp.
+   *
+   * W2's drain re-checks assets because a chain event mentioned them. If that
+   * check stamped `materializedVersion` at the chain's `versionBlock`, a
+   * genuinely NEWER assertion delivered moments later by gossip — carrying that
+   * event's lower `(blockNumber, txIndex)` — would be rejected as stale by
+   * `shouldApplyMaterialization`, permanently. The node would look healthy and
+   * silently stop accepting the updates it exists to receive.
+   *
+   * These rows live HERE, next to the handler that owns the guarantee, because
+   * the two-node e2e cannot measure it: `advanceExactGraphScopedVersion` writes
+   * only when strictly greater, so end to end the promotion has already stored
+   * exactly what the already-current path would write and the guard's removal
+   * is invisible (a solo-removal mutant survived it 4/4). Forcing the gap there
+   * fails too — a real node's chain-driven reconcile sweep writes the same
+   * stamp on its own timer, making the assertion non-deterministic rather than
+   * discriminating.
+   *
+   * The stamp is deliberately pushed BELOW `versionBlock` first, so an
+   * unguarded advance is a visible write rather than a no-op the
+   * strictly-greater rule swallows — and that is also the shape the hazard
+   * takes in production.
+   */
+  const W2R_LOW_STAMP = { blockNumber: 1, txIndex: 0 };
+
+  async function stageConfirmedThenLowerStamp(): Promise<{
+    message: FinalizationMessageMsg;
+    metaGraph: string;
+    reconcileHandler: FinalizationHandler;
+  }> {
+    // The chain binding check is what gates the exact reconcile path, so the
+    // handler needs `getKAContextGraphId`; the default stub has none and every
+    // reconcile below would stop at `unverified` before reaching the guard.
+    const reconcileHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(4, { getKAContextGraphId: async () => 42n }),
+    );
+    const { message } = await stageGraph();
+    await reconcileHandler.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+      '12D3KooWPublisher',
+    );
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await writeMaterializedVersion(store, metaGraph, UAL, W2R_LOW_STAMP);
+    expect(
+      await readMaterializedVersion(store, metaGraph, UAL),
+      'fixture precondition: the stamp must actually start below versionBlock',
+    ).toEqual(W2R_LOW_STAMP);
+    return { message, metaGraph, reconcileHandler };
+  }
+
+  it('inspect-only reconcile of an already-current KA leaves the version stamp untouched', async () => {
+    const { message, metaGraph, reconcileHandler } = await stageConfirmedThenLowerStamp();
+
+    await expect(
+      reconcileGraphScoped(reconcileHandler, message, { inspectOnly: true }),
+    ).resolves.toBe('already-confirmed');
+
+    expect(
+      await readMaterializedVersion(store, metaGraph, UAL),
+      'an inspection must leave the stamp exactly as it found it — raising it '
+      + 'would make a later, genuinely newer assertion at a lower block '
+      + 'permanently unapplicable',
+    ).toEqual(W2R_LOW_STAMP);
+  });
+
+  it('the same reconcile WITHOUT inspect-only does advance the stamp', async () => {
+    // The opposite polarity, and the reason the row above can fail at all:
+    // without it, "the stamp did not move" would also pass on a build where
+    // nothing writes stamps.
+    const { message, metaGraph, reconcileHandler } = await stageConfirmedThenLowerStamp();
+
+    await expect(reconcileGraphScoped(reconcileHandler, message))
+      .resolves.toBe('already-confirmed');
+
+    const stamp = await readMaterializedVersion(store, metaGraph, UAL);
+    expect(
+      stamp?.blockNumber ?? 0,
+      'the unguarded path advances to the chain version block — which is '
+      + 'exactly what makes the guard necessary',
+    ).toBeGreaterThan(W2R_LOW_STAMP.blockNumber);
+  });
 
   it('atomically replaces the exact VM graph and emits constant-size rootless metadata', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
