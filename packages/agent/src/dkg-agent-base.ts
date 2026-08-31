@@ -23,6 +23,8 @@ import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
+import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
+import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
@@ -1191,14 +1193,17 @@ export class DKGAgentBase {
    * while dormant (no dataDir) or after `stop()`.
    */
   protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
+  /** One explicit serializer and physical drain boundary for every catalog mutation. */
+  protected readonly rfc64CatalogMutationCoordinatorV1 =
+    new Rfc64CatalogMutationCoordinatorV1();
+  /** One explicit owner for observer, receiver, supervisor, and mutation lifetimes. */
+  protected rfc64CatalogRuntimeV1!: Rfc64CatalogRuntimeV1;
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
     new Map<string, Rfc64PublicCatalogNativeSynchronizationEvidenceV1>();
   /** Bounded process-local terminal receiver failures, keyed by announced head. */
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
-  /** Serialize local author-head construction/CAS independently per exact scope. */
-  protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /** Process-local reverse candidates plus the monotonic binding fence. */
   protected readonly contextGraphBindingState = new ContextGraphBindingState();

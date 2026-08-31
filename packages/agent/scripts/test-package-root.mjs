@@ -257,6 +257,12 @@ const blockedRfc64Modules = [
   'swm-recovery-plan-v1.js',
   'swm-inventory-catalog-reconciler-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
+  'abort-v1.js',
+  'catalog-mutation-runtime-v1.js',
+  'catalog-runtime-v1.js',
+  'coalescing-supervisor-v1.js',
+  'supervisor-status-v1.js',
+  'serialized-scope-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;
 const emittedRfc64Modules = await listEmittedRfc64Modules();

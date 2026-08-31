@@ -177,7 +177,15 @@ export type {
 export type {
   ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
   ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
-} from './dkg-agent-rfc64-catalog-auto-publish.js';
+} from './dkg-agent-rfc64-swm-catalog-projection.js';
+export type {
+  Rfc64PublicCatalogAuthorRepairOutcomeV1,
+  Rfc64PublicCatalogAuthorRepairStatusV1,
+  Rfc64SwmCatalogProjectionSupervisorStatusV1,
+} from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+export type {
+  Rfc64PublicCatalogBootstrapStatusV1,
+} from './dkg-agent-rfc64-catalog-bootstrap.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';

@@ -11,6 +11,7 @@ import {
   type EvmAddressV1,
   type MemberRosterV1,
   type ProtocolRouter,
+  type SendOptions,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -36,6 +37,8 @@ import {
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import { mintRfc64CatalogNativeScopedReadCapabilityV1 } from
   '../src/rfc64/catalog-native-scoped-read-capability-v1-internal.js';
+import { Rfc64CatalogMutationCoordinatorV1 } from
+  '../src/rfc64/catalog-mutation-runtime-v1.js';
 import {
   RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2,
   RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2,
@@ -79,9 +82,18 @@ type RouterHandler = (
 class RecordingRouter {
   readonly handlers = new Map<string, RouterHandler>();
   readonly events: string[] = [];
-  readonly sends: Array<Readonly<{ protocolId: string; data: Uint8Array }>> = [];
+  readonly sends: Array<Readonly<{
+    peerId: string;
+    protocolId: string;
+    data: Uint8Array;
+    options?: SendOptions;
+  }>> = [];
   failRegistrationFor: string | undefined;
-  sendResponse: (protocolId: string) => Promise<Uint8Array> = async () => Uint8Array.of(0);
+  sendResponse: (
+    protocolId: string,
+    options: SendOptions | undefined,
+    peerId: string,
+  ) => Promise<Uint8Array> = async () => Uint8Array.of(0);
 
   register(protocolId: string, handler: RouterHandler): void {
     this.events.push(`register:${protocolId}`);
@@ -97,13 +109,14 @@ class RecordingRouter {
   }
 
   async send(
-    _peerId: string,
+    peerId: string,
     protocolId: string,
     data: Uint8Array,
+    options?: SendOptions,
   ): Promise<Uint8Array> {
     this.events.push(`send:${protocolId}`);
-    this.sends.push(Object.freeze({ protocolId, data }));
-    return this.sendResponse(protocolId);
+    this.sends.push(Object.freeze({ peerId, protocolId, data, options }));
+    return this.sendResponse(protocolId, options, peerId);
   }
 
   asProtocolRouter(): ProtocolRouter {
@@ -1017,6 +1030,45 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
+  it('propagates announcement cancellation and skips every later peer', async () => {
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+    });
+    const policy = acceptPolicy(service);
+    const head = announcement(policy.policyDigest);
+    const controller = new AbortController();
+    let markFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+    router.sendResponse = async (_protocolId, options, peerId) => {
+      expect(peerId).toBe('peer-blocked');
+      expect(options?.signal).toBe(controller.signal);
+      markFirstEntered();
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+          once: true,
+        });
+      });
+    };
+    service.start();
+
+    const announcing = service.announceCatalogHead({
+      announcement: head,
+      peers: ['peer-blocked', 'peer-must-not-run'],
+      signal: controller.signal,
+    });
+    await firstEntered;
+    controller.abort(new Error('repair closing'));
+    await expect(announcing).resolves.toMatchObject({
+      announcedPeers: [],
+      failedPeers: [{ peerId: 'peer-blocked', error: 'repair closing' }],
+    });
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['peer-blocked']);
+    await service.close();
+  });
+
   it('constructs one reconciler with frozen fetch-only capabilities and the configured timeout', async () => {
     const router = new RecordingRouter();
     let clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1> | undefined;
@@ -1270,6 +1322,76 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(failure).toBeInstanceOf(Rfc64CatalogReconciliationTerminalErrorV1);
     expect(failure).toMatchObject({ outcome: 'closed', terminalReason: null });
     expect(reconcileHead).not.toHaveBeenCalled();
+  });
+
+  it('serializes remote apply before the local-author convergence it triggers', async () => {
+    const coordinator = new Rfc64CatalogMutationCoordinatorV1();
+    const events: string[] = [];
+    const remoteEntered = deferred<void>();
+    const releaseRemote = deferred<void>();
+    let localProjection: Promise<void> | undefined;
+    const catalogScope: AuthorCatalogScopeV1 = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    };
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      runCatalogMutationExclusive: (scope, operation, signal) =>
+        coordinator.run(scope, operation, signal),
+      receiver: {
+        retryBackoffMs: 0,
+        onHeadApplied: () => {
+          localProjection = coordinator.run(
+            catalogScope,
+            async () => { events.push('local-converged'); },
+          );
+        },
+      },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead: async () => {
+          events.push('remote-enter');
+          remoteEntered.resolve(undefined);
+          await releaseRemote.promise;
+          events.push('remote-exit');
+          return 'applied';
+        },
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const current = announcement(policy.policyDigest);
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(Object.freeze({
+      announcement: current,
+      head: {} as never,
+    }));
+
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-a',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    });
+    await remoteEntered.promise;
+    expect(events).toEqual(['remote-enter']);
+    releaseRemote.resolve(undefined);
+    await synchronization;
+    await localProjection;
+    expect(events).toEqual(['remote-enter', 'remote-exit', 'local-converged']);
+    await service.close();
+    await coordinator.closeAndDrain();
   });
 
   it('selects the highest exact head, retains all matching providers, and fails over', async () => {

@@ -290,6 +290,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
+    this.rfc64CatalogMutationCoordinatorV1.reopen();
     if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
       this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
       return;
@@ -315,6 +316,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           this.config.rfc64CatalogExecutionPlan,
           contextGraphId,
         ),
+      runCatalogMutationExclusive: (scope, operation, signal) =>
+        this.rfc64CatalogMutationCoordinatorV1.run(scope, operation, signal),
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -325,6 +328,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
+        onHeadApplied: (announcement) => {
+          const authorAddress = announcement.authorAddress.toLowerCase();
+          if (!this.listLocalAgents().some(
+            ({ agentAddress }) => agentAddress.toLowerCase() === authorAddress,
+          )) return;
+          this.requestRfc64SwmCatalogProjectionV1({
+            contextGraphId: announcement.contextGraphId,
+            authorAddress: authorAddress as EvmAddressV1,
+            ctx,
+          });
+        },
         onError: (announcement, error) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
@@ -338,6 +352,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this.log.info(ctx, 'RFC-64 public author-catalog transport started');
   }
 
+  /** Fence receiver admission while keeping local authoring transports live. */
+  async closeRfc64PublicCatalogReceiverAdmissionV1(this: DKGAgent): Promise<void> {
+    await this.rfc64PublicCatalogServiceV1?.closeReceiverAdmissionAndDrain();
+  }
+
   /** Stop serving and drain in-flight receiver work. Idempotent + undefined-safe. */
   async closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
     const service = this.rfc64PublicCatalogServiceV1;
@@ -345,8 +364,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     try {
       await service?.close();
     } finally {
-      this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-      this.rfc64PublicCatalogReconciliationFailuresV1.clear();
+      try {
+        // Service close fences remote admission. The explicit coordinator then
+        // waits for any non-cooperative physical mutation that outlived an
+        // aborted caller before persistence can be released.
+        await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+      } finally {
+        this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+        this.rfc64PublicCatalogReconciliationFailuresV1.clear();
+      }
     }
   }
 

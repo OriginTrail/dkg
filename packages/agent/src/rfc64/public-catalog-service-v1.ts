@@ -148,6 +148,12 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly resolveContextGraphAuthority?: (
     contextGraphId: ContextGraphIdV1,
   ) => Rfc64CatalogAuthorityPolicyV1;
+  /** Share one mutation boundary with local catalog authoring for this scope. */
+  readonly runCatalogMutationExclusive?: <T>(
+    scope: Readonly<AuthorCatalogScopeV1>,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ) => Promise<T>;
 }
 
 export type Rfc64PublicCatalogHeadFetchClientV1 = Pick<
@@ -232,6 +238,7 @@ export interface AnnounceRfc64PublicCatalogHeadInputV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   /** Unique peer IDs; at most RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1. */
   readonly peers: readonly string[];
+  readonly signal?: AbortSignal;
 }
 
 export interface AnnounceRfc64PublicCatalogHeadResultV1 {
@@ -407,9 +414,21 @@ export class Rfc64PublicCatalogServiceV1 {
           if (lane === 'legacy' || lane === 'disabled') {
             throw new Error('RFC-64 catalog reconciliation is disabled for legacy-mode CG');
           }
-          return lane === 'shadow-stage'
-            ? stagingReconciler.reconcileHead(remotePeerId, announcement, signal)
-            : nativeReconciler.reconcileHead(remotePeerId, announcement, signal);
+          if (lane === 'shadow-stage') {
+            return stagingReconciler.reconcileHead(remotePeerId, announcement, signal);
+          }
+          const reconcile = () => nativeReconciler.reconcileHead(
+            remotePeerId,
+            announcement,
+            signal,
+          );
+          return options.runCatalogMutationExclusive === undefined
+            ? reconcile()
+            : options.runCatalogMutationExclusive(
+              this.#resolveTrustedCatalogScope(announcement),
+              reconcile,
+              signal,
+            );
         },
       };
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
@@ -494,6 +513,11 @@ export class Rfc64PublicCatalogServiceV1 {
     }
   }
 
+  /** Fence receiver scheduling and drain applied-head callbacks; keep authoring live. */
+  async closeReceiverAdmissionAndDrain(): Promise<void> {
+    await this.#receiver.close();
+  }
+
   /** Stop serving, drain in-flight receiver work, then release. Idempotent. */
   async close(): Promise<void> {
     if (this.#closed) return;
@@ -502,7 +526,7 @@ export class Rfc64PublicCatalogServiceV1 {
     try {
       // Keep both outbound transports live until the scheduler has drained.
       // Post-close availability callbacks are harmless: schedule() rejects them.
-      await this.#receiver.close();
+      await this.closeReceiverAdmissionAndDrain();
     } finally {
       this.#transport.stop();
       this.#currentHeadDiscoveryTransport?.stop();
@@ -653,7 +677,7 @@ export class Rfc64PublicCatalogServiceV1 {
       peers,
       this.#nativeTransport?.privateScopeBoundReadsConfigured === true,
     );
-    return this.#announceCatalogHeadSnapshot(announcement, peers);
+    return this.#announceCatalogHeadSnapshot(announcement, peers, input.signal);
   }
 
   /**
@@ -874,12 +898,18 @@ export class Rfc64PublicCatalogServiceV1 {
   async #announceCatalogHeadSnapshot(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     peers: readonly string[],
+    signal?: AbortSignal,
   ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
     const announcedPeers: string[] = [];
     const failedPeers: Array<{ peerId: string; error: string }> = [];
     for (const peerId of peers) {
+      if (signal?.aborted) break;
       try {
-        await this.#transport.announceCatalogHead(peerId, announcement, this.#sendOptions());
+        await this.#transport.announceCatalogHead(
+          peerId,
+          announcement,
+          this.#sendOptions(signal),
+        );
         announcedPeers.push(peerId);
       } catch (error) {
         failedPeers.push({

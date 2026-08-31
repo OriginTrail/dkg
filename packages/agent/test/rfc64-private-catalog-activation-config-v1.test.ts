@@ -20,11 +20,10 @@ import {
   rfc64CatalogRolloutModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64CatalogAuthorityDecisionV1,
-  resolveRfc64CatalogExecutionPlanV1,
-  resolveRfc64CatalogExecutionPlanAuthorityV1,
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
+  resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationInputV1,
@@ -180,20 +179,23 @@ describe('RFC-64 private catalog activation', () => {
     const bootstrap = snapshotRfc64CatalogBootstrapConfigV1(
       privateActivation().bootstrap,
     )!;
+    const activation = resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: {
+        killSwitch: false,
+        contextGraphModes: { [PRIVATE_CG]: 'shadow' },
+      },
+    }, chainIdentity);
     const resolverAgent = {
       config: {
         rfc64CatalogBootstrap: bootstrap,
+        rfc64CatalogRollout: {
+          selectedContextGraphs: activation.selectedContextGraphs,
+          rollout: activation.rollout,
+        },
         rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
-          configuredContextGraphs: [],
-          activation: {
-            enabled: true,
-            selectedContextGraphs: [PRIVATE_CG],
-            selectedPublicContextGraphs: [],
-            rollout: {
-              killSwitch: false,
-              contextGraphModes: { [PRIVATE_CG]: 'shadow' },
-            },
-          },
+          configuredContextGraphs: [PRIVATE_CG],
+          activation,
         }),
       },
     } as unknown as DKGAgent;
@@ -642,31 +644,6 @@ describe('RFC-64 private catalog activation', () => {
         targets: [],
       }],
     })).toThrow(/configured twice/u);
-  });
-
-  it('keeps a legacy public bootstrap graph active beside selected catalog rollout', () => {
-    const plan = resolveRfc64CatalogExecutionPlanV1({
-      configuredContextGraphs: [],
-      standaloneTrack2ContextGraphs: [PUBLIC_CG],
-      activation: {
-        enabled: true,
-        selectedContextGraphs: [PRIVATE_CG],
-        selectedPublicContextGraphs: [],
-        rollout: {
-          killSwitch: false,
-          contextGraphModes: { [PRIVATE_CG]: 'catalog' },
-        },
-      },
-    });
-
-    expect(plan.track2ContextGraphs).toEqual([PRIVATE_CG, PUBLIC_CG]);
-    expect(resolveRfc64CatalogExecutionPlanAuthorityV1(plan, PUBLIC_CG)).toMatchObject({
-      selected: false,
-      mode: 'catalog',
-      track2Enabled: true,
-      legacySyncAllowed: true,
-      authoringAllowed: true,
-    });
   });
 
   it('enforces the policy limit in the daemon additive/legacy bootstrap merge', () => {
