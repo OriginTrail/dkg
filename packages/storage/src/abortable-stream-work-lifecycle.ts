@@ -49,12 +49,18 @@ export function openLazyAbortableStream<T>(
         assertActive(signalScope.signal, options.deadlineAt, options.timeoutMessage);
         throw cause;
       }
-      assertActive(signalScope.signal, options.deadlineAt, options.timeoutMessage);
-      if (!isAsyncIterable<T>(source)) options.invalidSource();
-
+      if (!isAsyncIterable<T>(source)) {
+        assertActive(signalScope.signal, options.deadlineAt, options.timeoutMessage);
+        options.invalidSource();
+      }
       const iterator = source[Symbol.asyncIterator]();
       let complete = false;
       try {
+        // Once open() has produced a valid stream, its iterator must belong to
+        // this cleanup scope before observing cancellation again. Otherwise a
+        // cancellation delivered between promise settlement and this
+        // continuation can strand the acquired backend resource.
+        assertActive(signalScope.signal, options.deadlineAt, options.timeoutMessage);
         while (true) {
           assertActive(signalScope.signal, options.deadlineAt, options.timeoutMessage);
           let next: IteratorResult<T>;

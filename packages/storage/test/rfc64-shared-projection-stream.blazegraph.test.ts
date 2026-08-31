@@ -30,6 +30,7 @@ describe('Blazegraph RFC-64 shared-projection stream', () => {
     }) as typeof fetch;
     const store = new BlazegraphStore('http://blazegraph.invalid/sparql', { timeout: 1_000 });
 
+    expect(store.rfc64SharedProjectionStreamCertifiedV1).toBe(true);
     const source = await store.rfc64SharedProjectionStreamV1(OPERATION, {
       byteCeiling: 4096,
     });
@@ -63,6 +64,35 @@ describe('Blazegraph RFC-64 shared-projection stream', () => {
     });
 
     expect(await collect(result.bytes)).toEqual(fixture.projectionBytes);
+  });
+
+  it('keeps Blazegraph UCHAR wire expansion separate from canonical projection ceilings', async () => {
+    const escapedCodePoint = String.raw`\u00E9`;
+    const canonicalSubject = `urn:${'é'.repeat(128)}`;
+    const fixture = createRfc64SharedProjectionTestFixture({
+      triples: [{
+        subject: canonicalSubject,
+        predicate: 'urn:p',
+        object: '"alpha"',
+      }],
+    });
+    const wireLine = `<urn:${escapedCodePoint.repeat(128)}> <urn:p> "alpha" .\n`;
+    const canonicalCeiling = fixture.projectionBytes.byteLength;
+    const wireBytes = new TextEncoder().encode(wireLine);
+    const operation = Object.freeze({
+      ...fixture.operation,
+      signedByteCeiling: canonicalCeiling,
+      protocolByteCeiling: canonicalCeiling,
+    });
+    expect(wireBytes.byteLength).toBeGreaterThan(canonicalCeiling);
+    globalThis.fetch = (async () => new Response(wireBytes, { status: 200 })) as typeof fetch;
+    const store = new BlazegraphStore('http://blazegraph.invalid/sparql');
+
+    const source = await store.rfc64SharedProjectionStreamV1(operation, {
+      byteCeiling: canonicalCeiling,
+    });
+
+    expect(await collect(source)).toEqual(fixture.projectionBytes);
   });
 
   it('bounds and cancels an oversized non-2xx response body', async () => {

@@ -231,6 +231,7 @@ export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
+  readonly rfc64SharedProjectionStreamCertifiedV1 = true as const;
   readonly rfc64SharedProjectionStreamV1;
   private readonly url: string;
   private readonly operationTimeoutMs: number;
@@ -376,6 +377,25 @@ export class BlazegraphStore implements TripleStore {
       ...options,
       source: options?.source ?? 'blazegraph.deleteByPattern.countBefore',
     });
+    await this.applyDeleteByPattern(pattern, options);
+    const after = await this.countQuads(pattern.graph, {
+      ...options,
+      source: options?.source ?? 'blazegraph.deleteByPattern.countAfter',
+    });
+    return Math.max(0, before - after);
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<DKGQuad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    await this.applyDeleteByPattern(pattern, options);
+  }
+
+  private async applyDeleteByPattern(
+    pattern: Partial<DKGQuad>,
+    options?: QueryOptions,
+  ): Promise<void> {
     const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
     const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
     const o = pattern.object ? formatTerm(pattern.object) : '?o';
@@ -395,11 +415,6 @@ export class BlazegraphStore implements TripleStore {
         'deleteByPattern',
       );
     }
-    const after = await this.countQuads(pattern.graph, {
-      ...options,
-      source: options?.source ?? 'blazegraph.deleteByPattern.countAfter',
-    });
-    return Math.max(0, before - after);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -562,10 +577,13 @@ export class BlazegraphStore implements TripleStore {
     storeOperation?: StoreOperation,
   ): Promise<QueryResult> {
     const trimmed = sparql.trim();
-    const classified = classifySparqlOperation(trimmed);
-    const isAsk = classified.kind === 'read' && classified.form === 'ASK';
-    const isConstruct = classified.kind === 'read'
-      && (classified.form === 'CONSTRUCT' || classified.form === 'DESCRIBE');
+    // PREFIX / BASE prologues precede the query form. Classify through the
+    // shared scanner so graph-producing queries still negotiate N-Quads
+    // instead of being sent with the SELECT/ASK JSON Accept header.
+    const operation = classifySparqlOperation(trimmed);
+    const isAsk = operation.kind === 'read' && operation.form === 'ASK';
+    const isConstruct = operation.kind === 'read'
+      && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     return this.runStoreWork(
       storeOperation ?? (isConstruct ? 'construct' : 'query'),
       options,

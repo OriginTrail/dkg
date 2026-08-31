@@ -59,6 +59,7 @@ import {
 } from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
+import { createVmReconcilePeerTopology } from '../src/vm-reconcile-peer-topology.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -754,7 +755,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       nextRetryAt: Date.now() + 60_000,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
     negativeKeysByCg.set(localCgId, new Set([recentKey]));
     fetchCooldown.set(localCgId, { startedAt: Date.now(), owner: Symbol(localCgId) });
@@ -993,13 +994,27 @@ describe('Phase D - VM reconcile damping', () => {
   });
 
   it('rehydrates a generation-gated miss after restart without repeating the scan', async () => {
-    const durable = new Map<string, VmReconcileNegativeRecord>();
+    type LegacyVmReconcileNegativeRecord = Omit<
+      VmReconcileNegativeRecord,
+      'peerTopology' | 'cleanMissPeerIds'
+    >;
+    const durable = new Map<string, LegacyVmReconcileNegativeRecord>();
     const subscriptionStore: ContextGraphSubscriptionStore = {
       loadAll: async () => [],
       save: async () => undefined,
       delete: async () => undefined,
       loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
-      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
+      saveVmReconcileNegative: async (record) => {
+        durable.set(record.cacheKey, {
+          cacheKey: record.cacheKey,
+          localCgId: record.localCgId,
+          failures: record.failures,
+          nextRetryAt: record.nextRetryAt,
+          swmGen: record.swmGen,
+          candidateNamespaces: record.candidateNamespaces,
+          peerTopologyKey: record.peerTopologyKey,
+        });
+      },
       deleteVmReconcileNegative: async (key) => { durable.delete(key); },
       deleteVmReconcileNegativesForContextGraph: async (cg) => {
         for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
@@ -1011,6 +1026,10 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
     await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
     expect(durable.size).toBe(1);
+    const savedLegacyRecord = [...durable.values()][0]!;
+    expect(savedLegacyRecord.peerTopologyKey).toEqual(expect.any(String));
+    expect('peerTopology' in savedLegacyRecord).toBe(false);
+    expect('cleanMissPeerIds' in savedLegacyRecord).toBe(false);
 
     await agent!.stop();
     agent = null;
@@ -1028,6 +1047,85 @@ describe('Phase D - VM reconcile damping', () => {
     await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
     expect(expensiveScans).toBe(0);
     expect(fetch.calls).toHaveLength(0);
+  });
+
+  it('rehydrates clean-miss evidence and reuses it after a peer disappears', async () => {
+    const durable = new Map<string, VmReconcileNegativeRecord>();
+    let durableLoads = 0;
+    let durableSaves = 0;
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (key) => {
+        durableLoads += 1;
+        const record = durable.get(key);
+        return record ? structuredClone(record) : null;
+      },
+      saveVmReconcileNegative: async (record) => {
+        durableSaves += 1;
+        durable.set(record.cacheKey, structuredClone(record));
+      },
+      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
+      deleteVmReconcileNegativesForContextGraph: async (cg) => {
+        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
+      },
+    };
+    const localCgId = '59';
+    const onChainCgId = 59n;
+    const kaId = 9059n;
+    let connectedPeers = ['peer-stable', 'peer-flaky'];
+    let internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+    const provenPeers = ['peer-stable', 'peer-flaky'];
+    const initialFetch = recorder(async () => ({
+      catchup: emptyCatchupStats(),
+      cleanMissPeerIds: [provenPeers.shift()!],
+    }));
+    (internals as any).syncVmRecoveryFromConnectedPeers = initialFetch;
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(initialFetch.calls).toHaveLength(2);
+    expect(durableSaves).toBe(1);
+    expect(durable.size).toBe(1);
+    const savedRecord = [...durable.values()][0]!;
+    expect(savedRecord.peerTopology).toMatchObject({
+      kind: 'readable',
+      peers: expect.arrayContaining([
+        { peerId: 'peer-stable', core: false },
+        { peerId: 'peer-flaky', core: false },
+      ]),
+    });
+    expect(savedRecord.cleanMissPeerIds).toEqual(['peer-stable', 'peer-flaky']);
+
+    const loadsBeforeRestart = durableLoads;
+    await agent!.stop();
+    agent = null;
+    connectedPeers = ['peer-stable'];
+    internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+    const restartedFetch = recorder(async () => ({
+      catchup: emptyCatchupStats(),
+      cleanMissPeerIds: ['peer-stable'],
+    }));
+    (internals as any).syncVmRecoveryFromConnectedPeers = restartedFetch;
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans += 1;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(durableLoads).toBeGreaterThan(loadsBeforeRestart);
+    expect(restartedFetch.calls).toHaveLength(0);
+    expect(expensiveScans).toBe(0);
   });
 
   it('rescans after restart when an incomplete operation payload appears only in a per-KA child graph', async () => {
@@ -1142,6 +1240,111 @@ describe('Phase D - VM reconcile damping', () => {
     // verdict. Peer topology gates the FETCH, not the scan.
     expect(fetch.calls).toHaveLength(3);
     expect(expensiveScans).toBe(0);
+  });
+
+  it.each([
+    ['preferred peer', 154n, 'peer-new', false],
+    ['privacy mode', 155n, 'peer-stable', true],
+  ] as const)(
+    'refetches after a cached miss when the %s changes',
+    async (_field, onChainCgId, preferredPeerId, privateOnly) => {
+      const internals = await boot();
+      const localCgId = onChainCgId.toString();
+      registerUnmatchedKC(internals.chain, 9_000n + onChainCgId, onChainCgId);
+      let peerTopology = createVmReconcilePeerTopology({
+        preferredPeerId: 'peer-stable',
+        privateOnly: false,
+        peers: [{ peerId: 'peer-stable', core: false }],
+      });
+      (internals as any).vmReconcilePeerTopology = async () => peerTopology;
+      const fetch = recorder(async () => emptyCatchupStats());
+      (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+      await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+        .resolves.toEqual({ status: 'pending' });
+      const initialFetches = fetch.calls.length;
+      expect(initialFetches).toBeGreaterThan(0);
+
+      peerTopology = createVmReconcilePeerTopology({
+        preferredPeerId,
+        privateOnly,
+        peers: [{ peerId: 'peer-stable', core: false }],
+      });
+      await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+        .resolves.toEqual({ status: 'pending' });
+      expect(fetch.calls.length).toBeGreaterThan(initialFetches);
+    },
+  );
+
+  it('reuses a negative cache entry when a previously checked peer disappears', async () => {
+    const internals = await boot();
+    const onChainCgId = 58n;
+    registerUnmatchedKC(internals.chain, 9018n, onChainCgId);
+
+    let connectedPeers = ['peer-stable', 'peer-flaky'];
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+
+    const provenPeers = ['peer-stable', 'peer-flaky'];
+    const fetch = recorder(async () => ({
+      catchup: emptyCatchupStats(),
+      cleanMissPeerIds: [provenPeers.shift() ?? 'peer-stable'],
+    }));
+    (internals as any).syncVmRecoveryFromConnectedPeers = fetch;
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    const fetchesAfterFirstMiss = fetch.calls.length;
+    expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
+    expect(expensiveScans).toBeGreaterThan(0);
+
+    expensiveScans = 0;
+    connectedPeers = ['peer-stable'];
+
+    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
+    expect(expensiveScans).toBe(0);
+  });
+
+  it('rechecks a remaining peer that was skipped before another clean peer disappeared', async () => {
+    const internals = await boot();
+    const onChainCgId = 60n;
+    registerUnmatchedKC(internals.chain, 9020n, onChainCgId);
+
+    let connectedPeers = ['peer-skipped', 'peer-clean'];
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+    let fetchCalls = 0;
+    let snapshotAvailable = false;
+    const fetch = recorder(async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) {
+        return { catchup: noProtocolCatchupStats(), cleanMissPeerIds: [] };
+      }
+      if (fetchCalls === 2) {
+        return { catchup: emptyCatchupStats(), cleanMissPeerIds: ['peer-clean'] };
+      }
+      snapshotAvailable = true;
+      return { catchup: emptyCatchupStats(), cleanMissPeerIds: ['peer-skipped'] };
+    });
+    (internals as any).syncVmRecoveryFromConnectedPeers = fetch;
+    (internals as any).getOrCreateFinalizationHandler = () => ({
+      handleChainReconciledKC: async () => snapshotAvailable ? 'promoted' : 'no-swm',
+    });
+
+    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(fetch.calls).toHaveLength(2);
+
+    connectedPeers = ['peer-skipped'];
+    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch.calls).toHaveLength(3);
   });
 
   it('reuses a negative cache entry when connected peers only reorder', async () => {
@@ -1598,7 +1801,7 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).recordVmReconcileNegativeCache(keyA, '61', {
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: 'unreadable',
+      peerTopology: { kind: 'unreadable' },
     });
 
     await expect((internals as any).shouldDeferVmReconcileByNegativeCache(keyB, '62')).resolves.toBe(false);
@@ -1606,7 +1809,7 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).recordVmReconcileNegativeCache(keyB, '62', {
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: 'unreadable',
+      peerTopology: { kind: 'unreadable' },
     });
 
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(2);
@@ -1880,7 +2083,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: Date.now() + 60_000,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
     (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
       handleChainReconciledKC: recorder(async () => 'stale-target'),
@@ -1900,7 +2103,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: number;
       swmGen: string;
       candidateNamespaces: unknown[];
-      peerTopologyKey: string;
+      peerTopology: { kind: 'unreadable' };
     }>;
     const now = Date.now();
     const cacheKey = 'retry-history-key';
@@ -1911,7 +2114,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: now - 1,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     } as any);
 
     (internals as any).pruneVmReconcileState(now);
@@ -1921,7 +2124,7 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).recordVmReconcileNegativeCache(cacheKey, 'retry-cg', {
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
 
     expect(negativeCache.get(cacheKey)?.failures).toBe(2);
@@ -1966,7 +2169,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: number;
       swmGen: string;
       candidateNamespaces: unknown[];
-      peerTopologyKey: string;
+      peerTopology: { kind: 'unreadable' };
     }>;
     const fetchCooldown = (internals as any).vmReconcileFetchCooldowns as Map<
       string,
@@ -1986,7 +2189,7 @@ describe('Phase D - VM reconcile damping', () => {
         nextRetryAt: now + 60_000,
         swmGen: 'empty:0',
         candidateNamespaces: [],
-        peerTopologyKey: '',
+        peerTopology: { kind: 'unreadable' },
       });
     }
     fetchCooldown.set('expired-cg', {
@@ -2014,7 +2217,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: now + 60_000,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('cleanup-cg', 'cleanup-cache');
     (internals as any).markVmReconcileNegativeCacheHydrated('cleanup-hydrated', 'cleanup-cg');
@@ -2042,7 +2245,7 @@ describe('Phase D - VM reconcile damping', () => {
       nextRetryAt: now + 60_000,
       swmGen: 'empty:0',
       candidateNamespaces: [],
-      peerTopologyKey: '',
+      peerTopology: { kind: 'unreadable' },
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('hosted-cg', 'hosted-cache');
     (internals as any).markVmReconcileNegativeCacheHydrated('hosted-hydrated', 'hosted-cg');

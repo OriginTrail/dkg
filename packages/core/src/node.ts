@@ -25,6 +25,13 @@ import { readRelayReservations, readConnectionStreams } from './relay-internal-s
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
 import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
+import { isPublicLikeAddress } from './network/address-policy.js';
+import type { ConfiguredRelayTarget } from './network/relay-target.js';
+
+export {
+  isLocalOrInternalHostname,
+  isPublicLikeAddress,
+} from './network/address-policy.js';
 
 export interface DKGServices extends Record<string, unknown> {
   dht: KadDHT;
@@ -568,47 +575,6 @@ interface RelayTarget {
  * Circuit-relay addresses are checked separately by callers because the
  * "peer record is dialable" signal merges both classes.
  */
-export function isLocalOrInternalHostname(host: string): boolean {
-  if (typeof host !== 'string' || host.length === 0) return true;
-  const h = host.toLowerCase();
-  if (h === 'localhost') return true;
-  if (h.endsWith('.local') || h.endsWith('.localhost')) return true;
-  if (h.endsWith('.test') || h.endsWith('.example')) return true;
-  if (h.endsWith('.invalid') || h.endsWith('.localdomain')) return true;
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(h)) return true;
-  if (/^\[?[0-9a-f:]+\]?$/.test(h) && h.includes(':')) return true;
-  if (!h.includes('.')) return true;
-  return false;
-}
-
-export function isPublicLikeAddress(addr: string): boolean {
-  const dnsMatch = addr.match(/^\/(?:dns|dns4|dns6|dnsaddr)\/([^/]+)\//);
-  if (dnsMatch) return !isLocalOrInternalHostname(dnsMatch[1]);
-  const ipv4 = addr.match(/^\/ip4\/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\//);
-  if (ipv4) {
-    const o = ipv4[1].split('.').map(Number);
-    if (o.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
-    if (o[0] === 0 || o[0] === 127) return false;
-    if (o[0] === 10) return false;
-    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return false;
-    if (o[0] === 192 && o[1] === 168) return false;
-    if (o[0] === 169 && o[1] === 254) return false;
-    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return false;
-    if (o[0] >= 224) return false;
-    return true;
-  }
-  const ipv6 = addr.match(/^\/ip6\/([^/]+)\//);
-  if (ipv6) {
-    const ip = ipv6[1].toLowerCase();
-    if (ip === '::' || ip === '::1') return false;
-    if (ip.startsWith('fe80')) return false;
-    if (/^f[cd]/.test(ip)) return false;
-    if (ip.startsWith('ff')) return false;
-    return true;
-  }
-  return false;
-}
-
 /**
  * True when the node advertises at least one DIRECT (non-circuit) public
  * self-address — i.e. peers can dial it without a relay hop. Such a node does
@@ -1915,6 +1881,18 @@ export class DKGNode {
 
   get isStarted(): boolean {
     return this.node !== null;
+  }
+
+  /**
+   * Relay candidates after the node startup pipeline has parsed addresses,
+   * canonicalized peer ids, removed self references, and merged duplicates.
+   * Consumers must use this snapshot rather than reinterpret raw relayPeers.
+   */
+  getConfiguredRelayTargets(): ConfiguredRelayTarget[] {
+    return this.relayTargets.map(({ peerId, addrs }) => ({
+      peerId: peerId.toString(),
+      addresses: addrs.map((addr) => addr.toString()),
+    }));
   }
 
   /**

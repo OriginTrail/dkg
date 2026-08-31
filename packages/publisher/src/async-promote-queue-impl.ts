@@ -17,7 +17,10 @@
  * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md` (plan).
  */
 
-import { type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
@@ -83,15 +86,21 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    */
   private static readonly mutationQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_MAX_RETRIES = 5;
-  private static readonly DEFAULT_LEASE_MS = 5 * 60 * 1000;
+  // A managed-store recovery can legitimately reject every heartbeat and
+  // bookkeeping write for several minutes. Keep the lease longer than the
+  // worker's bounded bookkeeping-retry window so an in-process worker is not
+  // misclassified as a crashed partial promote while it is still trying to
+  // persist the outcome.
+  private static readonly DEFAULT_LEASE_MS = 15 * 60 * 1000;
 
   private readonly graphUri: string;
   private readonly maxRetries: number;
-  private readonly leaseMs: number;
+  readonly effectiveLeaseMs: number;
   private readonly now: () => number;
   private readonly idGenerator: () => string;
   private readonly claimTokenGenerator: () => string;
   private readonly backoff: (attemptCount: number) => number;
+  private workScheduler?: { onWorkAvailable(): void };
   private paused = false;
   private graphEnsured = false;
 
@@ -101,7 +110,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_PROMOTE_CONTROL_GRAPH_URI;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncPromoteQueue.DEFAULT_MAX_RETRIES;
-    this.leaseMs = config.leaseMs ?? TripleStoreAsyncPromoteQueue.DEFAULT_LEASE_MS;
+    this.effectiveLeaseMs = config.leaseMs ?? TripleStoreAsyncPromoteQueue.DEFAULT_LEASE_MS;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.claimTokenGenerator = config.claimTokenGenerator ?? (() => crypto.randomUUID());
@@ -115,7 +124,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   async enqueue(request: PromoteRequest): Promise<string> {
     this.validateRequest(request);
     const requestSnapshot = this.snapshotRequest(request);
-    return this.withMutationLock(async () => {
+    const jobId = await this.withMutationLock(async () => {
       await this.ensureGraph();
       await this.assertNoActiveConflict(this.conflictLookupForRequest(requestSnapshot));
 
@@ -134,6 +143,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       await this.writeJob(job);
       return jobId;
     });
+    this.notifyWorkAvailable();
+    return jobId;
   }
 
   async getStatus(jobId: string): Promise<PromoteJob | null> {
@@ -229,6 +240,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       };
       await this.writeJob(recovered);
     });
+    this.notifyWorkAvailable();
   }
 
   // ===========================================================================
@@ -245,10 +257,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
       const now = this.now();
       await this.reconcileExpiredRunning(now);
-      const candidates = (await this.listUnlocked(
+      const jobs = await this.listUnlocked(
         {},
         'publisher.asyncPromote.claimNext.candidates',
-      )).filter((j) => {
+      );
+      const candidates = jobs.filter((j) => {
         if (j.state === 'queued') return true;
         if (j.state === 'failed_retrying' && (j.attempt.nextRetryAt ?? 0) <= now) return true;
         return false;
@@ -259,10 +272,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         claimableCandidates.push(candidate);
       }
 
-      const running = await this.listUnlocked(
-        { state: ['running'] },
-        'publisher.asyncPromote.claimNext.running',
-      );
+      // The candidates read is already an all-jobs snapshot under the queue's
+      // mutation lock. Derive running lanes from it instead of issuing a
+      // second full control-graph query on every worker poll.
+      const running = jobs.filter((job) => job.state === 'running');
       const eligible = claimableCandidates.filter((candidate) =>
         !running.some((active) => active.jobId !== candidate.jobId && this.jobsShareClaimLane(active, candidate)),
       );
@@ -279,7 +292,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         lease: {
           workerId,
           acquiredAt: now,
-          expiresAt: now + this.leaseMs,
+          expiresAt: now + this.effectiveLeaseMs,
           lastHeartbeatAt: now,
           claimToken,
         },
@@ -309,7 +322,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         updatedAt: now,
         lease: {
           ...job.lease!,
-          expiresAt: now + this.leaseMs,
+          expiresAt: now + this.effectiveLeaseMs,
           lastHeartbeatAt: now,
         },
       };
@@ -510,7 +523,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
   async resume(): Promise<void> {
     this.paused = false;
+    this.notifyWorkAvailable();
   }
+
+  readonly workScheduling = {
+    attachScheduler: (scheduler: { onWorkAvailable(): void }): (() => void) => {
+      this.workScheduler = scheduler;
+      return () => {
+        if (this.workScheduler === scheduler) this.workScheduler = undefined;
+      };
+    },
+  };
 
   async getStats(): Promise<PromoteStats> {
     return this.withMutationLock(async () => {
@@ -529,6 +552,16 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   // ===========================================================================
   // Internals
   // ===========================================================================
+
+  private notifyWorkAvailable(): void {
+    try {
+      this.workScheduler?.onWorkAvailable();
+    } catch {
+      // Queue persistence has already committed. A best-effort in-process
+      // wake must never change the enqueue/recover result; periodic polling
+      // remains the durable fallback.
+    }
+  }
 
   private validateRequest(request: PromoteRequest): void {
     if (!request.contextGraphId || typeof request.contextGraphId !== 'string') {
@@ -663,7 +696,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   // All of a job's triples live under jobSubject(jobId) in the single control-plane
   // graph, so this provably cannot touch another job or another graph.
   private async deleteJob(jobId: string): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(jobId), graph: this.graphUri });
+    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri });
     await this.store.flush?.();
   }
 

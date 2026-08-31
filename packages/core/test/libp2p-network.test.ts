@@ -3,6 +3,10 @@ import { multiaddr } from '@multiformats/multiaddr';
 import { DKGNode } from '../src/node.js';
 import { LibP2PNetwork } from '../src/network/libp2p-network.js';
 
+const CONNECT_TARGET = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const CONFIGURED_RELAY = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const CONFIGURED_CIRCUIT = `${CONFIGURED_RELAY}/p2p-circuit/p2p/${CONNECT_TARGET}`;
+
 /**
  * RFC 07 §5 — `LibP2PNetwork` is a thin facade over `DKGNode.libp2p`.
  * These tests exercise it against two real libp2p instances rather
@@ -137,6 +141,55 @@ describe('LibP2PNetwork', () => {
     await b.start();
 
     await expect(netA.addKnownAddresses(b.peerId, [])).resolves.toBeUndefined();
+  });
+
+  it('connectPeer forwards the configured relay snapshot and caller options', async () => {
+    const dialed: string[] = [];
+    const merged: Array<{ peerId: string; addresses: string[] }> = [];
+    const logs: string[] = [];
+    let connected = false;
+    let relaySnapshotReads = 0;
+    const facadeNode = {
+      libp2p: {
+        getConnections: () => connected
+          ? [{ remotePeer: { toString: () => CONNECT_TARGET } }]
+          : [],
+        dial: async (target: { toString(): string }) => {
+          const address = target.toString();
+          dialed.push(address);
+          if (address === CONFIGURED_CIRCUIT) connected = true;
+        },
+        peerStore: {
+          merge: async (
+            peerId: { toString(): string },
+            update: { multiaddrs: Array<{ toString(): string }> },
+          ) => {
+            merged.push({
+              peerId: peerId.toString(),
+              addresses: update.multiaddrs.map((address) => address.toString()),
+            });
+          },
+        },
+      },
+      getConfiguredRelayTargets: () => {
+        relaySnapshotReads += 1;
+        return [{
+          peerId: CONFIGURED_RELAY.split('/').at(-1)!,
+          addresses: [CONFIGURED_RELAY],
+        }];
+      },
+    } as unknown as DKGNode;
+    const network = new LibP2PNetwork(facadeNode);
+
+    await network.connectPeer(CONNECT_TARGET, [], { log: (message) => logs.push(message) });
+
+    expect(relaySnapshotReads).toBe(1);
+    expect(dialed).toEqual([CONFIGURED_RELAY, CONFIGURED_CIRCUIT]);
+    expect(merged).toEqual([{ peerId: CONNECT_TARGET, addresses: [CONFIGURED_CIRCUIT] }]);
+    expect(logs).toEqual([
+      `Preconnecting relay: ${CONFIGURED_RELAY}`,
+      `Dialing circuit: ${CONFIGURED_CIRCUIT}`,
+    ]);
   });
 
   it('handle aborts the stream when an async handler rejects (Codex PR #494)', async () => {
