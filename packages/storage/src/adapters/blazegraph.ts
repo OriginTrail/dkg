@@ -49,6 +49,7 @@ import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import type { StoreOperation, StoreOperationOutcome } from '../store-operation-outcome.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
+  RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1,
   type Rfc64HttpProjectionRequestV1,
 } from '../rfc64-http-shared-projection-runner.js';
 
@@ -244,14 +245,7 @@ export class BlazegraphStore implements TripleStore {
       responseError: (status, excerpt) => new Error(
         `Blazegraph construct failed (${status}): ${excerpt}`,
       ),
-    }, {
-      accept: 'text/x-nquads, application/n-quads',
-      diagnosticByteCeiling: (projectionByteCeiling) => Math.min(
-        projectionByteCeiling,
-        64 * 1024,
-      ),
-      managedOxigraph: false,
-    });
+    }, RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1);
   }
 
   private runStreamingConstruct<T>(

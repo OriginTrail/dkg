@@ -87,7 +87,7 @@ import {
 } from '../managed-oxigraph-runtime-store.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
-  managedOxigraphDiagnosticByteCeilingV1,
+  RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1,
   type Rfc64HttpProjectionRequestV1,
 } from '../rfc64-http-shared-projection-runner.js';
 import {
@@ -344,11 +344,7 @@ export class SparqlHttpStore implements TripleStore {
           status,
           excerpt,
         ),
-      }, {
-        accept: 'application/n-quads, text/n-quads',
-        diagnosticByteCeiling: managedOxigraphDiagnosticByteCeilingV1,
-        managedOxigraph: true,
-      });
+      }, RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1);
     }
   }
 

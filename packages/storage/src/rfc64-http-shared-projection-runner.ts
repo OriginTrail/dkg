@@ -33,25 +33,35 @@ export interface Rfc64HttpProjectionTransportV1 {
   ): Error;
 }
 
-export interface Rfc64HttpProjectionPolicyV1 {
-  /** Backend-specific media-type preference, retained byte-for-byte. */
+export const RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1 = Object.freeze({
+  backend: 'blazegraph' as const,
+});
+
+export const RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1 = Object.freeze({
+  backend: 'managed-oxigraph' as const,
+});
+
+export type Rfc64HttpProjectionResponseStrategyV1 =
+  | typeof RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1
+  | typeof RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1;
+
+interface ResolvedRfc64HttpProjectionResponseStrategyV1 {
   readonly accept: string;
-  /** Preserve the adapter's established bounded diagnostic allowance. */
   readonly diagnosticByteCeiling: (projectionByteCeiling: number) => number;
-  /** Detect the cancellation trailer emitted by DKG-managed Oxigraph. */
   readonly managedOxigraph: boolean;
 }
 
 /**
  * Install the common RFC-64 HTTP projection workflow over a scheduler-owning
- * streaming CONSTRUCT transport. Adapters supply only transport, media type,
- * error construction, and backend response policy; response validation,
+ * streaming CONSTRUCT transport. Adapters supply only transport, typed error
+ * construction, and one named backend response strategy; response validation,
  * bounded diagnostics, cancellation, and spooling have one lifecycle owner.
  */
 export function createRfc64HttpSharedProjectionRunnerV1(
   transport: Rfc64HttpProjectionTransportV1,
-  policy: Rfc64HttpProjectionPolicyV1,
+  responseStrategy: Rfc64HttpProjectionResponseStrategyV1,
 ): Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1'] {
+  const policy = resolveRfc64HttpProjectionResponseStrategyV1(responseStrategy);
   return (
     operation: Rfc64SharedProjectionStreamOperationV1,
     options,
@@ -91,7 +101,24 @@ export function createRfc64HttpSharedProjectionRunnerV1(
   });
 }
 
-/** Independent allowance used by managed Oxigraph to retain timeout evidence. */
-export function managedOxigraphDiagnosticByteCeilingV1(): number {
-  return MAX_DIAGNOSTIC_RESPONSE_BYTES;
+function resolveRfc64HttpProjectionResponseStrategyV1(
+  strategy: Rfc64HttpProjectionResponseStrategyV1,
+): ResolvedRfc64HttpProjectionResponseStrategyV1 {
+  switch (strategy.backend) {
+    case 'blazegraph':
+      return Object.freeze({
+        accept: 'text/x-nquads, application/n-quads',
+        diagnosticByteCeiling: (projectionByteCeiling: number) => Math.min(
+          projectionByteCeiling,
+          MAX_DIAGNOSTIC_RESPONSE_BYTES,
+        ),
+        managedOxigraph: false,
+      });
+    case 'managed-oxigraph':
+      return Object.freeze({
+        accept: 'application/n-quads, text/n-quads',
+        diagnosticByteCeiling: () => MAX_DIAGNOSTIC_RESPONSE_BYTES,
+        managedOxigraph: true,
+      });
+  }
 }
