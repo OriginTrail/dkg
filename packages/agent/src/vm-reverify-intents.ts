@@ -105,6 +105,15 @@ export type VmReverifyRetryReason =
   | 'context-graph-not-held'
   /** Evidence was fine; nobody reachable had the version. */
   | 'unresolved'
+  /**
+   * Unresolvable BY CONFIGURATION: the asset needs its version-scoped shared
+   * working memory recovered before it can be promoted, and the durable plane
+   * that carries SWM is switched off (ADR-W2R-10). Deferred forever rather than
+   * parked — an operator who turns the durable plane back on must find the work
+   * waiting, and `no-peer-has-version` would be a lie about a node that never
+   * got to ask a peer.
+   */
+  | 'durable-sync-disabled'
   /** An error this table does not recognise. Treated as transient, loudly. */
   | 'unexpected-error';
 
@@ -136,6 +145,12 @@ export interface VmReverifyTransitionInput {
   observedBlock: number;
   /** 1-based index of the attempt that just completed. */
   attemptNumber: number;
+  /**
+   * Whether the SWM recovery this repair depends on is available at all
+   * (ADR-W2R-10 gates it on `durableSyncEnabled`). False turns an `unresolved`
+   * item into an indefinite deferral instead of a countdown to a park.
+   */
+  swmRecoveryAvailable?: boolean;
   /** When this generation first attempted anything; absent before attempt 1. */
   firstAttemptAt?: number;
   now: number;
@@ -221,6 +236,14 @@ export function planTransition(input: VmReverifyTransitionInput): VmReverifyTran
     // unreachable peer and would hide a genuine protocol gap.
     if (kind === 'root-removed') {
       return { action: 'abandon', reason: 'version-regression-unsupported' };
+    }
+    // BEFORE the park, deliberately. With the durable plane off there is no
+    // route by which this could ever resolve, so counting down to
+    // `no-peer-has-version` would blame the network for a local switch and
+    // would bury the work under a terminal state an operator has no reason to
+    // go looking for.
+    if (input.swmRecoveryAvailable === false) {
+      return retry('durable-sync-disabled', 'evidence-unavailable', attemptNumber);
     }
     if (firstAttemptAt !== undefined && now - firstAttemptAt >= parkAfterMs) {
       return { action: 'abandon', reason: 'no-peer-has-version' };

@@ -119,6 +119,8 @@ export interface VmReverifyRunSummary {
   retried: number;
   abandoned: number;
   left: number;
+  /** Whole-Context-Graph SWM recoveries paired with an unresolved item. */
+  swmRecoveries: number;
   /** Aggregate peer contact across the run's calls. */
   peerAttempts: number;
   networkAttempted: boolean;
@@ -145,6 +147,29 @@ export interface VmReverifyWorkerDependencies {
     uals: readonly string[],
     options: { inspectOnly?: boolean; admissionPriority?: number },
   ): Promise<ContextGraphAssetFetchResult>;
+  /**
+   * Recover a Context Graph's shared working memory from a peer (ADR-W2R-10).
+   *
+   * The exact-asset fetch transfers data and metadata only — it carries no SWM
+   * — but chain-promotion refuses to materialize until the local version-scoped
+   * SWM projection matches the head count and the chain root. For a host-only
+   * core nothing else supplies that: the durable/VM scope is the explicit
+   * `syncContextGraphs` list, the finalization SWM slice is member gossip, and
+   * the whole-CG recovery's only other caller is the operator CLI route. So
+   * without this pairing the drain detects perfectly and repairs nothing for
+   * exactly the population the feature exists for.
+   */
+  recoverContextGraphSwm?(localCgId: string): Promise<void>;
+  /**
+   * Whether the durable plane that carries SWM is switched on.
+   *
+   * Checked HERE rather than inferred from an empty recovery result:
+   * `recoverContextGraphSwmFromPeer` warn-skips internally when the durable
+   * plane is off and returns an empty result, which is indistinguishable from
+   * "ran and found nothing". Reading the switch directly keeps
+   * `durable-sync-disabled` an honest statement instead of a guess.
+   */
+  durableSyncEnabled?(): boolean;
   log: VmReverifyWorkerLog;
   now?: () => number;
   settings?: Partial<VmReverifyWorkerSettings>;
@@ -162,6 +187,7 @@ function emptySummary(): VmReverifyRunSummary {
     retried: 0,
     abandoned: 0,
     left: 0,
+    swmRecoveries: 0,
     peerAttempts: 0,
     networkAttempted: false,
     outcomes: {},
@@ -176,6 +202,8 @@ export class VmReverifyWorker {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #kickTimer: ReturnType<typeof setTimeout> | undefined;
   #inFlight: Promise<VmReverifyRunSummary> | undefined;
+  /** Set per chunk by `pairSwmRecovery`; consumed by the pure transition table. */
+  private swmRecoveryAvailable: boolean | undefined;
 
   constructor(private readonly deps: VmReverifyWorkerDependencies) {
     this.#settings = resolveVmReverifyWorkerSettings(deps.settings);
@@ -259,10 +287,12 @@ export class VmReverifyWorker {
     for (const [localCgId, records] of groups) {
       if (callsRemaining <= 0) break;
       callsRemaining -= 1;
-      const outcomes = await this.resolveChunkOutcomes(localCgId, records, summary);
+      let outcomes = await this.resolveChunkOutcomes(localCgId, records, summary);
+      outcomes = await this.pairSwmRecovery(localCgId, records, outcomes, summary);
       // Recorded only after the whole chunk — including any singleton fallback
-      // — has an outcome, so a poisoned sibling can never cause a healthy row
-      // to be written against a result that was later superseded.
+      // and any SWM-recovery retry — has an outcome, so a poisoned sibling can
+      // never cause a healthy row to be written against a result that was later
+      // superseded.
       await this.recordChunk(records, outcomes, summary, now);
     }
     return summary;
@@ -328,6 +358,59 @@ export class VmReverifyWorker {
     return outcomes;
   }
 
+  /**
+   * ADR-W2R-10: an `unresolved` item is paired ONCE with a whole-Context-Graph
+   * SWM recovery, then the exact fetch is re-run ONCE.
+   *
+   * Triggered on `unresolved` rather than on `no-swm` specifically, because the
+   * repair primitive does not surface WHY inspection failed — `no-swm` and
+   * "nobody had it" both arrive as `unresolved`. `unresolved` is the superset,
+   * and a recovery that turns out to have been unnecessary costs one bounded
+   * call under the ladder's throttling. Recording the narrower cause would mean
+   * widening the primitive's result type; noted as the follow-up.
+   *
+   * Whole-CG is heavier than a per-KA scoped transfer would be. It is chosen
+   * because it SHIPS, is #2050-hardened, routes public and private lanes
+   * correctly, and runs under `swm_recovery` admission — a per-KA scoped SWM
+   * fetch is new protocol-adjacent machinery, recorded as the optimization.
+   */
+  private async pairSwmRecovery(
+    localCgId: string,
+    records: readonly VmReverifyIntentRecord[],
+    outcomes: Map<string, CallOutcome>,
+    summary: VmReverifyRunSummary,
+  ): Promise<Map<string, CallOutcome>> {
+    const stranded = records.filter((record) => {
+      const outcome = outcomes.get(record.ual);
+      return outcome?.kind === 'item' && outcome.status === 'unresolved';
+    });
+    if (stranded.length === 0) return outcomes;
+    if (!this.deps.recoverContextGraphSwm) return outcomes;
+    // An operator who killed the durable plane must not have W2 resurrect it.
+    if (this.deps.durableSyncEnabled && !this.deps.durableSyncEnabled()) {
+      this.swmRecoveryAvailable = false;
+      return outcomes;
+    }
+    this.swmRecoveryAvailable = true;
+
+    try {
+      await this.deps.recoverContextGraphSwm(localCgId);
+    } catch (error) {
+      this.deps.log.warn(
+        `vm-reverify swm-recovery for cg=${localCgId} failed: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return outcomes;
+    }
+    summary.swmRecoveries += 1;
+
+    // ONE re-run, for the stranded UALs only.
+    const retried = await this.resolveChunkOutcomes(localCgId, stranded, summary);
+    const merged = new Map(outcomes);
+    for (const [ual, outcome] of retried) merged.set(ual, outcome);
+    return merged;
+  }
+
   private async call(
     localCgId: string,
     uals: readonly string[],
@@ -369,6 +452,9 @@ export class VmReverifyWorker {
           : { firstAttemptAt: record.firstAttemptAt }),
         now,
         parkAfterMs: this.#settings.parkAfterMs,
+        ...(this.swmRecoveryAvailable === undefined
+          ? {}
+          : { swmRecoveryAvailable: this.swmRecoveryAvailable }),
       });
       await this.apply(record, transition, now);
       this.tally(summary, record, outcome, transition);

@@ -323,11 +323,25 @@ async function createHostCore(): Promise<DKGAgent> {
     chainConfig: chainConfig(HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC1_ADMIN),
     chainEventCursorStore: cursorStore.store,
     contextGraphSubscriptionStore: subscriptionStore.store,
-    // Close every repair route except the one under test. Without these, a
-    // green here would not distinguish "the chain lane repaired it" from
-    // "ordinary sync happened to re-touch the asset".
+    // Close every AUTOMATIC repair route while leaving the durable plane the
+    // drain itself depends on switched ON (ADR-W2R-10).
+    //
+    // `durableSyncEnabled: false` was the original isolation and it was wrong
+    // in an instructive way: the exact-asset fetch carries no SWM, so the
+    // drain's own repair needs `recoverContextGraphSwmFromPeer`, which that
+    // switch disables. The isolation would have disabled the thing under test
+    // and the resulting red would have looked exactly like a missing feature.
+    //
+    // Single-path attribution survives without it: `syncOnConnectEnabled:false`
+    // removes the connect trigger, an EMPTY `syncContextGraphs` removes the
+    // ambient durable/VM scope (that list IS the automatic scope), and the node
+    // is unsubscribed from the CG so no member gossip reaches it. The only SWM
+    // recovery in the window is therefore the drain's own call.
     syncOnConnectEnabled: false,
-    durableSyncEnabled: false,
+    durableSyncEnabled: true,
+    syncContextGraphs: [],
+    syncReconcilerIntervalMs: 3_600_000,
+    syncStalenessThresholdMs: 3_600_000,
   } as any);
   liveAgents.add(agent);
   return agent;

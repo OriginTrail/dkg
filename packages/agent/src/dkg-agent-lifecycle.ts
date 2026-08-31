@@ -288,7 +288,10 @@ import {
   type ExactAssetCommitment,
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
-import { EXACT_ASSET_FETCH_ADMISSION_PRIORITY } from './sync/exact-asset-fetch.js';
+import {
+  EXACT_ASSET_FETCH_ADMISSION_PRIORITY,
+  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+} from './sync/exact-asset-fetch.js';
 import { VmReverifyWorker } from './vm-reverify-worker.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
@@ -3203,6 +3206,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           intents: reverifyIntents,
           fetchContextGraphAssets: (localCgId, uals, options) =>
             this.fetchContextGraphAssets(localCgId, uals, options),
+          // ADR-W2R-10. The exact fetch carries no SWM, and chain-promotion
+          // will not materialize without the local version-scoped projection —
+          // so for a host-only core the drain would detect forever and repair
+          // never. Peers are resolved the same way the exact fetch resolves
+          // them, and the first that yields a recovery wins.
+          recoverContextGraphSwm: async (localCgId) => {
+            for (const peerId of await this.resolveVmReverifySwmPeers(localCgId)) {
+              const r = await this.recoverContextGraphSwmFromPeer(peerId, localCgId);
+              // "Did this peer actually supply anything?" — any of the four
+              // write counters moving means yes. Stop at the first that did;
+              // trying the rest would re-fetch what we already hold.
+              if (
+                r.insertedDataQuads > 0 || r.insertedMetaQuads > 0
+                || r.replacedGraphs > 0 || r.replacedRoots > 0
+              ) return;
+            }
+          },
+          // Read the switch rather than infer it from an empty recovery result:
+          // `recoverContextGraphSwmFromPeer` warn-skips internally when the
+          // durable plane is off and returns empty, which is indistinguishable
+          // from "ran and found nothing".
+          durableSyncEnabled: () => durableSyncEnabled(this.config),
           log: {
             info: (message) => this.log.info(ctx, message),
             warn: (message) => this.log.warn(ctx, message),
@@ -7958,6 +7983,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * detects a full / cross-epoch gap; isolated from `runSharedMemorySync` so the
    * incremental path is untouched.
    */
+  /**
+   * Peers to try for a W2 SWM recovery (ADR-W2R-10), in the same order the
+   * exact-asset fetch resolves them: the Context Graph's curators first, then
+   * the preferred sync peer, then whoever is connected. Bounded by the same
+   * peer cap, and self is excluded.
+   *
+   * Deliberately mirrors `fetchContextGraphAssets`'s `resolvePeerIds` instead of
+   * inventing a second policy — a peer good enough to serve the exact fetch is
+   * the peer whose SWM we want, and two orderings would eventually disagree.
+   */
+  async resolveVmReverifySwmPeers(this: DKGAgent, localCgId: string): Promise<string[]> {
+    const curators = await this.resolveCuratorPeerIdsForCg(localCgId, {
+      maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+    }).catch(() => ({ peerIds: [] as string[] }));
+    const connected = this.node?.libp2p?.getConnections?.()
+      ?.map((connection) => connection.remotePeer.toString()) ?? [];
+    return [...new Set([
+      ...curators.peerIds,
+      this.preferredSyncPeers.get(localCgId),
+      ...connected,
+    ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))]
+      .slice(0, MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS);
+  }
+
   async recoverContextGraphSwmFromPeer(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,

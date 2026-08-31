@@ -60,6 +60,7 @@ function plan(input: {
   attemptNumber?: number;
   firstAttemptAt?: number;
   now?: number;
+  swmRecoveryAvailable?: boolean;
 }): VmReverifyTransition {
   const versionBlock = input.relation === undefined
     ? undefined
@@ -80,6 +81,9 @@ function plan(input: {
     observedBlock: OBSERVED_BLOCK,
     attemptNumber: input.attemptNumber ?? 1,
     ...(input.firstAttemptAt === undefined ? {} : { firstAttemptAt: input.firstAttemptAt }),
+    ...(input.swmRecoveryAvailable === undefined
+      ? {}
+      : { swmRecoveryAvailable: input.swmRecoveryAvailable }),
     now: input.now ?? NOW,
   });
 }
@@ -396,6 +400,45 @@ describe('planTransition — the 24 h park', () => {
       firstAttemptAt,
       now: firstAttemptAt + VM_REVERIFY_PARK_AFTER_MS * 10,
     })).toMatchObject({ action: 'retry', reason: 'snapshot-behind-event' });
+  });
+
+  it('DEFERS instead of parking when the durable plane that carries SWM is off', () => {
+    // ADR-W2R-10. The exact fetch carries no SWM, so with the durable plane off
+    // there is NO route by which this item could ever resolve. Counting it down
+    // to `no-peer-has-version` would blame the network for a local switch, and
+    // would bury the work under a terminal state an operator has no reason to
+    // go looking for once they turn the plane back on.
+    const wayPastTheBudget = {
+      kind: 'lifecycle-update' as const,
+      status: 'unresolved' as const,
+      relation: 'equal' as const,
+      firstAttemptAt,
+      now: firstAttemptAt + VM_REVERIFY_PARK_AFTER_MS * 10,
+    };
+
+    expect(plan({ ...wayPastTheBudget, swmRecoveryAvailable: false })).toMatchObject({
+      action: 'retry',
+      reason: 'durable-sync-disabled',
+      outcomeClass: 'evidence-unavailable',
+    });
+
+    // Same inputs, recovery AVAILABLE: the park is reached. Measuring both
+    // polarities is what proves the new branch is the thing making the
+    // difference rather than the park having quietly stopped working.
+    expect(plan({ ...wayPastTheBudget, swmRecoveryAvailable: true }))
+      .toEqual({ action: 'abandon', reason: 'no-peer-has-version' });
+  });
+
+  it('a root REMOVAL still abandons even with the durable plane off', () => {
+    // Ordering: an unrepairable direction outranks an unavailable mechanism.
+    expect(plan({
+      kind: 'root-removed',
+      status: 'unresolved',
+      relation: 'equal',
+      firstAttemptAt,
+      now: firstAttemptAt + VM_REVERIFY_PARK_AFTER_MS,
+      swmRecoveryAvailable: false,
+    })).toEqual({ action: 'abandon', reason: 'version-regression-unsupported' });
   });
 
   it('root-removed abandons for its own reason, not the park reason', () => {

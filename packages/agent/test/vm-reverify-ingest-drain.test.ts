@@ -580,11 +580,17 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
       ? never
       : Record<string, number> = {},
     now = 10_000,
+    swm: {
+      recover?: (localCgId: string) => Promise<void>;
+      durableSyncEnabled?: () => boolean;
+    } = {},
   ) {
     const lines: string[] = [];
     const worker = new VmReverifyWorker({
       intents,
       fetchContextGraphAssets: fetch,
+      ...(swm.recover ? { recoverContextGraphSwm: swm.recover } : {}),
+      ...(swm.durableSyncEnabled ? { durableSyncEnabled: swm.durableSyncEnabled } : {}),
       log: { info: (message) => lines.push(message), warn: (message) => lines.push(message) },
       now: () => now,
       settings: settings as never,
@@ -770,6 +776,84 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
       byUal.get(ualOf(53n)),
       'the second Context Graph must still get its call in this run',
     ).toMatchObject({ action: 'resolve' });
+  });
+
+  it('pairs an unresolved item with ONE whole-CG SWM recovery, then retries the fetch ONCE', async () => {
+    // ADR-W2R-10. The exact-asset fetch transfers data and metadata but no SWM,
+    // and chain-promotion refuses to materialize until the local version-scoped
+    // SWM projection is present. For a host-only core nothing else supplies it,
+    // so without this pairing the drain detects perfectly and repairs never —
+    // green-while-inert for exactly the population the feature exists for.
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 61n, 100);
+    const recovered: string[] = [];
+    // Missing until the recovery lands, present afterwards — the shape the real
+    // `head=N, store=0` -> `store=N` transition takes.
+    let swmPresent = false;
+    const fetch = makeFetch({
+      snapshotFor: () => snapshot(200),
+      localState: () => (swmPresent ? 'materialized' : 'missing'),
+      peerIds: ['peer-a'],
+    });
+    const { worker } = makeWorker(intents, fetch, {}, 10_000, {
+      recover: async (localCgId) => { recovered.push(localCgId); swmPresent = true; },
+      durableSyncEnabled: () => true,
+    });
+
+    const run = await worker.runOnce();
+
+    expect(recovered, 'exactly one whole-CG recovery, for the right CG').toEqual([DRAIN_CG]);
+    expect(run.swmRecoveries).toBe(1);
+    expect(
+      fetch.requested.length,
+      'the chunk call, then ONE re-run for the stranded UAL — not a loop',
+    ).toBe(2);
+    expect(run.items[0]).toMatchObject({ ual, action: 'resolve' });
+    expect(await intents.countPending()).toBe(0);
+  });
+
+  it('does NOT resurrect the durable plane an operator switched off', async () => {
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 62n, 100);
+    const recovered: string[] = [];
+    const fetch = makeFetch({ snapshotFor: () => snapshot(200), localState: () => 'missing' });
+    const { worker } = makeWorker(intents, fetch, {}, 10_000, {
+      recover: async (localCgId) => { recovered.push(localCgId); },
+      durableSyncEnabled: () => false,
+    });
+
+    const run = await worker.runOnce();
+
+    expect(recovered, 'no recovery may be attempted').toEqual([]);
+    expect(run.swmRecoveries).toBe(0);
+    expect(fetch.requested.length, 'and no second fetch').toBe(1);
+    expect(run.items[0]).toMatchObject({
+      ual,
+      action: 'retry',
+      reason: 'durable-sync-disabled',
+    });
+    expect(
+      intents.rows.get(ual)?.state,
+      'deferred, never parked — the work must be waiting when the plane returns',
+    ).toBe('PENDING');
+  });
+
+  it('survives a recovery that throws, and leaves the item retryable', async () => {
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 63n, 100);
+    const fetch = makeFetch({ snapshotFor: () => snapshot(200), localState: () => 'missing' });
+    const { worker, lines } = makeWorker(intents, fetch, {}, 10_000, {
+      recover: async () => { throw new Error('peer hung up'); },
+      durableSyncEnabled: () => true,
+    });
+
+    const run = await worker.runOnce();
+
+    expect(run.items[0]).toMatchObject({ ual, action: 'retry', reason: 'unresolved' });
+    expect(fetch.requested.length, 'a failed recovery must not trigger the re-fetch').toBe(1);
+    expect(lines.some((line) => line.includes('swm-recovery') && line.includes('peer hung up')))
+      .toBe(true);
+    expect(await intents.countPending()).toBe(1);
   });
 
   it('abandons a chain-identity conflict instead of retrying it forever', async () => {
