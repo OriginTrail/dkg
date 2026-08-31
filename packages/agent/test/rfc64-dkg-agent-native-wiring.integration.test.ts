@@ -522,6 +522,13 @@ async function connectBothWays(a: DKGAgent, b: DKGAgent): Promise<void> {
   await b.node.libp2p.dial(multiaddr(tcpMultiaddr(a)));
 }
 
+function allowAllNetworkAdmissionForTest(agent: DKGAgent): void {
+  const coordinator = (agent as any).networkAdmissionCoordinator;
+  coordinator.isAcceptedPeer = () => true;
+  coordinator.isRejectedPeer = () => false;
+  coordinator.ensureAdmitted = async () => true;
+}
+
 function catalogScopeDigest() {
   return computeAuthorCatalogScopeDigestV1({
     networkId: NETWORK_ID,
@@ -5053,6 +5060,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       },
       finalizedRuntime: { rpcUrl: rpcServer.url, chainAdapter: adapter },
     });
+    allowAllNetworkAdmissionForTest(provider);
     provider.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster });
     const authorDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-finalized-private-repair-'));
     tempDirs.push(authorDataDir);
@@ -5088,6 +5096,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       },
     });
+    allowAllNetworkAdmissionForTest(author);
     peerAddresses.set(author.peerId, AUTHOR);
     await connectBothWays(author, provider);
     let announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
@@ -5153,6 +5162,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           });
       },
     });
+    allowAllNetworkAdmissionForTest(author);
     peerAddresses.set(author.peerId, AUTHOR);
     await connectBothWays(author, provider);
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
@@ -5220,6 +5230,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           });
       },
     });
+    allowAllNetworkAdmissionForTest(author);
     peerAddresses.set(author.peerId, AUTHOR);
     await startupRepairEntered;
     await connectBothWays(author, provider);
@@ -5264,6 +5275,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       },
     });
+    allowAllNetworkAdmissionForTest(author);
     peerAddresses.set(author.peerId, AUTHOR);
     await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(author.readRfc64AppliedCatalogHeadV1({
@@ -5292,6 +5304,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       },
     });
+    allowAllNetworkAdmissionForTest(author);
     peerAddresses.set(author.peerId, AUTHOR);
     await connectBothWays(author, provider);
     await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
