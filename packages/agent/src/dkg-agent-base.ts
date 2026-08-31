@@ -1836,6 +1836,10 @@ export class DKGAgentBase {
       this.vmReverifyIntents = injected;
       return;
     }
+    // The `dataDir` check is redundant at RUNTIME — the effective gate below
+    // already returns false without one — and is kept because it narrows the
+    // type for the open call. Reordering these two is an equivalent mutation;
+    // deleting the gate is not, and has its own test.
     if (!this.config.dataDir) return;
     if (!(this as unknown as DKGAgent).vmUpdateConvergenceEnabled()) return;
     this.vmReverifyIntents = await openSqliteVmReverifyIntentStore(this.config.dataDir);

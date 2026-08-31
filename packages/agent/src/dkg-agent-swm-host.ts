@@ -2782,6 +2782,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       };
     }
     this.setContextGraphSubscription(localCgId, next);
+    // Taking a graph back into custody is new evidence about reachability, so
+    // W2 intents this graph previously gave up on become live work again
+    // (#2435, ADR-W2R-4).
+    this.reviveVmReverifyIntentsForContextGraph(localCgId);
     this.log.info(
       createOperationContext('system'),
       `Phase D: marked public cg=${numericStr} as core-hosted (will chain-reconcile to VM across restarts)`,
@@ -2898,10 +2902,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * already-held KA whose on-chain root changed — together with the REASON it
    * is off.
    *
-   * One resolver, four conditions, in the order an operator would ask them:
+   * One resolver, four conditions. The order is not cosmetic: when more than
+   * one holds, the FIRST is reported, and it has to be the one an operator can
+   * act on. A node with both switches off that answered `flag-off` would send
+   * them to flip the W2 flag, which would change nothing.
    *
    *  - the background reconciler is the thing this rides on. With it off, W2
-   *    off is the intended reading, not an accident;
+   *    off is the intended reading, not an accident, and it outranks every
+   *    other reason because nothing else can help until it is back;
    *  - the operator switch (config, `DKG_VM_UPDATE_CONVERGENCE_ENABLED` wins);
    *  - a `dataDir`, because an intent that does not survive a restart is not an
    *    intent — the whole point is convergence across the downtime that caused

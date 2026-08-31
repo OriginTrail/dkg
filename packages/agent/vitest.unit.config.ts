@@ -166,6 +166,7 @@ export default defineConfig({
       "test/vm-reverify-intent-store.test.ts",
       "test/vm-reverify-intents.test.ts",
       "test/vm-reverify-ingest-drain.test.ts",
+      "test/vm-reverify-wiring.test.ts",
       "test/named-ka-publish-recovery.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
       "test/swm-slice-ka-bound.test.ts",

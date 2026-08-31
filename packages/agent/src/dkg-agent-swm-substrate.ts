@@ -484,7 +484,43 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       await fh.handleFinalizationMessage(data, contextGraphId, from);
     });
 
+    this.reviveVmReverifyIntentsForContextGraph(contextGraphId);
+
     return subscription;
+  }
+
+  /**
+   * Re-open W2 (#2435) intents this Context Graph gave up on.
+   *
+   * An intent is abandoned on evidence about REACHABILITY — nobody had the
+   * version, or the graph was not held here — and (re-)subscribing or
+   * (re-)hosting the graph is new evidence about exactly that. Without this
+   * hook, `abandoned` is terminal in practice: a node that dropped a CG and
+   * later took it back would keep serving the stale root it gave up on, with
+   * no event to raise the intent again because the mutation is long past.
+   *
+   * Fire-and-forget on purpose: subscribing must not fail, or wait, because a
+   * background convergence hint could not be written.
+   */
+  reviveVmReverifyIntentsForContextGraph(this: DKGAgent, contextGraphId: string): void {
+    const intents = this.vmReverifyIntents;
+    if (!intents) return;
+    void intents.reviveForContextGraph(contextGraphId)
+      .then((revived) => {
+        if (revived > 0) {
+          this.log.info(
+            createOperationContext('system'),
+            `vm-reverify revived ${revived} abandoned intent(s) for cg=${contextGraphId}`,
+          );
+        }
+      })
+      .catch((err) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `vm-reverify revive for cg=${contextGraphId} failed: `
+          + `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   /**
