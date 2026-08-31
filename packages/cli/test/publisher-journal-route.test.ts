@@ -5,6 +5,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // #1829 — GET /api/publisher/journal route: read-only append-only journal, by jobId
 // or facts-pure by lifecycle identity. createPublisherControlFromStore enables
@@ -140,7 +141,7 @@ function createContext(path: string, publisherControl: RequestContext['publisher
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
+    authentication: requestAuthentication({ kind: 'anonymous' }),
     requestAgentAddress,
   };
 }

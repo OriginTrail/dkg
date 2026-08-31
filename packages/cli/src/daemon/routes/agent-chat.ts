@@ -118,7 +118,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -333,6 +333,7 @@ import {
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
 import { classifyAgentConnectError } from './agent-connect-error.js';
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
 import { handleAgentsListRoute } from './agents-list.js';
 import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
@@ -441,9 +442,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
   } = ctx;
+  const actor = actorFromRequestContext(ctx);
+  const {
+    authentication,
+    authenticatedAgentAddress,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
 
 
   // POST /api/agent/register — register a new agent on this node
@@ -481,14 +486,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // routes (e.g. memory.ts, query.ts) already use for caller-vs-target
   // gating.
   function authorizeKeyManagementOnAddress(targetAddress: string): { ok: true } | { ok: false; status: number; body: Record<string, unknown> } {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (!tokenAgentAddress) return { ok: true };
-    if (tokenAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
+    if (!authenticatedAgentAddress) return { ok: true };
+    if (authenticatedAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
     return {
       ok: false,
       status: 403,
       body: {
-        error: `Agent token for ${tokenAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
+        error: `Agent token for ${authenticatedAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
           'Use a node-level admin token (~/.dkg/auth.token) to manage other agents on this node.',
       },
     };
@@ -601,8 +605,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // agent's; gating to admin avoids a non-default-agent token tricking
   // the daemon into republishing on demand for spam.
   if (req.method === "POST" && path === "/api/agent/publish-profile") {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (tokenAgentAddress) {
+    if (!canAdministerNode(authentication)) {
       return jsonResponse(res, 403, {
         error: 'POST /api/agent/publish-profile requires a node-level admin token; agent-scoped tokens cannot trigger a profile republish.',
       });
@@ -617,8 +620,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
 
   // GET /api/agent/identity — current agent identity for the requesting token
   if (req.method === "GET" && path === "/api/agent/identity") {
-    const token = extractBearerToken(req.headers.authorization);
-    const agentAddress = agent.resolveAgentAddress(token);
+    const agentAddress = requestAgentAddress;
     const localAgents = agent.listLocalAgents();
     const current = localAgents.find((a) => a.agentAddress === agentAddress);
     return jsonResponse(res, 200, {
@@ -942,10 +944,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     if (parsed.precomputedUpdateAttestation !== undefined && !precomputedUpdateAttestation) {
       return;
     }
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
     if (!authorizeAgentScopedAuthorClaim(
       res,
-      tokenAgentAddress,
+      authenticatedAgentAddress,
       precomputedUpdateAttestation?.authorAddress,
       "precomputedUpdateAttestation.authorAddress",
     )) {

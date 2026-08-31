@@ -6,6 +6,7 @@ import {
   DKG_LOCAL_LLM_UI_SESSION_ID,
 } from '../local-llm-service.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
+import { canAdministerNode } from '../../auth.js';
 
 export const LOCAL_LLM_CHAT_BODY_BYTES = 64 * 1024;
 export const LOCAL_LLM_MAX_MESSAGE_CHARS = 16_000;
@@ -29,12 +30,7 @@ function serviceErrorResponse(
 }
 
 function isNodeAdminCaller(ctx: RequestContext): boolean {
-  if (ctx.config.auth?.enabled === false) return true;
-  return Boolean(
-    ctx.requestToken
-    && ctx.validTokens.has(ctx.requestToken)
-    && !ctx.agent.resolveAgentByToken(ctx.requestToken),
-  );
+  return canAdministerNode(ctx.authentication);
 }
 
 async function readJsonObject(ctx: RequestContext): Promise<Record<string, unknown> | null> {

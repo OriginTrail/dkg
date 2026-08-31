@@ -6,6 +6,7 @@ import { QuorumUnmetError, type LiftJob } from '@origintrail-official/dkg-publis
 import { createPublisherControlFromStore, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 /**
  * GH#2270 — what the daemon TELLS an operator about retries.
@@ -417,7 +418,7 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
       validTokens: new Set<string>(),
       apiHost: '127.0.0.1', apiPortRef: { value: 0 },
       url, path: url.pathname,
-      requestToken: undefined, requestAgentAddress: '0x0',
+      authentication: requestAuthentication({ kind: 'anonymous' }), requestAgentAddress: '0x0',
     } as unknown as RequestContext);
     return { status: res.statusCode, body: res.body ? JSON.parse(res.body) : {} };
   }

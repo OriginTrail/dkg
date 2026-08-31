@@ -633,7 +633,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     admission,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
 

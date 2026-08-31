@@ -90,6 +90,7 @@ import {
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
+import { authenticatedAgentAddress } from '../../auth.js';
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -732,7 +733,17 @@ function rejectSelectedAuthorOnCreate(
 }
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, publisherControl, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
+  const {
+    req,
+    res,
+    agent,
+    publisherControl,
+    path,
+    url,
+    requestAgentAddress,
+    authentication,
+    emitMemoryGraphChanged,
+  } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
   const method = req.method ?? "GET";
 
@@ -815,7 +826,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // Parity with the legacy assertion routes: resolve/validate the write
   // contextGraphId against the caller's known graphs before any mutation, so a
   // bad/foreign id is a 400 here rather than an opaque 500 from the engine.
-  const writePreflightCallerAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,

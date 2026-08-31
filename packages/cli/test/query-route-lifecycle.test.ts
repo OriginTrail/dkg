@@ -15,6 +15,7 @@ import {
 } from '../src/daemon/routes/query.js';
 import { respondIfStoreUnavailable } from '../src/daemon/http-utils.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 class RequestStub extends EventEmitter {
   aborted = false;
@@ -65,8 +66,8 @@ function queryRouteContext(
     validTokens: new Set<string>(),
     url: new URL('http://127.0.0.1/api/query'),
     path: '/api/query',
-    requestToken: undefined,
     requestAgentAddress: '',
+    authentication: requestAuthentication({ kind: 'anonymous' }),
   } as unknown as RequestContext;
 }
 
