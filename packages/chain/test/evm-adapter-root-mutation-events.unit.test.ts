@@ -73,6 +73,7 @@ function minimalConfig(): EVMAdapterConfig {
 }
 
 interface FakeLog {
+  address?: string;
   topics: string[];
   data: string;
   blockNumber: number;
@@ -106,6 +107,9 @@ function encodeLog(
   if (!fragment) throw new Error(`event ${eventName} not in ABI`);
   const { data, topics } = iface.encodeEventLog(fragment, values);
   return {
+    // The bound storage contract's address — the r16 escape guard rejects a
+    // response log from any other contract as endpoint corruption.
+    address: '0x' + '22'.repeat(20),
     topics: [...topics],
     data,
     blockNumber: 4_242,
@@ -528,6 +532,27 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(calls).toEqual(['corrupt', 'healthy']);
     expect(events).toHaveLength(1);
     expect(events[0].data['kaId']).toBe(KA_ID.toString());
+  });
+
+  it('a response log that ESCAPES the requested filter is endpoint corruption (review r16)', async () => {
+    // eth_getLogs filters by address and block range. A log from another
+    // contract, or outside the requested window, proves the endpoint violated
+    // the request — accepting it would fabricate a root-mutation position and
+    // poison downstream ordering/de-duplication; silently dropping it would
+    // hide the corruption from the failover. Both reject through the same
+    // retryable corruption path.
+    const iface = new Interface(KA_ABI as never);
+    const good = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
+    const foreignContract: FakeLog = { ...good, address: '0x' + '99'.repeat(20) };
+    const outsideWindow: FakeLog = { ...good, blockNumber: 10_000 }; // drain requests 1..9_000
+
+    for (const [label, bad] of [['foreign contract', foreignContract], ['outside window', outsideWindow]] as const) {
+      const { adapter } = makeAdapter({
+        logsByEvent: { KnowledgeAssetMerkleRootAdded: [bad, good] },
+      });
+      await expect(drain(adapter, ['KnowledgeAssetMerkleRootAdded']), label)
+        .rejects.toThrow(/outside the requested filter/);
+    }
   });
 
   it('each yielded event carries the position of ITS OWN log (review r10)', async () => {

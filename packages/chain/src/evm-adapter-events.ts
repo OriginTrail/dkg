@@ -258,9 +258,28 @@ export class EventsMethods extends EVMChainAdapterBase {
         // retries on another endpoint, and the lane cursor cannot advance on
         // an untrustworthy response. (Logs OUTSIDE the requested filter stay
         // droppable noise; only a matching topic0 asserts anything.)
+        const fromBound = filter.fromBlock ?? 0;
+        const toBound = filter.toBlock;
         for (const log of raw) {
           const topic0 = log.topics[0]?.toLowerCase();
           if (topic0 == null || !nameByTopic.has(topic0)) continue;
+          // A matching log must also OBEY the request it claims to answer
+          // (review r16): `eth_getLogs` filters by address and block range,
+          // so a response log from another contract or outside the window
+          // proves the endpoint violated the request — accepting it would
+          // fabricate a root-mutation position and poison downstream
+          // ordering/de-duplication. Same retryable corruption path.
+          if (log.address?.toLowerCase() !== address.toLowerCase()
+            || log.blockNumber < fromBound
+            || (typeof toBound === 'number' && log.blockNumber > toBound)) {
+            const escaped = new Error(
+              `RPC endpoint returned a log outside the requested filter: `
+              + `address=${String(log.address).slice(0, 60)} block=${log.blockNumber} `
+              + `(requested ${address} blocks ${fromBound}..${typeof toBound === 'number' ? toBound : 'latest'})`,
+            );
+            (escaped as Error & { code?: string }).code = 'BAD_DATA';
+            throw escaped;
+          }
           const kaIdTopic = log.topics[1];
           if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) {
             const corruption = new Error(
