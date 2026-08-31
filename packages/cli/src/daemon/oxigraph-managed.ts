@@ -26,6 +26,8 @@ import { join } from 'node:path';
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
+  type ManagedOxigraphRuntimeStoreConfigV1,
+  type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
@@ -283,11 +285,7 @@ export function planManagedOxigraph(
 export interface ManagedOxigraphResult {
   handle: OxigraphServerHandle;
   /** Drop-in replacement for `config.store`. */
-  storeConfig: {
-    backend: 'sparql-http';
-    options: Record<string, unknown>;
-    graphSetIndex?: StoreConfigLike['graphSetIndex'];
-  };
+  storeConfig: ManagedOxigraphRuntimeStoreConfigV1;
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
   /** Set only when the operator enabled the feature (else leave config as-is). */
   sharedMemoryPublicSnapshotStorage?: ManagedSnapshotStorageConfig;
@@ -338,7 +336,7 @@ export async function startManagedOxigraph(
     io: opts.serverIo,
   });
 
-  const runtimeStoreConfig: ManagedOxigraphResult['storeConfig'] = {
+  const runtimeStoreConfig: TripleStoreConfig = {
     backend: 'sparql-http',
     options: {
       ...plan.storeConfigTemplate.options,

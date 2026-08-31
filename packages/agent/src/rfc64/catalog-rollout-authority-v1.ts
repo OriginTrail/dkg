@@ -80,6 +80,40 @@ export interface Rfc64CatalogExecutionPlanV1 {
   readonly standaloneTrack2Enabled: boolean;
 }
 
+/**
+ * Read one authority answer from the construction-time execution plan.
+ * Runtime services never reinterpret the raw rollout configuration.
+ */
+export function resolveRfc64CatalogExecutionPlanAuthorityV1(
+  plan: Rfc64CatalogExecutionPlanV1,
+  contextGraphId: string,
+): Rfc64CatalogAuthorityPolicyV1 {
+  const selected = plan.selectedAuthority[contextGraphId];
+  if (selected !== undefined) return selected;
+  if (plan.standaloneTrack2Enabled) {
+    return Object.freeze({
+      contextGraphId,
+      selected: false,
+      mode: 'catalog',
+      killSwitchActive: false,
+      legacySyncAllowed: true,
+      track2Enabled: true,
+      authoringAllowed: true,
+      reconciliationLane: 'catalog-apply',
+    });
+  }
+  return Object.freeze({
+    contextGraphId,
+    selected: false,
+    mode: 'legacy',
+    killSwitchActive: plan.killSwitchActive,
+    legacySyncAllowed: true,
+    track2Enabled: false,
+    authoringAllowed: false,
+    reconciliationLane: 'legacy',
+  });
+}
+
 const RFC64_CATALOG_ROLLOUT_FIELDS_V1 = new Set([
   'contextGraphModes',
   'killSwitch',
@@ -305,7 +339,10 @@ export function rfc64ExecutionPlanAllowsLegacySyncV1(
   plan: Rfc64CatalogExecutionPlanV1,
   contextGraphId: string,
 ): boolean {
-  return plan.selectedAuthority[contextGraphId]?.legacySyncAllowed ?? true;
+  return resolveRfc64CatalogExecutionPlanAuthorityV1(
+    plan,
+    contextGraphId,
+  ).legacySyncAllowed;
 }
 
 function assertRolloutInputV1(

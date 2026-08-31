@@ -25,7 +25,8 @@ import { Rfc64CatalogSynchronizationErrorV1 } from
 import { resolveRfc64PeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
-  resolveRfc64CatalogAuthorityDecisionV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
+  type Rfc64CatalogExecutionPlanV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
@@ -174,8 +175,8 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     contextGraphId: string,
   ): readonly string[] {
     if (
-      !resolveRfc64CatalogAuthorityDecisionV1(
-        this.config.rfc64CatalogRollout,
+      !resolveRfc64CatalogExecutionPlanAuthorityV1(
+        this.config.rfc64CatalogExecutionPlan,
         contextGraphId,
       ).legacySyncAllowed
     ) return Object.freeze([]);
@@ -195,7 +196,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const service = this.rfc64PublicCatalogServiceV1;
     const partition = partitionRfc64CatalogBootstrapV1(
       config,
-      this.config.rfc64CatalogRollout,
+      this.config.rfc64CatalogExecutionPlan,
     );
     if (partition.track2Policies.length > 0 && service === undefined) {
       throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
@@ -491,15 +492,15 @@ export function partitionRfc64CatalogBootstrapV1(
     readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
     readonly retryIntervalMs?: number;
   }>,
-  activation: DKGAgent['config']['rfc64CatalogRollout'],
+  executionPlan: Rfc64CatalogExecutionPlanV1,
 ): Rfc64CatalogBootstrapPartitionV1 {
   const track2Policies: Rfc64CatalogBootstrapPolicyV1[] = [];
   const track2Targets: Rfc64CatalogBootstrapTargetPlanV1[] = [];
   const legacyPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
   for (const accepted of config.acceptedPolicies) {
     const { policyEnvelope, targets, completeSwmProviders = [] } = accepted;
-    const authority = resolveRfc64CatalogAuthorityDecisionV1(
-      activation,
+    const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
+      executionPlan,
       policyEnvelope.payload.contextGraphId,
     );
     if (authority.legacySyncAllowed) legacyPolicies.push(accepted);

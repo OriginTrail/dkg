@@ -69,7 +69,7 @@ import {
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
-import { resolveRfc64CatalogAuthorityDecisionV1 } from
+import { resolveRfc64CatalogExecutionPlanAuthorityV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 
 export type {
@@ -685,9 +685,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     contextGraphId: string,
     subGraphName: string | null | undefined,
   ): ResolvedRfc64AcceptedPublicRootLaneV1 | null {
-    const rollout = this.config.rfc64CatalogRollout;
-    if (!resolveRfc64CatalogAuthorityDecisionV1(
-      rollout,
+    if (!resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
       contextGraphId,
     ).authoringAllowed) return null;
     const policy = this.config.rfc64PublicCatalogAutoPublishPolicy;

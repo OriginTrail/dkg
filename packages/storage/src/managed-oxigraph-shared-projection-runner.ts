@@ -9,6 +9,7 @@ import { spoolRfc64SharedProjectionHttpResponseV1 } from './rfc64-shared-project
 import { readSparqlResponseText } from './adapters/sparql-response-policy.js';
 
 const SOURCE = 'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1';
+const MAX_DIAGNOSTIC_RESPONSE_BYTES = 64 * 1024;
 
 export interface ManagedOxigraphConstructRequestV1 {
   readonly accept: 'application/n-quads, text/n-quads';
@@ -52,7 +53,10 @@ export function createManagedOxigraphSharedProjectionRunnerV1(
   }, async (response, lifecycleSignal) => {
     if (!response.ok) {
       const text = await readSparqlResponseText(response, {
-        maxResponseBytes: Math.min(options.byteCeiling, 64 * 1024),
+        // Successful projection bytes are constrained by byteCeiling below.
+        // Error evidence has an independent bounded allowance so a small
+        // projection cannot truncate the managed cancellation marker.
+        maxResponseBytes: MAX_DIAGNOSTIC_RESPONSE_BYTES,
         managedOxigraph: true,
         operation: 'construct',
         tolerateReadFailure: true,
