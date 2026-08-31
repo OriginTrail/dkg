@@ -75,7 +75,7 @@ export function openLazyAbortableStream<T>(
       } finally {
         if (!complete) {
           await raceStoreWorkAgainstAbort(
-            Promise.resolve(iterator.return?.()),
+            Promise.resolve().then(() => iterator.return?.()),
             signalScope.signal,
           ).catch(() => undefined);
         }

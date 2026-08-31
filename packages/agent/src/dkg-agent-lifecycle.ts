@@ -677,10 +677,11 @@ import {
 import {
   resolveRfc64CatalogAuthorityDecisionV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
+  rfc64ExecutionPlanAllowsLegacySyncV1,
 } from
   './rfc64/public-catalog-activation-config-v1.js';
-import { persistRfc64CatalogAuthorityPlanV1 } from
-  './rfc64/catalog-rollout-authority-state-v1.js';
+import { reconcileRfc64CatalogAuthorityPlanV1 } from
+  './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -703,8 +704,8 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
     selectedRecoveryContextGraphIds: [...new Set([
       ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
         config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
-      ).filter((contextGraphId) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        config.rfc64CatalogRollout,
+      ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
+        config.rfc64CatalogExecutionPlan,
         contextGraphId,
       )),
       ...edgeSelectedContextGraphIds,
@@ -2023,7 +2024,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.config.dataDir !== undefined
         && this.rfc64PersistenceV1 !== undefined
       ) {
-        await persistRfc64CatalogAuthorityPlanV1(
+        await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
           this.store,
           this.config.rfc64CatalogRollout,
@@ -4863,8 +4864,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
     const acceptedPolicies = (this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?? []).filter(({ policyEnvelope }) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        this.config.rfc64CatalogRollout,
+      ?? []).filter(({ policyEnvelope }) => rfc64ExecutionPlanAllowsLegacySyncV1(
+        this.config.rfc64CatalogExecutionPlan,
         policyEnvelope.payload.contextGraphId,
       ));
     // Private RFC-64 selections stay out of `syncContextGraphs`: that list is
@@ -4875,8 +4876,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(this.config.syncContextGraphs ?? []),
       ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      ).filter((contextGraphId) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        this.config.rfc64CatalogRollout,
+      ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
+        this.config.rfc64CatalogExecutionPlan,
         contextGraphId,
       )),
     ])];

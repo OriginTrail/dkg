@@ -174,12 +174,11 @@ export {
   isRfc64ExactBindingsReadCapabilityV1,
   isRfc64SemanticReadCapabilityV1,
   isRfc64SemanticReadCapabilitySourceV1,
-  resolveRfc64SemanticReadCapabilityV1,
   RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
   type Rfc64ExactBindingsReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
   type Rfc64ExactBindingsStoreRowV1,
-  type ResolvedRfc64SemanticReadCapabilityV1,
+  type Rfc64SemanticReadCapabilityResultV1,
   type Rfc64SemanticReadCapabilityV1,
 } from './rfc64-exact-bindings-read-capability.js';
 export {

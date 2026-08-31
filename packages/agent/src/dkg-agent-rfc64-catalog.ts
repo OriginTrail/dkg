@@ -291,19 +291,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
-    if (rfc64CatalogKillSwitchActiveV1(this.config.rfc64CatalogRollout)) {
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
       this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
       return;
     }
-    const selectedContextGraphs = this.config.rfc64CatalogRollout.selectedContextGraphs;
     if (
-      selectedContextGraphs.length > 0
-      && selectedContextGraphs.every((contextGraphId) => (
-        !resolveRfc64CatalogAuthorityDecisionV1(
-          this.config.rfc64CatalogRollout,
-          contextGraphId,
-        ).track2Enabled
-      ))
+      !this.config.rfc64CatalogExecutionPlan.standaloneTrack2Enabled
+      && this.config.rfc64CatalogExecutionPlan.track2ContextGraphs.length === 0
     ) {
       this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
       return;

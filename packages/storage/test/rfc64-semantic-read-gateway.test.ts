@@ -274,8 +274,12 @@ describe('SyncSemanticStoreV1', () => {
   });
 
   it('accepts a legacy semantic-only custom adapter during the compatibility window', async () => {
-    const legacyRead = vi.fn(async () => []);
+    const legacyRead = vi.fn(async () => ({
+      variables: ['p', 'o'],
+      rows: [],
+    }));
     const legacyStore = {
+      rfc64SemanticReadCertifiedV1: true,
       rfc64SemanticReadV1: legacyRead,
     } as unknown as TripleStore;
     await expect(new SyncSemanticStoreV1(legacyStore).read(
@@ -285,9 +289,24 @@ describe('SyncSemanticStoreV1', () => {
     expect(legacyRead).toHaveBeenCalledOnce();
   });
 
+  it('validates a legacy adapter projection before treating empty rows as absent', async () => {
+    const legacyStore = {
+      rfc64SemanticReadCertifiedV1: true,
+      rfc64SemanticReadV1: vi.fn(async () => ({
+        variables: ['o', 'p'],
+        rows: [],
+      })),
+    } as unknown as TripleStore;
+    await expect(new SyncSemanticStoreV1(legacyStore).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    )).rejects.toMatchObject({ code: 'rfc64-semantic-read-result' });
+  });
+
   it('preserves legacy semantic adapter result-error classification', async () => {
     const legacyError = new Rfc64SemanticReadCapabilityResultErrorV1('malformed result');
     const legacyStore = {
+      rfc64SemanticReadCertifiedV1: true,
       rfc64SemanticReadV1: vi.fn(async () => {
         throw legacyError;
       }),
@@ -425,6 +444,46 @@ describe('SyncSemanticStoreV1', () => {
       await heldRespawn;
       await Promise.resolve();
       expect(postToWorker).not.toHaveBeenCalled();
+    } finally {
+      internals.respawnPromise = null;
+      releaseRespawn();
+      await store.close();
+    }
+  });
+
+  it('reports the configured worker timeout after a respawn consumes part of the deadline', async () => {
+    const store = new OxigraphWorkerStore();
+    let releaseRespawn!: () => void;
+    const heldRespawn = new Promise<void>((resolve) => {
+      releaseRespawn = resolve;
+    });
+    const internals = store as unknown as {
+      respawnPromise: Promise<void> | null;
+      callWithTimeout: <T>(
+        timeoutMs: number,
+        signal: AbortSignal | undefined,
+        method: string,
+        ...args: unknown[]
+      ) => Promise<T>;
+      postToWorker: (...args: unknown[]) => Promise<unknown>;
+    };
+    internals.respawnPromise = heldRespawn;
+    vi.spyOn(performance, 'now')
+      .mockReturnValueOnce(0)
+      .mockReturnValue(300);
+    const postToWorker = vi.spyOn(internals, 'postToWorker').mockResolvedValue(undefined);
+    try {
+      const pending = internals.callWithTimeout<void>(1_000, undefined, 'query', 'SELECT {}');
+      internals.respawnPromise = null;
+      releaseRespawn();
+      await pending;
+      expect(postToWorker).toHaveBeenCalledWith(
+        700,
+        undefined,
+        'query',
+        ['SELECT {}'],
+        1_000,
+      );
     } finally {
       internals.respawnPromise = null;
       releaseRespawn();
