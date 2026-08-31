@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
   Rfc64SemanticReadManifestErrorV1,
-  compileRfc64SemanticReadOperationV2,
+  Rfc64SemanticRecordErrorV1,
+  compileRfc64SemanticReadOperationV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
   type ChainIdV1,
@@ -166,7 +167,7 @@ describe('SyncSemanticStoreV1', () => {
 
   it('keeps both certified read call shapes on every built-in adapter', async () => {
     const current = FIXTURES[0];
-    const operation = compileRfc64SemanticReadOperationV2(current.coordinate);
+    const operation = compileRfc64SemanticReadOperationV1(current.coordinate);
     const typedRows = projectRfc64SemanticRecordStoreRowsV1(current.record);
     const quads = typedRows.map(renderRfc64SemanticStoreRowV1);
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
@@ -232,7 +233,7 @@ describe('SyncSemanticStoreV1', () => {
     if (result.kind === 'record') expect(result.decoded.record).toEqual(current.record);
     expect(requests).toHaveLength(1);
     expect(requests[0].body).toBe(
-      compileRfc64SemanticReadOperationV2(current.coordinate).sparql,
+      compileRfc64SemanticReadOperationV1(current.coordinate).sparql,
     );
     expect(requests[0].signal).toBeInstanceOf(AbortSignal);
   });
@@ -404,7 +405,7 @@ describe('SyncSemanticStoreV1', () => {
     );
   });
 
-  it('uses the manifest compiler as the only request-validation boundary', async () => {
+  it('owns the exact gateway envelope while delegating coordinate validation to the manifest', async () => {
     const query = vi.fn(async (): Promise<QueryResult> => ({ type: 'bindings', bindings: [] }));
     const gateway = new SyncSemanticStoreV1(certifiedStore(query));
     let getterInvoked = false;
@@ -424,8 +425,6 @@ describe('SyncSemanticStoreV1', () => {
       const error = await rejected(gateway.read(input, { timeoutMs: 1_000 }));
       expect(error).toBeInstanceOf(Rfc64SemanticReadGatewayErrorV1);
       expect(error).toMatchObject({ code: 'rfc64-semantic-read-request' });
-      expect((error as Error & { cause: unknown }).cause)
-        .toBeInstanceOf(Rfc64SemanticReadManifestErrorV1);
     }
     expect(getterInvoked).toBe(false);
     expect(query).not.toHaveBeenCalled();

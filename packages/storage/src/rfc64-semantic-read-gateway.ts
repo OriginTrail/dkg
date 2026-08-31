@@ -1,9 +1,9 @@
 import {
-  compileRfc64SemanticReadRequestV2,
+  compileRfc64SemanticReadOperationV1,
   decodeRfc64SemanticRecordStoreRowsV1,
   Rfc64SemanticReadManifestErrorV1,
   type DecodedRfc64SemanticRecordV1,
-  type Rfc64SemanticReadOperationV2,
+  type Rfc64SemanticReadOperationV1,
   type Rfc64SemanticRecordCoordinateV1,
 } from '@origintrail-official/dkg-core';
 
@@ -15,6 +15,7 @@ import {
   resolveRfc64SemanticReadDispatchV1,
   Rfc64SemanticReadCapabilityResultErrorV1,
 } from './rfc64-exact-bindings-read-capability.js';
+import { snapshotExactOrdinaryDataRecord } from './closed-data-snapshot.js';
 import type { TripleStore } from './triple-store.js';
 
 export const MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1 = 30_000;
@@ -59,7 +60,7 @@ export class Rfc64SemanticReadGatewayErrorV1 extends Error {
  */
 export class SyncSemanticStoreV1 {
   private readonly dispatch: (
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     signal: AbortSignal | undefined,
   ) => Promise<readonly import('@origintrail-official/dkg-core').Rfc64SemanticStoreRowV1[]>;
 
@@ -81,10 +82,17 @@ export class SyncSemanticStoreV1 {
     input: unknown,
     options: Rfc64SemanticReadOptionsV1,
   ): Promise<Rfc64SemanticReadResultV1> {
-    let operation: Rfc64SemanticReadOperationV2;
+    let operation: Rfc64SemanticReadOperationV1;
     try {
-      operation = compileRfc64SemanticReadRequestV2(input);
+      const request = snapshotExactOrdinaryDataRecord(
+        input,
+        ['coordinate'],
+        'RFC-64 semantic read request',
+        (message) => fail('rfc64-semantic-read-request', message),
+      );
+      operation = compileRfc64SemanticReadOperationV1(request.coordinate);
     } catch (cause) {
+      if (cause instanceof Rfc64SemanticReadGatewayErrorV1) throw cause;
       if (cause instanceof Rfc64SemanticReadManifestErrorV1) {
         fail('rfc64-semantic-read-request', cause.message, cause);
       }

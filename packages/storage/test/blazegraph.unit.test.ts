@@ -709,7 +709,10 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   });
 
   it('ASK query returns boolean result', async () => {
-    setFetch(async () => new Response(JSON.stringify({ boolean: true }), {
+    setFetch(async () => new Response(JSON.stringify({
+      head: { link: ['https://example.test/results'] },
+      boolean: true,
+    }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
@@ -717,6 +720,19 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const r = await s.query('ASK { GRAPH <http://g1> { ?s ?p ?o } }');
     expect(r.type).toBe('boolean');
     if (r.type === 'boolean') expect(r.value).toBe(true);
+  });
+
+  it.each([
+    'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+    'BASE <urn:base:> ASK { ?s <p> ?o }',
+    '# leading comment\nASK { ?s ?p ?o }',
+  ])('classifies prologue-prefixed ASK as boolean: %s', async (query) => {
+    setFetch(async () => new Response(JSON.stringify({ head: {}, boolean: false }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const result = await new BlazegraphStore(baseUrl).query(query);
+    expect(result).toEqual({ type: 'boolean', value: false });
   });
 
   it('query throws when SPARQL endpoint returns error', async () => {
