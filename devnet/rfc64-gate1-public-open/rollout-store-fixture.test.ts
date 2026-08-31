@@ -4,8 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import blazegraphRuntimeContract from
-  '@origintrail-official/dkg/blazegraph-runtime-contract';
+import { renderBlazegraphNamespaceXml } from '@origintrail-official/dkg-storage';
 
 import {
   cleanupRolloutStoreFixture,
@@ -15,8 +14,8 @@ import {
 
 const BLAZEGRAPH_URL = 'http://127.0.0.1:9999/bigdata/namespace/kb/sparql';
 
-test('loads the typed Blazegraph runtime contract through its public subpath', () => {
-  const namespaceXml = blazegraphRuntimeContract.renderBlazegraphNamespaceXml(
+test('loads the canonical Blazegraph namespace contract from storage', () => {
+  const namespaceXml = renderBlazegraphNamespaceXml(
     'rfc64-runtime-contract-probe',
   );
   assert.match(namespaceXml, /rfc64-runtime-contract-probe/u);

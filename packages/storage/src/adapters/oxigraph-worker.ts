@@ -18,6 +18,7 @@ import {
 } from '../rfc64-author-commit-cas.js';
 import {
   deserializeWorkerErrorV1,
+  type WorkerResponseV1,
 } from '../worker-error-protocol.js';
 
 /**
@@ -412,26 +413,16 @@ export class OxigraphWorkerStore implements TripleStore {
     // this: a spawn only happens in the constructor or within respawn(), which
     // bails the moment a close() is seen.
     this.markSpawnedLive();
-    worker.on('message', (msg: {
-      id: number;
-      result?: unknown;
-      error?: string;
-      errorName?: string;
-      errorCode?: string;
-    }) => {
+    worker.on('message', (msg: WorkerResponseV1) => {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the
       // crash-loop accounting window (see MAX_CONSECUTIVE_RESPAWNS).
-      if (!msg.error) this.consecutiveRespawnFailures = 0;
+      if (!('error' in msg)) this.consecutiveRespawnFailures = 0;
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
-      if (msg.error) {
-        p.reject(deserializeWorkerErrorV1({
-          name: msg.errorName ?? 'Error',
-          message: msg.error,
-          ...(msg.errorCode === undefined ? {} : { code: msg.errorCode }),
-        }));
+      if ('error' in msg) {
+        p.reject(deserializeWorkerErrorV1(msg.error));
       }
       else p.resolve(msg.result);
     });
@@ -649,7 +640,7 @@ export class OxigraphWorkerStore implements TripleStore {
     if (deadlineAt !== undefined && remainingMs <= 0) {
       throw createOxigraphWorkerTimeoutError(method, timeoutMs);
     }
-    return this.postToWorker<T>(remainingMs, signal, method, args);
+    return this.postToWorker<T>(remainingMs, signal, method, args, timeoutMs);
   }
 
   private postToWorker<T>(
@@ -657,6 +648,7 @@ export class OxigraphWorkerStore implements TripleStore {
     signal: AbortSignal | undefined,
     method: string,
     args: unknown[],
+    configuredTimeoutMs = timeoutMs,
   ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -701,7 +693,7 @@ export class OxigraphWorkerStore implements TripleStore {
         timer = setTimeout(() => {
           if (this.pending.delete(id)) {
             cleanup();
-            reject(createOxigraphWorkerTimeoutError(method, timeoutMs));
+            reject(createOxigraphWorkerTimeoutError(method, configuredTimeoutMs));
           }
         }, timeoutMs);
         // A pending-op timer must not keep the process alive on its own.

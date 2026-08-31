@@ -191,7 +191,7 @@ function buildGoldenArtifact() {
   const forged = {
     attemptedCatalogHeadDigest: digest('9'),
     catalogAuthorAddress: AUTHOR,
-    expectedFailureCode: 'catalog-native-receiver-authorization',
+    expectedFailureCode: 'catalog-native-receiver-not-found',
     recoveredAuthorAddress: ATTACKER,
   };
   return {

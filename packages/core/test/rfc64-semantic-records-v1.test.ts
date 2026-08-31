@@ -12,6 +12,7 @@ import {
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
   snapshotRfc64SemanticRecordV1,
+  typedRdfStoreRowByteLengthV1,
   type ChainIdV1,
   type ContextGraphIdV1,
   type DecimalU64V1,
@@ -605,6 +606,25 @@ describe('RFC-64 semantic record RDF codec v1', () => {
         },
         ...currentRows.slice(1),
       ], coordinateFor(records[0])),
+      'rfc64-semantic-too-large',
+    );
+    const multibyteRow = {
+      ...currentRows[0],
+      object: {
+        kind: 'literal' as const,
+        value: 'é'.repeat(MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1 / 2),
+        datatypeIri: 'http://www.w3.org/2001/XMLSchema#string',
+      },
+    };
+    expect(multibyteRow.object.value.length)
+      .toBeLessThan(MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1);
+    expect(typedRdfStoreRowByteLengthV1(multibyteRow))
+      .toBeGreaterThan(MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1);
+    expectCode(
+      () => decodeRfc64SemanticRecordStoreRowsV1(
+        [multibyteRow, ...currentRows.slice(1)],
+        coordinateFor(records[0]),
+      ),
       'rfc64-semantic-too-large',
     );
   });

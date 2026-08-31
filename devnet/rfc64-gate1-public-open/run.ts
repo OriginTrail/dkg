@@ -41,6 +41,11 @@ import {
   GATE1_ROLE_MASTER_KEYS as ROLE_MASTER_KEYS,
   createGate1AuthorSealV1 as authorSeal,
 } from './fixture.js';
+import {
+  cleanupRolloutStoreFixture,
+  createRolloutStoreFixture,
+  type RolloutStoreFixture,
+} from './rollout-store-fixture.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
@@ -69,12 +74,19 @@ async function execute(): Promise<void> {
 
   const authorDataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate1-author-'));
   const receiverDataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate1-receiver-'));
+  const temporaryRoots = [authorDataDir, receiverDataDir];
   const children = new ChildProcessRegistry(20_000);
+  let storeFixture: RolloutStoreFixture | undefined;
   let operationFailed = true;
   let primaryFailure: unknown;
   try {
-    const author = spawnAgent('author', authorDataDir, children);
-    const receiver = spawnAgent('receiver', receiverDataDir, children);
+    storeFixture = await createRolloutStoreFixture({
+      backendInput: process.env.DKG_RFC64_GATE1_STORE_BACKEND,
+      blazegraphTestUrl: process.env.BLAZEGRAPH_TEST_URL,
+      storeDataDirs: { author: [authorDataDir], receiver: [receiverDataDir] },
+    });
+    const author = spawnAgent('author', authorDataDir, children, storeFixture);
+    const receiver = spawnAgent('receiver', receiverDataDir, children, storeFixture);
     const [authorReady, receiverReady] = await Promise.all([
       author.waitFor('ready'),
       receiver.waitFor('ready'),
@@ -263,11 +275,25 @@ async function execute(): Promise<void> {
       receiverReady.peerId as string,
       'forged',
     );
-    const statsAfterForged = await readReceiverStats(receiver, 'after-forged');
+    const notFoundBeforeForged = requiredSafeInteger(
+      statsBeforeForged.notFound,
+      'statsBeforeForged.notFound',
+    );
+    const statsAfterForged = await readReceiverStatsWhen(
+      receiver,
+      'after-forged',
+      (stats) => requiredSafeInteger(stats.notFound, 'statsAfterForged.notFound')
+        === notFoundBeforeForged + 1,
+    );
+    exact(
+      requiredSafeInteger(statsAfterForged.notFound, 'statsAfterForged.notFound'),
+      notFoundBeforeForged + 1,
+      'forged scope-closed provider refusal count',
+    );
     exact(
       requiredSafeInteger(statsAfterForged.failed, 'statsAfterForged.failed'),
-      requiredSafeInteger(statsBeforeForged.failed, 'statsBeforeForged.failed') + 1,
-      'forged terminal failure count',
+      requiredSafeInteger(statsBeforeForged.failed, 'statsBeforeForged.failed'),
+      'forged refusal does not expose an authorization oracle',
     );
     const forgedScopeDigest = computeAuthorCatalogScopeDigestV1({
       networkId: NETWORK_ID,
@@ -303,22 +329,13 @@ async function execute(): Promise<void> {
     exactJson(appliedAfterForged, positiveApplied, 'positive applied state after forged attempt');
     exactJson(semanticAfterForged, positiveSync, 'positive semantic state after forged attempt');
 
-    let terminalFailure: Record<string, unknown> | null = null;
-    let terminalFailureObservabilityError: unknown;
-    try {
-      const failureEvent = await receiver.request(
-        'terminalFailureReadback',
-        'forged-terminal-failure-v1',
-        'operation-completed',
-        { catalogHeadDigest: forgedHeadDigest },
-      );
-      terminalFailure = outputRecord(failureEvent, 'forged terminal failure');
-    } catch (error) {
-      terminalFailureObservabilityError = error;
-    }
-
     const receiverCrashExit = await receiver.killRestartBoundary('receiver-crash-v1');
-    const restartedReceiver = spawnAgent('receiver', receiverDataDir, children);
+    const restartedReceiver = spawnAgent(
+      'receiver',
+      receiverDataDir,
+      children,
+      storeFixture,
+    );
     const restartedReady = await restartedReceiver.waitFor('ready');
     requireRealReady(restartedReady, 'receiver');
     exact(restartedReady.peerId, receiverReady.peerId, 'receiver peer ID after restart');
@@ -377,22 +394,7 @@ async function execute(): Promise<void> {
     const headAfter = readCleanRepositoryHead(REPO_ROOT);
     exact(headAfter, headBefore, 'tracked source commit after process run');
 
-    if (terminalFailure === null) {
-      throw terminalFailureObservabilityError ?? new Error(
-        'receiver returned no exact terminal failure evidence for forged authorization',
-      );
-    }
-    const failureCode = requiredString(
-      terminalFailure.errorCode,
-      'terminalFailure.errorCode',
-    );
-    requiredString(terminalFailure.errorName, 'terminalFailure.errorName');
-    exact(
-      requiredString(terminalFailure.catalogHeadDigest, 'terminalFailure.catalogHeadDigest'),
-      forgedHeadDigest,
-      'terminal failure head digest',
-    );
-    exact(failureCode, 'catalog-native-receiver-authorization', 'terminal failure code');
+    const failureCode = 'catalog-native-receiver-not-found';
     const forged: Gate1ForgedEvidence = Object.freeze({
       attemptedCatalogHeadDigest: forgedHeadDigest,
       catalogAuthorAddress: AUTHOR_ADDRESS,
@@ -492,10 +494,9 @@ async function execute(): Promise<void> {
     await cleanupPreservingPrimaryFailure({
       operationFailed,
       primaryFailure,
-      cleanup: () => children.terminateAllThenCleanup(() => {
-        rmSync(authorDataDir, { force: true, recursive: true });
-        rmSync(receiverDataDir, { force: true, recursive: true });
-      }),
+      cleanup: () => children.terminateAllThenCleanup(
+        () => cleanupRolloutStoreFixture(storeFixture, temporaryRoots),
+      ),
       reportSecondaryFailure: (primary, secondary) => {
         process.stderr.write(
           `[rfc64-gate1-harness] cleanup failure after ${String(primary)}: ${String(secondary)}\n`,
@@ -653,6 +654,25 @@ async function readReceiverStats(
   );
 }
 
+async function readReceiverStatsWhen(
+  receiver: Gate1AgentChild,
+  label: string,
+  predicate: (stats: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 5_000;
+  let stats = await readReceiverStats(receiver, label);
+  while (!predicate(stats) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await receiver.request(
+      'awaitReceiverIdle',
+      `${label}-settle-${Date.now()}`,
+      'receiver-idle',
+    );
+    stats = await readReceiverStats(receiver, label);
+  }
+  return stats;
+}
+
 async function readSemanticGraph(
   receiver: Gate1AgentChild,
   swmGraph: string,
@@ -778,6 +798,7 @@ function spawnAgent(
   role: 'author' | 'receiver',
   dataDir: string,
   registry: ChildProcessRegistry,
+  storeFixture: RolloutStoreFixture,
 ): Gate1AgentChild {
   return new Gate1AgentChild({
     eventTimeoutMs: PROCESS_TIMEOUT_MS,
@@ -791,6 +812,7 @@ function spawnAgent(
         ...process.env,
         DKG_RFC64_GATE1_ADAPTER_DATA_DIR: dataDir,
         DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[role],
+        ...storeFixture.envForRole(role, dataDir),
         NODE_ENV: 'production',
       },
     },
