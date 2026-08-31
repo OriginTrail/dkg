@@ -79,10 +79,15 @@ export interface Rfc64AuthorCommitCasSemanticInputV1 {
   readonly appliedSet: Rfc64AuthorCommitStateTransitionV1;
 }
 
-/** Backward-compatible V1 capability: legacy callers and the typed semantic compiler. */
-export type Rfc64AuthorCommitCasInputV1 =
+/** Backward-compatible source shapes accepted only at the outer capability edge. */
+export type Rfc64AuthorCommitCasSourceInputV1 =
   | Rfc64AuthorCommitCasLegacyInputV1
   | Rfc64AuthorCommitCasSemanticInputV1;
+
+/** Public compatibility input plus the canonical command carried internally. */
+export type Rfc64AuthorCommitCasInputV1 =
+  | Rfc64AuthorCommitCasSourceInputV1
+  | NormalizedRfc64AuthorCommitCasV1;
 
 export type Rfc64AuthorCommitCasResultV1 = 'committed' | 'conflict';
 
@@ -214,6 +219,8 @@ async function bestEffortRfc64Cleanup(cleanup: () => void | Promise<void>): Prom
 
 /** Canonical validated metadata consumed by every adapter and decorator. */
 export interface NormalizedRfc64AuthorCommitCasV1 {
+  readonly planKind: 'rfc64-author-commit-plan-v1';
+  readonly sourceKind: 'legacy' | 'semantic';
   readonly graphReplacements: readonly Rfc64AuthorCommitGraphReplacementPlanV1[];
   readonly subjectReplacements: readonly Rfc64AuthorCommitSubjectReplacementPlanV1[];
   readonly predicateReplacements: readonly Rfc64AuthorCommitPredicateReplacementPlanV1[];
@@ -223,9 +230,12 @@ export interface NormalizedRfc64AuthorCommitCasV1 {
   readonly referencedGraphs: readonly string[];
 }
 
+const NORMALIZED_RFC64_AUTHOR_COMMIT_PLANS = new WeakSet<object>();
+
 export function normalizeRfc64AuthorCommitCasV1(
   input: Rfc64AuthorCommitCasInputV1,
 ): NormalizedRfc64AuthorCommitCasV1 {
+  if ('planKind' in input) return importNormalizedPlan(input);
   return 'currentHead' in input
     ? normalizeSemanticRfc64AuthorCommitCasV1(input)
     : normalizeLegacyRfc64AuthorCommitCasV1(input);
@@ -278,32 +288,13 @@ function normalizeSemanticRfc64AuthorCommitCasV1(
     ...stateReplacements,
   ]);
   const guards = stateGuards;
-  const touchedGraphs = Object.freeze([...new Set([
-    ...graphReplacements.map(({ graphUri }) => graphUri),
-    ...subjectReplacements
-      .filter(({ role }) => role === 'authorSeal')
-      .map(({ graphUri }) => graphUri),
-    ...subjectReplacements
-      .filter(({ role }) => role !== 'authorSeal')
-      .map(({ graphUri }) => graphUri),
-  ])]);
-  const referencedGraphs = Object.freeze([...new Set([
-    ...touchedGraphs,
-    ...guards.map(({ graphUri }) => graphUri),
-  ])]);
-  const semanticQuads = Object.freeze([
-    ...graphReplacements.flatMap(({ quads }) => quads),
-    ...subjectReplacements.flatMap(({ quads }) => quads),
-  ]);
-  return Object.freeze({
+  return finalizeNormalizedPlan(
+    'semantic',
     graphReplacements,
     subjectReplacements,
-    predicateReplacements: Object.freeze([]),
+    Object.freeze([]),
     guards,
-    semanticQuads,
-    touchedGraphs,
-    referencedGraphs,
-  });
+  );
 }
 
 function normalizeLegacyRfc64AuthorCommitCasV1(
@@ -366,35 +357,13 @@ function normalizeLegacyRfc64AuthorCommitCasV1(
     quads: input.authorSealQuads,
   }), ...stateReplacements]);
   const guards = Object.freeze([currentHead, ...stateGuards]);
-  const touchedGraphs = Object.freeze([...new Set([
-    input.sharedProjectionGraph,
-    input.authorSealGraph,
-    input.currentHeadGraph,
-    ...stateReplacements.map(({ graphUri }) => graphUri),
-  ])]);
-  const referencedGraphs = Object.freeze([...new Set([
-    ...touchedGraphs,
-    ...guards.map(({ graphUri }) => graphUri),
-  ])]);
-  const semanticQuads = Object.freeze([
-    ...input.sharedProjectionQuads,
-    ...subjectReplacements.flatMap(({ quads }) => quads),
-    Object.freeze({
-      graph: input.currentHeadGraph,
-      subject: input.currentHeadSubject,
-      predicate: input.currentHeadPredicate,
-      object: input.nextCurrentHeadObject,
-    }),
-  ]);
-  return Object.freeze({
+  return finalizeNormalizedPlan(
+    'legacy',
     graphReplacements,
     subjectReplacements,
-    predicateReplacements: Object.freeze([currentHead]),
+    Object.freeze([currentHead]),
     guards,
-    semanticQuads,
-    touchedGraphs,
-    referencedGraphs,
-  });
+  );
 }
 
 /**
@@ -406,7 +375,7 @@ function normalizeLegacyRfc64AuthorCommitCasV1(
 export async function mapRfc64AuthorCommitCasV1(
   manifest: NormalizedRfc64AuthorCommitCasV1,
   mapper: Rfc64AuthorCommitCasMapperV1,
-): Promise<Rfc64AuthorCommitCasInputV1> {
+): Promise<NormalizedRfc64AuthorCommitCasV1> {
   const graphReplacements = await Promise.all(manifest.graphReplacements.map(async (replacement) => ({
     ...replacement,
     quads: await Promise.all(replacement.quads.map((quad) => mapper.mapQuad(quad, {
@@ -444,83 +413,129 @@ export async function mapRfc64AuthorCommitCasV1(
         }))),
   })));
   const predicateReplacements = await Promise.all(
-    manifest.predicateReplacements.map(async (replacement) => ({
-      ...replacement,
-      nextObject: await mapper.mapObject(replacement.nextObject, {
+    manifest.predicateReplacements.map(async (replacement) => {
+      const mappedGuard = guards.find(({ role }) => role === replacement.role);
+      if (mappedGuard === undefined) {
+        throw new Error(`RFC-64 author commit plan has no ${replacement.role} guard`);
+      }
+      const nextObject = await mapper.mapObject(replacement.nextObject, {
         role: replacement.role,
         graphUri: replacement.graphUri,
         kind: 'next',
-      }),
-    })),
+      });
+      if (nextObject === null) {
+        throw new Error('RFC-64 author commit mapper removed the next current head');
+      }
+      return {
+        ...replacement,
+        expectedObject: mappedGuard.expectedObject,
+        expectedQuads: mappedGuard.expectedQuads,
+        nextObject,
+      };
+    }),
   );
 
-  const graphReplacement = requireMappedRole(graphReplacements, 'sharedProjection');
-  const authorSeal = requireMappedRole(subjectReplacements, 'authorSeal');
-  const transition = (
-    role: Rfc64AuthorCommitGuardPlanV1['role'],
-  ): Rfc64AuthorCommitStateTransitionV1 => {
-    const guard = requireMappedRole(guards, role);
-    const replacement = requireMappedRole(subjectReplacements, role);
-    return Object.freeze({
-      graphUri: replacement.graphUri,
-      subject: replacement.subject,
-      predicate: guard.predicate,
-      expectedObject: guard.expectedObject,
-      expectedQuads: guard.expectedQuads,
-      quads: replacement.quads,
-    });
-  };
-  if (predicateReplacements.length > 0) {
-    const currentHead = requireMappedRole(predicateReplacements, 'currentHead');
-    const mappedCurrentHead = requireMappedRole(guards, 'currentHead');
-    const nextCurrentHeadObject = currentHead.nextObject;
-    if (nextCurrentHeadObject === null) {
-      throw new Error('RFC-64 author commit mapper removed the next current head');
-    }
-    const sealInvalidations = subjectReplacements
-      .filter(({ role }) => role === 'sealInvalidation')
-      .sort((left, right) => left.roleIndex - right.roleIndex)
-      .map(({ graphUri, subject, quads }) => Object.freeze({ graphUri, subject, quads }));
-    return Object.freeze({
-      sharedProjectionGraph: graphReplacement.graphUri,
-      sharedProjectionQuads: graphReplacement.quads,
-      authorSealGraph: authorSeal.graphUri,
-      authorSealSubject: authorSeal.subject,
-      authorSealQuads: authorSeal.quads,
-      currentHeadGraph: mappedCurrentHead.graphUri,
-      currentHeadSubject: mappedCurrentHead.subject,
-      currentHeadPredicate: mappedCurrentHead.predicate,
-      expectedCurrentHeadObject: mappedCurrentHead.expectedObject,
-      nextCurrentHeadObject,
-      kaStateDigest: transition('kaStateDigest'),
-      subgraphMutationGeneration: transition('subgraphMutationGeneration'),
-      contextGraphMutationGeneration: transition('contextGraphMutationGeneration'),
-      appliedSet: transition('appliedSet'),
-      sealInvalidations,
-    });
-  }
-  return Object.freeze({
-    sharedProjectionGraph: graphReplacement.graphUri,
-    sharedProjectionQuads: graphReplacement.quads,
-    authorSealGraph: authorSeal.graphUri,
-    authorSealSubject: authorSeal.subject,
-    authorSealQuads: authorSeal.quads,
-    currentHead: transition('currentHead'),
-    subgraphMutationGeneration: transition('subgraphMutationGeneration'),
-    contextGraphMutationGeneration: transition('contextGraphMutationGeneration'),
-    appliedSet: transition('appliedSet'),
-  });
+  return finalizeNormalizedPlan(
+    manifest.sourceKind,
+    graphReplacements,
+    subjectReplacements,
+    predicateReplacements,
+    guards,
+  );
 }
 
-function requireMappedRole<T extends Readonly<{ role: Rfc64AuthorCommitSemanticRoleV1 }>>(
-  values: readonly T[],
-  role: T['role'],
-): T {
-  const matches = values.filter((value) => value.role === role);
-  if (matches.length !== 1) {
-    throw new Error(`RFC-64 author commit plan requires exactly one ${role} role`);
+function importNormalizedPlan(
+  input: NormalizedRfc64AuthorCommitCasV1,
+): NormalizedRfc64AuthorCommitCasV1 {
+  if (NORMALIZED_RFC64_AUTHOR_COMMIT_PLANS.has(input)) return input;
+  if (
+    input.planKind !== 'rfc64-author-commit-plan-v1'
+    || (input.sourceKind !== 'legacy' && input.sourceKind !== 'semantic')
+    || !Array.isArray(input.graphReplacements)
+    || !Array.isArray(input.subjectReplacements)
+    || !Array.isArray(input.predicateReplacements)
+    || !Array.isArray(input.guards)
+  ) {
+    throw new Error('RFC-64 author commit plan is malformed');
   }
-  return matches[0]!;
+  return finalizeNormalizedPlan(
+    input.sourceKind,
+    input.graphReplacements,
+    input.subjectReplacements,
+    input.predicateReplacements,
+    input.guards,
+  );
+}
+
+function finalizeNormalizedPlan(
+  sourceKind: NormalizedRfc64AuthorCommitCasV1['sourceKind'],
+  graphReplacementsInput: readonly Rfc64AuthorCommitGraphReplacementPlanV1[],
+  subjectReplacementsInput: readonly Rfc64AuthorCommitSubjectReplacementPlanV1[],
+  predicateReplacementsInput: readonly Rfc64AuthorCommitPredicateReplacementPlanV1[],
+  guardsInput: readonly Rfc64AuthorCommitGuardPlanV1[],
+): NormalizedRfc64AuthorCommitCasV1 {
+  if (graphReplacementsInput.length !== 1) {
+    throw new Error('RFC-64 author commit plan requires exactly one shared projection');
+  }
+  if (
+    (sourceKind === 'semantic' && predicateReplacementsInput.length !== 0)
+    || (sourceKind === 'legacy' && predicateReplacementsInput.length !== 1)
+  ) {
+    throw new Error('RFC-64 author commit plan source kind does not match its operations');
+  }
+  const freezeQuads = (quads: readonly Quad[]): readonly Quad[] => Object.freeze(
+    quads.map((quad) => Object.freeze({ ...quad })),
+  );
+  const graphReplacements = Object.freeze(graphReplacementsInput.map((replacement) =>
+    Object.freeze({ ...replacement, quads: freezeQuads(replacement.quads) })));
+  const subjectReplacements = Object.freeze(subjectReplacementsInput.map((replacement) =>
+    Object.freeze({ ...replacement, quads: freezeQuads(replacement.quads) })));
+  const guards = Object.freeze(guardsInput.map((guard) => Object.freeze({
+    ...guard,
+    expectedQuads: guard.expectedQuads === undefined || guard.expectedQuads === null
+      ? guard.expectedQuads
+      : freezeQuads(guard.expectedQuads),
+  })));
+  const predicateReplacements = Object.freeze(predicateReplacementsInput.map((replacement) =>
+    Object.freeze({
+      ...replacement,
+      expectedQuads: replacement.expectedQuads === undefined
+        || replacement.expectedQuads === null
+        ? replacement.expectedQuads
+        : freezeQuads(replacement.expectedQuads),
+    })));
+  const touchedGraphs = Object.freeze([...new Set([
+    ...graphReplacements.map(({ graphUri }) => graphUri),
+    ...subjectReplacements.map(({ graphUri }) => graphUri),
+    ...predicateReplacements.map(({ graphUri }) => graphUri),
+  ])]);
+  const referencedGraphs = Object.freeze([...new Set([
+    ...touchedGraphs,
+    ...guards.map(({ graphUri }) => graphUri),
+  ])]);
+  const semanticQuads = Object.freeze([
+    ...graphReplacements.flatMap(({ quads }) => quads),
+    ...subjectReplacements.flatMap(({ quads }) => quads),
+    ...predicateReplacements.map((replacement) => Object.freeze({
+      graph: replacement.graphUri,
+      subject: replacement.subject,
+      predicate: replacement.predicate,
+      object: replacement.nextObject,
+    })),
+  ]);
+  const plan = Object.freeze({
+    planKind: 'rfc64-author-commit-plan-v1' as const,
+    sourceKind,
+    graphReplacements,
+    subjectReplacements,
+    predicateReplacements,
+    guards,
+    semanticQuads,
+    touchedGraphs,
+    referencedGraphs,
+  });
+  NORMALIZED_RFC64_AUTHOR_COMMIT_PLANS.add(plan);
+  return plan;
 }
 
 /** Build the one certified transactional update for the closed manifest. */

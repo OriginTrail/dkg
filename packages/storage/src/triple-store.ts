@@ -24,16 +24,12 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import type {
   CanonicalAuthorSealStoreRowV1,
-  Rfc64SharedProjectionStreamOperationV1,
 } from '@origintrail-official/dkg-core';
 import type {
   Rfc64ExactBindingsReadOperationV1,
 } from './rfc64-exact-bindings-read-capability.js';
-import type {
-  Rfc64SharedProjectionStreamCapabilityOptionsV1,
-} from './rfc64-shared-projection-stream-capability.js';
 import {
-  isManagedOxigraphRuntimeStoreConfigV1,
+  getManagedOxigraphRuntimeConstructionAuthorityV1,
 } from './managed-oxigraph-runtime-store.js';
 
 export interface Quad {
@@ -146,12 +142,6 @@ export interface TripleStore {
     operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
-  /** Open one certified exact-graph RFC-64 shared-projection stream. */
-  rfc64SharedProjectionStreamV1?(
-    operation: Rfc64SharedProjectionStreamOperationV1,
-    options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
-  ): Promise<AsyncIterable<Uint8Array>>;
-
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;
@@ -524,12 +514,8 @@ export interface TripleStoreConfig {
 
 type AdapterFactory = (
   options?: Record<string, unknown>,
-  context?: TripleStoreAdapterConstructionContext,
+  constructionAuthority?: object,
 ) => Promise<TripleStore>;
-
-interface TripleStoreAdapterConstructionContext {
-  readonly managedOxigraphRuntime: boolean;
-}
 
 const adapterRegistry = new Map<string, AdapterFactory>();
 
@@ -550,10 +536,8 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
-  const context = Object.freeze({
-    managedOxigraphRuntime: isManagedOxigraphRuntimeStoreConfigV1(config),
-  });
-  const store = await factory(resolveAdapterOptions(config), context);
+  const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
+  const store = await factory(resolveAdapterOptions(config), constructionAuthority);
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)

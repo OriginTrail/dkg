@@ -123,6 +123,10 @@ describe('CanonicalGraphScopedAuthorSealV1 bytes and projection', () => {
       toStoreRows(rows),
       COORDINATE,
     ).payload).toEqual(privatePayload);
+    expect(decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      rows,
+      COORDINATE,
+    ).payload).toEqual(privatePayload);
   });
 
   it('canonicalizes only backend-equivalent UAL and dateTime post-read forms', () => {

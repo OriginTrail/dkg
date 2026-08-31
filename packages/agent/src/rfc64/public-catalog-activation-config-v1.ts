@@ -36,6 +36,7 @@ export {
   rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64CatalogExecutionPlanV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogExecutionPlanV1,
   type ResolvedRfc64CatalogRolloutConfigV1,
   type Rfc64CatalogRolloutConfigV1,

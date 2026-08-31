@@ -196,6 +196,7 @@ export {
 } from './rfc64-author-seal-read-gateway.js';
 export {
   createManagedOxigraphRuntimeStoreConfigV1,
+  type ManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';
 export {
   isRfc64SharedProjectionStreamCapabilityV1,

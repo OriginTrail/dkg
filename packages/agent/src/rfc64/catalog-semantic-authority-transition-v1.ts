@@ -3,11 +3,17 @@
 import {
   DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
+  computeKaProjectionDigestV1,
   contextGraphWorkspaceGraphUri,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  encodeCanonicalCgSharedPublicRootProjectionV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type ContextGraphIdV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
+  type Digest32V1,
   type KaIdV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -35,6 +41,9 @@ export interface Rfc64CatalogOwnedRowRemovalV1 {
   readonly swmGraph: string;
   readonly sealMetaGraph: string;
   readonly sealSubject: string;
+  readonly sealCoordinate: CanonicalGraphScopedAuthorSealCoordinateV1;
+  readonly projectionDigest: Digest32V1;
+  readonly sealDigest: Digest32V1;
 }
 
 export interface Rfc64SemanticTransitionLocationV1 {
@@ -43,7 +52,7 @@ export interface Rfc64SemanticTransitionLocationV1 {
   readonly sealSubject: string;
 }
 
-interface Rfc64SemanticTransitionPreimageV1
+export interface Rfc64SemanticTransitionPreimageV1
   extends Rfc64SemanticTransitionLocationV1 {
   readonly graphQuads: readonly Readonly<Quad>[];
   readonly sealQuads: readonly Readonly<Quad>[];
@@ -59,11 +68,20 @@ export function planRfc64CatalogOwnedRowRemovalV1(
     authorAddress: scope.authorAddress,
     assertionCoordinate: row.assertionCoordinate,
   });
+  const sealCoordinate = Object.freeze({
+    contextGraphId: scope.contextGraphId,
+    subGraphName: scope.subGraphName,
+    authorAddress: scope.authorAddress,
+    assertionCoordinate: row.assertionCoordinate,
+  });
   return Object.freeze({
     kaId: row.kaId,
     swmGraph: deriveRfc64PublicSwmGraphV1(scope.contextGraphId, row.kaId),
     sealMetaGraph: placement.metaGraph,
     sealSubject: placement.subject,
+    sealCoordinate,
+    projectionDigest: row.projectionDigest,
+    sealDigest: row.sealDigest,
   });
 }
 
@@ -149,6 +167,26 @@ export async function deactivateRfc64CatalogOwnedProjectionV1(
   store: TripleStore,
   removal: Readonly<Rfc64CatalogOwnedRowRemovalV1>,
 ): Promise<void> {
+  await removeRfc64CatalogOwnedProjectionV1(store, removal);
+}
+
+/** Relinquish catalog authority only while its exact semantic row still owns the location. */
+export async function deactivateRfc64CatalogOwnedProjectionIfStillOwnedV1(
+  store: TripleStore,
+  removal: Readonly<Rfc64CatalogOwnedRowRemovalV1>,
+  preimage: Readonly<Rfc64SemanticTransitionPreimageV1>,
+): Promise<'removed' | 'preserved-divergent'> {
+  if (!semanticPreimageBelongsToCatalogRowV1(removal, preimage)) {
+    return 'preserved-divergent';
+  }
+  await removeRfc64CatalogOwnedProjectionV1(store, removal);
+  return 'removed';
+}
+
+async function removeRfc64CatalogOwnedProjectionV1(
+  store: TripleStore,
+  removal: Readonly<Rfc64CatalogOwnedRowRemovalV1>,
+): Promise<void> {
   let replaced: boolean;
   try {
     replaced = await tryReplaceGraphAndSubjectAtomically(
@@ -198,6 +236,32 @@ export async function deactivateRfc64CatalogOwnedProjectionV1(
       'catalog-native-receiver-activation',
       `removed KA ${removal.kaId} projection or author seal remains present`,
     );
+  }
+}
+
+function semanticPreimageBelongsToCatalogRowV1(
+  removal: Readonly<Rfc64CatalogOwnedRowRemovalV1>,
+  preimage: Readonly<Rfc64SemanticTransitionPreimageV1>,
+): boolean {
+  try {
+    const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(
+      preimage.graphQuads.map(({ subject, predicate, object }) => ({
+        subject,
+        predicate,
+        object,
+      })),
+    );
+    if (computeKaProjectionDigestV1(projectionBytes) !== removal.projectionDigest) return false;
+    const decoded = decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      preimage.sealQuads,
+      removal.sealCoordinate,
+    );
+    return computeCanonicalGraphScopedAuthorSealDigestV1(decoded.payload)
+      === removal.sealDigest;
+  } catch {
+    // Missing, malformed, or later-written content is not owned by the stale
+    // applied catalog row and must survive authority relinquishment.
+    return false;
   }
 }
 

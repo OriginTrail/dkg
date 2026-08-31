@@ -18,9 +18,6 @@ import {
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 export interface StageKnowledgeAssetSharedWorkingMemoryInputV1 {
-  readonly store: TripleStore;
-  readonly writeLocks: Map<string, Promise<void>>;
-  readonly graphManager?: GraphManager;
   readonly contextGraphId: string;
   readonly kaUal: string;
   readonly assertionVersion: string | number | bigint;
@@ -34,24 +31,35 @@ export interface StageKnowledgeAssetSharedWorkingMemoryInputV1 {
   readonly agentAddress?: string;
   readonly subGraphName?: string;
   readonly timestamp?: Date;
-  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }
 
 export interface StagedKnowledgeAssetSharedWorkingMemoryV1 {
+  readonly contextGraphId: string;
+  readonly shareOperationId: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly subGraphName?: string;
   readonly swmGraph: string;
   readonly tripleCount: number;
 }
 
+interface StageKnowledgeAssetSharedWorkingMemoryStorageInputV1
+  extends StageKnowledgeAssetSharedWorkingMemoryInputV1 {
+  readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly graphManager: GraphManager;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+}
+
 /**
- * Stage one complete graph-scoped SWM snapshot and keep the canonical per-KA
- * lock until `consume` finishes. This makes the store replacement, immutable
- * operation snapshot, mutable head, and the publisher's subsequent SWM read
- * one serialized lifecycle rather than exposing an unlocked persistence API.
+ * Stage one complete graph-scoped SWM snapshot under the publisher-owned
+ * canonical per-store lock domain. The returned reference names immutable
+ * operation bytes, so chain and network work never runs while holding the
+ * local storage lock.
  */
-export async function stageKnowledgeAssetSharedWorkingMemoryV1<T>(
-  input: StageKnowledgeAssetSharedWorkingMemoryInputV1,
-  consume: (staged: StagedKnowledgeAssetSharedWorkingMemoryV1) => Promise<T>,
-): Promise<T> {
+export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
+  input: StageKnowledgeAssetSharedWorkingMemoryStorageInputV1,
+): Promise<StagedKnowledgeAssetSharedWorkingMemoryV1> {
   const scope = createGraphKnowledgeAssetScope(input.kaUal, input.assertionVersion);
   const lockKey = swmKaWriteLockKey(
     input.contextGraphId,
@@ -59,7 +67,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryV1<T>(
     scope.ual,
   );
   return withKeyedLocks(input.writeLocks, [lockKey], async () => {
-    const graphManager = input.graphManager ?? new GraphManager(input.store);
+    const graphManager = input.graphManager;
     const swmBucket = graphManager.sharedMemoryUri(input.contextGraphId, input.subGraphName);
     const sharedMemoryScope: SharedMemoryGraphScope = {
       kind: 'named-lifecycle',
@@ -126,6 +134,14 @@ export async function stageKnowledgeAssetSharedWorkingMemoryV1<T>(
       shareOperationId: input.shareOperationId,
       ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
     });
-    return consume(Object.freeze({ swmGraph, tripleCount: input.quads.length }));
+    return Object.freeze({
+      contextGraphId: input.contextGraphId,
+      shareOperationId: input.shareOperationId,
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+      swmGraph,
+      tripleCount: input.quads.length,
+    });
   });
 }

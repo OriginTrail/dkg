@@ -23,7 +23,27 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import type { Quad } from '../src/triple-store.js';
+import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
+import type {
+  Quad,
+} from '../src/triple-store.js';
+import type { Rfc64SemanticAuthorCommitInputV1 } from
+  '../src/rfc64-semantic-author-commit-v1.js';
+import {
+  MemoryLayer,
+  contextGraphLayerUri,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
+  projectRfc64SemanticRecordStoreRowsV1,
+  renderRfc64SemanticStoreRowV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
+  type CanonicalGraphScopedAuthorSealV1,
+  type ContextGraphIdV1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type NetworkIdV1,
+  type Rfc64SemanticRecordV1,
+} from '@origintrail-official/dkg-core';
 
 const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_TEST_URL;
 
@@ -422,4 +442,180 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     },
     60_000,
   );
+
+  it(
+    'executes compiler-shaped semantic records and rejects a same-digest different-version predecessor',
+    async () => {
+      const fixture = semanticAuthorCommitFixture();
+      const compiled = compileRfc64SemanticAuthorCommitV1(fixture.input);
+      const graphs = [...compiled.referencedGraphs];
+      try {
+        await store.insert([
+          ...semanticRows(fixture.unexpectedHead),
+          ...fixture.expectedTail.flatMap(semanticRows),
+        ]);
+        await expect(store.rfc64AuthorCommitCasV1(compiled)).resolves.toBe('conflict');
+        expect(await store.countQuads(fixture.projectionGraph)).toBe(0);
+        expect(await store.countQuads(fixture.sealGraph)).toBe(0);
+
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+        await store.insert([
+          ...semanticRows(fixture.expectedHead),
+          ...fixture.expectedTail.flatMap(semanticRows),
+        ]);
+        await expect(store.rfc64AuthorCommitCasV1(compiled)).resolves.toBe('committed');
+        expect(await store.countQuads(fixture.projectionGraph)).toBe(1);
+        expect(await store.countQuads(fixture.sealGraph)).toBe(14);
+      } finally {
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+      }
+    },
+    60_000,
+  );
 });
+
+function semanticAuthorCommitFixture(): Readonly<{
+  input: Rfc64SemanticAuthorCommitInputV1;
+  expectedHead: Extract<Rfc64SemanticRecordV1, { recordType: 'CurrentAuthorCatalogRefV1' }>;
+  unexpectedHead: Extract<Rfc64SemanticRecordV1, { recordType: 'CurrentAuthorCatalogRefV1' }>;
+  expectedTail: readonly Rfc64SemanticRecordV1[];
+  projectionGraph: string;
+  sealGraph: string;
+}> {
+  const networkId = 'otp:20430' as NetworkIdV1;
+  const contextGraphId = (
+    '0x0123456789abcdef0123456789abcdef01234567/99'
+  ) as ContextGraphIdV1;
+  const author = '0x89abcdef0123456789abcdef0123456789abcdef' as EvmAddressV1;
+  const digest = (value: string) => `0x${value.repeat(64)}` as Digest32V1;
+  const projectionGraph = contextGraphLayerUri(
+    contextGraphId,
+    MemoryLayer.SharedWorkingMemory,
+    author,
+    '7',
+  );
+  const coordinate = Object.freeze({
+    contextGraphId,
+    subGraphName: null,
+    authorAddress: author,
+    assertionCoordinate: 'blazegraph-semantic-fixture',
+  }) as CanonicalGraphScopedAuthorSealCoordinateV1;
+  const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1(coordinate);
+  const seal = Object.freeze({
+    assertedAtChainId: '20430',
+    assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
+    assertionFinalizedAt: '2026-08-29T10:00:00.123Z',
+    assertionMerkleRoot: digest('e'),
+    assertionVersion: '1',
+    authorAddress: author,
+    authorAttestationR: digest('1'),
+    authorAttestationVS: digest('2'),
+    authorSchemeVersion: '1',
+    contentScopeVersion: '2',
+    kaUal: `did:dkg:${networkId}/${author}/7`,
+    privateMerkleRoot: null,
+    privateTripleCount: '0',
+    publicTripleCount: '1',
+    reservedKaId: ((BigInt(author) << 96n) | 7n).toString(),
+  }) as CanonicalGraphScopedAuthorSealV1;
+  const expectedHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    networkId,
+    contextGraphId,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    subGraphName: null,
+    authorAddress: author,
+    catalogEra: '1',
+    catalogVersion: '4',
+    catalogHeadDigest: digest('a'),
+  });
+  const nextHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    ...expectedHead.value,
+    catalogVersion: '5',
+    catalogHeadDigest: digest('b'),
+  });
+  const unexpectedHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    ...expectedHead.value,
+    catalogVersion: '3',
+  });
+  const expectedSubgraph = semanticRecord('SubgraphMutationGuardV1', {
+    networkId,
+    contextGraphId,
+    subGraphName: null,
+    generation: '4',
+  });
+  const nextSubgraph = semanticRecord('SubgraphMutationGuardV1', {
+    ...expectedSubgraph.value,
+    generation: '5',
+  });
+  const expectedContextGraph = semanticRecord('ContextGraphMutationGuardV1', {
+    networkId,
+    contextGraphId,
+    generation: '8',
+  });
+  const nextContextGraph = semanticRecord('ContextGraphMutationGuardV1', {
+    ...expectedContextGraph.value,
+    generation: '9',
+  });
+  const expectedApplied = semanticRecord('AppliedSubgraphSetRefV1', {
+    networkId,
+    contextGraphId,
+    generation: '8',
+    subgraphIndexEra: '1',
+    subgraphIndexVersion: '3',
+    subgraphCount: '1',
+    appliedDirectoryRootDigest: digest('c'),
+  });
+  const nextApplied = semanticRecord('AppliedSubgraphSetRefV1', {
+    ...expectedApplied.value,
+    generation: '9',
+    appliedDirectoryRootDigest: digest('d'),
+  });
+  return Object.freeze({
+    input: Object.freeze({
+      sharedProjectionGraph: projectionGraph,
+      sharedProjectionQuads: Object.freeze([{
+        subject: 'urn:test:blazegraph-semantic',
+        predicate: 'urn:test:value',
+        object: '"new"',
+        graph: projectionGraph,
+      }]),
+      authorSealGraph: placement.metaGraph,
+      authorSealSubject: placement.subject,
+      authorSealQuads: projectCanonicalGraphScopedAuthorSealRowsV1(seal, coordinate),
+      expectedCurrentHead: expectedHead,
+      nextCurrentHead: nextHead,
+      expectedSubgraphMutation: expectedSubgraph,
+      nextSubgraphMutation: nextSubgraph,
+      expectedContextGraphMutation: expectedContextGraph,
+      nextContextGraphMutation: nextContextGraph,
+      expectedAppliedSet: expectedApplied,
+      nextAppliedSet: nextApplied,
+    }),
+    expectedHead,
+    unexpectedHead,
+    expectedTail: Object.freeze([
+      expectedSubgraph,
+      expectedContextGraph,
+      expectedApplied,
+    ]),
+    projectionGraph,
+    sealGraph: placement.metaGraph,
+  });
+}
+
+function semanticRows(record: Rfc64SemanticRecordV1): Quad[] {
+  return projectRfc64SemanticRecordStoreRowsV1(record)
+    .map(renderRfc64SemanticStoreRowV1);
+}
+
+function semanticRecord<Type extends Rfc64SemanticRecordV1['recordType']>(
+  recordType: Type,
+  value: Extract<Rfc64SemanticRecordV1, { recordType: Type }>['value'],
+): Extract<Rfc64SemanticRecordV1, { recordType: Type }> {
+  return Object.freeze({ recordType, value: Object.freeze(value) }) as Extract<
+    Rfc64SemanticRecordV1,
+    { recordType: Type }
+  >;
+}
