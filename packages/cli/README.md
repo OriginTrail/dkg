@@ -64,6 +64,50 @@ the effective lane once at boot. A background query that is shed before
 execution returns HTTP 503 with `Retry-After: 1` and
 `code: "STORE_SCHEDULER_BUSY"`.
 
+## Rust/Wasm semantic runtime (Phase 0)
+
+The semantic runtime is an experimental, default-off Phase 0 gate. When
+explicitly enabled, the daemon verifies the packaged Wasm hash and ABI, starts
+it in a bounded Worker Thread, and requires a successful restore handshake
+before continuing graph activation:
+
+```json
+{
+  "semanticRuntime": {
+    "enabled": true,
+    "watchdogMs": 100
+  }
+}
+```
+
+The operator must also select one DKG-published execution policy. For example:
+
+```json
+{
+  "semanticRuntime": {
+    "enabled": true,
+    "watchdogMs": 100,
+    "operatorPolicyIri": "urn:sr:policy:operator-codex"
+  }
+}
+```
+
+`GET /api/semantic-runtime/resolve?contextGraphId=...&programIri=...` exposes the
+effective authority used by the native Program panel: Program requirements,
+operator Tool offers, the selected policy, and locally installed and enabled
+adapters. `POST /api/semantic-runtime/invoke` requires
+`{ "contextGraphId": "...", "programIri": "...", "invocationId": "<UUID>" }`.
+It loads the Program from Verifiable Memory and executes its admitted plan in
+the packaged Wasm runtime. The current closed adapter registry supports
+`agent/investigate@1` through Codex or the configured OpenAI-compatible LLM;
+undeclared or unavailable effects fail closed.
+
+A successful response is returned only after the exact LLM output and its
+SHA-256 hash have been published in an `sr:Execution` Knowledge Asset in the
+same Context Graph. The response contains `executionIri`, `executionUal`, and
+`persisted: true`. Reusing the same invocation UUID resumes the durable effect
+journal and does not repeat an already completed LLM call.
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2

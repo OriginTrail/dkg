@@ -1,0 +1,54 @@
+{
+  "name": "@origintrail-official/dkg-semantic-runtime",
+  "version": "10.0.14",
+  "description": "Integrity-verified Rust/Wasm semantic runtime host for DKG V10",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22.13.0 <23.0.0 || >=23.4.0"
+  },
+  "scripts": {
+    "prebuild": "node ../../scripts/build-semantic-runtime.mjs --verify-only",
+    "build": "tsc",
+    "build:wasm": "node ../../scripts/build-semantic-runtime.mjs",
+    "check:wasm": "node ../../scripts/build-semantic-runtime.mjs --check",
+    "prepack": "pnpm run build && node ../../scripts/build-semantic-runtime.mjs --verify-only",
+    "pretest": "pnpm run build",
+    "test": "vitest run",
+    "test:differential": "vitest run test/differential.test.ts",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1",
+    "cborg": "6.1.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7",
+    "@types/node": "^22",
+    "vitest": "^4.0.18"
+  },
+  "files": [
+    "dist",
+    "generated",
+    "schema",
+    "smoke",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg.git",
+    "directory": "packages/semantic-runtime"
+  }
+}

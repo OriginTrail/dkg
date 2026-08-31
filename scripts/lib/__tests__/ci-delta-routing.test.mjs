@@ -257,6 +257,7 @@ test('the browser suite follows the UI surface and the packages its harness comp
     'packages/publisher',
     'packages/query',
     'packages/random-sampling',
+    'packages/semantic-runtime',
     'packages/storage',
   ]);
   for (const workspace of deferred) {

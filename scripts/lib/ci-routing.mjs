@@ -141,6 +141,13 @@ export const WORKSPACE_RULES = Object.freeze({
     // chain: the chain scope's node-ui identity-wallet suite starts a DKGAgent.
     evmScopes: ['chain', 'agent'],
   },
+  'packages/semantic-runtime': {
+    // The package's Rust/Wasm gate is a dedicated workflow job. Selecting the
+    // CLI owner also rebuilds and tests its TypeScript consumer. The
+    // Blazegraph storage conformance suite loads it through the CLI launcher.
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/cli': {
     // tornado_blazegraph: that job's storage conformance suite runs the CLI's
     // built Oxigraph launcher (test-systems/storage-conformance.test.ts),
@@ -237,6 +244,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/publisher': ['tornado_publisher'],
   'packages/random-sampling': ['kosava_hardhat_plugins'],
   'packages/agent': ['tornado_agent'],
+  'packages/semantic-runtime': ['bura_cli'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
   'packages/graph-viz': ['kosava_supporting'],

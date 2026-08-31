@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/dkg-runtime-types",
+  "crates/dkg-authority-model",
+  "crates/dkg-effect-model",
+  "crates/dkg-trace-model",
+  "crates/dkg-ir",
+  "crates/dkg-strategy-compiler",
+  "crates/dkg-runtime-kernel",
+  "crates/dkg-runtime-codec",
+  "crates/dkg-runtime-wasm",
+  "crates/dkg-runtime-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.98.0"
+
+[workspace.dependencies]
+dkg-runtime-types = { path = "crates/dkg-runtime-types" }
+dkg-authority-model = { path = "crates/dkg-authority-model" }
+dkg-effect-model = { path = "crates/dkg-effect-model" }
+dkg-trace-model = { path = "crates/dkg-trace-model" }
+dkg-ir = { path = "crates/dkg-ir" }
+dkg-strategy-compiler = { path = "crates/dkg-strategy-compiler" }
+dkg-runtime-kernel = { path = "crates/dkg-runtime-kernel" }
+dkg-runtime-codec = { path = "crates/dkg-runtime-codec" }
+minicbor = { version = "=2.3.0", features = ["alloc", "derive"] }
+lexpr = { version = "=0.2.7", default-features = false }
+sha2 = { version = "=0.10.9", default-features = false }
+wasm-bindgen = "=0.2.127"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+panic = "abort"
+strip = "symbols"
