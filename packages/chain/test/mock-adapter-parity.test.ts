@@ -43,6 +43,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES } from '../src/evm-adapter-events.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
 import { ethers } from 'ethers';
@@ -73,6 +74,14 @@ const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
   'getContextGraphNameHashResolver',
+  // KA root-mutation lane (PR #2436) — TS-private members of the events
+  // mixin, visible to runtime reflection like every erased `private`. Both
+  // take EVM-only inputs (an ethers `Contract`; an `EventFilter` routed
+  // through `queryFilterWithFailover`) and are reachable from the outside
+  // only through `listenForEvents` / `supportsEventTypes`, which ARE parity
+  // surfaces and are implemented on the mock.
+  'contractHasEvent',
+  'yieldKnowledgeAssetRootMutationLogs',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
@@ -387,6 +396,24 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(MOCK_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
     expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(false);
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
+  });
+
+  it('mock supportsEventTypes answers the root-mutation vocabulary like the EVM ABI probe', async () => {
+    // The offline-mode gate in the agent awaits `chain.supportsEventTypes?.(…)`
+    // and enables the kaRootMutations feature only on `[]` missing. A mock
+    // that lacked the method (optional-chained `undefined`) or reported the
+    // four names missing would silently disable the feature for every
+    // offline developer — the exact CH-8 surprise this suite exists to catch.
+    const mock = new MockChainAdapter();
+    await expect(
+      mock.supportsEventTypes(KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES),
+    ).resolves.toEqual([]);
+    // Unknown names must come back as missing, not be absorbed: a caller that
+    // probes for a typo'd event name needs to see the typo, and an
+    // all-supported stub would make this row impossible to fail.
+    await expect(
+      mock.supportsEventTypes(['KnowledgeAssetUpdated', 'NoSuchEventOnAnyAbi']),
+    ).resolves.toEqual(['NoSuchEventOnAnyAbi']);
   });
 
   it('method arity (declared parameter count) is within 1 of EVMChainAdapter for each shared method', () => {

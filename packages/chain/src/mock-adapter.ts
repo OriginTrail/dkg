@@ -44,8 +44,34 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES } from './evm-adapter-events.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
+
+/**
+ * Event names the mock's simulated V10 contract surface DECLARES, for
+ * `supportsEventTypes` parity with the EVM adapter's ABI probe.
+ *
+ * Two sources, deliberately kept apart:
+ * - the four KA root-mutation names come from the SAME join constant the EVM
+ *   adapter serves and the poller lane subscribes with — one vocabulary, no
+ *   second copy to drift;
+ * - the scan names below mirror the branches `EVMChainAdapter.listenForEvents`
+ *   dispatches on (see `evm-adapter-events.ts`), which is what "declared"
+ *   means for events the mock replays through `pushEvent`.
+ */
+const MOCK_DECLARED_EVENT_TYPES: ReadonlySet<string> = new Set([
+  ...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
+  'KnowledgeBatchCreated',
+  'ContextGraphExpanded',
+  'KnowledgeAssetRegisteredToContextGraph',
+  'KCCreated',
+  'KnowledgeAssetCreated',
+  'NameClaimed',
+  'ContextGraphNameClaimed',
+  'ContextGraphCreated',
+  'RelayCapabilityUpdated',
+]);
 
 export interface MockChainAdapterOptions {
   /** Seed the first CG allocation for fixtures that model an existing registry. */
@@ -756,6 +782,27 @@ export class MockChainAdapter implements ChainAdapter {
         yield evt;
       }
     }
+  }
+
+  /**
+   * Which of `names` this simulated chain does NOT declare (parity with
+   * `EVMChainAdapter.supportsEventTypes`, which asks the bound ABI).
+   *
+   * The mock's equivalent of "the ABI declares it" is membership in
+   * {@link MOCK_DECLARED_EVENT_TYPES}: the V10 contract surface this adapter
+   * simulates declares all four KA root-mutation events, whether or not any
+   * mock operation happens to emit one — exactly as a real chain declares
+   * `popMerkleRoot`'s event even when nobody ever calls it. A user who
+   * develops offline against the mock and gates a feature on this probe must
+   * see the same answer they will get after flipping `chain.type` to `evm`
+   * (CH-8).
+   *
+   * NOTE: `listenForEvents` above replays whatever a scenario `pushEvent`ed
+   * and is deliberately name-agnostic; this probe is about the DECLARED
+   * vocabulary, not about which events a given scenario recorded.
+   */
+  async supportsEventTypes(names: readonly string[]): Promise<string[]> {
+    return names.filter((name) => !MOCK_DECLARED_EVENT_TYPES.has(name));
   }
 
   // --- Context Graphs (name-hash commitment via ContextGraphNameRegistry) ---
