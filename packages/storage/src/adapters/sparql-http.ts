@@ -78,8 +78,10 @@ import { readSparqlResponseText } from './sparql-response-policy.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -252,6 +254,7 @@ export interface SparqlHttpStoreOptions {
 export class SparqlHttpStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1: true | false;
+  readonly rfc64SemanticReadCertifiedV1: true | false;
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
@@ -288,6 +291,7 @@ export class SparqlHttpStore implements TripleStore {
     this.managedByDkg = options.managedByDkg === true;
     this.managedOxigraph = options.managedOxigraph === true;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
+    this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
     this.consistencyProfile = this.managedOxigraph
@@ -321,6 +325,16 @@ export class SparqlHttpStore implements TripleStore {
       throw new Error('RFC-64 exact reads require a DKG-managed Oxigraph endpoint');
     }
     return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    if (!this.rfc64SemanticReadCertifiedV1) {
+      throw new Error('RFC-64 semantic reads require a DKG-managed Oxigraph endpoint');
+    }
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   private runStoreWork<T>(
