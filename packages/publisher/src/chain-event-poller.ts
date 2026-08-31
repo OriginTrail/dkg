@@ -5,13 +5,11 @@ import {
 } from '@origintrail-official/dkg-chain';
 import {
   Logger,
-  canonicalDigest32,
-  canonicalNullableAuthorAddress,
   createOperationContext,
   type FinalizedEventPositionV1,
-  type KnowledgeAssetRootMutationKindV1,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { decodeKnowledgeAssetRootMutationEvent } from './ka-root-mutation-decode.js';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 import {
@@ -201,23 +199,6 @@ const KA_ROOT_MUTATION_REWIND_ON_RESTORE_BLOCKS = 50;
  * ~5 minutes at the default 12 s cadence.
  */
 const KA_ROOT_MUTATION_RESCAN_EVERY_POLLS = 25;
-
-/**
- * On-chain event name → the off-chain kind a consumer classifies it as.
- *
- * The keys are `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES` and the values are
- * `KnowledgeAssetRootMutationKindV1`; the `Record` type makes an unmapped name
- * a compile error rather than a silently dropped event.
- */
-const KA_ROOT_MUTATION_KIND_BY_EVENT: Record<
-  (typeof KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES)[number],
-  KnowledgeAssetRootMutationKindV1
-> = {
-  KnowledgeAssetUpdated: 'lifecycle-update',
-  KnowledgeAssetMerkleRootAdded: 'root-added',
-  KnowledgeAssetMerkleRootsUpdated: 'roots-replaced',
-  KnowledgeAssetMerkleRootRemoved: 'root-removed',
-};
 
 export interface ChainEventPollerConfig {
   chain: ChainAdapter;
@@ -643,116 +624,27 @@ export class ChainEventPoller {
    */
   private async handleKaRootMutation(event: ChainEvent, ctx: OperationContext): Promise<void> {
     if (!this.onKnowledgeAssetRootMutated) return;
-    const kind = KA_ROOT_MUTATION_KIND_BY_EVENT[
-      event.type as (typeof KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES)[number]
-    ];
-    if (!kind) return;
 
-    const { data } = event;
-    const kaId = String(data['kaId'] ?? '');
-    if (!/^\d+$/.test(kaId)) {
-      this.log.warn(ctx, `Chain event: ${event.type} dropped, kaId not a decimal id (block=${event.blockNumber})`);
+    // ONE decoder, on core's canonical boundary (review r5) — the poller
+    // orchestrates; it does not restate canonicalization rules that drift.
+    const decoded = decodeKnowledgeAssetRootMutationEvent(event);
+    if (!decoded.ok) {
+      if (decoded.reason !== 'unknown-event-type') {
+        this.log.warn(ctx, `Chain event: ${event.type} dropped, ${decoded.reason} (block=${event.blockNumber})`);
+      }
       return;
     }
 
-    const position = this.readEventPosition(event, ctx);
-    if (!position) return;
-
+    const { mutation } = decoded;
     this.log.info(ctx,
-      `Chain event: ${event.type} block=${event.blockNumber} kind=${kind} kaId=${kaId}`,
+      `Chain event: ${event.type} block=${mutation.position.blockNumber} kind=${mutation.kind} kaId=${mutation.kaId}`,
     );
-
-    // Construction is per-variant so the union's impossible-field guarantees
-    // hold at the single production construction site, not just for consumers.
-    const base = { kaId, position };
-    const merkleRoot = kind === 'roots-replaced'
-      ? undefined
-      : this.readCanonicalDigest(data['merkleRoot']);
-    let mutation: KnowledgeAssetRootMutationEventV1;
-    switch (kind) {
-      case 'lifecycle-update':
-        mutation = {
-          kind, ...base,
-          ...(merkleRoot ? { merkleRoot } : {}),
-          author: this.readAuthor(data['author'], event, ctx),
-        };
-        break;
-      case 'root-added':
-      case 'root-removed':
-        mutation = { kind, ...base, ...(merkleRoot ? { merkleRoot } : {}) };
-        break;
-      case 'roots-replaced':
-        mutation = { kind, ...base };
-        break;
-    }
 
     await this.onKnowledgeAssetRootMutated(mutation);
   }
 
-  /**
-   * The chain position of an event, or `undefined` when it is not usable.
-   *
-   * `blockHash` and `transactionHash` are validated as canonical 32-byte
-   * digests because a consumer orders and de-duplicates on this record; a
-   * position with an empty or malformed hash cannot be compared against a
-   * stored one, so recording it would corrupt exactly the decision it exists
-   * to support.
-   */
-  private readEventPosition(
-    event: ChainEvent,
-    ctx: OperationContext,
-  ): FinalizedEventPositionV1 | undefined {
-    const { data } = event;
-    const blockHash = this.readCanonicalDigest(data['blockHash']);
-    const transactionHash = this.readCanonicalDigest(data['txHash']);
-    const transactionIndex = data['txIndex'];
-    const logIndex = data['logIndex'];
-    if (
-      !blockHash ||
-      !transactionHash ||
-      !Number.isInteger(transactionIndex) || (transactionIndex as number) < 0 ||
-      !Number.isInteger(logIndex) || (logIndex as number) < 0 ||
-      !Number.isInteger(event.blockNumber) || event.blockNumber < 0
-    ) {
-      this.log.warn(ctx, `Chain event: ${event.type} dropped, incomplete chain position (block=${event.blockNumber})`);
-      return undefined;
-    }
-    return {
-      blockNumber: event.blockNumber,
-      blockHash,
-      transactionHash,
-      transactionIndex: transactionIndex as number,
-      logIndex: logIndex as number,
-    };
-  }
 
-  /** A lowercase canonical 32-byte digest, or `undefined` if it is not one. */
-  private readCanonicalDigest(value: unknown): string | undefined {
-    if (typeof value !== 'string') return undefined;
-    try {
-      // Lowercased first: RPC hashes already are, but an adapter that returned
-      // a checksummed/upper-case spelling would otherwise be rejected for a
-      // difference that carries no meaning.
-      return canonicalDigest32(value.toLowerCase());
-    } catch {
-      return undefined;
-    }
-  }
 
-  /**
-   * The attested author, `null` for the unattributed publish path (the zero
-   * address) and `null` — with a warning — for anything that does not
-   * canonicalise. Advisory metadata: never a reason to drop the event.
-   */
-  private readAuthor(value: unknown, event: ChainEvent, ctx: OperationContext): string | null {
-    if (typeof value !== 'string') return null;
-    try {
-      return canonicalNullableAuthorAddress(value.toLowerCase());
-    } catch {
-      this.log.warn(ctx, `Chain event: ${event.type} carried a noncanonical author (block=${event.blockNumber}); recording null`);
-      return null;
-    }
-  }
 
   private async handleAllowListUpdated(event: ChainEvent, ctx: OperationContext): Promise<void> {
     if (!this.onAllowListUpdated) return;

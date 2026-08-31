@@ -438,6 +438,12 @@ export {
   type OnContextGraphCreated,
   type OnKnowledgeAssetRootMutated,
 } from './chain-event-poller.js';
+export {
+  decodeKnowledgeAssetRootMutationEvent,
+  KA_ROOT_MUTATION_KIND_BY_EVENT,
+  type KnowledgeAssetRootMutationDecodeFailure,
+  type KnowledgeAssetRootMutationDecodeResult,
+} from './ka-root-mutation-decode.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
