@@ -399,6 +399,31 @@ describe('ChainEventPoller — kaRootMutations cursor restore', () => {
     expect(byLane.get('KnowledgeAssetUpdated')!.fromBlock).toBe(951);
     expect(byLane.get('KnowledgeAssetRegisteredToContextGraph')!.fromBlock).toBe(1_001);
   });
+
+  it('a cursor rewound to the ZERO floor scans from block 1, never live-seeds (review r14)', async () => {
+    // Zero is also the uninitialized sentinel: without restored-state
+    // tracking, a persisted cursor of 25 rewound by 50 reads as "no cursor"
+    // and the lane live-seeds to head - 9_000 — skipping every mutation in
+    // blocks 1..11_000 DESPITE having restored a cursor. The boundary case
+    // (saved === rewind) floors identically.
+    for (const saved of [25, 50]) {
+      const { adapter, filters } = makeChain(20_000);
+      const poller = new ChainEventPoller({
+        chain: adapter,
+        publishHandler: makeHandler(),
+        intervalMs: CADENCE_MS,
+        clock: () => 0,
+        cursorPersistence: {
+          async loadLane(lane) { return lane === 'kaRootMutations' ? saved : undefined; },
+          async saveLane() { /* not under test */ },
+        } satisfies LaneCursorPersistence,
+        onKnowledgeAssetRootMutated: async () => { /* sink */ },
+      });
+      await poll(poller);
+      expect(filters.length, `saved=${saved}`).toBeGreaterThan(0);
+      expect(filters[0].fromBlock, `saved=${saved}`).toBe(1);
+    }
+  });
 });
 
 describe('ChainEventPoller — kaRootMutations idle cost and periodic re-scan', () => {

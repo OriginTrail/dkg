@@ -17,6 +17,14 @@ export type ChainEventPollerLane =
 
 interface ChainEventPollerLaneState {
   lastBlock: number;
+  /**
+   * A persisted cursor was successfully restored for this lane — recorded
+   * SEPARATELY from `lastBlock` because zero is also the uninitialized
+   * sentinel (review r14): a low cursor rewound to the zero floor must scan
+   * from block 1, not be mistaken for "no cursor" and live-seeded thousands
+   * of blocks past the very window the restore was preserving.
+   */
+  cursorRestored?: boolean;
   headKnown: boolean;
   requiresFullHistory?: boolean;
   nextRunAtMs?: number;
@@ -271,6 +279,7 @@ export class ChainEventLaneRunner {
       if (saved != null && saved > 0) {
         const rewound = this.rewindBlocks(lane, saved);
         lane.state.lastBlock = rewound;
+        lane.state.cursorRestored = true;
         this.log.info(
           ctx,
           rewound === saved
@@ -361,7 +370,7 @@ export class ChainEventLaneRunner {
 
     if (head != null && !state.headKnown) {
       state.headKnown = true;
-      if (state.lastBlock === 0 && !lane.requiresFullHistory) {
+      if (state.lastBlock === 0 && !state.cursorRestored && !lane.requiresFullHistory) {
         state.lastBlock = Math.max(0, head - lane.liveSeedLookbackBlocks);
         this.log.info(ctx, `Seeded poller cursor near chain head: lane=${lane.spec.name} head=${head} scanning from ${state.lastBlock}`);
       } else if (state.lastBlock === 0 && lane.spec.onBackfillFromGenesis) {

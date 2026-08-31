@@ -243,12 +243,34 @@ export class EventsMethods extends EVMChainAdapterBase {
     const address = await kaStorage.getAddress();
     const logs = await this.readProvider(
       'kas.getLogs(KnowledgeAssetRootMutations)',
-      (provider) => provider.getLogs({
-        address,
-        topics: [[...nameByTopic.keys()]],
-        fromBlock: filter.fromBlock ?? 0,
-        toBlock: filter.toBlock ?? 'latest',
-      }),
+      async (provider) => {
+        const raw = await provider.getLogs({
+          address,
+          topics: [[...nameByTopic.keys()]],
+          fromBlock: filter.fromBlock ?? 0,
+          toBlock: filter.toBlock ?? 'latest',
+        });
+        // An impossible EVM shape is ENDPOINT corruption, not event data
+        // (review r14): a real log topic is exactly one 32-byte word, so a
+        // wrong-sized indexed-id topic on a log the endpoint claims matches
+        // our filter cannot originate on-chain. Throwing HERE — inside the
+        // per-provider callback — makes it a scan failure the read-failover
+        // retries on another endpoint, and the lane cursor cannot advance on
+        // an untrustworthy response. (Logs OUTSIDE the requested filter stay
+        // droppable noise; only a matching topic0 asserts anything.)
+        for (const log of raw) {
+          const topic0 = log.topics[0]?.toLowerCase();
+          if (topic0 == null || !nameByTopic.has(topic0)) continue;
+          const kaIdTopic = log.topics[1];
+          if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) {
+            throw new Error(
+              `RPC endpoint returned a malformed root-mutation log at block ${log.blockNumber}: `
+              + `indexed KA-id topic is ${kaIdTopic == null ? 'missing' : String(kaIdTopic).slice(0, 80)}`,
+            );
+          }
+        }
+        return raw;
+      },
       { policy: 'wideLogScan', skipPreferred: true },
     );
 
@@ -257,12 +279,11 @@ export class EventsMethods extends EVMChainAdapterBase {
       const eventName = topic0 == null ? undefined : nameByTopic.get(topic0);
       if (!eventName) continue; // a provider answering outside the OR filter
       const kaIdTopic = log.topics[1];
-      // The indexed id of a real EVM log is exactly one 32-byte word. A
-      // wrong-sized topic from a malformed RPC must be SKIPPED, not
-      // reinterpreted: `getBigInt` alone would parse `0x01` into asset id 1.
-      // Skipping costs a consumer nothing; THROWING would abort the scan,
-      // hold the lane cursor, and stall every later event behind one
-      // malformed log — a deterministic stall, not a retryable one.
+      // Defense in depth: the per-provider callback above already rejects a
+      // wrong-sized indexed-id topic as endpoint corruption (review r14), so
+      // for logs that came through it this branch is unreachable. It stays
+      // because `getBigInt` alone would parse `0x01` into asset id 1 —
+      // never reinterpret a wrong-sized word, whatever the code path.
       if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) continue;
       const kaId = ethers.getBigInt(kaIdTopic).toString();
 
