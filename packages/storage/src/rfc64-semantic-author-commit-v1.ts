@@ -1,9 +1,8 @@
 import {
-  MemoryLayer,
   RFC64_SEMANTIC_PREDICATES_V1,
   assertCanonicalDeterministicUalV1,
   buildCatalogAssertionScopeV1,
-  contextGraphLayerUri,
+  deriveRfc64SharedProjectionGraphIriV1,
   decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   decodeIriComponentV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
@@ -304,12 +303,9 @@ function assertPayloadTargets(
       'sealed KA identity does not belong to the semantic commit network and author',
     );
   }
-  const expectedProjectionGraph = contextGraphLayerUri(
-    scope.contextGraphId,
-    MemoryLayer.SharedWorkingMemory,
-    scope.authorAddress,
-    ual.kaNumber,
-    scope.subGraphName ?? undefined,
+  const expectedProjectionGraph = deriveRfc64SharedProjectionGraphIriV1(
+    scope,
+    ual,
   );
   if (sharedProjectionGraph !== expectedProjectionGraph) {
     fail(

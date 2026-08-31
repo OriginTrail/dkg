@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ASSERTION_SEAL_PREDICATES,
-  MemoryLayer,
-  contextGraphLayerUri,
+  assertCanonicalDeterministicUalV1,
+  deriveRfc64SharedProjectionGraphIriV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
   projectRfc64SemanticRecordStoreRowsV1,
@@ -44,12 +44,9 @@ const DIGEST_B = `0x${'b'.repeat(64)}` as Digest32V1;
 const DIGEST_C = `0x${'c'.repeat(64)}` as Digest32V1;
 const DIGEST_D = `0x${'d'.repeat(64)}` as Digest32V1;
 const KA_NUMBER = '7';
-const PROJECTION_GRAPH = contextGraphLayerUri(
-  CONTEXT_GRAPH,
-  MemoryLayer.SharedWorkingMemory,
-  AUTHOR,
-  KA_NUMBER,
-  SUBGRAPH,
+const PROJECTION_GRAPH = deriveRfc64SharedProjectionGraphIriV1(
+  { contextGraphId: CONTEXT_GRAPH, subGraphName: SUBGRAPH },
+  assertCanonicalDeterministicUalV1(`did:dkg:${NETWORK}/${AUTHOR}/${KA_NUMBER}`),
 );
 const SEAL_COORDINATE = Object.freeze({
   contextGraphId: CONTEXT_GRAPH,

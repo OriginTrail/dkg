@@ -14,50 +14,12 @@ export interface StoreWorkTimeoutRace {
   readonly timeoutError: () => Error;
 }
 
+export interface StoreWorkRaceOptions<T> {
+  readonly onLateResult?: (value: T) => void | Promise<void>;
+  readonly timeout?: StoreWorkTimeoutRace;
+}
+
 const NOOP_DISPOSE = () => {};
-
-/** Race store work against cancellation while preserving the abort reason. */
-export function raceStoreWorkAgainstAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-  timeout?: StoreWorkTimeoutRace,
-): Promise<T> {
-  if (!signal && (!timeout || timeout.timeoutMs <= 0)) return work;
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (action: () => void) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-      action();
-    };
-    const onAbort = () => finish(() => reject(normalizeAbortReason(signal?.reason)));
-    signal?.addEventListener('abort', onAbort, { once: true });
-    // Attach both handlers before observing pre-abort so every started promise
-    // remains consumed even when cancellation wins the race immediately.
-    work.then(
-      (value) => finish(() => resolve(value)),
-      (cause) => finish(() => reject(cause)),
-    );
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-    if (timeout && timeout.timeoutMs > 0) {
-      timer = setTimeout(
-        () => finish(() => reject(timeout.timeoutError())),
-        timeout.timeoutMs,
-      );
-      if (typeof timer.unref === 'function') timer.unref();
-    }
-  });
-}
-
-function normalizeAbortReason(reason: unknown): Error {
-  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
 
 export function composeAbortSignals(
   primary: AbortSignal | undefined,
@@ -92,6 +54,63 @@ export function composeAbortSignals(
     secondary.addEventListener('abort', forwardSecondary, { once: true });
   }
   return { signal: combined.signal, dispose };
+}
+
+/**
+ * Race one already-started operation against cancellation without leaking a
+ * listener or an unhandled late settlement. An optional late-result hook owns
+ * resources that arrive after cancellation (for example a backend iterator).
+ */
+export function raceStoreWorkAgainstAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+  options: StoreWorkRaceOptions<T> = {},
+): Promise<T> {
+  const timeoutMs = options.timeout?.timeoutMs ?? 0;
+  if (!signal && timeoutMs <= 0) return work;
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (action: () => void): boolean => {
+      if (settled) return false;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      action();
+      return true;
+    };
+    const consumeLateResult = (value: T) => {
+      if (!options.onLateResult) return;
+      void Promise.resolve()
+        .then(() => options.onLateResult?.(value))
+        .catch(() => undefined);
+    };
+    const onAbort = () => finish(() => reject(normalizeAbortReason(signal?.reason)));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // Attach both handlers before observing pre-abort so every started promise
+    // remains consumed even when cancellation wins the race immediately.
+    work.then(
+      (value) => {
+        if (!finish(() => resolve(value))) consumeLateResult(value);
+      },
+      (cause) => finish(() => reject(cause)),
+    );
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    if (timeoutMs > 0) {
+      timer = setTimeout(
+        () => finish(() => reject(options.timeout!.timeoutError())),
+        timeoutMs,
+      );
+      if (typeof timer.unref === 'function') timer.unref();
+    }
+  });
+}
+
+function normalizeAbortReason(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
 interface StoreWorkGeneration {

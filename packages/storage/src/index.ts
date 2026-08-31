@@ -182,6 +182,19 @@ export {
   type Rfc64AuthorSealReadResultV1,
 } from './rfc64-author-seal-read-gateway.js';
 export {
+  MAX_RFC64_SHARED_PROJECTION_STREAM_TIMEOUT_MS_V1,
+  Rfc64SharedProjectionStreamGatewayErrorV1,
+  SyncSharedProjectionStoreV1,
+  type Rfc64SharedProjectionStreamGatewayErrorCodeV1,
+  type Rfc64SharedProjectionStreamOptionsV1,
+  type Rfc64SharedProjectionStreamResultV1,
+} from './rfc64-shared-projection-stream-gateway.js';
+export {
+  isRfc64SharedProjectionStreamCapabilityV1,
+  type Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  type Rfc64SharedProjectionStreamCapabilityV1,
+} from './rfc64-shared-projection-stream-capability.js';
+export {
   resolveGraphScopedOrLegacyMetadata,
   type GraphScopedOrLegacyMetadata,
 } from './graph-knowledge-asset-metadata-loader.js';

@@ -96,11 +96,15 @@ describe('RFC-64 transferred catalog seal binding', () => {
     const snapshot = readVerifiedCatalogSealBindingV1(verified);
     expect(snapshot).toMatchObject({
       networkId: 'otp:20430',
+      contextGraphId: 'a/b',
+      subGraphName: null,
       authorAddress: AUTHOR,
       kaId: KA_ID,
       assertionCoordinate: 'name λ',
       assertionVersion: '2',
       sealDigest: SEAL_DIGEST,
+      projectionDigest: ROW.projectionDigest,
+      signedTransferByteLength: ROW.transfer.byteLength,
       placement: {
         subject: `did:dkg:context-graph:v1/root/a%2Fb/assertion/${AUTHOR}/name%20%CE%BB`,
         metaGraph: 'did:dkg:context-graph:v1/root/a%2Fb/_meta',

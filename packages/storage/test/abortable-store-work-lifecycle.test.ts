@@ -10,17 +10,63 @@ function abortCalls(spy: ReturnType<typeof vi.spyOn>): number {
 }
 
 describe('AbortableStoreWorkLifecycle signal ownership', () => {
-  it('races store work against abort and always removes its listener', async () => {
-    const controller = new AbortController();
-    const remove = vi.spyOn(controller.signal, 'removeEventListener');
-    await expect(raceStoreWorkAgainstAbort(Promise.resolve('done'), controller.signal))
-      .resolves.toBe('done');
-    expect(abortCalls(remove)).toBe(1);
+  it('shares one abort race for pre-abort, registration races, rejection, and late cleanup', async () => {
+    const preAborted = new AbortController();
+    const preAbortReason = new Error('already stopped');
+    preAborted.abort(preAbortReason);
+    const lateCleanup = vi.fn();
+    await expect(raceStoreWorkAgainstAbort(
+      Promise.resolve('late'),
+      preAborted.signal,
+      { onLateResult: lateCleanup },
+    )).rejects.toBe(preAbortReason);
+    await Promise.resolve();
+    expect(lateCleanup).toHaveBeenCalledWith('late');
 
-    const reason = new Error('cancelled');
-    controller.abort(reason);
-    await expect(raceStoreWorkAgainstAbort(Promise.resolve('late'), controller.signal))
-      .rejects.toBe(reason);
+    const registrationRace = new AbortController();
+    const registrationRemove = vi.spyOn(registrationRace.signal, 'removeEventListener');
+    const add = registrationRace.signal.addEventListener.bind(registrationRace.signal);
+    vi.spyOn(registrationRace.signal, 'addEventListener').mockImplementation((...args) => {
+      add(...args);
+      registrationRace.abort(new Error('registration race'));
+    });
+    await expect(raceStoreWorkAgainstAbort(
+      new Promise<string>(() => {}),
+      registrationRace.signal,
+    )).rejects.toThrow('registration race');
+    expect(abortCalls(registrationRemove)).toBe(1);
+
+    const normal = new AbortController();
+    const normalRemove = vi.spyOn(normal.signal, 'removeEventListener');
+    await expect(raceStoreWorkAgainstAbort(
+      Promise.resolve('done'),
+      normal.signal,
+    )).resolves.toBe('done');
+    expect(abortCalls(normalRemove)).toBe(1);
+
+    const rejected = new AbortController();
+    const rejectedRemove = vi.spyOn(rejected.signal, 'removeEventListener');
+    const failure = new Error('backend failed');
+    await expect(raceStoreWorkAgainstAbort(
+      Promise.reject(failure),
+      rejected.signal,
+    )).rejects.toBe(failure);
+    expect(abortCalls(rejectedRemove)).toBe(1);
+
+    let resolveLate!: (value: string) => void;
+    const lateWork = new Promise<string>((resolve) => { resolveLate = resolve; });
+    const cancelled = new AbortController();
+    const cancelledRemove = vi.spyOn(cancelled.signal, 'removeEventListener');
+    const cleanup = vi.fn();
+    const raced = raceStoreWorkAgainstAbort(lateWork, cancelled.signal, {
+      onLateResult: cleanup,
+    });
+    cancelled.abort(new Error('cancelled'));
+    await expect(raced).rejects.toThrow('cancelled');
+    resolveLate('owned-resource');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(cleanup).toHaveBeenCalledWith('owned-resource');
+    expect(abortCalls(cancelledRemove)).toBe(1);
   });
 
   it('observes a late work rejection after pre-abort', async () => {
@@ -44,6 +90,31 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     }
   });
 
+  it('consumes synchronous and asynchronous late-result cleanup failures', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (cause: unknown) => unhandled.push(cause);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      for (const onLateResult of [
+        () => { throw new Error('synchronous cleanup failure'); },
+        async () => { throw new Error('asynchronous cleanup failure'); },
+      ]) {
+        let resolveWork!: (value: string) => void;
+        const work = new Promise<string>((resolve) => { resolveWork = resolve; });
+        const controller = new AbortController();
+        const reason = new Error('cancelled');
+        const raced = raceStoreWorkAgainstAbort(work, controller.signal, { onLateResult });
+        controller.abort(reason);
+        await expect(raced).rejects.toBe(reason);
+        resolveWork('late resource');
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('owns deadline cleanup and consumes work that settles after timeout', async () => {
     let rejectWork!: (cause: unknown) => void;
     const work = new Promise<never>((_resolve, reject) => {
@@ -55,8 +126,10 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     process.on('unhandledRejection', onUnhandled);
     try {
       await expect(raceStoreWorkAgainstAbort(work, undefined, {
-        timeoutMs: 5,
-        timeoutError: () => timeout,
+        timeout: {
+          timeoutMs: 5,
+          timeoutError: () => timeout,
+        },
       })).rejects.toBe(timeout);
       rejectWork(new Error('late store failure'));
       await new Promise<void>((resolve) => setImmediate(resolve));
