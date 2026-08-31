@@ -364,25 +364,35 @@ describe('system binary version probing', () => {
     )).rejects.toThrow(/exceeded 4096 bytes/u);
   });
 
-  it.skipIf(process.platform === 'win32')('times out and reaps a version probe that never exits', async () => {
+  it.skipIf(process.platform === 'win32')('times out and reaps a version probe that ignores SIGTERM', async () => {
     const probeStateDir = await mkdtemp(join(tmpdir(), 'oxi-probe-state-'));
     const pidPath = join(probeStateDir, 'pid');
     const startedAt = Date.now();
+    let watchdog: NodeJS.Timeout | undefined;
     try {
-      await expect(withSystemBinary(
-        `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));\nsetInterval(() => {}, 1_000);\n`,
+      const probe = withSystemBinary(
+        `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));\nprocess.on('SIGTERM', () => {});\nsetInterval(() => {}, 1_000);\n`,
         (cacheDir) => resolveOxigraphBinary({
           cacheDir,
           platform: 'freebsd' as NodeJS.Platform,
           log: () => {},
-          versionProbeTimeoutMs: 1_000,
+          versionProbeTimeoutMs: 500,
         }),
-      )).rejects.toThrow(/timed out after 1000ms/u);
+      );
+      const outerWatchdog = new Promise<never>((_, reject) => {
+        watchdog = setTimeout(
+          () => reject(new Error('test watchdog: version probe remained pending')),
+          2_500,
+        );
+      });
+      await expect(Promise.race([probe, outerWatchdog]))
+        .rejects.toThrow(/timed out after 500ms/u);
 
-      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
       const childPid = Number(await readFile(pidPath, 'utf8'));
       expect(() => process.kill(childPid, 0)).toThrow();
     } finally {
+      if (watchdog) clearTimeout(watchdog);
       await rm(probeStateDir, { recursive: true, force: true });
     }
   });

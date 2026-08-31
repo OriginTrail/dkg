@@ -56,6 +56,7 @@ import { join } from 'node:path';
 /** Pinned Oxigraph release. Bump deliberately (re-pin checksums below). */
 export const OXIGRAPH_VERSION = '0.5.8';
 export const OXIGRAPH_VERSION_PROBE_TIMEOUT_MS = 5_000;
+const OXIGRAPH_VERSION_PROBE_KILL_GRACE_MS = 250;
 const OXIGRAPH_VERSION_OUTPUT_MAX_BYTES = 4_096;
 
 interface OxigraphAsset {
@@ -169,12 +170,14 @@ function defaultProbeVersion(
   timeoutMs = OXIGRAPH_VERSION_PROBE_TIMEOUT_MS,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    execFile(path, ['--version'], {
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const child = execFile(path, ['--version'], {
       encoding: 'utf8',
       killSignal: 'SIGTERM',
       maxBuffer: OXIGRAPH_VERSION_OUTPUT_MAX_BYTES,
       timeout: timeoutMs,
     }, (error, stdout, stderr) => {
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       const output = `${stdout}\n${stderr}`.trim();
       if (error) {
         if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
@@ -209,6 +212,9 @@ function defaultProbeVersion(
       }
       resolve(version);
     });
+    forceKillTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }, timeoutMs + OXIGRAPH_VERSION_PROBE_KILL_GRACE_MS);
   });
 }
 
