@@ -10,6 +10,7 @@ import type {
   TripleStoreDecorator,
   UpdateOptions,
 } from './triple-store.js';
+import { deleteByPatternWithoutCount } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
@@ -287,6 +288,27 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       this.scheduleFullRefresh('deleteByPattern');
     }
     return removed;
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.enabled) {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      return;
+    }
+    await deleteByPatternWithoutCount(this.inner, pattern, options);
+    const graph = pattern.graph;
+    if (graph) {
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
+    } else {
+      // Without an exact count, conservatively invalidate even when the
+      // pattern may have matched no rows. This preserves graph membership
+      // correctness without reintroducing count-before/count-after scans.
+      this.scheduleFullRefresh('deleteByPattern');
+    }
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {

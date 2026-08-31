@@ -53,6 +53,9 @@ describe('isPublicLikeAddress (daemon-side dialability classifier)', () => {
     it('rejects loopback + link-local + ULA IPv6', () => {
       expect(isPublicLikeAddress('/ip6/::1/tcp/9090/p2p/12D3Koo')).toBe(false);
       expect(isPublicLikeAddress('/ip6/fe80::1/tcp/9090/p2p/12D3Koo')).toBe(false);
+      expect(isPublicLikeAddress('/ip6/fe90::1/tcp/9090/p2p/12D3Koo')).toBe(false);
+      expect(isPublicLikeAddress('/ip6/fea0::1/tcp/9090/p2p/12D3Koo')).toBe(false);
+      expect(isPublicLikeAddress('/ip6/febf::1/tcp/9090/p2p/12D3Koo')).toBe(false);
       expect(isPublicLikeAddress('/ip6/fc00::1/tcp/9090/p2p/12D3Koo')).toBe(false);
     });
 

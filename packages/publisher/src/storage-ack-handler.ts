@@ -1,4 +1,5 @@
 import {
+  deleteByPatternWithoutCount,
   GraphManager,
   loadSelectedSharedMemoryQuads,
   tryReplaceGraphAtomically,
@@ -935,7 +936,8 @@ export class StorageACKHandler {
           ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
         ).catch(() => {});
       }
-      await this.store.deleteByPattern(
+      await deleteByPatternWithoutCount(
+        this.store,
         { graph: metaGraph, subject: operationSubject },
         ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', signal),
       );

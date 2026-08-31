@@ -4,6 +4,7 @@ export type {
   ActiveLiftJobClaimSession,
   AsyncLiftAdministrativeMutations,
   AsyncLiftDetailedRetrier,
+  AsyncLiftRetryFilter,
   AsyncLiftRetryOutcome,
   AsyncLiftRetryStateReader,
   AsyncKnowledgeAssetVmPublishExecutionInput,

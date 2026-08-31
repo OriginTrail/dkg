@@ -1,4 +1,5 @@
 import {
+  deleteByPatternWithoutCount,
   tryUpdateWithTouchedGraphs,
   type Quad,
   type QueryOptions,
@@ -46,7 +47,8 @@ WHERE { GRAPH ${sparqlIri(catalogGraph)} {
 
   if (!usedTargetedUpdate) {
     for (const subject of catalogSubjects) {
-      await store.deleteByPattern(
+      await deleteByPatternWithoutCount(
+        store,
         { graph: catalogGraph, subject },
         catalogStoreOptions('deleteByPattern', signal),
       );
