@@ -103,6 +103,54 @@ describe('RFC-64 rollout authority integration', () => {
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
   });
 
+  it('keeps authorized catalog-mode metadata refresh off member and host SWM gossip', async () => {
+    const catalog = await startAgent('catalog-metadata-refresh-fence', activation('catalog'));
+    catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+
+    const internals = catalog as any;
+    expect(catalog.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID)).toMatchObject({
+      subscribed: true,
+    });
+    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+
+    // Exercise the exact post-catch-up transition from the review: metadata is
+    // confirmed and local SWM membership would otherwise authorize the member
+    // gossip consumer. queueSharedMemoryGossipSubscription remains
+    // fire-and-forget, so capture the concrete reconciliation promise.
+    vi.spyOn(catalog, 'hasConfirmedMetaState').mockResolvedValue(true);
+    const memberAuthority = vi.spyOn(catalog, 'canUseSharedMemoryForContextGraph')
+      .mockResolvedValue(true);
+    const reconciliations: Promise<void>[] = [];
+    const reconcile = catalog.reconcileSharedMemoryGossipSubscription.bind(catalog);
+    vi.spyOn(catalog, 'reconcileSharedMemoryGossipSubscription').mockImplementation((cg) => {
+      const pending = reconcile(cg);
+      reconciliations.push(pending);
+      return pending;
+    });
+
+    await internals.refreshMetaSyncedFlags([CONTEXT_GRAPH_ID]);
+    await vi.waitFor(() => expect(reconciliations).toHaveLength(1));
+    await Promise.all(reconciliations);
+
+    expect(catalog.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID)).toMatchObject({
+      subscribed: true,
+      metaSynced: true,
+    });
+    expect(memberAuthority).not.toHaveBeenCalled();
+    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+
+    // A core's ordinary host reconciliation is another legacy entry point.
+    // Make every non-RFC prerequisite available so catalog authority is the
+    // reason it stays unwired.
+    internals.swmHostModeStore = {};
+    const curated = vi.spyOn(catalog, 'isCuratedForHostMode').mockResolvedValue(true);
+    await catalog.reconcileSwmHostModeSubscription(CONTEXT_GRAPH_ID);
+    const hostKey = catalog.canonicalSwmHostModeKey(CONTEXT_GRAPH_ID);
+    expect(curated).not.toHaveBeenCalled();
+    expect(internals.swmHostModeSubscribed.has(hostKey)).toBe(false);
+    expect(internals.swmHostModeHandlers.has(hostKey)).toBe(false);
+  });
+
   it('leaves a persisted member row dormant under exclusive catalog authority', async () => {
     const persisted = new Map<string, any>([[CONTEXT_GRAPH_ID, {
       id: CONTEXT_GRAPH_ID,

@@ -407,11 +407,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
     });
     const persist = syncMode === 'on-demand' ? false : options?.persist;
-    const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
-      this.config.rfc64CatalogExecutionPlan,
-      contextGraphId,
-    );
-    if (!authority.legacySyncAllowed) {
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       // Preserve the user's durable selection and VM intent without installing
       // any legacy publish/update/finalization/SWM gossip authority. RFC-64 is
       // the sole SWM lane for a catalog-authoritative selected CG.
@@ -607,6 +603,25 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Resolve the immutable RFC-64 authority plan at every legacy SWM gossip
+   * boundary. Host-mode discovery can address a CG by its wire hash, whereas
+   * the operator plan is cleartext-keyed; consult the authenticated reverse
+   * binding before treating an apparently unselected wire id as legacy-owned.
+   */
+  rfc64LegacySwmGossipAllowedForContextGraph(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    const authorityContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
+      ? this.wireIdToLocalCgId.get(contextGraphId.toLowerCase()) ?? contextGraphId
+      : contextGraphId;
+    return resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
+      authorityContextGraphId,
+    ).legacySyncAllowed;
+  }
+
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
     // Reconcile is the membership boundary; rebuild this CG's policy view
     // before deciding whether to keep or drop the SWM subscription.
@@ -621,6 +636,30 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
     const isRegistered = this.sharedMemoryGossipRegistered.has(contextGraphId);
     const ctx = createOperationContext('system');
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
+      // This is the actual member-mode authority boundary. A selected catalog
+      // CG retains its durable subscription row and chain-inventoried VM
+      // intent, but a later metadata refresh must not reinstall the legacy SWM
+      // consumer after subscribeToContextGraph() fenced it out.
+      if (isRegistered) {
+        // GossipSubManager.unsubscribe() is topic-wide, so clear both member
+        // and host bookkeeping before returning. Catalog reconciliation is
+        // the sole SWM authority for this CG and neither legacy handler may be
+        // restored below.
+        this.gossip.unsubscribe(swmTopic);
+        this.sharedMemoryGossipRegistered.delete(contextGraphId);
+        const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+        this.swmHostModeSubscribed.delete(hostKey);
+        this.swmHostModeCurated.delete(hostKey);
+        this.swmHostModeHandlers.delete(hostKey);
+        this.enqueueHostModePersistence(contextGraphId, false);
+      } else {
+        // Remove a host-only handler surgically when no member handler owns the
+        // topic. This also clears its restart-persistent designation.
+        this.unwireSwmHostModeHandler(contextGraphId);
+      }
+      return;
+    }
     if (!(await this.canUseSharedMemoryForContextGraph(contextGraphId))) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
@@ -932,10 +971,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   public trackSyncContextGraph(this: DKGAgent, contextGraphId: string): boolean {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     if (systemContextGraphs.has(contextGraphId)) return false;
-    if (!resolveRfc64CatalogExecutionPlanAuthorityV1(
-      this.config.rfc64CatalogExecutionPlan,
-      contextGraphId,
-    ).legacySyncAllowed) return false;
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) return false;
 
     const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
     if (syncSet.has(contextGraphId)) return false;
