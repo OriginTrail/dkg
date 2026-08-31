@@ -22,7 +22,10 @@ import type { FinalizationRecoveryHealth } from './finalization-recovery-store.j
 import {
   openSqliteVmReverifyIntentStore,
 } from './vm-reverify-intent-sqlite-store.js';
-import type { VmReverifyIntentStore } from './vm-reverify-intent-store.js';
+import {
+  VM_REVERIFY_INTENTS_DATABASE_FILENAME,
+  type VmReverifyIntentStore,
+} from './vm-reverify-intent-store.js';
 import type { VmReverifyWorker } from './vm-reverify-worker.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
@@ -1175,6 +1178,13 @@ export class DKGAgentBase {
    * the ingest kicks it optionally and never assumes it exists.
    */
   vmReverifyWorker?: VmReverifyWorker;
+  /**
+   * Why the intent store could not be opened, when the feature was enabled and
+   * the open failed. Read by the effective-state resolver so the operator-facing
+   * answer to "why is this node not converging?" stays in ONE place instead of
+   * being reconstructed from logs.
+   */
+  vmReverifyIntentStoreFailure?: string;
   /** Explicit owner for finalization persistence and network identity lifetimes. */
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /**
@@ -1828,6 +1838,18 @@ export class DKGAgentBase {
    * point: with the switch off this release must leave a `dataDir` byte-for-byte
    * as the base release left it, so a rollback is a non-event. An injected store
    * (tests) is used as-is and no file is touched.
+   *
+   * A FAILED open must not take the node down. This runs inside the startup
+   * `try` whose contract is "fail the boot", which is right for the finalization
+   * inbox — core durability — and wrong for an optional, kill-switchable
+   * background convergence feature: a disk error or a stray permission on this
+   * scratch file would make the node unbootable, and the operator's remedy
+   * (turn the switch off) requires a boot to discover the cause. That is the
+   * exact property ADR-W2R-6 gave this feature its own file to avoid, so the
+   * failure is caught here, reported LOUDLY with the flag and the path, and the
+   * feature stays off while the node starts. Silence would be the other error:
+   * an operator who enabled convergence would have no way to see it never
+   * armed, which is a documented bypass wearing a guard's clothes.
    */
   protected async prepareVmReverifyIntentStore(): Promise<void> {
     if (this.vmReverifyIntents) return;
@@ -1842,7 +1864,21 @@ export class DKGAgentBase {
     // deleting the gate is not, and has its own test.
     if (!this.config.dataDir) return;
     if (!(await (this as unknown as DKGAgent).vmUpdateConvergenceEnabled())) return;
-    this.vmReverifyIntents = await openSqliteVmReverifyIntentStore(this.config.dataDir);
+    const databasePath = join(this.config.dataDir, VM_REVERIFY_INTENTS_DATABASE_FILENAME);
+    try {
+      this.vmReverifyIntents = await openSqliteVmReverifyIntentStore(this.config.dataDir);
+      this.vmReverifyIntentStoreFailure = undefined;
+    } catch (error) {
+      this.vmReverifyIntentStoreFailure =
+        error instanceof Error ? error.message : String(error);
+      this.log.error(
+        createOperationContext('system'),
+        'DKG_VM_UPDATE_CONVERGENCE_ENABLED is on but the re-verification intent '
+        + `store could not be opened at ${databasePath}: `
+        + `${this.vmReverifyIntentStoreFailure}. Chain-triggered re-verification `
+        + 'is DISABLED for this process; the node continues without it.',
+      );
+    }
   }
 
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */

@@ -14,7 +14,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -243,6 +243,46 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     });
     await internals.prepareVmReverifyIntentStore();
     expect(existsSync(intentFile)).toBe(false);
+  }, 60_000);
+
+  it('a store that FAILS to open is loud, leaves the feature off, and does NOT kill the boot', async () => {
+    // This open runs inside the startup `try` whose contract is "fail the
+    // boot" — correct for the finalization inbox, catastrophic for an optional
+    // background feature. Unguarded, a stray permission on a scratch file makes
+    // the node unbootable, and the remedy (turn the switch off) needs a boot to
+    // discover the cause. That is the very property ADR-W2R-6 gave this feature
+    // its own file to avoid.
+    //
+    // The opposite error is just as bad: swallowing it silently would leave an
+    // operator who enabled convergence with no way to see it never armed — a
+    // documented bypass wearing a guard's clothes. So all three properties are
+    // pinned together: NOT fatal, feature OFF, and LOUD.
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    const { internals, dataDir, intentFile } = await boot();
+
+    // A directory where the database file belongs: the open cannot succeed, and
+    // it fails the way a real filesystem fault does rather than via a stub.
+    await mkdir(intentFile, { recursive: true });
+    const errors: string[] = [];
+    internals.log.error = (_ctx: unknown, message: string) => { errors.push(message); };
+
+    await expect(
+      internals.prepareVmReverifyIntentStore(),
+      'a failed intent-store open must never propagate into startup',
+    ).resolves.toBeUndefined();
+
+    expect(internals.vmReverifyIntents, 'the feature stays off').toBeUndefined();
+    expect(
+      await internals.vmUpdateConvergenceState(),
+      'and the single operator-facing resolver says WHY',
+    ).toEqual({ effective: false, reason: 'store-open-failed' });
+
+    expect(errors, 'the failure must be reported at ERROR level').toHaveLength(1);
+    expect(errors[0], 'naming the flag an operator would look for').toContain(
+      'DKG_VM_UPDATE_CONVERGENCE_ENABLED',
+    );
+    expect(errors[0], 'and the path they would inspect').toContain(dataDir);
   }, 60_000);
 
   it('stops the drain BEFORE closing the file it writes to', async () => {

@@ -2969,6 +2969,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (missing.length > 0) {
       return { effective: false, reason: `abi-missing:${String(missing[0])}` };
     }
+    // The feature is wanted and the chain can serve it, but the durable store
+    // this all rests on refused to open. Reported here rather than only logged,
+    // so an operator who enabled convergence can SEE that it never armed.
+    if (this.vmReverifyIntentStoreFailure !== undefined) {
+      return { effective: false, reason: 'store-open-failed' };
+    }
     return { effective: true };
   }
 
