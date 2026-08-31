@@ -34,7 +34,7 @@ import {
   decodeGossipEnvelope, type GossipEnvelopeMsg,
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
   Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
@@ -272,6 +272,7 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import {
+  alignSyncPageResponderSessionWithCheckpoint,
   deleteSyncPageCheckpoint,
   fetchSyncPages,
   SyncPageSizeProfileCache,
@@ -288,10 +289,12 @@ import {
   type ExactAssetCommitment,
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
-import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
+import {
+  insertWithOversizeGuard,
+  type OversizeGuardHooks,
+} from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
-  getSyncCheckpointKey,
   MemorySyncCheckpointStore,
   type DurableManifestDigest,
   type SelectedSwmMetaRetentionScope,
@@ -322,6 +325,7 @@ import {
   type DurableSyncContext,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
+import { createAgentRegistryDataMaterializer } from './sync/requester/agent-registry-data-materializer.js';
 import { createGraphScopedPhysicalOperationFence } from './sync/requester/graph-scoped-operation-fence.js';
 import {
   mergeExactDurableFetchDisposition,
@@ -346,6 +350,10 @@ import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
+import {
+  createRequesterTransportPlan,
+  createStrictChangelogTransportPlan,
+} from './sync/requester/transport-plan.js';
 import {
   recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
@@ -440,6 +448,7 @@ import {
   orderContextGraphIdsByPriority,
   syncPriorityClass,
   type SyncAdmissionSource,
+  type SyncContextGraphPriorityConfig,
   type SyncSchedulerLane,
 } from './sync/policy.js';
 import { automaticDurableSyncContextGraphs } from './sync/system-context-graph-policy.js';
@@ -903,6 +912,70 @@ async function runSerializedDurableContextGraphSync<T>(
       signal.removeEventListener('abort', onAbort);
     });
   });
+}
+
+/** Execute one cross-transport plan after every item has selected its lane. */
+async function runPrioritizedSyncWork(
+  agent: DKGAgent,
+  ctx: OperationContext,
+  remotePeerId: string,
+  work: readonly ContextGraphSyncWork<DurableSyncAccumulator>[],
+  priorities: Readonly<SyncContextGraphPriorityConfig> | undefined,
+  onDeferred: (item: ContextGraphSyncWork<DurableSyncAccumulator>, error: Error) => void,
+  priority?: number,
+  source?: SyncAdmissionSource,
+): Promise<DurableSyncResult | undefined> {
+  const accumulator = await runOrderedContextGraphSyncs<DurableSyncAccumulator>({
+    work,
+    priorities,
+    emptyResult: createDurableSyncAccumulator,
+    runWithAdmission: (item, run) => {
+      const admit = () => agent.runContextGraphSyncWithBackpressure(
+        ctx,
+        item.contextGraphId,
+        item.lane,
+        item.operationId,
+        run,
+        { priorityOverride: priority, source },
+      );
+      return item.lane === 'durable'
+        ? runSerializedDurableContextGraphSync(
+            agent,
+            remotePeerId,
+            item.contextGraphId,
+            admit,
+          )
+        : admit();
+    },
+    merge: mergeDurableSyncAccumulatorInto,
+    markDeferred: (summary) => {
+      recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
+      return markDurableTerminalBoundary(summary, false);
+    },
+    onDeferred,
+  });
+  return durableSyncAccumulatorHasTerminalBoundary(accumulator)
+    ? finalizeDurableSyncCompletion(accumulator)
+    : undefined;
+}
+
+async function runPlannedChangelogContextGraph(
+  agent: DKGAgent,
+  ctx: OperationContext,
+  remotePeerId: string,
+  contextGraphId: string,
+  onAccessDenied: ((contextGraphId: string) => void) | undefined,
+  onFallback: (contextGraphId: string, error: unknown) => void,
+): Promise<DurableSyncAccumulator> {
+  try {
+    const result = await agent.runChangelogSyncForCg(ctx, remotePeerId, contextGraphId);
+    if (result.deniedPhases > 0) onAccessDenied?.(contextGraphId);
+    return durableSyncAccumulatorFromResult(result);
+  } catch (error) {
+    if (getSyncBackpressureBusyError(error)) throw error;
+    onFallback(contextGraphId, error);
+    return createDurableSyncAccumulator();
+  }
 }
 
 function combineSyncAdmissionSignals(
@@ -5410,6 +5483,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   pruneSyncReconcilerState(this: DKGAgent, now = Date.now()): void {
     const syncTiming = this.config.syncReconcilerTiming;
     this.syncCheckpoints.pruneExpired?.(now);
+    this.authoritativeAgentSnapshots.pruneExpired(now);
     const connected = new Set(this.node.libp2p.getPeers().map((pid) => pid.toString()));
     for (const [peerId, ts] of this.catchupOnConnectAt) {
       if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
@@ -5787,13 +5861,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       && contextGraphIds.length > 0
     ) {
       try {
-        const lane = await this.runChangelogLane(
+        const lane = await this.runPrioritizedSyncPlan(
           ctx,
           remotePeerId,
           contextGraphIds,
           onAccessDenied,
-          options?.priority,
-          normalizeSyncAdmissionSource(options?.source),
+          onPhase,
+          sinceBatchIdFor,
+          options,
         );
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
@@ -5819,6 +5894,94 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       durableSyncAccumulatorFromResult(legacyResult),
     );
     return finalizeDurableSyncCompletion(accumulator);
+  }
+
+  /**
+   * Select one transport per Context Graph, then order the resulting work as a
+   * single plan. This coordinator owns cross-lane policy; the changelog runner
+   * below remains changelog-only.
+   */
+  async runPrioritizedSyncPlan(this: DKGAgent,
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphIds: string[],
+    onAccessDenied?: (contextGraphId: string) => void,
+    onPhase?: PhaseCallback,
+    sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
+    options?: DurableSyncOptions,
+  ): Promise<{ result?: DurableSyncResult; remainingLegacyCgs: string[] }> {
+    const peerProtocols = await this.getPeerProtocols(remotePeerId);
+    if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
+      return { remainingLegacyCgs: contextGraphIds };
+    }
+
+    const remainingLegacyCgs: string[] = [];
+    const legacyOptions: LegacyDurableContextGraphOptions = {
+      onPhase,
+      onAtomicCommitStarted: options?.onAtomicCommitStarted,
+      onAccessDenied,
+      sinceBatchIdFor,
+      stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
+      exactAssetSelection: options?.exactAssetSelection,
+      settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
+      isCurrent: options?.isCurrent,
+      durableMetaContinuation: options?.durableMetaContinuation,
+    };
+    const plan = await createRequesterTransportPlan<DurableSyncAccumulator>({
+      remotePeerId,
+      contextGraphIds,
+      selectWork: async (contextGraphId) => {
+        if (
+          isAgentRegistryContextGraph(contextGraphId)
+          || await this.isPrivateContextGraph(contextGraphId)
+        ) {
+          return {
+            lane: 'durable',
+            run: async (remainingContextGraphs: number) => durableSyncAccumulatorFromResult(
+              await this.runLegacyDurableSyncForContextGraph(
+                ctx,
+                remotePeerId,
+                contextGraphId,
+                remainingContextGraphs,
+                legacyOptions,
+              ),
+            ),
+          };
+        }
+        return {
+          lane: 'changelog',
+          run: () => runPlannedChangelogContextGraph(
+            this,
+            ctx,
+            remotePeerId,
+            contextGraphId,
+            onAccessDenied,
+            (failedContextGraphId, error) => {
+              this.log.warn(
+                ctx,
+                `Changelog sync failed for CG ${failedContextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`,
+              );
+              remainingLegacyCgs.push(failedContextGraphId);
+            },
+          ),
+        };
+      },
+    });
+
+    const result = await runPrioritizedSyncWork(
+      this,
+      ctx,
+      remotePeerId,
+      plan.work,
+      this.config.syncContextGraphPriorities,
+      (item, error) => this.log.info(
+        ctx,
+        `Deferring ${item.lane} sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
+      ),
+      options?.priority,
+      normalizeSyncAdmissionSource(options?.source),
+    );
+    return { result, remainingLegacyCgs };
   }
 
   /**
@@ -6234,6 +6397,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const proofCheckpointStore = exactAssetSelection?.kind === 'challenge-pinned'
       ? new MemorySyncCheckpointStore()
       : undefined;
+    const authoritativeAgentSnapshot = exactAssetSelection === undefined
+      && isAgentRegistryContextGraph(contextGraphId);
+    const durableCheckpointStore = this.syncCheckpoints;
+    const dataMaterializer = authoritativeAgentSnapshot
+      ? createAgentRegistryDataMaterializer({
+          contextGraphId,
+          remotePeerId,
+          store: this.store,
+          snapshots: this.authoritativeAgentSnapshots,
+          reconciler: this.agentRegistrySnapshotReconciler,
+          insertNonRegistryQuads: (quads, operationSignal) =>
+            this.insertSyncedQuadsAndInvalidateListCache([...quads], {
+              priority: 'background',
+              source: 'agent.durableSync.storeInsert',
+              signal: operationSignal,
+            }),
+          recordOversizeDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+          invalidateContextGraphList: () => this.invalidateListContextGraphsCache(),
+          // Reconciliation can remove policy rows from the responder's own
+          // rooted profile tree, so additions alone are not a sufficient key.
+          invalidateContextGraphMetaProjection: () => this.contextGraphMetaProjection.markAllDirty(),
+        })
+      : undefined;
     const runGraphScopedOperation = createGraphScopedPhysicalOperationFence({
       isClosed: () => this.graphScopedStoreClosed,
       captureSubscription: (operationContextGraphId) =>
@@ -6300,7 +6486,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             sinceBatchId,
             signal: fetchContext.signal,
             forceFreshSession: forceFreshSession
-              || onVerifiedFullSnapshot !== undefined,
+              || (!authoritativeAgentSnapshot && onVerifiedFullSnapshot !== undefined),
             manifestDigest,
             manifestPrefixDigestAtOffset,
             shouldStopAfterPage,
@@ -6309,27 +6495,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               : exactAssetUalsForSelection(exactAssetSelection),
             returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope,
-            checkpointStore: ephemeralRequesterState
-              ? proofCheckpointStore
-              : undefined,
+            checkpointStore: ephemeralRequesterState ? proofCheckpointStore : undefined,
             ephemeralRequesterState,
           },
         );
       },
-      sinceBatchIdFor,
+      sinceBatchIdFor: authoritativeAgentSnapshot ? undefined : sinceBatchIdFor,
       exactAssetSelectionFor: exactAssetSelection?.kind === 'ual-only'
         ? () => exactAssetSelection
         : undefined,
       durableMetaContinuation,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: ({ quads, signal: operationSignal }) => {
-        return this.insertSyncedQuadsAndInvalidateListCache(quads, {
+      storeInsert: ({ quads, signal: operationSignal }) =>
+        this.insertSyncedQuadsAndInvalidateListCache(quads, {
           priority: 'background',
           source: 'agent.durableSync.storeInsert',
           signal: operationSignal,
-        });
-      },
+        }),
+      dataMaterializer,
       ...(exactAssetSelection?.kind === 'challenge-pinned'
         ? {
             authenticateChallengePinnedAsset: ({
@@ -6484,10 +6668,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
       }),
       onVerifiedFullSnapshot,
-      deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
+      deleteCheckpoint: (key) => deleteSyncPageCheckpoint(durableCheckpointStore, key),
       setCheckpoint: (key, checkpoint) => {
         if (checkpoint.binding) {
-          this.syncCheckpoints.setManifestBoundOffset(
+          durableCheckpointStore.setManifestBoundOffset(
             key,
             checkpoint.offset,
             checkpoint.binding.manifestDigest,
@@ -6497,13 +6681,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             checkpoint.responderSessionOffset,
           );
         } else {
-          this.syncCheckpoints.set(
+          durableCheckpointStore.set(
             key,
             checkpoint.offset,
             Date.now(),
             checkpoint.responderSessionOffset,
           );
         }
+        alignSyncPageResponderSessionWithCheckpoint(durableCheckpointStore, key);
       },
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
@@ -6558,55 +6743,46 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return { remainingLegacyCgs: contextGraphIds };
     }
     const legacyCgs: string[] = [];
-    const work = [];
-    for (const contextGraphId of contextGraphIds) {
-      if (await this.isPrivateContextGraph(contextGraphId)) {
-        legacyCgs.push(contextGraphId);
-        continue;
-      }
-      work.push({
-        contextGraphId,
-        lane: 'changelog' as const,
-        operationId: `changelog:${contextGraphId}:${remotePeerId.slice(-8)}`,
-        run: async (): Promise<DurableSyncAccumulator> => {
-          try {
-            const result = await this.runChangelogSyncForCg(ctx, remotePeerId, contextGraphId);
-            if (result.deniedPhases > 0) onAccessDenied?.(contextGraphId);
-            return durableSyncAccumulatorFromResult(result);
-          } catch (error) {
-            if (getSyncBackpressureBusyError(error)) throw error;
-            this.log.warn(ctx, `Changelog sync failed for CG ${contextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
-            legacyCgs.push(contextGraphId);
-            return createDurableSyncAccumulator();
-          }
-        },
-      });
-    }
-    const accumulator = await runOrderedContextGraphSyncs<DurableSyncAccumulator>({
-      work,
-      priorities: this.config.syncContextGraphPriorities,
-      emptyResult: createDurableSyncAccumulator,
-      runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
-        ctx,
-        item.contextGraphId,
-        item.lane,
-        item.operationId,
-        run,
-        { priorityOverride: priority, source },
-      ),
-      merge: mergeDurableSyncAccumulatorInto,
-      markDeferred: (summary) => {
-        recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
-        return markDurableTerminalBoundary(summary, false);
+    const plan = await createStrictChangelogTransportPlan<DurableSyncAccumulator>({
+      remotePeerId,
+      contextGraphIds,
+      // A direct caller gets strict changelog behavior and an explicit legacy
+      // remainder for every graph whose lane belongs to the mixed coordinator.
+      selectWork: async (contextGraphId) => {
+        if (
+          isAgentRegistryContextGraph(contextGraphId)
+          || await this.isPrivateContextGraph(contextGraphId)
+        ) return { lane: 'deferred' };
+        return {
+          lane: 'changelog',
+          run: () => runPlannedChangelogContextGraph(
+            this,
+            ctx,
+            remotePeerId,
+            contextGraphId,
+            onAccessDenied,
+            (failedContextGraphId, error) => {
+              this.log.warn(ctx, `Changelog sync failed for CG ${failedContextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
+              legacyCgs.push(failedContextGraphId);
+            },
+          ),
+        };
       },
-      onDeferred: (item, error) => this.log.info(
+    });
+    legacyCgs.push(...plan.deferredContextGraphIds);
+    const result = await runPrioritizedSyncWork(
+      this,
+      ctx,
+      remotePeerId,
+      plan.work,
+      this.config.syncContextGraphPriorities,
+      (item, error) => this.log.info(
         ctx,
         `Deferring changelog sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
       ),
-    });
-    const result = durableSyncAccumulatorHasTerminalBoundary(accumulator)
-      ? finalizeDurableSyncCompletion(accumulator)
-      : undefined;
+      priority,
+      source,
+    );
     return { result, remainingLegacyCgs: legacyCgs };
   }
 

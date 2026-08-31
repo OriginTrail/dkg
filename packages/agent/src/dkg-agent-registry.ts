@@ -136,7 +136,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, signAgentPeerIdBinding, verifyAgentPeerIdBinding, type AgentProfileConfig } from './profile.js';
 import {
   signAgentDelegation,
   verifyAgentDelegation,
@@ -463,6 +463,23 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const pubKeyBase64 = Buffer.from(this.wallet.keypair.publicKey).toString('base64');
     const relayAddrs = this.config.relayPeers;
     const defaultAgent = this.defaultAgentAddress ? this.localAgents.get(this.defaultAgentAddress) : undefined;
+    const peerIdProof = defaultAgent?.privateKey
+      ? signAgentPeerIdBinding(
+          defaultAgent.agentAddress,
+          this.node.peerId,
+          defaultAgent.privateKey,
+        )
+      : defaultAgent?.peerIdProof;
+    if (
+      peerIdProof
+      && defaultAgent
+      && !verifyAgentPeerIdBinding(defaultAgent.agentAddress, this.node.peerId, peerIdProof)
+    ) {
+      throw new Error(
+        `Stored peer binding proof for self-sovereign agent ${defaultAgent.agentAddress} `
+        + `does not authorize node peer ${this.node.peerId}`,
+      );
+    }
 
     // Populate `contextGraphsServed` so peers can discover which CGs this
     // node hosts via the public agent profile, but ONLY include CGs whose
@@ -492,6 +509,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
     const profileConfig: AgentProfileConfig = {
       peerId: this.node.peerId,
+      ...(peerIdProof ? { peerIdProof } : {}),
       name: this.config.name,
       description: this.config.description,
       framework: this.config.framework,
@@ -624,6 +642,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
     name: string,
     opts?: {
       publicKey?: string;
+      /** Wallet signature over this node's peer ID for self-sovereign publication. */
+      peerIdProof?: string;
       framework?: string;
       encryptionKeyAlgorithm?: typeof WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
       publicEncryptionKey?: string;
@@ -638,6 +658,15 @@ export class AgentRegistryMethods extends DKGAgentBase {
     if (opts?.publicKey && (opts.publicEncryptionKey || opts.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
       throw new Error('Self-sovereign agents must provide both publicEncryptionKey and encryptionKeyProof');
     }
+    if (opts?.peerIdProof && !opts.publicKey) {
+      throw new Error('peerIdProof is only accepted for self-sovereign agents; custodial agents sign it locally');
+    }
+    if (opts?.publicKey && opts.peerIdProof) {
+      const address = ethers.computeAddress(opts.publicKey);
+      if (!verifyAgentPeerIdBinding(address, this.node.peerId, opts.peerIdProof)) {
+        throw new Error(`peerIdProof does not authorize node peer ${this.node.peerId} for agent ${address}`);
+      }
+    }
 
     const record = opts?.publicKey
       ? registerSelfSovereignAgent(
@@ -651,6 +680,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
             encryptionKeyProof: opts.encryptionKeyProof,
           }
           : undefined,
+        opts.peerIdProof,
       )
       : generateCustodialAgent(name, opts?.framework);
 
@@ -1097,6 +1127,9 @@ export class AgentRegistryMethods extends DKGAgentBase {
     if (record.publicKey) {
       quads.push({ subject: agentUri, predicate: `${DKG}publicKey`, object: `"${record.publicKey}"`, graph });
     }
+    if (record.peerIdProof) {
+      quads.push({ subject: agentUri, predicate: `${DKG}peerIdProof`, object: `"${record.peerIdProof}"`, graph });
+    }
     // Emit one (publicEncryptionKey, algorithm, proof) tuple per registered key
     // — the resolver collects every authenticated key into the recipient set, so
     // multi-key agents need all entries present in RDF. For revoked keys we
@@ -1150,7 +1183,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // could otherwise brick our own keys.
     const rdfEncryptionKeysByAgent = await this.loadEncryptionKeyTriplesByAgent();
     const sparql = `
-      SELECT ?agent ?name ?address ?mode ?tokenHash ?legacyToken ?publicKey ?framework ?createdAt ?isDefault WHERE {
+      SELECT ?agent ?name ?address ?mode ?tokenHash ?legacyToken ?publicKey ?peerIdProof ?framework ?createdAt ?isDefault WHERE {
         GRAPH <${graph}> {
           ?agent a <${DKG}Agent> ;
                  <https://schema.org/name> ?name ;
@@ -1159,6 +1192,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
           OPTIONAL { ?agent <${DKG}agentAuthTokenHash> ?tokenHash }
           OPTIONAL { ?agent <${DKG}agentAuthToken> ?legacyToken }
           OPTIONAL { ?agent <${DKG}publicKey> ?publicKey }
+          OPTIONAL { ?agent <${DKG}peerIdProof> ?peerIdProof }
           OPTIONAL { ?agent <https://dkg.origintrail.io/skill#framework> ?framework }
           OPTIONAL { ?agent <${DKG}createdAt> ?createdAt }
           OPTIONAL { ?agent <${DKG}isDefaultAgent> ?isDefault }
@@ -1192,6 +1226,13 @@ export class AgentRegistryMethods extends DKGAgentBase {
           authToken,
           createdAt: strip(row['createdAt']) || '',
         };
+        const storedPeerIdProof = ksEntry?.peerIdProof ?? strip(row['peerIdProof']);
+        if (
+          storedPeerIdProof
+          && verifyAgentPeerIdBinding(record.agentAddress, this.node.peerId, storedPeerIdProof)
+        ) {
+          record.peerIdProof = storedPeerIdProof;
+        }
 
         // Restore private key: prefer keystore file, fall back to operational keys
         if (record.mode === 'custodial' && !record.privateKey) {
@@ -1405,6 +1446,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
       existing[record.agentAddress.toLowerCase()] = {
         authToken: record.authToken,
         ...(record.privateKey ? { privateKey: record.privateKey } : {}),
+        ...(record.peerIdProof ? { peerIdProof: record.peerIdProof } : {}),
         ...(record.workspaceEncryptionKeys.length
           ? { workspaceEncryptionKeys: record.workspaceEncryptionKeys.map((k) => ({ ...k })) }
           : {}),

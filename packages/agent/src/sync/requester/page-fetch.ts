@@ -147,6 +147,34 @@ export function deleteSyncPageCheckpoint(
   checkpointStore.delete(checkpointKey);
 }
 
+/**
+ * Re-align the process-local responder-session cache after an owner rewrites a
+ * durable checkpoint coordinate (notably rollback after a failed atomic
+ * materialization). The opaque responder session remains unchanged; only its
+ * verified/raw requester coordinate is restored.
+ */
+export function alignSyncPageResponderSessionWithCheckpoint(
+  checkpointStore: SyncCheckpointStore,
+  checkpointKey: string,
+  now = Date.now(),
+): void {
+  const checkpoint = checkpointStore.get(checkpointKey, now);
+  if (
+    !checkpoint?.responderSessionId
+    || checkpoint.responderSessionExpiresAtMs === undefined
+    || checkpoint.responderSessionExpiresAtMs <= now
+  ) {
+    unfinishedSyncResponderSessions.delete(checkpointKey);
+    return;
+  }
+  rememberUnfinishedSyncResponderSession(checkpointKey, {
+    syncSessionId: checkpoint.responderSessionId,
+    expiresAt: checkpoint.responderSessionExpiresAtMs,
+    responderSessionOffset: checkpoint.responderSessionOffset ?? checkpoint.offset,
+    ...(checkpoint.manifestDigest ? { manifestDigest: checkpoint.manifestDigest } : {}),
+  }, now);
+}
+
 function isSyncResponderSessionInvalidError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const message = err.message.toLowerCase();

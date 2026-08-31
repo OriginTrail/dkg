@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   OxigraphStore,
+  buildAtomicSubjectPrefixReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
   type Quad,
 } from '../src/index.js';
@@ -146,5 +147,61 @@ describe('buildAtomicSubjectReplaceUpdate', () => {
     const sparql = buildAtomicSubjectReplaceUpdate(GRAPH, SUBJECT_A, []);
     expect(sparql).toBe(`DELETE WHERE { GRAPH <${GRAPH}> { <${SUBJECT_A}> ?p ?o } }`);
     expect(sparql).not.toContain('INSERT DATA');
+  });
+});
+
+describe('buildAtomicSubjectPrefixReplaceUpdate', () => {
+  const ROOT = 'did:dkg:agent:0x1111111111111111111111111111111111111111';
+  const COLLIDING_ROOT = `${ROOT}2`;
+
+  it('atomically replaces the root plus slash and fragment descendants only', async () => {
+    const store = new OxigraphStore();
+    const slashChild = `${ROOT}/.well-known/genid/cap1`;
+    const fragmentChild = `${ROOT}#x25519-old`;
+    await store.insert([
+      quad(ROOT, 'urn:test:status', '"old"'),
+      quad(slashChild, 'urn:test:name', '"obsolete-capability"'),
+      quad(fragmentChild, 'urn:test:revokedAt', '"obsolete-key"'),
+      quad(COLLIDING_ROOT, 'urn:test:status', '"unrelated"'),
+      quad(SUBJECT_B, 'urn:test:kind', '"request"'),
+    ]);
+
+    await store.replaceSubjectPrefix(GRAPH, ROOT, [
+      quad(ROOT, 'urn:test:status', '"fresh"'),
+      quad(`${ROOT}/.well-known/genid/cap2`, 'urn:test:name', '"fresh-capability"'),
+    ], [quad(SUBJECT_B, 'urn:test:forwarded', '"new"')]);
+
+    const result = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${GRAPH}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
+    );
+    const bindings = result.type === 'bindings' ? result.bindings : [];
+    expect(bindings).toEqual(expect.arrayContaining([
+      { s: ROOT, p: 'urn:test:status', o: '"fresh"' },
+      { s: `${ROOT}/.well-known/genid/cap2`, p: 'urn:test:name', o: '"fresh-capability"' },
+      { s: COLLIDING_ROOT, p: 'urn:test:status', o: '"unrelated"' },
+      { s: SUBJECT_B, p: 'urn:test:kind', o: '"request"' },
+      { s: SUBJECT_B, p: 'urn:test:forwarded', o: '"new"' },
+    ]));
+    expect(bindings).not.toEqual(expect.arrayContaining([
+      { s: slashChild, p: 'urn:test:name', o: '"obsolete-capability"' },
+      { s: fragmentChild, p: 'urn:test:revokedAt', o: '"obsolete-key"' },
+    ]));
+  });
+
+  it('emits one SPARQL Modify with strict root delimiters', () => {
+    const sparql = buildAtomicSubjectPrefixReplaceUpdate(GRAPH, ROOT, [
+      quad(ROOT, 'urn:test:status', '"fresh"'),
+    ]);
+    expect(sparql).toContain('DELETE {');
+    expect(sparql).toContain('INSERT {');
+    expect(sparql).toContain(`?existingSubject = <${ROOT}>`);
+    expect(sparql).toContain(`"${ROOT}/"`);
+    expect(sparql).toContain(`"${ROOT}#"`);
+  });
+
+  it('rejects payload rows outside the rooted profile tree', () => {
+    expect(() => buildAtomicSubjectPrefixReplaceUpdate(GRAPH, ROOT, [
+      quad(COLLIDING_ROOT, 'urn:test:status', '"wrong-root"'),
+    ])).toThrow(/must target prefix/);
   });
 });

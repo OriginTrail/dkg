@@ -65,8 +65,12 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
   };
 });
 
-import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
-import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
+import {
+  PROTOCOL_SYNC_CHANGELOG,
+} from '@origintrail-official/dkg-core';
+import {
+  createDurableSyncAccumulator,
+} from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   durableSyncRequestPageSize,
@@ -687,7 +691,7 @@ describe('durable sync lifecycle chain binding', () => {
   });
 
   it('keeps caller-signalled durable sync off the non-cancellable changelog lane', async () => {
-    const runChangelogLane = vi.fn(async () => ({ remainingLegacyCgs: [] }));
+    const runPrioritizedSyncPlan = vi.fn(async () => ({ remainingLegacyCgs: [] }));
     const runLegacyDurableSync = vi.fn(async () => ({
       insertedTriples: 0,
       complete: false,
@@ -702,7 +706,7 @@ describe('durable sync lifecycle chain binding', () => {
     const agentLike: any = {
       config: {},
       store: changelogCapableStore,
-      runChangelogLane,
+      runPrioritizedSyncPlan,
       runLegacyDurableSync,
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -712,7 +716,7 @@ describe('durable sync lifecycle chain binding', () => {
       'peer-changelog-capable',
       [contextGraphId],
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runPrioritizedSyncPlan).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync).not.toHaveBeenCalled();
 
     const controller = new AbortController();
@@ -726,7 +730,7 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       { signal: controller.signal },
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runPrioritizedSyncPlan).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
       signal: controller.signal,

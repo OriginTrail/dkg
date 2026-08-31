@@ -51,6 +51,7 @@ import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-que
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectPrefixReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
@@ -746,6 +747,33 @@ export class SparqlHttpStore implements TripleStore {
       update,
       options: { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
       operation: 'replaceSubject',
+    });
+  }
+
+  async replaceSubjectPrefix(
+    graphUri: string,
+    prefix: string,
+    replacementQuads: DKGQuad[],
+    additionalQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.atomicUpdates) {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectPrefix', 'SparqlHttpStore');
+    }
+    assertQuadLiteralsMutf8Safe([...replacementQuads, ...additionalQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceSubjectPrefix',
+    });
+    await this.runRemoteGraphMutation({
+      scope: { kind: 'graphs', graphs: [graphUri] },
+      update: buildAtomicSubjectPrefixReplaceUpdate(
+        graphUri,
+        prefix,
+        replacementQuads,
+        additionalQuads,
+      ),
+      options: { ...options, source: options?.source ?? 'sparql-http.replaceSubjectPrefix' },
+      operation: 'replaceSubjectPrefix',
     });
   }
 

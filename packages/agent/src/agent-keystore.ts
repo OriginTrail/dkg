@@ -54,6 +54,8 @@ export interface WorkspaceEncryptionKeyEntry {
 export interface KeystoreEntry {
   authToken?: string;
   privateKey?: string;
+  /** Wallet signature authorizing this node's peer ID for a self-sovereign agent. */
+  peerIdProof?: string;
   workspaceEncryptionKeys?: WorkspaceEncryptionKeyEntry[];
   encryptionKeyAlgorithm?: typeof WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
   publicEncryptionKey?: string;
@@ -65,6 +67,8 @@ export interface AgentKeyRecord {
   agentAddress: string;
   publicKey: string;
   privateKey?: string;
+  /** Wallet signature authorizing this node's peer ID; supplied off-node in self-sovereign mode. */
+  peerIdProof?: string;
   /**
    * Canonical store of all encryption keys this agent has ever registered.
    * Default-key views below (`publicEncryptionKey`, `privateEncryptionKey`,
@@ -138,11 +142,13 @@ export function registerSelfSovereignAgent(
     publicEncryptionKey: string;
     encryptionKeyProof: string;
   },
+  peerIdProof?: string,
 ): AgentKeyRecord {
   const address = ethers.computeAddress(publicKey);
   const record: AgentKeyRecord = {
     agentAddress: address,
     publicKey,
+    peerIdProof,
     workspaceEncryptionKeys: [],
     name,
     framework,

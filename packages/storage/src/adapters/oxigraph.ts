@@ -22,6 +22,7 @@ import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectPrefixReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
@@ -429,6 +430,26 @@ export class OxigraphStore implements TripleStore {
     // subject transiently empty. No staging graph / cleanup: a failed request
     // rolls the whole thing back.
     this.store.update(buildAtomicSubjectReplaceUpdate(graphUri, subject, quads));
+    this.scheduleFlush();
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+  }
+
+  async replaceSubjectPrefix(
+    graphUri: string,
+    prefix: string,
+    replacementQuads: DKGQuad[],
+    additionalQuads: DKGQuad[],
+  ): Promise<void> {
+    assertQuadLiteralsMutf8Safe([...replacementQuads, ...additionalQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'OxigraphStore.replaceSubjectPrefix',
+    });
+    this.store.update(buildAtomicSubjectPrefixReplaceUpdate(
+      graphUri,
+      prefix,
+      replacementQuads,
+      additionalQuads,
+    ));
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }

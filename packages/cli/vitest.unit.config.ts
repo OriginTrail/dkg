@@ -29,6 +29,7 @@ export default defineConfig({
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
+          'test/agent-peer-binding-registration-route.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/config.test.ts',

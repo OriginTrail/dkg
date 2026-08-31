@@ -450,12 +450,12 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "POST" && path === "/api/agent/register") {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
-    const { name, publicKey, framework } = parsed;
+    const { name, publicKey, peerIdProof, framework } = parsed;
     if (!name || typeof name !== "string") {
       return jsonResponse(res, 400, { error: 'Missing required field "name"' });
     }
     try {
-      const record = await agent.registerAgent(name, { publicKey, framework });
+      const record = await agent.registerAgent(name, { publicKey, peerIdProof, framework });
       validTokens.add(record.authToken);
       const response: Record<string, unknown> = {
         agentAddress: record.agentAddress,

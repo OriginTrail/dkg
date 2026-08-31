@@ -22,6 +22,7 @@ export {
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   tryReplaceSubjectAtomically,
+  tryReplaceSubjectPrefixAtomically,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
@@ -29,9 +30,11 @@ export {
 export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   assertSubjectReplacementPayload,
+  assertSubjectPrefixReplacementPayload,
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildAtomicSubjectPrefixReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
@@ -41,6 +44,7 @@ export {
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
+  isReplaceSubjectPrefixCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {

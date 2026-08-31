@@ -78,6 +78,10 @@ class NotStartedTimeoutAtomicReplaceStore extends SpyStore {
     throw this.notStarted('replaceSubject');
   }
 
+  async replaceSubjectPrefix(): Promise<void> {
+    throw this.notStarted('replaceSubjectPrefix');
+  }
+
   private notStarted(operation: string): StoreOperationTimeoutError {
     return new StoreOperationTimeoutError({
       backend: 'managed-test-store',
@@ -144,6 +148,12 @@ describe('ChangelogStore — pre-execution atomic replace rejection', () => {
             'http://ex.org/a',
             [q('http://ex.org/a', G1)],
           )],
+          ['replaceSubjectPrefix', () => log.replaceSubjectPrefix(
+            G1,
+            'http://ex.org/a',
+            [q('http://ex.org/a', G1)],
+            [q('http://ex.org/b', G1)],
+          )],
         ] as const) {
           await expect(work()).rejects.toMatchObject({
             code: 'STORE_SCHEDULER_BUSY',
@@ -181,8 +191,34 @@ describe('ChangelogStore — pre-execution atomic replace rejection', () => {
     });
     await expect(log.replaceSubject(G1, 'http://ex.org/a', [q('http://ex.org/a', G1)]))
       .rejects.toMatchObject({ outcome: 'not_started', storeOperation: 'replaceSubject' });
+    await expect(log.replaceSubjectPrefix(
+      G1,
+      'http://ex.org/a',
+      [q('http://ex.org/a', G1)],
+      [q('http://ex.org/b', G1)],
+    )).rejects.toMatchObject({
+      outcome: 'not_started',
+      storeOperation: 'replaceSubjectPrefix',
+    });
 
     expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+
+  it('requests reconciliation after an indeterminate subject-prefix failure', async () => {
+    const base = new OxigraphStore();
+    vi.spyOn(base, 'replaceSubjectPrefix').mockRejectedValueOnce(
+      new Error('injected indeterminate replace failure'),
+    );
+    const log = new ChangelogStore(base);
+
+    await expect(log.replaceSubjectPrefix(
+      G1,
+      'http://ex.org/a',
+      [q('http://ex.org/a', G1)],
+      [q('http://ex.org/b', G1)],
+    )).rejects.toThrow('injected indeterminate replace failure');
+    expect(log.needsReconcile).toBe(true);
     await base.close();
   });
 });

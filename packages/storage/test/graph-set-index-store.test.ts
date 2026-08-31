@@ -117,6 +117,34 @@ async function exhaustTouchedGraphProbeRetries(
 }
 
 describe('GraphSetIndexStore', () => {
+  it('invalidates a warm index after an indeterminate subject-prefix failure', async () => {
+    const graph = 'did:dkg:context-graph:possibly-committed';
+    const inner = new OxigraphStore();
+    await inner.insert([q(graph)]);
+    const diagnostics: unknown[] = [];
+    const store = new GraphSetIndexStore(inner, {
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    await expect(store.listGraphs()).resolves.toContain(graph);
+    vi.spyOn(inner, 'replaceSubjectPrefix').mockRejectedValueOnce(
+      new Error('injected indeterminate replace failure'),
+    );
+
+    await expect(store.replaceSubjectPrefix(
+      graph,
+      'urn:subject',
+      [q(graph, 'urn:subject')],
+      [],
+    )).rejects.toThrow('injected indeterminate replace failure');
+    await expect(store.listGraphs()).resolves.toContain(graph);
+    expect(diagnostics).toContainEqual({
+      type: 'dirty-rebuild',
+      source: 'replaceSubjectPrefix',
+      graphCount: 1,
+    });
+    await inner.close();
+  });
+
   for (const adapter of [
     {
       name: 'BlazegraphStore',
@@ -186,6 +214,12 @@ describe('GraphSetIndexStore', () => {
           )],
           ['replaceSubject', () => store.replaceSubject(
             'urn:graph', 'urn:subject', [q('urn:graph', 'urn:subject')],
+          )],
+          ['replaceSubjectPrefix', () => store.replaceSubjectPrefix(
+            'urn:graph',
+            'urn:subject',
+            [q('urn:graph', 'urn:subject')],
+            [q('urn:graph', 'urn:forwarded')],
           )],
         ] as const) {
           await expect(work()).rejects.toMatchObject({

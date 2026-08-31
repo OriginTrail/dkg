@@ -691,6 +691,15 @@ export class OxigraphWorkerStore implements TripleStore {
     await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
       this.call('replaceSubject', graphUri, subject, quads));
   }
+  async replaceSubjectPrefix(
+    graphUri: string,
+    prefix: string,
+    replacementQuads: Quad[],
+    additionalQuads: Quad[],
+  ): Promise<void> {
+    await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
+      this.call('replaceSubjectPrefix', graphUri, prefix, replacementQuads, additionalQuads));
+  }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
   }
