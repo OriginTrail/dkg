@@ -95,21 +95,22 @@ describe('readChangelogDeltaPage — delta serving', () => {
     await store.close();
   });
 
-  it('excludes wrong-CG / private / shared-memory graphs (no existence leak)', async () => {
+  it('excludes wrong-CG / private / shared-memory / RFC-64 control graphs (no existence leak)', async () => {
     const store = await storeWith([['urn:s', 'urn:p', '"v"', G1]]);
     const other = `${contextGraphDataUri('other-cg')}/9`;
     const priv = `${cgPrefix}/_private`;
     const swm = `${cgPrefix}/_shared_memory`;
+    const rfc64Control = `${cgPrefix}/_sync/applied-cg`;
     const resp = await readChangelogDeltaPage({
-      reader: new FakeReader({ era: 'E1', seq: 4 }, [
-        rec(1, G1, 'upsert'), rec(2, other, 'upsert'), rec(3, priv, 'upsert'), rec(4, swm, 'upsert'),
+      reader: new FakeReader({ era: 'E1', seq: 5 }, [
+        rec(1, G1, 'upsert'), rec(2, other, 'upsert'), rec(3, priv, 'upsert'), rec(4, swm, 'upsert'), rec(5, rfc64Control, 'upsert'),
       ]),
       store, contextGraphId: CG, sinceSeq: 0, requesterEra: 'E1', limit: 100,
     });
     expect(resp.kind).toBe('delta');
     if (resp.kind !== 'delta') return;
     expect(resp.records.map((r) => r.graph)).toEqual([G1]); // only the in-CG data graph
-    expect(resp.nextSeq).toBe(4);              // still advances past the filtered window
+    expect(resp.nextSeq).toBe(5);              // still advances past the filtered window
     await store.close();
   });
 

@@ -28,7 +28,11 @@ import {
   assertNetworkIdV1 as assertSharedNetworkIdV1,
   type NetworkIdV1,
 } from './sync-wire-identifiers.js';
-import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
+import {
+  assertExactKeys,
+  isPlainRecord,
+  snapshotSelectedDataRecord,
+} from './sync-wire-objects.js';
 import {
   AUTHOR_LANE_SCOPE_KEYS_V1,
   MAX_AUTHOR_LANE_IDENTIFIER_BYTES_V1,
@@ -43,6 +47,7 @@ import {
   type ContextGraphIdV1,
   type SubGraphNameV1,
 } from './author-lane-scope-v1.js';
+import { encodeCanonicalIriComponentV1 } from './canonical-iri-component-v1.js';
 
 declare const ASSERTION_COORDINATE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SCOPE_V1_BRAND: unique symbol;
@@ -134,6 +139,17 @@ export class AuthorCatalogCodecError extends Error {
   }
 }
 
+/** Catalog-compatible public wrapper around the neutral percent encoder. */
+export function iriComponentV1(value: string): string {
+  return encodeCanonicalIriComponentV1(
+    assertNfcUtf8Identifier(
+      value,
+      'IRI component',
+      MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1,
+    ),
+  );
+}
+
 export function assertNetworkIdV1(
   value: unknown,
   label = 'networkId',
@@ -186,32 +202,19 @@ export function isCatalogForbiddenCodePointV1(codePoint: number): boolean {
   );
 }
 
-/** Percent-encode one already canonical catalog-v1 identifier component. */
-export function iriComponentV1(value: string): string {
-  const identifier = assertNfcUtf8Identifier(
-    value,
-    'IRI component',
-    MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1,
-  );
-  const bytes = UTF8.encode(identifier);
-  let encoded = '';
-  for (const byte of bytes) {
-    if (isUnescapedIriComponentByte(byte)) {
-      encoded += String.fromCharCode(byte);
-    } else {
-      encoded += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
-    }
-  }
-  return encoded;
-}
-
 /** Build the prefix-free root/subgraph assertion scope used by catalog-v1 seals. */
 export function buildCatalogAssertionScopeV1(lane: CatalogLaneV1): CatalogAssertionScopeV1 {
-  assertCatalogLaneV1(lane);
-  const context = iriComponentV1(lane.contextGraphId);
-  const result = lane.subGraphName === null
+  const snapshot = snapshotCatalogLaneV1(lane);
+  return formatCatalogAssertionScopeV1(snapshot);
+}
+
+function formatCatalogAssertionScopeV1(
+  snapshot: Readonly<CatalogLaneV1>,
+): CatalogAssertionScopeV1 {
+  const context = encodeCanonicalIriComponentV1(snapshot.contextGraphId);
+  const result = snapshot.subGraphName === null
     ? `v1/root/${context}`
-    : `v1/subgraph/${context}/${iriComponentV1(lane.subGraphName)}`;
+    : `v1/subgraph/${context}/${encodeCanonicalIriComponentV1(snapshot.subGraphName)}`;
   return result as CatalogAssertionScopeV1;
 }
 
@@ -221,12 +224,12 @@ export function buildCatalogAssertionSubjectV1(
   authorAddress: EvmAddressV1,
   assertionCoordinate: AssertionCoordinateV1,
 ): CatalogAssertionSubjectV1 {
-  assertCatalogLaneV1(lane);
+  const snapshot = snapshotCatalogLaneV1(lane);
   assertCatalogScalar(() => assertCanonicalEvmAddress(authorAddress, 'authorAddress'));
   assertAssertionCoordinateV1(assertionCoordinate);
   return (
-    `did:dkg:context-graph:${buildCatalogAssertionScopeV1(lane)}`
-    + `/assertion/${authorAddress}/${iriComponentV1(assertionCoordinate)}`
+    `did:dkg:context-graph:${formatCatalogAssertionScopeV1(snapshot)}`
+    + `/assertion/${authorAddress}/${encodeCanonicalIriComponentV1(assertionCoordinate)}`
   ) as CatalogAssertionSubjectV1;
 }
 
@@ -464,21 +467,23 @@ export function assertAuthorCatalogRowScopeBindingV1(
   assertPackedKaIdAuthorBindingV1(row.kaId, scope.authorAddress);
 }
 
-function assertCatalogLaneV1(lane: unknown): asserts lane is CatalogLaneV1 {
-  if (!isPlainRecord(lane)) {
-    fail('catalog-schema', 'catalog lane must be a plain JSON object');
+function snapshotCatalogLaneV1(lane: unknown): Readonly<CatalogLaneV1> {
+  let snapshot: ReturnType<typeof snapshotSelectedDataRecord<
+    readonly ['contextGraphId', 'subGraphName']
+  >>;
+  try {
+    snapshot = snapshotSelectedDataRecord(
+      lane,
+      ['contextGraphId', 'subGraphName'] as const,
+      'catalog lane',
+    );
+  } catch (cause) {
+    fail('catalog-schema', 'catalog lane must expose enumerable data properties', cause);
   }
-  // AuthorCatalogScopeV1 is itself a CatalogLaneV1, so these helpers must admit
-  // that structural superset. Still require the two consumed fields to be own,
-  // enumerable data properties before reading them.
-  for (const key of ['contextGraphId', 'subGraphName']) {
-    const descriptor = Object.getOwnPropertyDescriptor(lane, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail('catalog-schema', `catalog lane ${key} must be an enumerable data property`);
-    }
-  }
-  assertContextGraphIdV1(lane.contextGraphId);
-  if (lane.subGraphName !== null) assertSubGraphNameV1(lane.subGraphName);
+  const { contextGraphId, subGraphName } = snapshot;
+  assertContextGraphIdV1(contextGraphId);
+  if (subGraphName !== null) assertSubGraphNameV1(subGraphName);
+  return Object.freeze({ contextGraphId, subGraphName });
 }
 
 function assertCatalogLaneIdentifier(value: unknown, label: string): string {
@@ -536,18 +541,6 @@ function assertWellFormedUnicode(value: string, label: string): void {
       fail('catalog-identifier', `${label} contains an unpaired UTF-16 surrogate`);
     }
   }
-}
-
-function isUnescapedIriComponentByte(byte: number): boolean {
-  return (
-    (byte >= 0x41 && byte <= 0x5a)
-    || (byte >= 0x61 && byte <= 0x7a)
-    || (byte >= 0x30 && byte <= 0x39)
-    || byte === 0x2d
-    || byte === 0x2e
-    || byte === 0x5f
-    || byte === 0x7e
-  );
 }
 
 function assertClosedKeys(
