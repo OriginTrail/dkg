@@ -69,6 +69,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
+      'kosava_node_ui',
       'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
