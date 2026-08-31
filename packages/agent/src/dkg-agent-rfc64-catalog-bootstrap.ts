@@ -14,9 +14,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
-  Rfc64CatalogBootstrapConfigV1,
   Rfc64CatalogBootstrapPolicyV1,
-  Rfc64PublicCatalogBootstrapConfigV1,
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
@@ -27,15 +25,18 @@ import { Rfc64CoalescingSupervisorV1 } from
 import { resolveRfc64PeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
+  resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogExecutionPlanV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
+import {
+  boundedRfc64SupervisorErrorV1,
+  rfc64SupervisorErrorMessageV1,
+} from './rfc64/supervisor-status-v1.js';
 
-const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
 const COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1 = 10_000;
-const UTF8 = new TextEncoder();
 
 export type Rfc64PublicCatalogBootstrapOutcomeV1 =
   | 'pending'
@@ -176,10 +177,12 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         contextGraphId,
       ).legacySyncAllowed
     ) return Object.freeze([]);
-    const config = this.config.rfc64CatalogBootstrap
-      ?? this.config.rfc64PublicCatalogBootstrap;
+    const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+      this.config.rfc64CatalogBootstrap,
+      this.config.rfc64PublicCatalogBootstrap,
+    );
     if (config === undefined) return Object.freeze([]);
-    const policy = acceptedPoliciesV1(config).find(
+    const policy = config.acceptedPolicies.find(
       ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
     );
     return policy?.completeSwmProviders ?? Object.freeze([]);
@@ -187,7 +190,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
 
   /** Accept pinned policies and start the first bounded provider pass. */
   startRfc64PublicCatalogBootstrapV1(this: DKGAgent, ctx: OperationContext): void {
-    const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
+    const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+      this.config.rfc64CatalogBootstrap,
+      this.config.rfc64PublicCatalogBootstrap,
+    );
     if (
       config === undefined
       || this.rfc64CatalogRuntimeV1.readBootstrapState() !== undefined
@@ -222,7 +228,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       onError: (error) => {
         this.log.warn(
           ctx,
-          `RFC-64 public catalog bootstrap pass failed: ${errorMessageV1(error)}`,
+          `RFC-64 public catalog bootstrap pass failed: ${rfc64SupervisorErrorMessageV1(error)}`,
         );
       },
       closingMessage: 'RFC-64 public catalog bootstrap closing',
@@ -319,7 +325,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
               (_peerId, error) => {
                 this.log.warn(
                   state.ctx,
-                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${rfc64SupervisorErrorMessageV1(error)}`,
                 );
               },
               0,
@@ -327,7 +333,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           } catch (error) {
             this.log.warn(
               state.ctx,
-              `RFC-64 complete SWM provider ${providerPeerId.slice(-8)} is not dialable: ${errorMessageV1(error)}`,
+              `RFC-64 complete SWM provider ${providerPeerId.slice(-8)} is not dialable: ${rfc64SupervisorErrorMessageV1(error)}`,
             );
           }
         },
@@ -419,7 +425,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       // that work visible for both failed and known-incomplete outcomes.
       target.attempts = target.providers.length;
       terminalError = error;
-      lastError = boundedErrorV1(errorMessageV1(error));
+      lastError = boundedRfc64SupervisorErrorV1(error);
     }
     const classification = classifyRfc64CatalogBootstrapFailureV1(
       target.requiresPrivateVm,
@@ -436,23 +442,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target.updatedAtMs = Date.now();
   }
 
-  private resolveRuntimeRfc64CatalogBootstrapV1(
-    this: DKGAgent,
-  ): Readonly<{
-    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
-    readonly retryIntervalMs?: number;
-  }> | undefined {
-    const current = this.config.rfc64CatalogBootstrap;
-    if (current !== undefined) return current;
-    const legacy = this.config.rfc64PublicCatalogBootstrap;
-    if (legacy === undefined) return undefined;
-    return Object.freeze({
-      acceptedPolicies: legacy.acceptedPublicPolicies,
-      ...(legacy.retryIntervalMs === undefined
-        ? {}
-        : { retryIntervalMs: legacy.retryIntervalMs }),
-    });
-  }
 }
 
 /** Resolve each accepted policy exactly once into immutable lifecycle lanes. */
@@ -510,14 +499,6 @@ export function partitionRfc64CatalogBootstrapV1(
   });
 }
 
-function acceptedPoliciesV1(
-  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>,
-): readonly Rfc64CatalogBootstrapPolicyV1[] {
-  return 'acceptedPolicies' in config
-    ? config.acceptedPolicies
-    : config.acceptedPublicPolicies;
-}
-
 function snapshotTargetStatusV1(
   target: MutableTargetStatusV1,
 ): Readonly<Rfc64PublicCatalogBootstrapTargetStatusV1> {
@@ -542,18 +523,4 @@ function snapshotTargetStatusV1(
     lastError: target.lastError,
     updatedAtMs: target.updatedAtMs,
   });
-}
-
-function errorMessageV1(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function boundedErrorV1(input: string): string {
-  if (UTF8.encode(input).byteLength <= MAX_STATUS_ERROR_BYTES_V1) return input;
-  let output = '';
-  for (const character of input) {
-    if (UTF8.encode(`${output}${character}`).byteLength > MAX_STATUS_ERROR_BYTES_V1) break;
-    output += character;
-  }
-  return output;
 }

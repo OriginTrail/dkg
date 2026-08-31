@@ -204,6 +204,30 @@ export interface ResolvedRfc64PublicCatalogControlsV1 {
   readonly requiresDataDir: boolean;
 }
 
+export interface Rfc64RuntimeCatalogBootstrapConfigV1 {
+  readonly acceptedPolicies: Rfc64CatalogBootstrapConfigV1['acceptedPolicies'];
+  readonly retryIntervalMs?: number;
+}
+
+/**
+ * One compatibility boundary for the current additive manifest and the legacy
+ * public-only manifest. Runtime supervisors must observe the same effective
+ * policy set while the deprecated field remains accepted.
+ */
+export function resolveRfc64RuntimeCatalogBootstrapConfigV1(
+  current: Readonly<Rfc64CatalogBootstrapConfigV1> | undefined,
+  legacy: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+): Readonly<Rfc64RuntimeCatalogBootstrapConfigV1> | undefined {
+  if (current !== undefined) return current;
+  if (legacy === undefined) return undefined;
+  return Object.freeze({
+    acceptedPolicies: legacy.acceptedPublicPolicies,
+    ...(legacy.retryIntervalMs === undefined
+      ? {}
+      : { retryIntervalMs: legacy.retryIntervalMs }),
+  });
+}
+
 export interface Rfc64PublicCatalogActivationChainIdentityV1 {
   /** Effective RFC-64 network identifier, for example `base:84532`. */
   readonly networkId: NetworkIdV1 | undefined;

@@ -261,6 +261,7 @@ const blockedRfc64Modules = [
   'catalog-mutation-runtime-v1.js',
   'catalog-runtime-v1.js',
   'coalescing-supervisor-v1.js',
+  'supervisor-status-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;

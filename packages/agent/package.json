@@ -35,6 +35,7 @@
     "./dist/rfc64/catalog-mutation-runtime-v1.js": null,
     "./dist/rfc64/catalog-runtime-v1.js": null,
     "./dist/rfc64/coalescing-supervisor-v1.js": null,
+    "./dist/rfc64/supervisor-status-v1.js": null,
     "./dist/rfc64/serialized-scope-runtime-v1.js": null,
     "./dist/rfc64/control-envelope-signer-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,

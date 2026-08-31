@@ -17,18 +17,17 @@ import type { DKGAgent } from './dkg-agent.js';
 import {
   partitionRfc64CatalogBootstrapV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
-import type {
-  Rfc64CatalogBootstrapConfigV1,
-  Rfc64CatalogBootstrapPolicyV1,
-  Rfc64PublicCatalogBootstrapConfigV1,
-} from './dkg-agent-types.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { Rfc64CoalescingSupervisorV1 } from
   './rfc64/coalescing-supervisor-v1.js';
+import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
+  './rfc64/public-catalog-activation-config-v1.js';
+import {
+  boundedRfc64SupervisorErrorV1,
+  rfc64SupervisorErrorMessageV1,
+} from './rfc64/supervisor-status-v1.js';
 
 const MAX_CONCURRENT_REPAIRS_V1 = 4;
-const MAX_STATUS_ERROR_BYTES_V1 = 1024;
-const UTF8 = new TextEncoder();
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
   | 'pending'
@@ -88,7 +87,10 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   ): void {
     // Same-instance restart reopens live admission even when no bootstrap
     // manifest exists and the first scope will arrive through SHARE.
-    const config = this.resolveRuntimeRfc64ProjectionBootstrapConfigV1();
+    const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+      this.config.rfc64CatalogBootstrap,
+      this.config.rfc64PublicCatalogBootstrap,
+    );
     if (config === undefined) return;
     const partition = partitionRfc64CatalogBootstrapV1(
       config,
@@ -188,7 +190,10 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
 
     let state = this.rfc64CatalogRuntimeV1.readProjectionState();
     if (state === undefined) {
-      const config = this.resolveRuntimeRfc64ProjectionBootstrapConfigV1();
+      const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+        this.config.rfc64CatalogBootstrap,
+        this.config.rfc64PublicCatalogBootstrap,
+      );
       const retryIntervalMs = config === undefined
         ? undefined
         : partitionRfc64CatalogBootstrapV1(
@@ -283,7 +288,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       onError: (error) => {
         this.log.warn(
           ctx,
-          `RFC-64 SWM catalog projection pass failed: ${errorMessageV1(error)}`,
+          `RFC-64 SWM catalog projection pass failed: ${rfc64SupervisorErrorMessageV1(error)}`,
         );
       },
       beforePeriodicPass: () => {
@@ -363,46 +368,14 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
         inventoryHeadObjectDigest: null,
         catalogVersion: null,
         inventoryRowCount: null,
-        lastError: boundedErrorV1(errorMessageV1(error)),
+        lastError: boundedRfc64SupervisorErrorV1(error),
         updatedAtMs: Date.now(),
       });
       this.log.warn(
         createOperationContext('system'),
-        `RFC-64 local SWM catalog projection failed for ${repair.contextGraphId} / ${repair.authorAddress}: ${errorMessageV1(error)}`,
+        `RFC-64 local SWM catalog projection failed for ${repair.contextGraphId} / ${repair.authorAddress}: ${rfc64SupervisorErrorMessageV1(error)}`,
       );
     }
   }
 
-  private resolveRuntimeRfc64ProjectionBootstrapConfigV1(
-    this: DKGAgent,
-  ): Readonly<{
-    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
-    readonly retryIntervalMs?: number;
-  }> | undefined {
-    const current = this.config.rfc64CatalogBootstrap;
-    if (current !== undefined) return current;
-    const legacy: Rfc64PublicCatalogBootstrapConfigV1 | undefined =
-      this.config.rfc64PublicCatalogBootstrap;
-    if (legacy === undefined) return undefined;
-    return Object.freeze({
-      acceptedPolicies: legacy.acceptedPublicPolicies,
-      ...(legacy.retryIntervalMs === undefined
-        ? {}
-        : { retryIntervalMs: legacy.retryIntervalMs }),
-    }) as Rfc64CatalogBootstrapConfigV1;
-  }
-}
-
-function errorMessageV1(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function boundedErrorV1(input: string): string {
-  if (UTF8.encode(input).byteLength <= MAX_STATUS_ERROR_BYTES_V1) return input;
-  let output = '';
-  for (const character of input) {
-    if (UTF8.encode(`${output}${character}`).byteLength > MAX_STATUS_ERROR_BYTES_V1) break;
-    output += character;
-  }
-  return output;
 }

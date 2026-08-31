@@ -35,10 +35,6 @@ export class Rfc64CoalescingSupervisorV1 {
   request(): boolean {
     if (this.#closed) return false;
     this.#requested = true;
-    if (this.#timer !== null) {
-      clearTimeout(this.#timer);
-      this.#timer = null;
-    }
     this.#launch();
     return true;
   }
@@ -74,17 +70,25 @@ export class Rfc64CoalescingSupervisorV1 {
           this.#launch();
           return;
         }
-        const retryIntervalMs = this.#options.retryIntervalMs ?? 0;
-        if (retryIntervalMs > 0) {
-          this.#timer = setTimeout(() => {
-            this.#timer = null;
-            this.#options.beforePeriodicPass?.();
-            this.request();
-          }, retryIntervalMs);
-          this.#timer.unref?.();
-        }
+        this.#schedulePeriodicPass();
       });
     this.#run = run;
+  }
+
+  /**
+   * Arm the periodic deadline only when one is not already pending. Immediate
+   * live requests run alongside that deadline; they must never postpone the
+   * retry pass that re-dirties failed or otherwise inactive scopes.
+   */
+  #schedulePeriodicPass(): void {
+    const retryIntervalMs = this.#options.retryIntervalMs ?? 0;
+    if (retryIntervalMs <= 0 || this.#timer !== null || this.#closed) return;
+    this.#timer = setTimeout(() => {
+      this.#timer = null;
+      this.#options.beforePeriodicPass?.();
+      this.request();
+    }, retryIntervalMs);
+    this.#timer.unref?.();
   }
 
   async #drainRequestedPasses(): Promise<void> {
