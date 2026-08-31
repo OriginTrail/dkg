@@ -959,6 +959,12 @@ export class DKGAgent extends DKGAgentBase {
     }, chainIdentity);
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
+      standaloneTrack2ContextGraphs:
+        normalizedConfig.rfc64PublicCatalogActivation === undefined
+          ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
+            ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+          ) ?? [])
+          : [],
       activation: catalogActivation,
     });
     const config: StorageAckNormalizedDKGAgentConfig = {

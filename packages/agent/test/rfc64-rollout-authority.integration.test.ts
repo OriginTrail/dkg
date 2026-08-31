@@ -284,6 +284,55 @@ describe('RFC-64 rollout authority integration', () => {
     30_000,
   );
 
+  it('preserves locally authored shadow discovery state and legacy material on restart', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-shadow-author-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const author = await startAgent(
+      'shadow-author-restart',
+      {
+        ...activation('shadow'),
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+      dataDir,
+      persistentStorePath,
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    const seal = await authorSeal(810n);
+    const applied = await author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'shadow-author-restart-guard' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealFromCanonical(seal),
+    });
+    expect(applied).not.toBeNull();
+    // Shadow catalog publication accompanies existing legacy material; it does
+    // not grant catalog semantic authority over that material.
+    await seedCatalogSemanticClosure(author, seal, 'shadow-author-restart-guard');
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+
+    const restarted = await startAgent(
+      'shadow-author-restarted',
+      activation('shadow'),
+      dataDir,
+      persistentStorePath,
+    );
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ currentCatalogHeadDigest: applied?.currentCatalogHeadDigest });
+    await expectCatalogSemanticClosure(
+      restarted,
+      seal,
+      'shadow-author-restart-guard',
+      true,
+    );
+  }, 30_000);
+
   it('preserves later legacy semantic content while relinquishing stale catalog authority', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-divergent-'));
     tempDirs.push(dataDir);
