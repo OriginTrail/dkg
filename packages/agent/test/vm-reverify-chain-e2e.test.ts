@@ -197,6 +197,21 @@ async function buildUpdateSeal(opts: {
   };
 }
 
+/**
+ * Lexical form of an RDF literal term.
+ *
+ * The store returns the full term (`"Widget v1"`, with the quotes, plus any
+ * `^^datatype` or `@lang` tail). Comparing against that raw string would make
+ * every assertion below depend on the term serialization rather than on what
+ * the node actually serves.
+ */
+function literalText(raw: string): string {
+  if (!raw.startsWith('"')) return raw;
+  const closing = raw.lastIndexOf('"');
+  if (closing <= 0) return raw;
+  return raw.slice(1, closing).replace(/\\(.)/g, '$1');
+}
+
 /** Every value this node can serve for `<SUBJECT> schema:name ?o`, any graph. */
 async function heldNames(agent: DKGAgent): Promise<string[]> {
   const result: any = await (agent as any).store.query(
@@ -204,7 +219,9 @@ async function heldNames(agent: DKGAgent): Promise<string[]> {
     { source: 'test.w2r.heldNames' },
   );
   const bindings: any[] = result?.bindings ?? [];
-  return [...new Set(bindings.map((b) => String(b.o?.value ?? b.o)))].sort();
+  return [...new Set(
+    bindings.map((b) => literalText(String(b.o?.value ?? b.o))),
+  )].sort();
 }
 
 /** Quads this node holds in the VERIFIABLE-memory graph of one exact version. */
@@ -352,7 +369,15 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
     onChainCgId = registration.onChainId;
     expect(onChainCgId, 'the CG must be registered on chain').toBeTruthy();
 
-    await host.createContextGraph({ id: CG, name: 'W2R Reverify Public' });
+    // The host may ALREADY know this Context Graph: registering it on chain
+    // emits `ContextGraphCreated`, and the host's own chain poller binds and
+    // bootstraps it locally without being asked. That is production behaviour —
+    // a receiver learns a public CG from chain — so create it only if the node
+    // has not already discovered it, rather than assuming this test is the
+    // first writer.
+    if (!(await (host as any).contextGraphExists(CG))) {
+      await host.createContextGraph({ id: CG, name: 'W2R Reverify Public' });
+    }
     publisher.subscribeToContextGraph(CG);
     host.subscribeToContextGraph(CG);
     for (const agent of [publisher, host]) {
