@@ -1,8 +1,6 @@
-import { performance } from 'node:perf_hooks';
 import {
   asGraphWriteRevisionSource,
   isSparqlHttpResponseError,
-  type GraphWriteRevisionSource,
 } from '@origintrail-official/dkg-storage';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 
@@ -45,7 +43,6 @@ import {
   knowledgeAssetLayerGraphUri,
   buildLegacyKnowledgeAssetMetadataQuery,
   type ParsedGraphKnowledgeAssetMetadata,
-  BoundedLruCache,
 } from '@origintrail-official/dkg-core';
 import {
   validateReadOnlySparql,
@@ -70,6 +67,7 @@ import {
   resolveSparqlPrefixedName,
   type SparqlPrefixName,
 } from './sparql-graph-scope.js';
+import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -92,11 +90,8 @@ export class ScopedQueryViolationError extends Error {
   }
 }
 
-const SCOPED_CONTENT_GRAPH_CACHE_MAX_ENTRIES = 256;
-const DEFAULT_SCOPED_CONTENT_GRAPH_CACHE_TTL_MS = 10_000;
-
 export interface DKGQueryEngineOptions {
-  /** External writers are not covered by local write generations, so reuse is bounded. */
+  /** Defense-in-depth expiry for stores whose revisions cover every writer. */
   scopedContentGraphCacheTtlMs?: number;
   now?: () => number;
 }
@@ -386,32 +381,15 @@ export function resolveViewGraphs(
 export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
-  private readonly graphWriteRevisionSource: GraphWriteRevisionSource | null;
-  // Partition discovery is expensive (three SPARQL classifications plus a
-  // graph-family scan). Retain completed values only while the adapter proves
-  // no local write touched the context-graph prefix, with a monotonic TTL
-  // backstop for writers the adapter generation cannot observe.
-  private readonly scopedContentGraphAllowListCache = new BoundedLruCache<
-    string,
-    { generation: number; validatedAt: number; value: readonly string[] }
-  >(SCOPED_CONTENT_GRAPH_CACHE_MAX_ENTRIES);
-  private readonly scopedContentGraphAllowListInFlight = new Map<
-    string,
-    { generation: number | null; promise: Promise<readonly string[]> }
-  >();
-  private readonly scopedContentGraphCacheTtlMs: number;
-  private readonly now: () => number;
+  private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
 
   constructor(store: TripleStore, options: DKGQueryEngineOptions = {}) {
     this.store = store;
     this.graphManager = new GraphManager(store);
-    this.graphWriteRevisionSource = asGraphWriteRevisionSource(store);
-    const configuredTtl = options.scopedContentGraphCacheTtlMs
-      ?? DEFAULT_SCOPED_CONTENT_GRAPH_CACHE_TTL_MS;
-    this.scopedContentGraphCacheTtlMs = Number.isFinite(configuredTtl)
-      ? Math.max(0, configuredTtl)
-      : DEFAULT_SCOPED_CONTENT_GRAPH_CACHE_TTL_MS;
-    this.now = options.now ?? (() => performance.now());
+    this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
+      asGraphWriteRevisionSource(store),
+      { ttlMs: options.scopedContentGraphCacheTtlMs, now: options.now },
+    );
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -1100,59 +1078,18 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     subGraphName?: string,
   ): Promise<readonly string[]> {
     const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
-    // Admission lanes remain isolated while work is in flight, but completed
-    // graph classification is semantic data independent of priority/source.
-    const flightKey = JSON.stringify([contentKey, reads.shared.cacheKey]);
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
-    const revision = this.graphWriteRevisionSource?.getWriteRevision(graphPrefix);
-    const completed = this.scopedContentGraphAllowListCache.get(contentKey);
-    if (
-      completed
-      && revision?.stable
-      && completed.generation === revision.generation
-      && this.now() - completed.validatedAt < this.scopedContentGraphCacheTtlMs
-    ) {
-      return completed.value;
-    }
-    if (completed) this.scopedContentGraphAllowListCache.delete(contentKey);
-
-    const pending = this.scopedContentGraphAllowListInFlight.get(flightKey);
-    const generation = revision?.generation ?? null;
-    if (pending && (
-      this.graphWriteRevisionSource === null || pending.generation === generation
-    )) {
-      return raceAgainstCallerAbort(pending.promise, reads.signal);
-    }
-
-    const promise = this.discoverScopedContentGraphAllowList(
-      contextGraphId,
-      reads.shared,
-      subGraphName,
-    ).then((value) => {
-      const after = this.graphWriteRevisionSource?.getWriteRevision(graphPrefix);
-      if (
-        revision?.stable
-        && after?.stable
-        && after.generation === revision.generation
-      ) {
-        const immutable: readonly string[] = Object.freeze([...value]);
-        this.scopedContentGraphAllowListCache.set(contentKey, {
-          generation: after.generation,
-          validatedAt: this.now(),
-          value: immutable,
-        });
-        return immutable;
-      }
-      return value;
+    return this.scopedContentGraphDiscoveryMemo.get({
+      contentKey,
+      laneKey: reads.shared.cacheKey,
+      graphPrefix,
+      signal: reads.signal,
+      load: () => this.discoverScopedContentGraphAllowList(
+        contextGraphId,
+        reads.shared,
+        subGraphName,
+      ),
     });
-    const flight = { generation, promise };
-    this.scopedContentGraphAllowListInFlight.set(flightKey, flight);
-    void promise.finally(() => {
-      if (this.scopedContentGraphAllowListInFlight.get(flightKey) === flight) {
-        this.scopedContentGraphAllowListInFlight.delete(flightKey);
-      }
-    }).catch(() => undefined);
-    return raceAgainstCallerAbort(promise, reads.signal);
   }
 
   private async discoverScopedContentGraphAllowList(

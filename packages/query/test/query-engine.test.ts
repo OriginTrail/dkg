@@ -2099,7 +2099,7 @@ describe('DKGQueryEngine', () => {
     expect(second.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
   });
 
-  it('revalidates completed partition discovery after the external-writer TTL', async () => {
+  it('revalidates every authorization discovery under a process-local revision', async () => {
     let now = 0;
     const backend = new OxigraphStore();
     const codeSubGraph = `${GRAPH}/code`;
@@ -2113,6 +2113,7 @@ describe('DKGQueryEngine', () => {
     // Model an adapter-local generation that cannot observe another writer.
     const maskedRevisionStore = new Proxy(backend, {
       get(target, property) {
+        if (property === 'writeRevisionCoverage') return 'process-local';
         if (property === 'getWriteRevision') {
           return () => ({ generation: 0, stable: true });
         }
@@ -2144,15 +2145,48 @@ describe('DKGQueryEngine', () => {
       q('urn:docs:data', SCHEMA_NAME, '"DocsData"', docsSubGraph),
     ]);
 
-    const boundedStale = await ttlEngine.query(sparql, options);
-    expect(boundedStale.bindings.some((row) => row['g'] === docsSubGraph)).toBe(false);
-    expect(discoverySpy.calls).toHaveLength(1);
-
-    now = 11;
     const revalidated = await ttlEngine.query(sparql, options);
     expect(discoverySpy.calls).toHaveLength(2);
     expect(revalidated.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
     expect(revalidated.bindings.some((row) => row['g'] === codeSubGraph)).toBe(false);
+  });
+
+  it('immediately excludes a parent partition reclassified by an external writer', async () => {
+    const backend = new OxigraphStore();
+    const collidingSubGraph = `${GRAPH}/code`;
+    await backend.insert([
+      ...subGraphRegistration('code'),
+      q('urn:code:data', SCHEMA_NAME, '"ParentData"', collidingSubGraph),
+    ]);
+    const maskedRevisionStore = new Proxy(backend, {
+      get(target, property) {
+        if (property === 'writeRevisionCoverage') return 'process-local';
+        if (property === 'getWriteRevision') {
+          return () => ({ generation: 0, stable: true });
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as OxigraphStore;
+    const externalWriterEngine = new DKGQueryEngine(maskedRevisionStore);
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } }`;
+    const options = { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true };
+
+    const parentView = await externalWriterEngine.query(sparql, options);
+    expect(parentView.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(true);
+
+    await backend.insert([
+      q(
+        collidingSubGraph,
+        RDF_TYPE,
+        DKG_CONTEXT_GRAPH,
+        `${collidingSubGraph}/_meta`,
+      ),
+    ]);
+    const afterReclassification = await externalWriterEngine.query(sparql, options);
+    expect(afterReclassification.bindings.some((row) => row['g'] === collidingSubGraph))
+      .toBe(false);
+    await backend.close();
   });
 
   it('does not retain a discovery crossed by a local generation change', async () => {

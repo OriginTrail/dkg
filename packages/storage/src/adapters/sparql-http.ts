@@ -239,6 +239,7 @@ export interface SparqlHttpStoreOptions {
 }
 
 export class SparqlHttpStore implements TripleStore {
+  readonly writeRevisionCoverage = 'process-local' as const;
   readonly queryCancellation = 'interruptible' as const;
 
   private readonly queryEndpoint: string;

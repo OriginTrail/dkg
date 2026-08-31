@@ -36,9 +36,13 @@ export interface GraphWriteGenSource {
 
 /** Revision-aware successor capability used by cache and negative-memo consumers. */
 export interface GraphWriteRevisionSource {
+  /** Whether this source observes every writer that can mutate the live store. */
+  readonly writeRevisionCoverage?: GraphWriteRevisionCoverage;
   /** The same observational generation plus whether it is safe to memoize. */
   getWriteRevision(graphPrefix: string): GraphWriteRevision;
 }
+
+export type GraphWriteRevisionCoverage = 'process-local' | 'all-writers';
 
 export interface GraphWriteRevision {
   generation: number;
@@ -256,6 +260,9 @@ export function asGraphWriteRevisionSource(store: unknown): GraphWriteRevisionSo
     ),
   );
   return source
-    ? { getWriteRevision: (graphPrefix) => source.getWriteRevision(graphPrefix) }
+    ? {
+      writeRevisionCoverage: source.writeRevisionCoverage ?? 'process-local',
+      getWriteRevision: (graphPrefix) => source.getWriteRevision(graphPrefix),
+    }
     : null;
 }
