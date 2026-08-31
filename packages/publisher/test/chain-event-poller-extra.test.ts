@@ -28,16 +28,16 @@
  *   - stop() is idempotent and clears the interval
  *
  * ======================================================================
- * SPEC-GAP SG-6 (carried forward from the original V9 migration):
- *   The real `EVMChainAdapter.listenForEvents()` yields only the event
- *   types the deployed contracts emit (`KCCreated`,
- *   `ContextGraphExpanded`, `ContextGraphCreated`, ...). It does NOT
- *   yield `KnowledgeAssetUpdated`, `AllowListUpdated`,
- *   `ProfileCreated`, or `ProfileUpdated` even though
- *   `ChainEventPoller.poll()` declares callback slots for all four.
- *   Those four callback paths are dead code in production. A dedicated
- *   regression test below pins this gap so the fix (extending
- *   `listenForEvents` with the missing branches) cannot silently slip.
+ * SPEC-GAP SG-6 (carried forward from the original V9 migration, now
+ * PARTLY CLOSED — see the last describe in this file):
+ *   The real `EVMChainAdapter.listenForEvents()` used to yield none of
+ *   `KnowledgeAssetUpdated`, `AllowListUpdated`, `ProfileCreated`,
+ *   `ProfileUpdated`, though `ChainEventPoller` declared a callback slot
+ *   for each — four dead code paths in production.
+ *   #2435 closed the first one: the adapter now yields all four KA
+ *   root-mutation events and the `kaRootMutations` lane dispatches them,
+ *   so that row is a POSITIVE end-to-end test. The remaining three are
+ *   still unserved and still pinned.
  * ======================================================================
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
@@ -472,16 +472,87 @@ describe('ChainEventPoller — fault isolation & lifecycle', () => {
   }, 30_000);
 });
 
-describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 extended event types', () => {
-  it('EVMChainAdapter.listenForEvents does NOT yield KnowledgeAssetUpdated / AllowListUpdated / ProfileCreated / ProfileUpdated', async () => {
-    // Spec §5.1 names extended event types the poller declares callback
-    // slots for. Four are never produced by the real adapter (the V9
-    // KnowledgeAssetsStorage branches were archived together with the
-    // contract — see `packages/chain/src/archive/`). This test proves
-    // the gap end-to-end against the V10 channels the adapter does
-    // support today: we scan a broad block range asking for every
-    // currently-supported type plus the four missing ones, and assert
-    // the four missing ones are never yielded.
+/**
+ * SG-6, flipped (#2435).
+ *
+ * The original SG-6 row PINNED the absence of `KnowledgeAssetUpdated` on the
+ * real adapter, and instructed its own successor: "if a future PR extends the
+ * adapter correctly, rewrite this into a positive coverage test." That PR is
+ * this one. What follows is the positive half — the whole path from a real
+ * contract emit through the real adapter and the real lane to the callback —
+ * plus the residual half of the gap, which is still real.
+ */
+describe('ChainEventPoller — SG-6 flipped: KA root mutations dispatch end to end', () => {
+  it('dispatches all four root-mutation kinds from real contract emits', async () => {
+    // Hub owner: `HubDependent._checkHubContract` grants the `onlyContracts`
+    // emitters to the Hub owner as well as to registered contracts.
+    const chain = createEVMAdapter(HARDHAT_KEYS.DEPLOYER);
+    const provider = createProvider();
+    await (chain as any).init();
+
+    const hub = (chain as any).contracts.hub;
+    const ka = (chain as any).contracts.knowledgeAssetStorage;
+    const deployer = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER).address;
+    expect(String(await hub.owner()).toLowerCase()).toBe(deployer.toLowerCase());
+
+    // OT-RFC-43: the KA id's high 160 bits must equal the attested author.
+    const author = ethers.getAddress('0x6666666666666666666666666666666666666666');
+    const kaId = (BigInt(author) << 96n) | 7_777n;
+    const updateRoot = ethers.keccak256(ethers.toUtf8Bytes('sg6-update'));
+    const pushedRoot = ethers.keccak256(ethers.toUtf8Bytes('sg6-pushed'));
+    const replacedRoot = ethers.keccak256(ethers.toUtf8Bytes('sg6-replaced'));
+
+    const startBlock = await provider.getBlockNumber();
+    await (await ka.createKnowledgeAsset(
+      deployer, author, kaId, 'sg6-create',
+      ethers.keccak256(ethers.toUtf8Bytes('sg6-create-root')),
+      1, 1000, 1, 2, 0, false, 1,
+    )).wait();
+    await (await ka.updateKnowledgeAsset(
+      deployer, author, kaId, 'sg6-update', updateRoot, 0, [], 2000, 0, 2,
+    )).wait();
+    await (await ka.pushMerkleRoot(deployer, kaId, pushedRoot)).wait();
+    await (await ka.setMerkleRoots(kaId, [[deployer, replacedRoot, 1_700_000_000n]])).wait();
+    await (await ka.popMerkleRoot(kaId)).wait();
+
+    const seen: Array<{ kind: string; kaId: string; merkleRoot?: string; author?: string | null }> = [];
+    const poller = new ChainEventPoller({
+      chain,
+      publishHandler: new PublishHandler(new OxigraphStore(), new TypedEventBus()),
+      intervalMs: 60_000,
+      // Seed the lane just before the first emit so the scan covers them all
+      // without depending on where the shared node's head happens to be.
+      cursorPersistence: {
+        async loadLane() { return startBlock; },
+        async saveLane() { /* not under test here */ },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => {
+        if (e.kaId !== kaId.toString()) return;
+        seen.push({ kind: e.kind, kaId: e.kaId, merkleRoot: e.merkleRoot, author: e.author });
+      },
+    });
+
+    await poller.pollNow();
+    await poller.stop();
+
+    expect(seen.map((e) => e.kind)).toEqual([
+      'lifecycle-update',
+      'root-added',
+      'roots-replaced',
+      'root-removed',
+    ]);
+    expect(seen[0].merkleRoot).toBe(updateRoot);
+    expect(seen[0].author).toBe(author.toLowerCase());
+    expect(seen[1].merkleRoot).toBe(pushedRoot);
+    // The dynamic root array is deliberately never decoded.
+    expect(seen[2].merkleRoot).toBeUndefined();
+    expect(seen[3].merkleRoot).toBe(replacedRoot);
+  }, 120_000);
+
+  it('still does NOT yield AllowListUpdated / ProfileCreated / ProfileUpdated', async () => {
+    // The residual half of SG-6. `KnowledgeAssetUpdated` has left this list;
+    // these three callback slots remain dead code in production, and this row
+    // keeps saying so until someone wires them.
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const provider = createProvider();
 
@@ -492,7 +563,6 @@ describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 extended event t
       eventTypes: [
         'KCCreated',
         'ContextGraphCreated',
-        'KnowledgeAssetUpdated',
         'AllowListUpdated',
         'ProfileCreated',
         'ProfileUpdated',
@@ -503,13 +573,11 @@ describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 extended event t
       yielded.push(ev.type);
     }
 
-    const missing = ['KnowledgeAssetUpdated', 'AllowListUpdated', 'ProfileCreated', 'ProfileUpdated'];
-    for (const type of missing) {
-      // This assertion is expected to PASS today (adapter never yields
-      // these types). If a future PR extends the adapter correctly, the
-      // assertion flips to fail loudly — at which point this test should
-      // be rewritten into a positive coverage test for that event type.
-      expect(yielded.includes(type), `adapter now yields "${type}" — great, but this SG-6 regression test must be updated to exercise the positive dispatch path`).toBe(false);
+    // Positive control: without it these three could pass vacuously against a
+    // scan that yielded nothing at all.
+    expect(yielded.length).toBeGreaterThan(0);
+    for (const type of ['AllowListUpdated', 'ProfileCreated', 'ProfileUpdated']) {
+      expect(yielded.includes(type), `adapter now yields "${type}" — rewrite this row into a positive dispatch test for it`).toBe(false);
     }
   }, 30_000);
 });

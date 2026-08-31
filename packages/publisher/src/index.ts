@@ -425,12 +425,25 @@ export {
 export { UpdateHandler } from './update-handler.js';
 export {
   ChainEventPoller,
+  type ChainEventLaneHealth,
+  type ChainEventLaneMetrics,
+  type ChainEventLanePollResult,
   type ChainEventPollerConfig,
   type CursorPersistence,
+  type KnowledgeAssetLifecycleUpdateEventV1,
+  type KnowledgeAssetRootAddedEventV1,
   type KnowledgeAssetRootMutationEventV1,
+  type KnowledgeAssetRootRemovedEventV1,
+  type KnowledgeAssetRootsReplacedEventV1,
   type OnContextGraphCreated,
   type OnKnowledgeAssetRootMutated,
 } from './chain-event-poller.js';
+export {
+  decodeKnowledgeAssetRootMutationEvent,
+  KA_ROOT_MUTATION_KIND_BY_EVENT,
+  type KnowledgeAssetRootMutationDecodeFailure,
+  type KnowledgeAssetRootMutationDecodeResult,
+} from './ka-root-mutation-decode.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';

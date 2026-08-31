@@ -153,6 +153,7 @@ export {
 // branches that produce them without any test noticing.
 export {
   KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
+  SERVED_EVENT_TYPES,
   type KnowledgeAssetRootMutationEventType,
 } from './evm-adapter-events.js';
 export { NoChainAdapter } from './no-chain-adapter.js';

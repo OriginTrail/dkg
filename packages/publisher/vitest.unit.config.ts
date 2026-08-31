@@ -3,6 +3,13 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      // Chain-event poller lanes. Pure logic against a fake `ChainAdapter` —
+      // no Hardhat, unlike the rest of `test/chain-event-poller-*`. Neither
+      // file was listed here, so the unit command answered "No test files
+      // found" for them and they only ever ran behind the default config's
+      // Hardhat boot.
+      'test/chain-event-lane-runner.unit.test.ts',
+      'test/chain-event-poller-ka-root-mutations.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',

@@ -44,8 +44,21 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { SERVED_EVENT_TYPES } from './evm-adapter-events.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
+
+/**
+ * Event names the mock's simulated V10 contract surface DECLARES, for
+ * `supportsEventTypes` parity with the EVM adapter's ABI probe.
+ *
+ * ONE source (review r6): the EVM adapter's `SERVED_EVENT_TYPES` — the keys
+ * of its event-ownership registry — so the mock cannot drift into a third
+ * representation of the served vocabulary. "Declared" for the mock means the
+ * public name is served by `listenForEvents`, exactly the parity the CH-8
+ * probe contract wants.
+ */
+const MOCK_DECLARED_EVENT_TYPES: ReadonlySet<string> = new Set(SERVED_EVENT_TYPES);
 
 export interface MockChainAdapterOptions {
   /** Seed the first CG allocation for fixtures that model an existing registry. */
@@ -756,6 +769,27 @@ export class MockChainAdapter implements ChainAdapter {
         yield evt;
       }
     }
+  }
+
+  /**
+   * Which of `names` this simulated chain does NOT declare (parity with
+   * `EVMChainAdapter.supportsEventTypes`, which asks the bound ABI).
+   *
+   * The mock's equivalent of "the ABI declares it" is membership in
+   * {@link MOCK_DECLARED_EVENT_TYPES}: the V10 contract surface this adapter
+   * simulates declares all four KA root-mutation events, whether or not any
+   * mock operation happens to emit one — exactly as a real chain declares
+   * `popMerkleRoot`'s event even when nobody ever calls it. A user who
+   * develops offline against the mock and gates a feature on this probe must
+   * see the same answer they will get after flipping `chain.type` to `evm`
+   * (CH-8).
+   *
+   * NOTE: `listenForEvents` above replays whatever a scenario `pushEvent`ed
+   * and is deliberately name-agnostic; this probe is about the DECLARED
+   * vocabulary, not about which events a given scenario recorded.
+   */
+  async supportsEventTypes(names: readonly string[]): Promise<string[]> {
+    return names.filter((name) => !MOCK_DECLARED_EVENT_TYPES.has(name));
   }
 
   // --- Context Graphs (name-hash commitment via ContextGraphNameRegistry) ---

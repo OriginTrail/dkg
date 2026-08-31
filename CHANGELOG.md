@@ -4,6 +4,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Added
+
+- **The four Knowledge-Asset root-mutation chain events are pollable** (#2436, enables the fix for #2435): `listenForEvents` serves `KnowledgeAssetUpdated`, `KnowledgeAssetMerkleRootAdded`, `KnowledgeAssetMerkleRootsUpdated` and `KnowledgeAssetMerkleRootRemoved` through one topic-OR finalizable scan, and the poller's `kaRootMutations` lane delivers them as a typed per-kind payload with full chain position. Inert in this release: no node code passes the lane's callback yet.
+
+### Removed
+
+- **BREAKING for package embedders only — `ChainEventPollerConfig.onCollectionUpdated`** (#2436): the callback and its `collectionUpdates` lane are replaced by `onKnowledgeAssetRootMutated` / `kaRootMutations`. Against the in-repo EVM adapter the old callback never fired (no adapter branch served its event), so **node operators are not affected**. Code embedding `@origintrail-official/dkg-publisher` with a CUSTOM `ChainAdapter` that emitted `KnowledgeAssetUpdated` must move to the new callback: the payload is a per-kind discriminated union (canonical strings + full `FinalizedEventPositionV1` instead of `batchId`/`Uint8Array`/bare block number), and its rejection contract differs deliberately — a rejecting handler HOLDS the lane cursor for a re-scan instead of being swallowed. Constructing the poller with the removed key logs a loud warning naming the replacement; an orphaned `collectionUpdates` cursor row is inert.
+
 ## [10.0.14] - 2026-08-25
 
 A selected-public convergence and publisher-recovery release. An Edge node can opt a bounded set of publicly readable Context Graphs into RFC-64: an operator-approved graph-complete provider drives bounded native Shared Memory recovery, while Verifiable Memory remains independently derived from finalized blockchain inventory. Both lanes continue across partial progress and provider gaps, and VM recovery batches assets by bounded byte/quad footprint instead of treating an arbitrarily large graph as one transfer. The async publisher now resolves transaction-bearing failures from chain evidence and never re-sends a job on a guess. Operators can select the mined-receipt confirmation depth; the default is one confirmation. Signed SWM inventory remains shadow evidence in this release and does not drive receiver synchronization. RFC-64 remains operator-selected and public-only: a valid non-empty bootstrap manifest activates its selected scope when `enabled` is omitted, while an absent block or explicit `enabled: false` remains dormant. Private encrypted live sharing is unchanged, and private catalog-based cold join is not part of this release. **No smart-contract changes or deployments are required.**

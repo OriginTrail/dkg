@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ethers, Wallet } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES } from '../src/evm-adapter-events.js';
 import {
   spawnHardhatEnv,
   killHardhat,
@@ -105,6 +106,108 @@ describe('EVMChainAdapter integration', () => {
       // Confirm the on-chain ST gate is in the same state.
       const inST = await adapter.isShardingTableMember!(BigInt(newId));
       expect(inST).toBe(false);
+    }, 60_000);
+  });
+
+  /**
+   * #2435 — the four root-mutation events, driven by the REAL emitters.
+   *
+   * The unit suite proves the decode against encoded logs; it cannot prove that
+   * `DKGKnowledgeAssets` still emits what that encoding assumes. A contract
+   * change that renamed a field or moved it in or out of the indexed set would
+   * leave every unit row green while production yielded nothing — which reads,
+   * downstream, exactly like "this asset's root never changed".
+   *
+   * All four emitters are `onlyContracts`, which `HubDependent._checkHubContract`
+   * also grants to the Hub OWNER — the deployer here. That is asserted rather
+   * than assumed, so a harness change surfaces as "the deployer is no longer the
+   * hub owner" instead of an opaque revert.
+   */
+  describe('listenForEvents — Knowledge Asset root mutations (#2435)', () => {
+    it('yields all four root-mutation events emitted by the real contract', async () => {
+      const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+      await (adapter as any).init();
+
+      const deployer = new Wallet(HARDHAT_KEYS.DEPLOYER).address;
+      const hub = (adapter as any).contracts.hub;
+      const ka = (adapter as any).contracts.knowledgeAssetStorage;
+      expect(String(await hub.owner()).toLowerCase()).toBe(deployer.toLowerCase());
+
+      // OT-RFC-43: the KA id's high 160 bits MUST equal the attested author.
+      const author = ethers.getAddress('0x5555555555555555555555555555555555555555');
+      const kaId = (BigInt(author) << 96n) | 4_242n;
+      const createRoot = ethers.keccak256(ethers.toUtf8Bytes('root-mutations-create'));
+      const updateRoot = ethers.keccak256(ethers.toUtf8Bytes('root-mutations-update'));
+      const pushedRoot = ethers.keccak256(ethers.toUtf8Bytes('root-mutations-pushed'));
+      const replacedRoot = ethers.keccak256(ethers.toUtf8Bytes('root-mutations-replaced'));
+
+      const created = await (await ka.createKnowledgeAsset(
+        deployer, author, kaId, 'rm-create', createRoot,
+        1, 1000, 1, 2, 0, false, 1,
+      )).wait();
+      const fromBlock = Number(created.blockNumber);
+
+      // One transaction per emitter, in the order a real asset would see them.
+      await (await ka.updateKnowledgeAsset(
+        deployer, author, kaId, 'rm-update', updateRoot,
+        0, [], 2000, 0, 2,
+      )).wait();                                                  // KnowledgeAssetUpdated
+      await (await ka.pushMerkleRoot(deployer, kaId, pushedRoot)).wait();  // ...MerkleRootAdded
+      await (await ka.setMerkleRoots(kaId, [
+        [deployer, replacedRoot, 1_700_000_000n],
+      ])).wait();                                                 // ...MerkleRootsUpdated
+      const popped = await (await ka.popMerkleRoot(kaId)).wait();  // ...MerkleRootRemoved
+      const toBlock = Number(popped.blockNumber);
+
+      // Scan with EXACTLY the exported constant — the same list the poller
+      // lane subscribes with, so a name dropped from it fails here too.
+      const seen: Array<{ type: string; data: Record<string, unknown> }> = [];
+      for await (const ev of adapter.listenForEvents({
+        eventTypes: [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES],
+        fromBlock,
+        toBlock,
+      })) {
+        if (ev.data['kaId'] === kaId.toString()) seen.push({ type: ev.type, data: ev.data });
+      }
+
+      expect(new Set(seen.map((e) => e.type))).toEqual(
+        new Set(KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES),
+      );
+
+      const byType = new Map(seen.map((e) => [e.type, e.data]));
+      for (const [type, data] of byType) {
+        expect(data['kaId'], type).toBe(kaId.toString());
+        expect(String(data['txHash']), type).toMatch(/^0x[0-9a-f]{64}$/i);
+        expect(String(data['blockHash']), type).toMatch(/^0x[0-9a-f]{64}$/i);
+        expect(typeof data['txIndex'], type).toBe('number');
+        expect(typeof data['logIndex'], type).toBe('number');
+      }
+
+      // The root each emitter actually committed, straight off the wire.
+      expect(byType.get('KnowledgeAssetUpdated')!['merkleRoot']).toBe(updateRoot);
+      expect(byType.get('KnowledgeAssetMerkleRootAdded')!['merkleRoot']).toBe(pushedRoot);
+      expect(byType.get('KnowledgeAssetMerkleRootRemoved')!['merkleRoot']).toBe(replacedRoot);
+      // `setMerkleRoots` carries a dynamic array we deliberately never decode.
+      expect('merkleRoot' in byType.get('KnowledgeAssetMerkleRootsUpdated')!).toBe(false);
+
+      // `author` is indexed on the lifecycle update only.
+      expect(String(byType.get('KnowledgeAssetUpdated')!['author']).toLowerCase())
+        .toBe(author.toLowerCase());
+      expect('author' in byType.get('KnowledgeAssetMerkleRootAdded')!).toBe(false);
+      expect('author' in byType.get('KnowledgeAssetMerkleRootsUpdated')!).toBe(false);
+      expect('author' in byType.get('KnowledgeAssetMerkleRootRemoved')!).toBe(false);
+    }, 120_000);
+
+    it('reports the deployed ABI as supporting every root-mutation event', async () => {
+      const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+      await expect(
+        adapter.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]),
+      ).resolves.toEqual([]);
+      // Negative control — otherwise an implementation that always answered
+      // "nothing missing" would pass the row above.
+      await expect(
+        adapter.supportsEventTypes(['KnowledgeAssetUpdated', 'NoSuchEventEverEmitted']),
+      ).resolves.toEqual(['NoSuchEventEverEmitted']);
     }, 60_000);
   });
 });
