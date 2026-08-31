@@ -1,6 +1,6 @@
-import React, { useMemo, useState, Suspense } from 'react';
+import React, { useEffect, useMemo, useState, Suspense } from 'react';
 import { api } from '../../../api-wrapper.js';
-import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
+import { invokeSemanticProgram, resolveSemanticProgram, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type SemanticProgramResolution, type PromoteOutcome, type PublishResult } from '../../../api.js';
 import { useMemoryEntities, canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
@@ -14,6 +14,106 @@ import { TRUST_COLORS, entityAuthorUri, transitionAgentUri, transitionAtISO, sho
 import { GraphSurface, RdfGraph } from './graph.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
+
+const SR_PROGRAM = 'https://origintrail.io/semantic-runtime/v1#Program';
+
+function SemanticProgramPanel({
+  contextGraphId,
+  programIri,
+  onRefresh,
+  onNavigate,
+}: {
+  contextGraphId: string;
+  programIri: string;
+  onRefresh: () => void;
+  onNavigate: (uri: string) => void;
+}) {
+  const [resolution, setResolution] = useState<SemanticProgramResolution | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [invocationId, setInvocationId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    resolveSemanticProgram(contextGraphId, programIri)
+      .then((value) => { if (!cancelled) setResolution(value); })
+      .catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [contextGraphId, programIri]);
+
+  const run = async () => {
+    const id = invocationId ?? crypto.randomUUID();
+    setInvocationId(id); // Retain on failure: retrying must use the same idempotency key.
+    setRunning(true);
+    setError(null);
+    try {
+      const result = await invokeSemanticProgram(contextGraphId, programIri, id);
+      if (!result.persisted || !result.executionIri || !result.executionUal) {
+        throw new Error('The daemon did not confirm Execution persistence');
+      }
+      await Promise.resolve(onRefresh());
+      onNavigate(result.executionIri);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="v10-ka-section" data-testid="semantic-program-panel">
+      <div className="v10-ka-section-title">Semantic Program</div>
+      {loading && <div className="v10-ka-desc">Resolving operator tools and policy…</div>}
+      {resolution && (
+        <>
+          <div className="v10-ka-prop">
+            <span className="v10-ka-prop-key">Executing Node</span>
+            <span className="v10-ka-prop-val mono">{resolution.executingNode}</span>
+          </div>
+          <div className="v10-ka-prop">
+            <span className="v10-ka-prop-key">Operator Policy</span>
+            <span className="v10-ka-prop-val mono">{resolution.selectedPolicy.iri} · v{resolution.selectedPolicy.version}</span>
+          </div>
+          <div className="v10-ka-section-title" style={{ marginTop: 12 }}>Required Tools</div>
+          {resolution.requiredTools.map((tool) => (
+            <div key={tool.toolIri} className="v10-ka-prop" data-testid="semantic-tool-resolution">
+              <span className="v10-ka-prop-key">{tool.effective ? '✓ Available' : '✕ Unavailable'}</span>
+              <span className="v10-ka-prop-val">
+                <span className="mono">{tool.toolIri}</span><br />
+                requested · {tool.offered ? 'offered' : 'not offered'} · {tool.policyAllowed ? 'policy allowed' : 'policy denied'} · {tool.locallyInstalled ? 'installed' : 'not installed'} · {tool.locallyEnabled ? 'enabled' : 'disabled'}
+                {tool.unavailableReason && <><br />{tool.unavailableReason}</>}
+              </span>
+            </div>
+          ))}
+          {resolution.previousExecutions.length > 0 && (
+            <>
+              <div className="v10-ka-section-title" style={{ marginTop: 12 }}>Previous Executions</div>
+              {resolution.previousExecutions.map((execution) => (
+                <button key={execution} className="v10-ka-conn" onClick={() => onNavigate(execution)}>
+                  <span className="v10-ka-conn-target mono">{execution}</span>
+                </button>
+              ))}
+            </>
+          )}
+          <button
+            className="v10-ka-back"
+            data-testid="run-semantic-program"
+            disabled={!resolution.executable || running}
+            onClick={run}
+            style={{ marginTop: 12 }}
+          >
+            {running ? 'Running and publishing…' : 'Run Program'}
+          </button>
+        </>
+      )}
+      {error && <div className="v10-ka-desc" data-testid="semantic-program-error">{error}</div>}
+    </div>
+  );
+}
 
 
 // Small sub-graph badge rendered next to cross-references so the user
@@ -480,6 +580,15 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                 <div className="v10-ka-section">
                   <div className="v10-ka-desc"><p>{desc}</p></div>
                 </div>
+              )}
+
+              {entity.types.includes(SR_PROGRAM) && (
+                <SemanticProgramPanel
+                  contextGraphId={contextGraphId}
+                  programIri={entity.uri}
+                  onRefresh={onRefresh}
+                  onNavigate={onNavigate}
+                />
               )}
 
               {entity.properties.size > 0 && (

@@ -36,6 +36,7 @@ const REQUIRED_RUNTIME_PACKAGES = [
   '@origintrail-official/dkg-query',
   '@origintrail-official/dkg-random-sampling',
   '@origintrail-official/dkg-rdf-utils',
+  '@origintrail-official/dkg-semantic-runtime',
   '@origintrail-official/dkg-storage',
   '@origintrail-official/kafka-plugin',
 ];
