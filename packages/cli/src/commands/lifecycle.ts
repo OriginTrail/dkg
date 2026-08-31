@@ -103,6 +103,47 @@ import {
   waitForDaemonExit,
 } from '../daemon/shutdown-wait.js';
 
+interface StopCommandDependencies {
+  connectApi(): Promise<{ shutdown(): Promise<unknown> }>;
+  readPid(): Promise<number | null>;
+  resolveWaitTimeoutMs(pid: number): Promise<number>;
+  waitForExit(pid: number, timeoutMs: number): Promise<boolean>;
+  log(message: string): void;
+  error(message: string): void;
+}
+
+const defaultStopCommandDependencies: StopCommandDependencies = {
+  connectApi: () => ApiClient.connect(),
+  readPid,
+  resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
+  waitForExit: (pid, timeoutMs) => waitForDaemonExit(pid, { timeoutMs }),
+  log: (message) => console.log(message),
+  error: (message) => console.error(message),
+};
+
+/** Executable boundary for the user-facing `dkg stop` lifecycle. */
+export async function executeStopCommand(
+  dependencies: StopCommandDependencies = defaultStopCommandDependencies,
+): Promise<boolean> {
+  const client = await dependencies.connectApi();
+  const pid = await dependencies.readPid();
+  await client.shutdown();
+  dependencies.log('Daemon stopping...');
+  if (!pid) {
+    dependencies.log('Stopped.');
+    return true;
+  }
+  const timeoutMs = await dependencies.resolveWaitTimeoutMs(pid);
+  if (await dependencies.waitForExit(pid, timeoutMs)) {
+    dependencies.log('Stopped.');
+    return true;
+  }
+  dependencies.error(
+    `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
+  );
+  return false;
+}
+
 export function registerLifecycleCommands(program: Command): void {
 // ─── dkg start ───────────────────────────────────────────────────────
 
@@ -251,18 +292,7 @@ program
   .description('Stop the DKG daemon')
   .action(async () => {
     try {
-      const client = await ApiClient.connect();
-      const pid = await readPid();
-      await client.shutdown();
-      console.log('Daemon stopping...');
-      const timeoutMs = resolveDaemonShutdownWaitTimeoutMs();
-      if (!pid || await waitForDaemonExit(pid, { timeoutMs })) {
-        console.log('Stopped.');
-        return;
-      }
-      console.error(
-        `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
-      );
+      await executeStopCommand();
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

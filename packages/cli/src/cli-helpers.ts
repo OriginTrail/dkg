@@ -366,18 +366,40 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+interface StopDaemonDependencies {
+  readPid(): Promise<number | null>;
+  isRunning(pid: number): boolean;
+  kill(pid: number, signal: NodeJS.Signals): void;
+  resolveWaitTimeoutMs(pid: number): Promise<number>;
+  waitForExit(pid: number, timeoutMs: number): Promise<boolean>;
+  log(message: string): void;
+  error(message: string): void;
+}
+
+const defaultStopDaemonDependencies: StopDaemonDependencies = {
+  readPid,
+  isRunning: isProcessRunning,
+  kill: (pid, signal) => process.kill(pid, signal),
+  resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
+  waitForExit: (pid, timeoutMs) => waitForDaemonExit(pid, { timeoutMs }),
+  log: (message) => console.log(message),
+  error: (message) => console.error(message),
+};
+
 /** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
-async function stopDaemonIfRunning(): Promise<boolean> {
-  const pid = await readPid();
-  if (!pid || !isProcessRunning(pid)) return true;
-  console.log('Stopping daemon...');
-  try { process.kill(pid, 'SIGTERM'); } catch (err) {
+async function stopDaemonIfRunning(
+  dependencies: StopDaemonDependencies = defaultStopDaemonDependencies,
+): Promise<boolean> {
+  const pid = await dependencies.readPid();
+  if (!pid || !dependencies.isRunning(pid)) return true;
+  dependencies.log('Stopping daemon...');
+  try { dependencies.kill(pid, 'SIGTERM'); } catch (err) {
     if (!hasErrorCode(err, 'ESRCH')) throw err;
   }
-  const timeoutMs = resolveDaemonShutdownWaitTimeoutMs();
-  const stopped = await waitForDaemonExit(pid, { timeoutMs });
+  const timeoutMs = await dependencies.resolveWaitTimeoutMs(pid);
+  const stopped = await dependencies.waitForExit(pid, timeoutMs);
   if (stopped) return true;
-  console.error(
+  dependencies.error(
     `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
   );
   return false;

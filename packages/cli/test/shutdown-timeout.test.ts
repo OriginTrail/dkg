@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
 import {
   SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
   SHUTDOWN_FORCED_OFFSET,
@@ -8,6 +7,7 @@ import {
   MIN_SHUTDOWN_HARD_TIMEOUT_MS,
   MAX_SHUTDOWN_HARD_TIMEOUT_MS,
   decodeForcedExitCode,
+  coordinateDaemonShutdown,
   encodeForcedShutdownExitCode,
   isForcedShutdownExitCode,
   raceShutdownWithTimeout,
@@ -64,18 +64,19 @@ describe('resolveShutdownPolicy', () => {
     );
   });
 
-  it('forwards the startup-resolved scalar at the production lifecycle race join', () => {
-    const lifecycleSource = readFileSync(
-      new URL('../src/daemon/lifecycle.ts', import.meta.url),
-      'utf8',
+  it('forwards the startup-resolved policy at the executable shutdown race boundary', async () => {
+    const observedTimeouts: number[] = [];
+    await coordinateDaemonShutdown(
+      Promise.resolve(),
+      resolveShutdownPolicy('60000'),
+      () => {},
+      undefined,
+      async (_cleanup, hardTimeoutMs) => {
+        observedTimeouts.push(hardTimeoutMs);
+        return { forced: false };
+      },
     );
-    expect(lifecycleSource).toMatch(
-      /const shutdownHardTimeoutMs = resolveShutdownPolicy\([\s\S]*?\)\.hardTimeoutMs;/u,
-    );
-    expect(lifecycleSource).toMatch(
-      /raceShutdownWithTimeout\(\s*cleanup,\s*shutdownHardTimeoutMs,\s*log,/u,
-    );
-    expect(resolveShutdownPolicy('60000').hardTimeoutMs).toBe(60_000);
+    expect(observedTimeouts).toEqual([60_000]);
   });
 });
 

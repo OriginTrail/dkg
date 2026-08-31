@@ -5,9 +5,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { runForegroundSupervisor } from '../src/cli-supervisor.js';
+import { runForegroundWorkerIteration } from '../src/cli-supervisor.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -16,9 +16,6 @@ describe('foreground supervisor restart command', () => {
     const root = await mkdtemp(join(tmpdir(), 'dkg-foreground-shutdown-policy-'));
     const savedDkgHome = process.env.DKG_HOME;
     const observedGrace: number[] = [];
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
-      throw new Error(`process.exit(${code ?? 0})`);
-    });
     try {
       const dkgHome = join(root, 'home');
       const slotEntry = join(
@@ -41,17 +38,18 @@ describe('foreground supervisor restart command', () => {
         DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000',
       };
 
-      await expect(runForegroundSupervisor(
-        env,
-        async (_child, config) => {
-          observedGrace.push(config.shutdownGraceMs);
-          env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
-          return () => undefined;
+      await expect(runForegroundWorkerIteration({
+        childEnv: env,
+        dependencies: {
+          startWorkerLiveness: async (_child, config) => {
+            observedGrace.push(config.shutdownGraceMs);
+            env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
+            return () => undefined;
+          },
         },
-      )).rejects.toThrow('process.exit(0)');
+      })).resolves.toMatchObject({ originalExitCode: 0 });
       expect(observedGrace).toEqual([66_000]);
     } finally {
-      exitSpy.mockRestore();
       if (savedDkgHome === undefined) delete process.env.DKG_HOME;
       else process.env.DKG_HOME = savedDkgHome;
       await rm(root, { recursive: true, force: true });

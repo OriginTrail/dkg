@@ -277,10 +277,11 @@ import {
   carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
 import {
+  coordinateDaemonShutdown,
   encodeForcedShutdownExitCode,
-  raceShutdownWithTimeout,
 } from './shutdown.js';
-import { resolveShutdownPolicy } from './shutdown-policy.js';
+import { resolveShutdownPolicy, type ShutdownPolicy } from './shutdown-policy.js';
+import { persistDaemonShutdownPolicy } from './shutdown-wait.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
@@ -977,6 +978,14 @@ export async function validateStartupGenesis(
 
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
+  const shutdownPolicy = resolveShutdownPolicy(process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
+  await persistDaemonShutdownPolicy(shutdownPolicy).catch((error) => {
+    console.warn(
+      `[shutdown-policy] could not persist the worker shutdown deadline: `
+      + `${error instanceof Error ? error.message : String(error)}. `
+      + `Lifecycle commands will use the maximum bounded wait.`,
+    );
+  });
   const config = await loadConfig();
   configureKaPublishLifecycleDebugLogging(config);
   const startedAt = Date.now();
@@ -986,7 +995,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   // Wrapped in try/finally so the PID file is cleaned up if boot fails.
   await writePid(process.pid);
   try {
-    await runDaemonInner(foreground, config, startedAt);
+    await runDaemonInner(foreground, config, startedAt, shutdownPolicy);
   } catch (err) {
     await removePid().catch(() => {});
     throw err;
@@ -1147,6 +1156,9 @@ export async function runDaemonInner(
   foreground: boolean,
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
+  shutdownPolicy: ShutdownPolicy = resolveShutdownPolicy(
+    process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS,
+  ),
 ): Promise<void> {
   let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
   try {
@@ -1155,6 +1167,7 @@ export async function runDaemonInner(
       config,
       startedAt,
       (cleanup) => { cleanupOwnedStartupResources = cleanup; },
+      shutdownPolicy,
     );
   } catch (error) {
     await cleanupOwnedStartupResources?.();
@@ -1167,10 +1180,8 @@ async function runDaemonInnerWithStartupOwnership(
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
+  shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
-  const shutdownHardTimeoutMs = resolveShutdownPolicy(
-    process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS,
-  ).hardTimeoutMs;
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -3871,9 +3882,9 @@ async function runDaemonInnerWithStartupOwnership(
       detachDaemonLogTee();
       await daemonLogFileWriter.shutdown();
     });
-    const { forced } = await raceShutdownWithTimeout(
+    const { forced } = await coordinateDaemonShutdown(
       cleanup,
-      shutdownHardTimeoutMs,
+      shutdownPolicy,
       log,
       cleanupStateFiles,
     );

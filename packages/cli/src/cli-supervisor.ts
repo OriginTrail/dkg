@@ -168,9 +168,70 @@ async function runDaemonSupervisor(): Promise<void> {
   }
 }
 
+interface ForegroundWorkerIterationDependencies {
+  clearApiPort(): Promise<void>;
+  spawnWorker(childEnv: NodeJS.ProcessEnv): ReturnType<typeof spawn>;
+  startWorkerLiveness: typeof maybeStartSupervisorLivenessWatcher;
+  warn(message: string): void;
+}
+
+const foregroundWorkerIterationDependencies: ForegroundWorkerIterationDependencies = {
+  clearApiPort: removeApiPort,
+  spawnWorker: (childEnv) => {
+    const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
+    return spawn(
+      daemonCommand.executable,
+      daemonCommand.args,
+      { stdio: 'inherit', env: childEnv },
+    );
+  },
+  startWorkerLiveness: maybeStartSupervisorLivenessWatcher,
+  warn: supervisorWarn,
+};
+
+interface ForegroundWorkerIterationResult {
+  rawExitCode: number | null;
+  forced: boolean;
+  originalExitCode: number | null;
+}
+
+async function runForegroundWorkerIteration(input: {
+  childEnv: NodeJS.ProcessEnv;
+  livenessConfig?: SupervisorLivenessConfig;
+  onChild?: (child: ReturnType<typeof spawn> | null) => void;
+  dependencies?: Partial<ForegroundWorkerIterationDependencies>;
+}): Promise<ForegroundWorkerIterationResult> {
+  const dependencies = {
+    ...foregroundWorkerIterationDependencies,
+    ...input.dependencies,
+  };
+  await dependencies.clearApiPort().catch((err: any) => {
+    dependencies.warn(
+      `[supervisor] could not clear stale api.port before foreground spawn: `
+      + `${err?.message ?? String(err)}`,
+    );
+  });
+  const child = dependencies.spawnWorker(input.childEnv);
+  input.onChild?.(child);
+  let stopWatcher: (() => void) | undefined;
+  try {
+    stopWatcher = await dependencies.startWorkerLiveness(
+      child,
+      input.livenessConfig ?? resolveSupervisorLivenessConfig(input.childEnv),
+    );
+    const rawExitCode = await new Promise<number | null>((resolve) => {
+      child.once('exit', (code) => resolve(code));
+      child.once('error', () => resolve(1));
+    });
+    return { rawExitCode, ...decodeForcedExitCode(rawExitCode) };
+  } finally {
+    stopWatcher?.();
+    input.onChild?.(null);
+  }
+}
+
 async function runForegroundSupervisor(
   childEnv: NodeJS.ProcessEnv = process.env,
-  startWorkerLiveness: typeof maybeStartSupervisorLivenessWatcher = maybeStartSupervisorLivenessWatcher,
 ): Promise<void> {
   const livenessConfig = resolveSupervisorLivenessConfig(childEnv);
   const maxCrashRestarts = 5;
@@ -189,31 +250,12 @@ async function runForegroundSupervisor(
     while (true) {
       if (signalled) process.exit(0);
 
-      await removeApiPort().catch((err: any) => {
-        supervisorWarn(
-          `[supervisor] could not clear stale api.port before foreground spawn: ${err?.message ?? String(err)}`,
-        );
+      const decision = await runForegroundWorkerIteration({
+        childEnv,
+        livenessConfig,
+        onChild: (child) => { currentChild = child; },
       });
-
-      const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
-      currentChild = spawn(
-        daemonCommand.executable,
-        daemonCommand.args,
-        {
-          stdio: 'inherit',
-          env: childEnv,
-        },
-      );
-
-      const stopWatcher = await startWorkerLiveness(currentChild, livenessConfig);
-
-      const rawExitCode = await new Promise<number | null>((resolve) => {
-        currentChild!.once('exit', (code) => resolve(code));
-        currentChild!.once('error', () => resolve(1));
-      });
-      stopWatcher();
-      currentChild = null;
-      const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
+      const { rawExitCode, forced, originalExitCode } = decision;
       if (forced) {
         console.warn(
           `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
@@ -247,6 +289,7 @@ export {
   appendSupervisorLog,
   supervisorWarn,
   maybeStartSupervisorLivenessWatcher,
+  runForegroundWorkerIteration,
   runDaemonSupervisor,
   runForegroundSupervisor,
 };

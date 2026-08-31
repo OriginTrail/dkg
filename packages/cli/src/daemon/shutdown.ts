@@ -25,7 +25,10 @@
  */
 
 import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
-import { DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS } from './shutdown-policy.js';
+import {
+  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
+  type ShutdownPolicy,
+} from './shutdown-policy.js';
 
 export {
   DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
@@ -179,4 +182,15 @@ export async function raceShutdownWithTimeout(
     if (timer) clearTimeout(timer);
   }
   return { forced };
+}
+
+/** Apply a startup-resolved policy at the shutdown race boundary. */
+export function coordinateDaemonShutdown(
+  cleanup: Promise<void>,
+  policy: ShutdownPolicy,
+  log: (msg: string) => void,
+  onForcedTimeout?: () => void | Promise<void>,
+  race: typeof raceShutdownWithTimeout = raceShutdownWithTimeout,
+): Promise<{ forced: boolean }> {
+  return race(cleanup, policy.hardTimeoutMs, log, onForcedTimeout);
 }
