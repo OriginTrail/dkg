@@ -72,6 +72,8 @@ export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
 export * from './swm-author-inventory-v1.js';
 export * from './rfc64-semantic-addresses-v1.js';
+export * from './rfc64-semantic-records-v1.js';
+export * from './typed-rdf-store-row-v1.js';
 export * from './event-bus.js';
 export * from './backpressure-observability.js';
 export {

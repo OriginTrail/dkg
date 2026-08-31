@@ -4,6 +4,7 @@ import * as coreBarrel from '../src/index.js';
 import { ASSERTION_SEAL_PREDICATES } from '../src/assertion-seal.js';
 import {
   MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1,
+  CanonicalGraphScopedAuthorSealError,
   assertCanonicalGraphScopedAuthorSealCoordinateV1,
   assertCanonicalGraphScopedAuthorSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
@@ -363,6 +364,33 @@ describe('CanonicalGraphScopedAuthorSealV1 typed store inverse', () => {
       for (const value of ['<urn:wrapped>', 'urn:has space', 'urn:has\u0000control']) {
         expect(() => renderCanonicalAuthorSealStoreRowV1({ ...base, [field]: value }))
           .toThrow(new RegExp(`${field} must contain one bare safe IRI`));
+      }
+    }
+  });
+
+  it('preserves schema-versus-term error codes for malformed typed row IRIs', () => {
+    const base: CanonicalAuthorSealStoreRowV1 = {
+      subjectIri: SUBJECT,
+      predicateIri: 'urn:predicate',
+      graphIri: META_GRAPH,
+      object: { kind: 'literal', value: AUTHOR, datatypeIri: `${XSD}string` },
+    };
+    for (const field of ['subjectIri', 'predicateIri', 'graphIri'] as const) {
+      try {
+        renderCanonicalAuthorSealStoreRowV1({ ...base, [field]: 42 } as never);
+        throw new Error('expected non-string IRI rejection');
+      } catch (error) {
+        expect(error).toBeInstanceOf(CanonicalGraphScopedAuthorSealError);
+        expect((error as CanonicalGraphScopedAuthorSealError).code)
+          .toBe('canonical-seal-row-schema');
+      }
+      try {
+        renderCanonicalAuthorSealStoreRowV1({ ...base, [field]: 'urn:has space' });
+        throw new Error('expected unsafe IRI rejection');
+      } catch (error) {
+        expect(error).toBeInstanceOf(CanonicalGraphScopedAuthorSealError);
+        expect((error as CanonicalGraphScopedAuthorSealError).code)
+          .toBe('canonical-seal-row-term');
       }
     }
   });
