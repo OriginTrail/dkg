@@ -389,8 +389,7 @@ describe('DashboardDB — retention', () => {
       insert.run(2_001, 'error', 'keep-error');
 
       expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'done' });
 
       const rows = volumeDb.db.prepare(
         `SELECT level, message FROM logs ORDER BY id ASC`,
@@ -635,8 +634,7 @@ describe('DashboardDB — retention', () => {
       ]);
 
       volumeDb.db.exec('DROP TRIGGER fail_inline_log_retention');
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 1, status: 'more' });
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 1, status: 'done' });
     } finally {
       volumeDb.close();
       rmSync(volumeDir, { recursive: true, force: true });

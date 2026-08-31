@@ -1382,10 +1382,7 @@ export class DashboardDB {
       };
     }
 
-    // If the batch filled, conservatively schedule another tick. An exact-size
-    // final batch costs one extra cheap probe before compaction, which is safer
-    // than running a second million-row count after every deletion.
-    const { deleted, filledBatch: hasMore } = batch;
+    const { deleted, hasMore } = batch;
     const reclaim = hasMore
       ? { compacted: false, reclaimPending: false }
       : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);

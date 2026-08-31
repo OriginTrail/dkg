@@ -16,7 +16,10 @@ function protectedLevelSql(column: string): string {
   return `${column} IN (${PROTECTED_LOG_LEVELS_SQL})`;
 }
 
-type RoutineLogRetentionSchemaDatabase = Pick<Database.Database, 'exec' | 'prepare'>;
+type RoutineLogRetentionSchemaDatabase = Pick<
+  Database.Database,
+  'exec' | 'prepare' | 'transaction'
+>;
 
 const ROUTINE_LOG_INDEX_NAME = 'idx_logs_routine_id';
 const ROUTINE_LOG_INDEX_SQL = `
@@ -104,19 +107,37 @@ export const ROUTINE_LOG_PRUNE_SQL = `
 export function installRoutineLogRetentionSchema(
   db: RoutineLogRetentionSchemaDatabase,
 ): void {
-  // BEGIN IMMEDIATE acquires the write reservation before counting. Another
-  // connection can only commit after the canonical triggers are active, so no
-  // write can fall between the seed and its maintenance boundary.
-  db.exec('BEGIN IMMEDIATE');
-  try {
+  const install = db.transaction(() => {
     const logsTable = db.prepare(`
       SELECT 1 AS found FROM sqlite_master
       WHERE type = 'table' AND name = 'logs'
     `).get() as { found: number } | undefined;
-    if (!logsTable) {
-      db.exec('COMMIT');
-      return;
-    }
+    if (!logsTable) return;
+
+    const stateTable = db.prepare(`
+      SELECT 1 AS found FROM sqlite_master
+      WHERE type = 'table' AND name = 'log_retention_state'
+    `).get() as { found: number } | undefined;
+    const initialStateColumns = stateTable
+      ? new Set(
+        (db.prepare('PRAGMA table_info(log_retention_state)').all() as Array<{ name: string }>)
+          .map(({ name }) => name),
+      )
+      : new Set<string>();
+    const stateRow = initialStateColumns.has('schema_version')
+      ? db.prepare(`
+        SELECT schema_version FROM log_retention_state WHERE singleton_id = 1
+      `).get() as { schema_version: number } | undefined
+      : undefined;
+    const canonicalSchema = hasCanonicalRetentionDefinitions(db);
+
+    // Reopening a canonical database must not mutate the schema. In
+    // particular, recreating the partial index scans every routine log row and
+    // defeats the constant-time startup path this state table provides.
+    if (
+      stateRow?.schema_version === ROUTINE_LOG_RETENTION_SCHEMA_VERSION
+      && canonicalSchema
+    ) return;
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS log_retention_state (
@@ -125,11 +146,7 @@ export function installRoutineLogRetentionSchema(
         routine_count INTEGER NOT NULL CHECK (routine_count >= 0)
       )
     `);
-    const stateColumns = new Set(
-      (db.prepare('PRAGMA table_info(log_retention_state)').all() as Array<{ name: string }>)
-        .map(({ name }) => name),
-    );
-    if (!stateColumns.has('schema_version')) {
+    if (!initialStateColumns.has('schema_version') && stateTable) {
       // Repairs databases created by an earlier development revision of V35.
       db.exec(`
         ALTER TABLE log_retention_state
@@ -137,23 +154,25 @@ export function installRoutineLogRetentionSchema(
       `);
     }
 
-    const stateRow = db.prepare(`
+    const repairedStateRow = db.prepare(`
       SELECT schema_version FROM log_retention_state WHERE singleton_id = 1
     `).get() as { schema_version: number } | undefined;
-    const canonicalSchema = hasCanonicalRetentionDefinitions(db);
-    const needsReseed = !stateRow
-      || stateRow.schema_version !== ROUTINE_LOG_RETENTION_SCHEMA_VERSION
+    const needsSchemaRepair = !canonicalSchema;
+    const needsReseed = !repairedStateRow
+      || repairedStateRow.schema_version !== ROUTINE_LOG_RETENTION_SCHEMA_VERSION
       || !canonicalSchema;
 
-    // Recreate every owned object from immutable versioned SQL. Comparing the
-    // persisted definitions above decides whether counter drift is possible;
-    // rebuilding is cheap and prevents same-name stale objects from surviving.
-    db.exec([
-      ...RETENTION_TRIGGER_DEFINITIONS.map(({ name }) => `DROP TRIGGER IF EXISTS ${name}`),
-      `DROP INDEX IF EXISTS ${ROUTINE_LOG_INDEX_NAME}`,
-      ROUTINE_LOG_INDEX_SQL,
-      ...RETENTION_TRIGGER_DEFINITIONS.map(({ sql }) => sql),
-    ].join(';\n'));
+    if (needsSchemaRepair) {
+      // Recreate every owned object from immutable versioned SQL only when
+      // validation found drift. Rebuilding the partial index is intentionally
+      // reserved for this repair path because it scans the logs table.
+      db.exec([
+        ...RETENTION_TRIGGER_DEFINITIONS.map(({ name }) => `DROP TRIGGER IF EXISTS ${name}`),
+        `DROP INDEX IF EXISTS ${ROUTINE_LOG_INDEX_NAME}`,
+        ROUTINE_LOG_INDEX_SQL,
+        ...RETENTION_TRIGGER_DEFINITIONS.map(({ sql }) => sql),
+      ].join(';\n'));
+    }
 
     if (needsReseed) {
       db.prepare(`
@@ -165,15 +184,12 @@ export function installRoutineLogRetentionSchema(
           routine_count = excluded.routine_count
       `).run({ schemaVersion: ROUTINE_LOG_RETENTION_SCHEMA_VERSION });
     }
-    db.exec('COMMIT');
-  } catch (error: unknown) {
-    try {
-      db.exec('ROLLBACK');
-    } catch {
-      // BEGIN IMMEDIATE itself may have failed before a transaction existed.
-    }
-    throw error;
-  }
+  });
+
+  // IMMEDIATE acquires the write reservation before validation/counting.
+  // Another connection can only commit after canonical triggers are active,
+  // so no write can fall between the seed and its maintenance boundary.
+  install.immediate();
 }
 
 function hasCanonicalRetentionDefinitions(db: RoutineLogRetentionSchemaDatabase): boolean {
@@ -206,7 +222,7 @@ export class RoutineLogRetentionInvariantError extends Error {
 export interface RoutineLogPruneBatch {
   deleted: number;
   hadOverflow: boolean;
-  filledBatch: boolean;
+  hasMore: boolean;
 }
 
 /**
@@ -253,14 +269,14 @@ export class RoutineLogRetention {
   pruneOverflowBatch(): RoutineLogPruneBatch {
     const overflowRows = this.routineCount() - this.rowCap;
     if (overflowRows <= 0) {
-      return { deleted: 0, hadOverflow: false, filledBatch: false };
+      return { deleted: 0, hadOverflow: false, hasMore: false };
     }
     const deleteRows = Math.min(this.batchRows, overflowRows);
     const deleted = this.db.prepare(ROUTINE_LOG_PRUNE_SQL).run({ deleteRows }).changes;
     return {
       deleted,
       hadOverflow: true,
-      filledBatch: deleted === this.batchRows,
+      hasMore: overflowRows > deleteRows,
     };
   }
 

@@ -71,11 +71,38 @@ describe('RoutineLogRetention', () => {
     expect(retention.pruneOverflowBatch()).toEqual({
       deleted: 1,
       hadOverflow: true,
-      filledBatch: true,
+      hasMore: false,
     });
     expect(db.prepare(`SELECT level, message FROM logs ORDER BY id`).all()).toEqual([
       { level: 'error', message: 'routine-a' },
     ]);
+  });
+
+  it('reports remaining overflow exactly at and above the batch boundary', () => {
+    installRoutineLogRetentionSchema(db);
+    const insert = db.prepare(`
+      INSERT INTO logs (ts, level, module, message)
+      VALUES (?, 'info', 'test', ?)
+    `);
+    insert.run(1, 'one');
+    insert.run(2, 'two');
+
+    const exactBatch = new RoutineLogRetention(db, 0, 2);
+    expect(exactBatch.pruneOverflowBatch()).toEqual({
+      deleted: 2,
+      hadOverflow: true,
+      hasMore: false,
+    });
+
+    insert.run(3, 'one');
+    insert.run(4, 'two');
+    insert.run(5, 'three');
+    const batchPlusOne = new RoutineLogRetention(db, 0, 2);
+    expect(batchPlusOne.pruneOverflowBatch()).toEqual({
+      deleted: 2,
+      hadOverflow: true,
+      hasMore: true,
+    });
   });
 
   it('fails loudly on a missing singleton and repairs its count on reinstall', () => {
@@ -156,15 +183,21 @@ describe('RoutineLogRetention', () => {
       INSERT INTO logs (ts, level, module, message)
       VALUES (1, 'info', 'test', 'already-tracked')
     `).run();
-    let reseedStatements = 0;
+    const scannedOrMutatingSql: string[] = [];
     const observedDb = new Proxy(db, {
       get(target, property) {
         if (property === 'prepare') {
           return (sql: string) => {
             if (sql.includes('SELECT 1, @schemaVersion, COUNT(*) FROM logs')) {
-              reseedStatements += 1;
+              scannedOrMutatingSql.push(sql);
             }
             return target.prepare(sql);
+          };
+        }
+        if (property === 'exec') {
+          return (sql: string) => {
+            if (/\b(?:CREATE|DROP|ALTER)\b/i.test(sql)) scannedOrMutatingSql.push(sql);
+            return target.exec(sql);
           };
         }
         const value = Reflect.get(target, property, target) as unknown;
@@ -173,7 +206,7 @@ describe('RoutineLogRetention', () => {
     });
 
     installRoutineLogRetentionSchema(observedDb);
-    expect(reseedStatements).toBe(0);
+    expect(scannedOrMutatingSql).toEqual([]);
     expect(retentionState(db).routine_count).toBe(1);
   });
 });
@@ -190,17 +223,16 @@ describe('installRoutineLogRetentionSchema locking', () => {
       let racingWriteBlocked = false;
       const installingDb = new Proxy(installerConnection, {
         get(target, property) {
-          if (property === 'exec') {
+          if (property === 'prepare') {
             return (sql: string) => {
-              const result = target.exec(sql);
-              if (sql === 'BEGIN IMMEDIATE') {
+              if (!racingWriteBlocked && sql.includes("name = 'logs'")) {
                 expect(() => racingConnection.prepare(`
                   INSERT INTO logs (ts, level, module, message)
                   VALUES (1, 'info', 'racer', 'blocked')
                 `).run()).toThrow(/locked/);
                 racingWriteBlocked = true;
               }
-              return result;
+              return target.prepare(sql);
             };
           }
           const value = Reflect.get(target, property, target) as unknown;
