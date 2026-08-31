@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   StoreSchedulerBusyError,
   type QueryResult as StoreQueryResult,
+  type StoreSchedulerBusyErrorLike,
   type StoreSchedulerBusyReason,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -29,6 +30,22 @@ function queryOnlyStore(query: TripleStore['query']): TripleStore {
 
 function busyError(reason: StoreSchedulerBusyReason, operation: string) {
   return new StoreSchedulerBusyError(reason, 'normal', operation);
+}
+
+function structuralBusyError(
+  reason: StoreSchedulerBusyReason,
+  operation: string,
+): StoreSchedulerBusyErrorLike {
+  return {
+    code: 'STORE_SCHEDULER_BUSY',
+    retryable: true,
+    outcome: 'not_started',
+    storeOperationOutcomeTag: 'dkg.store-operation-outcome.v1',
+    reason,
+    priority: 'normal',
+    operation,
+    storeOperation: 'query',
+  };
 }
 
 function expectedBusyResponse(
@@ -63,7 +80,9 @@ class BusyUalQueryEngine extends DKGQueryEngine {
 
 describe('QueryHandler store-busy responses', () => {
   it('preserves queue-wait admission failure through direct and encoded SPARQL responses', async () => {
-    const failure = busyError('queue_wait_timeout', 'remote-query.read');
+    // Deliberately use a plain structural value to exercise the package
+    // boundary rather than relying on shared Error-class identity.
+    const failure = structuralBusyError('queue_wait_timeout', 'remote-query.read');
     const store = queryOnlyStore(async (): Promise<StoreQueryResult> => { throw failure; });
     const handler = new QueryHandler(new DKGQueryEngine(store), {
       defaultPolicy: 'public',

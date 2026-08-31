@@ -16,6 +16,7 @@ import type {
   LookupType,
   NonBusyQueryStatus,
   QueryBusyResponse,
+  QueryNonBusyResponse,
 } from './query-types.js';
 
 const DEFAULT_LIMIT = 100;
@@ -131,7 +132,7 @@ export class QueryHandler {
       const timeout = Math.min(request.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
       const contextGraphPolicy = this.contextGraphPolicy(contextGraphId);
 
-      let response: QueryResponse;
+      let response: QueryNonBusyResponse;
 
       switch (request.lookupType) {
         case 'ENTITY_BY_UAL':
@@ -171,7 +172,7 @@ export class QueryHandler {
     lookupType: LookupType,
     contextGraphId: string | undefined,
     peerId: string,
-  ): Promise<QueryResponse | null> {
+  ): Promise<QueryNonBusyResponse | null> {
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
 
     // ENTITY_BY_UAL: the target CG is only known AFTER the UAL resolves, so
@@ -199,7 +200,7 @@ export class QueryHandler {
     lookupType: LookupType,
     contextGraphId: string,
     peerId: string,
-  ): Promise<QueryResponse | null> {
+  ): Promise<QueryNonBusyResponse | null> {
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
     const cgConfig = this.config.contextGraphs?.[contextGraphId];
     if (!cgConfig) {
@@ -276,7 +277,7 @@ export class QueryHandler {
     return this.config.contextGraphs?.[contextGraphId];
   }
 
-  private checkRateLimit(peerId: string): QueryResponse | null {
+  private checkRateLimit(peerId: string): QueryNonBusyResponse | null {
     const now = Date.now();
     let bucket = this.rateBuckets.get(peerId);
 
@@ -298,7 +299,7 @@ export class QueryHandler {
     return null;
   }
 
-  private async lookupByUAL(opId: string, ual: string, peerId: string): Promise<QueryResponse> {
+  private async lookupByUAL(opId: string, ual: string, peerId: string): Promise<QueryNonBusyResponse> {
     if (!ual) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing ual');
     }
@@ -338,7 +339,7 @@ export class QueryHandler {
     contextGraphId: string,
     rdfType: string,
     limit: number,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!rdfType) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing rdfType');
     }
@@ -363,7 +364,7 @@ export class QueryHandler {
     opId: string,
     contextGraphId: string,
     entityUri: string,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!entityUri) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing entityUri');
     }
@@ -392,7 +393,7 @@ export class QueryHandler {
     sparql: string,
     limit: number,
     timeout: number,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!sparql) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing sparql');
     }
@@ -460,9 +461,9 @@ export class QueryHandler {
     };
   }
 
-  private enforceResultSize(response: QueryResponse): QueryResponse {
+  private enforceResultSize(response: QueryNonBusyResponse): QueryNonBusyResponse {
     const serialized = JSON.stringify(response);
-    if (serialized.length <= MAX_RESULT_BYTES || response.status === 'BUSY') return response;
+    if (serialized.length <= MAX_RESULT_BYTES) return response;
 
     return {
       ...response,
@@ -477,7 +478,7 @@ function errorResponse(
   opId: string,
   status: NonBusyQueryStatus,
   error: string,
-): QueryResponse {
+): QueryNonBusyResponse {
   return {
     operationId: opId,
     status,
