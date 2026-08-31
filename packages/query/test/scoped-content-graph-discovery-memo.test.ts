@@ -25,13 +25,11 @@ const REQUEST = {
 };
 
 describe('ScopedContentGraphDiscoveryMemo', () => {
-  it('reuses completed values across lanes only under an all-writers revision', async () => {
+  it('reuses completed values across lanes until the all-writers generation changes', async () => {
     let revision = { generation: 1, stable: true };
-    let now = 0;
     let loads = 0;
     const memo = new ScopedContentGraphDiscoveryMemo(
       revisionSource('all-writers', () => revision),
-      { ttlMs: 10, now: () => now },
     );
     const load = async () => [`urn:graph:${++loads}`];
 
@@ -41,13 +39,9 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
     ]);
     expect(loads).toBe(1);
 
-    now = 11;
+    revision = { generation: 2, stable: true };
     await expect(memo.get({ ...REQUEST, load })).resolves.toEqual(['urn:graph:2']);
     expect(loads).toBe(2);
-
-    revision = { generation: 2, stable: true };
-    await expect(memo.get({ ...REQUEST, load })).resolves.toEqual(['urn:graph:3']);
-    expect(loads).toBe(3);
   });
 
   it('never reuses authorization discovery under a process-local revision', async () => {
@@ -110,5 +104,43 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
     gate.resolve(['urn:graph:ok']);
     await expect(shared).resolves.toEqual(['urn:graph:ok']);
     await expect(otherLane).resolves.toEqual(['urn:graph:ok']);
+  });
+
+  it('isolates completed values and concurrent flights by authorization scope key', async () => {
+    const code = deferred<readonly string[]>();
+    const decisions = deferred<readonly string[]>();
+    let loads = 0;
+    const memo = new ScopedContentGraphDiscoveryMemo(
+      revisionSource('all-writers', () => ({ generation: 1, stable: true })),
+    );
+
+    const codeRequest = memo.get({
+      ...REQUEST,
+      contentKey: '["parent","code"]',
+      load: () => { loads += 1; return code.promise; },
+    });
+    const decisionsRequest = memo.get({
+      ...REQUEST,
+      contentKey: '["parent","decisions"]',
+      load: () => { loads += 1; return decisions.promise; },
+    });
+    expect(loads).toBe(2);
+
+    code.resolve(['urn:graph:code']);
+    decisions.resolve(['urn:graph:decisions']);
+    await expect(codeRequest).resolves.toEqual(['urn:graph:code']);
+    await expect(decisionsRequest).resolves.toEqual(['urn:graph:decisions']);
+
+    await expect(memo.get({
+      ...REQUEST,
+      contentKey: '["parent","code"]',
+      load: async () => { loads += 1; return ['urn:graph:wrong']; },
+    })).resolves.toEqual(['urn:graph:code']);
+    await expect(memo.get({
+      ...REQUEST,
+      contentKey: '["parent","decisions"]',
+      load: async () => { loads += 1; return ['urn:graph:wrong']; },
+    })).resolves.toEqual(['urn:graph:decisions']);
+    expect(loads).toBe(2);
   });
 });

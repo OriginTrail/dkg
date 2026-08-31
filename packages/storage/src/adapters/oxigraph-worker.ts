@@ -4,7 +4,11 @@ import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
+import {
+  GraphWriteGenTracker,
+  type GraphWriteLifecycle,
+  type GraphWriteScope,
+} from '../graph-write-gen.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -153,10 +157,17 @@ export class OxigraphWorkerStore implements TripleStore {
   private worker!: Worker;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-  // #1609: per-graph write generations, bumped client-side after each
-  // successful mutation RPC (the worker owns no caller-visible caches).
-  // Feeds the chain-reconcile negative memo via `asGraphWriteGenSource`.
+  // #1609: per-graph write generations, bumped client-side around every
+  // mutation RPC and globally around persisted-worker replacement. Feeds
+  // cache consumers via `asGraphWriteRevisionSource` / `asGraphWriteGenSource`.
   private readonly writeGen = new GraphWriteGenTracker();
+  /**
+   * Global revision fence spanning an unexpected persisted-worker exit until
+   * the replacement proves it has loaded and can serve operations. The exit
+   * transition advances the generation before any replacement read can run;
+   * the first successful reply closes the unstable interval.
+   */
+  private replacementRevisionLifecycle: GraphWriteLifecycle | null = null;
   private readonly operationTimeoutMs: number;
   /** Resolved path of the compiled worker impl; reused verbatim on respawn. */
   private readonly workerPath: string;
@@ -330,7 +341,11 @@ export class OxigraphWorkerStore implements TripleStore {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the
       // crash-loop accounting window (see MAX_CONSECUTIVE_RESPAWNS).
-      if (!msg.error) this.consecutiveRespawnFailures = 0;
+      if (!msg.error) {
+        this.consecutiveRespawnFailures = 0;
+        this.replacementRevisionLifecycle?.settle();
+        this.replacementRevisionLifecycle = null;
+      }
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
@@ -374,6 +389,9 @@ export class OxigraphWorkerStore implements TripleStore {
       // Distinguish the two unexpected exits up front so the log and the
       // lifecycle transition below agree on what just happened.
       const inMemoryLost = !intentional && this.persistPath === undefined;
+      if (!intentional && !inMemoryLost && !this.replacementRevisionLifecycle) {
+        this.replacementRevisionLifecycle = this.writeGen.beginWrite({ kind: 'all' });
+      }
       if (intentional) {
         console.info(`[oxigraph-worker] worker exited (code ${code}) — initiated by close()`);
       } else if (inMemoryLost) {

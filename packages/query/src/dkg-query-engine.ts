@@ -67,6 +67,7 @@ import {
   resolveSparqlPrefixedName,
   type SparqlPrefixName,
 } from './sparql-graph-scope.js';
+import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
 
 /**
@@ -88,12 +89,6 @@ export class ScopedQueryViolationError extends Error {
     super(`Scoped query violation: ${message}`);
     this.name = 'ScopedQueryViolationError';
   }
-}
-
-export interface DKGQueryEngineOptions {
-  /** Defense-in-depth expiry for stores whose revisions cover every writer. */
-  scopedContentGraphCacheTtlMs?: number;
-  now?: () => number;
 }
 
 function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
@@ -155,29 +150,6 @@ function createQueryStoreReadContext(
       ]),
     },
   };
-}
-
-function raceAgainstCallerAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) {
-    const reason = signal.reason;
-    return Promise.reject(
-      reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')),
-    );
-  }
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    void work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }
 
 /**
@@ -383,12 +355,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly graphManager: GraphManager;
   private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
 
-  constructor(store: TripleStore, options: DKGQueryEngineOptions = {}) {
+  constructor(store: TripleStore) {
     this.store = store;
     this.graphManager = new GraphManager(store);
     this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
       asGraphWriteRevisionSource(store),
-      { ttlMs: options.scopedContentGraphCacheTtlMs, now: options.now },
     );
   }
 

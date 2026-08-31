@@ -1,14 +1,11 @@
-import { performance } from 'node:perf_hooks';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import type { GraphWriteRevisionSource } from '@origintrail-official/dkg-storage';
+import { callerAbortReason, raceAgainstCallerAbort } from './caller-abort.js';
 
 const DEFAULT_MAX_ENTRIES = 256;
-const DEFAULT_TTL_MS = 10_000;
 
 export interface ScopedContentGraphDiscoveryMemoOptions {
   maxEntries?: number;
-  ttlMs?: number;
-  now?: () => number;
 }
 
 export interface ScopedContentGraphDiscoveryRequest {
@@ -26,26 +23,18 @@ export interface ScopedContentGraphDiscoveryRequest {
  * generation cannot authorize reuse for an externally mutable SPARQL backend.
  */
 export class ScopedContentGraphDiscoveryMemo {
-  private readonly completed: BoundedLruCache<
-    string,
-    { validatedAt: number; value: readonly string[] }
-  >;
+  private readonly completed: BoundedLruCache<string, readonly string[]>;
   private readonly inFlight = new Map<string, Promise<readonly string[]>>();
-  private readonly ttlMs: number;
-  private readonly now: () => number;
 
   constructor(
     private readonly revisionSource: GraphWriteRevisionSource | null,
     options: ScopedContentGraphDiscoveryMemoOptions = {},
   ) {
     this.completed = new BoundedLruCache(options.maxEntries ?? DEFAULT_MAX_ENTRIES);
-    const configuredTtl = options.ttlMs ?? DEFAULT_TTL_MS;
-    this.ttlMs = Number.isFinite(configuredTtl) ? Math.max(0, configuredTtl) : DEFAULT_TTL_MS;
-    this.now = options.now ?? (() => performance.now());
   }
 
   get(request: ScopedContentGraphDiscoveryRequest): Promise<readonly string[]> {
-    if (request.signal?.aborted) return Promise.reject(abortReason(request.signal));
+    if (request.signal?.aborted) return Promise.reject(callerAbortReason(request.signal));
     if (this.revisionSource?.writeRevisionCoverage !== 'all-writers') {
       return raceAgainstCallerAbort(request.load(), request.signal);
     }
@@ -55,10 +44,7 @@ export class ScopedContentGraphDiscoveryMemo {
 
     const completedKey = JSON.stringify([request.contentKey, before.generation]);
     const cached = this.completed.get(completedKey);
-    if (cached && this.now() - cached.validatedAt < this.ttlMs) {
-      return raceAgainstCallerAbort(Promise.resolve(cached.value), request.signal);
-    }
-    if (cached) this.completed.delete(completedKey);
+    if (cached) return raceAgainstCallerAbort(Promise.resolve(cached), request.signal);
 
     const flightKey = JSON.stringify([
       request.contentKey,
@@ -72,7 +58,7 @@ export class ScopedContentGraphDiscoveryMemo {
       const after = this.revisionSource!.getWriteRevision(request.graphPrefix);
       if (after.stable && after.generation === before.generation) {
         const immutable = Object.freeze([...value]);
-        this.completed.set(completedKey, { validatedAt: this.now(), value: immutable });
+        this.completed.set(completedKey, immutable);
         return immutable;
       }
       return value;
@@ -83,22 +69,4 @@ export class ScopedContentGraphDiscoveryMemo {
     }).catch(() => undefined);
     return raceAgainstCallerAbort(promise, request.signal);
   }
-}
-
-function raceAgainstCallerAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) return Promise.reject(abortReason(signal));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortReason(signal));
-    signal.addEventListener('abort', onAbort, { once: true });
-    void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
-}
-
-function abortReason(signal: AbortSignal): Error {
-  const reason = signal.reason;
-  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }

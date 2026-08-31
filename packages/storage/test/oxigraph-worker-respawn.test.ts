@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Worker } from 'node:worker_threads';
-import { OxigraphWorkerStore, type Quad } from '../src/index.js';
+import {
+  OxigraphWorkerStore,
+  asGraphWriteRevisionSource,
+  type Quad,
+} from '../src/index.js';
 
 // Regression tests for unexpected-worker-exit recovery. The production
 // failure: ERR_WORKER_OUT_OF_MEMORY kills ONLY the worker thread, the daemon
@@ -106,9 +110,16 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       // insert() only schedules the worker's 50ms debounced flush; force the
       // data to disk so the respawned worker hydrates it back.
       await store.flush();
+      const revisions = asGraphWriteRevisionSource(store)!;
+      expect(revisions.writeRevisionCoverage).toBe('all-writers');
+      const beforeCrash = revisions.getWriteRevision('urn:test:');
+      expect(beforeCrash.stable).toBe(true);
 
       const before = internals(store).worker;
       await killWorker(store);
+      const replacing = revisions.getWriteRevision('urn:test:');
+      expect(replacing.stable).toBe(false);
+      expect(replacing.generation).toBeGreaterThan(beforeCrash.generation);
 
       // Same store OBJECT (every daemon alias keeps working), new thread.
       expect(internals(store).worker).not.toBe(before);
@@ -116,6 +127,9 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       // Reads see the persisted data again — the exact op that used to fail
       // forever with "the store is closed".
       expect(await store.countQuads('urn:test:g')).toBe(10);
+      const recovered = revisions.getWriteRevision('urn:test:');
+      expect(recovered.stable).toBe(true);
+      expect(recovered.generation).toBeGreaterThan(replacing.generation);
       // A disk-persisted store recovers fully: the state model is back to 'live'
       // (this is the branch finding 1 deliberately keeps auto-respawning).
       expect(internals(store).lifecycle).toBe('live');
