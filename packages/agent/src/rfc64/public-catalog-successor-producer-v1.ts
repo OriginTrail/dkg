@@ -50,6 +50,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { mapWithConcurrency } from '../map-with-concurrency.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogRowAuthorshipV1,
@@ -127,6 +128,9 @@ export interface Rfc64PublicCatalogSuccessorProducerOptionsV1 {
    */
   readonly readKaBundleByDigest?: (blobDigest: Digest32V1) => Promise<Uint8Array | null>;
 }
+
+/** Bound independent immutable-bundle reads/writes without serializing an entire successor. */
+const RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1 = 8;
 
 export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
@@ -439,32 +443,36 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         row.transfer.blobDigest,
       ] as const),
     );
-    for (const { prepared, row } of verifiedAssets) {
-      try {
-        if (
-          previousBundleByKaId.get(row.kaId) === prepared.encoded.blobDigest
-          && this.#readKaBundleByDigest !== undefined
-        ) {
-          const existing = await this.#readKaBundleByDigest(prepared.encoded.blobDigest);
-          if (existing !== null && bytesEqualV1(existing, prepared.bundleBytes)) continue;
+    await mapWithConcurrency(
+      verifiedAssets,
+      RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1,
+      async ({ prepared, row }): Promise<void> => {
+        try {
+          if (
+            previousBundleByKaId.get(row.kaId) === prepared.encoded.blobDigest
+            && this.#readKaBundleByDigest !== undefined
+          ) {
+            const existing = await this.#readKaBundleByDigest(prepared.encoded.blobDigest);
+            if (existing !== null && bytesEqualV1(existing, prepared.bundleBytes)) return;
+          }
+          const bundleReceipt = await this.#stageKaBundle(Object.freeze({
+            blobDigest: prepared.encoded.blobDigest,
+            bundleBytes: new Uint8Array(prepared.bundleBytes),
+          }));
+          assertExactDurableBundleReceipt(
+            bundleReceipt,
+            prepared.encoded.blobDigest,
+            prepared.bundleBytes.byteLength,
+          );
+        } catch (cause) {
+          fail(
+            'catalog-successor-producer-bundle-stage',
+            `verified opaque KA bundle ${prepared.row.kaId} could not be staged`,
+            cause,
+          );
         }
-        const bundleReceipt = await this.#stageKaBundle(Object.freeze({
-          blobDigest: prepared.encoded.blobDigest,
-          bundleBytes: new Uint8Array(prepared.bundleBytes),
-        }));
-        assertExactDurableBundleReceipt(
-          bundleReceipt,
-          prepared.encoded.blobDigest,
-          prepared.bundleBytes.byteLength,
-        );
-      } catch (cause) {
-        fail(
-          'catalog-successor-producer-bundle-stage',
-          `verified opaque KA bundle ${prepared.row.kaId} could not be staged`,
-          cause,
-        );
-      }
-    }
+      },
+    );
 
     let stagedControlObjects: StageVerifiedControlObjectsResultV1;
     try {
