@@ -34,6 +34,24 @@ interface SupervisorLivenessConfig {
   shutdownGraceMs: number;
 }
 
+interface SupervisorLivenessDependencies {
+  readPort(): Promise<number | null>;
+  loadApiHost(): Promise<string | undefined>;
+  apiPortExists(): boolean;
+  startWatcher: typeof startLivenessWatcher;
+  wait(ms: number): Promise<void>;
+  warn(message: string): void;
+}
+
+const supervisorLivenessDependencies: SupervisorLivenessDependencies = {
+  readPort: () => readApiPort(),
+  loadApiHost: () => loadConfig().then((loaded) => loaded.apiHost),
+  apiPortExists: () => existsSync(apiPortPath()),
+  startWatcher: startLivenessWatcher,
+  wait: sleep,
+  warn: supervisorWarn,
+};
+
 function resolveSupervisorLivenessConfig(env: NodeJS.ProcessEnv): SupervisorLivenessConfig {
   return {
     enabled: isLivenessProbeEnabled(env.DKG_SUPERVISOR_LIVENESS_PROBE),
@@ -58,7 +76,12 @@ function resolveSupervisorLivenessConfig(env: NodeJS.ProcessEnv): SupervisorLive
 async function maybeStartSupervisorLivenessWatcher(
   child: { kill(signal: 'SIGKILL'): boolean },
   config: SupervisorLivenessConfig = resolveSupervisorLivenessConfig(process.env),
+  dependencyOverrides: Partial<SupervisorLivenessDependencies> = {},
 ): Promise<() => void> {
+  const dependencies = {
+    ...supervisorLivenessDependencies,
+    ...dependencyOverrides,
+  };
   if (!config.enabled) {
     return () => {};
   }
@@ -70,12 +93,12 @@ async function maybeStartSupervisorLivenessWatcher(
   let watcher: { stop(): void } | null = null;
   void (async () => {
     while (!cancelled) {
-      const port = await readApiPort().catch(() => null);
+      const port = await dependencies.readPort().catch(() => null);
       if (port) {
         if (cancelled) return;
-        const apiHost = await loadConfig().then((loaded) => loaded.apiHost).catch(() => undefined);
+        const apiHost = await dependencies.loadApiHost().catch(() => undefined);
         if (cancelled) return;
-        watcher = startLivenessWatcher({
+        watcher = dependencies.startWatcher({
           port,
           host: probeHostForApiHost(apiHost),
           // Graceful-shutdown disarm: the worker's `shutdown()` removes
@@ -83,10 +106,10 @@ async function maybeStartSupervisorLivenessWatcher(
           // `dashDb.close()`, …), so its absence is the unambiguous "I'm
           // intentionally shutting down" signal. Without this the watcher
           // would race a slow teardown and SIGKILL mid-cleanup.
-          isShuttingDown: () => !existsSync(apiPortPath()),
+          isShuttingDown: () => !dependencies.apiPortExists(),
           shutdownGraceMs: config.shutdownGraceMs,
           onUnresponsive: () => {
-            supervisorWarn(
+            dependencies.warn(
               `[supervisor] worker unresponsive after ${LIVENESS_CONSECUTIVE_FAILURES_TO_KILL} consecutive liveness probes; SIGKILL + respawn.`,
             );
             try {
@@ -96,12 +119,12 @@ async function maybeStartSupervisorLivenessWatcher(
             }
           },
           onFailure: (consecutive: number) => {
-            supervisorWarn(`[supervisor] liveness probe failed (${consecutive} in a row).`);
+            dependencies.warn(`[supervisor] liveness probe failed (${consecutive} in a row).`);
           },
         });
         return;
       }
-      await sleep(500);
+      await dependencies.wait(500);
     }
   })();
 

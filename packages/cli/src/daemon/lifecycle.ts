@@ -243,7 +243,11 @@ import {
   closeDaemonBackingStoresAfterTeardown,
   runProducerQuiescentTeardown,
 } from './teardown.js';
-import { closeDaemonHttpServer, createDaemonSseRegistry } from './http-lifecycle.js';
+import {
+  closeDaemonHttpServer,
+  createDaemonDetachedResponseRegistry,
+  createDaemonSseRegistry,
+} from './http-lifecycle.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -277,8 +281,8 @@ import {
   carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
 import {
-  coordinateDaemonShutdown,
   encodeForcedShutdownExitCode,
+  raceShutdownWithTimeout,
 } from './shutdown.js';
 import { resolveShutdownPolicy, type ShutdownPolicy } from './shutdown-policy.js';
 import { persistDaemonShutdownPolicy } from './shutdown-wait.js';
@@ -2827,6 +2831,7 @@ async function runDaemonInnerWithStartupOwnership(
   // collector) so the presence gate below can consult it; the /api/events
   // handler further down populates it.
   const sseClients = createDaemonSseRegistry();
+  const detachedHttpResponses = createDaemonDetachedResponseRegistry();
 
   // Metrics presence gate (#1066 Item 1): the metric COUNT getters are
   // full-store scans, so the collector skips them when nothing is consuming
@@ -3710,6 +3715,12 @@ async function runDaemonInnerWithStartupOwnership(
       // chain-RPC transport exhaustion (so rethrowing lifecycle publish routes
       // get the retryable status); else 500.
       respondWithDaemonError(res, err);
+    } finally {
+      // Any handler that returned after starting, but not ending, a response
+      // transferred ownership to an asynchronous producer (route-plugin SSE,
+      // built-in detached stream, etc.). Keep one server-wide shutdown owner
+      // while finite handlers that are still running continue to drain normally.
+      detachedHttpResponses.track(res);
     }
     // Note: the admission slot is released on the response's `close` event
     // (registered above), not in a finally here — see the comment at acquire.
@@ -3823,7 +3834,7 @@ async function runDaemonInnerWithStartupOwnership(
         // shutdown, where previously it was skipped.
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
-            closeHttpServer: () => closeDaemonHttpServer(server, sseClients),
+            closeHttpServer: () => closeDaemonHttpServer(server, detachedHttpResponses),
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,
@@ -3882,9 +3893,9 @@ async function runDaemonInnerWithStartupOwnership(
       detachDaemonLogTee();
       await daemonLogFileWriter.shutdown();
     });
-    const { forced } = await coordinateDaemonShutdown(
+    const { forced } = await raceShutdownWithTimeout(
       cleanup,
-      shutdownPolicy,
+      shutdownPolicy.hardTimeoutMs,
       log,
       cleanupStateFiles,
     );

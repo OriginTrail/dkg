@@ -52,8 +52,7 @@ import {
 import { migrateToBlueGreen, noteEdgeLegacyReleases } from './migration.js';
 import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
 import {
-  resolveDaemonShutdownWaitTimeoutMs,
-  waitForDaemonExit,
+  completeDaemonShutdown,
 } from './daemon/shutdown-wait.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
@@ -370,20 +369,16 @@ interface StopDaemonDependencies {
   readPid(): Promise<number | null>;
   isRunning(pid: number): boolean;
   kill(pid: number, signal: NodeJS.Signals): void;
-  resolveWaitTimeoutMs(pid: number): Promise<number>;
-  waitForExit(pid: number, timeoutMs: number): Promise<boolean>;
+  completeShutdown(pid: number): Promise<boolean>;
   log(message: string): void;
-  error(message: string): void;
 }
 
 const defaultStopDaemonDependencies: StopDaemonDependencies = {
   readPid,
   isRunning: isProcessRunning,
   kill: (pid, signal) => process.kill(pid, signal),
-  resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
-  waitForExit: (pid, timeoutMs) => waitForDaemonExit(pid, { timeoutMs }),
+  completeShutdown: (pid) => completeDaemonShutdown(pid),
   log: (message) => console.log(message),
-  error: (message) => console.error(message),
 };
 
 /** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
@@ -396,13 +391,7 @@ async function stopDaemonIfRunning(
   try { dependencies.kill(pid, 'SIGTERM'); } catch (err) {
     if (!hasErrorCode(err, 'ESRCH')) throw err;
   }
-  const timeoutMs = await dependencies.resolveWaitTimeoutMs(pid);
-  const stopped = await dependencies.waitForExit(pid, timeoutMs);
-  if (stopped) return true;
-  dependencies.error(
-    `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
-  );
-  return false;
+  return dependencies.completeShutdown(pid);
 }
 
 export {

@@ -99,26 +99,21 @@ import {
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
 import { resolveShutdownPolicy } from '../daemon/shutdown-policy.js';
 import {
-  resolveDaemonShutdownWaitTimeoutMs,
-  waitForDaemonExit,
+  completeDaemonShutdown,
 } from '../daemon/shutdown-wait.js';
 
 interface StopCommandDependencies {
   connectApi(): Promise<{ shutdown(): Promise<unknown> }>;
   readPid(): Promise<number | null>;
-  resolveWaitTimeoutMs(pid: number): Promise<number>;
-  waitForExit(pid: number, timeoutMs: number): Promise<boolean>;
+  completeShutdown(pid: number | null): Promise<boolean>;
   log(message: string): void;
-  error(message: string): void;
 }
 
 const defaultStopCommandDependencies: StopCommandDependencies = {
   connectApi: () => ApiClient.connect(),
   readPid,
-  resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
-  waitForExit: (pid, timeoutMs) => waitForDaemonExit(pid, { timeoutMs }),
+  completeShutdown: completeDaemonShutdown,
   log: (message) => console.log(message),
-  error: (message) => console.error(message),
 };
 
 /** Executable boundary for the user-facing `dkg stop` lifecycle. */
@@ -129,19 +124,7 @@ export async function executeStopCommand(
   const pid = await dependencies.readPid();
   await client.shutdown();
   dependencies.log('Daemon stopping...');
-  if (!pid) {
-    dependencies.log('Stopped.');
-    return true;
-  }
-  const timeoutMs = await dependencies.resolveWaitTimeoutMs(pid);
-  if (await dependencies.waitForExit(pid, timeoutMs)) {
-    dependencies.log('Stopped.');
-    return true;
-  }
-  dependencies.error(
-    `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
-  );
-  return false;
+  return dependencies.completeShutdown(pid);
 }
 
 export function registerLifecycleCommands(program: Command): void {

@@ -86,3 +86,37 @@ export async function waitForDaemonExit(
   }
   return true;
 }
+
+export interface CompleteDaemonShutdownDependencies {
+  resolveWaitTimeoutMs(pid: number): Promise<number>;
+  waitForExit(pid: number, timeoutMs: number): Promise<boolean>;
+  log(message: string): void;
+  error(message: string): void;
+}
+
+const defaultCompleteDaemonShutdownDependencies: CompleteDaemonShutdownDependencies = {
+  resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
+  waitForExit: (pid, timeoutMs) => waitForDaemonExit(pid, { timeoutMs }),
+  log: (message) => console.log(message),
+  error: (message) => console.error(message),
+};
+
+/** Canonical post-trigger wait and reporting path for every daemon stop command. */
+export async function completeDaemonShutdown(
+  pid: number | null,
+  dependencies: CompleteDaemonShutdownDependencies = defaultCompleteDaemonShutdownDependencies,
+): Promise<boolean> {
+  if (pid === null) {
+    dependencies.log('Stopped.');
+    return true;
+  }
+  const timeoutMs = await dependencies.resolveWaitTimeoutMs(pid);
+  if (await dependencies.waitForExit(pid, timeoutMs)) {
+    dependencies.log('Stopped.');
+    return true;
+  }
+  dependencies.error(
+    `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
+  );
+  return false;
+}

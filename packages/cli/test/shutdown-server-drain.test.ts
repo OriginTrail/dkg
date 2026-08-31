@@ -8,9 +8,10 @@ import {
 } from '../src/daemon/teardown.js';
 import {
   closeDaemonHttpServer,
-  createDaemonSseRegistry,
-  type DaemonSseRegistry,
+  createDaemonDetachedResponseRegistry,
+  type DaemonDetachedResponseRegistry,
 } from '../src/daemon/http-lifecycle.js';
+import type { RoutePlugin } from '../src/daemon/plugin-api.js';
 import {
   openEventStream,
   startLiveDaemon,
@@ -45,11 +46,11 @@ function requestBody(port: number): Promise<string> {
 function shutdownCleanup(
   server: Server,
   stopDependencies: () => void,
-  sseClients: DaemonSseRegistry = createDaemonSseRegistry(),
+  detachedResponses: DaemonDetachedResponseRegistry = createDaemonDetachedResponseRegistry(),
 ): Promise<void> {
   const noop = async () => undefined;
   return runProducerQuiescentTeardown(buildProducerQuiescentTeardownSteps({
-    closeHttpServer: () => closeDaemonHttpServer(server, sseClients),
+    closeHttpServer: () => closeDaemonHttpServer(server, detachedResponses),
     closeLocalLlm: noop,
     drainCatchupJobs: async () => undefined,
     flushTelemetry: noop,
@@ -92,20 +93,28 @@ describe('HTTP callback draining during bounded shutdown', () => {
     }
   }, 90_000);
 
-  it('ends tracked SSE streams before draining and reaches dependency cleanup', async () => {
-    const sseClients = createDaemonSseRegistry();
+  it('ends a plugin-provided SSE stream and reaches dependency cleanup', async () => {
+    const detachedResponses = createDaemonDetachedResponseRegistry();
     let markConnected!: () => void;
     const connected = new Promise<void>((resolve) => { markConnected = resolve; });
     const downstreamSteps: string[] = [];
-    const server = createServer((request, response) => {
-      response.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        Connection: 'keep-alive',
-      });
-      sseClients.add(response);
-      request.on('close', () => sseClients.delete(response));
-      response.write('event: connected\ndata: {}\n\n');
-      markConnected();
+    const plugin: RoutePlugin = {
+      name: 'shutdown-stream',
+      handle({ res }) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          Connection: 'keep-alive',
+        });
+        res.write('event: connected\ndata: {}\n\n');
+      },
+    };
+    const server = createServer(async (request, response) => {
+      try {
+        await plugin.handle({ req: request, res: response } as any);
+      } finally {
+        detachedResponses.track(response);
+        markConnected();
+      }
     });
     const port = await listen(server);
     let markClosed!: () => void;
@@ -116,11 +125,11 @@ describe('HTTP callback draining during bounded shutdown', () => {
     });
     request.once('error', markClosed);
     await connected;
-    expect(sseClients.size).toBe(1);
+    expect(detachedResponses.size).toBe(1);
 
     const noop = async () => undefined;
     const cleanup = runProducerQuiescentTeardown(buildProducerQuiescentTeardownSteps({
-      closeHttpServer: () => closeDaemonHttpServer(server, sseClients),
+      closeHttpServer: () => closeDaemonHttpServer(server, detachedResponses),
       closeLocalLlm: noop,
       drainCatchupJobs: async () => undefined,
       flushTelemetry: noop,
@@ -135,7 +144,7 @@ describe('HTTP callback draining during bounded shutdown', () => {
     await expect(raceShutdownWithTimeout(cleanup, 250, () => undefined))
       .resolves.toEqual({ forced: false });
     await closed;
-    expect(sseClients.size).toBe(0);
+    expect(detachedResponses.size).toBe(0);
     expect(downstreamSteps).toEqual(['agent', 'telemetry']);
   });
 

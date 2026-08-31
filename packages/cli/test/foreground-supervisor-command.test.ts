@@ -7,11 +7,47 @@ import { promisify } from 'node:util';
 
 import { describe, expect, it } from 'vitest';
 
-import { runForegroundWorkerIteration } from '../src/cli-supervisor.js';
+import {
+  maybeStartSupervisorLivenessWatcher,
+  runForegroundWorkerIteration,
+} from '../src/cli-supervisor.js';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import { resolveLivenessShutdownGraceMs } from '../src/daemon/supervisor-liveness.js';
 
 const execFileAsync = promisify(execFile);
 
 describe('foreground supervisor restart command', () => {
+  it('hands the 300s worker shutdown policy to the real watcher constructor as 306s', async () => {
+    let observedGraceMs: number | undefined;
+    let stopCalls = 0;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const shutdownGraceMs = resolveLivenessShutdownGraceMs(
+      resolveShutdownPolicy('300000').hardTimeoutMs,
+    );
+    const stop = await maybeStartSupervisorLivenessWatcher(
+      { kill: () => true },
+      { enabled: true, shutdownGraceMs },
+      {
+        readPort: async () => 7878,
+        loadApiHost: async () => '127.0.0.1',
+        apiPortExists: () => true,
+        startWatcher: (options) => {
+          observedGraceMs = options.shutdownGraceMs;
+          markStarted();
+          return { stop: () => { stopCalls += 1; } };
+        },
+        wait: async () => {},
+        warn: () => {},
+      },
+    );
+
+    await started;
+    expect(observedGraceMs).toBe(306_000);
+    stop();
+    expect(stopCalls).toBe(1);
+  });
+
   it('passes the startup-captured shutdown policy to the real watcher boundary', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dkg-foreground-shutdown-policy-'));
     const savedDkgHome = process.env.DKG_HOME;

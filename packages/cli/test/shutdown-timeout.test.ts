@@ -7,7 +7,6 @@ import {
   MIN_SHUTDOWN_HARD_TIMEOUT_MS,
   MAX_SHUTDOWN_HARD_TIMEOUT_MS,
   decodeForcedExitCode,
-  coordinateDaemonShutdown,
   encodeForcedShutdownExitCode,
   isForcedShutdownExitCode,
   raceShutdownWithTimeout,
@@ -64,20 +63,6 @@ describe('resolveShutdownPolicy', () => {
     );
   });
 
-  it('forwards the startup-resolved policy at the executable shutdown race boundary', async () => {
-    const observedTimeouts: number[] = [];
-    await coordinateDaemonShutdown(
-      Promise.resolve(),
-      resolveShutdownPolicy('60000'),
-      () => {},
-      undefined,
-      async (_cleanup, hardTimeoutMs) => {
-        observedTimeouts.push(hardTimeoutMs);
-        return { forced: false };
-      },
-    );
-    expect(observedTimeouts).toEqual([60_000]);
-  });
 });
 
 describe('isForcedShutdownExitCode', () => {

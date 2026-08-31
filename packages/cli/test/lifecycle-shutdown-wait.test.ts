@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { stopDaemonIfRunning } from '../src/cli-helpers.js';
 import { executeStopCommand } from '../src/commands/lifecycle.js';
 import {
+  completeDaemonShutdown,
   persistDaemonShutdownPolicy,
   resolveDaemonShutdownWaitTimeoutMs,
   waitForDaemonExit,
@@ -48,10 +49,13 @@ describe('lifecycle command shutdown waits', () => {
           shutdown: async () => { shutdownRequests += 1; },
         }),
         readPid: async () => process.pid,
-        resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
-        waitForExit: simulation.wait,
+        completeShutdown: (pid) => completeDaemonShutdown(pid, {
+          resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
+          waitForExit: simulation.wait,
+          log: (message) => logs.push(message),
+          error: (message) => logs.push(message),
+        }),
         log: (message) => logs.push(message),
-        error: (message) => logs.push(message),
       })).resolves.toBe(true);
     } finally {
       if (savedDkgHome === undefined) delete process.env.DKG_HOME;
@@ -73,10 +77,13 @@ describe('lifecycle command shutdown waits', () => {
       readPid: async () => 42,
       isRunning: () => true,
       kill: (_pid, signal) => { signals.push(signal); },
-      resolveWaitTimeoutMs: async () => 61_000,
-      waitForExit: simulation.wait,
+      completeShutdown: (pid) => completeDaemonShutdown(pid, {
+        resolveWaitTimeoutMs: async () => 61_000,
+        waitForExit: simulation.wait,
+        log: () => {},
+        error: () => {},
+      }),
       log: () => {},
-      error: () => {},
     })).resolves.toBe(true);
 
     expect(signals).toEqual(['SIGTERM']);
@@ -90,10 +97,13 @@ describe('lifecycle command shutdown waits', () => {
       readPid: async () => 42,
       isRunning: () => true,
       kill: () => {},
-      resolveWaitTimeoutMs: async () => 1_250,
-      waitForExit: simulation.wait,
+      completeShutdown: (pid) => completeDaemonShutdown(pid, {
+        resolveWaitTimeoutMs: async () => 1_250,
+        waitForExit: simulation.wait,
+        log: () => {},
+        error: (message) => errors.push(message),
+      }),
       log: () => {},
-      error: (message) => errors.push(message),
     })).resolves.toBe(false);
 
     expect(simulation.elapsed()).toBe(1_250);
