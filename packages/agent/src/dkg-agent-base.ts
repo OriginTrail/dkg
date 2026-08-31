@@ -1144,17 +1144,6 @@ export class DKGAgentBase {
   protected randomSamplingDisabledReason: RandomSamplingDisabledReason = 'not_started';
   protected randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingBindRetryInFlight = false;
-  /**
-   * Process-local, chain-attested reverse bindings used only by proof-time
-   * exact repair. Positive entries avoid repeating local graph discovery;
-   * short-lived negative entries keep an unresolved challenge from launching
-   * the same store scan on every prover tick.
-   */
-  protected readonly randomSamplingContextGraphResolutionCache = new Map<string, {
-    localContextGraphId?: string;
-    requiresSubscription?: boolean;
-    expiresAt: number;
-  }>();
   protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   protected storageACKRegistrationRetryInFlight = false;
   // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating

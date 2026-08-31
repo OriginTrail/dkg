@@ -1632,7 +1632,10 @@ export class MockChainAdapter implements ChainAdapter {
    * (`0`=public, `1`=curated). Unknown ids yield `0` to match the
    * Solidity default-zero mapping.
    */
-  async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
+  async getContextGraphAccessPolicy(
+    contextGraphId: bigint,
+    _options: ChainReadOptions = {},
+  ): Promise<number> {
     const cg = this.contextGraphs.get(contextGraphId);
     if (!cg) return 0;
     const ap = (cg as { accessPolicy?: number }).accessPolicy;
@@ -1648,7 +1651,10 @@ export class MockChainAdapter implements ChainAdapter {
    * proof callers require before trusting {@link getContextGraphAccessPolicy}
    * (which is permissively default-`0` for unknown ids).
    */
-  async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
+  async isContextGraphActiveOnChain(
+    contextGraphId: bigint,
+    _options: ChainReadOptions = {},
+  ): Promise<boolean> {
     return this.contextGraphs.has(contextGraphId);
   }
 
