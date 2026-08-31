@@ -412,6 +412,19 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             announcement.catalogHeadObjectDigest,
             error,
           );
+          const failure = this.rfc64PublicCatalogReconciliationFailuresV1.read(
+            announcement.catalogHeadObjectDigest,
+          );
+          this.log.warn(
+            ctx,
+            `RFC-64 catalog reconciliation failed head=${announcement.catalogHeadObjectDigest}`
+              + ` error=${failure?.errorName ?? 'UnknownError'}`
+              + ` code=${failure?.errorCode ?? 'none'}`
+              + ` cause=${failure?.causeCode ?? 'none'}`
+              + ` detail=${error instanceof Rfc64PublicCatalogNativeReceiverErrorV1
+                ? error.message
+                : 'unavailable'}`,
+          );
         },
       },
     });
