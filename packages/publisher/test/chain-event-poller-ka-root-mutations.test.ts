@@ -697,6 +697,46 @@ describe('ChainEventPoller — pollNow', () => {
     await expect(poller.pollNow()).rejects.toThrow(/stopped/);
   });
 
+  it('a manual poll waiting behind an INTERVAL scan is cancelled by a stop() that begins mid-wait (review r13)', async () => {
+    // The pre-wait stopping check is stale across the suspension: a pollNow()
+    // queued behind a held-open startup scan must not start fresh adapter
+    // work once stop() has begun — the drain would otherwise wait on a scan
+    // that began AFTER shutdown.
+    let head = 50_000;
+    let scansStarted = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => head,
+      listenForEvents: async function* (): AsyncIterable<ChainEvent> {
+        scansStarted += 1;
+        if (scansStarted === 1) await gate; // hold the STARTUP scan open
+        for (const evt of [] as ChainEvent[]) yield evt;
+      },
+    } as unknown as ChainAdapter;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      clock: () => 0,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+
+    await poller.start();                 // startup scan begins, blocked on the gate
+    await new Promise((r) => setTimeout(r, 10));
+    const manual = poller.pollNow();      // waits behind the startup scan
+    head = 50_010;                        // fresh work: an uncancelled manual
+                                          // poll would be adapter-visible
+    await new Promise((r) => setTimeout(r, 10));
+    const stopped = poller.stop();        // shutdown begins while manual waits
+    release();
+    await Promise.allSettled([manual, stopped]);
+
+    // Only the scan that was active at shutdown ever started.
+    expect(scansStarted).toBe(1);
+  });
+
   it('a whole-poll rejection reaches its own caller only; the queue recovers (review r7)', async () => {
     // Serialization promises each manual caller its OWN scan's outcome. The
     // stored chain pre-swallows every run (`run.catch(() => {})`) precisely so

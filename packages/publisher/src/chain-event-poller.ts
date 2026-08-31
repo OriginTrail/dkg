@@ -332,6 +332,12 @@ export class ChainEventPoller {
     // call can begin after stop() has resolved.
     if (this.stopping) return;
     await this.waitForCurrentPoll();
+    // Re-check after the await (review r13): stop() can begin while this
+    // queued manual poll waits behind an interval scan. The guard above is
+    // STALE across the suspension — proceeding would start fresh RPC work
+    // during the drain, violating the documented cancel semantics and letting
+    // stop() hang on a scan that began after shutdown.
+    if (this.stopping) return;
     this.laneRunner.clearActiveLaneSchedules();
     const pending = this.laneRunner.poll();
     // Registered as the in-flight poll so a concurrent interval tick skips
