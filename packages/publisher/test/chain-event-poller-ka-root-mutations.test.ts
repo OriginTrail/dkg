@@ -724,6 +724,76 @@ describe('ChainEventPoller — pollNow', () => {
     expect(runnerCalls).toBe(2);
   });
 
+  it('start-stop-start re-arms pollNow: the stopping latch is not terminal (review r10)', async () => {
+    // The public lifecycle explicitly supports restart; a latch that never
+    // resets would leave the restarted poller with a permanently refusing
+    // manual API -- contradictory state the review named.
+    const { adapter, filters, setHead } = makeChain(50_000);
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      clock: () => 0,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    await poller.stop();
+    await expect(poller.pollNow()).rejects.toThrow(/stopped/);
+
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    setHead(50_010);
+    await expect(poller.pollNow()).resolves.toBeUndefined();
+    const last = filters[filters.length - 1];
+    expect(last.fromBlock).toBe(50_001);
+    expect(last.toBlock).toBe(50_010);
+    await poller.stop();
+  });
+
+  it('a start() issued while stop() is still draining serializes behind it (review r10)', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let scans = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => 50_000,
+      listenForEvents: async function* (): AsyncIterable<ChainEvent> {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        scans += 1;
+        if (scans === 1) await gate; // hold the pre-stop scan open
+        active -= 1;
+        for (const evt of [] as ChainEvent[]) yield evt;
+      },
+    } as unknown as ChainAdapter;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      clock: () => 0,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+
+    const p1 = poller.pollNow();          // scanning, blocked on the gate
+    await new Promise((r) => setTimeout(r, 10));
+    const stopped = poller.stop();        // drains p1
+    const restarted = poller.start();     // must WAIT for the drain, not re-arm over it
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    await Promise.allSettled([p1, stopped, restarted]);
+    await poller.waitForCurrentPoll();
+
+    // Never two scans in flight -- a start() that jumped the drain would have
+    // issued its immediate first poll while p1 was still gated.
+    expect(maxActive).toBe(1);
+    // And the restart is REAL: the manual API works again.
+    await expect(poller.pollNow()).resolves.toBeUndefined();
+    await poller.stop();
+  });
+
   it("passing the removed 'onCollectionUpdated' key warns loudly and enables no lane (review r3)", async () => {
     // A JavaScript consumer of the old key would otherwise fail silently. The
     // observable behaviour is unchanged from before the rename — the old lane

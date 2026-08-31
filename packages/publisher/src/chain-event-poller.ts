@@ -194,6 +194,13 @@ export class ChainEventPoller {
    */
   private stopping = false;
 
+  /**
+   * The in-flight `stop()` drain, when one is running. `start()` serializes
+   * behind it so a restart cannot re-arm scans the drain is still awaiting
+   * (review r10).
+   */
+  private stopPromise: Promise<void> | null = null;
+
   /** Max blocks to scan per poll — stays within typical RPC range limits. */
   private static readonly MAX_RANGE = 9_000;
 
@@ -233,7 +240,18 @@ export class ChainEventPoller {
 
   async start(): Promise<void> {
     if (this.running) return;
+    // Serialize a restart behind an unfinished stop() (review r10): without
+    // this await, a start() issued mid-drain re-arms the interval and
+    // overwrites `inFlightPoll` while the drain still awaits the old scan --
+    // exactly the overlapping-scan state stop() exists to prevent.
+    if (this.stopPromise) {
+      try { await this.stopPromise; } catch { /* stop() reports its own failures */ }
+    }
+    if (this.running) return; // a concurrent start won the race during the await
     this.running = true;
+    // stop() is NOT terminal: the public lifecycle supports start-stop-start
+    // reuse, so the manual-poll latch re-arms with the poller (review r10).
+    this.stopping = false;
 
     const ctx = createOperationContext('system');
 
@@ -347,6 +365,16 @@ export class ChainEventPoller {
    * void; they just lose the in-flight-await guarantee.
    */
   async stop(): Promise<void> {
+    const drain = this.drainAndStop();
+    this.stopPromise = drain;
+    try {
+      await drain;
+    } finally {
+      if (this.stopPromise === drain) this.stopPromise = null;
+    }
+  }
+
+  private async drainAndStop(): Promise<void> {
     this.stopping = true;
     if (this.timer) {
       clearInterval(this.timer);
