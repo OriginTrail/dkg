@@ -214,6 +214,24 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     expect(existsSync(intentFile)).toBe(false);
   }, 60_000);
 
+  it('stops the drain BEFORE closing the file it writes to', async () => {
+    // The worker is the store's only writer. Closing the file under a running
+    // drain would surface as a rejected write during shutdown — or, worse, as a
+    // half-applied transition — so the ordering is enforced inside
+    // `closeVmReverifyIntentStore` rather than left to its callers.
+    delete process.env[INTENT_ENV];
+    const order: string[] = [];
+    const { internals } = await boot();
+    internals.vmReverifyWorker = { stop: async () => { order.push('worker-stop'); } };
+    internals.vmReverifyIntents = { close: async () => { order.push('store-close'); } };
+
+    await internals.closeVmReverifyIntentStore();
+
+    expect(order).toEqual(['worker-stop', 'store-close']);
+    expect(internals.vmReverifyWorker).toBeUndefined();
+    expect(internals.vmReverifyIntents).toBeUndefined();
+  }, 60_000);
+
   it('an INJECTED store is honoured and is never closed by the agent that borrowed it', async () => {
     delete process.env[INTENT_ENV];
     let closed = 0;

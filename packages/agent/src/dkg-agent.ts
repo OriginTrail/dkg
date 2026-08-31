@@ -2186,9 +2186,10 @@ export class DKGAgent extends DKGAgentBase {
       await this.syncVerifyWorker.close();
       this.syncVerifyWorker = undefined;
     }
-    // W2 (#2435): the re-verify worker is stopped above, so its intent file has
-    // no writer left. Close it before the finalization inbox — it is the newer,
-    // narrower lifetime and nothing else depends on it.
+    // W2 (#2435). `closeVmReverifyIntentStore` stops the drain before it closes
+    // the file, so the store never outlives its only writer. Closed before the
+    // finalization inbox: it is the newer, narrower lifetime and nothing else
+    // depends on it.
     let reverifyCloseFailed = false;
     let reverifyCloseFailure: unknown;
     try {

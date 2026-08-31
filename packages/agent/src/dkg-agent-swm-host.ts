@@ -3357,13 +3357,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
 
     if (resolved.kind !== 'graph') {
-      // Not held, or held as a pre-V2 legacy row. Legacy holdings are a stated
-      // non-goal: they have no graph-scoped identity for the exact fetch to
-      // address, and durable sync plus the ordinal sweep still cover them.
-      this.log.info(
-        ctx,
-        `vm-reverify ingest skipped ual=${ual}: ${resolved.kind === 'legacy' ? 'legacy holding' : 'not held'}`,
-      );
+      // Not held here — which deliberately also covers a pre-V2 LEGACY holding.
+      // Legacy rows are a stated non-goal (no graph-scoped identity for the
+      // exact fetch to address; durable sync and the ordinal sweep still cover
+      // them), so this caller passes no legacy reader and a legacy marker
+      // resolves as `absent` rather than as its own case. Reporting a separate
+      // "legacy" outcome here would be a branch that can never be taken.
+      this.log.info(ctx, `vm-reverify ingest skipped ual=${ual}: not held here`);
       return;
     }
 

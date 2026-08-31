@@ -1876,6 +1876,13 @@ export class DKGAgentBase {
    * asserting on it across a restart), so it is only detached, never closed.
    */
   protected async closeVmReverifyIntentStore(): Promise<void> {
+    // Stop the drain FIRST, and here rather than at the call site: the worker
+    // is the store's only writer, so making the teardown order a property of
+    // this method means no future caller can get it wrong, and no comment has
+    // to be trusted to keep it right.
+    const worker = this.vmReverifyWorker;
+    this.vmReverifyWorker = undefined;
+    await worker?.stop();
     const store = this.vmReverifyIntents;
     this.vmReverifyIntents = undefined;
     if (!store || store === this.config.vmReverifyIntentStore) return;
