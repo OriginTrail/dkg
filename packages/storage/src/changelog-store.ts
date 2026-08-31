@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
-  deleteByPatternWithoutCount,
-  findTripleStoreCapability,
-} from './triple-store.js';
+  loadSortedGraphCatalog, type SortedGraphCatalog, type SortedGraphSetSource,
+} from './graph-set-index-store.js';
+import { SortedGraphCatalogProjection } from './sorted-graph-catalog-projection.js';
+import { deleteByPatternWithoutCount, findTripleStoreCapability } from './triple-store.js';
 import type {
   Quad,
   QueryOptions,
@@ -210,7 +211,7 @@ export interface ChangelogStoreOptions {
  * Write-path append-only change log. See the class-level docstring for the
  * crash-consistency and single-writer arguments.
  */
-export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
+export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, SortedGraphSetSource {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -221,6 +222,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
   private readonly eraGuard?: ChangelogEraGuard;
+  private readonly visibleSortedGraphs: SortedGraphCatalogProjection;
 
   /** Last durably committed seq (0 = none). Next seq is `seq + 1`. */
   private seq = 0;
@@ -246,6 +248,9 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
     this.reserved = reserved;
+    this.visibleSortedGraphs = new SortedGraphCatalogProjection(
+      (graph) => !this.reserved.has(graph),
+    );
     this.onAppend = options.onAppend;
     this.eraGuard = options.eraGuard;
   }
@@ -528,6 +533,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
   async listGraphs(options?: QueryOptions): Promise<string[]> {
     const graphs = await this.inner.listGraphs(options);
     return graphs.filter((g) => !this.isReservedGraph(g));
+  }
+
+  async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
+    // Explicitly project here because this boundary owns reserved-graph visibility.
+    return this.visibleSortedGraphs.project(await loadSortedGraphCatalog(this.inner, options));
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {

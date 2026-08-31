@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   asGraphWriteRevisionSource,
+  loadSortedGraphCatalog,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
@@ -39,10 +40,10 @@ import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
+import { compareCodePoint } from '@origintrail-official/dkg-core';
 import { isLegacySyncGraphCandidateV1 } from '../legacy-sync-graph-candidate.js';
-import { compareCodePoint } from '../code-point-order.js';
 import {
-  createGraphMembershipSnapshot,
+  createGraphMembershipSnapshotFromSortedCatalog,
   type GraphMembershipSnapshot,
 } from '../graph-membership-snapshot.js';
 
@@ -313,15 +314,18 @@ export function createResponderGraphListMemo(
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
-      const load = store.listGraphs(syncResponderStoreOptions(undefined, 'sync.responder.listGraphs'))
+      const graphOptions = syncResponderStoreOptions(undefined, 'sync.responder.listGraphs');
+      const load = loadSortedGraphCatalog(store, graphOptions)
         .then((graphs) => {
           // Content writes advance the store revision even when named-graph
           // membership is unchanged. Reuse the immutable index in that case:
           // enumeration stays freshness-safe, while sorting, Set construction,
           // and every downstream membership index remain stable.
-          const snapshot = lastSnapshot?.matches(graphs)
+          const snapshot = (
+            lastSnapshot?.graphs === graphs || lastSnapshot?.matches(graphs)
+          )
             ? lastSnapshot
-            : createGraphMembershipSnapshot(graphs);
+            : createGraphMembershipSnapshotFromSortedCatalog(graphs);
           lastSnapshot = snapshot;
           cached = {
             value: snapshot,

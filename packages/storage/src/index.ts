@@ -128,9 +128,12 @@ export {
   DEFAULT_GRAPH_SET_REVALIDATE_MS,
   DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS,
   GraphSetIndexStore,
+  loadSortedGraphCatalog,
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
   type GraphSetMutationSource,
+  type SortedGraphCatalog,
+  type SortedGraphSetSource,
 } from './graph-set-index-store.js';
 export {
   CHANGELOG_GRAPH,
