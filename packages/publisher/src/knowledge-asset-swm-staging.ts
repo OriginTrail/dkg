@@ -18,6 +18,7 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
+import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 export interface StageKnowledgeAssetSharedWorkingMemoryInputV1 {
@@ -44,6 +45,8 @@ export interface StagedKnowledgeAssetSharedWorkingMemoryV1 {
   readonly subGraphName?: string;
   readonly swmGraph: string;
   readonly tripleCount: number;
+  /** Exact immutable public operation snapshot consumed by this reference. */
+  readonly publicQuadsDigest: string;
 }
 
 interface StageKnowledgeAssetSharedWorkingMemoryStorageInputV1
@@ -146,6 +149,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
       swmGraph,
       tripleCount: publicQuads.length,
+      publicQuadsDigest: workspacePublicQuadsDigest(publicQuads),
     });
   });
 }

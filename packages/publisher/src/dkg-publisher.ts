@@ -4542,6 +4542,9 @@ export class DKGPublisher implements Publisher {
         : { publicSnapshotStore: this.publicSnapshotStore }),
     });
     const quads = snapshot.quads.filter((quad) => !isSwmMerkleExcludedQuad(quad));
+    if (snapshot.publicQuadsDigest !== stagedOperation.publicQuadsDigest) {
+      throw new Error('Staged SWM operation snapshot differs from its immutable reference');
+    }
     if (quads.length !== stagedOperation.tripleCount) {
       throw new Error('Staged SWM operation triple count differs from its filtered snapshot');
     }

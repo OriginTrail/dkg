@@ -162,6 +162,46 @@ describe('knowledge-asset SWM staging', () => {
     expect(consumed[0]).toEqual(consumed[1]);
     expect(consumed[0]).toEqual([{ ...content, graph: '' }]);
   });
+
+  it('rejects an older staged reference when its operation id is restaged with equal-count RDF', async () => {
+    const store = new OxigraphStore();
+    const publisher = new DKGPublisher({
+      store,
+      chain: { chainId: 'none' } as never,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+    const first = await publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      shareOperationId: 'reused-operation',
+      quads: A,
+      privateTripleCount: 0,
+    });
+    await publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      shareOperationId: 'reused-operation',
+      quads: B,
+      privateTripleCount: 0,
+    });
+    publisher.update = (async () => {
+      throw new Error('stale reference must fail before publishing');
+    }) as never;
+
+    await expect(publisher.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(7n, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      privateQuads: [],
+      contentScopeVersion: 2,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      publicTripleCount: A.length,
+      privateTripleCount: 0,
+      stagedOperation: first,
+    })).rejects.toThrow(/immutable reference/u);
+  });
 });
 
 async function readGraphObjects(store: OxigraphStore, graph: string): Promise<string[]> {
