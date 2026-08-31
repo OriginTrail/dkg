@@ -10,7 +10,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   decodeKnowledgeAssetRootMutationEvent,
-  type KnowledgeAssetRootMutationEventV1,
   type OnKnowledgeAssetRootMutated,
 } from './ka-root-mutation-decode.js';
 import type { PublishHandler } from './publish-handler.js';
