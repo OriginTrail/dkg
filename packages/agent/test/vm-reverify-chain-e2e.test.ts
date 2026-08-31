@@ -41,6 +41,33 @@
  *
  * Ports: self-spawned Hardhat on 8555 (the shared agent-lane node is 9547;
  * 8547–8554 are taken by other self-spawning agent e2e files).
+ *
+ * KNOWN INSTABILITY ON WINDOWS DEV BOXES — read before diagnosing a failure.
+ *
+ * On Windows this file (and other agent e2es that start real nodes) can abort
+ * its vitest worker instead of failing a test: "Worker exited unexpectedly",
+ * with either NO test output at all (`tests 0ms`, aborted during `beforeAll`
+ * agent startup) or a partial run (3 of 4 pass, then the worker exits during
+ * SC-2's restart). Measured here at roughly one clean run in seven.
+ *
+ * It is NOT specific to this file and NOT caused by the code under test:
+ * `rfc49-catalog-parity.e2e.test.ts`, which this file has never touched, aborts
+ * identically on a loaded box and passes on a quiet one. It matches this
+ * repository's known Windows + vitest-forks + oxigraph-native-worker pattern.
+ * CI runs Linux, where these suites have been stable.
+ *
+ * Two mitigations are in place and BOTH are known insufficient on their own:
+ * `afterAll` removes the data directories this file creates (a test that
+ * litters eventually lies about something else), and a settle after
+ * `host.stop()` lets the persistent store release its handles before the
+ * restart re-opens the same directory. Measured effect of the settle: green on
+ * the next attempt, then 0 of 3.
+ *
+ * WHAT THIS MEANS FOR READING A RESULT. The aborts are worker-exit-shaped,
+ * never false-pass-shaped, so a run whose assertions actually EXECUTED is
+ * trustworthy however many sibling runs crashed. Gate on "the run reached the
+ * rows" — a count of reported tests — not on the exit code, because an abort
+ * also exits non-zero and would otherwise fabricate a passing mutant kill.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
