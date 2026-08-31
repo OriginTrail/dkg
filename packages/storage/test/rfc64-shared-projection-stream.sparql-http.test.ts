@@ -65,7 +65,9 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     const forged = await createTripleStore({
       backend: 'sparql-http',
       options: {
-        queryEndpoint: 'http://forged.invalid/query',
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+        managedByDkg: true,
         managedOxigraph: true,
         managedOxigraphRuntimeCapability: {
           kind: 'dkg-managed-oxigraph-runtime-v1',
@@ -74,6 +76,36 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     });
 
     expect(forged.rfc64SharedProjectionStreamV1).toBeUndefined();
+    expect(() => new SyncSharedProjectionStoreV1(forged)).toThrow(
+      'triple store has no certified RFC-64 shared-projection stream capability',
+    );
+
+    const trustedConfig = createManagedOxigraphRuntimeStoreConfigV1({
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+        managedByDkg: true,
+      },
+    });
+    const trusted = await createTripleStore(trustedConfig);
+    const spreadCopy = await createTripleStore({ ...trustedConfig });
+    const jsonCopy = await createTripleStore(JSON.parse(
+      JSON.stringify(trustedConfig),
+    ) as { backend: string; options: Record<string, unknown> });
+    expect(() => new SyncSharedProjectionStoreV1(trusted)).not.toThrow();
+    for (const copied of [spreadCopy, jsonCopy]) {
+      expect(() => new SyncSharedProjectionStoreV1(copied)).toThrow(
+        'triple store has no certified RFC-64 shared-projection stream capability',
+      );
+    }
+    await Promise.all([
+      forged.close(),
+      trusted.close(),
+      spreadCopy.close(),
+      jsonCopy.close(),
+    ]);
+
     const invalidOptions = [
       [{
         queryEndpoint: 'https://remote.example/query',
