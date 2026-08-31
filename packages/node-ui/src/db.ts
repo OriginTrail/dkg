@@ -24,6 +24,7 @@ import { RoutineLogRetention } from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
+  SqliteLegacyContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
 export const SCHEMA_VERSION = 34;

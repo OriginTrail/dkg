@@ -13,6 +13,7 @@ import {
   registryCursorStores,
   seam,
 } from './context-graph-registry-scan-test-support.js';
+import { ContextGraphRegistryTipScanCursor } from '../src/context-graph-registry-scan-cursor.js';
 
 const DEPLOYMENT_ID = 'evm:31337:hub=0x0000000000000000000000000000000000000001';
 const LEGACY_KEY: ContextGraphRegistryScanCursorKey = {
@@ -20,6 +21,12 @@ const LEGACY_KEY: ContextGraphRegistryScanCursorKey = {
   deploymentId: DEPLOYMENT_ID,
   registryAddress: REGISTRY,
 };
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 class JsonLegacyRegistryScanCursorStore implements ContextGraphRegistryScanCursorStore {
   readonly values = new Map<string, number>();
@@ -46,6 +53,38 @@ class KindedJsonLegacyRegistryScanCursorStore extends JsonLegacyRegistryScanCurs
 }
 
 describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
+  it('serializes overlapping strict saves and leaves durable progress at the newest target', async () => {
+    const olderWrite = deferred();
+    const newerWrite = deferred();
+    const saves: number[] = [];
+    let durable: number | undefined;
+    const cursor = new ContextGraphRegistryTipScanCursor({
+      chainId: LEGACY_KEY.chainId,
+      deploymentId: LEGACY_KEY.deploymentId,
+      store: {
+        load: async () => durable,
+        save: async (_key, nextBlock) => {
+          saves.push(nextBlock);
+          await (nextBlock === 100 ? olderWrite.promise : newerWrite.promise);
+          durable = nextBlock;
+        },
+      },
+    });
+
+    const older = cursor.saveStrictWatermark(REGISTRY, 100);
+    await vi.waitFor(() => expect(saves).toEqual([100]));
+    const newer = cursor.saveStrictWatermark(REGISTRY, 200);
+    newerWrite.resolve();
+    await Promise.resolve();
+    expect(saves).toEqual([100]);
+
+    olderWrite.resolve();
+    await Promise.all([older, newer]);
+    expect(saves).toEqual([100, 200]);
+    expect(durable).toBe(200);
+    expect(cursor.getCachedWatermark(REGISTRY)).toBe(200);
+  });
+
   it('exposes only the load policy owned by each cursor role', () => {
     const { adapter } = makeAdapter(makeRegistry(), 10_000);
     const historical = (adapter as any).contextGraphRegistryScanCursor;
@@ -255,6 +294,13 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
     expect(historical.values.get(JSON.stringify(LEGACY_KEY))).toBe(2_000);
     expect((adapter as any).contextGraphRegistryTipScanCursor.getCachedWatermark(REGISTRY))
       .toBe(10_001);
+  });
+
+  it('rejects ambiguous legacy and role-aware cursor-store configuration', () => {
+    expect(() => makeAdapter(makeRegistry(), 10_000, {
+      contextGraphRegistryScanCursorStore: new JsonLegacyRegistryScanCursorStore(),
+      contextGraphRegistryRoleAwareScanCursorStore: new MemoryRegistryScanCursorStore(),
+    })).toThrow(/only one registry scan cursor store/u);
   });
 
   it('retains process-local tip progress across unrelated preflight invalidation', async () => {

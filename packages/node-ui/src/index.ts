@@ -18,6 +18,7 @@ export {
 export {
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
+  SqliteLegacyContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 export type {
   DashboardDBOptions,

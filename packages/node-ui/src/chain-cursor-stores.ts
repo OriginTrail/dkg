@@ -1,12 +1,14 @@
 import Database from 'better-sqlite3';
 import type { DashboardDB } from './db.js';
 
-type RegistryScanCursorKey = {
+type LegacyRegistryScanCursorKey = {
   chainId: string;
   deploymentId: string;
   registryAddress: string;
-  /** Missing only for the original historical-store compatibility surface. */
-  cursorKind?: 'historical' | 'tip';
+};
+
+type RegistryScanCursorKey = LegacyRegistryScanCursorKey & {
+  cursorKind: 'historical' | 'tip';
 };
 
 function parsePositiveSafeInteger(value: number | string | undefined): number | undefined {
@@ -112,13 +114,12 @@ export class SqliteContextGraphRegistryScanCursorStore {
   }
 
   async load(key: RegistryScanCursorKey): Promise<number | undefined> {
-    const cursorKind = this.cursorKind(key);
     const current = this.cursors.load(
       this.scope(key),
       this.registryKey(key),
-      cursorKind === 'tip',
+      key.cursorKind === 'tip',
     );
-    if (current !== undefined || cursorKind === 'tip') return current;
+    if (current !== undefined || key.cursorKind === 'tip') return current;
     return this.cursors.load(this.scope(key), this.legacyRegistryKey(key))
       ?? this.legacyCursors.load(this.legacyKey(key));
   }
@@ -132,11 +133,7 @@ export class SqliteContextGraphRegistryScanCursorStore {
   }
 
   private registryKey(key: RegistryScanCursorKey): string {
-    return `${this.cursorKind(key)}:${key.registryAddress.toLowerCase()}`;
-  }
-
-  private cursorKind(key: RegistryScanCursorKey): 'historical' | 'tip' {
-    return key.cursorKind ?? 'historical';
+    return `${key.cursorKind}:${key.registryAddress.toLowerCase()}`;
   }
 
   private legacyRegistryKey(key: { registryAddress: string }): string {
@@ -150,5 +147,22 @@ export class SqliteContextGraphRegistryScanCursorStore {
       key.deploymentId,
       key.registryAddress.toLowerCase(),
     ].join(':');
+  }
+}
+
+/** Compatibility adapter that confines the original role-less API to historical progress. */
+export class SqliteLegacyContextGraphRegistryScanCursorStore {
+  private readonly roleAware: SqliteContextGraphRegistryScanCursorStore;
+
+  constructor(dashboard: DashboardDB) {
+    this.roleAware = new SqliteContextGraphRegistryScanCursorStore(dashboard);
+  }
+
+  async load(key: LegacyRegistryScanCursorKey): Promise<number | undefined> {
+    return this.roleAware.load({ ...key, cursorKind: 'historical' });
+  }
+
+  async save(key: LegacyRegistryScanCursorKey, nextBlock: number): Promise<void> {
+    await this.roleAware.save({ ...key, cursorKind: 'historical' }, nextBlock);
   }
 }

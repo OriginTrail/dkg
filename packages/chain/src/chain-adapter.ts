@@ -611,6 +611,36 @@ export function contextGraphRegistryScanCursorStoreForRole(
   };
 }
 
+/** Normalize legacy/canonical configuration once before scanner construction. */
+export function normalizeContextGraphRegistryScanCursorStore(input: {
+  legacy?: ContextGraphRegistryScanCursorStore;
+  roleAware?: ContextGraphRegistryRoleAwareScanCursorStore;
+}): ContextGraphRegistryRoleAwareScanCursorStore | undefined {
+  if (input.legacy && input.roleAware) {
+    throw new Error(
+      'Configure only one registry scan cursor store: legacy or role-aware, not both',
+    );
+  }
+  if (input.roleAware) return input.roleAware;
+  if (!input.legacy) return undefined;
+  const legacy = input.legacy;
+  const historicalKey = (
+    key: ContextGraphRegistryRoleAwareScanCursorKey,
+  ): ContextGraphRegistryScanCursorKey => ({
+    chainId: key.chainId,
+    deploymentId: key.deploymentId,
+    registryAddress: key.registryAddress,
+  });
+  return {
+    load: (key) => key.cursorKind === 'historical'
+      ? legacy.load(historicalKey(key))
+      : Promise.resolve(undefined),
+    save: (key, nextBlock) => key.cursorKind === 'historical'
+      ? legacy.save(historicalKey(key), nextBlock)
+      : Promise.resolve(),
+  };
+}
+
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
 /**

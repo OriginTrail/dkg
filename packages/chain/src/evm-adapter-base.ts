@@ -18,6 +18,7 @@ import {
   DEFAULT_APPROVAL_POLICY,
   buildEvmDeploymentId,
   contextGraphRegistryScanCursorStoreForRole,
+  normalizeContextGraphRegistryScanCursorStore,
 } from './chain-adapter.js';
 import type {
   ApprovalPolicy,
@@ -1323,13 +1324,16 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
-    const roleAwareCursorStore = config.contextGraphRegistryRoleAwareScanCursorStore;
+    const roleAwareCursorStore = normalizeContextGraphRegistryScanCursorStore({
+      legacy: config.contextGraphRegistryScanCursorStore,
+      roleAware: config.contextGraphRegistryRoleAwareScanCursorStore,
+    });
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryHistoricalScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
       store: roleAwareCursorStore
         ? contextGraphRegistryScanCursorStoreForRole(roleAwareCursorStore, 'historical')
-        : config.contextGraphRegistryScanCursorStore,
+        : undefined,
     });
     this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryTipScanCursor({
       chainId: this.chainId,

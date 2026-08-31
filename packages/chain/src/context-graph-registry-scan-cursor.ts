@@ -11,22 +11,31 @@ type CursorInput = {
   store?: ContextGraphRegistryScanCursorStore;
 };
 
+interface CursorState {
+  cached?: number;
+  pending?: number;
+  persisting?: Promise<void>;
+}
+
 abstract class ContextGraphRegistryScanCursorBase {
-  private readonly watermarks: Map<string, number> = new Map();
+  private readonly states: Map<string, CursorState> = new Map();
 
   constructor(protected readonly input: CursorInput) {}
 
   getCachedWatermark(registryAddress: string): number | undefined {
     const cacheKey = this.cacheKey(registryAddress);
-    return this.normalize(this.watermarks.get(cacheKey))
-      ?? this.pendingWatermark(cacheKey);
+    const state = this.cursorState(cacheKey);
+    const cached = this.normalize(state.cached);
+    const pending = this.normalize(state.pending);
+    return cached === undefined ? pending : Math.max(cached, pending ?? 0);
   }
 
   protected async loadStoredWatermark(registryAddress: string): Promise<number | undefined> {
     const cacheKey = this.cacheKey(registryAddress);
-    const cached = this.normalize(this.watermarks.get(cacheKey));
+    const state = this.cursorState(cacheKey);
+    const cached = this.normalize(state.cached);
     if (cached != null) return cached;
-    const pending = this.pendingWatermark(cacheKey);
+    const pending = this.normalize(state.pending);
     if (pending != null) return pending;
 
     if (!this.input.store) return undefined;
@@ -37,24 +46,29 @@ abstract class ContextGraphRegistryScanCursorBase {
         `invalid persisted registry scan cursor: expected a positive safe integer, got ${String(persisted)}`,
       );
     }
-    if (normalized != null) this.watermarks.set(cacheKey, normalized);
+    if (normalized != null) state.cached = normalized;
     return normalized;
   }
 
   protected clearCachedWatermarks(): void {
-    this.watermarks.clear();
+    this.states.clear();
   }
 
   protected cachedWatermark(cacheKey: string): number | undefined {
-    return this.normalize(this.watermarks.get(cacheKey));
+    return this.normalize(this.cursorState(cacheKey).cached);
   }
 
   protected rememberWatermark(cacheKey: string, nextBlock: number): void {
-    this.watermarks.set(cacheKey, nextBlock);
+    this.cursorState(cacheKey).cached = nextBlock;
   }
 
-  protected pendingWatermark(_cacheKey: string): number | undefined {
-    return undefined;
+  protected cursorState(cacheKey: string): CursorState {
+    let state = this.states.get(cacheKey);
+    if (!state) {
+      state = {};
+      this.states.set(cacheKey, state);
+    }
+    return state;
   }
 
   protected cacheKey(registryAddress: string): string {
@@ -116,13 +130,6 @@ export class ContextGraphRegistryHistoricalScanCursor
 
 /** Tip scan cursor with an explicit fail-closed persistence contract. */
 export class ContextGraphRegistryTipScanCursor extends ContextGraphRegistryScanCursorBase {
-  /** Failed strict writes remain safety anchors until the store confirms them. */
-  private readonly pendingStrictWatermarks: Map<string, number> = new Map();
-
-  protected override pendingWatermark(cacheKey: string): number | undefined {
-    return this.normalize(this.pendingStrictWatermarks.get(cacheKey));
-  }
-
   async loadStrictWatermark(registryAddress: string): Promise<number | undefined> {
     try {
       return await this.loadStoredWatermark(registryAddress);
@@ -143,21 +150,37 @@ export class ContextGraphRegistryTipScanCursor extends ContextGraphRegistryScanC
     if (normalized == null) return;
 
     const cacheKey = this.cacheKey(registryAddress);
-    const existing = this.cachedWatermark(cacheKey);
-    const pending = this.pendingWatermark(cacheKey);
-    if (existing != null && existing >= normalized && pending == null) return;
+    const state = this.cursorState(cacheKey);
+    const existing = this.normalize(state.cached);
+    const pending = this.normalize(state.pending);
+    if (existing != null && existing >= normalized && pending == null) {
+      await state.persisting;
+      return;
+    }
 
     const target = Math.max(existing ?? 0, pending ?? 0, normalized);
-    this.rememberWatermark(cacheKey, target);
+    state.cached = target;
     if (!this.input.store) return;
 
-    this.pendingStrictWatermarks.set(cacheKey, target);
+    state.pending = target;
+    if (!state.persisting) {
+      const persist = (async () => {
+        while (state.pending !== undefined) {
+          const next = state.pending;
+          await this.input.store!.save(this.cursorKey(cacheKey), next);
+          if (state.pending === next) state.pending = undefined;
+        }
+      })().finally(() => {
+        if (state.persisting === persist) state.persisting = undefined;
+      });
+      state.persisting = persist;
+    }
     try {
-      await this.input.store.save(this.cursorKey(cacheKey), target);
-      if (this.pendingStrictWatermarks.get(cacheKey) === target) {
-        this.pendingStrictWatermarks.delete(cacheKey);
-      }
+      await state.persisting;
     } catch (err) {
+      if (state.pending === undefined) {
+        state.pending = target;
+      }
       console.warn(
         `[chain] ContextGraphNameRegistry tip cursor save failed: ${err instanceof Error ? err.message : String(err)}`,
       );
