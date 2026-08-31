@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sdk = vi.hoisted(() => {
@@ -23,7 +24,10 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
 }));
 
 import { createDkgLocalLlmRuntimeSession } from '../src/local-llm-runtime-factory.js';
-import { DKG_CLI_PACKAGE_VERSION } from '../src/package-version.js';
+
+const cliPackageJson = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+) as { version: string };
 
 describe('local LLM runtime factory initialization lifecycle', () => {
   beforeEach(() => {
@@ -81,7 +85,7 @@ describe('local LLM runtime factory initialization lifecycle', () => {
 
     expect(sdk.Client).toHaveBeenCalledWith({
       name: 'dkg-local-llm',
-      version: DKG_CLI_PACKAGE_VERSION,
+      version: cliPackageJson.version,
     });
     const connectSignal = sdk.client.connect.mock.calls[0][1]?.signal;
     const listSignal = sdk.client.listTools.mock.calls[0][1]?.signal;
