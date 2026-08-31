@@ -125,27 +125,25 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
       'sync.responder.readDurableMetaGraphSnapshot',
       { storeOperation: 'query' },
     )],
-  ])('remembers a full-snapshot %s and uses bounded pages for the session', async (_label, deadlineError) => {
-    const backingStore = new OxigraphStore();
-    await backingStore.insert(Array.from({ length: 3 }, (_, index) => ({
-      graph: META,
-      subject: `did:dkg:activity:timeout-fallback-${index}`,
-      predicate: `${DKG_NS}label`,
-      object: `"row-${index}"`,
-    })));
+  ])('propagates a full-snapshot %s without entering mutable OFFSET paging', async (
+    _label,
+    deadlineError,
+  ) => {
     let snapshotQueries = 0;
-    const query = vi.fn<TripleStore['query']>(async (sparql, options) => {
+    const firstError = deadlineError();
+    const secondError = deadlineError();
+    const query = vi.fn<TripleStore['query']>(async (_sparql, options) => {
       if (options?.source === 'sync.responder.readDurableMetaGraphSnapshot') {
         snapshotQueries += 1;
-        throw deadlineError();
+        throw snapshotQueries === 1 ? firstError : secondError;
       }
-      return backingStore.query(sparql, options);
+      throw new Error(`unexpected store query: ${options?.source ?? 'unknown'}`);
     });
     const store = { query } as TripleStore;
     const memo = createResponderSyncRowListMemo();
-    const cacheKey = 'durable-meta:timeout-fallback';
+    const cacheKey = 'durable-meta:timeout-propagation';
 
-    const first = await readDurableMetaPage({
+    await expect(readDurableMetaPage({
       store,
       contextGraphId: CG,
       registeredSubGraphNames: [],
@@ -153,23 +151,23 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
       limit: 1,
       rowListMemo: memo,
       rowListCacheKey: cacheKey,
-    });
-    const second = await readDurableMetaPage({
+    })).rejects.toBe(firstError);
+    await expect(readDurableMetaPage({
       store,
       contextGraphId: CG,
       registeredSubGraphNames: [],
-      offset: first.length,
+      offset: 0,
       limit: 1,
       rowListMemo: memo,
       rowListCacheKey: cacheKey,
-    });
+    })).rejects.toBe(secondError);
 
-    expect(first).toHaveLength(1);
-    expect(second).toHaveLength(1);
-    expect(snapshotQueries).toBe(1);
+    // A transient timeout is neither memoized as intrinsic size evidence nor
+    // converted into a mutable ordered page stream. A retry re-attempts the
+    // immutable snapshot and preserves the original operator-visible cause.
+    expect(snapshotQueries).toBe(2);
     expect(query.mock.calls.filter(([, options]) =>
-      options?.source === 'sync.responder.readDurableMetaRowsPage')).toHaveLength(2);
-    await backingStore.close();
+      options?.source === 'sync.responder.readDurableMetaRowsPage')).toHaveLength(0);
   });
 
   it('cached path: extends a page across the seal boundary, never splitting it', async () => {
