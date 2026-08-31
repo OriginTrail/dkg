@@ -1,6 +1,7 @@
-import { readFile, unlink, writeFile } from 'node:fs/promises';
+import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { dkgDir, ensureDkgDir, isProcessRunning } from '../config.js';
+import { writeFileAtomic } from './fs-utils.js';
 import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
 import {
   MAX_SHUTDOWN_HARD_TIMEOUT_MS,
@@ -11,6 +12,12 @@ import {
 export const DAEMON_EXIT_POLL_INTERVAL_MS = 500;
 const DAEMON_SHUTDOWN_POLICY_STATE_FILE = 'shutdown-policy.json';
 
+interface ShutdownPolicyState {
+  version: 1;
+  pid: number;
+  hardTimeoutMs: number;
+}
+
 function daemonShutdownPolicyStatePath(): string {
   return join(dkgDir(), DAEMON_SHUTDOWN_POLICY_STATE_FILE);
 }
@@ -19,49 +26,57 @@ function daemonShutdownPolicyStatePath(): string {
 export async function persistDaemonShutdownPolicy(policy: ShutdownPolicy): Promise<void> {
   const validated = resolveShutdownPolicy(String(policy.hardTimeoutMs));
   await ensureDkgDir();
-  await writeFile(daemonShutdownPolicyStatePath(), JSON.stringify({
+  await writeFileAtomic(daemonShutdownPolicyStatePath(), JSON.stringify({
     version: 1,
     pid: process.pid,
     ...validated,
-  }), 'utf8');
+  }));
+}
+
+function decodeShutdownPolicyState(serialized: string): ShutdownPolicyState | null {
+  try {
+    const parsed = JSON.parse(serialized) as Partial<ShutdownPolicyState>;
+    if (
+      parsed.version !== 1
+      || !Number.isSafeInteger(parsed.pid)
+      || !Number.isSafeInteger(parsed.hardTimeoutMs)
+    ) return null;
+    const validated = resolveShutdownPolicy(String(parsed.hardTimeoutMs));
+    return { version: 1, pid: parsed.pid as number, ...validated };
+  } catch {
+    return null;
+  }
+}
+
+async function readShutdownPolicyState(): Promise<ShutdownPolicyState | null> {
+  try {
+    return decodeShutdownPolicyState(
+      await readFile(daemonShutdownPolicyStatePath(), 'utf8'),
+    );
+  } catch {
+    return null;
+  }
 }
 
 /** Read only state written from a validated worker policy. */
 export async function readPersistedDaemonShutdownPolicy(
   expectedPid: number,
 ): Promise<ShutdownPolicy | null> {
-  try {
-    const parsed = JSON.parse(await readFile(daemonShutdownPolicyStatePath(), 'utf8')) as {
-      version?: unknown;
-      pid?: unknown;
-      hardTimeoutMs?: unknown;
-    };
-    if (
-      parsed.version !== 1
-      || !Number.isSafeInteger(parsed.pid)
-      || parsed.pid !== expectedPid
-      || !Number.isSafeInteger(parsed.hardTimeoutMs)
-    ) return null;
-    return resolveShutdownPolicy(String(parsed.hardTimeoutMs));
-  } catch {
-    return null;
-  }
+  const state = await readShutdownPolicyState();
+  return state?.pid === expectedPid ? { hardTimeoutMs: state.hardTimeoutMs } : null;
 }
 
 /** Remove only the policy owned by the worker being retired. */
 export async function removePersistedDaemonShutdownPolicy(expectedPid: number): Promise<void> {
+  const state = await readShutdownPolicyState();
+  if (state?.pid !== expectedPid) return;
   try {
-    const parsed = JSON.parse(await readFile(daemonShutdownPolicyStatePath(), 'utf8')) as {
-      version?: unknown;
-      pid?: unknown;
-    };
-    if (parsed.version !== 1 || parsed.pid !== expectedPid) return;
     await unlink(daemonShutdownPolicyStatePath());
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error
       ? (error as NodeJS.ErrnoException).code
       : undefined;
-    if (code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    if (code !== 'ENOENT') throw error;
   }
 }
 

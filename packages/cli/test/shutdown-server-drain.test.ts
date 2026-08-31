@@ -1,4 +1,6 @@
 import { createServer, get, type Server } from 'node:http';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { raceShutdownWithTimeout } from '../src/daemon/shutdown.js';
@@ -89,6 +91,63 @@ describe('HTTP callback draining during bounded shutdown', () => {
       expect(Date.now() - shutdownStartedAt).toBeLessThan(5_000);
     } finally {
       stream?.close();
+      await stopLiveDaemon(daemon);
+    }
+  }, 90_000);
+
+  it('force-exits a real daemon at the configured hard timeout', async () => {
+    let daemon: LiveDaemon | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      daemon = await startLiveDaemon({
+        authEnabled: false,
+        extraConfig: { chain: { type: 'mock' } },
+        env: { DKG_SHUTDOWN_HARD_TIMEOUT_MS: '5000' },
+        prepareHome: async (home) => {
+          const pluginPath = join(home, 'blocking-shutdown-plugin.mjs');
+          await writeFile(pluginPath, `
+            export default {
+              name: 'blocking-shutdown-test',
+              async handle({ req, res }) {
+                if (req.url !== '/api/test/block-shutdown') return;
+                res.writeHead(200, { 'Content-Type': 'text/plain' });
+                res.write('started');
+                await new Promise((resolve) => setTimeout(resolve, 30000));
+                res.end('finished');
+              },
+            };
+          `);
+          const configPath = join(home, 'config.json');
+          const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+          config.routePlugins = [pluginPath];
+          await writeFile(configPath, JSON.stringify(config));
+        },
+      });
+      const response = await fetch(`${daemon.base}/api/test/block-shutdown`);
+      expect(response.status).toBe(200);
+      reader = response.body!.getReader();
+      const firstChunk = await reader.read();
+      expect(new TextDecoder().decode(firstChunk.value)).toContain('started');
+
+      const exited = new Promise<number | null>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('daemon did not honor the configured shutdown timeout')),
+          10_000,
+        );
+        daemon!.child.once('exit', (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+      });
+      const shutdownStartedAt = Date.now();
+
+      expect(daemon.child.kill('SIGTERM')).toBe(true);
+      await expect(exited).resolves.toBe(100);
+      const elapsedMs = Date.now() - shutdownStartedAt;
+      expect(elapsedMs).toBeGreaterThanOrEqual(4_500);
+      expect(elapsedMs).toBeLessThan(10_000);
+    } finally {
+      await reader?.cancel().catch(() => {});
       await stopLiveDaemon(daemon);
     }
   }, 90_000);

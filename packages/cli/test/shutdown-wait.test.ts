@@ -9,13 +9,16 @@ import {
   resolveDaemonShutdownWaitTimeoutMs,
   waitForDaemonExit,
 } from '../src/daemon/shutdown-wait.js';
+import { _autoUpdateIo } from '../src/daemon/manifest.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 const originalDkgHome = process.env.DKG_HOME;
 const originalShutdownTimeout = process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS;
 const temporaryHomes: string[] = [];
+const originalAtomicWriteIo = { ..._autoUpdateIo };
 
 afterEach(async () => {
+  Object.assign(_autoUpdateIo, originalAtomicWriteIo);
   if (originalDkgHome === undefined) delete process.env.DKG_HOME;
   else process.env.DKG_HOME = originalDkgHome;
   if (originalShutdownTimeout === undefined) delete process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS;
@@ -62,6 +65,33 @@ describe('daemon lifecycle shutdown wait', () => {
 
     await removePersistedDaemonShutdownPolicy(process.pid);
     await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toBeNull();
+  });
+
+  it('keeps the previous complete policy visible when an atomic replacement is interrupted', async () => {
+    const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-policy-atomic-'));
+    temporaryHomes.push(dkgHome);
+    process.env.DKG_HOME = dkgHome;
+    await persistDaemonShutdownPolicy(resolveShutdownPolicy('60000'));
+
+    const writes: string[] = [];
+    const renames: Array<[string, string]> = [];
+    _autoUpdateIo.writeFile = (async (path: unknown) => {
+      writes.push(String(path));
+    }) as typeof _autoUpdateIo.writeFile;
+    _autoUpdateIo.rename = (async (from: unknown, to: unknown) => {
+      renames.push([String(from), String(to)]);
+      throw new Error('interrupted before replace');
+    }) as typeof _autoUpdateIo.rename;
+    _autoUpdateIo.unlink = (async () => {}) as typeof _autoUpdateIo.unlink;
+
+    await expect(
+      persistDaemonShutdownPolicy(resolveShutdownPolicy('5000')),
+    ).rejects.toThrow('interrupted before replace');
+    expect(writes[0]).toMatch(/shutdown-policy\.json\.tmp\./u);
+    expect(renames[0]?.[1]).toMatch(/shutdown-policy\.json$/u);
+    await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toEqual({
+      hardTimeoutMs: 60_000,
+    });
   });
 
   it('reports a shutdown longer than 10s as successful within its configured budget', async () => {

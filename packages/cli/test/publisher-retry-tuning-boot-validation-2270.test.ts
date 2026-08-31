@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 // GH#2270 — a bad retry knob must fail CONFIG VALIDATION at daemon boot, not the
 // publisher constructor. The publisher runtime starts deferred and folds its
@@ -159,7 +160,7 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'evm:100',
       },
-    } as any, Date.now());
+    } as any, Date.now(), resolveShutdownPolicy(undefined));
   }
 
   function closeAgentCreateDb(): void {

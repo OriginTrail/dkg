@@ -1169,9 +1169,7 @@ export async function runDaemonInner(
   foreground: boolean,
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
-  shutdownPolicy: ShutdownPolicy = resolveShutdownPolicy(
-    process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS,
-  ),
+  shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
   try {

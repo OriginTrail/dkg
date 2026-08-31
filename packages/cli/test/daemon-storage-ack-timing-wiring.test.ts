@@ -9,6 +9,7 @@ import {
   computeContextGraphPolicyObjectDigestV1,
 } from '@origintrail-official/dkg-core';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 const PRIVATE_RFC64_CONTEXT_GRAPH =
   '0x1111111111111111111111111111111111111111/private-daemon-wiring';
@@ -260,7 +261,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         receiptTimeoutMs: 1_200_000,
       },
       ...configOverrides,
-    } as any, Date.now())).rejects.toThrow('after-agent-create');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
 
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
@@ -427,7 +428,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
           ],
         },
       },
-    } as any, Date.now())).rejects.toThrow(/policy network differs/u);
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(/policy network differs/u);
 
     expect(mocks.agentCreate).not.toHaveBeenCalled();
     expect(mocks.chainResetWipe).not.toHaveBeenCalled();
@@ -500,7 +501,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       listenPort: 0,
       nodeRole: 'core',
       storageAck: '60000',
-    } as any, Date.now())).rejects.toThrow(/storageAck must be an object/);
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(/storageAck must be an object/);
 
     expect(mocks.chainResetWipe).not.toHaveBeenCalled();
     expect(mocks.agentCreate).not.toHaveBeenCalled();
@@ -598,7 +599,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         chainId: 'evm:100',
         receiptTimeoutMs: 1_200_000,
       },
-    } as any, Date.now());
+    } as any, Date.now(), resolveShutdownPolicy(undefined));
 
     await new Promise((resolve) => realSetTimeout(resolve, 0));
     await new Promise((resolve) => realSetTimeout(resolve, 0));
