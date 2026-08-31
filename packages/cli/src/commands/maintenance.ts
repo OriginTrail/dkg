@@ -15,12 +15,11 @@ import {
   requestFaucetFunding,
   resolveDkgConfigHome,
   toErrorMessage,
-  hasErrorCode,
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
+  readApiPort, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadResolvedNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
@@ -77,7 +76,6 @@ import {
   formatPublisherJobValue,
   stripQuotes,
   formatQuadObject,
-  sleep,
   stopDaemonIfRunning,
 } from '../cli-helpers.js';
 import type { ActionOpts, CatchupStatusCommandOptions } from '../cli-helpers.js';
@@ -222,7 +220,7 @@ program
       if (updateStatus === 'updated') {
         const stopped = await stopDaemonIfRunning();
         if (!stopped) {
-          console.error('Update applied but old daemon is still running. Stop it manually and run "dkg start".');
+          console.error('Update applied but the old daemon did not stop before the configured shutdown deadline.');
           process.exit(1);
         }
         console.log('Update applied. Run "dkg start" to start with the new version.');
@@ -317,7 +315,7 @@ program
       }
       const stopped = await stopDaemonIfRunning();
       if (!stopped) {
-        console.error('Rollback applied but old daemon is still running. Stop it manually and run "dkg start".');
+        console.error('Rollback applied but the old daemon did not stop before the configured shutdown deadline.');
         process.exit(1);
       }
       console.log(`Rolled back to ${targetVersion}. Run "dkg start" to start with the rolled-back version.`);
@@ -346,22 +344,9 @@ program
       process.exit(1);
     }
 
-    const pid = await readPid();
-    if (pid && isProcessRunning(pid)) {
-      console.log('Stopping daemon...');
-      try {
-        process.kill(pid, 'SIGTERM');
-      } catch (err) {
-        if (!hasErrorCode(err, 'ESRCH')) throw err;
-      }
-      for (let i = 0; i < 20; i++) {
-        await sleep(500);
-        if (!isProcessRunning(pid)) break;
-      }
-      if (isProcessRunning(pid)) {
-        console.error('Rollback aborted: daemon is still running after SIGTERM. Stop it manually and retry.');
-        process.exit(1);
-      }
+    if (!(await stopDaemonIfRunning())) {
+      console.error('Rollback aborted because the daemon did not stop before its configured shutdown deadline.');
+      process.exit(1);
     }
 
     await swapSlot(target);

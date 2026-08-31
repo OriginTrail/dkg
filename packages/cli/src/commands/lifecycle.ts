@@ -98,6 +98,10 @@ import {
 } from '../cli-supervisor.js';
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
 import { resolveShutdownPolicy } from '../daemon/shutdown-policy.js';
+import {
+  resolveDaemonShutdownWaitTimeoutMs,
+  waitForDaemonExit,
+} from '../daemon/shutdown-wait.js';
 
 export function registerLifecycleCommands(program: Command): void {
 // ─── dkg start ───────────────────────────────────────────────────────
@@ -248,18 +252,17 @@ program
   .action(async () => {
     try {
       const client = await ApiClient.connect();
+      const pid = await readPid();
       await client.shutdown();
       console.log('Daemon stopping...');
-      // Wait for process to exit
-      for (let i = 0; i < 20; i++) {
-        await sleep(500);
-        const pid = await readPid();
-        if (!pid || !isProcessRunning(pid)) {
-          console.log('Stopped.');
-          return;
-        }
+      const timeoutMs = resolveDaemonShutdownWaitTimeoutMs();
+      if (!pid || await waitForDaemonExit(pid, { timeoutMs })) {
+        console.log('Stopped.');
+        return;
       }
-      console.log('Daemon still running after 10s — you may need to kill it manually.');
+      console.error(
+        `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
+      );
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

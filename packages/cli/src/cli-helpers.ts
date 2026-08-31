@@ -51,6 +51,10 @@ import {
 } from './daemon/supervisor-liveness.js';
 import { migrateToBlueGreen, noteEdgeLegacyReleases } from './migration.js';
 import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
+import {
+  resolveDaemonShutdownWaitTimeoutMs,
+  waitForDaemonExit,
+} from './daemon/shutdown-wait.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -370,11 +374,12 @@ async function stopDaemonIfRunning(): Promise<boolean> {
   try { process.kill(pid, 'SIGTERM'); } catch (err) {
     if (!hasErrorCode(err, 'ESRCH')) throw err;
   }
-  for (let i = 0; i < 20; i++) {
-    await sleep(500);
-    if (!isProcessRunning(pid)) return true;
-  }
-  console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
+  const timeoutMs = resolveDaemonShutdownWaitTimeoutMs();
+  const stopped = await waitForDaemonExit(pid, { timeoutMs });
+  if (stopped) return true;
+  console.error(
+    `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
+  );
   return false;
 }
 
