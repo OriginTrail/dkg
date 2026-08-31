@@ -20,6 +20,7 @@ import type {
 import {
   mapRfc64AuthorCommitCasV1,
   normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
 } from './rfc64-author-commit-cas.js';
 import {
   ContentAddressedBlobSingleFlight,
@@ -179,7 +180,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         ? this.translateGuardObject(context.graphUri, object)
         : this.externalizeScalarObject(context.graphUri, object!),
     });
-    return this.inner.rfc64AuthorCommitCasV1(mappedInput, options);
+    return this.inner.rfc64AuthorCommitCasV1(
+      sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput),
+      options,
+    );
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {

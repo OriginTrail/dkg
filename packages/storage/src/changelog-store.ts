@@ -20,7 +20,10 @@ import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
-import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
+} from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted, type StoreOperation } from './store-operation-outcome.js';
 
 /**
@@ -431,7 +434,8 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
       );
     }
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(manifest, options);
+    const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
     for (const graph of manifest.referencedGraphs) {
       this.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
     }
@@ -439,7 +443,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
       operation: 'rfc64AuthorCommitCasV1',
       touchedGraphs: manifest.touchedGraphs,
       options,
-      execute: () => this.inner.rfc64AuthorCommitCasV1!(manifest, options),
+      execute: () => this.inner.rfc64AuthorCommitCasV1!(source, options),
       committed: result => result === 'committed',
     });
   }

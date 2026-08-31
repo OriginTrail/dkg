@@ -12,7 +12,9 @@ import {
   type Rfc64AuthorCommitCasLegacyInputV1,
 } from '../src/index.js';
 import {
+  buildRfc64AuthorCommitCasUpdateFromNormalizedV1,
   buildRfc64AuthorCommitCasUpdateV1,
+  decodeNormalizedRfc64AuthorCommitCasV1,
   executeRfc64AuthorCommitCasV1,
   mapRfc64AuthorCommitCasV1,
   normalizeRfc64AuthorCommitCasV1,
@@ -264,15 +266,38 @@ describe('RFC-64 certified author commit CAS v1', () => {
 
   it('rejects a deserialized semantic plan that drops its mandatory guards', () => {
     const legitimate = normalizeRfc64AuthorCommitCasV1(authorCommitInput());
+    expect(decodeNormalizedRfc64AuthorCommitCasV1(structuredClone(legitimate)))
+      .toEqual(legitimate);
     const forged = {
       ...structuredClone(legitimate),
       guards: [],
-    } as unknown as Rfc64AuthorCommitCasInputV1;
+    };
 
-    expect(() => normalizeRfc64AuthorCommitCasV1(forged))
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(forged))
       .toThrow(/invalid guard topology/u);
-    expect(() => buildRfc64AuthorCommitCasUpdateV1(structuredClone(legitimate)))
+    expect(() => buildRfc64AuthorCommitCasUpdateFromNormalizedV1(
+      structuredClone(legitimate),
+    ))
       .not.toThrow();
+
+    const swapped = structuredClone(legitimate);
+    [swapped.subjectReplacements[1], swapped.subjectReplacements[2]] = [
+      swapped.subjectReplacements[2]!,
+      swapped.subjectReplacements[1]!,
+    ];
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(swapped))
+      .toThrow(/semantic currentHead requires one exact guarded replacement/u);
+
+    const legacy = structuredClone(normalizeRfc64AuthorCommitCasV1(
+      legacyAuthorCommitInput(),
+    ));
+    const invalidation = legacy.subjectReplacements.find(
+      ({ role }) => role === 'sealInvalidation',
+    );
+    if (!invalidation) throw new Error('expected legacy invalidation');
+    invalidation.roleIndex = 1;
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(legacy))
+      .toThrow(/invalid replacement topology/u);
   });
 
   it('maps the exported legacy contract through the operation-only canonical plan', async () => {

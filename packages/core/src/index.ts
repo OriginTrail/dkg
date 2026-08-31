@@ -73,6 +73,15 @@ export * from './swm-author-inventory-v1.js';
 export * from './rfc64-semantic-addresses-v1.js';
 export * from './rfc64-semantic-records-v1.js';
 export * from './rfc64-semantic-read-manifest-v1.js';
+export {
+  isClosedDataRecord,
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+  type ClosedDataPrototypePolicy,
+  type ClosedDataReject,
+  type ClosedDataSnapshotOptions,
+} from './sync-wire-objects.js';
 export * from './typed-rdf-store-row-v1.js';
 export * from './event-bus.js';
 export * from './backpressure-observability.js';
