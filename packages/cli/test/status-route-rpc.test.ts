@@ -121,6 +121,55 @@ async function requestStatusWithAgent(
 }
 
 describe('/api/status RFC-64 private recovery privacy', () => {
+  it('projects live mixed edge selection without leaking private ids into public status', async () => {
+    const publicContextGraph = 'runtime-selected-public';
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/runtime-selected-private';
+    const response = await requestStatusWithAgent(
+      {
+        readRfc64CatalogRuntimeSelectionV1: () => ({
+          subscriptionDriven: true,
+          eligibleContextGraphs: [publicContextGraph, privateContextGraph],
+          selectedContextGraphs: [privateContextGraph],
+        }),
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy(publicContextGraph)],
+          },
+        },
+      },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [publicContextGraph, privateContextGraph],
+        selectedPublicContextGraphs: [publicContextGraph],
+        selectedPrivateContextGraphs: [privateContextGraph],
+        rollout: {
+          killSwitch: false,
+          contextGraphModes: {
+            [publicContextGraph]: 'catalog',
+            [privateContextGraph]: 'catalog',
+          },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.runtimeSelection).toEqual({
+      subscriptionDriven: true,
+      eligibleContextGraphs: [publicContextGraph, privateContextGraph],
+      selectedContextGraphs: [privateContextGraph],
+    });
+    expect(response.body.rfc64PublicCatalog.runtimeSelection).toEqual({
+      subscriptionDriven: true,
+      selectedContextGraphs: [],
+    });
+  });
+
   it('reports aggregate telemetry for a private-only catalog activation', async () => {
     const privateContextGraph =
       '0x1111111111111111111111111111111111111111/private-only-telemetry';
@@ -677,6 +726,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64PublicCatalog).toEqual({
       enabled: false,
       selectedContextGraphs: [],
+      runtimeSelection: { subscriptionDriven: false, selectedContextGraphs: [] },
       rollout: { killSwitch: false, contextGraphModes: {} },
       autoPublishEnabled: false,
       completeSwmProviders: [],
@@ -735,6 +785,10 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64PublicCatalog).toEqual({
       enabled: true,
       selectedContextGraphs: ['selected-public-cg'],
+      runtimeSelection: {
+        subscriptionDriven: false,
+        selectedContextGraphs: ['selected-public-cg'],
+      },
       rollout: {
         killSwitch: true,
         contextGraphModes: { 'selected-public-cg': 'shadow' },

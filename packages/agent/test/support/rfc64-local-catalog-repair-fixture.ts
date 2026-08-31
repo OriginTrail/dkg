@@ -88,6 +88,7 @@ interface StartRepairAgentOptionsV1 {
   readonly name: string;
   readonly dataDir?: string;
   readonly storePath?: string;
+  readonly syncContextGraphs?: readonly string[];
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
@@ -113,6 +114,12 @@ export async function startRepairAgentV1(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
+    syncContextGraphs: options.syncContextGraphs
+      ?? (options.activation !== undefined && options.activation.enabled !== false
+        ? options.activation.bootstrap?.acceptedPublicPolicies.map(
+          ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+        ) ?? []
+        : []),
     ...(options.activation === undefined ? {} : {
       networkIdentity: {
         networkId: await computeNetworkId(),

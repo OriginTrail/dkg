@@ -1405,7 +1405,11 @@ async function runDaemonInnerWithStartupOwnership(
     ...new Set([
       ...resolveContextGraphs(config),
       ...resolveNetworkDefaultContextGraphs(network),
-      ...rfc64Catalog.selectedPublicContextGraphs,
+      // Cores host the public corpus and therefore activate the complete
+      // accepted manifest. Edges activate RFC-64 only through explicit
+      // operator/default subscriptions; the manifest remains eligibility and
+      // serving policy, never an implicit edge subscription.
+      ...(role === 'core' ? rfc64Catalog.selectedPublicContextGraphs : []),
     ]),
   ];
 

@@ -112,7 +112,9 @@ import {
 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
 import {
+  projectRfc64CatalogReceiverAuthorityV1,
   resolveRfc64CatalogExecutionPlanAuthorityV1,
+  type Rfc64CatalogAuthorityPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -292,7 +294,66 @@ export type PublishOpenAuthorCatalogSuccessorAssetResultV1 =
 export type PublishOpenAuthorCatalogExactSetSuccessorResultV1 =
   PublishAuthorCatalogExactSetSuccessorResultV1;
 
+export interface Rfc64CatalogRuntimeSelectionStatusV1 {
+  readonly subscriptionDriven: boolean;
+  readonly eligibleContextGraphs: readonly string[];
+  readonly selectedContextGraphs: readonly string[];
+}
+
 export class Rfc64CatalogMethods extends DKGAgentBase {
+  /**
+   * Receiver authority is the configured manifest policy projected through the
+   * canonical live subscription registry on edges. Cores deliberately retain
+   * manifest-wide receiver activity.
+   */
+  resolveRfc64CatalogReceiverAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64CatalogAuthorityPolicyV1 {
+    const configured = resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
+      contextGraphId,
+    );
+    const active = configured.eligible && (
+      (this.config.nodeRole ?? 'edge') === 'core'
+      || this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
+    );
+    return projectRfc64CatalogReceiverAuthorityV1(
+      configured,
+      { active },
+    );
+  }
+
+  /** Serving and explicit repair authority is independent of edge receipt. */
+  resolveRfc64CatalogServingAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64CatalogAuthorityPolicyV1 {
+    return resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
+      contextGraphId,
+    );
+  }
+
+  /** Safe runtime selection projection for daemon status and release harnesses. */
+  readRfc64CatalogRuntimeSelectionV1(
+    this: DKGAgent,
+  ): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
+    const eligibleContextGraphs = Object.freeze([
+      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
+    ].sort());
+    const subscriptionDriven = (this.config.nodeRole ?? 'edge') === 'edge';
+    return Object.freeze({
+      subscriptionDriven,
+      eligibleContextGraphs,
+      selectedContextGraphs: subscriptionDriven
+        ? Object.freeze(eligibleContextGraphs.filter((contextGraphId) => (
+          this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
+        )))
+        : eligibleContextGraphs,
+    });
+  }
+
   /**
    * Construct + start the public catalog service on the production router.
    * No-op when RFC-64 persistence is dormant (no `dataDir`) or already started.
@@ -320,11 +381,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
-      resolveContextGraphAuthority: (contextGraphId) =>
-        resolveRfc64CatalogExecutionPlanAuthorityV1(
-          this.config.rfc64CatalogExecutionPlan,
-          contextGraphId,
-        ),
+      resolveContextGraphAuthority: (contextGraphId, direction) =>
+        direction === 'serving'
+          ? this.resolveRfc64CatalogServingAuthorityV1(contextGraphId)
+          : this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
       runCatalogMutationExclusive: (scope, operation, signal) =>
         this.rfc64CatalogMutationCoordinatorV1.run(scope, operation, signal),
       currentHeadDiscovery: {
@@ -580,10 +640,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     if (
       contextGraphId !== undefined
-      && !resolveRfc64CatalogExecutionPlanAuthorityV1(
-        this.config.rfc64CatalogExecutionPlan,
-        contextGraphId,
-      ).authoringAllowed
+      && !this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).authoringAllowed
     ) {
       throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
     }

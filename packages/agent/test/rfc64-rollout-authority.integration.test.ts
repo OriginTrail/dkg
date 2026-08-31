@@ -82,6 +82,194 @@ afterEach(async () => {
 });
 
 describe('RFC-64 rollout authority integration', () => {
+  it('keeps an eligible edge CG dormant until subscribe and deactivates it on unsubscribe', async () => {
+    const providerPeerId = '12D3KooWSubscriptionOwnedCatalogProvider';
+    let synchronize!: ReturnType<typeof vi.spyOn>;
+    const edge = await startAgent(
+      'subscription-owned-selection',
+      {
+        ...activation('catalog'),
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          }],
+        },
+      },
+      undefined,
+      undefined,
+      (agent) => {
+        synchronize = vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
+          .mockResolvedValue(null);
+      },
+      { syncContextGraphs: [] },
+    );
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    const initialPass = edge.readRfc64PublicCatalogBootstrapStatusV1()?.pass ?? 0;
+
+    expect(edge.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(edge.readRfc64CatalogRuntimeSelectionV1()).toEqual({
+      subscriptionDriven: true,
+      eligibleContextGraphs: [CONTEXT_GRAPH_ID],
+      selectedContextGraphs: [],
+    });
+    expect(edge.rfc64PublicCatalogStatsV1()).toMatchObject({
+      started: true,
+      acceptedPolicies: 1,
+    });
+    expect(edge.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+      outcome: 'inactive',
+      attempts: 0,
+    });
+    expect(synchronize).not.toHaveBeenCalled();
+
+    // Sync-scope bookkeeping is not a subscription and cannot independently
+    // activate RFC-64 receiver work.
+    expect(edge.trackSyncContextGraph(CONTEXT_GRAPH_ID)).toBe(false);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(synchronize).not.toHaveBeenCalled();
+
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs)
+      .toEqual([CONTEXT_GRAPH_ID]);
+    expect(edge.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(true);
+    expect((edge as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(edge.readRfc64PublicCatalogBootstrapStatusV1()?.pass).toBeGreaterThan(initialPass);
+    expect(synchronize).toHaveBeenCalledTimes(1);
+    expect(edge.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+      outcome: 'not-found',
+      attempts: 1,
+    });
+
+    // An idempotent subscription cannot enqueue a duplicate invalidation.
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(synchronize).toHaveBeenCalledTimes(1);
+
+    edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs).toEqual([]);
+    expect(edge.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+      outcome: 'inactive',
+      attempts: 0,
+    });
+    expect(synchronize).toHaveBeenCalledTimes(1);
+
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(synchronize).toHaveBeenCalledTimes(2);
+    expect(edge.deleteContextGraphSubscription(CONTEXT_GRAPH_ID)).toBe(true);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs).toEqual([]);
+    expect(edge.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+      outcome: 'inactive',
+      attempts: 0,
+    });
+    expect(synchronize).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts a stale in-flight bootstrap pass and waits through the inactive rerun', async () => {
+    const providerPeerId = '12D3KooWBlockedSubscriptionCatalogProvider';
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    let firstSignal: AbortSignal | undefined;
+    let synchronize!: ReturnType<typeof vi.spyOn>;
+    const edge = await startAgent(
+      'subscription-transition-during-bootstrap',
+      {
+        ...activation('catalog'),
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          }],
+        },
+      },
+      undefined,
+      undefined,
+      (agent) => {
+        synchronize = vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
+          .mockImplementationOnce(async ({ signal }) => {
+            firstSignal = signal;
+            markEntered();
+            await new Promise<void>((resolve) => {
+              signal?.addEventListener('abort', () => resolve(), { once: true });
+            });
+            return null;
+          })
+          .mockResolvedValue(null);
+      },
+      { syncContextGraphs: [] },
+    );
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    const initialPass = edge.readRfc64PublicCatalogBootstrapStatusV1()?.pass ?? 0;
+
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await entered;
+    edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(synchronize).toHaveBeenCalledTimes(1);
+    expect(edge.readRfc64PublicCatalogBootstrapStatusV1()).toMatchObject({
+      running: false,
+      pass: initialPass + 2,
+      targets: [expect.objectContaining({
+        outcome: 'inactive',
+        attempts: 0,
+      })],
+    });
+  });
+
+  it('retains manifest-wide RFC-64 selection on core nodes', async () => {
+    const providerPeerId = '12D3KooWCoreManifestWideCatalogProvider';
+    let synchronize!: ReturnType<typeof vi.spyOn>;
+    const core = await startAgent(
+      'core-manifest-selection',
+      {
+        ...activation('catalog'),
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          }],
+        },
+      },
+      undefined,
+      undefined,
+      (agent) => {
+        synchronize = vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
+          .mockResolvedValue(null);
+      },
+      { nodeRole: 'core', syncContextGraphs: [] },
+    );
+    await core.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(core.readRfc64CatalogRuntimeSelectionV1()).toEqual({
+      subscriptionDriven: false,
+      eligibleContextGraphs: [CONTEXT_GRAPH_ID],
+      selectedContextGraphs: [CONTEXT_GRAPH_ID],
+    });
+    expect(synchronize).toHaveBeenCalledWith(expect.objectContaining({
+      remotePeerIds: [providerPeerId],
+      scope: expect.objectContaining({
+        authorAddress: AUTHOR,
+        contextGraphId: CONTEXT_GRAPH_ID,
+      }),
+    }));
+
+    // An ordinary host-only transition cannot abort manifest-wide core work.
+    const deactivate = vi.spyOn(
+      (core as any).rfc64PublicCatalogServiceV1,
+      'deactivateReceiverContextGraph',
+    );
+    core.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    core.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await core.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(deactivate).not.toHaveBeenCalled();
+    expect(synchronize).toHaveBeenCalledTimes(1);
+  });
+
   it('enforces legacy, shadow, catalog, and kill-switch authority at startup', async () => {
     const legacy = await startAgent('legacy', activation('legacy'));
     expect(legacy.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
@@ -151,7 +339,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(internals.swmHostModeHandlers.has(hostKey)).toBe(false);
   });
 
-  it('leaves a persisted member row dormant under exclusive catalog authority', async () => {
+  it('rehydrates persisted edge intent through exclusive catalog authority', async () => {
     const persisted = new Map<string, any>([[CONTEXT_GRAPH_ID, {
       id: CONTEXT_GRAPH_ID,
       name: 'persisted-before-rfc64',
@@ -176,13 +364,15 @@ describe('RFC-64 rollout authority integration', () => {
         },
       },
     );
-    expect(catalog.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(catalog.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(true);
+    expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs)
+      .toEqual([CONTEXT_GRAPH_ID]);
     expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect((catalog as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
     expect(catalog.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
-      activated: 0,
-      dormant: 1,
-      dormantIds: [CONTEXT_GRAPH_ID],
+      activated: 1,
+      dormant: 0,
+      dormantIds: [],
     });
     expect(persisted.get(CONTEXT_GRAPH_ID)).toMatchObject({ subscribed: true });
   });
@@ -208,7 +398,9 @@ describe('RFC-64 rollout authority integration', () => {
     await legacy.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(legacy.readRfc64PublicCatalogBootstrapStatusV1()).toMatchObject({
-      pass: 1,
+      // Startup observes the inactive edge first; the explicit subscription
+      // then invalidates that pass and runs the active recovery pass.
+      pass: 2,
       targets: [],
     });
     expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
@@ -680,6 +872,9 @@ async function startAgent(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
+    syncContextGraphs: activationInput?.bootstrap?.acceptedPublicPolicies.map(
+      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+    ) ?? [],
     networkIdentity: {
       networkId: await computeNetworkId(),
       chainId: NETWORK_ID,
@@ -690,6 +885,13 @@ async function startAgent(
   agents.push(agent);
   await beforeStart?.(agent);
   await agent.start();
+  for (const contextGraphId of extraConfig.syncContextGraphs
+    ?? activationInput?.bootstrap?.acceptedPublicPolicies.map(
+      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+    )
+    ?? []) {
+    agent.subscribeToContextGraph(contextGraphId);
+  }
   return agent;
 }
 

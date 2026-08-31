@@ -782,6 +782,11 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       selectedPublicContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
       selectedPrivateContextGraphs: [],
       accessPolicyAuthority: undefined,
+      // The compatibility-only public projection has no private bootstrap
+      // manifest, but keep the fallback structurally aligned with the shared
+      // activation snapshot so downstream status projection stays typed.
+      bootstrap: undefined,
+      autoPublish: rfc64PublicCatalogActivation.autoPublish,
       rollout: rfc64PublicCatalogActivation.rollout,
     };
     const rfc64CatalogRollout = {
@@ -806,6 +811,14 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
         ? agent.readRfc64PublicCatalogBootstrapStatusV1()
         : null;
+    const rfc64CatalogRuntimeSelection =
+      typeof agent.readRfc64CatalogRuntimeSelectionV1 === 'function'
+        ? agent.readRfc64CatalogRuntimeSelectionV1()
+        : {
+            subscriptionDriven: false,
+            eligibleContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
+            selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
+          };
     const selectedPublicContextGraphs = new Set(
       rfc64CatalogActivation.selectedPublicContextGraphs,
     );
@@ -983,6 +996,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       rfc64PublicCatalog: {
         enabled: rfc64PublicCatalogActivation.enabled,
         selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
+        runtimeSelection: {
+          subscriptionDriven: rfc64CatalogRuntimeSelection.subscriptionDriven,
+          selectedContextGraphs: rfc64CatalogRuntimeSelection.selectedContextGraphs.filter(
+            (contextGraphId) => selectedPublicContextGraphs.has(contextGraphId),
+          ),
+        },
         rollout: {
           killSwitch: rfc64CatalogRollout.killSwitch,
           contextGraphModes: Object.fromEntries(
@@ -1004,6 +1023,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
         selectedPublicContextGraphs: rfc64CatalogActivation.selectedPublicContextGraphs,
         selectedPrivateContextGraphs: rfc64CatalogActivation.selectedPrivateContextGraphs,
+        runtimeSelection: rfc64CatalogRuntimeSelection,
         autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
         rollout: rfc64CatalogRollout,
         privateAuthorityConfigured:

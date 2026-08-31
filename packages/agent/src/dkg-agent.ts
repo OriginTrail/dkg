@@ -441,7 +441,6 @@ import {
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import {
-  rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogActivationsV1,
@@ -862,6 +861,9 @@ export class DKGAgent extends DKGAgentBase {
       this,
       new Rfc64CatalogBootstrapOwnerV1({
         resolvePartition: resolveCatalogPartition,
+        resolveReceiverAuthority: (contextGraphId) => (
+          this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)
+        ),
         acceptTrack2Policies: (policies) => {
           if (policies.length === 0) return;
           const service = this.rfc64PublicCatalogServiceV1;
@@ -958,10 +960,8 @@ export class DKGAgent extends DKGAgentBase {
           return Object.freeze({
             ...plan,
             targets: Object.freeze(plan.targets.filter(({ contextGraphId }) => (
-              rfc64ExecutionPlanAllowsLegacySyncV1(
-                this.config.rfc64CatalogExecutionPlan,
-                contextGraphId,
-              )
+              this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)
+                .legacySyncAllowed
             ))),
           });
         },

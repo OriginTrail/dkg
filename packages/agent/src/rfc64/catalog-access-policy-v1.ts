@@ -44,6 +44,33 @@ export type Rfc64CatalogAccessOperationV1 =
   | 'ka-bundle-fetch-outbound'
   | 'ka-bundle-fetch-inbound';
 
+export type Rfc64CatalogAuthorityOperationV1 =
+  | Rfc64CatalogAccessOperationV1
+  | 'current-head-discovery-outbound'
+  | 'current-head-discovery-inbound';
+
+export type Rfc64CatalogAuthorityDirectionV1 = 'serving' | 'receiving';
+
+/** One exhaustive authority direction for every RFC-64 transport operation. */
+export function rfc64CatalogAuthorityDirectionV1(
+  operation: Rfc64CatalogAuthorityOperationV1,
+): Rfc64CatalogAuthorityDirectionV1 {
+  switch (operation) {
+    case 'announce-outbound':
+    case 'fetch-inbound':
+    case 'catalog-object-fetch-inbound':
+    case 'ka-bundle-fetch-inbound':
+    case 'current-head-discovery-inbound':
+      return 'serving';
+    case 'announce-inbound':
+    case 'fetch-outbound':
+    case 'catalog-object-fetch-outbound':
+    case 'ka-bundle-fetch-outbound':
+    case 'current-head-discovery-outbound':
+      return 'receiving';
+  }
+}
+
 export interface Rfc64CatalogAccessAuthorizationInputV1 {
   readonly operation: Rfc64CatalogAccessOperationV1;
   readonly remotePeerId: string;
@@ -338,18 +365,7 @@ function authorization(
 }
 
 function servingSide(operation: Rfc64CatalogAccessOperationV1): 'local' | 'remote' {
-  switch (operation) {
-    case 'announce-outbound':
-    case 'fetch-inbound':
-    case 'catalog-object-fetch-inbound':
-    case 'ka-bundle-fetch-inbound':
-      return 'local';
-    case 'announce-inbound':
-    case 'fetch-outbound':
-    case 'catalog-object-fetch-outbound':
-    case 'ka-bundle-fetch-outbound':
-      return 'remote';
-  }
+  return rfc64CatalogAuthorityDirectionV1(operation) === 'serving' ? 'local' : 'remote';
 }
 
 function snapshotAuthorizationInput(

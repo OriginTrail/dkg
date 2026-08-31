@@ -39,6 +39,7 @@ const MAX_CONCURRENT_TARGETS_V1 = 4;
 const COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1 = 10_000;
 
 export type Rfc64PublicCatalogBootstrapOutcomeV1 =
+  | 'inactive'
   | 'pending'
   | 'applied'
   | 'shadow-staged'
@@ -166,6 +167,10 @@ type CatalogSynchronizationResultV1 = Awaited<ReturnType<
 
 interface BootstrapOwnerDependenciesV1 {
   readonly resolvePartition: () => Rfc64CatalogBootstrapPartitionV1 | undefined;
+  readonly resolveReceiverAuthority: (contextGraphId: string) => Readonly<{
+    readonly legacySyncAllowed: boolean;
+    readonly track2Enabled: boolean;
+  }>;
   readonly acceptTrack2Policies: (
     policies: readonly Rfc64CatalogBootstrapPolicyV1[],
   ) => void;
@@ -253,6 +258,16 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     await this.#state?.runner.whenIdle();
   }
 
+  request(): void {
+    this.#state?.runner.request();
+  }
+
+  invalidate(contextGraphId: string): void {
+    this.#state?.runner.invalidateAndRequest(
+      `RFC-64 receiver selection changed for ${contextGraphId}`,
+    );
+  }
+
   async close(): Promise<void> {
     const state = this.#state;
     if (state === undefined) return;
@@ -275,11 +290,18 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     state.pass += 1;
     state.lastPassStartedAtMs = Date.now();
     try {
-      const completeSwmProviders = [...new Set(
-        state.legacyRecoveryConfig.acceptedPolicies.flatMap(
-          ({ completeSwmProviders: providers = [] }) => providers,
-        ),
-      )];
+      const activeLegacyPolicies = state.legacyRecoveryConfig.acceptedPolicies.filter(
+        ({ policyEnvelope }) => this.#dependencies.resolveReceiverAuthority(
+          policyEnvelope.payload.contextGraphId,
+        ).legacySyncAllowed,
+      );
+      const activeLegacyRecoveryConfig = Object.freeze({
+        ...state.legacyRecoveryConfig,
+        acceptedPolicies: Object.freeze(activeLegacyPolicies),
+      });
+      const completeSwmProviders = [...new Set(activeLegacyPolicies.flatMap(
+        ({ completeSwmProviders: providers = [] }) => providers,
+      ))];
       const connectedCompleteSwmProviders = new Set<string>();
       await mapWithConcurrency(
         completeSwmProviders,
@@ -308,7 +330,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
       for (const providerPeerId of connectedCompleteSwmProviders) {
         this.#dependencies.queueRecoveryPlan(
           resolveRfc64PeerSwmRecoveryPlanV1(
-            state.legacyRecoveryConfig,
+            activeLegacyRecoveryConfig,
             providerPeerId,
           ),
           (_peerId, error) => {
@@ -326,6 +348,26 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
   }
 
   async #synchronizeTarget(target: MutableTargetStatusV1, signal: AbortSignal): Promise<void> {
+    if (!this.#dependencies.resolveReceiverAuthority(target.scope.contextGraphId).track2Enabled) {
+      Object.assign(target, {
+        outcome: 'inactive' as const,
+        completionReason: null,
+        attempts: 0,
+        providerPeerId: null,
+        appliedHeadDigest: null,
+        stagedHeadDigest: null,
+        catalogVersion: null,
+        inventoryRowCount: null,
+        lastError: null,
+        updatedAtMs: Date.now(),
+      });
+      return;
+    }
+    // `state.running` exposes that a refresh is in progress. Keep the target's
+    // last completed snapshot intact until this attempt itself completes so a
+    // healthy, durably applied catalog does not transiently regress to pending
+    // (and lose its head/row evidence) on every periodic revalidation pass.
+    // New targets already start as pending in the state initializer below.
     let lastError: string | null = null;
     let terminalError: unknown | null = null;
     try {
@@ -443,12 +485,9 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    if (
-      !resolveRfc64CatalogExecutionPlanAuthorityV1(
-        this.config.rfc64CatalogExecutionPlan,
-        contextGraphId,
-      ).legacySyncAllowed
-    ) return Object.freeze([]);
+    if (!this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) {
+      return Object.freeze([]);
+    }
     const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
       this.config.rfc64CatalogBootstrap,
       this.config.rfc64PublicCatalogBootstrap,
@@ -472,9 +511,22 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     return bootstrapOwnerV1(this).status();
   }
 
-  /** Wait for the currently running startup/refresh pass only. */
+  /** Wait through the current pass and any subscription-triggered follow-up. */
   async whenRfc64PublicCatalogBootstrapIdleV1(this: DKGAgent): Promise<void> {
     await bootstrapOwnerV1(this).whenIdle();
+  }
+
+  /** Re-evaluate targets immediately after an edge subscription changes. */
+  requestRfc64PublicCatalogBootstrapPassV1(this: DKGAgent): void {
+    bootstrapOwnerV1(this).request();
+  }
+
+  /** Cancel stale selection work and coalesce one pass against the new registry state. */
+  invalidateRfc64PublicCatalogBootstrapPassV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): void {
+    bootstrapOwnerV1(this).invalidate(contextGraphId);
   }
 
   /** Stop future retries and abort/drain the current pass before service close. */
@@ -509,12 +561,13 @@ export function partitionRfc64CatalogBootstrapV1(
       executionPlan,
       policyEnvelope.payload.contextGraphId,
     );
+    const mode = authority.mode;
     if (authority.legacySyncAllowed) legacyPolicies.push(accepted);
     if (!authority.track2Enabled) continue;
     track2Policies.push(accepted);
     for (const target of targets) {
       track2Targets.push(Object.freeze({
-        mode: authority.mode as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
+        mode: mode as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
         scope: Object.freeze({
           networkId: policyEnvelope.payload.networkId,
           contextGraphId: policyEnvelope.payload.contextGraphId,

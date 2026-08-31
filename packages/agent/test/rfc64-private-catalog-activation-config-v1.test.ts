@@ -19,7 +19,9 @@ import {
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
+  projectRfc64CatalogReceiverAuthorityV1,
   resolveRfc64CatalogAuthorityDecisionV1,
+  resolveRfc64CatalogConfiguredAuthorityDecisionV1,
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
@@ -198,6 +200,7 @@ describe('RFC-64 private catalog activation', () => {
           activation,
         }),
       },
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
     } as unknown as DKGAgent;
 
     expect(resolveRfc64PrivateRecoveryContextGraphIdsV1(bootstrap))
@@ -380,6 +383,65 @@ describe('RFC-64 private catalog activation', () => {
     expect(rfc64CatalogRolloutModeForContextGraphV1(omitted, PRIVATE_CG)).toBe('catalog');
   });
 
+  it('activates eligible public and private catalog rails only for explicit edge selections', () => {
+    const activation = Object.freeze({
+      enabled: true,
+      selectedContextGraphs: Object.freeze([PUBLIC_CG, PRIVATE_CG]),
+      rollout: Object.freeze({
+        killSwitch: false,
+        contextGraphModes: Object.freeze({
+          [PUBLIC_CG]: 'catalog' as const,
+          [PRIVATE_CG]: 'catalog' as const,
+        }),
+      }),
+    });
+
+    expect(projectRfc64CatalogReceiverAuthorityV1(
+      resolveRfc64CatalogConfiguredAuthorityDecisionV1(activation, PUBLIC_CG),
+      { active: false },
+    )).toMatchObject({
+      selected: true,
+      eligible: true,
+      active: false,
+      mode: 'catalog',
+      reconciliationLane: 'disabled',
+      track2Enabled: false,
+      legacySyncAllowed: false,
+    });
+    expect(resolveRfc64CatalogConfiguredAuthorityDecisionV1(
+      activation,
+      PUBLIC_CG,
+    )).toMatchObject({
+      selected: true,
+      eligible: true,
+      active: true,
+      reconciliationLane: 'catalog-apply',
+      track2Enabled: true,
+      authoringAllowed: true,
+    });
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(
+      activation,
+      PUBLIC_CG,
+      { active: false },
+    )).toBe(false);
+    expect(projectRfc64CatalogReceiverAuthorityV1(
+      resolveRfc64CatalogConfiguredAuthorityDecisionV1(activation, PRIVATE_CG),
+      { active: true },
+    )).toMatchObject({
+      selected: true,
+      eligible: true,
+      active: true,
+      reconciliationLane: 'catalog-apply',
+      track2Enabled: true,
+      legacySyncAllowed: false,
+    });
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(
+      activation,
+      PRIVATE_CG,
+      { active: true },
+    )).toBe(false);
+  });
+
   it('preserves pre-activation Track-2 authoring while keeping ordinary sync legacy', () => {
     const disabled = Object.freeze({
       enabled: false,
@@ -439,6 +501,27 @@ describe('RFC-64 private catalog activation', () => {
     expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(activation, PRIVATE_CG))
       .toBe(false);
     expect(rfc64CatalogKillSwitchActiveV1(activation)).toBe(true);
+    const shadow = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
+      activation,
+      PUBLIC_CG,
+    );
+    expect(shadow).toMatchObject({
+      mode: 'shadow',
+      active: false,
+      track2Enabled: false,
+      legacySyncAllowed: true,
+    });
+    expect(projectRfc64CatalogReceiverAuthorityV1(
+      shadow,
+      { active: false },
+    )).toMatchObject({
+      selected: true,
+      eligible: true,
+      active: false,
+      mode: 'shadow',
+      track2Enabled: false,
+      legacySyncAllowed: false,
+    });
   });
 
   it('fails closed on malformed, unknown, or unselected rollout modes', () => {

@@ -37,8 +37,6 @@ import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-p
 import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
 import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from './rfc64/public-catalog-successor-producer-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
-import { resolveRfc64CatalogExecutionPlanAuthorityV1 } from
-  './rfc64/public-catalog-activation-config-v1.js';
 import {
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
@@ -341,11 +339,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   private assertRfc64CatalogAuthoringModeV1(
     this: DKGAgent,
     contextGraphId: string,
-  ): ReturnType<typeof resolveRfc64CatalogExecutionPlanAuthorityV1> {
-    const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
-      this.config.rfc64CatalogExecutionPlan,
-      contextGraphId,
-    );
+  ): ReturnType<DKGAgent['resolveRfc64CatalogServingAuthorityV1']> {
+    const authority = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId);
     if (authority.killSwitchActive) {
       throw new Error('RFC-64 catalog authoring is disabled by the Track-2 kill switch');
     }

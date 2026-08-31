@@ -12,6 +12,7 @@ import {
   AUTHOR,
   AUTHOR_WALLET,
   CONTEXT_GRAPH_ID,
+  NATIVE_DEPLOYMENT,
   NETWORK_ID,
   agents,
   bootstrapConfigV1,
@@ -21,6 +22,78 @@ import {
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
 describe('RFC-64 durable local SWM catalog projection repair', () => {
+  it('admits dormant durable inventory on subscribe and retries it on resubscribe', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-subscription-repair-'));
+    tempDirs.push(dataDir);
+    const storePath = join(dataDir, 'oxigraph');
+    const autoPublish = {
+      peers: [],
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+    const author = await startRepairAgentV1({
+      name: 'subscription-repair-author',
+      dataDir,
+      storePath,
+      autoPublish,
+    });
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(
+      AUTHOR_WALLET.privateKey,
+    );
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await seedInventoryAssetV1(author, 'post-start-subscription', 30n);
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+
+    let repair!: ReturnType<typeof vi.spyOn>;
+    const edge = await startRepairAgentV1({
+      name: 'subscription-repair-edge',
+      dataDir,
+      storePath,
+      syncContextGraphs: [],
+      activation: {
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        autoPublish,
+        rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' } },
+        bootstrap: bootstrapConfigV1(0, false),
+      },
+      beforeStart: (startingAgent) => {
+        vi.spyOn(startingAgent, 'listLocalAgents').mockReturnValue([
+          { agentAddress: AUTHOR } as never,
+        ]);
+        vi.spyOn(startingAgent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
+          .mockResolvedValue(null);
+        repair = vi.spyOn(startingAgent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+          .mockRejectedValue(new Error('simulated durable projection failure'));
+      },
+    });
+    await edge.whenRfc64PublicCatalogBootstrapIdleV1();
+    await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).not.toHaveBeenCalled();
+    expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()).toBeNull();
+
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).toHaveBeenCalledTimes(1);
+    expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
+      .toEqual([expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+        outcome: 'failed',
+        attempts: 1,
+      })]);
+
+    edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).toHaveBeenCalledTimes(2);
+    expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
+      .toEqual([expect.objectContaining({ outcome: 'failed', attempts: 2 })]);
+  }, 30_000);
+
   it('repairs durable additions and removals without remote author targets', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-restart-repair-'));
     tempDirs.push(dataDir);

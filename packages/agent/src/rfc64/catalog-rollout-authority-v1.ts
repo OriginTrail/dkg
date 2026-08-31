@@ -16,9 +16,20 @@ export interface ResolvedRfc64CatalogRolloutConfigV1 {
   readonly contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
 }
 
+type Rfc64CatalogAuthorityActivationV1 = Readonly<{
+  enabled?: boolean;
+  selectedContextGraphs: readonly string[];
+  rollout: ResolvedRfc64CatalogRolloutConfigV1;
+}>;
+
 interface Rfc64CatalogAuthorityPolicyCommonV1 {
   readonly contextGraphId: string;
+  /** @deprecated Compatibility alias for `eligible`. */
   readonly selected: boolean;
+  /** The immutable manifest contains this CG. */
+  readonly eligible: boolean;
+  /** This operation direction is active for this CG on the current node. */
+  readonly active: boolean;
   readonly mode: Rfc64CatalogRolloutModeV1;
   readonly killSwitchActive: boolean;
 }
@@ -38,7 +49,7 @@ export type Rfc64CatalogAuthorityPolicyV1 =
   }>)
   | (Rfc64CatalogAuthorityPolicyCommonV1 & Readonly<{
     reconciliationLane: 'disabled';
-    mode: 'shadow' | 'catalog';
+    mode: Rfc64CatalogRolloutModeV1;
     legacySyncAllowed: boolean;
     track2Enabled: false;
     authoringAllowed: false;
@@ -52,7 +63,8 @@ export type Rfc64CatalogAuthorityPolicyV1 =
   }>)
   | (Rfc64CatalogAuthorityPolicyCommonV1 & Readonly<{
     reconciliationLane: 'catalog-apply';
-    selected: true;
+    eligible: true;
+    active: true;
     mode: 'catalog';
     legacySyncAllowed: false;
     track2Enabled: true;
@@ -60,12 +72,21 @@ export type Rfc64CatalogAuthorityPolicyV1 =
   }>)
   | (Rfc64CatalogAuthorityPolicyCommonV1 & Readonly<{
     reconciliationLane: 'catalog-apply';
-    selected: false;
+    eligible: false;
+    active: true;
     mode: 'catalog';
     legacySyncAllowed: true;
     track2Enabled: true;
     authoringAllowed: true;
   }>);
+
+export interface Rfc64CatalogReceiverActivityV1 {
+  /**
+   * Edge nodes derive this value from the canonical subscription registry.
+   * Core nodes and configured serving/authoring resolution omit it.
+   */
+  readonly active: boolean;
+}
 
 export type Rfc64CatalogReconciliationLaneV1 =
   Rfc64CatalogAuthorityPolicyV1['reconciliationLane'];
@@ -94,6 +115,8 @@ export function resolveRfc64CatalogExecutionPlanAuthorityV1(
     return Object.freeze({
       contextGraphId,
       selected: false,
+      eligible: false,
+      active: true,
       mode: 'catalog',
       killSwitchActive: false,
       legacySyncAllowed: true,
@@ -105,6 +128,8 @@ export function resolveRfc64CatalogExecutionPlanAuthorityV1(
   return Object.freeze({
     contextGraphId,
     selected: false,
+    eligible: false,
+    active: true,
     mode: 'legacy',
     killSwitchActive: plan.killSwitchActive,
     legacySyncAllowed: true,
@@ -173,13 +198,13 @@ export function mergeRfc64CatalogRolloutConfigsV1(
 
 /** Resolve one selected CG's restart-stable authority mode. */
 export function rfc64CatalogRolloutModeForContextGraphV1(
-  activation: Readonly<{
-    selectedContextGraphs: readonly string[];
-    rollout: ResolvedRfc64CatalogRolloutConfigV1;
-  }> | undefined,
+  activation: Rfc64CatalogAuthorityActivationV1 | undefined,
   contextGraphId: string,
 ): Rfc64CatalogRolloutModeV1 {
-  if (activation === undefined || !activation.selectedContextGraphs.includes(contextGraphId)) {
+  if (
+    activation === undefined
+    || !activation.selectedContextGraphs.includes(contextGraphId)
+  ) {
     return 'legacy';
   }
   // Resolved activations produced by this release always carry a total plan.
@@ -192,28 +217,56 @@ export function rfc64CatalogRolloutModeForContextGraphV1(
   return mode;
 }
 
-/** Resolve the complete restart-stable capability set for one CG exactly once. */
+/** Resolve the configured mode without applying edge subscription selection. */
+export function rfc64CatalogConfiguredRolloutModeForContextGraphV1(
+  activation: Rfc64CatalogAuthorityActivationV1 | undefined,
+  contextGraphId: string,
+): Rfc64CatalogRolloutModeV1 {
+  if (activation === undefined || !activation.selectedContextGraphs.includes(contextGraphId)) {
+    return 'legacy';
+  }
+  return activation.rollout?.contextGraphModes[contextGraphId] ?? 'catalog';
+}
+
+/**
+ * @deprecated Resolve configured authority explicitly, then project receiver
+ * activity with `projectRfc64CatalogReceiverAuthorityV1` when required.
+ */
 export function resolveRfc64CatalogAuthorityDecisionV1(
-  activation: Readonly<{
-    enabled?: boolean;
-    selectedContextGraphs: readonly string[];
-    rollout: ResolvedRfc64CatalogRolloutConfigV1;
-  }> | undefined,
+  activation: Rfc64CatalogAuthorityActivationV1 | undefined,
+  contextGraphId: string,
+  receiverActivity?: Readonly<Rfc64CatalogReceiverActivityV1>,
+): Rfc64CatalogAuthorityPolicyV1 {
+  const configured = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
+    activation,
+    contextGraphId,
+  );
+  return receiverActivity === undefined
+    ? configured
+    : projectRfc64CatalogReceiverAuthorityV1(configured, receiverActivity);
+}
+
+/** Resolve provider/author authority without applying edge receiver selection. */
+export function resolveRfc64CatalogConfiguredAuthorityDecisionV1(
+  activation: Rfc64CatalogAuthorityActivationV1 | undefined,
   contextGraphId: string,
 ): Rfc64CatalogAuthorityPolicyV1 {
-  const selected = activation?.selectedContextGraphs.includes(contextGraphId) ?? false;
+  const eligible = activation?.selectedContextGraphs.includes(contextGraphId) ?? false;
   const mode = rfc64CatalogRolloutModeForContextGraphV1(activation, contextGraphId);
   const killSwitchActive = activation?.rollout?.killSwitch ?? false;
   // The disabled activation preserves the pre-activation direct catalog API
   // for unselected callers. Selected CGs always have exactly one authority.
-  const compatibilityTrack2 = activation?.enabled === false && !selected;
+  const compatibilityTrack2 = activation?.enabled === false && !eligible;
+  const active = compatibilityTrack2 || eligible;
   if (killSwitchActive && (compatibilityTrack2 || mode !== 'legacy')) {
     return Object.freeze({
       contextGraphId,
-      selected,
+      selected: eligible,
+      eligible,
+      active: false,
       mode: mode === 'legacy' ? 'catalog' : mode,
       killSwitchActive: true,
-      legacySyncAllowed: !selected || mode !== 'catalog',
+      legacySyncAllowed: !eligible || mode !== 'catalog',
       track2Enabled: false,
       authoringAllowed: false,
       reconciliationLane: 'disabled',
@@ -223,6 +276,8 @@ export function resolveRfc64CatalogAuthorityDecisionV1(
     return Object.freeze({
       contextGraphId,
       selected: false,
+      eligible: false,
+      active: true,
       mode: 'catalog',
       killSwitchActive: false,
       legacySyncAllowed: true,
@@ -235,6 +290,8 @@ export function resolveRfc64CatalogAuthorityDecisionV1(
     return Object.freeze({
       contextGraphId,
       selected: true,
+      eligible: true,
+      active: true,
       mode: 'catalog',
       killSwitchActive: false,
       legacySyncAllowed: false,
@@ -246,7 +303,9 @@ export function resolveRfc64CatalogAuthorityDecisionV1(
   if (mode === 'shadow') {
     return Object.freeze({
       contextGraphId,
-      selected,
+      selected: eligible,
+      eligible,
+      active: true,
       mode: 'shadow',
       killSwitchActive: false,
       legacySyncAllowed: true,
@@ -257,13 +316,35 @@ export function resolveRfc64CatalogAuthorityDecisionV1(
   }
   return Object.freeze({
     contextGraphId,
-    selected,
+    selected: eligible,
+    eligible,
+    active,
     mode: 'legacy',
     killSwitchActive,
     legacySyncAllowed: true,
     track2Enabled: false,
     authoringAllowed: false,
     reconciliationLane: 'legacy',
+  });
+}
+
+/** Apply canonical live receiver selection to an immutable configured policy. */
+export function projectRfc64CatalogReceiverAuthorityV1(
+  configured: Rfc64CatalogAuthorityPolicyV1,
+  activity: Readonly<Rfc64CatalogReceiverActivityV1>,
+): Rfc64CatalogAuthorityPolicyV1 {
+  if (!configured.eligible || activity.active) return configured;
+  return Object.freeze({
+    contextGraphId: configured.contextGraphId,
+    selected: configured.selected,
+    eligible: configured.eligible,
+    active: false,
+    mode: configured.mode,
+    killSwitchActive: configured.killSwitchActive,
+    legacySyncAllowed: false,
+    track2Enabled: false,
+    authoringAllowed: false,
+    reconciliationLane: 'disabled',
   });
 }
 
@@ -276,13 +357,15 @@ export function rfc64CatalogKillSwitchActiveV1(
 
 /** Catalog is the only mode that removes the legacy correctness authority. */
 export function rfc64LegacySyncAuthorityActiveForContextGraphV1(
-  activation: Readonly<{
-    selectedContextGraphs: readonly string[];
-    rollout: ResolvedRfc64CatalogRolloutConfigV1;
-  }> | undefined,
+  activation: Rfc64CatalogAuthorityActivationV1 | undefined,
   contextGraphId: string,
+  receiverActivity?: Readonly<Rfc64CatalogReceiverActivityV1>,
 ): boolean {
-  return resolveRfc64CatalogAuthorityDecisionV1(activation, contextGraphId).legacySyncAllowed;
+  return resolveRfc64CatalogAuthorityDecisionV1(
+    activation,
+    contextGraphId,
+    receiverActivity,
+  ).legacySyncAllowed;
 }
 
 /** One deterministic no-dual-authority projection for the legacy sync scope. */
@@ -319,7 +402,7 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     Object.create(null);
   const track2ContextGraphs: string[] = [];
   for (const contextGraphId of input.activation.selectedContextGraphs) {
-    const authority = resolveRfc64CatalogAuthorityDecisionV1(
+    const authority = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
       input.activation,
       contextGraphId,
     );
@@ -337,6 +420,8 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     selectedAuthority[contextGraphId] = Object.freeze({
       contextGraphId,
       selected: false,
+      eligible: false,
+      active: true,
       mode: 'catalog',
       killSwitchActive: false,
       legacySyncAllowed: true,

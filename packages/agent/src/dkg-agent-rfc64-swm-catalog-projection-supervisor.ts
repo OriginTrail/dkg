@@ -143,11 +143,12 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     if (existing !== undefined) {
       if (existing.runner.closed || existing.finalizedPrivateRunner.closed) return;
       for (const repair of repairs) {
-        if (existing.repairs.some((candidate) => (
+        const current = existing.repairs.find((candidate) => (
           candidate.contextGraphId === repair.contextGraphId
           && candidate.authorAddress === repair.authorAddress
-        ))) continue;
-        existing.repairs.push(repair);
+        ));
+        if (current === undefined) existing.repairs.push(repair);
+        else current.dirty = true;
       }
       if (repairs.length > 0) existing.runner.request();
       if (hasFinalizedPrivateRepairs) existing.finalizedPrivateRunner.request();
