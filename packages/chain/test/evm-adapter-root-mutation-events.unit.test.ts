@@ -46,6 +46,7 @@ import {
   KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
   type KnowledgeAssetRootMutationEventType,
 } from '../src/evm-adapter-events.js';
+import { RpcFailoverClient, type RpcEndpoint } from '../src/rpc-failover-client.js';
 import type { ChainEvent } from '../src/chain-adapter.js';
 
 const ABI_DIR = join(import.meta.dirname, '..', 'abi');
@@ -487,6 +488,44 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     // The corrupt response was rejected INSIDE the per-provider callback, the
     // failover tried the healthy endpoint, and the real mutation arrived.
     expect(attempts).toEqual(['corrupt-endpoint', 'healthy-endpoint']);
+    expect(events).toHaveLength(1);
+    expect(events[0].data['kaId']).toBe(KA_ID.toString());
+  });
+
+  it('endpoint corruption rides the REAL failover: BAD_DATA advances to the healthy endpoint (review r15)', async () => {
+    // The row above emulates the failover contract; this one runs the REAL
+    // RpcFailoverClient so the production retry CLASSIFIER decides the
+    // advance. A plain Error is non-retryable there — the corrupt endpoint
+    // would hold the lane in failure/backoff and the healthy endpoint would
+    // never be queried. The corruption error carries `code: 'BAD_DATA'`,
+    // which the raw-provider read path classifies as retryable.
+    const iface = new Interface(KA_ABI as never);
+    const valid = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
+    const corrupt: FakeLog = { ...valid, topics: [valid.topics[0]!, '0x01', ...valid.topics.slice(2)] };
+
+    const { adapter } = makeAdapter({});
+    const calls: string[] = [];
+    const endpoint = (name: string, logs: FakeLog[]): RpcEndpoint => ({
+      rpcUrl: `http://fake-${name}.invalid`,
+      provider: {
+        getLogs: async () => { calls.push(name); return logs; },
+      } as unknown as RpcEndpoint['provider'],
+    });
+    const failover = new RpcFailoverClient(
+      () => [endpoint('corrupt', [corrupt]), endpoint('healthy', [valid])],
+      (async () => { throw new Error('no signing in this test'); }) as never,
+      () => 'evm:31337',
+      { stickiness: { enabled: false } },
+    );
+    const priv = adapter as unknown as { rpcFailover: RpcFailoverClient; readProvider?: unknown };
+    priv.rpcFailover = failover;
+    // Drop the harness stub so the PROTOTYPE readProvider — the production
+    // transport entry — runs against the real failover client above.
+    delete priv.readProvider;
+
+    const events = await drain(adapter, ['KnowledgeAssetMerkleRootAdded']);
+
+    expect(calls).toEqual(['corrupt', 'healthy']);
     expect(events).toHaveLength(1);
     expect(events[0].data['kaId']).toBe(KA_ID.toString());
   });

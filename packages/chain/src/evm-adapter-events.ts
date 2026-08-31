@@ -263,10 +263,20 @@ export class EventsMethods extends EVMChainAdapterBase {
           if (topic0 == null || !nameByTopic.has(topic0)) continue;
           const kaIdTopic = log.topics[1];
           if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) {
-            throw new Error(
+            const corruption = new Error(
               `RPC endpoint returned a malformed root-mutation log at block ${log.blockNumber}: `
               + `indexed KA-id topic is ${kaIdTopic == null ? 'missing' : String(kaIdTopic).slice(0, 80)}`,
             );
+            // `BAD_DATA` is what routes this through the failover (review r15):
+            // a plain Error is rejected by `isRetryableRpcError`, so the
+            // transport would stop AT the corrupt endpoint instead of trying
+            // the next one. Raw PROVIDER reads keep the unmodified classifier
+            // (the contract-view exclusion of BAD_DATA applies only to
+            // `readContract`, where it means a deterministic client-side ABI
+            // decode) — here it means exactly what ethers uses it for: the
+            // endpoint returned malformed data.
+            (corruption as Error & { code?: string }).code = 'BAD_DATA';
+            throw corruption;
           }
         }
         return raw;
