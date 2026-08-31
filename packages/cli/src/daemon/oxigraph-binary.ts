@@ -155,7 +155,13 @@ export interface OxigraphBinaryIo {
 }
 
 function parseOxigraphVersionOutput(output: string): string | null {
-  return output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)/u)?.[1] ?? null;
+  const labelledVersions = new Set<string>();
+  const pattern = /(?:^|\s)oxigraph(?:\.exe)?(?:\s+version)?\s+v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?=\s|$)/giu;
+  for (const match of output.matchAll(pattern)) {
+    labelledVersions.add(match[1]);
+  }
+  if (labelledVersions.size !== 1) return null;
+  return labelledVersions.values().next().value ?? null;
 }
 
 function defaultProbeVersion(

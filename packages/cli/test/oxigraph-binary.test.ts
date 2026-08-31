@@ -311,6 +311,28 @@ describe('system binary version probing', () => {
     )).resolves.toMatchObject({ source: 'system', version: '0.6.1' });
   });
 
+  it('ignores unrelated versions before an Oxigraph-labelled version', async () => {
+    await expect(withSystemBinary(
+      '#!/bin/sh\necho "launcher 0.6.0"\necho "Oxigraph 0.5.8" >&2\n',
+      (cacheDir) => resolveOxigraphBinary({
+        cacheDir,
+        platform: 'freebsd' as NodeJS.Platform,
+        log: () => {},
+      }),
+    )).resolves.toMatchObject({ source: 'system', version: '0.5.8' });
+  });
+
+  it('rejects conflicting Oxigraph-labelled version lines', async () => {
+    await expect(withSystemBinary(
+      '#!/bin/sh\necho "Oxigraph 0.5.8"\necho "Oxigraph v0.6.0" >&2\n',
+      (cacheDir) => resolveOxigraphBinary({
+        cacheDir,
+        platform: 'freebsd' as NodeJS.Platform,
+        log: () => {},
+      }),
+    )).rejects.toThrow(/Unable to determine Oxigraph version/u);
+  });
+
   it('rejects a non-zero version probe even when its output contains a version', async () => {
     await expect(withSystemBinary(
       '#!/bin/sh\necho "Oxigraph 0.6.1"\nexit 7\n',
