@@ -18,23 +18,124 @@ import {
   canonicalEventPositionV1,
   canonicalNullableAuthorAddress,
   canonicalUnsignedDecimal,
+  type FinalizedEventPositionV1,
   type KnowledgeAssetRootMutationKindV1,
 } from '@origintrail-official/dkg-core';
-import type { ChainEvent } from '@origintrail-official/dkg-chain';
-import type { KnowledgeAssetRootMutationEventV1 } from './chain-event-poller.js';
+import type { ChainEvent, KnowledgeAssetRootMutationEventType } from '@origintrail-official/dkg-chain';
+
+/**
+ * One on-chain mutation of a Knowledge Asset's committed Merkle-root set.
+ *
+ * Emitted by the `kaRootMutations` lane for each of the four
+ * `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES`. The payload is deliberately
+ * canonical-string shaped (not `bigint`/`Uint8Array`) so it matches core's
+ * `FinalizedEventPositionV1` vocabulary and survives a durable round-trip
+ * without a lossy re-encode.
+ *
+ * `position` — not a bare `blockNumber` — because two root mutations of the
+ * SAME asset can land in one block; a consumer deciding whether an event is
+ * newer than one it already recorded needs `(block, txIndex, logIndex)`, which
+ * is exactly what core's `compareEventPosition` orders on.
+ */
+interface KnowledgeAssetRootMutationBaseV1 {
+  /** On-chain KA id, canonical unsigned decimal (never hex, never `bigint`). */
+  kaId: string;
+  /** Chain position, for ordering and de-duplication. */
+  position: FinalizedEventPositionV1;
+}
+
+/** `updateKnowledgeAsset` — the ordinary V10 lifecycle update. */
+export interface KnowledgeAssetLifecycleUpdateEventV1 extends KnowledgeAssetRootMutationBaseV1 {
+  kind: 'lifecycle-update';
+  /**
+   * The appended root, 0x-prefixed 32-byte hex. Optional because it is
+   * best-effort enrichment off `parseLog` — `kaId`/`position` come from the
+   * indexed topics and survive a payload that fails to decode.
+   */
+  merkleRoot?: string;
+  /**
+   * EIP-712-attested author; `null` for the unattributed publish path (the
+   * chain legally emits the zero address there). Optional for the same
+   * best-effort-decode reason as `merkleRoot`.
+   */
+  author?: string | null;
+}
+
+/** `pushMerkleRoot` — append-only admin push. Carries no author field on chain. */
+export interface KnowledgeAssetRootAddedEventV1 extends KnowledgeAssetRootMutationBaseV1 {
+  kind: 'root-added';
+  merkleRoot?: string;
+}
+
+/**
+ * `setMerkleRoots` — destructive replacement. Deliberately carries NO root:
+ * the event's dynamic `MerkleRoot[]` is never decoded (unbounded work on an
+ * untrusted payload), and no consumer needs it — the repair path re-reads the
+ * committed set from chain.
+ */
+export interface KnowledgeAssetRootsReplacedEventV1 extends KnowledgeAssetRootMutationBaseV1 {
+  kind: 'roots-replaced';
+}
+
+/** `popMerkleRoot` — destructive removal of the latest root. */
+export interface KnowledgeAssetRootRemovedEventV1 extends KnowledgeAssetRootMutationBaseV1 {
+  kind: 'root-removed';
+  /** The REMOVED root (best-effort decode), not a new latest root. */
+  merkleRoot?: string;
+}
+
+/**
+ * One on-chain mutation of a Knowledge Asset's committed Merkle-root set, as
+ * a discriminated union over `kind` (PR #2436 review r2): each variant carries
+ * exactly the fields its emitter defines, so an impossible combination — an
+ * author on `roots-replaced`, a root on a replacement — is a compile error
+ * rather than a prose rule.
+ *
+ * Payloads are canonical-string shaped (not `bigint`/`Uint8Array`) so they
+ * match core's `FinalizedEventPositionV1` vocabulary and survive a durable
+ * round-trip without a lossy re-encode. `position` — not a bare
+ * `blockNumber` — because two root mutations of the SAME asset can land in
+ * one block; ordering needs `(block, txIndex, logIndex)`, which is what
+ * core's `compareEventPosition` orders on.
+ */
+export type KnowledgeAssetRootMutationEventV1 =
+  | KnowledgeAssetLifecycleUpdateEventV1
+  | KnowledgeAssetRootAddedEventV1
+  | KnowledgeAssetRootsReplacedEventV1
+  | KnowledgeAssetRootRemovedEventV1;
+
+/**
+ * Callback for `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES`.
+ *
+ * Contract, unlike every other poller callback: **a rejection is not
+ * swallowed.** It propagates to the lane runner, which holds the lane cursor
+ * and re-scans the same window on the next due poll. So a handler that cannot
+ * durably record the event MUST reject — returning normally is a promise that
+ * the event has been taken responsibility for, and the cursor advances past it
+ * forever.
+ */
+export type OnKnowledgeAssetRootMutated = (
+  event: KnowledgeAssetRootMutationEventV1,
+) => Promise<void>;
 
 /**
  * On-chain event name → the off-chain kind a consumer classifies it as.
- * A `Record` over the closed union makes an unmapped name a compile error
- * rather than a silently dropped event.
+ * The keys are the CLOSED chain union (review r8), so an event name added to
+ * `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES` without a row here is a compile
+ * error rather than a silently dropped event — and the object carries a NULL
+ * prototype, so an inherited name like `toString` can never read as a row
+ * even if a call site indexes it without the own-property guard below.
  */
-export const KA_ROOT_MUTATION_KIND_BY_EVENT: Readonly<Record<string, KnowledgeAssetRootMutationKindV1>> =
-  Object.freeze({
+export const KA_ROOT_MUTATION_KIND_BY_EVENT: Readonly<
+  Record<KnowledgeAssetRootMutationEventType, KnowledgeAssetRootMutationKindV1>
+> = Object.freeze(
+  Object.assign(Object.create(null) as Record<never, never>, {
     KnowledgeAssetUpdated: 'lifecycle-update',
     KnowledgeAssetMerkleRootAdded: 'root-added',
     KnowledgeAssetMerkleRootsUpdated: 'roots-replaced',
     KnowledgeAssetMerkleRootRemoved: 'root-removed',
-  });
+  } satisfies Record<KnowledgeAssetRootMutationEventType, KnowledgeAssetRootMutationKindV1>),
+);
 
 export type KnowledgeAssetRootMutationDecodeFailure =
   | 'unknown-event-type'
@@ -80,7 +181,13 @@ function degradeDigest(value: unknown): string | undefined {
 export function decodeKnowledgeAssetRootMutationEvent(
   event: ChainEvent,
 ): KnowledgeAssetRootMutationDecodeResult {
-  const kind = KA_ROOT_MUTATION_KIND_BY_EVENT[event.type];
+  // Own-property check (review r8): indexing a plain object accepted names
+  // inherited from `Object.prototype` — `type: 'toString'` read the inherited
+  // function as a kind, bypassed this guard, matched no switch case, and
+  // returned `{ ok: true, mutation: undefined }` for the poller to throw on.
+  const kind = Object.hasOwn(KA_ROOT_MUTATION_KIND_BY_EVENT, event.type)
+    ? KA_ROOT_MUTATION_KIND_BY_EVENT[event.type as KnowledgeAssetRootMutationEventType]
+    : undefined;
   if (!kind) return { ok: false, reason: 'unknown-event-type' };
 
   const { data } = event;
@@ -103,10 +210,10 @@ export function decodeKnowledgeAssetRootMutationEvent(
     // which are advisory and degrade.
     position = canonicalEventPositionV1({
       blockNumber: event.blockNumber,
-      blockHash: data['blockHash'] as never,
-      transactionHash: data['txHash'] as never,
-      transactionIndex: data['txIndex'] as never,
-      logIndex: data['logIndex'] as never,
+      blockHash: data['blockHash'],
+      transactionHash: data['txHash'],
+      transactionIndex: data['txIndex'],
+      logIndex: data['logIndex'],
     });
   } catch {
     return { ok: false, reason: 'noncanonical-position' };

@@ -10,6 +10,7 @@ export default defineConfig({
       // Hardhat boot.
       'test/chain-event-lane-runner.unit.test.ts',
       'test/chain-event-poller-ka-root-mutations.test.ts',
+      'test/ka-root-mutation-decode.unit.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',

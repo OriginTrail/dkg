@@ -462,19 +462,30 @@ export type KnowledgeAssetRootMutationKindV1 =
   | FinalizedUnsupportedKnowledgeAssetRootMutationV1['kind'];
 
 /**
+ * The UNVALIDATED spelling of a position, as read off an untrusted boundary:
+ * same keys, every value still unproven. The validator's parameter says so
+ * honestly (PR #2436 review r8) — declaring `FinalizedEventPositionV1` here
+ * forced callers decoding loose payloads into `as never` casts that made the
+ * type boundary claim the input was already canonical.
+ */
+export type LooseEventPositionInputV1 = { readonly [K in keyof FinalizedEventPositionV1]: unknown };
+
+/**
  * Public alias of the position validator (PR #2436 review r5): consumers that
  * decode a LOOSE event payload into `FinalizedEventPositionV1` must use THIS
  * boundary rather than restating `Number.isInteger`-style checks that drift
  * from core's canonical rules (safe integers, lowercase 32-byte digests).
+ * Accepts the loose input shape and returns the proven one — the direction a
+ * trust boundary is supposed to point.
  */
 export function canonicalEventPositionV1(
-  input: FinalizedEventPositionV1,
+  input: LooseEventPositionInputV1,
   label = 'position',
 ): FinalizedEventPositionV1 {
   return canonicalPosition(input, label);
 }
 
-function canonicalPosition(input: FinalizedEventPositionV1, label: string): FinalizedEventPositionV1 {
+function canonicalPosition(input: LooseEventPositionInputV1, label: string): FinalizedEventPositionV1 {
   return {
     blockNumber: canonicalBlockNumber(input.blockNumber, `${label}.blockNumber`),
     blockHash: canonicalDigest32(input.blockHash, `${label}.blockHash`),
