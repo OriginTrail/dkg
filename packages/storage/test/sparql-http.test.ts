@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   SparqlHttpStore,
+  asGraphWriteRevisionSource,
   createManagedOxigraphRuntimeStoreConfigV1,
   createManagedOxigraphSparqlStoreV1,
   createTripleStore,
@@ -126,6 +127,10 @@ describe('SparqlHttpStore (test server)', () => {
 
   afterAll(async () => {
     await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  });
+
+  it('declares process-local revision coverage at the extracted adapter boundary', () => {
+    expect(asGraphWriteRevisionSource(store)?.writeRevisionCoverage).toBe('process-local');
   });
 
   it('insert sends INSERT DATA to update endpoint', async () => {

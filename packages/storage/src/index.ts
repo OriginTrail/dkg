@@ -148,6 +148,7 @@ export {
   type GraphWriteGenSource,
   type GraphWriteLifecycle,
   type GraphWriteRevision,
+  type GraphWriteRevisionCoverage,
   type GraphWriteRevisionSource,
   type GraphWriteScope,
 } from './graph-write-gen.js';

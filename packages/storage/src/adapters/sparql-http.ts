@@ -263,6 +263,7 @@ export interface SparqlHttpStoreOptions {
 }
 
 export class SparqlHttpStore implements TripleStore {
+  readonly writeRevisionCoverage = 'process-local' as const;
   readonly queryCancellation = 'interruptible' as const;
   /**
    * RFC-64 stream capability installed only for a storage-created managed
