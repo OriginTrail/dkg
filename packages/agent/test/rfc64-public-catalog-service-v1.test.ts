@@ -398,8 +398,10 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
           }),
       },
       currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest },
-      resolveContextGraphAuthority: inactiveReceiver,
-      resolveContextGraphServingAuthority: configuredServing,
+      resolveContextGraphAuthority: (contextGraphId, direction) =>
+        direction === 'serving'
+          ? configuredServing(contextGraphId)
+          : inactiveReceiver(contextGraphId),
     });
     const policy = acceptPolicy(service);
     service.start();

@@ -249,6 +249,7 @@ const blockedRfc64Modules = [
   'public-open-catalog-scope-v1.js',
   'public-catalog-reconciliation-failure-v1.js',
   'public-catalog-reconciliation-outcome-v1.js',
+  'public-catalog-receiver-task-lifecycle-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
   'public-catalog-issuer-delegation-v1.js',

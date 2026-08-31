@@ -381,10 +381,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
-      resolveContextGraphAuthority: (contextGraphId) =>
-        this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
-      resolveContextGraphServingAuthority: (contextGraphId) =>
-        this.resolveRfc64CatalogServingAuthorityV1(contextGraphId),
+      resolveContextGraphAuthority: (contextGraphId, direction) =>
+        direction === 'serving'
+          ? this.resolveRfc64CatalogServingAuthorityV1(contextGraphId)
+          : this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
       runCatalogMutationExclusive: (scope, operation, signal) =>
         this.rfc64CatalogMutationCoordinatorV1.run(scope, operation, signal),
       currentHeadDiscovery: {

@@ -49,10 +49,12 @@ export type Rfc64CatalogAuthorityOperationV1 =
   | 'current-head-discovery-outbound'
   | 'current-head-discovery-inbound';
 
+export type Rfc64CatalogAuthorityDirectionV1 = 'serving' | 'receiving';
+
 /** One exhaustive authority direction for every RFC-64 transport operation. */
 export function rfc64CatalogAuthorityDirectionV1(
   operation: Rfc64CatalogAuthorityOperationV1,
-): 'serving' | 'receiving' {
+): Rfc64CatalogAuthorityDirectionV1 {
   switch (operation) {
     case 'announce-outbound':
     case 'fetch-inbound':

@@ -2302,7 +2302,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
   });
 
-  it('schedules a pre-connected private complete provider on the ordinary SWM lane', async () => {
+  it('keeps legacy complete-provider recovery dormant until the edge subscribes', async () => {
     const policy = privateCatalogPolicy();
     const policyEnvelope = {
       issuer: AUTHOR,
@@ -2363,6 +2363,17 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       .mockReturnValue(true);
 
     await receiver.start();
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(connect).not.toHaveBeenCalled();
+    expect(queue).not.toHaveBeenCalled();
+    await expect(receiver.planSharedMemorySyncContextGraphs(
+      providerPeerId,
+      [policy.contextGraphId],
+      createOperationContext('sync-before-subscription'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({ targets: [] });
+
     receiver.subscribeToContextGraph(policy.contextGraphId);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 

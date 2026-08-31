@@ -521,6 +521,76 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await receiver.close();
   });
 
+  it('settles queued, deferred, and active cancellation through one lifecycle owner', async () => {
+    const activeEntered = deferred<void>();
+    const attemptedContextGraphs: string[] = [];
+    const active = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/active',
+      catalogHeadObjectDigest: `0x${'a1'.repeat(32)}`,
+    });
+    const queued = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/queued',
+      catalogHeadObjectDigest: `0x${'b2'.repeat(32)}`,
+    });
+    const deferredHead = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/deferred',
+      catalogHeadObjectDigest: `0x${'c3'.repeat(32)}`,
+    });
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (_peerId, head, signal) => {
+        attemptedContextGraphs.push(head.contextGraphId);
+        if (head.contextGraphId === active.contextGraphId) {
+          activeEntered.resolve();
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          return 'applied';
+        }
+        if (head.contextGraphId === deferredHead.contextGraphId) {
+          throw new Error('finalized chain lane busy');
+        }
+        throw new Error('queued task must never start');
+      },
+    ), {
+      maxConcurrent: 1,
+      admissionDeferralMs: 60_000,
+      isDeferrableError: (error) =>
+        error instanceof Error && error.message === 'finalized chain lane busy',
+    });
+
+    const activeCompletion = receiver.scheduleManyAndWait([{
+      announcement: active,
+      remotePeerId: 'peer-active',
+    }]);
+    await activeEntered.promise;
+    const queuedCompletion = receiver.scheduleManyAndWait([{
+      announcement: queued,
+      remotePeerId: 'peer-queued',
+    }]);
+    const deferredCompletion = receiver.scheduleManyAndWait([{
+      announcement: deferredHead,
+      remotePeerId: 'peer-deferred',
+    }]);
+
+    receiver.cancelContextGraph(queued.contextGraphId);
+    await expect(queuedCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    receiver.cancelContextGraph(active.contextGraphId);
+    await expect(activeCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    await vi.waitFor(() => {
+      expect(receiver.stats()).toMatchObject({ deferred: 1, inFlight: 0, queued: 0 });
+    });
+    receiver.cancelContextGraph(deferredHead.contextGraphId);
+    await expect(deferredCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    await receiver.whenIdle();
+
+    expect(attemptedContextGraphs).toEqual([
+      active.contextGraphId,
+      deferredHead.contextGraphId,
+    ]);
+    expect(receiver.stats()).toMatchObject({ deferred: 0, inFlight: 0, queued: 0 });
+    await receiver.close();
+  });
+
   it('round-robins transient failures with a bounded per-provider budget', async () => {
     const peers: string[] = [];
     const firstAttempt = deferred<void>();

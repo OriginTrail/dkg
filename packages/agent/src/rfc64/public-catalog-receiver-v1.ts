@@ -27,6 +27,14 @@ import {
   createRfc64PublicCatalogReceiverCompletionV1,
   type Rfc64PublicCatalogReceiverCompletionV1,
 } from './public-catalog-reconciliation-outcome-v1.js';
+import {
+  Rfc64ReceiverTaskLifecycleV1,
+  rfc64ReceiverCatalogScopeKeyV1,
+  rfc64ReceiverHeadKeyV1,
+  rfc64ReceiverNonNegativeIntV1,
+  rfc64ReceiverPositiveIntV1,
+  rfc64ReceiverProviderContextKeyV1,
+} from './public-catalog-receiver-task-lifecycle-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
 export type {
@@ -255,9 +263,8 @@ export class Rfc64PublicCatalogReceiverV1 {
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptEnd'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
-  readonly #queue: ReceiverTaskV1[] = [];
-  /** Every exact head currently queued or in-flight, including alternate peers. */
-  readonly #pendingByKey = new Map<string, ReceiverTaskV1>();
+  /** Every exact head and its queued/deferred/terminal task lifecycle. */
+  readonly #tasks = new Rfc64ReceiverTaskLifecycleV1<ReceiverTaskV1>();
   /** One semantic writer per exact author-catalog scope. */
   readonly #activeScopeKeys = new Set<string>();
   readonly #active = new Set<Promise<void>>();
@@ -269,16 +276,6 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #maxAdmissionDeferrals: number;
   readonly #isDeferrableError: (error: unknown) => boolean;
   readonly #deferralTimers = new Set<ReturnType<typeof setTimeout>>();
-  /**
-   * The third scheduler state, made explicit: accepted work that is neither
-   * queued nor active because it is waiting for the chain lane.
-   *
-   * It MUST be observable by `#isIdle()`. Without it a deferred head sits in
-   * `#pendingByKey` and a timer only, so `whenIdle()` resolved during the retry
-   * window and a caller draining the receiver — `synchronizeCurrentCatalogHead()`
-   * — could conclude scheduling had settled before the head was applied.
-   */
-  readonly #deferred = new Set<ReceiverTaskV1>();
   #isolatedCompletionSequence = 0;
 
   #scheduled = 0;
@@ -301,19 +298,28 @@ export class Rfc64PublicCatalogReceiverV1 {
     options: Rfc64PublicCatalogReceiverOptionsV1 = {},
   ) {
     this.#reconciler = reconciler;
-    this.#maxConcurrent = positiveInt(options.maxConcurrent, DEFAULTS.maxConcurrent);
-    this.#maxQueue = positiveInt(options.maxQueue, DEFAULTS.maxQueue);
-    this.#maxAttempts = positiveInt(options.maxAttempts, DEFAULTS.maxAttempts);
-    this.#maxProvidersPerHead = positiveInt(
+    this.#maxConcurrent = rfc64ReceiverPositiveIntV1(
+      options.maxConcurrent,
+      DEFAULTS.maxConcurrent,
+    );
+    this.#maxQueue = rfc64ReceiverPositiveIntV1(options.maxQueue, DEFAULTS.maxQueue);
+    this.#maxAttempts = rfc64ReceiverPositiveIntV1(
+      options.maxAttempts,
+      DEFAULTS.maxAttempts,
+    );
+    this.#maxProvidersPerHead = rfc64ReceiverPositiveIntV1(
       options.maxProvidersPerHead,
       DEFAULTS.maxProvidersPerHead,
     );
-    this.#retryBackoffMs = nonNegativeInt(options.retryBackoffMs, DEFAULTS.retryBackoffMs);
-    this.#admissionDeferralMs = nonNegativeInt(
+    this.#retryBackoffMs = rfc64ReceiverNonNegativeIntV1(
+      options.retryBackoffMs,
+      DEFAULTS.retryBackoffMs,
+    );
+    this.#admissionDeferralMs = rfc64ReceiverNonNegativeIntV1(
       options.admissionDeferralMs,
       DEFAULTS.admissionDeferralMs,
     );
-    this.#maxAdmissionDeferrals = positiveInt(
+    this.#maxAdmissionDeferrals = rfc64ReceiverPositiveIntV1(
       options.maxAdmissionDeferrals,
       DEFAULTS.maxAdmissionDeferrals,
     );
@@ -359,12 +365,12 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (inputs.length === 0) {
       throw new TypeError('RFC-64 receiver completion requires at least one provider');
     }
-    const firstKey = headKey(inputs[0]!.announcement);
-    if (inputs.some(({ announcement }) => headKey(announcement) !== firstKey)) {
+    const firstKey = rfc64ReceiverHeadKeyV1(inputs[0]!.announcement);
+    if (inputs.some(({ announcement }) => rfc64ReceiverHeadKeyV1(announcement) !== firstKey)) {
       throw new TypeError('RFC-64 receiver completion inputs must name one exact head');
     }
     const exactProviderKeys = new Set(inputs.map(({ announcement, remotePeerId }) => (
-      providerContextKey(remotePeerId, announcement)
+      rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement)
     )));
     if (exactProviderKeys.size !== inputs.length) {
       throw new TypeError('RFC-64 receiver completion providers must be distinct');
@@ -385,14 +391,14 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (this.#closed) return;
     for (const { announcement, remotePeerId } of inputs) {
       this.#scheduled += 1;
-      const key = headKey(announcement);
-      const candidate = this.#pendingByKey.get(key);
+      const key = rfc64ReceiverHeadKeyV1(announcement);
+      const candidate = this.#tasks.pending(key);
       const existing = candidate?.cancellation.signal.aborted === true
         ? undefined
         : candidate;
       if (existing !== undefined) {
         this.#dedupedInFlight += 1;
-        const providerKey = providerContextKey(remotePeerId, announcement);
+        const providerKey = rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement);
         const provider = existing.providers.get(providerKey);
         if (provider !== undefined) {
           provider.hintRevision += 1n;
@@ -412,14 +418,14 @@ export class Rfc64PublicCatalogReceiverV1 {
         continue;
       }
       this.#safeNotify(() => this.#onAttemptStart?.(announcement));
-      if (this.#queue.length >= this.#maxQueue) {
+      if (this.#tasks.queuedCount >= this.#maxQueue) {
         this.#droppedQueueFull += 1;
         continue;
       }
-      const providerKey = providerContextKey(remotePeerId, announcement);
+      const providerKey = rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement);
       const task: ReceiverTaskV1 = {
         key,
-        scopeKey: catalogScopeKey(announcement),
+        scopeKey: rfc64ReceiverCatalogScopeKeyV1(announcement),
         contextGraphId: announcement.contextGraphId,
         cancellation: new AbortController(),
         revision: 1n,
@@ -430,8 +436,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           hintRevision: 1n,
         }]]),
       };
-      this.#pendingByKey.set(key, task);
-      this.#queue.push(task);
+      this.#tasks.schedule(task);
     }
     this.#pump();
   }
@@ -465,7 +470,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#scheduled += inputs.length;
     const first = inputs[0]!;
     this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
-    if (this.#queue.length >= this.#maxQueue) {
+    if (this.#tasks.queuedCount >= this.#maxQueue) {
       this.#droppedQueueFull += 1;
       completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'dropped',
@@ -475,7 +480,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
     const providers = new Map<string, ReceiverProviderV1>();
     for (const { announcement, remotePeerId } of inputs) {
-      const key = providerContextKey(remotePeerId, announcement);
+      const key = rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement);
       if (providers.has(key)) continue;
       providers.set(key, {
         key,
@@ -485,18 +490,17 @@ export class Rfc64PublicCatalogReceiverV1 {
       });
     }
     const task: ReceiverTaskV1 = {
-      key: `${headKey(first.announcement)}\nexplicit-provider-set:${
+      key: `${rfc64ReceiverHeadKeyV1(first.announcement)}\nexplicit-provider-set:${
         ++this.#isolatedCompletionSequence
       }`,
-      scopeKey: catalogScopeKey(first.announcement),
+      scopeKey: rfc64ReceiverCatalogScopeKeyV1(first.announcement),
       contextGraphId: first.announcement.contextGraphId,
       cancellation: new AbortController(),
       revision: 1n,
       providers,
       completionWaiters: [completion],
     };
-    this.#pendingByKey.set(task.key, task);
-    this.#queue.push(task);
+    this.#tasks.schedule(task);
     this.#pump();
   }
 
@@ -508,25 +512,16 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   /** Fence queued, deferred, and active work for one no-longer-selected CG. */
   cancelContextGraph(contextGraphId: string): void {
-    const tasks = new Set(
-      [...this.#pendingByKey.values()].filter(
-        (task) => task.contextGraphId === contextGraphId,
-      ),
-    );
-    for (const task of tasks) {
-      task.cancellation.abort(new Error(
-        `RFC-64 receiver selection inactive for ${contextGraphId}`,
-      ));
-      if (task.running === true) continue;
-      const queueIndex = this.#queue.indexOf(task);
-      if (queueIndex >= 0) this.#queue.splice(queueIndex, 1);
-      this.#deferred.delete(task);
-      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+    this.#tasks.cancelContextGraph(
+      contextGraphId,
+      new Error(`RFC-64 receiver selection inactive for ${contextGraphId}`),
+      (task) => createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
-      }));
-      if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
-    }
+      }),
+      (task) => this.#finishReconciliationAttempt(task),
+      (waiter) => this.#safeNotify(waiter),
+    );
     if (this.#isIdle()) this.#resolveIdle();
   }
 
@@ -540,27 +535,17 @@ export class Rfc64PublicCatalogReceiverV1 {
       return;
     }
     this.#closed = true;
-    for (const task of new Set(this.#pendingByKey.values())) {
-      task.cancellation.abort(new Error('RFC-64 public catalog receiver closing'));
-    }
+    this.#tasks.abortAll(new Error('RFC-64 public catalog receiver closing'));
     for (const timer of this.#deferralTimers) clearTimeout(timer);
     this.#deferralTimers.clear();
-    for (const task of this.#deferred) {
-      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+    this.#tasks.finalizeNonRunning(
+      (task) => createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
-      }));
-      if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
-    }
-    this.#deferred.clear();
-    const abandoned = this.#queue.splice(0);
-    for (const task of abandoned) {
-      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
-        outcome: 'closed',
-        providerAttempts: task.providerAttempts ?? 0,
-      }));
-      if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
-    }
+      }),
+      (task) => this.#finishReconciliationAttempt(task),
+      (waiter) => this.#safeNotify(waiter),
+    );
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
     await Promise.allSettled([...this.#active]);
     this.#resolveIdle();
@@ -578,9 +563,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       droppedQueueFull: this.#droppedQueueFull,
       droppedProviders: this.#droppedProviders,
       admissionDeferred: this.#admissionDeferred,
-      deferred: this.#deferred.size,
+      deferred: this.#tasks.deferredCount,
       inFlight: this.#active.size,
-      queued: this.#queue.length,
+      queued: this.#tasks.queuedCount,
       providerAttempts: this.#providerAttempts,
       providerSwitches: this.#providerSwitches,
       providerSuccesses: this.#providerSuccesses,
@@ -589,19 +574,20 @@ export class Rfc64PublicCatalogReceiverV1 {
   }
 
   #pump(): void {
-    while (!this.#closed && this.#active.size < this.#maxConcurrent && this.#queue.length > 0) {
-      const taskIndex = this.#queue.findIndex(
+    while (
+      !this.#closed
+      && this.#active.size < this.#maxConcurrent
+      && this.#tasks.queuedCount > 0
+    ) {
+      const task = this.#tasks.takeNextRunnable(
         (candidate) => !this.#activeScopeKeys.has(candidate.scopeKey),
       );
-      if (taskIndex < 0) return;
-      const [task] = this.#queue.splice(taskIndex, 1);
       if (task === undefined) return;
       if (task.cancellation.signal.aborted) {
         this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
           outcome: 'closed',
           providerAttempts: task.providerAttempts ?? 0,
         }));
-        if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
         continue;
       }
       this.#activeScopeKeys.add(task.scopeKey);
@@ -627,7 +613,12 @@ export class Rfc64PublicCatalogReceiverV1 {
           // accepted a fresher hint before this completion continuation ran.
           // Keep the pending key and put the mutated task back through the
           // scheduler instead of deleting the accepted observation.
-          this.#queue.push(task);
+          if (!this.#tasks.requeue(task)) {
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+              outcome: 'closed',
+              providerAttempts: task.providerAttempts ?? 0,
+            }));
+          }
           return;
         }
         switch (outcome.kind) {
@@ -688,7 +679,6 @@ export class Rfc64PublicCatalogReceiverV1 {
             }));
             break;
         }
-        if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
       }).finally(() => {
         task.running = false;
         this.#active.delete(run);
@@ -713,8 +703,6 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#admissionDeferred += 1;
     if (task.admissionDeferrals > this.#maxAdmissionDeferrals) {
       this.#failed += 1;
-      this.#deferred.delete(task);
-      if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
       const firstProvider = task.providers.values().next().value;
       this.#safeNotify(() => this.#onError?.(
         firstProvider!.announcement,
@@ -731,10 +719,16 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
     // Registered BEFORE the timer is armed: between these two statements the
     // task must never be invisible to the idle predicate.
-    this.#deferred.add(task);
+    if (!this.#tasks.defer(task)) {
+      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: task.providerAttempts ?? 0,
+      }));
+      return;
+    }
     const timer = setTimeout(() => {
       this.#deferralTimers.delete(timer);
-      this.#deferred.delete(task);
+      this.#tasks.removeDeferred(task);
       if (
         this.#closed
         || this.#closing.signal.aborted
@@ -744,12 +738,10 @@ export class Rfc64PublicCatalogReceiverV1 {
           outcome: 'closed',
           providerAttempts: task.providerAttempts ?? 0,
         }));
-        if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
         if (this.#isIdle()) this.#resolveIdle();
         return;
       }
-      this.#queue.push(task);
-      this.#pump();
+      if (this.#tasks.requeue(task)) this.#pump();
     }, this.#admissionDeferralMs);
     // Never hold the process open for a retry.
     (timer as { unref?: () => void }).unref?.();
@@ -920,11 +912,12 @@ export class Rfc64PublicCatalogReceiverV1 {
     task: ReceiverTaskV1,
     result: Rfc64PublicCatalogReceiverCompletionV1,
   ): void {
-    if (task.settled === true) return;
-    task.settled = true;
-    this.#finishReconciliationAttempt(task);
-    const waiters = task.completionWaiters?.splice(0) ?? [];
-    for (const resolve of waiters) this.#safeNotify(() => resolve(result));
+    this.#tasks.finalize(
+      task,
+      result,
+      (settledTask) => this.#finishReconciliationAttempt(settledTask),
+      (waiter) => this.#safeNotify(waiter),
+    );
   }
 
   #finishReconciliationAttempt(task: ReceiverTaskV1): void {
@@ -941,7 +934,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   }
 
   #isIdle(): boolean {
-    return this.#active.size === 0 && this.#queue.length === 0 && this.#deferred.size === 0;
+    return this.#active.size === 0 && this.#tasks.isIdle;
   }
 
   #resolveIdle(): void {
@@ -950,44 +943,6 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#idleWaiters = [];
     for (const resolve of waiters) resolve();
   }
-}
-
-/**
- * Dedup key: the exact head identity (scope + both digests). Heads at a new
- * era/version or with a different object/signature digest are distinct work.
- * The policy digest is part of the work identity. A successor policy can
- * authorize the same durable head, but private finalized recovery must run its
- * accepted-current and chain precommit again for that new generation.
- */
-function headKey(a: Rfc64PublicCatalogHeadAnnouncementV1): string {
-  return [
-    a.networkId,
-    a.contextGraphId,
-    a.subGraphName ?? '',
-    a.authorAddress,
-    a.catalogEra,
-    a.catalogVersion,
-    a.policyDigest,
-    a.catalogHeadObjectDigest,
-    a.signatureVariantDigest,
-  ].join('\n');
-}
-
-function catalogScopeKey(a: Rfc64PublicCatalogHeadAnnouncementV1): string {
-  return [
-    a.networkId,
-    a.contextGraphId,
-    a.subGraphName ?? '',
-    a.authorAddress,
-    a.catalogEra,
-  ].join('\n');
-}
-
-function providerContextKey(
-  peerId: string,
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-): string {
-  return `${peerId}\n${announcement.policyDigest}`;
 }
 
 function nextEligibleProvider(
@@ -1016,14 +971,6 @@ function nextEligibleProvider(
     }
   }
   return null;
-}
-
-function positiveInt(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
-}
-
-function nonNegativeInt(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : fallback;
 }
 
 function providerFailureV1(
