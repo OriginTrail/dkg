@@ -689,6 +689,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const producer = new Rfc64PublicCatalogSuccessorProducerV1({
       controlObjects: persistence.controlObjects,
       stageKaBundle: persistence.kaBundles.putKaBundle,
+      readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
     });
     const produced = await producer.produceAndStageExactSet({
       previousHead: history.previousHead,

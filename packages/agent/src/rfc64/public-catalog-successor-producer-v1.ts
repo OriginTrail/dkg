@@ -121,6 +121,11 @@ export interface Rfc64PublicCatalogSuccessorProducerOptionsV1 {
   readonly stageKaBundle: (
     input: StageRfc64PublicCatalogBundleV1,
   ) => Promise<StagedRfc64PublicCatalogBundleReceiptV1>;
+  /**
+   * Optional durable-cache read used to avoid re-fsyncing unchanged bundles
+   * already referenced by the verified predecessor bucket.
+   */
+  readonly readKaBundleByDigest?: (blobDigest: Digest32V1) => Promise<Uint8Array | null>;
 }
 
 export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
@@ -195,6 +200,8 @@ export interface ProducedAndStagedPublicOpenExactSetSuccessorV1 {
 export class Rfc64PublicCatalogSuccessorProducerV1 {
   readonly #stageVerifiedObjects: Rfc64ControlObjectOperationsV1['stageVerifiedObjects'];
   readonly #stageKaBundle: Rfc64PublicCatalogSuccessorProducerOptionsV1['stageKaBundle'];
+  readonly #readKaBundleByDigest:
+    Rfc64PublicCatalogSuccessorProducerOptionsV1['readKaBundleByDigest'];
 
   constructor(options: Rfc64PublicCatalogSuccessorProducerOptionsV1) {
     if (
@@ -206,6 +213,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     this.#stageVerifiedObjects = options.controlObjects.stageVerifiedObjects
       .bind(options.controlObjects);
     this.#stageKaBundle = options.stageKaBundle;
+    this.#readKaBundleByDigest = options.readKaBundleByDigest;
   }
 
   async produceAndStage(
@@ -425,8 +433,21 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    for (const { prepared } of verifiedAssets) {
+    const previousBundleByKaId = new Map(
+      (input.previousBucket?.payload.rows ?? []).map((row) => [
+        row.kaId,
+        row.transfer.blobDigest,
+      ] as const),
+    );
+    for (const { prepared, row } of verifiedAssets) {
       try {
+        if (
+          previousBundleByKaId.get(row.kaId) === prepared.encoded.blobDigest
+          && this.#readKaBundleByDigest !== undefined
+        ) {
+          const existing = await this.#readKaBundleByDigest(prepared.encoded.blobDigest);
+          if (existing !== null && bytesEqualV1(existing, prepared.bundleBytes)) continue;
+        }
         const bundleReceipt = await this.#stageKaBundle(Object.freeze({
           blobDigest: prepared.encoded.blobDigest,
           bundleBytes: new Uint8Array(prepared.bundleBytes),
@@ -480,6 +501,14 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       stagedControlObjects,
     });
   }
+}
+
+function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {

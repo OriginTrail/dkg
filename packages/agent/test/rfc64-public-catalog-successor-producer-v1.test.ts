@@ -222,6 +222,68 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(stageVerifiedObjects).toHaveBeenCalledTimes(3);
   });
 
+  it('does not re-fsync an unchanged predecessor bundle', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const durableBundles = new Map<string, Uint8Array>();
+    const stageKaBundle = vi.fn(async (input) => {
+      durableBundles.set(input.blobDigest, new Uint8Array(input.bundleBytes));
+      return durableBundleReceipt(input);
+    });
+    const readKaBundleByDigest = vi.fn(async (digest: string) => {
+      const bytes = durableBundles.get(digest);
+      return bytes === undefined ? null : new Uint8Array(bytes);
+    });
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: {
+        stageVerifiedObjects: async () => Object.freeze({
+          durable: true as const,
+          namespaceDurability: 'test-exact-durable' as never,
+          objects: Object.freeze([]),
+        }),
+      } as never,
+      stageKaBundle,
+      readKaBundleByDigest: readKaBundleByDigest as never,
+    });
+    const firstSeal = await authorSeal(AUTHOR_WALLET);
+    const secondSeal = await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER);
+    const first = await producer.produceAndStageExactSet({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assets: [{
+        assertionCoordinate: 'gate-1-object' as never,
+        projectionBytes: PROJECTION,
+        seal: firstSeal,
+      }],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+
+    await producer.produceAndStageExactSet({
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      previousBucket: first.publication.bucket,
+      assets: [{
+        assertionCoordinate: 'gate-1-object' as never,
+        projectionBytes: PROJECTION,
+        seal: firstSeal,
+      }, {
+        assertionCoordinate: 'gate-2-object' as never,
+        projectionBytes: PROJECTION,
+        seal: secondSeal,
+      }],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+
+    expect(readKaBundleByDigest).toHaveBeenCalledOnce();
+    expect(stageKaBundle).toHaveBeenCalledTimes(2);
+  });
+
   it('shares one ordered immutable asset snapshot across producer and reconciler boundaries', async () => {
     const firstProjection = new Uint8Array(PROJECTION);
     const first = {
