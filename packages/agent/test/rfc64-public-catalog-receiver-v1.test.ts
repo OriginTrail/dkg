@@ -485,6 +485,148 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ scheduled: 3, applied: 0, inFlight: 0, queued: 0 });
   });
 
+  it('cancels and fences an in-flight reconciliation when its CG becomes inactive', async () => {
+    const entered = deferred<void>();
+    const onHeadApplied = vi.fn();
+    let observedSignal: AbortSignal | undefined;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (_peerId, _announcement, signal) => {
+        observedSignal = signal;
+        entered.resolve();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return 'applied';
+      },
+    ), { onHeadApplied });
+    const current = announcement();
+    const completion = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+
+    await entered.promise;
+    receiver.cancelContextGraph(current.contextGraphId);
+
+    expect(observedSignal?.aborted).toBe(true);
+    await expect(completion).resolves.toEqual({
+      outcome: 'closed',
+      appliedProviderPeerId: null,
+      providerAttempts: 0,
+      error: null,
+    });
+    await receiver.whenIdle();
+    expect(onHeadApplied).not.toHaveBeenCalled();
+    expect(receiver.stats()).toMatchObject({ applied: 0, inFlight: 0, queued: 0 });
+    await receiver.close();
+  });
+
+  it('requeues the same head when resubscribed while its cancelled run settles', async () => {
+    const firstEntered = deferred<void>();
+    const releaseFirst = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const current = announcement();
+    const peers: string[] = [];
+    let attempts = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      attempts += 1;
+      if (attempts === 1) {
+        firstEntered.resolve();
+        return releaseFirst.promise;
+      }
+      return 'applied';
+    }));
+
+    const cancelled = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+    await firstEntered.promise;
+    receiver.cancelContextGraph(current.contextGraphId);
+    const replacement = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+    releaseFirst.resolve('applied');
+
+    await expect(cancelled).resolves.toMatchObject({ outcome: 'closed' });
+    await expect(replacement).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(peers).toEqual(['peerA', 'peerA']);
+    expect(receiver.stats()).toMatchObject({ applied: 1, inFlight: 0, queued: 0 });
+    await receiver.close();
+  });
+
+  it('settles queued, deferred, and active cancellation through one lifecycle owner', async () => {
+    const activeEntered = deferred<void>();
+    const attemptedContextGraphs: string[] = [];
+    const active = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/active',
+      catalogHeadObjectDigest: `0x${'a1'.repeat(32)}`,
+    });
+    const queued = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/queued',
+      catalogHeadObjectDigest: `0x${'b2'.repeat(32)}`,
+    });
+    const deferredHead = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/deferred',
+      catalogHeadObjectDigest: `0x${'c3'.repeat(32)}`,
+    });
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (_peerId, head, signal) => {
+        attemptedContextGraphs.push(head.contextGraphId);
+        if (head.contextGraphId === active.contextGraphId) {
+          activeEntered.resolve();
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          return 'applied';
+        }
+        if (head.contextGraphId === deferredHead.contextGraphId) {
+          throw new Error('finalized chain lane busy');
+        }
+        throw new Error('queued task must never start');
+      },
+    ), {
+      maxConcurrent: 1,
+      admissionDeferralMs: 60_000,
+      isDeferrableError: (error) =>
+        error instanceof Error && error.message === 'finalized chain lane busy',
+    });
+
+    const activeCompletion = receiver.scheduleManyAndWait([{
+      announcement: active,
+      remotePeerId: 'peer-active',
+    }]);
+    await activeEntered.promise;
+    const queuedCompletion = receiver.scheduleManyAndWait([{
+      announcement: queued,
+      remotePeerId: 'peer-queued',
+    }]);
+    const deferredCompletion = receiver.scheduleManyAndWait([{
+      announcement: deferredHead,
+      remotePeerId: 'peer-deferred',
+    }]);
+
+    receiver.cancelContextGraph(queued.contextGraphId);
+    await expect(queuedCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    receiver.cancelContextGraph(active.contextGraphId);
+    await expect(activeCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    await vi.waitFor(() => {
+      expect(receiver.stats()).toMatchObject({ deferred: 1, inFlight: 0, queued: 0 });
+    });
+    receiver.cancelContextGraph(deferredHead.contextGraphId);
+    await expect(deferredCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    await receiver.whenIdle();
+
+    expect(attemptedContextGraphs).toEqual([
+      active.contextGraphId,
+      deferredHead.contextGraphId,
+    ]);
+    expect(receiver.stats()).toMatchObject({ deferred: 0, inFlight: 0, queued: 0 });
+    await receiver.close();
+  });
+
   it('round-robins transient failures with a bounded per-provider budget', async () => {
     const peers: string[] = [];
     const firstAttempt = deferred<void>();

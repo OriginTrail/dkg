@@ -241,6 +241,24 @@ function parametersFor(sql: string): Record<string, Uint8Array | number | string
     sharedAt: hexBytes('0000018bcfe56800'),
     expiresAt: null,
     bucket: hexBytes(SELECTED_BUCKET_HEX),
+    bucketCount: hexBytes(BUCKET_COUNT_HEX),
+    bucketObjectDigest: hexBytes('77'.repeat(32)),
+    catalogKeyDigest: hexBytes('88'.repeat(32)),
+    era: hexBytes('0000000000000001'),
+    expectedCatalogRowDigest: hexBytes('99'.repeat(32)),
+    kaId: hexBytes(`${AUTHOR_HEX}${'00'.repeat(11)}01`),
+    payloadByteLength: hexBytes('0000000000000010'),
+    projectionId: 'cg-shared-v1',
+    repairDigest: hexBytes('aa'.repeat(32)),
+    repairJson: '{}',
+    rowCount: hexBytes('0000000000000001'),
+    subgraphName: null,
+    transferBlobDigest: hexBytes('bb'.repeat(32)),
+    transferByteLength: hexBytes('0000000000000010'),
+    transferChunkCount: hexBytes('0000000000000001'),
+    transferChunkSize: hexBytes('0000000000040000'),
+    transferChunkTreeRoot: hexBytes('cc'.repeat(32)),
+    transferCodec: 'dkg-ka-bundle-v1',
     afterKaIdU256be: hexBytes(`${AUTHOR_HEX}${'00'.repeat(11)}01`),
     limit: 256,
   };
@@ -314,10 +332,12 @@ function expectPlanGate(plans: PlanClass): void {
     plans.getAppliedHead.some((detail) => detail.includes('USING PRIMARY KEY')),
     `${INVENTORY_V1_STATEMENT_IDS.getAppliedHead} must use its exact scope primary key`,
   ).toBe(true);
-  expect(
-    plans.updateAppliedHeadCas.some((detail) => detail.includes('USING PRIMARY KEY')),
-    `${INVENTORY_V1_STATEMENT_IDS.updateAppliedHeadCas} must use its exact scope primary key`,
-  ).toBe(true);
+  for (const statementId of ['updateAppliedHeadCas', 'deleteAppliedHeadCas'] as const) {
+    expect(
+      plans[statementId].some((detail) => detail.includes('USING PRIMARY KEY')),
+      `${INVENTORY_V1_STATEMENT_IDS[statementId]} must use its exact scope primary key`,
+    ).toBe(true);
+  }
 
   for (const statementId of [
     'getSwmAuthorHead',

@@ -376,7 +376,7 @@ describe('verifySyncedData — rootless graph scope', () => {
       ],
       nextSeq: 3,
       priorSeq: 1,
-      isForeignGraph: () => false,
+      isGraphAdmitted: () => true,
       verifiedByGraph,
       recordQuadCountByGraph: new Map([
         [changed.assertionGraph, changed.payload.length],
@@ -436,7 +436,7 @@ describe('verifySyncedData — rootless graph scope', () => {
       ],
       nextSeq: 3,
       priorSeq: 1,
-      isForeignGraph: () => false,
+      isGraphAdmitted: () => true,
       verifiedByGraph,
       recordQuadCountByGraph: new Map([
         [changed.assertionGraph, changed.payload.length],

@@ -366,6 +366,9 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@origintrail-official/dkg-publisher':
+        specifier: workspace:*
+        version: link:../../packages/publisher
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../../packages/storage

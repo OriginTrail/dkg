@@ -11,7 +11,8 @@ export type TripleStoreCapability =
   | 'update'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
-  | 'replaceSubject';
+  | 'replaceSubject'
+  | 'rfc64AuthorCommitCasV1';
 
 /**
  * Typed signal that an optional store capability is unavailable.
@@ -62,5 +63,12 @@ export function isReplaceSubjectCapabilityRefusal(error: unknown): boolean {
   return (
     error instanceof UnsupportedTripleStoreCapabilityError &&
     error.capability === 'replaceSubject'
+  );
+}
+
+export function isRfc64AuthorCommitCasCapabilityRefusal(error: unknown): boolean {
+  return (
+    error instanceof UnsupportedTripleStoreCapabilityError
+    && error.capability === 'rfc64AuthorCommitCasV1'
   );
 }

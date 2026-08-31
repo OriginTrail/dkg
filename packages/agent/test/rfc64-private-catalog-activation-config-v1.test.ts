@@ -16,9 +16,19 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
+  rfc64CatalogKillSwitchActiveV1,
+  rfc64CatalogRolloutModeForContextGraphV1,
+  rfc64LegacySyncAuthorityActiveForContextGraphV1,
+  projectRfc64CatalogReceiverAuthorityV1,
+  resolveRfc64CatalogAuthorityDecisionV1,
+  resolveRfc64CatalogConfiguredAuthorityDecisionV1,
   resolveRfc64CatalogActivationConfigV1,
+  resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
+  resolveRfc64CatalogExecutionPlanV1,
+  resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveRfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import {
   snapshotRfc64CatalogBootstrapConfigV1,
@@ -171,8 +181,26 @@ describe('RFC-64 private catalog activation', () => {
     const bootstrap = snapshotRfc64CatalogBootstrapConfigV1(
       privateActivation().bootstrap,
     )!;
+    const activation = resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: {
+        killSwitch: false,
+        contextGraphModes: { [PRIVATE_CG]: 'shadow' },
+      },
+    }, chainIdentity);
     const resolverAgent = {
-      config: { rfc64CatalogBootstrap: bootstrap },
+      config: {
+        rfc64CatalogBootstrap: bootstrap,
+        rfc64CatalogRollout: {
+          selectedContextGraphs: activation.selectedContextGraphs,
+          rollout: activation.rollout,
+        },
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [PRIVATE_CG],
+          activation,
+        }),
+      },
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
     } as unknown as DKGAgent;
 
     expect(resolveRfc64PrivateRecoveryContextGraphIdsV1(bootstrap))
@@ -263,6 +291,254 @@ describe('RFC-64 private catalog activation', () => {
         resolved.bootstrap.acceptedPolicies[0]!.policyEnvelope,
       ));
     expect(Object.isFrozen(resolved.bootstrap?.acceptedPolicies[0]?.rosterEnvelope)).toBe(true);
+  });
+
+  it('snapshots policy-neutral selected-catalog authoring independently from public controls', () => {
+    const catalog = {
+      ...privateActivation(),
+      autoPublish: {
+        catalogIssuerDelegationExpiresAt: '1893456000000',
+      },
+    } as const;
+    const resolved = resolveRfc64CatalogActivationConfigV1(catalog, chainIdentity);
+
+    expect(resolved.autoPublish).toEqual({
+      catalogIssuerDelegationEffectiveAt: '0',
+      catalogIssuerDelegationExpiresAt: '1893456000000',
+    });
+    expect(Object.isFrozen(resolved.autoPublish)).toBe(true);
+
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const publicBootstrap = {
+      acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+      retryIntervalMs: 1_000,
+    } as const;
+    const mixed = resolveRfc64CatalogActivationsV1({
+      catalog: resolved,
+      publicCatalog: {
+        autoPublish: {
+          peers: ['12D3KooPublicHint'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: publicBootstrap,
+      },
+    }, chainIdentity);
+    expect(mixed).toMatchObject({
+      catalog: { autoPublish: resolved.autoPublish },
+      publicCatalog: { autoPublish: { peers: ['12D3KooPublicHint'] } },
+      selectedCatalogAuthoringControls: [{
+        kind: 'selected-private',
+        contextGraphId: PRIVATE_CG,
+        announcementPeers: [PROVIDER_PEER],
+      }],
+    });
+    const roundTripped = resolveRfc64CatalogActivationsV1({
+      catalog: mixed.catalog,
+      publicCatalog: mixed.publicCatalog,
+    }, chainIdentity);
+    expect(roundTripped.selectedCatalogAuthoringControls).toEqual(
+      mixed.selectedCatalogAuthoringControls,
+    );
+    expect(roundTripped.catalog.selectedCatalogAuthoringControls).toEqual(
+      mixed.selectedCatalogAuthoringControls,
+    );
+  });
+
+  it('rejects selected-CG authoring before startup when provider authority is missing', () => {
+    expect(() => resolveRfc64CatalogActivationsV1({
+      catalog: {
+        autoPublish: {
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope: policyEnvelope(policy(PUBLIC_CG, 0)),
+            targets: [],
+          }],
+        },
+      },
+    }, chainIdentity)).toThrow(
+      new RegExp(`autoPublish requires completeSwmProviders for ${PUBLIC_CG}`, 'u'),
+    );
+  });
+
+  it('resolves restart-stable per-CG rollout modes without changing omitted compatibility', () => {
+    const catalog = resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: {
+        killSwitch: false,
+        contextGraphModes: { [PRIVATE_CG]: 'shadow' },
+      },
+    }, chainIdentity);
+
+    expect(rfc64CatalogRolloutModeForContextGraphV1(catalog, PRIVATE_CG)).toBe('shadow');
+    expect(rfc64CatalogRolloutModeForContextGraphV1(catalog, PUBLIC_CG)).toBe('legacy');
+    expect(rfc64CatalogKillSwitchActiveV1(catalog)).toBe(false);
+    expect(Object.isFrozen(catalog.rollout?.contextGraphModes)).toBe(true);
+
+    const omitted = resolveRfc64CatalogActivationConfigV1(
+      privateActivation(),
+      chainIdentity,
+    );
+    expect(rfc64CatalogRolloutModeForContextGraphV1(omitted, PRIVATE_CG)).toBe('catalog');
+  });
+
+  it('activates eligible public and private catalog rails only for explicit edge selections', () => {
+    const activation = Object.freeze({
+      enabled: true,
+      selectedContextGraphs: Object.freeze([PUBLIC_CG, PRIVATE_CG]),
+      rollout: Object.freeze({
+        killSwitch: false,
+        contextGraphModes: Object.freeze({
+          [PUBLIC_CG]: 'catalog' as const,
+          [PRIVATE_CG]: 'catalog' as const,
+        }),
+      }),
+    });
+
+    expect(projectRfc64CatalogReceiverAuthorityV1(
+      resolveRfc64CatalogConfiguredAuthorityDecisionV1(activation, PUBLIC_CG),
+      { active: false },
+    )).toMatchObject({
+      selected: true,
+      eligible: true,
+      active: false,
+      mode: 'catalog',
+      reconciliationLane: 'disabled',
+      track2Enabled: false,
+      legacySyncAllowed: false,
+    });
+    expect(resolveRfc64CatalogConfiguredAuthorityDecisionV1(
+      activation,
+      PUBLIC_CG,
+    )).toMatchObject({
+      selected: true,
+      eligible: true,
+      active: true,
+      reconciliationLane: 'catalog-apply',
+      track2Enabled: true,
+      authoringAllowed: true,
+    });
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(
+      activation,
+      PUBLIC_CG,
+      { active: false },
+    )).toBe(false);
+    expect(projectRfc64CatalogReceiverAuthorityV1(
+      resolveRfc64CatalogConfiguredAuthorityDecisionV1(activation, PRIVATE_CG),
+      { active: true },
+    )).toMatchObject({
+      selected: true,
+      eligible: true,
+      active: true,
+      reconciliationLane: 'catalog-apply',
+      track2Enabled: true,
+      legacySyncAllowed: false,
+    });
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(
+      activation,
+      PRIVATE_CG,
+      { active: true },
+    )).toBe(false);
+  });
+
+  it('preserves pre-activation Track-2 authoring while keeping ordinary sync legacy', () => {
+    const disabled = Object.freeze({
+      enabled: false,
+      selectedContextGraphs: Object.freeze([]),
+      rollout: undefined,
+    });
+    expect(rfc64CatalogRolloutModeForContextGraphV1(disabled, PUBLIC_CG)).toBe('legacy');
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(disabled, PUBLIC_CG)).toBe(true);
+    expect(resolveRfc64CatalogAuthorityDecisionV1(disabled as never, PUBLIC_CG))
+      .toMatchObject({ reconciliationLane: 'catalog-apply', authoringAllowed: true });
+  });
+
+  it('normalizes the previous release disabled resolved activation shapes', () => {
+    expect(resolveRfc64PublicCatalogActivationInputV1({
+      enabled: false,
+      selectedContextGraphs: [],
+    } as never, chainIdentity)).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
+    });
+    expect(resolveRfc64CatalogActivationInputV1({
+      enabled: false,
+      selectedContextGraphs: [],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [],
+    } as never, chainIdentity)).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
+    });
+  });
+
+  it('projects one legacy sync authority and never uses the kill switch as fallback', () => {
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const activation = resolveRfc64CatalogActivationsV1({
+      catalog: {
+        ...privateActivation(),
+        rollout: {
+          killSwitch: true,
+          contextGraphModes: { [PRIVATE_CG]: 'catalog' },
+        },
+      },
+      publicCatalog: {
+        rollout: { contextGraphModes: { [PUBLIC_CG]: 'shadow' } },
+        bootstrap: {
+          acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+          retryIntervalMs: 1_000,
+        },
+      },
+    }, chainIdentity).catalog;
+
+    expect(resolveRfc64LegacySyncContextGraphsV1({
+      configuredContextGraphs: ['ordinary-cg', PRIVATE_CG],
+      activation,
+    })).toEqual(['ordinary-cg', PUBLIC_CG]);
+    expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(activation, PRIVATE_CG))
+      .toBe(false);
+    expect(rfc64CatalogKillSwitchActiveV1(activation)).toBe(true);
+    const shadow = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
+      activation,
+      PUBLIC_CG,
+    );
+    expect(shadow).toMatchObject({
+      mode: 'shadow',
+      active: false,
+      track2Enabled: false,
+      legacySyncAllowed: true,
+    });
+    expect(projectRfc64CatalogReceiverAuthorityV1(
+      shadow,
+      { active: false },
+    )).toMatchObject({
+      selected: true,
+      eligible: true,
+      active: false,
+      mode: 'shadow',
+      track2Enabled: false,
+      legacySyncAllowed: false,
+    });
+  });
+
+  it('fails closed on malformed, unknown, or unselected rollout modes', () => {
+    expect(() => resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: { contextGraphModes: { [PRIVATE_CG]: 'automatic' } },
+    } as never, chainIdentity)).toThrow(/must be legacy, shadow, or catalog/u);
+
+    expect(() => resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: { contextGraphModes: { [PUBLIC_CG]: 'shadow' } },
+    }, chainIdentity)).toThrow(/contains unselected graph/u);
+
+    expect(() => resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: { killSwitch: 'yes' },
+    } as never, chainIdentity)).toThrow(/killSwitch must be a boolean/u);
   });
 
   it('accepts registered private policies for the Release 2 runtime', () => {
@@ -428,6 +704,32 @@ describe('RFC-64 private catalog activation', () => {
       catalog: privateActivation(),
       publicCatalog: conflictingPublic,
     }, chainIdentity)).toThrow(/conflict for selected graph/u);
+  });
+
+  it('unions disjoint rollout modes and lets either block engage the shared kill switch', () => {
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const union = resolveRfc64CatalogActivationsV1({
+      catalog: {
+        ...privateActivation(),
+        rollout: { contextGraphModes: { [PRIVATE_CG]: 'catalog' } },
+      },
+      publicCatalog: {
+        rollout: {
+          killSwitch: true,
+          contextGraphModes: { [PUBLIC_CG]: 'shadow' },
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+          retryIntervalMs: 1_000,
+        },
+      },
+    }, chainIdentity);
+
+    expect(rfc64CatalogRolloutModeForContextGraphV1(union.catalog, PRIVATE_CG))
+      .toBe('catalog');
+    expect(rfc64CatalogRolloutModeForContextGraphV1(union.catalog, PUBLIC_CG))
+      .toBe('shadow');
+    expect(rfc64CatalogKillSwitchActiveV1(union.catalog)).toBe(true);
   });
 
   it('enforces the global policy limit after additive and compatibility blocks are merged', () => {

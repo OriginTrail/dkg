@@ -6,6 +6,13 @@ import {
   type TrackedChildProcess,
 } from '../rfc64-persistence-lifecycle/process-lifecycle.js';
 import { GATE1_AGENT_EVENT_PREFIX } from './model.js';
+import {
+  parseGate1RolloutCommandInput,
+  parseGate1RolloutCommandOutput,
+  type Gate1RolloutCommand,
+  type Gate1RolloutCommandInput,
+  type Gate1RolloutCommandOutput,
+} from './rollout-process-protocol.js';
 
 const DEFAULT_EVENT_TIMEOUT_MS = 45_000;
 const MAX_CAPTURE_BYTES = 256 * 1024;
@@ -132,6 +139,16 @@ export class Gate1AgentChild {
       throw failure;
     }
     return event;
+  }
+
+  async requestRollout<K extends Gate1RolloutCommand>(
+    command: K,
+    requestId: string,
+    input: Gate1RolloutCommandInput<K>,
+  ): Promise<Gate1RolloutCommandOutput<K>> {
+    const parsedInput = parseGate1RolloutCommandInput(command, input);
+    const event = await this.request(command, requestId, 'operation-completed', parsedInput);
+    return parseGate1RolloutCommandOutput(command, event.output);
   }
 
   async stop(requestId: string): Promise<ProcessExitEvidence> {

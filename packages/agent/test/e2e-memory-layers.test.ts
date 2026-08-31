@@ -667,8 +667,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
 
     let updateHookForwarded: unknown = 'unset';
     const updateFired: string[] = [];
-    const realUpdate = underlying.updateKnowledgeAssetFromSharedMemory.bind(underlying);
-    underlying.updateKnowledgeAssetFromSharedMemory = async (kaId: bigint, options: any) => {
+    const realUpdate = underlying.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1.bind(underlying);
+    underlying.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1 = async (kaId: bigint, options: any) => {
       const original = options.onPublishConfirmed;
       updateHookForwarded = original;
       return realUpdate(kaId, {
@@ -2884,7 +2884,7 @@ describe('Query views', () => {
     // rejection-stops-the-send for the update path is proven at the publisher's own boundary in
     // `pre-broadcast-signal-await.test.ts`, and this row pins callback identity only.
     const realPublisher = (agent as any).publisher;
-    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromSharedMemory')
+    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromStagedSharedWorkingMemoryV1')
       .mockResolvedValue({ status: 'failed', kaManifest: [] } as never);
     const recorder = () => {};
     try {

@@ -77,14 +77,17 @@ export interface MaintainRfc64SwmAuthorInventoryResultV1 {
 export interface RemoveRfc64SwmAuthorInventoryInputV1 {
   readonly scope: SwmAuthorInventoryScopeV1;
   /** Exact SWM row identity that reached VM; a newer row for the UAL is preserved. */
-  readonly expectedRow: Readonly<Pick<
-    SwmAuthorInventoryRowV1,
-    'kaUal' | 'assertionVersion' | 'sealDigest'
-  >>;
+  readonly expectedRow: Readonly<Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1>;
   readonly issuedAt: TimestampMsV1;
   readonly signer: Rfc64ControlEnvelopeEip191SignerV1;
   readonly maxCasAttempts?: number;
 }
+
+/** Canonical identity required to remove exactly one confirmed SWM row. */
+export type Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 = Pick<
+  SwmAuthorInventoryRowV1,
+  'kaUal' | 'assertionVersion' | 'sealDigest'
+>;
 
 export interface RemoveRfc64SwmAuthorInventoryResultV1 {
   readonly status: 'applied' | 'absent';
@@ -353,10 +356,7 @@ function prepareInput(input: MaintainRfc64SwmAuthorInventoryInputV1): Readonly<{
 
 function prepareRemovalInput(input: RemoveRfc64SwmAuthorInventoryInputV1): Readonly<{
   scope: Readonly<SwmAuthorInventoryScopeV1>;
-  expectedRow: Readonly<Pick<
-    SwmAuthorInventoryRowV1,
-    'kaUal' | 'assertionVersion' | 'sealDigest'
-  >>;
+  expectedRow: Readonly<Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1>;
   issuedAt: TimestampMsV1;
   signer: Rfc64ControlEnvelopeEip191SignerV1;
   maxCasAttempts: number;

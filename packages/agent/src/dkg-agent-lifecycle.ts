@@ -9,6 +9,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -20,7 +21,7 @@ import {
   ENTITY_PRED_ALT, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY,
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
-  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -682,6 +683,12 @@ import {
   type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
+import {
+  rfc64ExecutionPlanAllowsLegacySyncV1,
+} from
+  './rfc64/public-catalog-activation-config-v1.js';
+import { reconcileRfc64CatalogAuthorityPlanV1 } from
+  './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -704,7 +711,10 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
     selectedRecoveryContextGraphIds: [...new Set([
       ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
         config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
-      ),
+      ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
+        config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      )),
       ...edgeSelectedContextGraphIds,
     ])],
   });
@@ -2028,6 +2038,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // network consumer. No dataDir intentionally leaves the feature dormant.
     await this.prepareRfc64PersistenceV1();
     try {
+      if (
+        this.config.dataDir !== undefined
+        && this.rfc64PersistenceV1 !== undefined
+      ) {
+        await reconcileRfc64CatalogAuthorityPlanV1(
+          this.rfc64PersistenceV1,
+          this.store,
+          this.config.rfc64CatalogExecutionPlan,
+        );
+      }
       await this.prepareFinalizationRecoveryStore();
       // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
       // so the local store is clean before this node serves or syncs anything.
@@ -2439,8 +2459,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // OT-RFC-64 Gate 1: wire the public author-catalog transport onto the
     // production router. Announce/fetch protocols are admission-gated like
     // every other node protocol. Dormant when no dataDir opened persistence.
-    this.startRfc64PublicCatalogServiceV1(ctx);
-    this.startRfc64PublicCatalogBootstrapV1(ctx);
+    this.rfc64CatalogRuntimeV1.start(ctx);
 
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
@@ -4871,9 +4890,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return 'not-started';
     }
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
-    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+    const acceptedPolicies = (this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?? [];
+      ?? []).filter(({ policyEnvelope }) => this.resolveRfc64CatalogReceiverAuthorityV1(
+        policyEnvelope.payload.contextGraphId,
+      ).legacySyncAllowed);
     // Private RFC-64 selections stay out of `syncContextGraphs`: that list is
     // also the automatic durable/VM scope, and private VM recovery belongs to
     // catalog activation. They still need an explicit SWM-only planning scope
@@ -4882,7 +4903,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(this.config.syncContextGraphs ?? []),
       ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      ),
+      ).filter((contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(
+        contextGraphId,
+      ).legacySyncAllowed),
     ])];
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
@@ -5149,6 +5172,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
+      if (!this.resolveRfc64CatalogReceiverAuthorityV1(
+        contextGraphId,
+      ).legacySyncAllowed) {
+        this.log.debug(
+          ctx,
+          `Skipping legacy SWM planning for catalog-authoritative CG "${contextGraphId.slice(0, 28)}"`,
+        );
+        continue;
+      }
       const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
         contextGraphId,
       );
@@ -5768,6 +5800,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return createIncompleteDurableSyncResult();
     }
+    const requestedContextGraphCount = contextGraphIds.length;
+    contextGraphIds = contextGraphIds.filter((contextGraphId) => (
+      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed
+    ));
+    if (contextGraphIds.length !== requestedContextGraphCount) {
+      this.log.debug(
+        ctx,
+        `Skipped ${requestedContextGraphCount - contextGraphIds.length} catalog-authoritative CG(s) from legacy durable sync`,
+      );
+    }
+    if (contextGraphIds.length === 0) return createIncompleteDurableSyncResult();
     // OT-RFC-59 — peel off the public CGs this peer serves via the O(delta) changelog
     // lane; the rest fall through to the legacy full-scan lane below. STRICTLY ADDITIVE:
     // gated on this node's `store.changelog` flag, and ANY failure returns every CG to
@@ -6629,14 +6672,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let insertedMetaTriples = 0;
     const accumulator = createDurableSyncAccumulator();
     const acceptUnverified = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId);
-    const cgDataUri = contextGraphDataUri(contextGraphId);
-    // In-scope iff the graph is this CG's own public data plane. Rejects the reserved
-    // changelog graph, any other CG, and the private/SWM planes (deferred to legacy).
-    const isForeignGraph = (graph: string): boolean => {
-      const inCg = graph === cgDataUri || graph.startsWith(`${cgDataUri}/`);
-      if (!inCg) return true;
-      return graph.includes('/_private') || graph.includes('/_shared_memory');
-    };
+    // One policy shared with the responder and durable requester: this lane
+    // admits only public payload plus top-level durable meta, never RFC-64
+    // control records, WM/SWM, private data, or another context graph.
+    const isGraphAdmitted = (graph: string): boolean =>
+      isLegacySyncGraphCandidateV1(graph, contextGraphId, 'changelog');
     const worker = this.getOrCreateSyncVerifyWorker();
 
     const outcome = await runChangelogSync({
@@ -6658,7 +6698,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // after collection.
       //
       // `plane: 'durable'` is exact rather than approximate: `runChangelogLane`
-      // admits only public Context Graphs, and `isForeignGraph` rejects the
+      // admits only public Context Graphs, and `isGraphAdmitted` rejects the
       // `/_shared_memory` and `/_private` planes, so everything this lane
       // transfers is durable. Shared-memory content defers to `runResync`,
       // which is separately instrumented as `transport=legacy`.
@@ -6746,7 +6786,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // branch). Fold its result in, and report completeness so the driver only advances
       // the cursor to headSeq when the resync verifiably fetched everything below it.
       runResync: async (dropCandidates) => {
-        const pendingDrops = [...new Set(dropCandidates)].filter((graph) => !isForeignGraph(graph));
+        const pendingDrops = [...new Set(dropCandidates)].filter(isGraphAdmitted);
         let dropsReconciled = pendingDrops.length === 0;
         let curatorAuthoritative = false;
         if (pendingDrops.length > 0) {
@@ -6796,8 +6836,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logWarn: (m) => this.log.warn(ctx, m),
       applyPage: async (page) => {
         // Parse the page's upsert records per plane (parseAndFilter validates + CG-filters).
-        const dataRecs = page.records.filter((r) => r.op === 'upsert' && !r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
-        const metaRecs = page.records.filter((r) => r.op === 'upsert' && r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
+        const dataRecs = page.records.filter((r) => r.op === 'upsert' && !r.graph.endsWith('/_meta') && isGraphAdmitted(r.graph));
+        const metaRecs = page.records.filter((r) => r.op === 'upsert' && r.graph.endsWith('/_meta') && isGraphAdmitted(r.graph));
         const recordQuadCountByGraph = new Map<string, number>();
         const metaGraphsWithRoot = new Set<string>();
         const dataQuads: Quad[] = [];
@@ -6842,7 +6882,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           records: page.records,
           nextSeq: page.nextSeq,
           priorSeq: page.priorSeq,
-          isForeignGraph,
+          isGraphAdmitted,
           verifiedByGraph,
           recordQuadCountByGraph,
           metaGraphsWithRoot,
@@ -9189,6 +9229,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    this.handleRfc64CatalogReceiverSelectionTransitionV1(
+      contextGraphId,
+      previous?.subscribed === true,
+      canonicalNext.subscribed === true,
+    );
     // VM cleanup policy belongs to the lifecycle consumer, not to the binding
     // registry. Invalidating a reverse candidate must also invalidate any work
     // captured against it; otherwise only an inactive subscription needs the
@@ -9424,12 +9469,46 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
     this.invalidateListContextGraphsCache();
     this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    const wasSubscribed = this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
     const deleted = this.subscribedContextGraphs.delete(contextGraphId);
+    if (deleted) this.handleRfc64CatalogReceiverSelectionTransitionV1(
+      contextGraphId,
+      wasSubscribed,
+      false,
+    );
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
     // new subscription later reuses the same local id.
     this.contextGraphBindingState.delete(contextGraphId);
     return deleted;
+  }
+
+  /** RFC-64-owned reaction to one canonical subscription state transition. */
+  handleRfc64CatalogReceiverSelectionTransitionV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    previousSubscribed: boolean,
+    nextSubscribed: boolean,
+  ): void {
+    const eligible = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).eligible;
+    const manifestWide = (this.config.nodeRole ?? 'edge') === 'core';
+    // A core is manifest-selected independently of its ordinary subscription
+    // record.  React only when the effective receiver capability changes: an
+    // unsubscribe must not fence a core's in-flight catalog reconciliation.
+    const wasReceiverActive = eligible && (manifestWide || previousSubscribed);
+    const isReceiverActive = eligible && (manifestWide || nextSubscribed);
+    if (wasReceiverActive === isReceiverActive) return;
+    if (!isReceiverActive) {
+      this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
+    }
+    this.invalidateRfc64PublicCatalogBootstrapPassV1(contextGraphId);
+    if (isReceiverActive && this.rfc64PublicCatalogServiceV1 !== undefined) {
+      // Re-entering the idempotent start boundary also dirties an existing
+      // failed repair for this newly active CG, including retryIntervalMs=0.
+      this.startRfc64SwmCatalogProjectionSupervisorV1(
+        createOperationContext('system'),
+      );
+    }
   }
 
   persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): Promise<void> {
@@ -9997,7 +10076,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
       const toActivate = [...hostedRows, ...cappedUserRows];
-      const dormantRows = cap > 0 ? userRows.slice(cap) : [];
+      const dormantRows = (cap > 0 ? userRows.slice(cap) : []).sort(byId);
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
         const approvedAgentAddress = row.subscribed
@@ -10090,15 +10169,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ctx,
           `Rehydrated ${toActivate.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
             (skipped > 0
-              ? ` (${skipped} non-hosted left dormant — over the ${cap} activation cap; ` +
-                `${hostedRows.length} hosted always restored)`
+              ? ` (${skipped} left dormant by the activation cap; ` +
+                `${hostedRows.length} hosted restored)`
               : ''),
         );
       }
       if (skipped > 0) {
         this.log.warn(
           ctx,
-          `${skipped} context-graph subscription(s) left dormant to avoid store contention (#997). ` +
+          `${skipped} context-graph subscription(s) left dormant by the activation cap. ` +
             `Prune stale ones via 'DELETE /api/context-graph/subscriptions', or raise ` +
             `maxRehydratedContextGraphSubscriptions. Inspect ` +
             `'GET /api/context-graph/subscriptions' for dormant ids.`,

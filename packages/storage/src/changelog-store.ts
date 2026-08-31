@@ -16,8 +16,18 @@ import type {
 import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
-import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
-import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
+import {
+  isAtomicGraphReplaceStagingGraph,
+} from './atomic-graph-replace.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './rfc64-author-commit-cas.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
+} from './rfc64-author-commit-cas.js';
+import { isStoreOperationNotStarted, type StoreOperation } from './store-operation-outcome.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -369,26 +379,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
     }
     if (!this.enabled) return this.inner.replaceGraph(graphUri, quads, options);
     this.assertNotReserved(graphUri, 'replaceGraph');
-    await this.runExclusive(async () => {
-      try {
-        await this.inner.replaceGraph!(graphUri, quads, options);
-      } catch (err) {
-        if (isAtomicReplaceOperationNotStarted(err, 'replaceGraph')) {
-          // A clean preflight or admission refusal explicitly bound to this
-          // replace means no mutation started, so there is no gap to reconcile.
-          throw err;
-        }
-        // The replaceGraph contract allows a rejected call to have left either
-        // the complete old graph or the complete new graph (e.g. a response
-        // lost after the backend committed). A committed overwrite with no
-        // marker is invisible to set-only reconcile, so flag the gap before
-        // propagating.
-        this.flagReconcile('replaceGraph(indeterminate-failure)');
-        throw err;
-      }
-      // The adapter's internal staging graph never crosses this decorator.
-      // Sync sees exactly one logical upsert/drop for the canonical graph.
-      await this.markPostMutation([graphUri], options);
+    await this.runAtomicMutation({
+      operation: 'replaceGraph',
+      touchedGraphs: [graphUri],
+      options,
+      execute: () => this.inner.replaceGraph!(graphUri, quads, options),
     });
   }
 
@@ -418,23 +413,18 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
     }
     this.assertNotReserved(graphUri, 'replaceGraphAndSubject');
     this.assertNotReserved(metaGraphUri, 'replaceGraphAndSubject');
-    await this.runExclusive(async () => {
-      try {
-        await this.inner.replaceGraphAndSubject!(
-          graphUri,
-          graphQuads,
-          metaGraphUri,
-          metadataSubject,
-          metadataQuads,
-          options,
-        );
-      } catch (error) {
-        if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraphAndSubject')) {
-          this.flagReconcile('replaceGraphAndSubject(indeterminate-failure)');
-        }
-        throw error;
-      }
-      await this.markPostMutation([graphUri, metaGraphUri], options);
+    await this.runAtomicMutation({
+      operation: 'replaceGraphAndSubject',
+      touchedGraphs: [graphUri, metaGraphUri],
+      options,
+      execute: () => this.inner.replaceGraphAndSubject!(
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+        options,
+      ),
     });
   }
 
@@ -454,19 +444,36 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
     // predicate/object is accepted, matching the insert() path (#1863 regression
     // the raw-update path reintroduced via assertNoReservedRef).
     this.assertNotReserved(graphUri, 'replaceSubject');
-    await this.runExclusive(async () => {
-      try {
-        await this.inner.replaceSubject!(graphUri, subject, quads, options);
-      } catch (error) {
-        if (isAtomicReplaceOperationNotStarted(error, 'replaceSubject')) {
-          // Clean preflight or replace-bound admission refusal: no mutation
-          // started, so there is nothing to reconcile.
-          throw error;
-        }
-        this.flagReconcile('replaceSubject(indeterminate-failure)');
-        throw error;
-      }
-      await this.markPostMutation([graphUri], options);
+    await this.runAtomicMutation({
+      operation: 'replaceSubject',
+      touchedGraphs: [graphUri],
+      options,
+      execute: () => this.inner.replaceSubject!(graphUri, subject, quads, options),
+    });
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'ChangelogStore',
+      );
+    }
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
+    for (const graph of manifest.referencedGraphs) {
+      this.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
+    }
+    return this.runAtomicMutation({
+      operation: 'rfc64AuthorCommitCasV1',
+      touchedGraphs: manifest.touchedGraphs,
+      options,
+      execute: () => this.inner.rfc64AuthorCommitCasV1!(source, options),
+      committed: result => result === 'committed',
     });
   }
 
@@ -665,6 +672,31 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
     // Keep the chain alive regardless of this op's outcome.
     this.tail = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  /** Shared outcome-aware lifecycle for every certified atomic mutation. */
+  private runAtomicMutation<T>(args: {
+    operation: StoreOperation;
+    touchedGraphs: readonly string[];
+    options?: QueryOptions;
+    execute: () => Promise<T>;
+    committed?: (result: T) => boolean;
+  }): Promise<T> {
+    return this.runExclusive(async () => {
+      let result: T;
+      try {
+        result = await args.execute();
+      } catch (error) {
+        if (!isStoreOperationNotStarted(error, args.operation)) {
+          this.flagReconcile(`${args.operation}(indeterminate-failure)`);
+        }
+        throw error;
+      }
+      if ((args.committed?.(result) ?? true)) {
+        await this.markPostMutation(args.touchedGraphs, args.options);
+      }
+      return result;
+    });
   }
 
   /**

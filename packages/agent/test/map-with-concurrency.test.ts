@@ -5,7 +5,10 @@
 // unchanged), and no more than `limit` callbacks are ever in flight (so a
 // high-degree node's subscribe round can't flood its own store).
 import { describe, it, expect } from 'vitest';
-import { mapWithConcurrency } from '../src/map-with-concurrency.js';
+import {
+  mapWithConcurrency,
+  mapWithConcurrencySettled,
+} from '../src/map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from '../src/sync/catchup-concurrency.js';
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
@@ -81,6 +84,26 @@ describe('mapWithConcurrency', () => {
         return n;
       }),
     ).rejects.toThrow('boom');
+  });
+
+  it('settles every bounded callback and preserves fulfillment and rejection order', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const settled = await mapWithConcurrencySettled([1, 2, 3, 4], 2, async (n) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await tick();
+      inFlight -= 1;
+      if (n % 2 === 0) throw new Error(`failed ${n}`);
+      return n * 10;
+    });
+    expect(peak).toBe(2);
+    expect(settled).toEqual([
+      { status: 'fulfilled', value: 10 },
+      { status: 'rejected', reason: new Error('failed 2') },
+      { status: 'fulfilled', value: 30 },
+      { status: 'rejected', reason: new Error('failed 4') },
+    ]);
   });
 
   it('default concurrency is a small positive cap', () => {
