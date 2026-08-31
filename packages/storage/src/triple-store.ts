@@ -24,6 +24,7 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import type {
   CanonicalAuthorSealStoreRowV1,
+  Rfc64SharedProjectionStreamOperationV1,
   Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import type {
@@ -102,6 +103,12 @@ export interface QueryOptions {
 
 export type TripleStoreQueryOptions = QueryOptions;
 
+export interface Rfc64SharedProjectionStreamCapabilityOptionsV1 {
+  /** Gateway-derived minimum of signed, operator, and protocol ceilings. */
+  readonly byteCeiling: number;
+  readonly signal?: AbortSignal;
+}
+
 /**
  * Options for a server-side `update()`. A superset of {@link QueryOptions} with an
  * index-maintenance hint — kept OFF the read-path `QueryOptions` so it can't be set
@@ -150,6 +157,13 @@ export interface TripleStore {
     operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<Rfc64SemanticReadCapabilityResultV1>;
+  /** Certified exact, non-materialized RFC-64 shared-projection stream. */
+  readonly rfc64SharedProjectionStreamCertifiedV1?: boolean;
+  rfc64SharedProjectionStreamV1?(
+    operation: Rfc64SharedProjectionStreamOperationV1,
+    options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  ): Promise<AsyncIterable<Uint8Array>>;
+
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;

@@ -269,6 +269,7 @@ export class SparqlHttpStore implements TripleStore {
    */
   readonly rfc64SharedProjectionStreamV1?:
     Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1'];
+  readonly rfc64SharedProjectionStreamCertifiedV1: true | false;
   readonly rfc64ExactBindingsReadCertifiedV1: true | false;
   readonly rfc64SemanticReadCertifiedV1: true | false;
 
@@ -311,6 +312,7 @@ export class SparqlHttpStore implements TripleStore {
     this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
       constructionAuthority,
     );
+    this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;

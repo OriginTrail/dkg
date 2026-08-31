@@ -8,9 +8,12 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
+  MAX_RFC64_SHARED_PROJECTION_STREAM_TIMEOUT_MS_V1,
   Rfc64SharedProjectionStreamGatewayErrorV1,
   SyncSharedProjectionStoreV1,
-} from '../src/rfc64-shared-projection-stream-gateway.js';
+  isRfc64SharedProjectionStreamCapabilityV1,
+  type Rfc64SharedProjectionStreamCapabilityV1,
+} from '../src/index.js';
 import type { TripleStore } from '../src/triple-store.js';
 import {
   createRfc64SharedProjectionTestFixture,
@@ -27,6 +30,17 @@ const PROJECTION_DIGEST = FIXTURE.projectionDigest;
 const REQUEST = FIXTURE.request;
 
 describe('SyncSharedProjectionStoreV1', () => {
+  it('exports the gateway and capability contract from the package root', () => {
+    const capability: Rfc64SharedProjectionStreamCapabilityV1 = {
+      rfc64SharedProjectionStreamCertifiedV1: true,
+      rfc64SharedProjectionStreamV1: async () => streamLines(TRIPLES),
+    };
+    expect(isRfc64SharedProjectionStreamCapabilityV1(capability)).toBe(true);
+    expect(MAX_RFC64_SHARED_PROJECTION_STREAM_TIMEOUT_MS_V1).toBe(600_000);
+    expect(() => new SyncSharedProjectionStoreV1(capability as unknown as TripleStore))
+      .not.toThrow();
+  });
+
   it('streams canonical bytes and proves count, order, ceiling, and digest at completion', async () => {
     let captured: Rfc64SharedProjectionStreamOperationV1 | undefined;
     let capturedByteCeiling: number | undefined;
@@ -248,12 +262,49 @@ describe('SyncSharedProjectionStoreV1', () => {
     await vi.waitFor(() => expect(closed).toBe(true));
   });
 
+  it('closes an acquired stream when cancellation lands at promise settlement', async () => {
+    const controller = new AbortController();
+    const cancellation = new DOMException('cancelled after acquisition', 'AbortError');
+    let returned = false;
+    const source: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            return { done: true, value: undefined };
+          },
+          async return() {
+            returned = true;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const sourcePromise = Promise.resolve(source);
+    const forwardSettlement = sourcePromise.then.bind(sourcePromise);
+    vi.spyOn(sourcePromise, 'then').mockImplementation(((onFulfilled, onRejected) =>
+      forwardSettlement((value) => {
+        const forwarded = onFulfilled?.(value);
+        controller.abort(cancellation);
+        return forwarded;
+      }, onRejected)) as typeof sourcePromise.then);
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(() => sourcePromise),
+    ).open(REQUEST, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    });
+
+    await expect(collect(result.bytes)).rejects.toBe(cancellation);
+    await vi.waitFor(() => expect(returned).toBe(true));
+  });
+
   it('enforces the deadline on a non-cooperative iterator read and closes it', async () => {
     let returned = false;
     const source: AsyncIterable<Uint8Array> = {
       [Symbol.asyncIterator]() {
         return {
-      next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+          next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
           async return() {
             returned = true;
             return { done: true, value: undefined };
@@ -390,6 +441,9 @@ describe('SyncSharedProjectionStoreV1', () => {
   it('refuses stores without an explicit certified stream capability', () => {
     expect(() => new SyncSharedProjectionStoreV1({} as TripleStore))
       .toThrow(/no certified RFC-64 shared-projection stream capability/);
+    expect(() => new SyncSharedProjectionStoreV1({
+      rfc64SharedProjectionStreamV1: async () => streamLines(TRIPLES),
+    } as TripleStore)).toThrow(/no certified RFC-64 shared-projection stream capability/);
   });
 });
 
@@ -436,7 +490,12 @@ function fakeStore(
     options: { readonly byteCeiling: number; readonly signal?: AbortSignal },
   ) => Promise<AsyncIterable<Uint8Array>>,
 ): TripleStore {
-  return { rfc64SharedProjectionStreamV1: open } as unknown as TripleStore;
+  const store = {
+    rfc64SharedProjectionStreamCertifiedV1: true as const,
+    rfc64SharedProjectionStreamV1: open,
+  } satisfies Pick<TripleStore,
+    'rfc64SharedProjectionStreamCertifiedV1' | 'rfc64SharedProjectionStreamV1'>;
+  return store as TripleStore;
 }
 
 async function* streamLines(
