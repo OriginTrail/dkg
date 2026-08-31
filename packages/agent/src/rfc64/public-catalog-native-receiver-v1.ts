@@ -75,7 +75,6 @@ import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher'
 import { ethers } from 'ethers';
 
 import { parseNQuads } from '../dkg-agent-utils.js';
-import { unpackKnowledgeAssetId } from '../ka-identity.js';
 import type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
   './public-catalog-native-committed-head-token-v1.js';
 export type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
