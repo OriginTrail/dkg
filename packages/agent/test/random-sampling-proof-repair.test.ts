@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
 import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
@@ -500,6 +501,131 @@ describe('Random Sampling proof-time exact repair', () => {
         },
       ).result,
     ).rejects.toThrow('cannot resolve local CG 1');
+  });
+
+  it('recovers a cold public CG binding from the durable ontology index', async () => {
+    const localContextGraphId = '0x9Eb3a49f91670f6b8EFC138Df0003F0ae0A23Dd0/cold-public-proof-cg';
+    const store = new OxigraphStore();
+    await store.insert([{
+      subject: `did:dkg:context-graph:${localContextGraphId}`,
+      predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+      object: '"317"',
+      graph: 'did:dkg:context-graph:ontology',
+    }]);
+    const committedNameHash = ethers.keccak256(ethers.toUtf8Bytes(localContextGraphId));
+    const agentLike = {
+      store,
+      config: { syncContextGraphs: [] },
+      chain: {
+        getContextGraphNameHash: vi.fn(async () => committedNameHash),
+        isContextGraphActiveOnChain: vi.fn(async () => true),
+        getContextGraphAccessPolicy: vi.fn(async () => 0),
+      },
+      subscribedContextGraphs: new Map(),
+      randomSamplingContextGraphResolutionCache: new Map(),
+      resolveLocalCgIdByOnChainId: vi.fn(() => null),
+      contextGraphNameCommitment: (id: string) =>
+        ethers.keccak256(ethers.toUtf8Bytes(id)),
+    };
+
+    await expect(
+      (LifecycleSyncMethods.prototype.resolveRandomSamplingLocalContextGraphId as any).call(
+        agentLike,
+        317n,
+      ),
+    ).resolves.toBe(localContextGraphId);
+
+    expect(agentLike.chain.getContextGraphNameHash).toHaveBeenCalledWith(317n, undefined);
+    expect(agentLike.chain.isContextGraphActiveOnChain).toHaveBeenCalledWith(317n);
+    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(317n);
+    await store.close();
+  });
+
+  it('falls back to local graph discovery when the durable binding is absent', async () => {
+    const localContextGraphId = 'cold-public-proof-cg';
+    const store = new OxigraphStore();
+    await store.insert([{
+      subject: 'urn:local-marker',
+      predicate: 'urn:value',
+      object: '"present"',
+      graph: `did:dkg:context-graph:${localContextGraphId}`,
+    }]);
+    const agentLike = {
+      store,
+      config: { syncContextGraphs: [] },
+      chain: {
+        getContextGraphNameHash: vi.fn(async () =>
+          ethers.keccak256(ethers.toUtf8Bytes(localContextGraphId))),
+        isContextGraphActiveOnChain: vi.fn(async () => true),
+        getContextGraphAccessPolicy: vi.fn(async () => 0),
+      },
+      subscribedContextGraphs: new Map(),
+      randomSamplingContextGraphResolutionCache: new Map(),
+      resolveLocalCgIdByOnChainId: vi.fn(() => null),
+      contextGraphNameCommitment: (id: string) =>
+        ethers.keccak256(ethers.toUtf8Bytes(id)),
+    };
+
+    await expect(
+      (LifecycleSyncMethods.prototype.resolveRandomSamplingLocalContextGraphId as any).call(
+        agentLike,
+        380n,
+      ),
+    ).resolves.toBe(localContextGraphId);
+    await store.close();
+  });
+
+  it('does not infer a private CG name without an active local subscription', async () => {
+    const localContextGraphId = 'cold-private-proof-cg';
+    const agentLike = {
+      store: {},
+      config: { syncContextGraphs: [localContextGraphId] },
+      chain: {
+        getContextGraphNameHash: vi.fn(async () =>
+          ethers.keccak256(ethers.toUtf8Bytes(localContextGraphId))),
+        isContextGraphActiveOnChain: vi.fn(async () => true),
+        getContextGraphAccessPolicy: vi.fn(async () => 1),
+      },
+      subscribedContextGraphs: new Map(),
+      randomSamplingContextGraphResolutionCache: new Map(),
+      resolveLocalCgIdByOnChainId: vi.fn(() => null),
+      contextGraphNameCommitment: (id: string) =>
+        ethers.keccak256(ethers.toUtf8Bytes(id)),
+    };
+
+    await expect(
+      (LifecycleSyncMethods.prototype.resolveRandomSamplingLocalContextGraphId as any).call(
+        agentLike,
+        318n,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects a stale local name whose commitment differs from the challenged slot', async () => {
+    const agentLike = {
+      store: { listGraphs: vi.fn(async () => []) },
+      config: { syncContextGraphs: ['stale-local-name'] },
+      chain: {
+        getContextGraphNameHash: vi.fn(async () =>
+          ethers.keccak256(ethers.toUtf8Bytes('different-live-name'))),
+        isContextGraphActiveOnChain: vi.fn(async () => true),
+        getContextGraphAccessPolicy: vi.fn(async () => 0),
+      },
+      subscribedContextGraphs: new Map(),
+      randomSamplingContextGraphResolutionCache: new Map(),
+      resolveLocalCgIdByOnChainId: vi.fn(() => null),
+      contextGraphNameCommitment: (id: string) =>
+        ethers.keccak256(ethers.toUtf8Bytes(id)),
+    };
+
+    await expect(
+      (LifecycleSyncMethods.prototype.resolveRandomSamplingLocalContextGraphId as any).call(
+        agentLike,
+        319n,
+      ),
+    ).resolves.toBeUndefined();
+    expect(agentLike.chain.isContextGraphActiveOnChain).not.toHaveBeenCalled();
+    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
   });
 
   it('aborts a stalled peer-setup stage under the shared deadline', async () => {
