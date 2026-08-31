@@ -10,7 +10,12 @@ import {
   parseRdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 
-import type { QueryOptions, QueryResult, TripleStore } from './triple-store.js';
+import {
+  findTripleStoreCapability,
+  type QueryOptions,
+  type QueryResult,
+  type TripleStore,
+} from './triple-store.js';
 import { SparqlJsonResultsShapeError } from './adapters/sparql-json-results.js';
 
 export const RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1 =
@@ -97,37 +102,45 @@ export function isRfc64ExactBindingsReadCapabilityV1(
 }
 
 /** Legacy semantic-only capability retained for the compatibility window. */
+export interface Rfc64SemanticReadCapabilityResultV1 {
+  readonly variables: readonly string[];
+  readonly rows: readonly Rfc64ExactBindingsStoreRowV1[];
+}
+
 export interface Rfc64SemanticReadCapabilityV1 {
+  readonly rfc64SemanticReadCertifiedV1: true;
   rfc64SemanticReadV1(
     operation: Rfc64SemanticReadOperationV2,
     options?: Pick<QueryOptions, 'signal'>,
-  ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]>;
+  ): Promise<Rfc64SemanticReadCapabilityResultV1>;
 }
 
-export interface ResolvedRfc64SemanticReadCapabilityV1 {
-  read(
-    operation: Rfc64SemanticReadOperationV2,
-    options?: Pick<QueryOptions, 'signal'>,
-  ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]>;
-}
+export type Rfc64SemanticReadDispatchV1 = (
+  operation: Rfc64SemanticReadOperationV2,
+  options?: Pick<QueryOptions, 'signal'>,
+) => Promise<readonly Rfc64ExactBindingsStoreRowV1[]>;
 
 /**
- * Normalize exact and compatibility adapters once at discovery. Gateways use
- * this one dispatch shape and do not install or shadow methods on store
- * instances.
+ * Discover and normalize exact and compatibility adapters once. The gateway
+ * receives one bound callable, so it cannot accidentally rediscover or invoke
+ * a different adapter after construction.
  */
-export function resolveRfc64SemanticReadCapabilityV1(
-  candidate: unknown,
-): ResolvedRfc64SemanticReadCapabilityV1 | null {
+export function resolveRfc64SemanticReadDispatchV1(
+  store: unknown,
+): Rfc64SemanticReadDispatchV1 | null {
+  const candidate = findTripleStoreCapability(
+    store,
+    isRfc64SemanticReadCapabilitySourceV1,
+  );
   if (isRfc64ExactBindingsReadCapabilityV1(candidate)) {
-    return Object.freeze({
-      read: candidate.rfc64ExactBindingsReadV1.bind(candidate),
-    });
+    return candidate.rfc64ExactBindingsReadV1.bind(candidate);
   }
   if (isRfc64SemanticReadCapabilityV1(candidate)) {
-    return Object.freeze({
-      read: candidate.rfc64SemanticReadV1.bind(candidate),
-    });
+    const legacyRead = candidate.rfc64SemanticReadV1.bind(candidate);
+    return async (operation, options) => {
+      const result = await legacyRead(operation, options);
+      return normalizeLegacySemanticReadCapabilityResultV1(result, operation);
+    };
   }
   return null;
 }
@@ -142,7 +155,48 @@ export function isRfc64SemanticReadCapabilitySourceV1(
 export function isRfc64SemanticReadCapabilityV1(
   candidate: unknown,
 ): candidate is Rfc64SemanticReadCapabilityV1 {
-  return hasDataMethod(candidate, 'rfc64SemanticReadV1');
+  return hasDataValue(candidate, 'rfc64SemanticReadCertifiedV1', true)
+    && hasDataMethod(candidate, 'rfc64SemanticReadV1');
+}
+
+function normalizeLegacySemanticReadCapabilityResultV1(
+  result: unknown,
+  operation: Rfc64SemanticReadOperationV2,
+): readonly Rfc64ExactBindingsStoreRowV1[] {
+  const variables = ownDataValue(result, 'variables');
+  if (!isExactOrdinaryArray(variables, operation.resultVariables)) {
+    invalid('semantic read returned the wrong result projection');
+  }
+  const rows = ownDataValue(result, 'rows');
+  if (!Array.isArray(rows) || Object.getPrototypeOf(rows) !== Array.prototype) {
+    invalid('semantic read rows must be an ordinary Array');
+  }
+  const keys = Reflect.ownKeys(rows);
+  if (
+    keys.some((key) => typeof key !== 'string')
+    || keys.length !== rows.length + 1
+    || !keys.includes('length')
+  ) {
+    invalid('semantic read rows must be dense and unadorned');
+  }
+  return rows;
+}
+
+function isExactOrdinaryArray(input: unknown, expected: readonly string[]): boolean {
+  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) return false;
+  const keys = Reflect.ownKeys(input);
+  if (
+    keys.some((key) => typeof key !== 'string')
+    || keys.length !== input.length + 1
+    || !keys.includes('length')
+    || input.length !== expected.length
+  ) return false;
+  for (let index = 0; index < expected.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
+    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      || descriptor.value !== expected[index]) return false;
+  }
+  return true;
 }
 
 function hasDataValue(candidate: unknown, key: string, expected: unknown): boolean {

@@ -1,13 +1,20 @@
-import type { ContextGraphIdV1, SubGraphNameV1 } from './author-lane-scope-v1.js';
-import type { Rfc64SemanticAddressV1 } from './rfc64-semantic-addresses-v1.js';
+import type {
+  Rfc64AuthorSemanticScopeV1,
+  Rfc64SemanticAddressV1,
+  Rfc64SemanticScopeV1,
+  Rfc64SubgraphSemanticScopeV1,
+} from './rfc64-semantic-addresses-v1.js';
 import type {
   ChainIdV1,
   DecimalU64V1,
   Digest32V1,
   EvmAddressV1,
 } from './sync-wire-scalars.js';
-import type { NetworkIdV1 } from './sync-wire-identifiers.js';
-import type { TypedRdfStoreObjectV1, TypedRdfStoreRowV1 } from './typed-rdf-store-row-v1.js';
+import type {
+  RenderedRdfStoreRowV1,
+  TypedRdfStoreObjectV1,
+  TypedRdfStoreRowV1,
+} from './typed-rdf-store-row-v1.js';
 import type { CanonicalIsoUtcMillisV1 } from './xsd-date-time.js';
 
 const DKG_ONTOLOGY = 'http://dkg.io/ontology/';
@@ -45,26 +52,16 @@ export const RFC64_SEMANTIC_PREDICATES_V1 = Object.freeze({
   CHAIN_COVERAGE_DIGEST: `${DKG_ONTOLOGY}chainCoverageDigest`,
 } as const);
 
-interface Rfc64SemanticScopeFieldsV1 {
-  readonly networkId: NetworkIdV1;
-  readonly contextGraphId: ContextGraphIdV1;
-}
-
-interface Rfc64SubgraphSemanticScopeFieldsV1 extends Rfc64SemanticScopeFieldsV1 {
-  readonly subGraphName: SubGraphNameV1 | null;
-}
-
-export interface CurrentAuthorCatalogRefV1 extends Rfc64SubgraphSemanticScopeFieldsV1 {
+export interface CurrentAuthorCatalogRefV1 extends Rfc64AuthorSemanticScopeV1 {
   readonly governanceChainId: ChainIdV1 | null;
   readonly governanceContractAddress: EvmAddressV1 | null;
   readonly ownershipTransitionDigest: Digest32V1 | null;
-  readonly authorAddress: EvmAddressV1;
   readonly catalogEra: DecimalU64V1;
   readonly catalogVersion: DecimalU64V1;
   readonly catalogHeadDigest: Digest32V1;
 }
 
-export interface AppliedSubgraphSealV1 extends Rfc64SubgraphSemanticScopeFieldsV1 {
+export interface AppliedSubgraphSealV1 extends Rfc64SubgraphSemanticScopeV1 {
   readonly checkpointEra: DecimalU64V1;
   readonly checkpointVersion: DecimalU64V1;
   readonly checkpointDigest: Digest32V1;
@@ -72,22 +69,22 @@ export interface AppliedSubgraphSealV1 extends Rfc64SubgraphSemanticScopeFieldsV
   readonly appliedAt: CanonicalIsoUtcMillisV1;
 }
 
-export interface SubgraphMutationGuardV1 extends Rfc64SubgraphSemanticScopeFieldsV1 {
+export interface SubgraphMutationGuardV1 extends Rfc64SubgraphSemanticScopeV1 {
   readonly generation: DecimalU64V1;
 }
 
-export interface ContextGraphMutationGuardV1 extends Rfc64SemanticScopeFieldsV1 {
+export interface ContextGraphMutationGuardV1 extends Rfc64SemanticScopeV1 {
   readonly generation: DecimalU64V1;
 }
 
-export interface SubgraphReconcileTargetGuardV1 extends Rfc64SubgraphSemanticScopeFieldsV1 {
+export interface SubgraphReconcileTargetGuardV1 extends Rfc64SubgraphSemanticScopeV1 {
   readonly generation: DecimalU64V1;
   readonly baselineSubgraphCheckpointDigest: Digest32V1 | null;
   readonly activeTargetSubgraphCheckpointDigest: Digest32V1;
   readonly pendingTargetCheckpointDigests: readonly Digest32V1[];
 }
 
-export interface AppliedSubgraphSetRefV1 extends Rfc64SemanticScopeFieldsV1 {
+export interface AppliedSubgraphSetRefV1 extends Rfc64SemanticScopeV1 {
   readonly generation: DecimalU64V1;
   readonly subgraphIndexEra: DecimalU64V1;
   readonly subgraphIndexVersion: DecimalU64V1;
@@ -95,7 +92,7 @@ export interface AppliedSubgraphSetRefV1 extends Rfc64SemanticScopeFieldsV1 {
   readonly appliedDirectoryRootDigest: Digest32V1;
 }
 
-export interface AppliedContextGraphSealV1 extends Rfc64SemanticScopeFieldsV1 {
+export interface AppliedContextGraphSealV1 extends Rfc64SemanticScopeV1 {
   readonly checkpointEra: DecimalU64V1;
   readonly checkpointVersion: DecimalU64V1;
   readonly checkpointDigest: Digest32V1;
@@ -128,27 +125,22 @@ export type Rfc64SemanticRecordFieldKeyV1<
 
 export type Rfc64SemanticRecordCoordinateV1 =
   | ({ readonly recordType: 'CurrentAuthorCatalogRefV1'; readonly authorAddress: EvmAddressV1 }
-    & Rfc64SubgraphSemanticScopeFieldsV1)
+    & Rfc64SubgraphSemanticScopeV1)
   | ({ readonly recordType:
       | 'AppliedSubgraphSealV1'
       | 'SubgraphMutationGuardV1'
       | 'SubgraphReconcileTargetGuardV1' }
-    & Rfc64SubgraphSemanticScopeFieldsV1)
+    & Rfc64SubgraphSemanticScopeV1)
   | ({ readonly recordType:
       | 'ContextGraphMutationGuardV1'
       | 'AppliedSubgraphSetRefV1'
       | 'AppliedContextGraphSealV1' }
-    & Rfc64SemanticScopeFieldsV1);
+    & Rfc64SemanticScopeV1);
 
 export type Rfc64SemanticStoreObjectV1 = TypedRdfStoreObjectV1;
 export type Rfc64SemanticStoreRowV1 = TypedRdfStoreRowV1;
 
-export interface Rfc64SemanticRenderedRowV1 {
-  readonly subject: string;
-  readonly predicate: string;
-  readonly object: string;
-  readonly graph: string;
-}
+export type Rfc64SemanticRenderedRowV1 = RenderedRdfStoreRowV1;
 
 export interface DecodedRfc64SemanticRecordV1 {
   readonly record: Rfc64SemanticRecordV1;
