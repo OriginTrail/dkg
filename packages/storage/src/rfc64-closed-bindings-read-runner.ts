@@ -1,9 +1,8 @@
-import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
-
 import {
   composeAbortSignals,
   raceStoreWorkAgainstAbort,
 } from './abortable-store-work-lifecycle.js';
+import { snapshotExactOrdinaryDataRecord } from './closed-data-snapshot.js';
 
 export interface Rfc64ClosedBindingsReadOptionsV1 {
   readonly timeoutMs: number;
@@ -18,10 +17,11 @@ export function snapshotRfc64ClosedBindingsReadOptionsV1(
 ): Rfc64ClosedBindingsReadOptionsV1 {
   let options: Readonly<Record<string, unknown>>;
   try {
-    options = snapshotExactDataRecord(
+    options = snapshotExactOrdinaryDataRecord(
       input,
       hasOwnKey(input, 'signal') ? ['signal', 'timeoutMs'] : ['timeoutMs'],
       label,
+      (message) => { throw new Error(message); },
     );
   } catch (cause) {
     invalid(`${label} has an invalid field set`, cause);
