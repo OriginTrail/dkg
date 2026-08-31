@@ -118,6 +118,14 @@ export function createCgSharedProjectionStreamVerifierV1(
   );
   let lineNumber = 0;
 
+  const commitOwnedLine = (
+    line: Uint8Array,
+    parsed: Readonly<CgSharedPublicRootProjectionTripleV1>,
+  ): Uint8Array => {
+    accumulator.pushCanonicalLine(line, parsed);
+    return line;
+  };
+
   const acceptCanonicalLine = (rawLine: Uint8Array): Uint8Array => {
     if (!(rawLine instanceof Uint8Array)) {
       fail('projection-input', 'projection stream line must be a Uint8Array');
@@ -142,8 +150,7 @@ export function createCgSharedProjectionStreamVerifierV1(
       line.subarray(0, line.byteLength - 1),
       lineNumber,
     );
-    accumulator.pushCanonicalLine(line, parsed);
-    return line;
+    return commitOwnedLine(line, parsed);
   };
 
   return Object.freeze({
@@ -160,7 +167,9 @@ export function createCgSharedProjectionStreamVerifierV1(
       const line = new Uint8Array(content.byteLength + 1);
       line.set(content);
       line[line.byteLength - 1] = 0x0a;
-      return acceptCanonicalLine(line);
+      lineNumber += 1;
+      const parsed = parseCanonicalProjectionLine(content, lineNumber, false);
+      return commitOwnedLine(line, parsed);
     },
     pushCanonicalLine(rawLine: Uint8Array): Uint8Array {
       return acceptCanonicalLine(rawLine);

@@ -12,14 +12,10 @@ import {
   snapshotRfc64ClosedBindingsReadOptionsV1,
 } from './rfc64-closed-bindings-read-runner.js';
 import {
-  isRfc64SemanticReadCapabilitySourceV1,
-  resolveRfc64SemanticReadCapabilityV1,
+  resolveRfc64SemanticReadDispatchV1,
   Rfc64SemanticReadCapabilityResultErrorV1,
 } from './rfc64-exact-bindings-read-capability.js';
-import {
-  findTripleStoreCapability,
-  type TripleStore,
-} from './triple-store.js';
+import type { TripleStore } from './triple-store.js';
 
 export const MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1 = 30_000;
 
@@ -68,18 +64,14 @@ export class SyncSemanticStoreV1 {
   ) => Promise<readonly import('@origintrail-official/dkg-core').Rfc64SemanticStoreRowV1[]>;
 
   constructor(store: TripleStore) {
-    const capabilitySource = findTripleStoreCapability(
-      store,
-      isRfc64SemanticReadCapabilitySourceV1,
-    );
-    const capability = resolveRfc64SemanticReadCapabilityV1(capabilitySource);
-    if (!capability) {
+    const dispatch = resolveRfc64SemanticReadDispatchV1(store);
+    if (!dispatch) {
       fail(
         'rfc64-semantic-read-capability',
         'triple store has no certified RFC-64 semantic read capability',
       );
     }
-    this.dispatch = (operation, signal) => capability.read(
+    this.dispatch = (operation, signal) => dispatch(
       operation,
       { signal },
     );
