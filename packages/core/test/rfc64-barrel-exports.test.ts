@@ -21,7 +21,7 @@ import {
   assertKaTransferDescriptorV1,
   canonicalizeKaTransferDescriptorV1,
   computeRfc64SubGraphKeyV1,
-  compileRfc64SemanticReadOperationV2,
+  compileRfc64SemanticReadOperationV1,
   decodeRfc64SemanticRecordStoreRowsV1,
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
@@ -90,7 +90,7 @@ describe('RFC-64 transfer descriptor + wire scalars public package barrel', () =
     expect(MAX_RFC64_PENDING_TARGET_DIGESTS_V1).toBe(64);
     expect(RFC64_SEMANTIC_READ_QUERY_IDS_V1).toHaveLength(6);
     for (const [name, fn] of [
-      ['compileRfc64SemanticReadOperationV2', compileRfc64SemanticReadOperationV2],
+      ['compileRfc64SemanticReadOperationV1', compileRfc64SemanticReadOperationV1],
       ['decodeRfc64SemanticRecordStoreRowsV1', decodeRfc64SemanticRecordStoreRowsV1],
       ['projectRfc64SemanticRecordStoreRowsV1', projectRfc64SemanticRecordStoreRowsV1],
       ['renderRfc64SemanticStoreRowV1', renderRfc64SemanticStoreRowV1],

@@ -1,8 +1,9 @@
 import {
   parseRenderedRdfStoreObjectV1,
+  snapshotTypedRdfStoreRowV1,
   type CanonicalAuthorSealStoreRowV1,
   type Rfc64AuthorSealReadOperationV1,
-  type Rfc64SemanticReadOperationV2,
+  type Rfc64SemanticReadOperationV1,
   type Rfc64SemanticStoreObjectV1,
 } from '@origintrail-official/dkg-core';
 
@@ -13,12 +14,17 @@ import {
   type TripleStore,
 } from './triple-store.js';
 import { SparqlJsonResultsShapeError } from './sparql-json-query-result.js';
+import {
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactOrdinaryDataRecord,
+} from './closed-data-snapshot.js';
 
 export const RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1 =
   'RFC64_EXACT_BINDINGS_RESULT_V1' as const;
 
 export type Rfc64ExactBindingsReadOperationV1 =
-  | Rfc64SemanticReadOperationV2
+  | Rfc64SemanticReadOperationV1
   | Rfc64AuthorSealReadOperationV1;
 
 export type Rfc64ExactBindingsStoreRowV1 = CanonicalAuthorSealStoreRowV1;
@@ -84,7 +90,7 @@ export async function executeRfc64ExactBindingsReadCapabilityV1(
 /** @deprecated Use {@link executeRfc64ExactBindingsReadCapabilityV1}. */
 export function executeRfc64SemanticReadCapabilityV1(
   store: Pick<TripleStore, 'query'>,
-  operation: Rfc64SemanticReadOperationV2,
+  operation: Rfc64SemanticReadOperationV1,
   options: Pick<QueryOptions, 'signal'> = {},
 ): Promise<Rfc64SemanticReadCapabilityResultV1> {
   return executeRfc64ExactBindingsReadCapabilityV1(store, operation, options)
@@ -106,13 +112,13 @@ export interface Rfc64SemanticReadCapabilityResultV1 {
 export interface Rfc64SemanticReadCapabilityV1 {
   readonly rfc64SemanticReadCertifiedV1: true;
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<Rfc64SemanticReadCapabilityResultV1>;
 }
 
 export type Rfc64SemanticReadDispatchV1 = (
-  operation: Rfc64SemanticReadOperationV2,
+  operation: Rfc64SemanticReadOperationV1,
   options?: Pick<QueryOptions, 'signal'>,
 ) => Promise<readonly Rfc64ExactBindingsStoreRowV1[]>;
 
@@ -157,21 +163,26 @@ export function isRfc64SemanticReadCapabilityV1(
 
 function normalizeLegacySemanticReadCapabilityResultV1(
   result: unknown,
-  _operation: Rfc64SemanticReadOperationV2,
+  _operation: Rfc64SemanticReadOperationV1,
 ): readonly Rfc64ExactBindingsStoreRowV1[] {
-  const rows = ownDataValue(result, 'rows');
-  if (!Array.isArray(rows) || Object.getPrototypeOf(rows) !== Array.prototype) {
-    invalid('semantic read rows must be an ordinary Array');
-  }
-  const keys = Reflect.ownKeys(rows);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== rows.length + 1
-    || !keys.includes('length')
-  ) {
-    invalid('semantic read rows must be dense and unadorned');
-  }
-  return rows;
+  const envelope = snapshotExactOrdinaryDataRecord(
+    result,
+    ['rows'],
+    'semantic read result',
+    invalid,
+  );
+  const rows = snapshotDenseDataArray(
+    envelope.rows,
+    'semantic read rows',
+    invalid,
+  );
+  return Object.freeze(rows.map((row) => {
+    try {
+      return snapshotTypedRdfStoreRowV1(row);
+    } catch (cause) {
+      invalid('semantic read row is malformed', cause);
+    }
+  }));
 }
 
 function hasDataValue(candidate: unknown, key: string, expected: unknown): boolean {
@@ -207,27 +218,25 @@ function normalizeRfc64ExactBindingsReadResultV1(
     invalid('exact-bindings read did not return bindings');
   }
   assertProjectionIfPresent(result, operation.resultVariables);
-  const bindings = ownDataValue(result, 'bindings');
-  if (!Array.isArray(bindings) || Object.getPrototypeOf(bindings) !== Array.prototype) {
-    invalid('exact-bindings read bindings must be an ordinary Array');
-  }
+  const bindings = snapshotDenseDataArray(
+    ownDataValue(result, 'bindings'),
+    'exact-bindings read bindings',
+    invalid,
+  );
   if (bindings.length > operation.rowCeiling) {
     invalid('exact-bindings read exceeded its row ceiling');
-  }
-  const keys = Reflect.ownKeys(bindings);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== bindings.length + 1
-    || !keys.includes('length')
-  ) {
-    invalid('exact-bindings read bindings must be dense and unadorned');
   }
   const rows: Rfc64ExactBindingsStoreRowV1[] = [];
   let normalizedBytes = 0;
   for (let index = 0; index < bindings.length; index += 1) {
-    const binding = ownDataValue(bindings, String(index));
-    const predicate = ownDataValue(binding, 'p');
-    const object = ownDataValue(binding, 'o');
+    const binding = snapshotExactOrdinaryDataRecord(
+      bindings[index],
+      ['o', 'p'],
+      `exact-bindings read binding ${index}`,
+      invalid,
+    );
+    const predicate = binding.p;
+    const object = binding.o;
     if (typeof predicate !== 'string' || typeof object !== 'string') {
       invalid('exact-bindings read terms must be strings');
     }
@@ -253,26 +262,16 @@ function assertProjectionIfPresent(
 ): void {
   const descriptor = Object.getOwnPropertyDescriptor(result, 'variables');
   if (!descriptor) return;
-  if (!descriptor.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-    invalid('exact-bindings read projection must be a data property');
-  }
-  const variables = descriptor.value;
-  if (!Array.isArray(variables) || Object.getPrototypeOf(variables) !== Array.prototype) {
-    invalid('exact-bindings read projection must be an ordinary Array');
-  }
-  const keys = Reflect.ownKeys(variables);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== variables.length + 1
-    || !keys.includes('length')
-    || variables.length !== expected.length
-  ) {
+  const variables = snapshotDenseDataArray(
+    readOwnEnumerableDataProperty(result, 'variables', 'exact-bindings read result', invalid),
+    'exact-bindings read projection',
+    invalid,
+  );
+  if (variables.length !== expected.length) {
     invalid('exact-bindings read returned the wrong result projection');
   }
   for (let index = 0; index < expected.length; index += 1) {
-    const value = Object.getOwnPropertyDescriptor(variables, String(index));
-    if (!value?.enumerable || !Object.prototype.hasOwnProperty.call(value, 'value')
-      || value.value !== expected[index]) {
+    if (variables[index] !== expected[index]) {
       invalid('exact-bindings read returned the wrong result projection');
     }
   }
@@ -287,14 +286,7 @@ function parseStoreObject(input: string): Rfc64SemanticStoreObjectV1 {
 }
 
 function ownDataValue(input: unknown, key: string): unknown {
-  if (input === null || typeof input !== 'object') {
-    invalid('exact-bindings read result must be an object');
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(input, key);
-  if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-    invalid(`exact-bindings read result ${key} must be a data property`);
-  }
-  return descriptor.value;
+  return readOwnEnumerableDataProperty(input, key, 'exact-bindings read result', invalid);
 }
 
 function invalid(message: string, cause?: unknown): never {

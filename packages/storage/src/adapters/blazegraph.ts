@@ -16,15 +16,16 @@ import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
   assertQuadLiteralsMutf8Safe,
+  classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -243,7 +244,7 @@ export class BlazegraphStore implements TripleStore {
   }
 
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ) {
     return executeRfc64SemanticReadCapabilityV1(this, operation, options);
@@ -524,9 +525,10 @@ export class BlazegraphStore implements TripleStore {
     storeOperation?: StoreOperation,
   ): Promise<QueryResult> {
     const trimmed = sparql.trim();
-    const upper = trimmed.toUpperCase();
-    const isAsk = upper.startsWith('ASK');
-    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    const classified = classifySparqlOperation(trimmed);
+    const isAsk = classified.kind === 'read' && classified.form === 'ASK';
+    const isConstruct = classified.kind === 'read'
+      && (classified.form === 'CONSTRUCT' || classified.form === 'DESCRIBE');
     return this.runStoreWork(
       storeOperation ?? (isConstruct ? 'construct' : 'query'),
       options,
