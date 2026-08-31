@@ -103,8 +103,7 @@ import {
 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
 import {
-  rfc64CatalogKillSwitchActiveV1,
-  resolveRfc64CatalogAuthorityDecisionV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -312,8 +311,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
       resolveContextGraphAuthority: (contextGraphId) =>
-        resolveRfc64CatalogAuthorityDecisionV1(
-          this.config.rfc64CatalogRollout,
+        resolveRfc64CatalogExecutionPlanAuthorityV1(
+          this.config.rfc64CatalogExecutionPlan,
           contextGraphId,
         ),
       currentHeadDiscovery: {
@@ -541,13 +540,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId?: string,
   ): void {
-    if (rfc64CatalogKillSwitchActiveV1(this.config.rfc64CatalogRollout)) {
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
       throw new Error('RFC-64 catalog authoring is disabled by the Track-2 kill switch');
     }
     if (
       contextGraphId !== undefined
-      && !resolveRfc64CatalogAuthorityDecisionV1(
-        this.config.rfc64CatalogRollout,
+      && !resolveRfc64CatalogExecutionPlanAuthorityV1(
+        this.config.rfc64CatalogExecutionPlan,
         contextGraphId,
       ).authoringAllowed
     ) {
