@@ -11,9 +11,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   asGraphWriteRevisionSource,
-  isStoreOperationTimeoutError,
   StoreResponseTooLargeError,
   StoreSchedulerBusyError,
+  isStoreOperationTimeoutError,
   type QueryOptions,
   type TripleStore,
   type ChangelogReader,
