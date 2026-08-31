@@ -383,6 +383,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
+import { localContextGraphIdMatchesCommittedNameHash } from './context-graph-binding-state.js';
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 
@@ -480,16 +481,6 @@ async function evaluateContextGraphSlotBinding(
   const getNameHash = chain.getContextGraphNameHash;
   if (typeof getNameHash !== 'function') return { kind: 'unprovable' };
 
-  const acceptable = new Set<string>();
-  try {
-    acceptable.add(ethers.keccak256(ethers.toUtf8Bytes(trimmed)).toLowerCase());
-  } catch {
-    return { kind: 'unprovable' };
-  }
-  if (/^0x[0-9a-fA-F]{64}$/.test(trimmed) && isWireIdKeyedSubscription(trimmed)) {
-    acceptable.add(trimmed.toLowerCase());
-  }
-
   let onChainHash: string | null | typeof TIMEOUT_SENTINEL;
   try {
     const read = signal
@@ -528,12 +519,16 @@ async function evaluateContextGraphSlotBinding(
     );
     return { kind: 'mismatch' };
   }
-  if (acceptable.has(onChainHash.toLowerCase())) return { kind: 'match' };
+  if (localContextGraphIdMatchesCommittedNameHash(
+    trimmed,
+    onChainHash,
+    isWireIdKeyedSubscription,
+  )) return { kind: 'match' };
 
   warn(
     opCtx ?? createOperationContext('share'),
     `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits `
-    + `name-hash ${onChainHash.toLowerCase()} ≠ this CG's expected wire id(s) ${[...acceptable].join(' | ')} — `
+    + `name-hash ${onChainHash.toLowerCase()} that does not match this CG's local identity — `
     + 'local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).',
   );
   return { kind: 'mismatch' };
@@ -812,6 +807,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async readLiveOnChainAccessPolicy(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
+    options: { signal?: AbortSignal } = {},
   ): Promise<0 | 1 | null> {
     let numericId: bigint;
     try {
@@ -843,9 +839,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       }
       return null;
     }
-    const live = await this.raceChainPolicyRead(
-      this.chain.isContextGraphActiveOnChain(numericId),
-    );
+    const live = await this.raceChainPolicyRead(options.signal
+      ? this.chain.isContextGraphActiveOnChain(numericId, { signal: options.signal })
+      : this.chain.isContextGraphActiveOnChain(numericId));
     if (live === TIMEOUT_SENTINEL) {
       this.log.warn(
         opCtx ?? createOperationContext('share'),
@@ -867,9 +863,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // value is strictly an improvement for the other, decrypt-gated readers).
     const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
     if (typeof getAccessPolicy !== 'function') return null;
-    const policy = await this.raceChainPolicyRead(
-      getAccessPolicy.call(this.chain, numericId),
-    );
+    const policy = await this.raceChainPolicyRead(options.signal
+      ? getAccessPolicy.call(this.chain, numericId, { signal: options.signal })
+      : getAccessPolicy.call(this.chain, numericId));
     if (policy === TIMEOUT_SENTINEL) {
       this.log.warn(
         opCtx ?? createOperationContext('share'),

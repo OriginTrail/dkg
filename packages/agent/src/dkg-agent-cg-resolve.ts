@@ -95,7 +95,6 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { resolveRandomSamplingLocalContextGraphBinding } from './sync/recovery/random-sampling-context-graph-resolver.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -713,31 +712,6 @@ export async function resolveCuratorSyncPeer(
 }
 
 export class ContextGraphResolveMethods extends DKGAgentBase {
-  /**
-   * Resolve a numeric Random Sampling challenge to one chain-attested local
-   * Context Graph binding, including the cold-start durable-index path.
-   */
-  async resolveRandomSamplingLocalContextGraphId(
-    this: DKGAgent,
-    onChainContextGraphId: bigint,
-    signal?: AbortSignal,
-  ): Promise<string | undefined> {
-    return resolveRandomSamplingLocalContextGraphBinding({
-      cacheOwner: this,
-      store: this.store,
-      chain: this.chain,
-      configuredContextGraphIds: this.config.syncContextGraphs ?? [],
-      resolveDirect: (id) => this.resolveLocalCgIdByOnChainId(id),
-      subscribedContextGraphIds: () => this.subscribedContextGraphs.keys(),
-      isSubscribed: (localContextGraphId) =>
-        this.subscribedContextGraphs.get(localContextGraphId)?.subscribed === true,
-      contextGraphNameCommitment: (localContextGraphId) =>
-        this.contextGraphNameCommitment(localContextGraphId),
-      isWireIdKeyedSubscription: (localContextGraphId) =>
-        this.isWireIdKeyedSubscription(localContextGraphId),
-    }, onChainContextGraphId, signal);
-  }
-
   async getCgMeta(
     this: DKGAgent,
     contextGraphId: string,

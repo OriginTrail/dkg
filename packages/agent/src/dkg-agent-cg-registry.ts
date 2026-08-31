@@ -375,7 +375,54 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
+import {
+  isCanonicalPositiveContextGraphId,
+  localContextGraphIdMatchesCommittedNameHash,
+} from './context-graph-binding-state.js';
+
+const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
+const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
+
+function contextGraphBindingAbortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(String(signal.reason ?? 'Context Graph binding resolution aborted'));
+  error.name = 'AbortError';
+  return error;
+}
+
+function raceContextGraphBindingAgainstAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(contextGraphBindingAbortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(contextGraphBindingAbortReason(signal));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+function localContextGraphIdFromTerm(raw: unknown): string | undefined {
+  const uri = typeof raw === 'string' ? raw.replace(/^<|>$/g, '') : '';
+  return uri.startsWith(CONTEXT_GRAPH_URI_PREFIX) && uri.length > CONTEXT_GRAPH_URI_PREFIX.length
+    ? uri.slice(CONTEXT_GRAPH_URI_PREFIX.length)
+    : undefined;
+}
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
   /**
@@ -412,6 +459,128 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   hasPendingSharedMemoryWrites(this: DKGAgent, contextGraphId: string): boolean {
     const owned = this.workspaceOwnedEntities.get(contextGraphId);
     return owned !== undefined && owned.size > 0;
+  }
+
+  /**
+   * Resolve a numeric chain slot to one local Context Graph through the
+   * canonical binding registry. Cold candidates come from durable numeric
+   * bindings or authoritative Context Graph declarations; commitment identity
+   * and live access policy reuse the shared binding/crypto authorities.
+   */
+  async resolveRandomSamplingLocalContextGraphId(
+    this: DKGAgent,
+    onChainContextGraphId: bigint,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    const direct = this.resolveLocalCgIdByOnChainId(onChainContextGraphId);
+    if (direct) return direct;
+
+    const cacheKey = onChainContextGraphId.toString();
+    const isSubscribed = (localCgId: string) =>
+      this.subscribedContextGraphs.get(localCgId)?.subscribed === true;
+    const cached = this.contextGraphBindingState.getChainAttestedResolution(
+      cacheKey,
+      isSubscribed,
+    );
+    if (cached.hit) return cached.localCgId;
+
+    const rememberMiss = (): undefined => {
+      this.contextGraphBindingState.rememberChainAttestedResolutionMiss(cacheKey);
+      return undefined;
+    };
+    const getNameHash = this.chain.getContextGraphNameHash;
+    if (typeof getNameHash !== 'function') return rememberMiss();
+
+    const committedNameHash = await raceContextGraphBindingAgainstAbort(
+      getNameHash.call(
+        this.chain,
+        onChainContextGraphId,
+        signal ? { signal } : undefined,
+      ),
+      signal,
+    );
+    if (!committedNameHash || !/^0x[0-9a-fA-F]{64}$/.test(committedNameHash)) {
+      return rememberMiss();
+    }
+    const matchesCommitment = (localCgId: string) =>
+      localContextGraphIdMatchesCommittedNameHash(
+        localCgId,
+        committedNameHash,
+        (candidate) => this.isWireIdKeyedSubscription(candidate),
+      );
+
+    const candidates = new Set<string>([
+      ...this.subscribedContextGraphs.keys(),
+      ...(this.config.syncContextGraphs ?? []),
+    ]);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+    try {
+      const durableBindings = await raceContextGraphBindingAgainstAbort(this.store.query(`
+        SELECT DISTINCT ?ctxGraph WHERE {
+          GRAPH <${ontologyGraph}> {
+            ?ctxGraph <${onChainIdPredicate}> ?onChainId .
+            FILTER(STR(?onChainId) = ${sparqlString(cacheKey)})
+          }
+        }
+        LIMIT 2
+      `, {
+        signal,
+        source: 'agent.contextGraph.resolveChainAttestedBinding.durableIndex',
+      }), signal);
+      if (durableBindings.type === 'bindings') {
+        for (const row of durableBindings.bindings) {
+          const localCgId = localContextGraphIdFromTerm(row['ctxGraph']);
+          if (localCgId) candidates.add(localCgId);
+        }
+      }
+    } catch {
+      if (signal?.aborted) throw contextGraphBindingAbortReason(signal);
+      // Compatibility discovery below remains available when the durable
+      // reverse index is absent or the older store cannot query it.
+    }
+
+    let matching = [...candidates].filter(matchesCommitment);
+    if (matching.length === 0) {
+      let declaredContextGraphIds: string[];
+      try {
+        declaredContextGraphIds = await raceContextGraphBindingAgainstAbort(
+          this.contextGraphMetaProjection.listDeclaredContextGraphIds({
+            signal,
+            source: 'agent.contextGraph.resolveChainAttestedBinding.declarations',
+          }),
+          signal,
+        );
+      } catch {
+        if (signal?.aborted) throw contextGraphBindingAbortReason(signal);
+        return rememberMiss();
+      }
+      if (declaredContextGraphIds.length > CHAIN_ATTESTED_DECLARATION_SCAN_MAX) {
+        return rememberMiss();
+      }
+      for (const localCgId of declaredContextGraphIds) candidates.add(localCgId);
+      matching = [...candidates].filter(matchesCommitment);
+    }
+    if (matching.length !== 1) return rememberMiss();
+
+    const localCgId = matching[0]!;
+    const accessPolicy = await raceContextGraphBindingAgainstAbort(
+      this.readLiveOnChainAccessPolicy(
+        cacheKey,
+        createOperationContext('sync'),
+        { signal },
+      ),
+      signal,
+    );
+    if (accessPolicy === null) return rememberMiss();
+    if (accessPolicy === 1 && !isSubscribed(localCgId)) return rememberMiss();
+
+    this.contextGraphBindingState.rememberChainAttestedResolution(
+      cacheKey,
+      localCgId,
+      accessPolicy === 1,
+    );
+    return localCgId;
   }
 
   async getContextGraphOnChainId(
