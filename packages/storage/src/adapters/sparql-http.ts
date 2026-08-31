@@ -27,19 +27,12 @@ import type {
   QueryOptions,
   UpdateOptions,
   QueryResult,
-  SelectResult,
   ConstructResult,
-  AskResult,
   StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import {
-  parseSparqlJsonSelectResponse,
-  parseSparqlJsonResponseText,
-  SparqlJsonResultsShapeError,
-} from './sparql-json-results.js';
-import { isOrdinaryDataRecord } from '../closed-data-snapshot.js';
+import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -955,32 +948,7 @@ export class SparqlHttpStore implements TripleStore {
               managedOxigraph: this.managedOxigraph,
               operation: canonicalOperation,
             });
-            const json = parseSparqlJsonResponseText(text);
-
-            if (
-              isAsk
-              || (
-                isOrdinaryDataRecord(json)
-                && Object.prototype.hasOwnProperty.call(json, 'boolean')
-              )
-            ) {
-              if (!isOrdinaryDataRecord(json) || typeof json.boolean !== 'boolean') {
-                throw new SparqlJsonResultsShapeError(
-                  'SPARQL JSON ASK response.boolean must be a boolean',
-                );
-              }
-              return {
-                type: 'boolean',
-                value: json.boolean,
-              } satisfies AskResult;
-            }
-
-            const parsed = parseSparqlJsonSelectResponse(json);
-            return {
-              type: 'bindings',
-              bindings: parsed.bindings,
-              variables: parsed.variables,
-            } satisfies SelectResult;
+            return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
           },
         );
       } finally {

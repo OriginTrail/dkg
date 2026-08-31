@@ -123,19 +123,28 @@ export type Rfc64SemanticRecordFieldKeyV1<
   K extends Rfc64SemanticRecordTypeV1,
 > = Extract<keyof Rfc64SemanticRecordValuesV1[K], string>;
 
+type Rfc64SubgraphSemanticRecordTypeV1 =
+  | 'AppliedSubgraphSealV1'
+  | 'SubgraphMutationGuardV1'
+  | 'SubgraphReconcileTargetGuardV1';
+type Rfc64ContextGraphSemanticRecordTypeV1 =
+  | 'ContextGraphMutationGuardV1'
+  | 'AppliedSubgraphSetRefV1'
+  | 'AppliedContextGraphSealV1';
+
 export type Rfc64SemanticRecordCoordinateV1 =
   | ({ readonly recordType: 'CurrentAuthorCatalogRefV1'; readonly authorAddress: EvmAddressV1 }
     & Rfc64SubgraphSemanticScopeV1)
-  | ({ readonly recordType:
-      | 'AppliedSubgraphSealV1'
-      | 'SubgraphMutationGuardV1'
-      | 'SubgraphReconcileTargetGuardV1' }
-    & Rfc64SubgraphSemanticScopeV1)
-  | ({ readonly recordType:
-      | 'ContextGraphMutationGuardV1'
-      | 'AppliedSubgraphSetRefV1'
-      | 'AppliedContextGraphSealV1' }
-    & Rfc64SemanticScopeV1);
+  | {
+      readonly [K in Rfc64SubgraphSemanticRecordTypeV1]: {
+        readonly recordType: K;
+      } & Rfc64SubgraphSemanticScopeV1;
+    }[Rfc64SubgraphSemanticRecordTypeV1]
+  | {
+      readonly [K in Rfc64ContextGraphSemanticRecordTypeV1]: {
+        readonly recordType: K;
+      } & Rfc64SemanticScopeV1;
+    }[Rfc64ContextGraphSemanticRecordTypeV1];
 
 export type Rfc64SemanticStoreObjectV1 = TypedRdfStoreObjectV1;
 export type Rfc64SemanticStoreRowV1 = TypedRdfStoreRowV1;

@@ -14,15 +14,18 @@ import {
   type Rfc64SemanticRecordTypeV1,
   type Rfc64SemanticRecordV1,
 } from '@origintrail-official/dkg-core';
-import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
 import {
   type Quad,
 } from './triple-store.js';
 import {
+  snapshotDenseDataArray,
+  snapshotExactOrdinaryDataRecord,
+} from './closed-data-snapshot.js';
+import {
   normalizeRfc64AuthorCommitCasV1,
   type NormalizedRfc64AuthorCommitCasV1,
-  type Rfc64AuthorCommitStateTransitionV1,
+  type Rfc64AuthorCommitExactStateTransitionV1,
 } from './rfc64-author-commit-cas.js';
 
 type SemanticRecordOfV1<Type extends Rfc64SemanticRecordTypeV1> = Extract<
@@ -318,7 +321,7 @@ function transition<Type extends Rfc64SemanticRecordTypeV1>(
   expected: SemanticRecordOfV1<Type> | null,
   next: SemanticRecordOfV1<Type>,
   guardPredicate: string,
-): Rfc64AuthorCommitStateTransitionV1 {
+): Rfc64AuthorCommitExactStateTransitionV1 {
   const nextRows = projectRfc64SemanticRecordStoreRowsV1(next);
   const firstNextRow = nextRows[0];
   if (firstNextRow === undefined) {
@@ -504,28 +507,12 @@ function optionalRecord<Type extends Rfc64SemanticRecordTypeV1>(
 }
 
 function snapshotQuads(input: unknown, label: string): readonly Quad[] {
-  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
-    fail('rfc64-semantic-author-commit-schema', `${label} must be an ordinary array`);
-  }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== input.length + 1
-    || !keys.includes('length')
-  ) {
-    fail('rfc64-semantic-author-commit-schema', `${label} must be dense and unadorned`);
-  }
+  const captured = snapshotDenseDataArray(input, label, (message) =>
+    fail('rfc64-semantic-author-commit-schema', message));
   const result: Quad[] = [];
-  for (let index = 0; index < input.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail(
-        'rfc64-semantic-author-commit-schema',
-        `${label} must use enumerable data properties`,
-      );
-    }
+  for (let index = 0; index < captured.length; index += 1) {
     const value = snapshotExactRecord(
-      descriptor.value,
+      captured[index],
       ['graph', 'object', 'predicate', 'subject'],
       `${label}[${index}]`,
     );
@@ -552,7 +539,12 @@ function snapshotExactRecord(
   label: string,
 ): Readonly<Record<string, unknown>> {
   try {
-    return snapshotExactDataRecord(input, expectedKeys, label);
+    return snapshotExactOrdinaryDataRecord(
+      input,
+      expectedKeys,
+      label,
+      (message) => { throw new Error(message); },
+    );
   } catch (cause) {
     fail('rfc64-semantic-author-commit-schema', `${label} has an invalid field set`, cause);
   }
