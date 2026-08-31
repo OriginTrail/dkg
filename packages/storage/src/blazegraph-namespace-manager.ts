@@ -1,11 +1,18 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
+import blazegraphNamespaceContract from '../blazegraph-namespace-contract.cjs';
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const canonicalNamespaceCodec: BlazegraphNamespaceCodec = Object.freeze({
+  assertNamespace: blazegraphNamespaceContract.assertBlazegraphNamespace,
+  renderNamespaceXml: blazegraphNamespaceContract.renderBlazegraphNamespaceXml,
+});
 
 export interface BlazegraphNamespaceManagerOptions {
   readonly namespaceApiUrl: string;
   readonly fetchImpl?: typeof fetch;
-  readonly namespaceCodec: BlazegraphNamespaceCodec;
+  /** Test seam only; production callers use the canonical storage-owned contract. */
+  readonly namespaceCodec?: BlazegraphNamespaceCodec;
   readonly requestTimeoutMs?: number;
 }
 
@@ -70,7 +77,7 @@ export class BlazegraphNamespaceManager {
     }
     this.namespaceApiUrl = normalizeBlazegraphNamespaceApiUrl(options.namespaceApiUrl);
     this.#fetch = options.fetchImpl ?? fetch;
-    this.#namespaceCodec = options.namespaceCodec;
+    this.#namespaceCodec = options.namespaceCodec ?? canonicalNamespaceCodec;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
@@ -204,6 +211,15 @@ export class BlazegraphNamespaceManager {
     return this.#fetch(input, { ...init, signal });
   }
 }
+
+export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE =
+  blazegraphNamespaceContract.BLAZEGRAPH_NAMESPACE_XML_TEMPLATE;
+export const assertBlazegraphNamespace =
+  blazegraphNamespaceContract.assertBlazegraphNamespace;
+export const normalizeBlazegraphNamespace =
+  blazegraphNamespaceContract.normalizeBlazegraphNamespace;
+export const renderBlazegraphNamespaceXml =
+  blazegraphNamespaceContract.renderBlazegraphNamespaceXml;
 
 export function normalizeBlazegraphNamespaceApiUrl(namespaceApiUrl: string): string {
   const parsed = parseHttpUrl(namespaceApiUrl, 'Blazegraph namespace API URL');

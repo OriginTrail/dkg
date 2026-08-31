@@ -1,64 +1,24 @@
 #!/usr/bin/env node
 /*
- * Single plain-CJS source of the Blazegraph runtime contract: the pinned
- * image metadata (blazegraph-image.json) AND the namespace-properties XML
- * template. TypeScript consumes it via createRequire
- * (packages/cli/src/daemon/blazegraph-docker.ts); shell consumes it via the
- * CLI below (scripts/devnet.sh, scripts/devnet-blazegraph-native.sh,
- * scripts/ci/verify-blazegraph-image-contract.sh).
+ * Plain-CJS facade for the pinned image metadata and the storage-owned
+ * Blazegraph namespace contract. Shell callers consume the CLI below while
+ * TypeScript imports the declared package subpath.
  *
  * TypeScript and workspace consumers import the declared public
  * `@origintrail-official/dkg/blazegraph-runtime-contract` subpath, while shell
- * callers run this file directly. It must therefore stay dependency-free and
- * buildless so both the repo checkout and packed tarball work before any
- * workspace build exists.
+ * callers run this file directly. Both this facade and the canonical storage
+ * contract are buildless CJS assets, so they work before workspace builds.
  */
 'use strict';
 
 const fs = require('node:fs');
-
-/**
- * Canonical XML template for a Blazegraph namespace tuned for DKG V10
- * (quads enabled, no truth maintenance, no text index, no statement
- * identifiers). Substitutes `{namespace}` for the namespace name.
- *
- * Blazegraph's loadFromXML matches the SYSTEM DOCTYPE literally (it is never
- * fetched; the dead java.sun.com URL is fine). quads=true is mandatory: the
- * DKG uses named graphs, and quads mode requires inference disabled via
- * NoAxioms.
- */
-const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">
-<properties>
-  <entry key="com.bigdata.rdf.sail.namespace">{namespace}</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.quads">true</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers">false</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.textIndex">false</entry>
-  <entry key="com.bigdata.rdf.sail.truthMaintenance">false</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.axiomsClass">com.bigdata.rdf.axioms.NoAxioms</entry>
-</properties>`;
-
-// Namespace names are templated into XML verbatim, so only accept a
-// conservative charset — anything needing escaping is rejected outright.
-const BLAZEGRAPH_NAMESPACE_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
-
-function assertBlazegraphNamespace(namespace) {
-  if (
-    typeof namespace !== 'string'
-    || !BLAZEGRAPH_NAMESPACE_PATTERN.test(namespace)
-    || namespace === '.'
-    || namespace === '..'
-  ) {
-    throw new Error(
-      `Blazegraph namespace ${JSON.stringify(namespace)} is invalid: it must match ${BLAZEGRAPH_NAMESPACE_PATTERN} and cannot be a URL dot segment`,
-    );
-  }
-}
-
-function renderBlazegraphNamespaceXml(namespace) {
-  assertBlazegraphNamespace(namespace);
-  return BLAZEGRAPH_NAMESPACE_XML_TEMPLATE.replace('{namespace}', namespace);
-}
+const blazegraphNamespaceContract = require('./blazegraph-namespace-contract.cjs');
+const {
+  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
+  assertBlazegraphNamespace,
+  normalizeBlazegraphNamespace,
+  renderBlazegraphNamespaceXml,
+} = blazegraphNamespaceContract;
 
 function parseBlazegraphImageMetadata(value, source = 'Blazegraph image metadata') {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -118,6 +78,7 @@ module.exports = {
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   assertBlazegraphNamespace,
   formatBlazegraphImageMetadata,
+  normalizeBlazegraphNamespace,
   parseBlazegraphImageMetadata,
   readBlazegraphImageMetadata,
   renderBlazegraphNamespaceXml,

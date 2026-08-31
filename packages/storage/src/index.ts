@@ -1,9 +1,13 @@
 export {
   BlazegraphNamespaceLease,
   BlazegraphNamespaceManager,
+  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
+  assertBlazegraphNamespace,
   blazegraphNamespaceApiUrlFromBaseUrl,
   blazegraphNamespaceApiUrlFromSparqlEndpoint,
+  normalizeBlazegraphNamespace,
   normalizeBlazegraphNamespaceApiUrl,
+  renderBlazegraphNamespaceXml,
   type BlazegraphNamespaceCodec,
   type BlazegraphNamespaceDisposeOptions,
   type BlazegraphNamespaceEnsureResult,
