@@ -93,6 +93,8 @@
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
+    "benchmark:code-point-comparator": "pnpm run build && node --expose-gc scripts/code-point-comparator-benchmark.cjs",
+    "benchmark:graph-membership-snapshot": "pnpm run build && node --expose-gc scripts/graph-membership-snapshot-benchmark.cjs",
     "benchmark:sync-responder-pages": "node --expose-gc scripts/sync-responder-page-benchmark.cjs",
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",

@@ -24,6 +24,7 @@ export async function readResponseTextBounded(
   if (contentLength && /^\d+$/.test(contentLength)) {
     const declaredBytes = BigInt(contentLength);
     if (declaredBytes > BigInt(maxBytes)) {
+      await response.body?.cancel().catch(() => undefined);
       throw new StoreResponseTooLargeError(maxBytes, declaredBytes);
     }
   }

@@ -245,14 +245,27 @@ export {
   type LiftJobClaimed,
   type LiftJobValidated,
   type LiftJobBroadcast,
+  type LiftJobLegacyEvidenceFreeBroadcast,
+  type LiftJobCompatibility,
+  type PersistedLiftJob,
+  type LiftJobPersistedFinalizedCompatibility,
   type LiftJobIncluded,
   type LiftJobFinalized,
   type LiftJobFailed,
+  type LiftJobPersistedFailure,
+  type LiftJobPersistedFailedFromClaimedWithRetainedValidation,
+  type LiftJobPersistedFailedFromValidatedWithoutClaim,
+  type LiftJobPersistedFailureWithoutProgress,
+  type LiftJobPersistedFailureWithRetainedTransaction,
+  type LiftJobPersistedFailureWithUnattributedRecoveryEvidence,
+  type LiftJobPersistedFailedFromIncludedWithFinalizedRecovery,
   type LiftJobFailedFromAccepted,
   type LiftJobFailedFromClaimed,
   type LiftJobFailedFromValidated,
   type LiftJobFailedFromBroadcast,
+  type LiftJobFailedFromBroadcastWithoutEvidence,
   type LiftJobFailedFromIncluded,
+  type LiftJobFailedFromIncludedWithoutEvidence,
   type LiftJob,
   type AdmissionJournalEntry,
   type JournalKind,
@@ -299,6 +312,7 @@ export {
   type ActiveLiftJobClaimSession,
   type AsyncLiftAdministrativeMutations,
   type AsyncLiftDetailedRetrier,
+  type AsyncLiftRetryFilter,
   type AsyncLiftPublisher,
   type ClaimSessionAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
@@ -333,6 +347,7 @@ export {
 export {
   SAFE_JOB_ID_PATTERN,
   SAFE_JOB_ID_MAX_LENGTH,
+  SAFE_JOB_ID_ERROR,
   isSafeJobId,
 } from './job-id.js';
 export {
@@ -359,6 +374,12 @@ export {
   type PromoteStats,
   type PromoteTerminalJobClearer,
 } from './async-promote-queue.js';
+export {
+  getPromoteReplaySafeErrorDiagnostic,
+  isPromoteReplaySafeError,
+  type PromoteReplaySafeErrorDiagnostic,
+} from './promote-replay-safety.js';
+export { type LegacyWmMigrationResult } from './legacy-wm-migration.js';
 export {
   AsyncLiftRunner,
   type AsyncLiftRunnerConfig,

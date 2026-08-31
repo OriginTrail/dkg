@@ -103,6 +103,54 @@ describe('RFC-64 rollout authority integration', () => {
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
   });
 
+  it('keeps authorized catalog-mode metadata refresh off member and host SWM gossip', async () => {
+    const catalog = await startAgent('catalog-metadata-refresh-fence', activation('catalog'));
+    catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+
+    const internals = catalog as any;
+    expect(catalog.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID)).toMatchObject({
+      subscribed: true,
+    });
+    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+
+    // Exercise the exact post-catch-up transition from the review: metadata is
+    // confirmed and local SWM membership would otherwise authorize the member
+    // gossip consumer. queueSharedMemoryGossipSubscription remains
+    // fire-and-forget, so capture the concrete reconciliation promise.
+    vi.spyOn(catalog, 'hasConfirmedMetaState').mockResolvedValue(true);
+    const memberAuthority = vi.spyOn(catalog, 'canUseSharedMemoryForContextGraph')
+      .mockResolvedValue(true);
+    const reconciliations: Promise<void>[] = [];
+    const reconcile = catalog.reconcileSharedMemoryGossipSubscription.bind(catalog);
+    vi.spyOn(catalog, 'reconcileSharedMemoryGossipSubscription').mockImplementation((cg) => {
+      const pending = reconcile(cg);
+      reconciliations.push(pending);
+      return pending;
+    });
+
+    await internals.refreshMetaSyncedFlags([CONTEXT_GRAPH_ID]);
+    await vi.waitFor(() => expect(reconciliations).toHaveLength(1));
+    await Promise.all(reconciliations);
+
+    expect(catalog.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID)).toMatchObject({
+      subscribed: true,
+      metaSynced: true,
+    });
+    expect(memberAuthority).not.toHaveBeenCalled();
+    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+
+    // A core's ordinary host reconciliation is another legacy entry point.
+    // Make every non-RFC prerequisite available so catalog authority is the
+    // reason it stays unwired.
+    internals.swmHostModeStore = {};
+    const curated = vi.spyOn(catalog, 'isCuratedForHostMode').mockResolvedValue(true);
+    await catalog.reconcileSwmHostModeSubscription(CONTEXT_GRAPH_ID);
+    const hostKey = catalog.canonicalSwmHostModeKey(CONTEXT_GRAPH_ID);
+    expect(curated).not.toHaveBeenCalled();
+    expect(internals.swmHostModeSubscribed.has(hostKey)).toBe(false);
+    expect(internals.swmHostModeHandlers.has(hostKey)).toBe(false);
+  });
+
   it('leaves a persisted member row dormant under exclusive catalog authority', async () => {
     const persisted = new Map<string, any>([[CONTEXT_GRAPH_ID, {
       id: CONTEXT_GRAPH_ID,
@@ -154,7 +202,7 @@ describe('RFC-64 rollout authority integration', () => {
       },
     }, undefined, undefined, (agent) => {
       connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-      queue = vi.spyOn(agent, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
         .mockReturnValue(true);
     });
     await legacy.whenRfc64PublicCatalogBootstrapIdleV1();
@@ -235,6 +283,55 @@ describe('RFC-64 rollout authority integration', () => {
     },
     30_000,
   );
+
+  it('preserves locally authored shadow discovery state and legacy material on restart', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-shadow-author-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const author = await startAgent(
+      'shadow-author-restart',
+      {
+        ...activation('shadow'),
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+      dataDir,
+      persistentStorePath,
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    const seal = await authorSeal(810n);
+    const applied = await author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'shadow-author-restart-guard' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealFromCanonical(seal),
+    });
+    expect(applied).not.toBeNull();
+    // Shadow catalog publication accompanies existing legacy material; it does
+    // not grant catalog semantic authority over that material.
+    await seedCatalogSemanticClosure(author, seal, 'shadow-author-restart-guard');
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+
+    const restarted = await startAgent(
+      'shadow-author-restarted',
+      activation('shadow'),
+      dataDir,
+      persistentStorePath,
+    );
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ currentCatalogHeadDigest: applied?.currentCatalogHeadDigest });
+    await expectCatalogSemanticClosure(
+      restarted,
+      seal,
+      'shadow-author-restart-guard',
+      true,
+    );
+  }, 30_000);
 
   it('preserves later legacy semantic content while relinquishing stale catalog authority', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-divergent-'));

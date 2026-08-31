@@ -10,7 +10,8 @@ import {
 export const INVENTORY_V1_APPLICATION_ID = 0x444b3634;
 export const INVENTORY_V1_LEGACY_USER_VERSION = 1;
 export const INVENTORY_V1_V2_USER_VERSION = 2;
-export const INVENTORY_V1_USER_VERSION = 3;
+export const INVENTORY_V1_V3_USER_VERSION = 3;
+export const INVENTORY_V1_USER_VERSION = 4;
 export const INVENTORY_V1_RELATIVE_PATH =
   `${RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1}/${RFC64_INVENTORY_DATABASE_FILENAME_V1}`;
 export const INVENTORY_V1_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
@@ -423,6 +424,32 @@ CREATE TABLE rfc64_swm_author_inventory_rows_v1 (
   ) ON DELETE CASCADE
 ) WITHOUT ROWID, STRICT`;
 
+/**
+ * Local shadow publication is durable catalog-discovery state, but never a
+ * claim that the catalog installed semantic authority.  This exact-head
+ * marker lets restart reconciliation preserve the corresponding legacy SWM
+ * material while still deactivating receiver-applied catalog authority.
+ */
+export const INVENTORY_V1_STAGED_HEADS_TABLE_SQL = `
+CREATE TABLE rfc64_staged_catalog_heads_v1 (
+  catalog_scope_digest BLOB NOT NULL CHECK (
+    typeof(catalog_scope_digest) = 'blob' AND length(catalog_scope_digest) = 32
+  ),
+  author_address BLOB NOT NULL CHECK (
+    typeof(author_address) = 'blob' AND length(author_address) = 20
+    AND author_address <> zeroblob(20)
+  ),
+  current_catalog_head_digest BLOB NOT NULL CHECK (
+    typeof(current_catalog_head_digest) = 'blob'
+    AND length(current_catalog_head_digest) = 32
+  ),
+  PRIMARY KEY (catalog_scope_digest, author_address),
+  FOREIGN KEY (catalog_scope_digest, author_address)
+  REFERENCES rfc64_applied_catalog_heads_v1 (
+    catalog_scope_digest, author_address
+  ) ON DELETE CASCADE
+) WITHOUT ROWID, STRICT`;
+
 export const INVENTORY_V1_LEGACY_DDL = [
   INVENTORY_V1_LOADS_TABLE_SQL,
   INVENTORY_V1_ROWS_TABLE_SQL,
@@ -433,6 +460,7 @@ export const INVENTORY_V1_DDL = [
   INVENTORY_V1_APPLIED_HEADS_TABLE_SQL,
   INVENTORY_V1_SWM_AUTHOR_HEADS_TABLE_SQL,
   INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL,
+  INVENTORY_V1_STAGED_HEADS_TABLE_SQL,
 ].join(';\n\n').concat(';');
 
 export const INVENTORY_V1_LEGACY_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
@@ -447,13 +475,20 @@ export const INVENTORY_V1_V2_USER_OBJECTS: Readonly<Record<string, string>> = Ob
   ),
 });
 
-export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+export const INVENTORY_V1_V3_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
   ...INVENTORY_V1_V2_USER_OBJECTS,
   rfc64_swm_author_inventory_heads_v1: normalizeInventoryV1SchemaSql(
     INVENTORY_V1_SWM_AUTHOR_HEADS_TABLE_SQL,
   ),
   rfc64_swm_author_inventory_rows_v1: normalizeInventoryV1SchemaSql(
     INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL,
+  ),
+});
+
+export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+  ...INVENTORY_V1_V3_USER_OBJECTS,
+  rfc64_staged_catalog_heads_v1: normalizeInventoryV1SchemaSql(
+    INVENTORY_V1_STAGED_HEADS_TABLE_SQL,
   ),
 });
 
@@ -464,6 +499,10 @@ PRAGMA user_version = ${INVENTORY_V1_V2_USER_VERSION};`;
 export const INVENTORY_V1_MIGRATE_V2_TO_V3_SQL = `
 ${INVENTORY_V1_SWM_AUTHOR_HEADS_TABLE_SQL};
 ${INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL};
+PRAGMA user_version = ${INVENTORY_V1_V3_USER_VERSION};`;
+
+export const INVENTORY_V1_MIGRATE_V3_TO_V4_SQL = `
+${INVENTORY_V1_STAGED_HEADS_TABLE_SQL};
 PRAGMA user_version = ${INVENTORY_V1_USER_VERSION};`;
 
 export function normalizeInventoryV1SchemaSql(sql: string): string {

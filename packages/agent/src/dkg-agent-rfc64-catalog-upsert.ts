@@ -85,7 +85,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1> {
-    this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
+    const authority = this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
       throw new Error('RFC-64 confirmed public asset upsert requires the root catalog lane');
     }
@@ -133,6 +133,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         params,
         assets,
         peers,
+        authority.reconciliationLane === 'shadow-stage',
       );
       return committed.applied;
     });
@@ -147,7 +148,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
   ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
-    this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
+    const authority = this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
       throw new Error('RFC-64 exact-set reconciliation requires the root catalog lane');
     }
@@ -211,6 +212,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           params,
           nextAssets,
           peers,
+          authority.reconciliationLane === 'shadow-stage',
         );
         successorsApplied += 1;
         state = Object.freeze({
@@ -236,7 +238,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   private assertRfc64CatalogAuthoringModeV1(
     this: DKGAgent,
     contextGraphId: string,
-  ): void {
+  ): ReturnType<typeof resolveRfc64CatalogExecutionPlanAuthorityV1> {
     const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
       this.config.rfc64CatalogExecutionPlan,
       contextGraphId,
@@ -247,6 +249,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     if (!authority.authoringAllowed) {
       throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
     }
+    return authority;
   }
 
   private async readRfc64CatalogMutationStateV1(
@@ -336,6 +339,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     }>,
     assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
     peers: readonly string[],
+    stageOnly: boolean,
   ) {
     const successor = await this.publishAuthorCatalogExactSetSuccessorV1({
       previousHead: state.previousHead,
@@ -358,6 +362,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       catalogVersion: successor.announcement.catalogVersion,
       inventoryRowCount: successor.signedBucketRowCount,
       expectedCurrentCatalogHeadDigest: state.expectedCurrentCatalogHeadDigest,
+      stageOnly,
     }).snapshot;
     await this.announceRfc64PublicCatalogHeadV1({
       announcement: successor.announcement,

@@ -5,7 +5,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
-import { GraphManager, invalidateSwmMaterializationWitness, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import { GraphManager, deleteByPatternWithoutCount, invalidateSwmMaterializationWitness, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
@@ -13,6 +13,7 @@ import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skole
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
+import { classifyExactSwmGraphReplaceFailure } from './promote-replay-safety.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
   assertTrustedCatalogTriplesAreGeneratedFloor,
@@ -1079,7 +1080,7 @@ async function stampTrustLevel(
 ): Promise<void> {
   const quads = buildTrustLevelQuads(subjects, level, graph) as Quad[];
   for (const quad of quads) {
-    await store.deleteByPattern({
+    await deleteByPatternWithoutCount(store, {
       graph: quad.graph,
       subject: quad.subject,
       predicate: TRUST_LEVEL_PREDICATE,
@@ -1231,6 +1232,11 @@ export class DKGPublisher implements Publisher {
         warn: (ctx, message) => this.log.warn(ctx, message),
       },
     });
+  }
+
+  /** Use one remote UPDATE when the caller does not consume a deletion count. */
+  private deleteStoreByPatternWithoutCount(pattern: Partial<Quad>): Promise<void> {
+    return deleteByPatternWithoutCount(this.store, pattern);
   }
 
   setWorkspaceAgentRecipientResolver(resolver: WorkspaceAgentRecipientResolver | undefined): void {
@@ -1942,7 +1948,7 @@ export class DKGPublisher implements Publisher {
     // Delete-then-insert for upserted entities (replace old triples).
     for (const m of manifestEntries) {
       if (swmOwned.has(m.rootEntity)) {
-        await this.store.deleteByPattern({ graph: swmGraph, subject: m.rootEntity });
+        await this.deleteStoreByPatternWithoutCount({ graph: swmGraph, subject: m.rootEntity });
         await this.store.deleteBySubjectPrefix(swmGraph, m.rootEntity + '/.well-known/genid/');
         await this.deleteMetaForRoot(swmMetaGraph, m.rootEntity);
       }
@@ -1979,7 +1985,7 @@ export class DKGPublisher implements Publisher {
     }
     if (newOwnershipEntries.length > 0) {
       for (const entry of newOwnershipEntries) {
-        await this.store.deleteByPattern({
+        await this.deleteStoreByPatternWithoutCount({
           graph: swmMetaGraph,
           subject: entry.rootEntity,
           predicate: 'http://dkg.io/ontology/workspaceOwner',
@@ -2499,7 +2505,7 @@ export class DKGPublisher implements Publisher {
           if (ctxGraphId) {
             await this.store.delete(storedQuads);
             for (const subject of trustSubjects) {
-              await this.store.deleteByPattern({
+              await this.deleteStoreByPatternWithoutCount({
                 graph: remapVmGraph,
                 subject,
                 predicate: TRUST_LEVEL_PREDICATE,
@@ -3089,7 +3095,7 @@ export class DKGPublisher implements Publisher {
       const catalogGraph = contextGraphCatalogUri(contextGraphId);
       const catalogSubjects = new Set(catalogQuads.map((q) => q.subject));
       for (const subject of catalogSubjects) {
-        await this.store.deleteByPattern({ graph: catalogGraph, subject });
+        await this.deleteStoreByPatternWithoutCount({ graph: catalogGraph, subject });
       }
       await this.store.insert(catalogQuads.map((q) => ({ ...q, graph: catalogGraph })));
     };
@@ -5292,7 +5298,7 @@ export class DKGPublisher implements Publisher {
       const catalogGraph = contextGraphCatalogUri(contextGraphId);
       const catalogSubjects = new Set(updateCatalogQuads.map((q) => q.subject));
       for (const subject of catalogSubjects) {
-        await this.store.deleteByPattern({ graph: catalogGraph, subject });
+        await this.deleteStoreByPatternWithoutCount({ graph: catalogGraph, subject });
       }
       await this.store.insert(updateCatalogQuads.map((q) => ({ ...q, graph: catalogGraph })));
     };
@@ -6040,7 +6046,7 @@ export class DKGPublisher implements Publisher {
           if (!hasBrokenDuplicates) continue;
           // Drop the stale marker so we record a fresh `appliedAt`
           // timestamp when the (now-fixed) pass completes.
-          await this.store.deleteByPattern({
+          await this.deleteStoreByPatternWithoutCount({
             graph: markerGraph,
             subject: MIGRATION_MARKER_SUBJECT,
             predicate: `${DKG}appliedAt`,
@@ -6117,7 +6123,7 @@ export class DKGPublisher implements Publisher {
             // Pattern-based delete is form-agnostic; safe to wipe all
             // wasAttributedTo for this subject because writers only ever
             // emit one (we're about to insert the canonical URI).
-            await this.store.deleteByPattern({
+            await this.deleteStoreByPatternWithoutCount({
               graph: swmMetaGraph,
               subject,
               predicate: `${PROV}wasAttributedTo`,
@@ -6343,7 +6349,7 @@ export class DKGPublisher implements Publisher {
       const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
       const countVal = parseCountLiteral(rawCount);
       if (countVal === 0) {
-        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+        await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: op });
       }
     }
   }
@@ -6414,7 +6420,7 @@ export class DKGPublisher implements Publisher {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     // Idempotent: drop any prior marker first, then insert exactly one.
-    await this.store.deleteByPattern({
+    await this.deleteStoreByPatternWithoutCount({
       graph: metaGraph,
       subject: lifecycleUri,
       predicate: SWM_SHARE_COMPLETE_PRED,
@@ -6463,7 +6469,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-    await this.store.deleteByPattern({
+    await this.deleteStoreByPatternWithoutCount({
       graph: metaGraph,
       subject: lifecycleUri,
       predicate: SWM_SHARE_COMPLETE_PRED,
@@ -6539,7 +6545,7 @@ export class DKGPublisher implements Publisher {
       subGraphName,
     );
     for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
-      await this.store.deleteByPattern({ graph: recoveryGraph, subject: recoverySubject, predicate });
+      await this.deleteStoreByPatternWithoutCount({ graph: recoveryGraph, subject: recoverySubject, predicate });
     }
   }
 
@@ -6596,7 +6602,7 @@ export class DKGPublisher implements Publisher {
       subGraphName,
     )) {
       for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
-        await this.store.deleteByPattern({ graph: metaGraph, subject, predicate });
+        await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject, predicate });
       }
     }
   }
@@ -6639,7 +6645,7 @@ export class DKGPublisher implements Publisher {
       }
       if (matchesConfirmedVm) continue;
       for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
-        await this.store.deleteByPattern({ graph: metaGraph, subject, predicate });
+        await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject, predicate });
       }
     }
   }
@@ -6708,7 +6714,7 @@ export class DKGPublisher implements Publisher {
       .map((quad) => ({ ...quad, subject: recoverySubject, graph: recoveryGraph }));
     if (loaded.subject !== recoverySubject) {
       for (const predicate of sealPredicates) {
-        await this.store.deleteByPattern({ graph: recoveryGraph, subject: recoverySubject, predicate });
+        await this.deleteStoreByPatternWithoutCount({ graph: recoveryGraph, subject: recoverySubject, predicate });
       }
       await this.store.insert(recoveryQuads);
     }
@@ -7418,9 +7424,9 @@ export class DKGPublisher implements Publisher {
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
     }
-    await this.store.deleteByPattern({ graph: swmMetaGraph, subject: headSubject });
+    await this.deleteStoreByPatternWithoutCount({ graph: swmMetaGraph, subject: headSubject });
     for (const operationSubject of operationSubjects) {
-      await this.store.deleteByPattern({
+      await this.deleteStoreByPatternWithoutCount({
         graph: swmMetaGraph,
         subject: assertSafeIri(operationSubject),
       });
@@ -7448,9 +7454,9 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     for (const rootEntity of rootEntities) {
       for (const g of swmGraphsForClear) {
-        await this.store.deleteByPattern({ graph: g, subject: rootEntity });
+        await this.deleteStoreByPatternWithoutCount({ graph: g, subject: rootEntity });
         await this.store.deleteBySubjectPrefix(g, rootEntity + '/.well-known/genid/');
-        await this.store.deleteByPattern({
+        await this.deleteStoreByPatternWithoutCount({
           graph: g, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
         });
       }
@@ -7708,7 +7714,7 @@ export class DKGPublisher implements Publisher {
     if (staleEvents.type === 'bindings') {
       for (const row of staleEvents.bindings) {
         const subj = row['s'];
-        if (subj) await this.store.deleteByPattern({ graph: metaGraph, subject: subj });
+        if (subj) await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: subj });
       }
     }
     if (preserved.length > 0) {
@@ -8909,11 +8915,15 @@ export class DKGPublisher implements Publisher {
     // The UAL-derived graph is the ownership boundary. Replace the complete
     // graph; never inspect, claim, skip, or delete individual RDF subjects.
     const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
-    await this.replaceExactKnowledgeAssetGraph(
-      swmGraphUri,
-      swmQuads,
-      'Knowledge Asset WM-to-SWM promotion',
-    );
+    try {
+      await this.replaceExactKnowledgeAssetGraph(
+        swmGraphUri,
+        swmQuads,
+        'Knowledge Asset WM-to-SWM promotion',
+      );
+    } catch (error) {
+      throw classifyExactSwmGraphReplaceFailure(error);
+    }
     // #2079: the SIXTH replace site. Same graph the catch-up witness keys on,
     // so the memo now describes content that is gone — and a replace leaves the
     // quad count intact, which is exactly what the count gate cannot see.
@@ -8944,7 +8954,7 @@ export class DKGPublisher implements Publisher {
     // Update the assertion's memory layer from WM → SWM in _meta
     const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
     const DKG_MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
-    await this.store.deleteByPattern({
+    await this.deleteStoreByPatternWithoutCount({
       graph: assertionMetaGraph,
       subject: graphUri,
       predicate: DKG_MEMORY_LAYER,
@@ -8957,8 +8967,8 @@ export class DKGPublisher implements Publisher {
     }]);
     const promotedAllRoots = true; // compatibility return name; v2 has no roots.
     const isFullCompletePromote = true;
-    await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
-    await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
+    await this.deleteStoreByPatternWithoutCount({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
+    await this.deleteStoreByPatternWithoutCount({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
 
     // Update assertion lifecycle record in _meta: created → promoted
     const promoted = generateAssertionPromotedMetadata({
@@ -9197,7 +9207,7 @@ export class DKGPublisher implements Publisher {
     await this.store.insert(discarded.insert);
 
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    await this.store.deleteByPattern({ subject: graphUri, graph: metaGraph });
+    await this.deleteStoreByPatternWithoutCount({ subject: graphUri, graph: metaGraph });
     // #1116 (review A1, round 5) — drop the SWM-share-complete marker too. A
     // marker survives discard via A2_PRESERVE on recreate, so a full-share →
     // discard → recreate → subset-share cycle would otherwise leave a stale
@@ -9214,7 +9224,7 @@ export class DKGPublisher implements Publisher {
     // marker's absence misleads a consumer about a surviving seal: the marker gates
     // "publishable full share", and a published KA is correctly NOT re-publishable
     // as a fresh full share (its seal is the published one, used only for VM ops).
-    await this.store.deleteByPattern({
+    await this.deleteStoreByPatternWithoutCount({
       graph: metaGraph,
       subject: lifecycleSubject,
       predicate: SWM_SHARE_COMPLETE_PRED,
@@ -9230,8 +9240,8 @@ export class DKGPublisher implements Publisher {
     // REPLACEs them with the current set anyway). A SWM-only / never-published
     // asset has no membership once discarded.
     if (!hasVmVersion) {
-      await this.store.deleteByPattern({ graph: metaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
-      await this.store.deleteByPattern({ graph: metaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
+      await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
+      await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
     }
     // A never-shared draft has no durable source and must lose its seal. An
     // exact graph-scoped SWM head, however, is immutable recovery state just
@@ -9307,7 +9317,7 @@ export class DKGPublisher implements Publisher {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    await this.store.deleteByPattern({ subject: graphUri, graph: metaGraph });
+    await this.deleteStoreByPatternWithoutCount({ subject: graphUri, graph: metaGraph });
     await this.dropAssertionScopedGraphs(graphUri);
 
     // #1116 FIX 2 — retire the stale WM lifecycle pointer once the WM draft is
@@ -9320,7 +9330,7 @@ export class DKGPublisher implements Publisher {
     );
     const isSwmResident = swmPointerRes.type === 'boolean' && swmPointerRes.value === true;
     if (isSwmResident) {
-      await this.store.deleteByPattern({
+      await this.deleteStoreByPatternWithoutCount({
         subject: lifecycleUri,
         predicate: WM_CURRENT_ASSERTION_PRED,
         graph: metaGraph,

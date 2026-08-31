@@ -24,6 +24,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
+import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
 import type {
   Quad,
 } from '../src/triple-store.js';
@@ -448,7 +449,7 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     async () => {
       const fixture = semanticAuthorCommitFixture();
       const compiled = compileRfc64SemanticAuthorCommitV1(fixture.input);
-      const graphs = [...compiled.referencedGraphs];
+      const graphs = [...normalizeRfc64AuthorCommitCasV1(compiled).referencedGraphs];
       try {
         await store.insert([
           ...semanticRows(fixture.unexpectedHead),

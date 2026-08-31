@@ -24,7 +24,16 @@ export {
   type SkillOfferingConfig,
 } from './profile.js';
 export { ProfileManager } from './profile-manager.js';
-export { DiscoveryClient, type DiscoveredAgent, type DiscoveredOffering, type SkillSearchOptions } from './discovery.js';
+export {
+  DiscoveryClient,
+  discoveredAgentIdentityKey,
+  discoveredAgentRowKey,
+  groupDiscoveredAgentIdentityRows,
+  type DiscoveredAgent,
+  type DiscoveredAgentIdentityRows,
+  type DiscoveredOffering,
+  type SkillSearchOptions,
+} from './discovery.js';
 export {
   signAgentDelegation,
   verifyAgentDelegation,
@@ -292,6 +301,10 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type VmReconcileNegativeRecord,
+  type VmReconcilePeerTopology,
+  type VmReconcilePeerTopologyEvidence,
+  type VmReconcilePeerTopologyPeer,
   type SelectedVmReconcileCursorStore,
   type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
@@ -391,6 +404,15 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
+export {
+  createVmReconcilePeerTopology,
+  createVmReconcileCleanMissPeerIds,
+  encodeLegacyVmReconcilePeerTopologyKey,
+  isVmReconcilePeerTopology,
+  parseLegacyVmReconcilePeerTopologyKey,
+  parseVmReconcileCleanMissPeerIds,
+  parseVmReconcilePeerTopology,
+} from './vm-reconcile-peer-topology.js';
 export {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   CATCHUP_STOP_ON_PROOF,

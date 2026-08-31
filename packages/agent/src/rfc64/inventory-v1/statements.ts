@@ -245,6 +245,12 @@ SELECT catalog_scope_digest, author_address, current_catalog_head_digest,
 FROM rfc64_applied_catalog_heads_v1
 ORDER BY catalog_scope_digest, author_address;`,
 
+  getStagedHead: `
+SELECT current_catalog_head_digest
+FROM rfc64_staged_catalog_heads_v1
+WHERE catalog_scope_digest = :scope
+  AND author_address = :author;`,
+
   insertAppliedHead: `
 INSERT INTO rfc64_applied_catalog_heads_v1 (
   catalog_scope_digest,
@@ -277,6 +283,20 @@ DELETE FROM rfc64_applied_catalog_heads_v1
 WHERE catalog_scope_digest = :scope
   AND author_address = :author
   AND current_catalog_head_digest = :expectedHead;`,
+
+  upsertStagedHead: `
+INSERT INTO rfc64_staged_catalog_heads_v1 (
+  catalog_scope_digest,
+  author_address,
+  current_catalog_head_digest
+) VALUES (:scope, :author, :head)
+ON CONFLICT (catalog_scope_digest, author_address) DO UPDATE SET
+  current_catalog_head_digest = excluded.current_catalog_head_digest;`,
+
+  deleteStagedHead: `
+DELETE FROM rfc64_staged_catalog_heads_v1
+WHERE catalog_scope_digest = :scope
+  AND author_address = :author;`,
 
   getSwmAuthorHead: `
 SELECT current_head_digest, inventory_version_u64be, total_rows_u64be,
@@ -368,9 +388,12 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   deleteHeader: 'rfc64.candidate-bucket.delete.v1',
   getAppliedHead: 'rfc64.applied-head.get.v1',
   listAppliedHeads: 'rfc64.applied-head.list.v1',
+  getStagedHead: 'rfc64.staged-head.get.v1',
   insertAppliedHead: 'rfc64.applied-head.insert.v1',
   updateAppliedHeadCas: 'rfc64.applied-head.cas-update.v1',
   deleteAppliedHeadCas: 'rfc64.applied-head.cas-delete.v1',
+  upsertStagedHead: 'rfc64.staged-head.upsert.v1',
+  deleteStagedHead: 'rfc64.staged-head.delete.v1',
   getSwmAuthorHead: 'rfc64.swm-author-inventory.head.get.v1',
   getSwmAuthorRows: 'rfc64.swm-author-inventory.rows.get.v1',
   insertSwmAuthorHead: 'rfc64.swm-author-inventory.head.insert.v1',
@@ -396,6 +419,7 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'countBucketRows',
   'getAppliedHead',
   'listAppliedHeads',
+  'getStagedHead',
   'getSwmAuthorHead',
   'getSwmAuthorRows',
 ] as const satisfies readonly InventoryV1StatementKey[]);
@@ -406,6 +430,10 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'insertAppliedHead',
   'updateAppliedHeadCas',
   'deleteAppliedHeadCas',
+  'upsertStagedHead',
+  'deleteStagedHead',
+  'upsertStagedHead',
+  'deleteStagedHead',
   'insertSwmAuthorHead',
   'updateSwmAuthorHeadCas',
   'upsertSwmAuthorRow',

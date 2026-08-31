@@ -12,6 +12,7 @@ import type {
   TripleStore,
   TripleStoreDecorator,
 } from './triple-store.js';
+import { deleteByPatternWithoutCount } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
@@ -20,6 +21,7 @@ import type {
 import {
   mapRfc64AuthorCommitCasV1,
   normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
 } from './rfc64-author-commit-cas.js';
 import {
   ContentAddressedBlobSingleFlight,
@@ -96,6 +98,20 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       removed += await this.inner.deleteByPattern(item, options);
     }
     return removed;
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    const translated = this.translateDeletePattern(pattern);
+    if (!Array.isArray(translated)) {
+      await deleteByPatternWithoutCount(this.inner, translated, options);
+      return;
+    }
+    for (const item of translated) {
+      await deleteByPatternWithoutCount(this.inner, item, options);
+    }
   }
 
   async replaceGraph(
@@ -179,7 +195,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         ? this.translateGuardObject(context.graphUri, object)
         : this.externalizeScalarObject(context.graphUri, object!),
     });
-    return this.inner.rfc64AuthorCommitCasV1(mappedInput, options);
+    return this.inner.rfc64AuthorCommitCasV1(
+      sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput),
+      options,
+    );
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {

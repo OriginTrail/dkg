@@ -26,6 +26,7 @@ import {
   SEAL_GRAPH,
   STATE_GRAPH,
   authorCommitInput,
+  legacyAuthorCommitInput,
   objectFor,
   overrideStore,
   quad,
@@ -89,6 +90,86 @@ describe('RFC-64 author commit decorator integration', () => {
     records.length = 0;
     await expect(tryRfc64AuthorCommitCasV1(store, authorCommitInput())).resolves.toBe('conflict');
     expect(records).toEqual([]);
+  });
+
+  it('preserves the legacy public input shape behind every decorator', async () => {
+    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-legacy-decorator-blobs-'));
+    tempDirs.push(blobDir);
+    const base = new OxigraphStore();
+    const received: Rfc64AuthorCommitCasInputV1[] = [];
+    const legacyOnly = overrideStore(base, {
+      rfc64AuthorCommitCasV1: async (input) => {
+        received.push(input);
+        if (!('currentHeadGraph' in input) || 'planKind' in input) {
+          throw new Error('legacy-only adapter received an internal plan');
+        }
+        return 'conflict';
+      },
+    });
+    const wrappers = [
+      new ChangelogStore(legacyOnly),
+      new GraphSetIndexStore(legacyOnly, { revalidateMs: 60_000 }),
+      new SharedMemoryLiteralBlobStore(legacyOnly, {
+        blobDir,
+        thresholdBytes: Number.MAX_SAFE_INTEGER,
+      }),
+    ];
+
+    for (const store of wrappers) {
+      await expect(store.rfc64AuthorCommitCasV1(legacyAuthorCommitInput()))
+        .resolves.toBe('conflict');
+    }
+    expect(received).toHaveLength(3);
+    expect(received.every((input) => 'currentHeadGraph' in input)).toBe(true);
+    await base.close();
+  });
+
+  it('snapshots a queued changelog commit before caller mutation', async () => {
+    const base = new OxigraphStore();
+    let releaseInsert!: () => void;
+    let insertEntered!: () => void;
+    const release = new Promise<void>((resolve) => { releaseInsert = resolve; });
+    const entered = new Promise<void>((resolve) => { insertEntered = resolve; });
+    let blockInsert = true;
+    let received: Rfc64AuthorCommitCasInputV1 | undefined;
+    const inner = overrideStore(base, {
+      insert: async (quads, options) => {
+        if (blockInsert) {
+          blockInsert = false;
+          insertEntered();
+          await release;
+        }
+        return base.insert(quads, options);
+      },
+      rfc64AuthorCommitCasV1: async (input) => {
+        received = input;
+        return 'conflict';
+      },
+    });
+    const store = new ChangelogStore(inner);
+    const blocker = store.insert([
+      quad('urn:test:rfc64:queue-blocker', P_VALUE, '"block"', OTHER_GRAPH),
+    ]);
+    await entered;
+
+    const mutable = legacyAuthorCommitInput();
+    const expectedSealGraph = mutable.authorSealGraph;
+    const expectedSealObject = mutable.authorSealQuads[0]!.object;
+    const commit = store.rfc64AuthorCommitCasV1(mutable);
+    (mutable as { authorSealGraph: string }).authorSealGraph = 'urn:test:rfc64:mutated';
+    (mutable.authorSealQuads[0] as { object: string }).object = '"mutated"';
+    releaseInsert();
+
+    await blocker;
+    await expect(commit).resolves.toBe('conflict');
+    expect(received).toBeDefined();
+    expect(received && 'planKind' in received).toBe(false);
+    expect(received && 'currentHeadGraph' in received ? received.authorSealGraph : undefined)
+      .toBe(expectedSealGraph);
+    expect(received && 'currentHeadGraph' in received
+      ? received.authorSealQuads[0]?.object
+      : undefined).toBe(expectedSealObject);
+    await base.close();
   });
 
   it('flags changelog reconciliation after an indeterminate post-commit failure', async () => {
