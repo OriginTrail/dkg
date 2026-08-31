@@ -16,15 +16,29 @@ export const RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1 = 6;
 export const RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1 = 1024;
 const RFC64_AUTHOR_COMMIT_SEMANTIC_STATE_REPLACEMENTS_V1 = 4;
 
-export interface Rfc64AuthorCommitValueGuardV1 {
+interface Rfc64AuthorCommitGuardBaseV1 {
   readonly graphUri: string;
   readonly subject: string;
   readonly predicate: string;
   /** `null` requires the guarded value to be absent. */
   readonly expectedObject: string | null;
-  /** Complete expected subject for typed semantic commits; absent on legacy callers. */
-  readonly expectedQuads?: readonly Quad[] | null;
 }
+
+export interface Rfc64AuthorCommitPredicateValueGuardV1
+  extends Rfc64AuthorCommitGuardBaseV1 {
+  readonly guardKind: 'predicate-value';
+}
+
+export interface Rfc64AuthorCommitExactSubjectGuardV1
+  extends Rfc64AuthorCommitGuardBaseV1 {
+  readonly guardKind: 'exact-subject';
+  /** Complete predecessor subject, or null when the whole subject must be absent. */
+  readonly expectedQuads: readonly Quad[] | null;
+}
+
+export type Rfc64AuthorCommitValueGuardV1 =
+  | Rfc64AuthorCommitPredicateValueGuardV1
+  | Rfc64AuthorCommitExactSubjectGuardV1;
 
 export interface Rfc64AuthorCommitSubjectReplacementV1 {
   readonly graphUri: string;
@@ -41,6 +55,12 @@ export interface Rfc64AuthorCommitStateTransitionV1 {
   /** Complete predecessor subject, or null when the whole subject must be absent. */
   readonly expectedQuads?: readonly Quad[] | null;
   readonly quads: readonly Quad[];
+}
+
+/** Complete-subject transition required by the typed semantic author path. */
+export interface Rfc64AuthorCommitExactStateTransitionV1
+  extends Rfc64AuthorCommitStateTransitionV1 {
+  readonly expectedQuads: readonly Quad[] | null;
 }
 
 /** Original exported V1 storage contract retained for existing callers. */
@@ -70,13 +90,13 @@ export interface Rfc64AuthorCommitCasSemanticInputV1 {
   readonly authorSealSubject: string;
   readonly authorSealQuads: readonly Quad[];
   /** Exact author current-head fence and complete next semantic record. */
-  readonly currentHead: Rfc64AuthorCommitStateTransitionV1;
+  readonly currentHead: Rfc64AuthorCommitExactStateTransitionV1;
   /** Exact subgraph mutation-generation fence and next mutation subject. */
-  readonly subgraphMutationGeneration: Rfc64AuthorCommitStateTransitionV1;
+  readonly subgraphMutationGeneration: Rfc64AuthorCommitExactStateTransitionV1;
   /** Exact context-graph mutation-generation fence and next mutation subject. */
-  readonly contextGraphMutationGeneration: Rfc64AuthorCommitStateTransitionV1;
+  readonly contextGraphMutationGeneration: Rfc64AuthorCommitExactStateTransitionV1;
   /** Exact applied-set fence and next applied-set subject. */
-  readonly appliedSet: Rfc64AuthorCommitStateTransitionV1;
+  readonly appliedSet: Rfc64AuthorCommitExactStateTransitionV1;
 }
 
 /** Backward-compatible source shapes accepted only at the outer capability edge. */
@@ -135,15 +155,18 @@ export interface Rfc64AuthorCommitSubjectReplacementPlanV1 {
   readonly quads: readonly Quad[];
 }
 
-export interface Rfc64AuthorCommitGuardPlanV1 extends Rfc64AuthorCommitValueGuardV1 {
-  readonly role: Exclude<
+type Rfc64AuthorCommitGuardRoleV1 = Exclude<
     Rfc64AuthorCommitSemanticRoleV1,
     'sharedProjection' | 'authorSeal' | 'sealInvalidation'
   >;
-}
+
+export type Rfc64AuthorCommitGuardPlanV1 =
+  | (Rfc64AuthorCommitPredicateValueGuardV1 & Readonly<{ role: Rfc64AuthorCommitGuardRoleV1 }>)
+  | (Rfc64AuthorCommitExactSubjectGuardV1 & Readonly<{ role: Rfc64AuthorCommitGuardRoleV1 }>);
 
 export interface Rfc64AuthorCommitPredicateReplacementPlanV1
-  extends Rfc64AuthorCommitGuardPlanV1 {
+  extends Rfc64AuthorCommitPredicateValueGuardV1 {
+  readonly role: Rfc64AuthorCommitGuardRoleV1;
   readonly nextObject: string;
 }
 
@@ -256,6 +279,7 @@ function normalizeSemanticRfc64AuthorCommitCasV1(
     }
   }
   const stateGuards = Object.freeze(roles.map(([role, transition]) => ({
+    guardKind: 'exact-subject' as const,
     role,
     graphUri: transition.graphUri,
     subject: transition.subject,
@@ -315,6 +339,7 @@ function normalizeLegacyRfc64AuthorCommitCasV1(
     throw new Error('RFC-64 author commit requires bounded seal invalidations');
   }
   const stateGuards = Object.freeze(roles.map(([role, transition]) => ({
+    guardKind: 'predicate-value' as const,
     role,
     graphUri: transition.graphUri,
     subject: transition.subject,
@@ -336,6 +361,7 @@ function normalizeLegacyRfc64AuthorCommitCasV1(
     })),
   ]);
   const currentHead = Object.freeze({
+    guardKind: 'predicate-value' as const,
     role: 'currentHead' as const,
     graphUri: input.currentHeadGraph,
     subject: input.currentHeadSubject,
@@ -394,16 +420,17 @@ export async function mapRfc64AuthorCommitCasV1(
       subject: replacement.subject,
     }))),
   })));
-  const guards = await Promise.all(manifest.guards.map(async (guard) => ({
-    ...guard,
-    expectedObject: await mapper.mapObject(guard.expectedObject, {
+  const guards = await Promise.all(manifest.guards.map(async (guard) => {
+    const expectedObject = await mapper.mapObject(guard.expectedObject, {
       role: guard.role,
       graphUri: guard.graphUri,
       kind: 'expected',
-    }),
-    expectedQuads: guard.expectedQuads === undefined
-      ? undefined
-      : guard.expectedQuads === null
+    });
+    if (guard.guardKind === 'predicate-value') return { ...guard, expectedObject };
+    return {
+      ...guard,
+      expectedObject,
+      expectedQuads: guard.expectedQuads === null
         ? null
         : await Promise.all(guard.expectedQuads.map((quad) => mapper.mapQuad(quad, {
           role: guard.role,
@@ -411,7 +438,8 @@ export async function mapRfc64AuthorCommitCasV1(
           graphUri: guard.graphUri,
           subject: guard.subject,
         }))),
-  })));
+    };
+  }));
   const predicateReplacements = await Promise.all(
     manifest.predicateReplacements.map(async (replacement) => {
       const mappedGuard = guards.find(({ role }) => role === replacement.role);
@@ -429,7 +457,6 @@ export async function mapRfc64AuthorCommitCasV1(
       return {
         ...replacement,
         expectedObject: mappedGuard.expectedObject,
-        expectedQuads: mappedGuard.expectedQuads,
         nextObject,
       };
     }),
@@ -490,20 +517,18 @@ function finalizeNormalizedPlan(
     Object.freeze({ ...replacement, quads: freezeQuads(replacement.quads) })));
   const subjectReplacements = Object.freeze(subjectReplacementsInput.map((replacement) =>
     Object.freeze({ ...replacement, quads: freezeQuads(replacement.quads) })));
-  const guards = Object.freeze(guardsInput.map((guard) => Object.freeze({
-    ...guard,
-    expectedQuads: guard.expectedQuads === undefined || guard.expectedQuads === null
-      ? guard.expectedQuads
-      : freezeQuads(guard.expectedQuads),
-  })));
+  const guards = Object.freeze(guardsInput.map((guard) => Object.freeze(
+    guard.guardKind === 'exact-subject'
+      ? {
+        ...guard,
+        expectedQuads: guard.expectedQuads === null
+          ? null
+          : freezeQuads(guard.expectedQuads),
+      }
+      : { ...guard },
+  )));
   const predicateReplacements = Object.freeze(predicateReplacementsInput.map((replacement) =>
-    Object.freeze({
-      ...replacement,
-      expectedQuads: replacement.expectedQuads === undefined
-        || replacement.expectedQuads === null
-        ? replacement.expectedQuads
-        : freezeQuads(replacement.expectedQuads),
-    })));
+    Object.freeze({ ...replacement })));
   const touchedGraphs = Object.freeze([...new Set([
     ...graphReplacements.map(({ graphUri }) => graphUri),
     ...subjectReplacements.map(({ graphUri }) => graphUri),
@@ -649,13 +674,15 @@ function validateSemanticInput(
     throw new Error('RFC-64 author commit requires one guarded current-head replacement');
   }
   for (const guard of stateGuards) {
-    if (guard.expectedQuads === undefined) {
+    if (guard.guardKind !== 'exact-subject') {
       throw new Error(`RFC-64 semantic ${guard.role} guard requires the complete predecessor subject`);
     }
     validateExactSubjectGuard(guard);
   }
   const predecessorQuadCount = stateGuards.reduce(
-    (count, guard) => count + (guard.expectedQuads?.length ?? 0),
+    (count, guard) => count + (
+      guard.guardKind === 'exact-subject' ? (guard.expectedQuads?.length ?? 0) : 0
+    ),
     0,
   );
   if (predecessorQuadCount > RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1) {
@@ -858,7 +885,7 @@ function validateCommonRfc64AuthorCommitCasV1(
 function formatGuard(guard: Rfc64AuthorCommitValueGuardV1, index: number): string {
   const graphUri = assertSafeIri(guard.graphUri);
   const subject = assertNonBlankNodeIri(guard.subject, 'RFC-64 author commit guard subject');
-  if (guard.expectedQuads !== undefined) {
+  if (guard.guardKind === 'exact-subject') {
     return formatExactSubjectGuard(graphUri, subject, guard.expectedQuads, index);
   }
   const predicate = assertSafeIri(unwrapIri(guard.predicate));
@@ -871,8 +898,7 @@ function formatGuard(guard: Rfc64AuthorCommitValueGuardV1, index: number): strin
     `FILTER(!sameTerm(?other${index}, ${expected})) } }`;
 }
 
-function validateExactSubjectGuard(guard: Rfc64AuthorCommitValueGuardV1): void {
-  if (guard.expectedQuads === undefined) return;
+function validateExactSubjectGuard(guard: Rfc64AuthorCommitExactSubjectGuardV1): void {
   if (guard.expectedQuads === null) {
     if (guard.expectedObject !== null) {
       throw new Error('RFC-64 absent semantic predecessor cannot carry a guard value');

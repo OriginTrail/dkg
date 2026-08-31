@@ -3,9 +3,9 @@
 export type ClosedDataReject = (message: string) => never;
 
 export function isOrdinaryDataRecord(input: unknown): input is Record<string, unknown> {
-  return input !== null
-    && typeof input === 'object'
-    && Object.getPrototypeOf(input) === Object.prototype;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return false;
+  const prototype = Object.getPrototypeOf(input);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /** Read one own enumerable data property without invoking an accessor. */
@@ -20,7 +20,7 @@ export function readOwnEnumerableDataProperty(
   }
   const descriptor = Object.getOwnPropertyDescriptor(input, key);
   if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-    reject(`${label}.${key} must be an enumerable data property`);
+    reject(`${label}.${key} must use enumerable data properties`);
   }
   return descriptor.value;
 }
@@ -49,14 +49,14 @@ export function snapshotDenseDataArray(
   return snapshot;
 }
 
-/** Snapshot an exact ordinary record through the same closed-data boundary. */
+/** Snapshot an exact plain data record through the same closed-data boundary. */
 export function snapshotExactOrdinaryDataRecord(
   input: unknown,
   expectedKeys: readonly string[],
   label: string,
   reject: ClosedDataReject,
 ): Readonly<Record<string, unknown>> {
-  if (!isOrdinaryDataRecord(input)) reject(`${label} must be a plain object`);
+  if (!isOrdinaryDataRecord(input)) reject(`${label} must be a plain data object`);
   const keys = Reflect.ownKeys(input);
   if (
     keys.some((key) => typeof key !== 'string')

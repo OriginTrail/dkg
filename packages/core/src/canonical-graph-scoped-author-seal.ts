@@ -54,8 +54,8 @@ import {
 } from './xsd-date-time.js';
 import {
   TypedRdfStoreRowErrorV1,
-  parseRenderedRdfStoreObjectV1,
   renderTypedRdfStoreRowV1,
+  snapshotDenseRenderedRdfStoreRowsV1,
   snapshotDenseTypedRdfStoreRowsV1,
   typedRdfLiteralV1,
   type TypedRdfStoreObjectV1,
@@ -759,25 +759,11 @@ export function decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
   rows: unknown,
   coordinate: CanonicalGraphScopedAuthorSealCoordinateV1,
 ): DecodedCanonicalGraphScopedAuthorSealRowsV1 {
-  const capturedRows = snapshotDenseRenderedAuthorSealRowsV1(rows);
   let typedRows: readonly CanonicalAuthorSealStoreRowV1[];
   try {
-    const parsed: CanonicalAuthorSealStoreRowV1[] = [];
-    for (let index = 0; index < capturedRows.length; index += 1) {
-      const row = capturedRows[index];
-      const current = snapshotExactDataRecord(
-        row,
-        ['graph', 'object', 'predicate', 'subject'],
-        `rendered author-seal row ${index}`,
-      );
-      parsed.push(Object.freeze({
-        graphIri: current.graph,
-        object: parseRenderedRdfStoreObjectV1(current.object),
-        predicateIri: current.predicate,
-        subjectIri: current.subject,
-      }) as CanonicalAuthorSealStoreRowV1);
-    }
-    typedRows = Object.freeze(parsed);
+    typedRows = snapshotDenseRenderedRdfStoreRowsV1(rows, {
+      allowedLengths: [14, 15],
+    }) as readonly CanonicalAuthorSealStoreRowV1[];
   } catch (cause) {
     if (cause instanceof CanonicalGraphScopedAuthorSealError) throw cause;
     const translated = translateTypedAuthorSealRowFailure(
@@ -787,41 +773,6 @@ export function decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
     fail(translated.code, translated.message, cause);
   }
   return decodeCanonicalGraphScopedAuthorSealRowsV1(typedRows, coordinate);
-}
-
-function snapshotDenseRenderedAuthorSealRowsV1(input: unknown): readonly unknown[] {
-  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
-    fail('canonical-seal-row-schema', 'rendered author-seal rows must be an ordinary array');
-  }
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
-  const length = lengthDescriptor
-    && Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
-    && Number.isSafeInteger(lengthDescriptor.value)
-    ? lengthDescriptor.value as number
-    : -1;
-  if (length !== 14 && length !== 15) {
-    fail('canonical-seal-row-cardinality', 'rendered author-seal rows require 14 or 15 rows');
-  }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== length + 1
-    || !keys.includes('length')
-  ) {
-    fail('canonical-seal-row-schema', 'rendered author-seal rows must be dense and unadorned');
-  }
-  const captured: unknown[] = [];
-  for (let index = 0; index < length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail(
-        'canonical-seal-row-schema',
-        'rendered author-seal rows must contain enumerable data properties',
-      );
-    }
-    captured.push(descriptor.value);
-  }
-  return Object.freeze(captured);
 }
 
 function translateTypedAuthorSealRowFailure(

@@ -1,7 +1,11 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   OxigraphStore,
+  OxigraphWorkerStore,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   SparqlHttpStore,
   type Rfc64AuthorCommitCasInputV1,
@@ -145,6 +149,34 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(await objectFor(store, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBeUndefined();
   });
 
+  it('preserves exported legacy commits through worker transport and reopen', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rfc64-legacy-author-worker-'));
+    const path = join(dir, 'store.nq');
+    const kaStateSubject = 'urn:test:rfc64:ka-state';
+    let store: OxigraphWorkerStore | null = new OxigraphWorkerStore(path);
+    try {
+      await seedOldState(store);
+      await store.insert([
+        quad(kaStateSubject, P_VALUE, '"old-ka-state"', STATE_GRAPH),
+        quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', SEAL_GRAPH),
+      ]);
+
+      await expect(store.rfc64AuthorCommitCasV1!(legacyAuthorCommitInput()))
+        .resolves.toBe('committed');
+      await store.close();
+      store = new OxigraphWorkerStore(path);
+
+      expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
+      expect(await objectFor(store, STATE_GRAPH, kaStateSubject, P_VALUE))
+        .toBe('"new-ka-state"');
+      expect(await objectFor(store, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE))
+        .toBeUndefined();
+    } finally {
+      await store?.close().catch(() => {});
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('maps every closed-manifest role through the canonical async plan', async () => {
     const input = authorCommitInput();
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
@@ -209,7 +241,10 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(guard('contextGraphMutationGeneration').expectedObject)
       .toBe('<urn:test:mapped:contextGraphMutationGeneration:expected>');
     expect(guard('appliedSet').expectedObject).toBe('<urn:test:mapped:appliedSet:expected>');
-    expect(guard('currentHead').expectedQuads?.[0]?.object)
+    const currentHeadGuard = guard('currentHead');
+    expect(currentHeadGuard.guardKind).toBe('exact-subject');
+    if (currentHeadGuard.guardKind !== 'exact-subject') throw new Error('expected exact guard');
+    expect(currentHeadGuard.expectedQuads?.[0]?.object)
       .toBe('"mapped:currentHead:0:7"');
     expect(manifest.semanticQuads).toHaveLength(7);
     expect(manifest.touchedGraphs).toEqual([
