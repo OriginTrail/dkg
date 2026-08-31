@@ -146,8 +146,43 @@ export interface OxigraphBinaryIo {
   rm: typeof rm;
   stat: typeof stat;
   access: typeof access;
+  /** Read and parse the selected executable's own `--version` output. */
+  probeVersion: (path: string) => Promise<string>;
   /** Clear the macOS quarantine xattr; best-effort, never throws. */
   clearQuarantine: (path: string) => Promise<void>;
+}
+
+function defaultProbeVersion(path: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(path, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    const collect = (chunk: Buffer | string) => {
+      const buffer = Buffer.from(chunk);
+      bytes += buffer.length;
+      if (bytes > 4_096) {
+        child.kill();
+        reject(new Error(`Oxigraph --version output from ${path} exceeded 4096 bytes`));
+        return;
+      }
+      chunks.push(buffer);
+    };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    child.once('error', reject);
+    child.once('close', (code) => {
+      const output = Buffer.concat(chunks).toString('utf8').trim();
+      const version = output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)/u)?.[1];
+      if (code !== 0 || !version) {
+        reject(new Error(
+          `Unable to determine Oxigraph version from ${path}`
+          + `${output ? `: ${output}` : ` (exit ${code ?? 'unknown'})`}`,
+        ));
+        return;
+      }
+      resolve(version);
+    });
+  });
 }
 
 function defaultClearQuarantine(path: string): Promise<void> {
@@ -174,8 +209,15 @@ function defaultIo(): OxigraphBinaryIo {
     rm,
     stat,
     access,
+    probeVersion: defaultProbeVersion,
     clearQuarantine: defaultClearQuarantine,
   };
+}
+
+export interface ResolvedOxigraphBinary {
+  path: string;
+  source: 'bundled' | 'system';
+  version: string;
 }
 
 export interface EnsureOxigraphBinaryOptions {
@@ -255,14 +297,14 @@ async function resolveSystemOxigraphOnPath(
 }
 
 /**
- * Ensure the pinned Oxigraph binary exists in `cacheDir` and return its
- * absolute path. Reuses a cached binary whose checksum matches; otherwise
- * downloads, verifies the SHA-256, marks it executable, clears macOS
- * quarantine, and atomically moves it into place.
+ * Resolve the executable plus the version metadata required for launch
+ * capabilities. Pinned assets carry their pinned version; PATH fallbacks are
+ * probed before they may be launched. Cached/downloaded assets are checksum
+ * verified, marked executable, and installed atomically.
  */
-export async function ensureOxigraphBinary(
+export async function resolveOxigraphBinary(
   opts: EnsureOxigraphBinaryOptions,
-): Promise<string> {
+): Promise<ResolvedOxigraphBinary> {
   const io = { ...defaultIo(), ...opts.io };
   const log = opts.log ?? (() => {});
   const platform = opts.platform ?? process.platform;
@@ -274,8 +316,9 @@ export async function ensureOxigraphBinary(
   if (!opts.asset && platform === 'linux' && (await isMuslLinux(io))) {
     const sys = await resolveSystemOxigraphOnPath(io, platform);
     if (sys) {
-      log(`musl libc detected; using system Oxigraph binary on PATH: ${sys}`);
-      return sys;
+      const version = await io.probeVersion(sys);
+      log(`musl libc detected; using system Oxigraph ${version} binary on PATH: ${sys}`);
+      return { path: sys, source: 'system', version };
     }
     throw new Error(
       `No glibc-compatible prebuilt Oxigraph ${OXIGRAPH_VERSION} for this musl host. ` +
@@ -292,8 +335,9 @@ export async function ensureOxigraphBinary(
     // error's own remediation and look for a system `oxigraph` on PATH.
     const sys = await resolveSystemOxigraphOnPath(io, platform);
     if (sys) {
-      log(`No pinned Oxigraph binary for this platform; using system binary on PATH: ${sys}`);
-      return sys;
+      const version = await io.probeVersion(sys);
+      log(`No pinned Oxigraph binary for this platform; using system Oxigraph ${version} on PATH: ${sys}`);
+      return { path: sys, source: 'system', version };
     }
     throw assetErr;
   }
@@ -306,7 +350,7 @@ export async function ensureOxigraphBinary(
     const existing = await io.readFile(target);
     if (sha256Hex(existing as Uint8Array) === resolved.sha256) {
       log(`Oxigraph ${OXIGRAPH_VERSION} binary cached at ${target}`);
-      return target;
+      return { path: target, source: 'bundled', version: OXIGRAPH_VERSION };
     }
     log(`Cached Oxigraph binary at ${target} failed checksum — re-downloading.`);
   } catch {
@@ -346,5 +390,12 @@ export async function ensureOxigraphBinary(
   await io.rm(target, { force: true }).catch(() => {});
   await io.rename(tmp, target);
   log(`Oxigraph ${OXIGRAPH_VERSION} binary verified and installed at ${target}`);
-  return target;
+  return { path: target, source: 'bundled', version: OXIGRAPH_VERSION };
+}
+
+/** Backward-compatible path-only facade for callers that do not plan runtime capabilities. */
+export async function ensureOxigraphBinary(
+  opts: EnsureOxigraphBinaryOptions,
+): Promise<string> {
+  return (await resolveOxigraphBinary(opts)).path;
 }

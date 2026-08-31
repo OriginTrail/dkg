@@ -24,7 +24,11 @@
  */
 import { join } from 'node:path';
 import { DEFAULT_SPARQL_HTTP_TIMEOUT_MS } from '@origintrail-official/dkg-storage';
-import { ensureOxigraphBinary, OXIGRAPH_VERSION } from './oxigraph-binary.js';
+import {
+  ensureOxigraphBinary,
+  OXIGRAPH_VERSION,
+  resolveOxigraphBinary,
+} from './oxigraph-binary.js';
 import {
   startOxigraphServer,
   type OxigraphServerHandle,
@@ -359,20 +363,29 @@ export interface StartManagedOxigraphOptions {
 export async function startManagedOxigraph(
   opts: StartManagedOxigraphOptions,
 ): Promise<ManagedOxigraphResult | null> {
-  const plan = planManagedOxigraph(opts.config, opts.dataDir, opts.platform);
-  if (!plan) return null;
+  const initialPlan = planManagedOxigraph(opts.config, opts.dataDir, opts.platform);
+  if (!initialPlan) return null;
   const log = opts.log ?? (() => {});
 
-  const binaryPath = await ensureOxigraphBinary({
-    cacheDir: plan.cacheDir,
+  const binary = await resolveOxigraphBinary({
+    cacheDir: initialPlan.cacheDir,
     platform: opts.platform,
     arch: opts.arch,
     log,
     io: opts.binaryIo,
   });
+  // PATH fallbacks are operator-installed and may not match the bundled
+  // release. Resolve timeout capabilities only after the executable itself
+  // reports its version; never inherit OXIGRAPH_VERSION by accident.
+  const plan = planManagedOxigraph(
+    opts.config,
+    opts.dataDir,
+    opts.platform,
+    binary.version,
+  )!;
 
   const handle = await startOxigraphServer({
-    binaryPath,
+    binaryPath: binary.path,
     location: plan.location,
     port: plan.port,
     log,

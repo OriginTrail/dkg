@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ensureOxigraphBinary,
+  resolveOxigraphBinary,
   resolveOxigraphAsset,
   OXIGRAPH_ASSETS,
   OXIGRAPH_VERSION,
@@ -180,7 +181,10 @@ describe('PATH fallback (real directories, real executables)', () => {
     pathDirA = await mkdtemp(join(tmpdir(), 'oxi-path-a-'));
     pathDirB = await mkdtemp(join(tmpdir(), 'oxi-path-b-'));
     await writeFile(join(pathDirA, 'oxigraph'), '#!/bin/sh\n'); // not executable
-    await writeFile(join(pathDirB, 'oxigraph'), '#!/bin/sh\nexit 0\n');
+    await writeFile(
+      join(pathDirB, 'oxigraph'),
+      '#!/bin/sh\n[ "$1" = "--version" ] && echo "Oxigraph 0.6.0"\nexit 0\n',
+    );
     await chmod(join(pathDirB, 'oxigraph'), 0o755);
   });
 
@@ -216,6 +220,27 @@ describe('PATH fallback (real directories, real executables)', () => {
       // the real executable in pathDirB wins. No download happened.
       expect(path).toBe(join(pathDirB, 'oxigraph'));
       expect(hits - before).toBe(0);
+    } finally {
+      process.env.PATH = prevPath;
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the selected system executable version as capability metadata', async () => {
+    const cacheDir = await freshCache();
+    process.env.PATH = `${pathDirA}:${pathDirB}`;
+    try {
+      await expect(resolveOxigraphBinary({
+        cacheDir,
+        platform: 'linux',
+        arch: 'x64',
+        io: { stat: statOnMuslHost },
+        log: () => {},
+      })).resolves.toEqual({
+        path: join(pathDirB, 'oxigraph'),
+        source: 'system',
+        version: '0.6.0',
+      });
     } finally {
       process.env.PATH = prevPath;
       await rm(cacheDir, { recursive: true, force: true });

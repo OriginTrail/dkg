@@ -36,6 +36,10 @@ beforeAll(async () => {
     `#!/usr/bin/env node
 const http = require('node:http');
 const args = process.argv.slice(2);
+if (args.includes('--version')) {
+  console.log('Oxigraph 0.6.0');
+  process.exit(0);
+}
 const bindIdx = args.indexOf('--bind');
 if (bindIdx < 0 || !args[bindIdx + 1]) {
   console.error('missing --bind');
@@ -551,7 +555,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
     }
   });
 
-  it('suppresses the native timeout through macOS startup', async () => {
+  it('uses the detected system 0.6 timeout capabilities through macOS startup', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
     const port = await freePort();
 
@@ -572,14 +576,17 @@ describe('startManagedOxigraph (real download + real server)', () => {
     try {
       expect(result).not.toBeNull();
       expect(result!.storeConfig.options.timeout).toBe(40_000);
-      expect(await fetchManagedArgs(port)).not.toContain('--timeout-s');
+      const args = await fetchManagedArgs(port);
+      const timeoutIndex = args.indexOf('--timeout-s');
+      expect(timeoutIndex).toBeGreaterThanOrEqual(0);
+      expect(args[timeoutIndex + 1]).toBe('35');
     } finally {
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });
     }
   });
 
-  it('guards the implicit server cutoff without deriving a native timeout', async () => {
+  it('honors a long client deadline for a detected system 0.6 binary', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
     const port = await freePort();
 
@@ -596,7 +603,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
     });
     try {
       expect(result).not.toBeNull();
-      expect(result!.storeConfig.options.timeout).toBe(55_000);
+      expect(result!.storeConfig.options.timeout).toBe(180_000);
       const args = await fetchManagedArgs(port);
       const timeoutIndex = args.indexOf('--timeout-s');
       expect(timeoutIndex).toBe(-1);
