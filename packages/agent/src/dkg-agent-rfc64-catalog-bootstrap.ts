@@ -27,7 +27,8 @@ import { Rfc64CoalescingSupervisorV1 } from
 import { resolveRfc64PeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
-  resolveRfc64CatalogAuthorityDecisionV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
+  type Rfc64CatalogExecutionPlanV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
@@ -148,7 +149,7 @@ export interface Rfc64CatalogBootstrapPartitionV1 {
   }>;
 }
 
-interface BootstrapStateV1 {
+export interface BootstrapStateV1 {
   readonly retryIntervalMs?: number;
   readonly legacyRecoveryConfig: Rfc64CatalogBootstrapPartitionV1['legacyRecoveryConfig'];
   readonly targets: MutableTargetStatusV1[];
@@ -170,8 +171,8 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     contextGraphId: string,
   ): readonly string[] {
     if (
-      !resolveRfc64CatalogAuthorityDecisionV1(
-        this.config.rfc64CatalogRollout,
+      !resolveRfc64CatalogExecutionPlanAuthorityV1(
+        this.config.rfc64CatalogExecutionPlan,
         contextGraphId,
       ).legacySyncAllowed
     ) return Object.freeze([]);
@@ -189,12 +190,12 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
     if (
       config === undefined
-      || this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>() !== undefined
+      || this.rfc64CatalogRuntimeV1.readBootstrapState() !== undefined
     ) return;
     const service = this.rfc64PublicCatalogServiceV1;
     const partition = partitionRfc64CatalogBootstrapV1(
       config,
-      this.config.rfc64CatalogRollout,
+      this.config.rfc64CatalogExecutionPlan,
     );
     if (partition.track2Policies.length > 0 && service === undefined) {
       throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
@@ -251,7 +252,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       lastPassStartedAtMs: null,
       lastPassCompletedAtMs: null,
     };
-    this.rfc64CatalogRuntimeV1?.writeBootstrapState(state);
+    this.rfc64CatalogRuntimeV1.writeBootstrapState(state);
     runner.request();
   }
 
@@ -259,7 +260,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   readRfc64PublicCatalogBootstrapStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64PublicCatalogBootstrapStatusV1> | null {
-    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
+    const state = this.rfc64CatalogRuntimeV1.readBootstrapState();
     if (state === undefined) return null;
     return Object.freeze({
       running: state.runner.running,
@@ -273,16 +274,16 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
 
   /** Wait for the currently running startup/refresh pass only. */
   async whenRfc64PublicCatalogBootstrapIdleV1(this: DKGAgent): Promise<void> {
-    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
+    const state = this.rfc64CatalogRuntimeV1.readBootstrapState();
     await state?.runner.whenIdle();
   }
 
   /** Stop future retries and abort/drain the current pass before service close. */
   async closeRfc64PublicCatalogBootstrapV1(this: DKGAgent): Promise<void> {
-    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
+    const state = this.rfc64CatalogRuntimeV1.readBootstrapState();
     if (state === undefined) return;
     await state.runner.close();
-    this.rfc64CatalogRuntimeV1?.clearBootstrapState();
+    this.rfc64CatalogRuntimeV1.clearBootstrapState();
   }
 
   private async runRfc64PublicCatalogBootstrapPassV1(
@@ -460,15 +461,15 @@ export function partitionRfc64CatalogBootstrapV1(
     readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
     readonly retryIntervalMs?: number;
   }>,
-  activation: DKGAgent['config']['rfc64CatalogRollout'],
+  executionPlan: Rfc64CatalogExecutionPlanV1,
 ): Rfc64CatalogBootstrapPartitionV1 {
   const track2Policies: Rfc64CatalogBootstrapPolicyV1[] = [];
   const track2Targets: Rfc64CatalogBootstrapTargetPlanV1[] = [];
   const legacyPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
   for (const accepted of config.acceptedPolicies) {
     const { policyEnvelope, targets, completeSwmProviders = [] } = accepted;
-    const authority = resolveRfc64CatalogAuthorityDecisionV1(
-      activation,
+    const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
+      executionPlan,
       policyEnvelope.payload.contextGraphId,
     );
     if (authority.legacySyncAllowed) legacyPolicies.push(accepted);

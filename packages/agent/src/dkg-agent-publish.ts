@@ -135,7 +135,6 @@ import {
   skolemizeKnowledgeAssetParts,
   assertNoKnowledgeAssetPayloadNamedGraphs,
   assertValidPrecomputedUpdateAttestation,
-  stageKnowledgeAssetSharedWorkingMemoryV1,
   isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
@@ -2134,10 +2133,8 @@ export class PublishMethods extends DKGAgentBase {
     // reconciliation can now resolve the staged version, counts, private
     // commitment, publisher, and immutable public payload without guessing.
     const updateOperationId = ctx.operationId;
-    const result = await stageKnowledgeAssetSharedWorkingMemoryV1({
-      store: this.store,
-      writeLocks: this.writeLocks,
-      graphManager,
+    const publisher = opts?.publisherOverride ?? this.publisher;
+    const stagedOperation = await this.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
       contextGraphId,
       shareOperationId: updateOperationId,
       kaUal: updateScope.ual,
@@ -2151,8 +2148,7 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress: updateScope.agentAddress,
       subGraphName: opts?.subGraphName,
       timestamp: new Date(),
-      publicSnapshotStore: this.publicSnapshotStore,
-    }, async () => {
+    });
       // GH #842: thread the on-chain cgId so the publisher can promote the update
       // payload into the per-cgId partition the RS prover reads. Without it,
       // updated KAs stay unprovable (data-corrupted / leaf-count-mismatch).
@@ -2232,7 +2228,6 @@ export class PublishMethods extends DKGAgentBase {
         ? generatedPrivateCatalogTripleKeys(contextGraphId)
         : undefined;
 
-      const publisher = opts?.publisherOverride ?? this.publisher;
       const publisherUpdateOptions = {
         contextGraphId,
         privateQuads: canonicalParts.privateQuads,
@@ -2248,6 +2243,7 @@ export class PublishMethods extends DKGAgentBase {
         contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
         kaUal: updateScope.ual,
         assertionVersion: updateScope.assertionVersion,
+        stagedOperation,
         publicTripleCount: canonicalParts.publicQuads.length,
         ...(canonicalPrivateMerkleRoot
           ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
@@ -2266,11 +2262,10 @@ export class PublishMethods extends DKGAgentBase {
         // private payload out to CG members (member distribution). Public → undefined.
         encryptInlineChunked: updateEncryptInlineChunked,
       };
-      return publisher.updateKnowledgeAssetFromSharedMemory(
+      const result = await publisher.updateKnowledgeAssetFromSharedMemory(
         kaId,
         publisherUpdateOptions,
       );
-    });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
     onPhase?.('broadcast', 'start');

@@ -1114,11 +1114,6 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
       rfc64CatalogBootstrap,
-      rfc64CatalogRollout: Object.freeze({
-        enabled: catalogActivation.enabled,
-        selectedContextGraphs: catalogActivation.selectedContextGraphs,
-        rollout: catalogActivation.rollout,
-      }),
       rfc64CatalogAuthoringPolicy,
       rfc64CatalogExecutionPlan,
       rfc64PublicCatalogBootstrap,
@@ -2187,7 +2182,7 @@ export class DKGAgent extends DKGAgentBase {
       // and authoring transports remain live. Receiver close then proves that
       // no later applied-head callback can enqueue work. Only after both
       // producer classes are quiet may the projection owner drain and close.
-      await this.rfc64CatalogRuntimeV1?.close();
+      await this.rfc64CatalogRuntimeV1.close();
     } catch (err) {
       this.log.warn(
         createOperationContext('connect'),
@@ -3598,7 +3593,7 @@ export class DKGAgent extends DKGAgentBase {
 
   /** Compatibility observation surface; lifecycle ownership lives in the runtime. */
   whenRfc64CatalogSupervisorsIdleV1(): Promise<void> {
-    return this.rfc64CatalogRuntimeV1?.whenIdle() ?? Promise.resolve();
+    return this.rfc64CatalogRuntimeV1.whenIdle();
   }
 
 }

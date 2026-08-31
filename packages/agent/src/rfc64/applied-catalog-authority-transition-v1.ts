@@ -39,11 +39,13 @@ import type {
   Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
 import {
-  deactivateRfc64CatalogOwnedProjectionV1,
+  deactivateRfc64CatalogOwnedProjectionIfStillOwnedV1,
   planRfc64CatalogOwnedRowRemovalV1,
   restoreRfc64SemanticTransitionV1,
   snapshotRfc64SemanticTransitionV1,
   transitionLocationFromRfc64RemovalV1,
+  type Rfc64CatalogOwnedRowRemovalV1,
+  type Rfc64SemanticTransitionPreimageV1,
 } from './catalog-semantic-authority-transition-v1.js';
 
 export interface DeactivateRfc64AppliedCatalogAuthorityInputV1 {
@@ -57,6 +59,13 @@ export interface DeactivateRfc64AppliedCatalogAuthorityInputV1 {
   readonly verifyIssuerSignature?: (
     envelope: SignedControlEnvelopeV1,
   ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
+}
+
+export interface PreparedRfc64AppliedCatalogAuthorityDeactivationV1 {
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly appliedHead: AppliedCatalogHeadSnapshotV1;
+  readonly removals: readonly Readonly<Rfc64CatalogOwnedRowRemovalV1>[];
+  readonly journal: readonly Readonly<Rfc64SemanticTransitionPreimageV1>[];
 }
 
 /** Gate 1 accepts only an author-signed issuer grant with no parent-agent hop. */
@@ -128,6 +137,22 @@ export async function readRfc64AppliedCatalogContextGraphIdV1(
 export async function deactivateRfc64AppliedCatalogAuthorityV1(
   input: DeactivateRfc64AppliedCatalogAuthorityInputV1,
 ): Promise<Readonly<{ contextGraphId: ContextGraphIdV1; removedRows: number }>> {
+  const prepared = await prepareRfc64AppliedCatalogAuthorityDeactivationV1(input);
+  return commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1({
+    store: input.store,
+    inventory: {
+      deleteAppliedCatalogHeadsV1: (heads) => {
+        for (const head of heads) input.inventory.deleteAppliedCatalogHeadV1(head);
+      },
+    },
+    prepared: [prepared],
+  });
+}
+
+/** Validate and snapshot one complete applied head before any mutation begins. */
+export async function prepareRfc64AppliedCatalogAuthorityDeactivationV1(
+  input: Omit<DeactivateRfc64AppliedCatalogAuthorityInputV1, 'inventory'>,
+): Promise<PreparedRfc64AppliedCatalogAuthorityDeactivationV1> {
   const verifyIssuerSignature = input.verifyIssuerSignature
     ?? verifyControlEnvelopeIssuerSignatureV1;
   const storedHead = await readValidatedAppliedHeadV1({
@@ -146,22 +171,58 @@ export async function deactivateRfc64AppliedCatalogAuthorityV1(
     input.store,
     removals.map(transitionLocationFromRfc64RemovalV1),
   );
+  return Object.freeze({
+    contextGraphId: scope.contextGraphId,
+    appliedHead: input.appliedHead,
+    removals: Object.freeze(removals),
+    journal,
+  });
+}
+
+/** Commit one context graph's prepared semantic and inventory transition. */
+export async function commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1(
+  input: Readonly<{
+    readonly store: TripleStore;
+    readonly inventory: Pick<Rfc64InventoryV1OperationsV1, 'deleteAppliedCatalogHeadsV1'>;
+    readonly prepared: readonly PreparedRfc64AppliedCatalogAuthorityDeactivationV1[];
+  }>,
+): Promise<Readonly<{ contextGraphId: ContextGraphIdV1; removedRows: number }>> {
+  const contextGraphIds = new Set(input.prepared.map(({ contextGraphId }) => contextGraphId));
+  if (contextGraphIds.size !== 1) {
+    throw new Error('prepared catalog authority batch must contain one context graph');
+  }
+  const combinedJournal = Object.freeze(input.prepared.flatMap(({ journal }) => journal));
   let mutationAttempted = false;
+  let removedRows = 0;
   try {
-    for (const removal of removals) {
-      mutationAttempted = true;
-      await deactivateRfc64CatalogOwnedProjectionV1(input.store, removal);
+    for (const current of input.prepared) {
+      for (let index = 0; index < current.removals.length; index += 1) {
+        const removal = current.removals[index];
+        const preimage = current.journal[index];
+        if (!removal || !preimage) throw new Error('prepared semantic journal is incomplete');
+        mutationAttempted = true;
+        const result = await deactivateRfc64CatalogOwnedProjectionIfStillOwnedV1(
+          input.store,
+          removal,
+          preimage,
+        );
+        if (result === 'removed') removedRows += 1;
+      }
     }
-    input.inventory.deleteAppliedCatalogHeadV1({
-      catalogScopeDigest: input.appliedHead.catalogScopeDigest,
-      authorAddress: input.appliedHead.authorAddress,
-      expectedCurrentCatalogHeadDigest: input.appliedHead.currentCatalogHeadDigest,
-    });
+    input.inventory.deleteAppliedCatalogHeadsV1(input.prepared.map(({ appliedHead }) => ({
+      catalogScopeDigest: appliedHead.catalogScopeDigest,
+      authorAddress: appliedHead.authorAddress,
+      expectedCurrentCatalogHeadDigest: appliedHead.currentCatalogHeadDigest,
+    })));
   } catch (cause) {
-    if (mutationAttempted) await restoreRfc64SemanticTransitionV1(input.store, journal);
+    if (mutationAttempted) {
+      await restoreRfc64SemanticTransitionV1(input.store, combinedJournal);
+    }
     throw new Error('RFC-64 catalog semantic authority deactivation failed', { cause });
   }
-  return Object.freeze({ contextGraphId: scope.contextGraphId, removedRows: removals.length });
+  const contextGraphId = input.prepared[0]?.contextGraphId;
+  if (!contextGraphId) throw new Error('prepared catalog authority batch is empty');
+  return Object.freeze({ contextGraphId, removedRows });
 }
 
 export async function loadExactAppliedCatalogRowsV1(

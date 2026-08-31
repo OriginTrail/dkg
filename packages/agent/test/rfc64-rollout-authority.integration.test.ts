@@ -21,7 +21,7 @@ import {
   type NetworkIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -37,6 +37,10 @@ import type { Rfc64PublicCatalogActivationInputV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
   '../src/rfc64/catalog-semantic-authority-transition-v1.js';
+import {
+  commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1,
+  prepareRfc64AppliedCatalogAuthorityDeactivationV1,
+} from '../src/rfc64/applied-catalog-authority-transition-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -228,6 +232,156 @@ describe('RFC-64 rollout authority integration', () => {
       nextMode === 'shadow' ? expect.objectContaining({ started: true }) : null,
     );
     expect(producer).not.toHaveBeenCalled();
+    },
+    30_000,
+  );
+
+  it('preserves later legacy semantic content while relinquishing stale catalog authority', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-divergent-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const author = await startAgent(
+      'catalog-divergent-author',
+      {
+        ...activation('catalog'),
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+      dataDir,
+      persistentStorePath,
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    const seal = await authorSeal(85n);
+    const applied = await author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'rollout-divergent-preservation' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealFromCanonical(seal),
+    });
+    await seedCatalogSemanticClosure(author, seal, 'rollout-divergent-preservation');
+    const store = (author as unknown as { store: OxigraphStore }).store;
+    const swmGraph = deriveRfc64PublicSwmGraphV1(CONTEXT_GRAPH_ID, seal.reservedKaId as never);
+    await store.insert([{
+      subject: 'https://example.org/later-legacy-write',
+      predicate: 'https://schema.org/name',
+      object: '"must survive"',
+      graph: swmGraph,
+    }]);
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+
+    const restarted = await startAgent(
+      'legacy-after-divergent-catalog',
+      activation('legacy'),
+      dataDir,
+      persistentStorePath,
+    );
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(applied).not.toBeNull();
+    await expectCatalogSemanticClosure(
+      restarted,
+      seal,
+      'rollout-divergent-preservation',
+      true,
+    );
+    const preserved = await (restarted as unknown as { store: OxigraphStore }).store.query(
+      `ASK { GRAPH <${swmGraph}> { <https://example.org/later-legacy-write> ?p ?o } }`,
+    );
+    expect(preserved).toEqual({ type: 'boolean', value: true });
+  }, 30_000);
+
+  it.each(['later semantic removal', 'inventory deletion'] as const)(
+    'rolls back the whole CG after injected %s failure and retries cleanly',
+    async (failureStage) => {
+      const author = await startAgent('catalog-atomic-transition', {
+        ...activation('catalog'),
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      });
+      vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+      const seals = [await authorSeal(86n), await authorSeal(87n)] as const;
+      for (const [index, seal] of seals.entries()) {
+        await author.recordRfc64PublicCatalogAssetV1({
+          contextGraphId: CONTEXT_GRAPH_ID,
+          assertionCoordinate: `rollout-atomic-${index}` as never,
+          publicQuads: PROJECTION_QUADS,
+          seal: assertionSealFromCanonical(seal),
+        });
+        await seedCatalogSemanticClosure(author, seal, `rollout-atomic-${index}`);
+      }
+      const internals = author as unknown as {
+        store: TripleStore;
+        rfc64PersistenceV1: {
+          controlObjects: Parameters<
+            typeof prepareRfc64AppliedCatalogAuthorityDeactivationV1
+          >[0]['controlObjects'];
+          inventory: Parameters<
+            typeof commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1
+          >[0]['inventory'] & {
+            listAppliedCatalogHeadsV1(): readonly any[];
+          };
+        };
+      };
+      const [appliedHead] = internals.rfc64PersistenceV1.inventory.listAppliedCatalogHeadsV1();
+      expect(appliedHead).toBeDefined();
+      const prepared = await prepareRfc64AppliedCatalogAuthorityDeactivationV1({
+        store: internals.store,
+        controlObjects: internals.rfc64PersistenceV1.controlObjects,
+        appliedHead,
+      });
+      let semanticMutations = 0;
+      const injectedStore = new Proxy(internals.store, {
+        get(target, property, receiver) {
+          if (property === 'replaceGraphAndSubject') {
+            return async (...args: unknown[]) => {
+              semanticMutations += 1;
+              if (failureStage === 'later semantic removal' && semanticMutations === 2) {
+                throw new Error('injected later semantic removal failure');
+              }
+              return (target.replaceGraphAndSubject as (...values: unknown[]) => unknown)
+                .apply(target, args);
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const injectedInventory = failureStage === 'inventory deletion'
+        ? { deleteAppliedCatalogHeadsV1: () => { throw new Error('injected inventory failure'); } }
+        : internals.rfc64PersistenceV1.inventory;
+
+      await expect(commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1({
+        store: injectedStore,
+        inventory: injectedInventory,
+        prepared: [prepared],
+      })).rejects.toThrow('catalog semantic authority deactivation failed');
+      for (const [index, seal] of seals.entries()) {
+        await expectCatalogSemanticClosure(author, seal, `rollout-atomic-${index}`, true);
+      }
+      expect(author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })).not.toBeNull();
+
+      await commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1({
+        store: internals.store,
+        inventory: internals.rfc64PersistenceV1.inventory,
+        prepared: [prepared],
+      });
+      for (const [index, seal] of seals.entries()) {
+        await expectCatalogSemanticClosure(author, seal, `rollout-atomic-${index}`, false);
+      }
+      expect(author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })).toBeNull();
     },
     30_000,
   );

@@ -1,5 +1,4 @@
 export {
-  BlazegraphNamespaceLease,
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   assertBlazegraphNamespace,
@@ -8,7 +7,6 @@ export {
   normalizeBlazegraphNamespace,
   normalizeBlazegraphNamespaceApiUrl,
   renderBlazegraphNamespaceXml,
-  type BlazegraphNamespaceCodec,
   type BlazegraphNamespaceDisposeOptions,
   type BlazegraphNamespaceEnsureResult,
   type BlazegraphNamespaceManagerOptions,
@@ -63,6 +61,7 @@ export {
   type Rfc64AuthorCommitCasLegacyInputV1,
   type Rfc64AuthorCommitCasSemanticInputV1,
   type Rfc64AuthorCommitCasResultV1,
+  type Rfc64AuthorCommitExactStateTransitionV1,
   type Rfc64AuthorCommitStateTransitionV1,
   type Rfc64AuthorCommitSubjectReplacementV1,
 } from './rfc64-author-commit-cas.js';
@@ -196,6 +195,7 @@ export {
 } from './rfc64-author-seal-read-gateway.js';
 export {
   createManagedOxigraphRuntimeStoreConfigV1,
+  type ManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';
 export {
   isRfc64SharedProjectionStreamCapabilityV1,

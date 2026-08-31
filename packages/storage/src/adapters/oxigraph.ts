@@ -39,8 +39,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -53,6 +55,7 @@ type OxQuad = oxigraph.Quad;
 export class OxigraphStore implements TripleStore {
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
   private store: OxStore;
   private persistPath: string | undefined;
   // #1609: per-graph write generations, bumped on every local mutation (the
@@ -80,6 +83,13 @@ export class OxigraphStore implements TripleStore {
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ) {
     return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   /**

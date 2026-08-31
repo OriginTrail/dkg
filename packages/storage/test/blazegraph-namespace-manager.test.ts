@@ -5,21 +5,9 @@ import {
   blazegraphNamespaceApiUrlFromBaseUrl,
   blazegraphNamespaceApiUrlFromSparqlEndpoint,
   normalizeBlazegraphNamespaceApiUrl,
-  type BlazegraphNamespaceCodec,
 } from '../src/blazegraph-namespace-manager.js';
 
 const NAMESPACE_API_URL = 'http://127.0.0.1:9999/bigdata/namespace';
-const namespaceCodec: BlazegraphNamespaceCodec = Object.freeze({
-  assertNamespace(namespace: string): void {
-    if (!/^[A-Za-z0-9_-]{1,128}$/u.test(namespace) || namespace === '.' || namespace === '..') {
-      throw new Error('invalid test namespace');
-    }
-  },
-  renderNamespaceXml(namespace: string): string {
-    this.assertNamespace(namespace);
-    return `<namespace>${namespace}</namespace>`;
-  },
-});
 
 describe('BlazegraphNamespaceManager', () => {
   it('ensures an existing namespace without issuing a create', async () => {
@@ -31,7 +19,6 @@ describe('BlazegraphNamespaceManager', () => {
     const manager = new BlazegraphNamespaceManager({
       namespaceApiUrl: NAMESPACE_API_URL,
       fetchImpl,
-      namespaceCodec,
       requestTimeoutMs: 100,
     });
 
@@ -45,7 +32,7 @@ describe('BlazegraphNamespaceManager', () => {
     }]);
   });
 
-  it('starts the complete lease plan concurrently and disposes every lease concurrently', async () => {
+  it('starts the complete handle plan concurrently and disposes every handle concurrently', async () => {
     const pendingCreates: Array<() => void> = [];
     let activeDeletes = 0;
     let maxActiveDeletes = 0;
@@ -67,20 +54,19 @@ describe('BlazegraphNamespaceManager', () => {
     const manager = new BlazegraphNamespaceManager({
       namespaceApiUrl: NAMESPACE_API_URL,
       fetchImpl,
-      namespaceCodec,
       requestTimeoutMs: 100,
     });
     const acquiring = manager.acquireMany(['author', 'receiver-a', 'receiver-b']);
     await waitFor(() => pendingCreates.length === 3);
     pendingCreates.forEach((resolve) => resolve());
-    const leases = await acquiring;
+    const handles = await acquiring;
 
-    expect(leases.map((lease) => lease.namespace)).toEqual([
+    expect(handles.map((handle) => handle.namespace)).toEqual([
       'author',
       'receiver-a',
       'receiver-b',
     ]);
-    await manager.disposeAll(leases);
+    await manager.disposeAll(handles);
     expect(maxActiveDeletes).toBe(3);
   });
 
@@ -88,14 +74,15 @@ describe('BlazegraphNamespaceManager', () => {
     let fetchCount = 0;
     const manager = new BlazegraphNamespaceManager({
       namespaceApiUrl: NAMESPACE_API_URL,
-      namespaceCodec,
       fetchImpl: async () => {
         fetchCount += 1;
         return new Response('', { status: 200 });
       },
     });
-    expect(() => manager.namespaceUrl(namespace)).toThrow(/invalid test namespace/u);
-    await expect(manager.acquireMany([namespace])).rejects.toThrow(/invalid test namespace/u);
+    expect(() => manager.namespaceUrl(namespace)).toThrow(/Blazegraph namespace .* is invalid/u);
+    await expect(manager.acquireMany([namespace])).rejects.toThrow(
+      /Blazegraph namespace .* is invalid/u,
+    );
     expect(fetchCount).toBe(0);
   });
 
@@ -103,7 +90,6 @@ describe('BlazegraphNamespaceManager', () => {
     const bodies: string[] = [];
     const manager = new BlazegraphNamespaceManager({
       namespaceApiUrl: NAMESPACE_API_URL,
-      namespaceCodec,
       fetchImpl: async (_input, init) => {
         bodies.push(String(init?.body));
         return new Response('', { status: 201 });
@@ -113,9 +99,16 @@ describe('BlazegraphNamespaceManager', () => {
       `${NAMESPACE_API_URL}/accepted-name`,
     );
     await expect(manager.acquireMany(['accepted-name'])).resolves.toHaveLength(1);
-    expect(bodies).toEqual(['<namespace>accepted-name</namespace>']);
-    expect(() => manager.namespaceUrl('author:probe')).toThrow(/invalid test namespace/u);
-    await expect(manager.acquireMany(['author:probe'])).rejects.toThrow(/invalid test namespace/u);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain(
+      '<entry key="com.bigdata.rdf.sail.namespace">accepted-name</entry>',
+    );
+    expect(() => manager.namespaceUrl('author:probe')).toThrow(
+      /Blazegraph namespace .* is invalid/u,
+    );
+    await expect(manager.acquireMany(['author:probe'])).rejects.toThrow(
+      /Blazegraph namespace .* is invalid/u,
+    );
   });
 
   it.each([
@@ -125,7 +118,6 @@ describe('BlazegraphNamespaceManager', () => {
     const methods: string[] = [];
     const manager = new BlazegraphNamespaceManager({
       namespaceApiUrl: NAMESPACE_API_URL,
-      namespaceCodec,
       fetchImpl: async (_input, init) => {
         methods.push(init?.method ?? 'GET');
         return inspect();
@@ -139,7 +131,6 @@ describe('BlazegraphNamespaceManager', () => {
     let deleteCalls = 0;
     const manager = new BlazegraphNamespaceManager({
       namespaceApiUrl: NAMESPACE_API_URL,
-      namespaceCodec,
       requestTimeoutMs: 100,
       fetchImpl: async (_input, init) => {
         if (init?.method === 'POST') throw new Error('create response lost');

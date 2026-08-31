@@ -2879,7 +2879,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // hand-off (or with the Track-2 kill switch). The immutable RFC-64
     // selection therefore remains an independent VM-reconcile intent source.
     const explicitlySelected = (this.config.syncContextGraphs ?? []).includes(contextGraphId)
-      || this.config.rfc64CatalogRollout.selectedContextGraphs.includes(contextGraphId);
+      || this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined;
     if (!explicitlySelected) return false;
     const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies

@@ -58,6 +58,8 @@ describe('N-Triples UCHAR decoding', () => {
   it('preserves malformed prefixes without hiding a later valid legacy escape', () => {
     expect(decodeNTriplesIriEscapesPreservingLegacy(String.raw`\u12\u0041`))
       .toBe(String.raw`\u12A`);
+    expect(decodeNTriplesIriEscapesPreservingLegacy(String.raw`\\u0041`))
+      .toBe(String.raw`\A`);
   });
 
   it('combines only two short surrogate escapes in strict IRI mode', () => {

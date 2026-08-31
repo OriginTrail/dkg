@@ -70,12 +70,18 @@ import {
   type OnChainProvenance,
 } from './metadata.js';
 import {
+  resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
   storeWorkspaceOperationPublicQuads,
   tryResolveKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
+import {
+  stageKnowledgeAssetSharedWorkingMemoryStorageV1,
+  type StageKnowledgeAssetSharedWorkingMemoryInputV1,
+  type StagedKnowledgeAssetSharedWorkingMemoryV1,
+} from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
 import {
@@ -1248,6 +1254,21 @@ export class DKGPublisher implements Publisher {
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
     return stripOptionalLiteral(result.bindings[0]?.['id'])?.trim();
+  }
+
+  /** Stage immutable graph-scoped SWM bytes in this publisher's canonical lock domain. */
+  async stageKnowledgeAssetSharedWorkingMemoryV1(
+    input: StageKnowledgeAssetSharedWorkingMemoryInputV1,
+  ): Promise<StagedKnowledgeAssetSharedWorkingMemoryV1> {
+    return stageKnowledgeAssetSharedWorkingMemoryStorageV1({
+      ...input,
+      store: this.store,
+      writeLocks: this.writeLocks,
+      graphManager: this.graphManager,
+      ...(this.publicSnapshotStore === undefined
+        ? {}
+        : { publicSnapshotStore: this.publicSnapshotStore }),
+    });
   }
 
   private async onChainContextGraphMatchesLocalId(
@@ -4444,7 +4465,9 @@ export class DKGPublisher implements Publisher {
    */
   async updateKnowledgeAssetFromSharedMemory(
     kaId: bigint,
-    options: Omit<PublishOptions, 'quads'>,
+    options: Omit<PublishOptions, 'quads'> & Readonly<{
+      stagedOperation?: StagedKnowledgeAssetSharedWorkingMemoryV1;
+    }>,
   ): Promise<PublishResult> {
     const descriptor = resolveGraphScopedPublishDescriptor({
       ...options,
@@ -4453,24 +4476,52 @@ export class DKGPublisher implements Publisher {
     if (!descriptor) {
       throw new Error('Graph-scoped SWM update requires a complete V2 content envelope');
     }
-    const swmBucket = this.graphManager.sharedMemoryUri(
-      options.contextGraphId,
-      options.subGraphName,
-    );
-    const scope: SharedMemoryGraphScope = {
-      kind: 'named-lifecycle',
-      identity: {
-        agentAddress: descriptor.scope.agentAddress,
-        kaNumber: BigInt(descriptor.scope.kaNumber),
-      },
-    };
-    const quads = await loadSharedMemoryQuadsForScope(
-      this.store,
-      swmBucket,
-      'all',
-      scope,
-      { quadFilter: (quad) => !isSwmMerkleExcludedQuad(quad) },
-    );
+    const stagedOperation = options.stagedOperation;
+    let quads: Quad[];
+    if (stagedOperation !== undefined) {
+      if (
+        stagedOperation.contextGraphId !== options.contextGraphId
+        || stagedOperation.kaUal !== descriptor.scope.ual
+        || stagedOperation.assertionVersion !== descriptor.scope.assertionVersion
+        || stagedOperation.subGraphName !== options.subGraphName
+      ) {
+        throw new Error('Staged SWM operation identity differs from the graph-scoped update');
+      }
+      const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+        store: this.store,
+        graphManager: this.graphManager,
+        contextGraphId: stagedOperation.contextGraphId,
+        shareOperationId: stagedOperation.shareOperationId,
+        kaUal: stagedOperation.kaUal,
+        assertionVersion: stagedOperation.assertionVersion,
+        ...(stagedOperation.subGraphName === undefined
+          ? {}
+          : { subGraphName: stagedOperation.subGraphName }),
+        ...(this.publicSnapshotStore === undefined
+          ? {}
+          : { publicSnapshotStore: this.publicSnapshotStore }),
+      });
+      quads = snapshot.quads;
+    } else {
+      const swmBucket = this.graphManager.sharedMemoryUri(
+        options.contextGraphId,
+        options.subGraphName,
+      );
+      const scope: SharedMemoryGraphScope = {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: descriptor.scope.agentAddress,
+          kaNumber: BigInt(descriptor.scope.kaNumber),
+        },
+      };
+      quads = await loadSharedMemoryQuadsForScope(
+        this.store,
+        swmBucket,
+        'all',
+        scope,
+        { quadFilter: (quad) => !isSwmMerkleExcludedQuad(quad) },
+      );
+    }
     const hasTrustedCatalogTriples =
       trustedCatalogTripleKeySet(options.trustedNonManifestCatalogTriples).size > 0;
     if (hasTrustedCatalogTriples) {
@@ -4491,8 +4542,9 @@ export class DKGPublisher implements Publisher {
         `No public or private quads available for graph-scoped KA ${descriptor.scope.ual}`,
       );
     }
+    const { stagedOperation: _consumedStagedOperation, ...publishOptions } = options;
     return this.update(kaId, {
-      ...options,
+      ...publishOptions,
       quads: quads.map((quad) => ({ ...quad, graph: '' })),
       [INTERNAL_ORIGIN_TOKEN]: true,
       ...(hasTrustedCatalogTriples

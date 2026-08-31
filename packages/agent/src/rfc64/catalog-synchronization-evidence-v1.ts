@@ -2,7 +2,7 @@
 
 import type {
   Rfc64CatalogAppliedHeadEvidenceV1,
-  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+  Rfc64FinalizedSwmRetirementLifecycleReceiptV2,
 } from './finalized-swm-retirement-lifecycle-receipt-v1.js';
 import type {
   Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
@@ -26,7 +26,7 @@ type Rfc64NativeSynchronizationEvidenceWithoutExtensionV1 =
 export type Rfc64CatalogSynchronizationEvidenceV1 = Readonly<
   Rfc64NativeSynchronizationEvidenceWithoutExtensionV1 & {
     readonly finalizedSwmRetirementLifecycleReceipts:
-      readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[];
+      readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV2>[];
   }
 >;
 
@@ -41,16 +41,19 @@ export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   }
   const receipts = extension?.finalizedSwmRetirementLifecycleReceipts ?? [];
   const { postAppliedHeadExtension: _postAppliedHeadExtension, ...baseEvidence } = evidence;
+  if (
+    extension !== undefined
+    && (
+      extension.committedHead.catalogHeadDigest !== evidence.catalogHeadDigest
+      || extension.committedHead.inventoryDigest !== evidence.inventoryDigest
+    )
+  ) {
+    throw new TypeError(
+      'RFC-64 applied-head evidence differs from its synchronization evidence head',
+    );
+  }
   const seenUals = new Set<string>();
   for (const receipt of receipts) {
-    if (
-      receipt.committedHead.catalogHeadDigest !== evidence.catalogHeadDigest
-      || receipt.committedHead.inventoryDigest !== evidence.inventoryDigest
-    ) {
-      throw new TypeError(
-        'RFC-64 lifecycle receipt differs from its synchronization evidence head',
-      );
-    }
     if (seenUals.has(receipt.kaUal)) {
       throw new TypeError(`RFC-64 synchronization evidence duplicates receipt ${receipt.kaUal}`);
     }
@@ -58,12 +61,8 @@ export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   }
   return Object.freeze({
     ...baseEvidence,
-    finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts.map((receipt) => (
-      Object.freeze({
-        ...receipt,
-        committedHead: Object.freeze({ ...receipt.committedHead }),
-      })
-    ))),
+    finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts.map((receipt) =>
+      Object.freeze({ ...receipt }))),
   });
 }
 
@@ -96,7 +95,6 @@ export function reduceRfc64CatalogSynchronizationEvidenceReplayV1(
           ...receipt,
           vmMaterializationStatus: 'materialized' as const,
           swmReconciliationOutcome: 'retired' as const,
-          committedHead: Object.freeze({ ...receipt.committedHead }),
         });
       }),
     ),
@@ -104,8 +102,8 @@ export function reduceRfc64CatalogSynchronizationEvidenceReplayV1(
 }
 
 function isBenignExactHeadLifecycleReplayV1(
-  previous: Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1> | undefined,
-  current: Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>,
+  previous: Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV2> | undefined,
+  current: Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV2>,
 ): boolean {
   return previous?.vmMaterializationStatus === 'materialized'
     && previous.swmReconciliationOutcome === 'retired'
@@ -117,8 +115,5 @@ function isBenignExactHeadLifecycleReplayV1(
     && previous.kaUal === current.kaUal
     && previous.assertionVersion === current.assertionVersion
     && previous.vmGraphIri === current.vmGraphIri
-    && previous.vmPostReadDigest === current.vmPostReadDigest
-    && previous.committedHead.kind === current.committedHead.kind
-    && previous.committedHead.catalogHeadDigest === current.committedHead.catalogHeadDigest
-    && previous.committedHead.inventoryDigest === current.committedHead.inventoryDigest;
+    && previous.vmPostReadDigest === current.vmPostReadDigest;
 }
