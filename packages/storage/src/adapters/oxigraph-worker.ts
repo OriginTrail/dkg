@@ -733,6 +733,9 @@ export class OxigraphWorkerStore implements TripleStore {
       () => this.call<number>('deleteByPattern', pattern),
     );
   }
+  async deleteByPatternWithoutCount(pattern: Partial<Quad>): Promise<void> {
+    await this.deleteByPattern(pattern);
+  }
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -781,7 +784,10 @@ export class OxigraphWorkerStore implements TripleStore {
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
     return this.runTrackedWrite(
       { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
-      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', manifest),
+      () => this.call<Rfc64AuthorCommitCasResultV1>(
+        'rfc64AuthorCommitCasNormalizedV1',
+        manifest,
+      ),
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {

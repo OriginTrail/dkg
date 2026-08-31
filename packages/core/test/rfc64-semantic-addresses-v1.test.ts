@@ -55,6 +55,16 @@ describe('RFC-64 semantic addresses v1', () => {
     );
   });
 
+  it.each([
+    'bad/name',
+    '_sync',
+    'e\u0301',
+    'a'.repeat(257),
+  ])('rejects noncanonical subgraph key input %j at the exported boundary', (value) => {
+    expect(() => computeRfc64SubGraphKeyV1(value as SubGraphNameV1))
+      .toThrow(/subGraphName/u);
+  });
+
   it('identifies only the directly reserved RFC-64 control-graph family', () => {
     const base = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
     expect(isRfc64SemanticControlGraphV1(`${base}/_sync`, CONTEXT_GRAPH)).toBe(true);

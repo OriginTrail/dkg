@@ -7,7 +7,10 @@ import {
   contextGraphLayerUri,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 
 const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
@@ -51,7 +54,7 @@ export async function applyPublishedNamedKaVmLifecycle(
     );
   }
 
-  await store.deleteByPattern({ subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, graph: metaGraph });
+  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, graph: metaGraph });
   await store.insert([{
     subject: lifecycleUri,
     predicate: VM_CURRENT_ASSERTION_PRED,
@@ -60,7 +63,7 @@ export async function applyPublishedNamedKaVmLifecycle(
   }]);
 
   for (const subject of [lifecycleUri, assertionUri]) {
-    await store.deleteByPattern({ subject, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+    await deleteByPatternWithoutCount(store, { subject, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
     await store.insert([{
       subject,
       predicate: MEMORY_LAYER_PRED,
@@ -68,14 +71,14 @@ export async function applyPublishedNamedKaVmLifecycle(
       graph: metaGraph,
     }]);
   }
-  await store.deleteByPattern({ subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
+  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
   await store.insert([{
     subject: lifecycleUri,
     predicate: STATE_PRED,
     object: '"published"',
     graph: metaGraph,
   }]);
-  await store.deleteByPattern({ subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
+  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
   await store.insert([{
     subject: lifecycleUri,
     predicate: PUBLISHED_UAL_PRED,
@@ -93,7 +96,7 @@ export async function applyPublishedNamedKaVmLifecycle(
     vmNumber,
     input.subGraphName,
   );
-  await store.deleteByPattern({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
+  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
   await store.insert([{
     subject: lifecycleUri,
     predicate: ASSERTION_GRAPH_PRED,
@@ -108,7 +111,7 @@ export async function applyPublishedNamedKaVmLifecycle(
     vmNumber,
     input.subGraphName,
   );
-  await store.deleteByPattern({ subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+  await deleteByPatternWithoutCount(store, { subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
   await store.insert([{
     subject: wmGraph,
     predicate: MEMORY_LAYER_PRED,

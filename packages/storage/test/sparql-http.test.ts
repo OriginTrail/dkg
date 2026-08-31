@@ -17,6 +17,7 @@ let server: Server;
 let queryUrl: string;
 let updateUrl: string;
 const insertedQuads: string[] = [];
+let countQuadsHits = 0;
 /** How many times the server received a listGraphs enumeration query (old `SELECT DISTINCT ?g` scan or the new index-read `GRAPH ?g {} FILTER EXISTS`). */
 let listGraphsHits = 0;
 /** The most recent listGraphs enumeration query the server received — asserted on to guard the query SHAPE (index-read, not the O(#quads) scan; dkg #1597). */
@@ -73,6 +74,7 @@ function startTestServer(): Promise<void> {
             return;
           }
           if (decoded.includes('COUNT(*)')) {
+            countQuadsHits++;
             res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
             res.end(JSON.stringify({
               head: { vars: ['c'] },
@@ -168,6 +170,40 @@ describe('SparqlHttpStore (test server)', () => {
     const updateReq = seen.find((r) => r.url.includes('/update'));
     expect(queryReq?.contentType).toBe('application/sparql-query; charset=utf-8');
     expect(updateReq?.contentType).toBe('application/sparql-update; charset=utf-8');
+  });
+
+  it.each([
+    [
+      'CONSTRUCT',
+      'PREFIX schema: <http://schema.org/>\nCONSTRUCT { ?s schema:name ?name } WHERE { ?s schema:name ?name }',
+    ],
+    [
+      'DESCRIBE',
+      'PREFIX schema: <http://schema.org/>\nDESCRIBE ?s WHERE { ?s schema:name ?name }',
+    ],
+  ])('uses an N-Quads Accept header for a PREFIX-prefixed %s query', async (
+    _form,
+    sparql,
+  ) => {
+    const originalFetch = globalThis.fetch;
+    let accept = '';
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      accept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? '';
+      return new Response(
+        '<http://ex.org/s> <http://schema.org/name> "Alice" .\n',
+        { status: 200, headers: { 'Content-Type': 'application/n-quads' } },
+      );
+    }) as typeof fetch;
+    try {
+      const prefixedStore = new SparqlHttpStore({
+        queryEndpoint: 'http://prefixed-construct.test/query',
+      });
+      const result = await prefixedStore.query(sparql);
+      expect(result.type).toBe('quads');
+      expect(accept).toBe('application/n-quads, text/n-quads');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('rejects RDF literals above the Java MUTF-8 hard limit before update POST', async () => {
@@ -1412,6 +1448,11 @@ describe('SparqlHttpStore (test server)', () => {
         attempt: (store) => store.deleteByPattern({ subject, graph }),
       },
       {
+        name: 'deleteByPatternWithoutCount',
+        scope: graph,
+        attempt: (store) => store.deleteByPatternWithoutCount({ subject, graph }),
+      },
+      {
         name: 'deleteBySubjectPrefix',
         scope: graph,
         attempt: (store) => store.deleteBySubjectPrefix(graph, subject),
@@ -1567,6 +1608,20 @@ describe('SparqlHttpStore (test server)', () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });
     expect(insertedQuads.some(q => q.includes('DELETE'))).toBe(true);
+  });
+
+  it('deleteByPatternWithoutCount sends one UPDATE and skips both COUNT queries', async () => {
+    insertedQuads.length = 0;
+    const countHitsBefore = countQuadsHits;
+
+    await store.deleteByPatternWithoutCount({
+      subject: 'http://ex.org/s',
+      graph: 'http://ex.org/g',
+    });
+
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('DELETE');
+    expect(countQuadsHits).toBe(countHitsBefore);
   });
 
   it('deleteBySubjectPrefix sends DELETE with FILTER STRSTARTS', async () => {

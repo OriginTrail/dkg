@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './agent-identity.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
 export * from './context-graph-join-policy.js';
@@ -74,6 +75,15 @@ export * from './rfc64-semantic-addresses-v1.js';
 export * from './rfc64-semantic-records-v1.js';
 export * from './rfc64-semantic-read-manifest-v1.js';
 export * from './rfc64-author-seal-read-manifest-v1.js';
+export {
+  isClosedDataRecord,
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+  type ClosedDataPrototypePolicy,
+  type ClosedDataReject,
+  type ClosedDataSnapshotOptions,
+} from './sync-wire-objects.js';
 export * from './typed-rdf-store-row-v1.js';
 export * from './event-bus.js';
 export * from './backpressure-observability.js';
@@ -164,9 +174,11 @@ export {
 // deep-import it from `../src/node.js`.
 export {
   type Network,
+  type PeerConnectionNetwork,
   type NodeIdentity,
   type Address,
   type DialOpts,
+  type PeerConnectOpts,
   type ProtocolHandler,
   LibP2PNetwork,
   canonicalPeerIdString,
@@ -176,8 +188,15 @@ export {
   StubNetworkStateRegistry,
   type AgentDirectoryLookup,
   type PeerResolverDeps,
+  type PeerConnectionOutcome,
+  connectLibp2pCandidate,
+  parseLibp2pConnectCandidate,
+  Libp2pConnectCandidateParseError,
+  type Libp2pConnectCandidate,
+  type Libp2pConnectHost,
   type PeerResolverLogger,
   type ResolveOpts,
+  type ConnectOpts,
   PeerResolver,
   dkgGossipMsgId,
   dkgGossipMsgIdRaw,

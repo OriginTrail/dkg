@@ -447,6 +447,32 @@ describe('GraphSetIndexStore', () => {
     });
   });
 
+  it('keeps graph membership correct after a no-count pattern delete', async () => {
+    const graph = 'did:dkg:context-graph:no-count-delete';
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q(graph)]);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+
+    await store.deleteByPatternWithoutCount({ graph, predicate: 'urn:p' });
+
+    await expect(store.listGraphs()).resolves.toEqual([]);
+  });
+
+  it('invalidates the full index after a graph-less no-count pattern delete', async () => {
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q('did:dkg:context-graph:no-count-one')]);
+    await expect(store.listGraphs()).resolves.toHaveLength(1);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await store.deleteByPatternWithoutCount({ predicate: 'urn:p' });
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(2);
+  });
+
   it('preserves deferred mutation source when hasGraph reads before listGraphs', async () => {
     const graph = 'did:dkg:context-graph:has-before-list';
     const counting = new CountingStore(new OxigraphStore());

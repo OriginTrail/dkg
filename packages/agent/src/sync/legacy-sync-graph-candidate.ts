@@ -24,12 +24,13 @@ export function isLegacySyncGraphCandidateV1(
 
   // Integrity-bearing assertion `/_meta` graphs remain payload. Only the
   // first-level `<cg>/<subgraph>/_meta` marker is protocol control metadata.
-  const segments = graph.slice(cg.length + 1).split('/').filter(Boolean);
+  const rawSegments = graph.slice(cg.length + 1).split('/');
+  const segments = rawSegments.filter(Boolean);
   if (segments.includes('_private')) return false;
   if (segments.includes('_working_memory')) return false;
   if (
     segments.includes('_shared_memory')
     || segments.includes('_shared_memory_meta')
   ) return false;
-  return !(segments.length === 2 && segments[1] === '_meta');
+  return !(rawSegments.length === 2 && rawSegments[1] === '_meta');
 }

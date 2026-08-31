@@ -44,6 +44,15 @@ export interface DialOpts {
   signal?: AbortSignal;
 }
 
+export interface PeerConnectOpts {
+  /** One caller-owned deadline shared by resolution and every dial attempt. */
+  signal?: AbortSignal;
+  /** Per-candidate cap so one stale route cannot starve later candidates. */
+  candidateTimeoutMs?: number;
+  /** Optional diagnostic sink for the transport's candidate walk. */
+  log?: (message: string) => void;
+}
+
 /**
  * Handler invoked for every inbound stream on a registered protocol.
  * Implementations should fully consume `stream` (read + close) before
@@ -131,4 +140,37 @@ export interface Network {
    */
   start(): Promise<void>;
   stop(): Promise<void>;
+}
+
+/**
+ * Optional transport capability used by {@link PeerResolver.connect}. Kept
+ * separate from {@link Network} so existing third-party Network
+ * implementations remain source-compatible when they only resolve addresses
+ * and open protocol streams.
+ */
+export interface PeerConnectionNetwork extends Network {
+  /**
+   * Establish a connection using an ordered resolver result. Implementations
+   * own address filtering, transport-specific relay setup, candidate timeout,
+   * and the final identity-only fallback.
+   */
+  connectPeer(
+    peerId: NodeIdentity,
+    resolvedAddresses: readonly Address[],
+    opts?: PeerConnectOpts,
+  ): Promise<void>;
+}
+
+/**
+ * Exact transport signal that an identity-only dial had no usable address.
+ * PeerResolver maps only this failure to an `unresolved` outcome; lifecycle,
+ * capability, policy, timeout, and other transport failures stay exceptional.
+ */
+export class PeerConnectionUnresolvedError extends Error {
+  readonly code = 'PEER_CONNECTION_UNRESOLVED';
+
+  constructor(message = 'Peer connection has no valid addresses', cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = 'PeerConnectionUnresolvedError';
+  }
 }

@@ -519,8 +519,10 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     // aimed at it would erase or corrupt the log, so it is rejected outright.
     await expect(log.dropGraph(CHANGELOG_GRAPH)).rejects.toThrow(/reserved/i);
     await expect(log.deleteByPattern({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
     await expect(log.deleteBySubjectPrefix(CHANGELOG_GRAPH, 'x')).rejects.toThrow(/reserved/i);
     expect(spy.insertCalls.length).toBe(callsBefore); // nothing reached the store
+    expect(await log.headSeq()).toBe(1); // log intact
     await base.close();
   });
 
@@ -552,6 +554,8 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     await log.insert([q('http://ex.org/a', G1)]); // seq 1
     await expect(log.deleteByPattern({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
     await expect(log.deleteByPattern({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
     expect(await log.headSeq()).toBe(1); // log intact
     await base.close();
   });
@@ -672,6 +676,28 @@ describe('ChangelogStore — delete-path op attribution & reconcile', () => {
     expect(await log.deleteByPattern({ subject: 'http://ex.org/b', graph: G1 })).toBeGreaterThan(0);
     expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual(['upsert', 'upsert', 'drop']);
     expect(log.needsReconcile).toBe(false); // graph-hinted path is fully attributed
+  });
+
+  it('no-count deleteByPattern emits a conservative marker and preserves drop attribution', async () => {
+    await log.insert([q('http://ex.org/a', G1), q('http://ex.org/b', G1)]);
+
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/a', graph: G1 });
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/b', graph: G1 });
+
+    expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual([
+      'upsert',
+      'upsert',
+      'drop',
+    ]);
+    expect(log.needsReconcile).toBe(false);
+  });
+
+  it('no-count graph-less delete flags reconcile without requiring a count', async () => {
+    await log.insert([q('http://ex.org/s1', G1)]);
+
+    await log.deleteByPatternWithoutCount({ predicate: 'http://ex.org/p' });
+
+    expect(log.needsReconcile).toBe(true);
   });
 });
 

@@ -5,6 +5,7 @@ import {
   buildCatalogAssertionScopeV1,
   contextGraphLayerUri,
   decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
+  decodeIriComponentV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   parseContextGraphAssertionUri,
   projectRfc64SemanticRecordStoreRowsV1,
@@ -24,7 +25,8 @@ import {
 } from './closed-data-snapshot.js';
 import {
   normalizeRfc64AuthorCommitCasV1,
-  type NormalizedRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasSemanticInputV1,
   type Rfc64AuthorCommitExactStateTransitionV1,
 } from './rfc64-author-commit-cas.js';
 
@@ -81,7 +83,7 @@ export class Rfc64SemanticAuthorCommitErrorV1 extends Error {
  */
 export function compileRfc64SemanticAuthorCommitV1(
   input: unknown,
-): NormalizedRfc64AuthorCommitCasV1 {
+): Rfc64AuthorCommitCasSemanticInputV1 {
   const candidate = snapshotExactRecord(input, [
     'authorSealGraph',
     'authorSealQuads',
@@ -218,7 +220,13 @@ export function compileRfc64SemanticAuthorCommitV1(
       RFC64_SEMANTIC_PREDICATES_V1.GENERATION,
     ),
   });
-  return normalizeRfc64AuthorCommitCasV1(compiled);
+  const source = sourceFromNormalizedRfc64AuthorCommitCasV1(
+    normalizeRfc64AuthorCommitCasV1(compiled),
+  );
+  if (!('currentHead' in source)) {
+    throw new Error('semantic author compiler produced a legacy storage input');
+  }
+  return source;
 }
 
 function assertPayloadTargets(
@@ -249,7 +257,7 @@ function assertPayloadTargets(
     contextGraphId: scope.contextGraphId,
     subGraphName: scope.subGraphName,
     authorAddress: scope.authorAddress,
-    assertionCoordinate: parsedCoordinate.name,
+    assertionCoordinate: decodeAssertionCoordinate(parsedCoordinate.name),
   }) as CanonicalGraphScopedAuthorSealCoordinateV1;
   let placement;
   try {
@@ -313,6 +321,18 @@ function assertPayloadTargets(
     fail(
       'rfc64-semantic-author-commit-scope',
       'shared projection quads target a graph outside the sealed KA author lane',
+    );
+  }
+}
+
+function decodeAssertionCoordinate(value: string): string {
+  try {
+    return decodeIriComponentV1(value);
+  } catch (cause) {
+    fail(
+      'rfc64-semantic-author-commit-schema',
+      'author seal assertion coordinate is not canonically encoded',
+      cause,
     );
   }
 }
