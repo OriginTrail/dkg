@@ -678,6 +678,9 @@ jobs:
       - name: "RFC-64 rollout transition certificate (Oxigraph)"
         if: matrix.shard == 10
         run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
+      - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
+        if: matrix.shard == 10
+        run: pnpm test:gate1:rfc64-public-open-harness
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit

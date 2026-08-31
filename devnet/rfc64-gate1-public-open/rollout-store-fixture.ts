@@ -8,7 +8,6 @@ import {
   createTripleStore,
   quadsToNQuads,
   readExactGraphPaged,
-  type BlazegraphNamespaceLease,
   type Quad,
   type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
@@ -23,6 +22,11 @@ import {
 
 export { parseRolloutStoreBackend, type RolloutStoreBackend } from './rollout-store-config.js';
 export type RolloutStoreRole = 'author' | 'receiver';
+type RolloutNamespaceHandle = Readonly<{
+  namespace: string;
+  namespaceUrl: string;
+  sparqlUrl: string;
+}>;
 
 export interface RolloutStoreFixture {
   readonly backend: RolloutStoreBackend;
@@ -160,7 +164,7 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
     private readonly endpointByStore: ReadonlyMap<string, string>,
     private readonly sentinelByStore: ReadonlyMap<string, string>,
     private readonly namespaceManager: BlazegraphNamespaceManager,
-    private readonly namespaceLeases: readonly BlazegraphNamespaceLease[],
+    private readonly namespaceHandles: readonly RolloutNamespaceHandle[],
     private readonly requestTimeoutMs: number,
   ) {}
 
@@ -193,15 +197,15 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
         }));
       }
     }
-    const leases = await namespaceManager.acquireMany(
+    const handles = await namespaceManager.acquireMany(
       plan.map((entry) => entry.namespace),
       input.signal,
     );
     const endpointByStore = new Map<string, string>();
     const sentinelByStore = new Map<string, string>();
     for (const [index, entry] of plan.entries()) {
-      const endpoint = leases[index]?.sparqlUrl;
-      if (endpoint === undefined) throw new Error(`missing namespace lease for ${entry.key}`);
+      const endpoint = handles[index]?.sparqlUrl;
+      if (endpoint === undefined) throw new Error(`missing namespace handle for ${entry.key}`);
       endpointByStore.set(entry.key, endpoint);
       const graph = sentinelGraph(nonce, entry.role, entry.roleIndex);
       sentinelByStore.set(entry.key, graph);
@@ -220,7 +224,7 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       }));
     } catch (cause) {
       try {
-        await namespaceManager.disposeAll(leases, { reconcileAttempts: 3 });
+        await namespaceManager.disposeAll(handles, { reconcileAttempts: 3 });
       } catch (cleanupCause) {
         throw new AggregateError(
           [cause, cleanupCause],
@@ -233,7 +237,7 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       endpointByStore,
       sentinelByStore,
       namespaceManager,
-      leases,
+      handles,
       input.requestTimeoutMs,
     );
   }
@@ -291,7 +295,7 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
   }
 
   async dispose(): Promise<void> {
-    await this.namespaceManager.disposeAll(this.namespaceLeases);
+    await this.namespaceManager.disposeAll(this.namespaceHandles);
   }
 }
 

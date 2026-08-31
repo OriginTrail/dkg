@@ -1,5 +1,4 @@
 export {
-  BlazegraphNamespaceLease,
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   assertBlazegraphNamespace,
@@ -8,7 +7,6 @@ export {
   normalizeBlazegraphNamespace,
   normalizeBlazegraphNamespaceApiUrl,
   renderBlazegraphNamespaceXml,
-  type BlazegraphNamespaceCodec,
   type BlazegraphNamespaceDisposeOptions,
   type BlazegraphNamespaceEnsureResult,
   type BlazegraphNamespaceManagerOptions,
