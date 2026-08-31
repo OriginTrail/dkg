@@ -10,6 +10,7 @@ import type {
   TripleStoreDecorator,
   UpdateOptions,
 } from './triple-store.js';
+import { deleteByPatternWithoutCount } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
@@ -21,7 +22,10 @@ import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
-import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
+} from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
 
@@ -290,6 +294,27 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     return removed;
   }
 
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.enabled) {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      return;
+    }
+    await deleteByPatternWithoutCount(this.inner, pattern, options);
+    const graph = pattern.graph;
+    if (graph) {
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
+    } else {
+      // Without an exact count, conservatively invalidate even when the
+      // pattern may have matched no rows. This preserves graph membership
+      // correctness without reintroducing count-before/count-after scans.
+      this.scheduleFullRefresh('deleteByPattern');
+    }
+  }
+
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     if (!this.enabled) {
       return this.inner.query(sparql, options);
@@ -483,7 +508,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       );
     }
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(manifest, options);
+    const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
     // Prepare every fallible index-maintenance input before dispatch. Once the
     // inner capability reports `committed`, only best-effort observation and
     // index maintenance may remain; malformed caller input must never create a
@@ -491,7 +517,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     const touchedGraphs = [...manifest.touchedGraphs];
     let result: Rfc64AuthorCommitCasResultV1;
     try {
-      result = await this.inner.rfc64AuthorCommitCasV1(manifest, options);
+      result = await this.inner.rfc64AuthorCommitCasV1(source, options);
     } catch (error) {
       if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
         this.scheduleFullRefresh('rfc64AuthorCommitCasV1');

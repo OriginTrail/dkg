@@ -144,6 +144,19 @@ export interface TripleStore {
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
+  /**
+   * Delete every matching quad without calculating the exact number removed.
+   *
+   * Remote SPARQL adapters can execute this as one UPDATE instead of the
+   * count-before / update / count-after sequence required by
+   * {@link deleteByPattern}. Optional so third-party stores remain compatible;
+   * callers should use {@link deleteByPatternWithoutCount}, which falls back to
+   * the counted operation when this capability is unavailable.
+   */
+  deleteByPatternWithoutCount?(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
   /** Execute one member of the certified closed RFC-64 exact-bindings union. */
   readonly rfc64ExactBindingsReadCertifiedV1?: boolean;
@@ -285,6 +298,32 @@ export function findTripleStoreCapability<T>(
     candidate = (candidate as { innerStore?: unknown }).innerStore;
   }
   return null;
+}
+
+/**
+ * Delete matching quads when the caller does not consume an exact count.
+ *
+ * The call deliberately stays on the outermost decorator so graph indexes,
+ * changelogs, literal translation, and cache invalidation still observe the
+ * mutation. Stores that have not implemented the optional fast path retain
+ * the old semantics through the counted fallback.
+ */
+export async function deleteByPatternWithoutCount<Pattern>(
+  store: {
+    deleteByPattern(pattern: Pattern, options?: QueryOptions): Promise<unknown>;
+    deleteByPatternWithoutCount?(
+      pattern: Pattern,
+      options?: QueryOptions,
+    ): Promise<void>;
+  },
+  pattern: Pattern,
+  options?: QueryOptions,
+): Promise<void> {
+  if (typeof store.deleteByPatternWithoutCount === 'function') {
+    await store.deleteByPatternWithoutCount(pattern, options);
+    return;
+  }
+  await store.deleteByPattern(pattern, options);
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import {
+  deleteByPatternWithoutCount,
   GraphManager,
   invalidateSwmMaterializationWitness,
   tryReplaceGraphAtomically,
@@ -2300,7 +2301,7 @@ export class SharedMemoryHandler {
       const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
       const countVal = parseCountLiteral(rawCount);
       if (countVal === 0) {
-        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+        await deleteByPatternWithoutCount(this.store, { graph: metaGraph, subject: op });
       }
     }
   }

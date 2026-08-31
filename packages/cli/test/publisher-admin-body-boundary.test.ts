@@ -1,8 +1,9 @@
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 
 // #1890 — the four publisher admin POST routes now share one request-body boundary
 // (readSmallJsonObject). This pins each route's body handling — importantly the previously
@@ -11,20 +12,29 @@ import type { RequestContext } from '../src/daemon/routes/context.js';
 // route keeps its own field validation + response shape. clear-job's wire contract is
 // asserted byte-identical (also guarded end-to-end by publisher-clear-job-route.test.ts).
 describe('#1890 publisher admin POST body boundary', () => {
-  function control(): RequestContext['publisherControl'] {
+  function control(
+    overrides: Partial<NonNullable<RequestContext['publisherControl']>> = {},
+  ): RequestContext['publisherControl'] {
     return {
       cancel: async () => {},
       // GH#2270 — the route reads the DETAILED disposition; `retry` stays on the fake
       // because it is still the base-contract method (delegating to this one in the real
       // publisher), and a body-boundary row must not depend on which one the route picked.
       retry: async () => 3,
-      retryDetailed: async () => ({ retried: 3, blockedPendingRecovery: 1, skipped: 2 }),
+      retryDetailed: async (filter) => filter?.jobId === 'lift-job-7'
+        ? { retried: 1, blockedPendingRecovery: 0, skipped: 0 }
+        : { retried: 3, blockedPendingRecovery: 1, skipped: 2 },
       clear: async () => 2,
       clearTerminalJob: async () => ({ outcome: 'already_absent' as const }),
+      ...overrides,
     } as unknown as RequestContext['publisherControl'];
   }
 
-  async function post(path: string, rawBody: string) {
+  async function post(
+    path: string,
+    rawBody: string,
+    publisherControl = control(),
+  ) {
     const url = new URL(`http://127.0.0.1${path}`);
     const req = Readable.from([]);
     Object.assign(req, {
@@ -40,7 +50,7 @@ describe('#1890 publisher admin POST body boundary', () => {
       req: req as RequestContext['req'],
       res: res as unknown as ServerResponse,
       agent: {} as RequestContext['agent'],
-      publisherControl: control(),
+      publisherControl,
       publisherState: { runtime: null, availability: { available: false, reason: 'publisher_disabled', retryable: false, operatorActionRequired: true } },
       config: {} as RequestContext['config'],
       startedAt: 0,
@@ -94,6 +104,44 @@ describe('#1890 publisher admin POST body boundary', () => {
     });
     it('unsupported status → 400', async () => {
       expect(await post('/api/publisher/retry', JSON.stringify({ status: 'queued' }))).toEqual({ status: 400, body: { error: 'Only status=failed is supported' } });
+    });
+    it('exact jobId → retries only the selected job', async () => {
+      expect(await post('/api/publisher/retry', JSON.stringify({
+        status: 'failed',
+        jobId: 'lift-job-7',
+      }))).toEqual({
+        status: 200,
+        body: { retried: 1, blockedPendingRecovery: 0, skipped: 0 },
+      });
+    });
+    it('invalid jobId → 400', async () => {
+      expect(await post('/api/publisher/retry', JSON.stringify({ status: 'failed', jobId: 42 }))).toEqual({
+        status: 400,
+        body: { error: SAFE_JOB_ID_ERROR },
+      });
+    });
+    it('empty jobId → 400 without broadening to retry-all', async () => {
+      expect(await post('/api/publisher/retry', JSON.stringify({ status: 'failed', jobId: '' }))).toEqual({
+        status: 400,
+        body: { error: SAFE_JOB_ID_ERROR },
+      });
+    });
+    it('rejects unsafe and overlength jobIds before querying publisher control', async () => {
+      const retryDetailed = vi.fn(async () => ({
+        retried: 0,
+        blockedPendingRecovery: 0,
+        skipped: 0,
+      }));
+      const publisherControl = control({ retryDetailed });
+
+      for (const jobId of ['bad>id', 'a'.repeat(257)]) {
+        expect(await post(
+          '/api/publisher/retry',
+          JSON.stringify({ status: 'failed', jobId }),
+          publisherControl,
+        )).toEqual({ status: 400, body: { error: SAFE_JOB_ID_ERROR } });
+      }
+      expect(retryDetailed).not.toHaveBeenCalled();
     });
     it('null body → 200 (hardened, not a 500)', async () => {
       expect(await post('/api/publisher/retry', 'null')).toEqual({ status: 200, body: { retried: 3, blockedPendingRecovery: 1, skipped: 2 } });

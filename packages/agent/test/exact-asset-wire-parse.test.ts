@@ -23,6 +23,7 @@ import {
   readDurableDataPage,
   serializeResponderRows,
 } from '../src/sync/responder/graph-plan.js';
+import { createGraphMembershipSnapshot } from '../src/sync/graph-membership-snapshot.js';
 import {
   linesFromNquads,
   registerTestSyncHandler,
@@ -232,7 +233,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
 
     const directPage = await readDurableDataPage({
       store,
-      graphList: payloadGraphs,
+      graphMembership: createGraphMembershipSnapshot(payloadGraphs),
       contextGraphId,
       sinceBatchId: null,
       offset: 0,
@@ -371,7 +372,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
 
     await expect(readDurableDataPage({
       store,
-      graphList: payloadGraphs,
+      graphMembership: createGraphMembershipSnapshot(payloadGraphs),
       contextGraphId,
       sinceBatchId: null,
       offset: 0,

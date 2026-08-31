@@ -39,6 +39,11 @@ import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
 import { isLegacySyncGraphCandidateV1 } from '../legacy-sync-graph-candidate.js';
+import { compareCodePoint } from '../code-point-order.js';
+import {
+  createGraphMembershipSnapshot,
+  type GraphMembershipSnapshot,
+} from '../graph-membership-snapshot.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -46,6 +51,7 @@ export {
   type SyncRow,
   type SyncRowListMemo,
 } from './snapshot-cache.js';
+export { compareCodePoint } from '../code-point-order.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const DKG_SUB_GRAPH = `${DKG}SubGraph`;
@@ -81,7 +87,7 @@ export interface GraphListMemo {
     refresh?: boolean;
     refreshGeneration?: string;
     signal?: AbortSignal;
-  }): Promise<readonly string[]>;
+  }): Promise<GraphMembershipSnapshot>;
 }
 
 export interface SubGraphNameMemo {
@@ -263,13 +269,14 @@ export function createResponderGraphListMemo(
     }
     return current !== undefined && stored !== current;
   };
+  let lastSnapshot: GraphMembershipSnapshot | null = null;
   let cached: {
-    value: readonly string[];
+    value: GraphMembershipSnapshot;
     cachedAt: number;
     revision: Revision;
   } | null = null;
   let inflight: {
-    promise: Promise<readonly string[]>;
+    promise: Promise<GraphMembershipSnapshot>;
     revision: Revision;
   } | null = null;
   return {
@@ -286,7 +293,7 @@ export function createResponderGraphListMemo(
         // identity. Concurrent reads at the same unstable generation share
         // one enumeration; the result is simply discarded for later callers.
         if (!supersedesInflight(pending.revision, revision)) {
-          return [...(await raceAgainstAbort(pending.promise, options?.signal))];
+          return raceAgainstAbort(pending.promise, options?.signal);
         }
         try {
           await raceAgainstAbort(pending.promise, options?.signal);
@@ -301,19 +308,26 @@ export function createResponderGraphListMemo(
         cached &&
         now - cached.cachedAt < ttlMs &&
         (!options?.refresh || (writeRevisionSource !== null && isWriteRevision(revision) && revision.stable))
-      ) return [...cached.value];
+      ) return cached.value;
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
       const load = store.listGraphs(syncResponderStoreOptions(undefined, 'sync.responder.listGraphs'))
         .then((graphs) => {
-          const sorted = [...new Set(graphs)].sort(compareCodePoint);
+          // Content writes advance the store revision even when named-graph
+          // membership is unchanged. Reuse the immutable index in that case:
+          // enumeration stays freshness-safe, while sorting, Set construction,
+          // and every downstream membership index remain stable.
+          const snapshot = lastSnapshot?.matches(graphs)
+            ? lastSnapshot
+            : createGraphMembershipSnapshot(graphs);
+          lastSnapshot = snapshot;
           cached = {
-            value: sorted,
+            value: snapshot,
             cachedAt: Date.now(),
             revision,
           };
-          return sorted;
+          return snapshot;
         })
         .finally(() => {
           if (inflight?.promise === load) inflight = null;
@@ -322,9 +336,9 @@ export function createResponderGraphListMemo(
         promise: load,
         revision,
       };
-      const graphs = await load;
+      const snapshot = await load;
       throwIfAborted(options?.signal);
-      return [...graphs];
+      return snapshot;
     },
   };
 }
@@ -564,17 +578,6 @@ function createSubGraphNameMemo(
   };
 }
 
-export function compareCodePoint(a: string, b: string): number {
-  const left = Array.from(a);
-  const right = Array.from(b);
-  const len = Math.min(left.length, right.length);
-  for (let i = 0; i < len; i++) {
-    const delta = left[i].codePointAt(0)! - right[i].codePointAt(0)!;
-    if (delta !== 0) return delta;
-  }
-  return left.length - right.length;
-}
-
 export function compareRows(a: SyncRow, b: SyncRow): number {
   return (
     compareCodePoint(a.g, b.g) ||
@@ -811,7 +814,7 @@ export function serializeResponderRowsWithinByteBudget(
 
 export async function readSwmMetaPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   registeredSubGraphNames: readonly string[];
   contextGraphId: string;
   cutoffIso: string | null;
@@ -825,8 +828,7 @@ export async function readSwmMetaPage(params: {
   freshMetaPlanMemo?: FreshSwmMetaPlanMemo;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
-  const graphSet = new Set(params.graphList);
-  const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
+  const candidateGraphs = graphs.filter((graph) => params.graphMembership.has(graph));
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
@@ -934,7 +936,7 @@ export async function readSwmMetaPage(params: {
 
 export async function readSwmDataPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   registeredSubGraphNames: readonly string[];
   contextGraphId: string;
   cutoffIso: string | null;
@@ -949,10 +951,10 @@ export async function readSwmDataPage(params: {
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
-  const graphSet = new Set(params.graphList);
-  const candidateGraphsFor = (graph: string) => params.graphList
-    .filter((candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph))
-    .sort(compareCodePoint);
+  const candidateGraphsFor = (graph: string) => params.graphMembership.equalOrUnder(
+    graph,
+    (candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph),
+  );
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
@@ -981,7 +983,7 @@ export async function readSwmDataPage(params: {
     const loadPlan = () => buildFreshSwmDataGraphPlan(
       params.store,
       dataGraphs,
-      graphSet,
+      params.graphMembership,
       params.cutoffIso!,
       signal,
     );
@@ -1577,7 +1579,7 @@ export async function readChangelogDeltaPage(params: {
 
 export async function readDurableDataPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   contextGraphId: string;
   sinceBatchId: bigint | null;
   offset: number;
@@ -1656,7 +1658,7 @@ export async function readDurableDataPage(params: {
           params.contextGraphId,
           planSignal,
         );
-        const { isCandidateGraph, isAdmitted } = createAdmissionContext(
+        const { cgPrefix, isCandidateGraph, isAdmitted } = createAdmissionContext(
           params.store,
           params.contextGraphId,
           { graphScopedVmManifest: manifest },
@@ -1673,7 +1675,7 @@ export async function readDurableDataPage(params: {
         // Legacy-only CGs retain the graph-list path, so their existing local
         // data remains readable and can still be synchronized on that lane.
         const legacyCandidateGraphs = manifest.knownGraphs.size === 0
-          ? params.graphList.filter(isCandidateGraph)
+          ? params.graphMembership.equalOrUnder(cgPrefix, isCandidateGraph)
           : [];
         const candidateGraphs = dedupeStrings([
           ...legacyCandidateGraphs,
@@ -1709,7 +1711,7 @@ export async function readDurableDataPage(params: {
       graphScopedVmManifest: manifest,
     });
   const candidateGraphs = dedupeStrings([
-    ...params.graphList.filter(isCandidateGraph),
+    ...params.graphMembership.equalOrUnder(cgPrefix, isCandidateGraph),
     ...manifest.confirmedEntries
       .filter((entry) => entry.rowCount > 0)
       .map((entry) => entry.graph),
@@ -3301,7 +3303,7 @@ async function readBoundedFreshSwmMetaSnapshot(
 async function readFreshSwmDataRows(
   store: TripleStore,
   dataGraphs: readonly string[],
-  graphSet: ReadonlySet<string>,
+  graphMembership: GraphMembershipSnapshot,
   candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
   signal?: AbortSignal,
@@ -3309,7 +3311,7 @@ async function readFreshSwmDataRows(
   const rows: SyncRow[] = [];
   for (const graph of dataGraphs) {
     const metaGraph = `${graph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
+    if (!graphMembership.has(metaGraph)) continue;
     const roots = await readFreshSwmRoots(store, metaGraph, cutoffIso, signal);
     if (roots.size === 0) continue;
     const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
@@ -3370,7 +3372,7 @@ function parseSparqlInteger(value: string | undefined): number {
 async function buildFreshSwmDataGraphPlan(
   store: TripleStore,
   dataGraphs: readonly string[],
-  graphSet: ReadonlySet<string>,
+  graphMembership: GraphMembershipSnapshot,
   cutoffIso: string,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
@@ -3378,7 +3380,7 @@ async function buildFreshSwmDataGraphPlan(
   for (const bucketGraph of dedupeStrings(dataGraphs).sort(compareCodePoint)) {
     throwIfAborted(signal);
     const metaGraph = `${bucketGraph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
+    if (!graphMembership.has(metaGraph)) continue;
     const roots = [...await readFreshSwmRoots(store, metaGraph, cutoffIso, signal)]
       .sort(compareCodePoint);
     for (const chunk of chunkValues(roots, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
@@ -3405,7 +3407,7 @@ async function buildFreshSwmDataGraphPlan(
         if (
           !graph
           || !root
-          || !graphSet.has(graph)
+          || !graphMembership.has(graph)
           || !chunkSet.has(root)
           || (graph !== bucketGraph
             && !isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph))

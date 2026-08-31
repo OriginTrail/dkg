@@ -26,10 +26,12 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
+  buildRfc64AuthorCommitCasUpdateFromNormalizedV1,
   buildRfc64AuthorCommitCasUpdateV1,
   executeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
+  type Rfc64AuthorCommitCasUpdateV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import {
@@ -300,6 +302,10 @@ export class OxigraphStore implements TripleStore {
     return matches.length;
   }
 
+  async deleteByPatternWithoutCount(pattern: Partial<DKGQuad>): Promise<void> {
+    await this.deleteByPattern(pattern);
+  }
+
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     throwIfAborted(options?.signal);
     // The embedded Oxigraph binding executes synchronously, so a caller abort
@@ -461,7 +467,23 @@ export class OxigraphStore implements TripleStore {
     options?: TripleStoreQueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
     throwIfAborted(options?.signal);
-    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    return this.executeRfc64AuthorCommitCasPlanV1(
+      buildRfc64AuthorCommitCasUpdateV1(input),
+    );
+  }
+
+  /** Worker-only transport boundary for the structured-cloned internal plan. */
+  async rfc64AuthorCommitCasNormalizedV1(
+    input: unknown,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    return this.executeRfc64AuthorCommitCasPlanV1(
+      buildRfc64AuthorCommitCasUpdateFromNormalizedV1(input),
+    );
+  }
+
+  private async executeRfc64AuthorCommitCasPlanV1(
+    plan: Rfc64AuthorCommitCasUpdateV1,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
     const guarded = plan.semanticQuads.filter(
       (quad) => !(quad.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(quad.graph)),
     );
