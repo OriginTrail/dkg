@@ -43,6 +43,15 @@ import {
   seedOldState,
 } from './rfc64-author-commit-cas-harness.js';
 
+function normalizeGeneratedIds(value: string): string {
+  return value
+    .replaceAll(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/giu,
+      '<generated-id>',
+    )
+    .replaceAll(/\?subject[PO][0-9a-f]{32}/giu, '?subject<generated-id>');
+}
+
 describe('RFC-64 certified author commit CAS v1', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -265,7 +274,8 @@ describe('RFC-64 certified author commit CAS v1', () => {
   });
 
   it('rejects a deserialized semantic plan that drops its mandatory guards', () => {
-    const legitimate = normalizeRfc64AuthorCommitCasV1(authorCommitInput());
+    const source = authorCommitInput();
+    const legitimate = normalizeRfc64AuthorCommitCasV1(source);
     expect(decodeNormalizedRfc64AuthorCommitCasV1(structuredClone(legitimate)))
       .toEqual(legitimate);
     const forged = {
@@ -275,10 +285,15 @@ describe('RFC-64 certified author commit CAS v1', () => {
 
     expect(() => decodeNormalizedRfc64AuthorCommitCasV1(forged))
       .toThrow(/invalid guard topology/u);
-    expect(() => buildRfc64AuthorCommitCasUpdateFromNormalizedV1(
+    const sourceUpdate = buildRfc64AuthorCommitCasUpdateV1(source);
+    const deserializedUpdate = buildRfc64AuthorCommitCasUpdateFromNormalizedV1(
       structuredClone(legitimate),
-    ))
-      .not.toThrow();
+    );
+    expect(normalizeGeneratedIds(deserializedUpdate.update)).toBe(
+      normalizeGeneratedIds(sourceUpdate.update),
+    );
+    expect(deserializedUpdate.semanticQuads).toEqual(sourceUpdate.semanticQuads);
+    expect(deserializedUpdate.touchedGraphs).toEqual(sourceUpdate.touchedGraphs);
 
     const swapped = structuredClone(legitimate);
     [swapped.subjectReplacements[1], swapped.subjectReplacements[2]] = [
