@@ -513,7 +513,7 @@ describe('ChainEventPoller — pollNow', () => {
 });
 
 describe('ChainEventPoller — lane health instruments', () => {
-  it('records poll outcomes and cursor lag with lane and result only', async () => {
+  it('records lane scans and cursor lag with lane and result only', async () => {
     let now = 0;
     const polls: Array<{ lane: ChainEventPollerLane; result: ChainEventLanePollResult }> = [];
     const lags: Array<{ lane: ChainEventPollerLane; lagBlocks: number }> = [];
@@ -528,11 +528,11 @@ describe('ChainEventPoller — lane health instruments', () => {
       intervalMs: CADENCE_MS,
       clock: () => now,
       metrics: {
-        recordPoll: function (...args) {
+        laneScan: function (...args) {
           rawArgCounts.push(args.length);
           polls.push({ lane: args[0], result: args[1] });
         },
-        recordCursorLagBlocks: function (...args) {
+        laneCursorLag: function (...args) {
           rawArgCounts.push(args.length);
           lags.push({ lane: args[0], lagBlocks: args[1] });
         },
@@ -550,7 +550,7 @@ describe('ChainEventPoller — lane health instruments', () => {
 
     expect(polls).toEqual([
       { lane: 'kaRootMutations', result: 'success' },
-      { lane: 'kaRootMutations', result: 'no-work' },
+      { lane: 'kaRootMutations', result: 'noWork' },
       { lane: 'kaRootMutations', result: 'failure' },
     ]);
     // Lag is measured before the scan: seeded 41 000 against head 50 000, then

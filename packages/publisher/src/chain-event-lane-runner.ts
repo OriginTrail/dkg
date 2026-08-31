@@ -34,7 +34,7 @@ const FAILURE_BACKOFF_INITIAL_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 
 /** How a due tick for one lane ended. Metric label value; keep stable. */
-export type ChainEventLanePollResult = 'success' | 'no-work' | 'failure';
+export type ChainEventLanePollResult = 'success' | 'failure' | 'noWork';
 
 /**
  * Lane-health recorder.
@@ -47,8 +47,8 @@ export type ChainEventLanePollResult = 'success' | 'no-work' | 'failure';
  * through this interface, because there is nowhere to put one.
  */
 export interface ChainEventLaneMetrics {
-  recordPoll(lane: ChainEventPollerLane, result: ChainEventLanePollResult): void;
-  recordCursorLagBlocks(lane: ChainEventPollerLane, lagBlocks: number): void;
+  laneScan(lane: ChainEventPollerLane, result: ChainEventLanePollResult): void;
+  laneCursorLag(lane: ChainEventPollerLane, lagBlocks: number): void;
 }
 
 /** Per-lane liveness, surfaced for the daemon's diagnostics route. */
@@ -352,7 +352,7 @@ export class ChainEventLaneRunner {
 
     if (head != null) {
       state.lastScanHead = head;
-      this.metrics?.recordCursorLagBlocks(lane.spec.name, Math.max(0, head - state.lastBlock));
+      this.metrics?.laneCursorLag(lane.spec.name, Math.max(0, head - state.lastBlock));
     }
     state.lastScanAtMs = now;
 
@@ -468,18 +468,18 @@ export class ChainEventLaneRunner {
   private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {
     const state = lane.state;
     if (outcome.kind === 'noWork') {
-      this.metrics?.recordPoll(lane.spec.name, 'no-work');
+      this.metrics?.laneScan(lane.spec.name, 'noWork');
       state.nextRunAtMs = outcome.now + lane.spec.cadenceMs;
       return;
     }
     if (outcome.kind === 'success') {
-      this.metrics?.recordPoll(lane.spec.name, 'success');
+      this.metrics?.laneScan(lane.spec.name, 'success');
       state.failureBackoffMs = undefined;
       state.nextRunAtMs = outcome.caughtUp ? outcome.now + lane.spec.cadenceMs : undefined;
       return;
     }
 
-    this.metrics?.recordPoll(lane.spec.name, 'failure');
+    this.metrics?.laneScan(lane.spec.name, 'failure');
     const previous = state.failureBackoffMs;
     const next = previous == null
       ? Math.max(FAILURE_BACKOFF_INITIAL_MS, lane.spec.cadenceMs)
