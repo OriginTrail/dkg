@@ -66,7 +66,6 @@ import {
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
-  type Rfc64SharedProjectionStreamOperationV1,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -79,16 +78,15 @@ import {
 import { readSparqlResponseText } from './sparql-response-policy.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
 import type {
-  Rfc64SharedProjectionStreamCapabilityOptionsV1,
   Rfc64SharedProjectionStreamCapabilityV1,
 } from '../rfc64-shared-projection-stream-capability.js';
 import {
-  spoolRfc64SharedProjectionHttpResponseV1,
-} from '../rfc64-shared-projection-http-spool.js';
-import {
   createManagedOxigraphRuntimeStoreConfigV1,
-  isManagedOxigraphRuntimeStoreOptionsV1,
 } from '../managed-oxigraph-runtime-store.js';
+import {
+  createManagedOxigraphSharedProjectionRunnerV1,
+  type ManagedOxigraphConstructRequestV1,
+} from '../managed-oxigraph-shared-projection-runner.js';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
@@ -117,6 +115,9 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
 const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
 const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
+const MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY = Object.freeze({
+  kind: 'dkg-managed-oxigraph-sparql-construction-v1',
+} as const);
 /**
  * A non-OK response from the configured SPARQL endpoint.
  *
@@ -309,7 +310,10 @@ export class SparqlHttpStore implements TripleStore {
   // reconcile negative memo via `asGraphWriteGenSource` / `getWriteRevision`.
   private readonly writeGen = new GraphWriteGenTracker();
 
-  constructor(options: SparqlHttpStoreOptions) {
+  constructor(
+    options: SparqlHttpStoreOptions,
+    constructionAuthority?: typeof MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY,
+  ) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
     }
@@ -317,7 +321,7 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
-    this.managedOxigraph = isManagedOxigraphRuntimeStoreOptionsV1(options);
+    this.managedOxigraph = constructionAuthority === MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
@@ -343,64 +347,44 @@ export class SparqlHttpStore implements TripleStore {
       this.headers['Authorization'] = options.auth;
     }
     if (this.managedOxigraph) {
-      this.rfc64SharedProjectionStreamV1 = (operation, capabilityOptions) =>
-        this.openManagedOxigraphSharedProjectionV1(operation, capabilityOptions);
+      this.rfc64SharedProjectionStreamV1 = createManagedOxigraphSharedProjectionRunnerV1({
+        runConstruct: (request, consume) => this.runStreamingConstruct(request, consume),
+        responseError: (status, excerpt) => new SparqlHttpResponseError(
+          'rfc64-shared-projection',
+          status,
+          excerpt,
+        ),
+      });
     }
   }
 
-  private openManagedOxigraphSharedProjectionV1(
-    operation: Rfc64SharedProjectionStreamOperationV1,
-    options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
-  ): ReturnType<Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1']> {
+  private runStreamingConstruct<T>(
+    request: ManagedOxigraphConstructRequestV1,
+    consume: (
+      response: Response,
+      lifecycleSignal: AbortSignal | undefined,
+    ) => Promise<T>,
+  ): Promise<T> {
     return this.runStoreWork(
       'construct',
       {
-        priority: 'background',
-        signal: options.signal,
-        source: 'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1',
+        priority: request.priority,
+        signal: request.signal,
+        source: request.source,
       },
       async (lifecycleSignal) => {
         const effectiveOptions: SparqlHttpQueryOptions = {
-          priority: 'background',
+          priority: request.priority,
           signal: lifecycleSignal,
-          source: 'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1',
+          source: request.source,
         };
         return this.postQuery(
-          operation.sparql,
-          'application/n-quads, text/n-quads',
+          request.sparql,
+          request.accept,
           'construct',
           'construct',
           effectiveOptions,
-          async (response) => {
-            if (!response.ok) {
-              const text = await readSparqlResponseText(response, {
-                maxResponseBytes: Math.min(options.byteCeiling, 64 * 1024),
-                managedOxigraph: true,
-                operation: 'construct',
-                tolerateReadFailure: true,
-              });
-              throw new SparqlHttpResponseError(
-                'rfc64-shared-projection',
-                response.status,
-                text.slice(0, 300),
-              );
-            }
-            if (response.body === null) {
-              throw new SparqlHttpResponseError(
-                'rfc64-shared-projection',
-                response.status,
-                'response has no readable body',
-              );
-            }
-            return spoolRfc64SharedProjectionHttpResponseV1({
-              body: response.body,
-              operation,
-              byteCeiling: options.byteCeiling,
-              signal: lifecycleSignal,
-              consumptionSignal: options.signal,
-              managedOxigraph: true,
-            });
-          },
+          (response) => consume(response, lifecycleSignal),
         );
       },
     );
@@ -1268,7 +1252,10 @@ export function createManagedOxigraphSparqlStoreV1(
       managedByDkg: true,
     },
   });
-  return new SparqlHttpStore(config.options as SparqlHttpStoreOptions);
+  return new SparqlHttpStore(
+    { ...options, managedByDkg: config.options.managedByDkg === true },
+    MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY,
+  );
 }
 
 function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {
@@ -1507,10 +1494,15 @@ export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
 // Adapter registration
 // ---------------------------------------------------------------------------
 
-registerTripleStoreAdapter('sparql-http', async (opts) => {
+registerTripleStoreAdapter('sparql-http', async (opts, context) => {
   const options = opts as SparqlHttpStoreOptions | undefined;
   if (!options?.queryEndpoint) {
     throw new Error('sparql-http adapter requires options.queryEndpoint (and optionally options.updateEndpoint)');
   }
-  return new SparqlHttpStore(options);
+  return new SparqlHttpStore(
+    options,
+    context?.managedOxigraphRuntime
+      ? MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY
+      : undefined,
+  );
 });

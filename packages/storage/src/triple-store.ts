@@ -33,7 +33,7 @@ import type {
   Rfc64SharedProjectionStreamCapabilityOptionsV1,
 } from './rfc64-shared-projection-stream-capability.js';
 import {
-  copyManagedOxigraphRuntimeStoreOptionsV1,
+  isManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';
 
 export interface Quad {
@@ -524,7 +524,12 @@ export interface TripleStoreConfig {
 
 type AdapterFactory = (
   options?: Record<string, unknown>,
+  context?: TripleStoreAdapterConstructionContext,
 ) => Promise<TripleStore>;
+
+interface TripleStoreAdapterConstructionContext {
+  readonly managedOxigraphRuntime: boolean;
+}
 
 const adapterRegistry = new Map<string, AdapterFactory>();
 
@@ -545,7 +550,10 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
-  const store = await factory(resolveAdapterOptions(config));
+  const context = Object.freeze({
+    managedOxigraphRuntime: isManagedOxigraphRuntimeStoreConfigV1(config),
+  });
+  const store = await factory(resolveAdapterOptions(config), context);
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
@@ -578,7 +586,7 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
   // process carries separate storage-issued runtime provenance; never derive
   // that consistency proof from persisted namespace ownership.
-  return copyManagedOxigraphRuntimeStoreOptionsV1(config.options, {
+  return Object.freeze({
     ...config.options,
     managedByDkg: false,
   });

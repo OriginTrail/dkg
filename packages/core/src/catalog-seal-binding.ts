@@ -14,7 +14,9 @@ import {
   type AssertionCoordinateV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
+  type ContextGraphIdV1,
   type NetworkIdV1,
+  type SubGraphNameV1,
 } from './author-catalog-codec.js';
 import {
   MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1,
@@ -30,6 +32,7 @@ import {
   assertCanonicalChainId,
   assertCanonicalEvmAddress,
   type ChainIdV1,
+  type ByteLengthV1,
   type DecimalU64V1,
   type Digest32V1,
   type EvmAddressV1,
@@ -59,18 +62,18 @@ export interface VerifiedCatalogSealBindingV1 {
 }
 
 export interface VerifiedCatalogSealBindingSnapshotV1 {
-  /** Canonical immutable scope retained by the verifier. */
-  readonly catalogScope: Readonly<AuthorCatalogScopeV1>;
-  /** Canonical immutable row retained by the verifier. */
-  readonly catalogRow: Readonly<AuthorCatalogRowV1>;
   readonly catalogScopeDigest: Digest32V1;
   readonly catalogRowDigest: Digest32V1;
   readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly subGraphName: SubGraphNameV1 | null;
   readonly authorAddress: EvmAddressV1;
   readonly kaId: KaIdV1;
   readonly assertionCoordinate: AssertionCoordinateV1;
   readonly assertionVersion: DecimalU64V1;
   readonly sealDigest: Digest32V1;
+  readonly projectionDigest: Digest32V1;
+  readonly signedTransferByteLength: ByteLengthV1;
   readonly placement: Readonly<CanonicalGraphScopedAuthorSealPlacementV1>;
   readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
   readonly sealRows: readonly Readonly<CanonicalGraphScopedAuthorSealRowV1>[];
@@ -241,26 +244,23 @@ export function verifyCatalogSealBindingV1(
   const placement = Object.freeze({ ...classified.placement });
   const sealSnapshot = Object.freeze({ ...classified.payload });
   const sealRows = Object.freeze(classified.rows.map((sealRow) => Object.freeze({ ...sealRow })));
-  const scopeSnapshot = Object.freeze({ ...scope });
-  const rowSnapshot = Object.freeze({
-    ...catalogRow,
-    transfer: Object.freeze({ ...catalogRow.transfer }),
-  });
   const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
   const snapshot = Object.freeze({
-    catalogScope: scopeSnapshot,
-    catalogRow: rowSnapshot,
     catalogScopeDigest,
     catalogRowDigest: computeAuthorCatalogRowDigestV1(
       catalogScopeDigest,
       catalogRow,
     ),
     networkId: pinnedDeployment.networkId,
+    contextGraphId: scope.contextGraphId,
+    subGraphName: scope.subGraphName,
     authorAddress: scope.authorAddress,
     kaId: catalogRow.kaId,
     assertionCoordinate: catalogRow.assertionCoordinate,
     assertionVersion: catalogRow.assertionVersion,
     sealDigest: classified.sealDigest,
+    projectionDigest: catalogRow.projectionDigest,
+    signedTransferByteLength: catalogRow.transfer.byteLength,
     placement,
     seal: sealSnapshot,
     sealRows,

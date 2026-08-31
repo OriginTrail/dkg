@@ -64,18 +64,25 @@ export function raceStoreWorkAgainstAbort<T>(
   return new Promise<T>((resolve, reject) => {
     let aborted = false;
     let settled = false;
+    let abortListenerAttached = false;
+    const removeAbortListener = () => {
+      if (!abortListenerAttached) return;
+      abortListenerAttached = false;
+      signal.removeEventListener('abort', onAbort);
+    };
     const onAbort = () => {
       if (settled) return;
       aborted = true;
       settled = true;
-      signal.removeEventListener('abort', onAbort);
+      removeAbortListener();
       reject(normalizeAbortReason(signal.reason));
     };
+    abortListenerAttached = true;
     signal.addEventListener('abort', onAbort, { once: true });
     if (!aborted && signal.aborted) onAbort();
     work.then(
       (value) => {
-        signal.removeEventListener('abort', onAbort);
+        removeAbortListener();
         if (aborted) {
           void Promise.resolve(onLateResult?.(value)).catch(() => undefined);
         } else if (!settled) {
@@ -84,7 +91,7 @@ export function raceStoreWorkAgainstAbort<T>(
         }
       },
       (cause) => {
-        signal.removeEventListener('abort', onAbort);
+        removeAbortListener();
         if (!settled) {
           settled = true;
           reject(cause);
