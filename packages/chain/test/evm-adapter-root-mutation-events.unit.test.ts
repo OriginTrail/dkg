@@ -87,6 +87,8 @@ interface ScanRecord {
   skipPreferred?: boolean;
   fromBlock: unknown;
   toBlock: unknown;
+  /** The COMPLETE `eth_getLogs` request the production callback issued (review r7). */
+  request?: { address?: unknown; topics?: unknown; fromBlock?: unknown; toBlock?: unknown };
 }
 
 /**
@@ -206,8 +208,34 @@ function makeAdapter(options: {
   // so ethers never eagerly decodes an untrusted payload (review r2): a
   // `queryFilter` route would wrap each log in an `EventLog`, whose
   // construction decodes the non-indexed tail before topics[1] is ever read.
-  priv.readProvider = async (label, _fn, opts) => recordScan(label, opts);
-  priv.readContractWith = async (_c, label, _fn, opts) => recordScan(label, opts);
+  //
+  // The seam EXECUTES the real callback against a fake provider (review r7): a
+  // stub that returned canned logs without running `fn` left the owning
+  // address, the topic OR-set and the block range unasserted — dropping
+  // `fromBlock` from the production request would have stayed green.
+  priv.readProvider = async (label, fn, opts) => {
+    const canned = recordScan(label, opts);
+    const record = scans[scans.length - 1];
+    const fakeProvider = {
+      getLogs: async (req: NonNullable<ScanRecord['request']>) => {
+        record.request = { ...req };
+        record.fromBlock = req.fromBlock;
+        record.toBlock = req.toBlock;
+        return canned;
+      },
+    };
+    return (fn as (p: typeof fakeProvider) => Promise<unknown>)(fakeProvider);
+  };
+  priv.readContractWith = async (_c, label, _fn, opts) => {
+    // The group scan must use the RAW provider route. A revival of the
+    // contract-read route (say, `queryFilterWithFailover` under the same
+    // label) FAILS here rather than silently receiving the same canned logs
+    // (review r7); legacy single-event branches still stub as before.
+    if (label.includes('KnowledgeAssetRootMutations')) {
+      throw new Error(`root-mutation scan took the contract-read route: ${label}`);
+    }
+    return recordScan(label, opts);
+  };
 
   return { adapter, scans, parseLogCalls, iface };
 }
@@ -403,6 +431,30 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
       expect(scan.policy, scan.label).toBe('wideLogScan');
       expect(scan.skipPreferred, scan.label).toBe(true);
     }
+  });
+
+  it('sends the owning address, the four-topic OR filter and the requested block range (review r7)', async () => {
+    const { adapter, scans, iface } = makeAdapter({});
+
+    await drain(adapter, [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+
+    expect(scans).toHaveLength(1);
+    const req = scans[0].request;
+    expect(req, 'the production callback never issued getLogs').toBeDefined();
+    // The scan is pinned to the storage contract that owns the events — an
+    // address-less request would match every contract on the chain.
+    expect(req?.address).toBe('0x' + '22'.repeat(20));
+    // topics[0] is the OR-set of exactly the four root-mutation topic hashes;
+    // no further topic positions are constrained.
+    const expectedHashes = KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES
+      .map((name) => iface.getEvent(name)!.topicHash);
+    const topics = req?.topics as string[][];
+    expect(topics).toHaveLength(1);
+    expect([...topics[0]].sort()).toEqual([...expectedHashes].sort());
+    // The range is the caller's window, verbatim — a dropped bound would scan
+    // from genesis or clamp to a lagging endpoint's tip.
+    expect(req?.fromBlock).toBe(1);
+    expect(req?.toBlock).toBe(9_000);
   });
 
   it('a legacy ABI without the four events yields nothing and does not throw', async () => {

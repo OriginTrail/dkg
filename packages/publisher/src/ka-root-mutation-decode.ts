@@ -46,17 +46,24 @@ export type KnowledgeAssetRootMutationDecodeResult =
   | { ok: false; reason: KnowledgeAssetRootMutationDecodeFailure };
 
 /**
- * `author` is ADVISORY enrichment: a malformed spelling degrades to `null`
- * (the unattributed reading) rather than dropping an event whose identity
- * fields are sound. `parseLog` returns checksummed addresses while core's
+ * `author` is ADVISORY enrichment with a TRI-STATE contract (review r7):
+ *  - canonical nonzero address → attributed (`author: '0x…'`)
+ *  - canonical zero address    → EXPLICITLY unattributed (`author: null`)
+ *  - absent or malformed       → UNKNOWN (`author` omitted)
+ * The last two must not collapse: `null` is a positive on-chain claim that
+ * nobody attested the update, while an omitted property only says this decode
+ * could not read the enrichment. A consumer that erased authorship over a
+ * corrupt RPC payload would be acting on evidence the chain never gave it.
+ * The event itself still flows either way — identity fields, not enrichment,
+ * decide delivery. `parseLog` returns checksummed addresses while core's
  * canonical form is lowercase, so the lowercasing here is load-bearing.
  */
-function degradeAuthor(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
+function degradeAuthor(value: unknown): string | null | undefined {
+  if (typeof value !== 'string') return undefined;
   try {
     return canonicalNullableAuthorAddress(value.toLowerCase());
   } catch {
-    return null;
+    return undefined;
   }
 }
 
@@ -109,13 +116,15 @@ export function decodeKnowledgeAssetRootMutationEvent(
 
   let mutation: KnowledgeAssetRootMutationEventV1;
   switch (kind) {
-    case 'lifecycle-update':
+    case 'lifecycle-update': {
+      const author = degradeAuthor(data['author']);
       mutation = {
         kind, kaId, position,
         ...(merkleRoot ? { merkleRoot } : {}),
-        author: degradeAuthor(data['author']),
+        ...(author !== undefined ? { author } : {}),
       };
       break;
+    }
     case 'root-added':
     case 'root-removed':
       mutation = { kind, kaId, position, ...(merkleRoot ? { merkleRoot } : {}) };

@@ -253,16 +253,25 @@ describe('ChainEventPoller — kaRootMutations payload', () => {
     expect(zero.author).toBeNull();
   });
 
-  it('records a noncanonical author as null rather than dropping the event', async () => {
+  it('a missing or malformed author is UNKNOWN (omitted), never explicitly unattributed (review r7)', async () => {
     // `author` is advisory; the asset identity is not. Dropping the event over
-    // a bad author field would lose a convergence for a cosmetic reason.
-    const seen = await dispatchOne(
+    // a bad author field would lose a convergence for a cosmetic reason — but
+    // reporting the failure as `author: null` would be worse: `null` is the
+    // POSITIVE on-chain claim "the zero address published this", and a corrupt
+    // RPC payload must not manufacture that claim. Tri-state: attributed
+    // string / explicit-zero `null` / unknown OMITTED.
+    const malformed = await dispatchOne(
       rootMutation('KnowledgeAssetUpdated', 50, { author: 'not-an-address' }),
     );
+    const missing = await dispatchOne(
+      rootMutation('KnowledgeAssetUpdated', 50, { author: undefined }),
+    );
 
-    expect(seen).toHaveLength(1);
-    expect(seen[0].author).toBeNull();
-    expect(seen[0].kaId).toBe('42');
+    for (const seen of [malformed, missing]) {
+      expect(seen).toHaveLength(1);
+      expect('author' in seen[0]).toBe(false);
+      expect(seen[0].kaId).toBe('42');
+    }
   });
 
   it('drops an event whose chain position is incomplete', async () => {
@@ -681,6 +690,38 @@ describe('ChainEventPoller — pollNow', () => {
     expect(scansStarted).toBe(1);
     // A pollNow() issued after stop() is refused loudly rather than queued.
     await expect(poller.pollNow()).rejects.toThrow(/stopped/);
+  });
+
+  it('a whole-poll rejection reaches its own caller only; the queue recovers (review r7)', async () => {
+    // Serialization promises each manual caller its OWN scan's outcome. The
+    // stored chain pre-swallows every run (`run.catch(() => {})`) precisely so
+    // a first caller's failure cannot poison the queue — this row exercises
+    // the rejection branch that promise rests on: drop that internal catch and
+    // the second caller below inherits the first caller's error.
+    const { adapter } = makeChain(50_000);
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => 0,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+    const priv = poller as unknown as { laneRunner: { poll(): Promise<void> } };
+    const realPoll = priv.laneRunner.poll.bind(priv.laneRunner);
+    let runnerCalls = 0;
+    priv.laneRunner.poll = async () => {
+      runnerCalls += 1;
+      if (runnerCalls === 1) throw new Error('whole poll boom');
+      return realPoll();
+    };
+
+    // A WHOLE-poll failure (the runner itself rejecting, not a per-lane scan
+    // error the runner catches and backs off internally) surfaces to the
+    // caller that asked for the scan.
+    await expect(poller.pollNow()).rejects.toThrow('whole poll boom');
+    // The next manual poll still runs and resolves: the queue recovered.
+    await expect(poller.pollNow()).resolves.toBeUndefined();
+    expect(runnerCalls).toBe(2);
   });
 
   it("passing the removed 'onCollectionUpdated' key warns loudly and enables no lane (review r3)", async () => {
