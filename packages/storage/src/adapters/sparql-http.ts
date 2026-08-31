@@ -84,6 +84,7 @@ import {
   createManagedOxigraphRuntimeStoreConfigV1,
   getManagedOxigraphRuntimeConstructionAuthorityV1,
   isManagedOxigraphRuntimeConstructionAuthorityV1,
+  snapshotManagedOxigraphRuntimeOptionsV1,
 } from '../managed-oxigraph-runtime-store.js';
 import {
   createManagedOxigraphSharedProjectionRunnerV1,
@@ -1233,13 +1234,10 @@ export function createManagedOxigraphSparqlStoreV1(
 ): SparqlHttpStore {
   const config = createManagedOxigraphRuntimeStoreConfigV1({
     backend: 'sparql-http',
-    options: {
-      ...options,
-      managedByDkg: true,
-    },
+    options: snapshotManagedOxigraphRuntimeOptionsV1(options, true),
   });
   return new SparqlHttpStore(
-    { ...options, managedByDkg: config.options.managedByDkg === true },
+    config.options as unknown as SparqlHttpStoreOptions,
     getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
 }

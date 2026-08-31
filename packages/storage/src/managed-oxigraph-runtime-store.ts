@@ -17,16 +17,66 @@ export interface ManagedOxigraphRuntimeStoreConfigV1 extends TripleStoreConfig {
   readonly [MANAGED_RUNTIME_CONTEXT]: typeof MANAGED_RUNTIME_AUTHORITY;
 }
 
+/**
+ * Capture an options bag without invoking caller code. Managed authority is
+ * valid only for the values in this snapshot, never for a later read from the
+ * caller-owned object.
+ *
+ * @internal Shared with the dedicated managed adapter constructor.
+ */
+export function snapshotManagedOxigraphRuntimeOptionsV1(
+  input: unknown,
+  managedByDkg = false,
+): Readonly<Record<string, unknown>> {
+  if (input === null || typeof input !== 'object') {
+    throw new Error('managed Oxigraph options must be an object of data properties');
+  }
+
+  let descriptors: PropertyDescriptorMap;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(input);
+  } catch {
+    throw new Error('managed Oxigraph options could not be snapshotted');
+  }
+
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== 'string') {
+      throw new Error('managed Oxigraph options must use string data properties');
+    }
+    const descriptor = descriptors[key]!;
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new Error(`managed Oxigraph option ${key} must be a data property`);
+    }
+    if (managedByDkg && key === 'managedByDkg') continue;
+    Object.defineProperty(snapshot, key, {
+      configurable: false,
+      enumerable: true,
+      value: descriptor.value,
+      writable: false,
+    });
+  }
+  if (managedByDkg) {
+    Object.defineProperty(snapshot, 'managedByDkg', {
+      configurable: false,
+      enumerable: true,
+      value: true,
+      writable: false,
+    });
+  }
+  return Object.freeze(snapshot);
+}
+
 export function createManagedOxigraphRuntimeStoreConfigV1(
   config: TripleStoreConfig,
 ): ManagedOxigraphRuntimeStoreConfigV1 {
   if (config.backend !== 'sparql-http') {
     throw new Error('managed Oxigraph runtime config must use the sparql-http backend');
   }
-  const options = config.options;
-  if (options === undefined) {
+  if (config.options === undefined) {
     throw new Error('managed Oxigraph runtime config requires endpoint options');
   }
+  const options = snapshotManagedOxigraphRuntimeOptionsV1(config.options);
   assertLoopbackEndpoint(options.queryEndpoint, 'queryEndpoint');
   assertLoopbackEndpoint(
     options.updateEndpoint ?? options.queryEndpoint,
@@ -37,9 +87,17 @@ export function createManagedOxigraphRuntimeStoreConfigV1(
   }
 
   const runtimeConfig = {
-    ...config,
     backend: 'sparql-http' as const,
-    options: Object.freeze({ ...options }),
+    options,
+    ...(config.largeLiteralStorage === undefined
+      ? {}
+      : { largeLiteralStorage: config.largeLiteralStorage }),
+    ...(config.graphSetIndex === undefined
+      ? {}
+      : { graphSetIndex: config.graphSetIndex }),
+    ...(config.changelog === undefined
+      ? {}
+      : { changelog: config.changelog }),
   } as ManagedOxigraphRuntimeStoreConfigV1;
   Object.defineProperty(runtimeConfig, MANAGED_RUNTIME_CONTEXT, {
     configurable: false,

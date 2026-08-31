@@ -130,6 +130,77 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     }
   });
 
+  it('rejects managed option accessors without invoking them', () => {
+    let reads = 0;
+    const options = {
+      managedByDkg: true,
+    } as Record<string, unknown>;
+    Object.defineProperty(options, 'queryEndpoint', {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return reads === 1
+          ? 'http://127.0.0.1:7878/query'
+          : 'https://remote.example/query';
+      },
+    });
+
+    expect(() => createManagedOxigraphRuntimeStoreConfigV1({
+      backend: 'sparql-http',
+      options,
+    })).toThrow('managed Oxigraph option queryEndpoint must be a data property');
+    expect(() => createManagedOxigraphSparqlStoreV1(
+      options as unknown as Parameters<typeof createManagedOxigraphSparqlStoreV1>[0],
+    )).toThrow('managed Oxigraph option queryEndpoint must be a data property');
+    expect(reads).toBe(0);
+  });
+
+  it('constructs the managed adapter only from the validated proxy snapshot', async () => {
+    const loopback = 'http://127.0.0.1:7878/query';
+    const mutable = {
+      queryEndpoint: loopback,
+      updateEndpoint: 'http://127.0.0.1:7878/update',
+      managedByDkg: true,
+    };
+    let ordinaryReads = 0;
+    const options = new Proxy(mutable, {
+      get(target, key, receiver) {
+        ordinaryReads += 1;
+        if (key === 'queryEndpoint') return 'https://remote.example/query';
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const config = createManagedOxigraphRuntimeStoreConfigV1({
+      backend: 'sparql-http',
+      options,
+    });
+    mutable.queryEndpoint = 'https://mutated.example/query';
+
+    const originalFetch = globalThis.fetch;
+    let requestedUrl: string | undefined;
+    globalThis.fetch = (async (input) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({
+        head: { vars: [] },
+        results: { bindings: [] },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/sparql-results+json' },
+      });
+    }) as typeof fetch;
+    let store: Awaited<ReturnType<typeof createTripleStore>> | undefined;
+    try {
+      store = await createTripleStore(config);
+      await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 1');
+      expect(requestedUrl).toBe(loopback);
+      expect(config.options.queryEndpoint).toBe(loopback);
+      expect(ordinaryReads).toBe(0);
+    } finally {
+      await store?.close();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('uses the frozen exact CONSTRUCT and exposes sorted canonical line bytes', async () => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
     const schedule = vi.spyOn(scheduler, 'run');

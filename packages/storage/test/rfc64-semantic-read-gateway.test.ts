@@ -184,10 +184,9 @@ describe('SyncSemanticStoreV1', () => {
       embedded,
       worker,
       new BlazegraphStore('http://rfc64-compat-blazegraph.test/sparql'),
-      new SparqlHttpStore({
-        queryEndpoint: 'http://rfc64-compat-oxigraph.test/query',
-        updateEndpoint: 'http://rfc64-compat-oxigraph.test/update',
-        managedOxigraph: true,
+      createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
       }),
     ];
     try {
