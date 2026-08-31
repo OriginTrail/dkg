@@ -70,7 +70,7 @@ interface MutableAuthorRepairStatusV1 {
   dirty: boolean;
 }
 
-interface ProjectionSupervisorStateV1 {
+export interface ProjectionSupervisorStateV1 {
   readonly retryIntervalMs?: number;
   readonly repairs: MutableAuthorRepairStatusV1[];
   readonly ctx: OperationContext;
@@ -92,7 +92,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     if (config === undefined) return;
     const partition = partitionRfc64CatalogBootstrapV1(
       config,
-      this.config.rfc64CatalogRollout,
+      this.config.rfc64CatalogExecutionPlan,
     );
     const localAuthors = this.listLocalAgents().map(
       ({ agentAddress }) => agentAddress.toLowerCase() as EvmAddressV1,
@@ -129,8 +129,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       },
     );
     if (repairs.length === 0) return;
-    const existing = this.rfc64CatalogRuntimeV1
-      ?.readProjectionState<ProjectionSupervisorStateV1>();
+    const existing = this.rfc64CatalogRuntimeV1.readProjectionState();
     if (existing !== undefined) {
       if (existing.runner.closed) return;
       for (const repair of repairs) {
@@ -158,7 +157,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       lastPassStartedAtMs: null,
       lastPassCompletedAtMs: null,
     };
-    this.rfc64CatalogRuntimeV1?.writeProjectionState(state);
+    this.rfc64CatalogRuntimeV1.writeProjectionState(state);
     runner.request();
   }
 
@@ -175,7 +174,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       readonly ctx?: OperationContext;
     }>,
   ): boolean {
-    if (this.rfc64CatalogRuntimeV1?.projectionAdmissionClosed ?? true) return false;
+    if (this.rfc64CatalogRuntimeV1.projectionAdmissionClosed) return false;
     assertContextGraphIdV1(params.contextGraphId, 'SWM catalog projection contextGraphId');
     const authorAddress = params.authorAddress.toLowerCase() as EvmAddressV1;
     assertCanonicalEvmAddress(authorAddress, 'SWM catalog projection authorAddress');
@@ -187,15 +186,14 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       return false;
     }
 
-    let state = this.rfc64CatalogRuntimeV1
-      ?.readProjectionState<ProjectionSupervisorStateV1>();
+    let state = this.rfc64CatalogRuntimeV1.readProjectionState();
     if (state === undefined) {
       const config = this.resolveRuntimeRfc64ProjectionBootstrapConfigV1();
       const retryIntervalMs = config === undefined
         ? undefined
         : partitionRfc64CatalogBootstrapV1(
           config,
-          this.config.rfc64CatalogRollout,
+          this.config.rfc64CatalogExecutionPlan,
         ).retryIntervalMs;
       let created!: ProjectionSupervisorStateV1;
       const runner = this.createRfc64SwmCatalogProjectionRunnerV1(
@@ -213,7 +211,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
         lastPassCompletedAtMs: null,
       };
       state = created;
-      this.rfc64CatalogRuntimeV1?.writeProjectionState(state);
+      this.rfc64CatalogRuntimeV1.writeProjectionState(state);
     }
     if (state.runner.closed) return false;
     let repair = state.repairs.find(
@@ -243,8 +241,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   readRfc64SwmCatalogProjectionSupervisorStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64SwmCatalogProjectionSupervisorStatusV1> | null {
-    const state = this.rfc64CatalogRuntimeV1
-      ?.readProjectionState<ProjectionSupervisorStateV1>();
+    const state = this.rfc64CatalogRuntimeV1.readProjectionState();
     if (state === undefined) return null;
     return Object.freeze({
       running: state.runner.running,
@@ -259,18 +256,16 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   }
 
   async whenRfc64SwmCatalogProjectionSupervisorIdleV1(this: DKGAgent): Promise<void> {
-    const state = this.rfc64CatalogRuntimeV1
-      ?.readProjectionState<ProjectionSupervisorStateV1>();
+    const state = this.rfc64CatalogRuntimeV1.readProjectionState();
     await state?.runner.whenIdle();
   }
 
   async closeRfc64SwmCatalogProjectionSupervisorV1(this: DKGAgent): Promise<void> {
-    this.rfc64CatalogRuntimeV1?.closeProjectionAdmission();
-    const state = this.rfc64CatalogRuntimeV1
-      ?.readProjectionState<ProjectionSupervisorStateV1>();
+    this.rfc64CatalogRuntimeV1.closeProjectionAdmission();
+    const state = this.rfc64CatalogRuntimeV1.readProjectionState();
     if (state === undefined) return;
     await state.runner.close();
-    this.rfc64CatalogRuntimeV1?.clearProjectionState();
+    this.rfc64CatalogRuntimeV1.clearProjectionState();
   }
 
   private createRfc64SwmCatalogProjectionRunnerV1(

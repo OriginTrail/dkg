@@ -25,6 +25,9 @@ import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
 import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
+import type { BootstrapStateV1 } from './dkg-agent-rfc64-catalog-bootstrap.js';
+import type { ProjectionSupervisorStateV1 } from
+  './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
@@ -1179,7 +1182,10 @@ export class DKGAgentBase {
   protected readonly rfc64CatalogMutationCoordinatorV1 =
     new Rfc64CatalogMutationCoordinatorV1();
   /** One explicit owner for observer, receiver, supervisor, and mutation lifetimes. */
-  protected rfc64CatalogRuntimeV1?: Rfc64CatalogRuntimeV1;
+  protected rfc64CatalogRuntimeV1!: Rfc64CatalogRuntimeV1<
+    BootstrapStateV1,
+    ProjectionSupervisorStateV1
+  >;
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
     new Map<string, Rfc64PublicCatalogNativeSynchronizationEvidenceV1>();

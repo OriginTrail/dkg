@@ -19,12 +19,12 @@ export interface Rfc64CatalogRuntimeOptionsV1 {
   readonly closeServiceAndMutations: () => Promise<void>;
 }
 
-export class Rfc64CatalogRuntimeV1 {
+export class Rfc64CatalogRuntimeV1<BootstrapState, ProjectionState> {
   readonly #options: Rfc64CatalogRuntimeOptionsV1;
   #started = false;
   #close: Promise<void> | null = null;
-  #bootstrapState: unknown;
-  #projectionState: unknown;
+  #bootstrapState: BootstrapState | undefined;
+  #projectionState: ProjectionState | undefined;
   #projectionAdmissionClosed = false;
 
   constructor(options: Rfc64CatalogRuntimeOptionsV1) {
@@ -32,10 +32,10 @@ export class Rfc64CatalogRuntimeV1 {
   }
 
   start(ctx: OperationContext): void {
-    if (this.#started) return;
     if (this.#close !== null) {
       throw new Error('RFC-64 catalog runtime cannot start while close is in progress');
     }
+    if (this.#started) return;
     this.#projectionAdmissionClosed = false;
     this.#options.openInventoryObservers();
     this.#options.startService(ctx);
@@ -51,11 +51,11 @@ export class Rfc64CatalogRuntimeV1 {
     ]);
   }
 
-  readBootstrapState<T>(): T | undefined {
-    return this.#bootstrapState as T | undefined;
+  readBootstrapState(): BootstrapState | undefined {
+    return this.#bootstrapState;
   }
 
-  writeBootstrapState<T>(state: T): void {
+  writeBootstrapState(state: BootstrapState): void {
     this.#bootstrapState = state;
   }
 
@@ -63,11 +63,11 @@ export class Rfc64CatalogRuntimeV1 {
     this.#bootstrapState = undefined;
   }
 
-  readProjectionState<T>(): T | undefined {
-    return this.#projectionState as T | undefined;
+  readProjectionState(): ProjectionState | undefined {
+    return this.#projectionState;
   }
 
-  writeProjectionState<T>(state: T): void {
+  writeProjectionState(state: ProjectionState): void {
     this.#projectionState = state;
   }
 
@@ -87,22 +87,38 @@ export class Rfc64CatalogRuntimeV1 {
     if (this.#close !== null) return this.#close;
     const closing = this.#closeOwnedLifecycle();
     this.#close = closing;
-    return closing.finally(() => {
+    void closing.then(() => {
       if (this.#close === closing) this.#close = null;
       this.#started = false;
+    }, () => {
+      // A failed owner did not prove that its resource closed. Keep the
+      // rejected close promise as a permanent fence: callers may observe the
+      // failure again, but same-instance restart cannot reopen partial state.
     });
+    return closing;
   }
 
   async #closeOwnedLifecycle(): Promise<void> {
     // Preserve the production dependency order: producer admission first,
     // receiver admission second, then fence both independent workload owners
     // concurrently before transport and mutation persistence are released.
-    await this.#options.closeInventoryObservers();
-    await this.#options.closeReceiverAdmission();
-    await Promise.all([
-      this.#options.closeBootstrap(),
-      this.#options.closeProjection(),
+    const failures: unknown[] = [];
+    const settle = async (actions: readonly (() => Promise<void>)[]): Promise<void> => {
+      const results = await Promise.allSettled(actions.map((action) => action()));
+      for (const result of results) {
+        if (result.status === 'rejected') failures.push(result.reason);
+      }
+    };
+    await settle([this.#options.closeInventoryObservers]);
+    await settle([this.#options.closeReceiverAdmission]);
+    await settle([
+      this.#options.closeBootstrap,
+      this.#options.closeProjection,
     ]);
-    await this.#options.closeServiceAndMutations();
+    await settle([this.#options.closeServiceAndMutations]);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'RFC-64 catalog runtime close failed');
+    }
   }
 }

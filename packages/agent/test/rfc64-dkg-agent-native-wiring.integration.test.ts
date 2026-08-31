@@ -76,6 +76,8 @@ import {
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
+  '../src/rfc64/public-catalog-native-reconciler-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
@@ -3190,6 +3192,96 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       contextGraphId: CONTEXT_GRAPH_ID,
       authorAddress: AUTHOR,
     }));
+  }, 60_000);
+
+  it('drains receiver-applied local projection before persistence closes', async () => {
+    const [author, receiver] = await Promise.all([
+      startNativeAgent('shutdown-callback-author'),
+      startNativeAgentWithOptions({
+        name: 'shutdown-callback-receiver',
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+        },
+      }),
+    ]);
+    receiver.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    vi.spyOn(receiver, 'listLocalAgents').mockReturnValue([
+      { agentAddress: AUTHOR } as never,
+    ]);
+    await connectBothWays(author, receiver);
+
+    let markReceiverCommitted!: () => void;
+    let releaseReceiverCompletion!: () => void;
+    const receiverCommitted = new Promise<void>((resolve) => {
+      markReceiverCommitted = resolve;
+    });
+    const receiverCompletionGate = new Promise<void>((resolve) => {
+      releaseReceiverCompletion = resolve;
+    });
+    const originalReconcile =
+      Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype.reconcileHead;
+    vi.spyOn(
+      Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype,
+      'reconcileHead',
+    ).mockImplementation(async function (...args) {
+      const result = await originalReconcile.apply(this, args);
+      markReceiverCommitted();
+      await receiverCompletionGate;
+      return result;
+    });
+
+    let markProjectionEntered!: () => void;
+    let releaseProjection!: () => void;
+    const projectionEntered = new Promise<void>((resolve) => {
+      markProjectionEntered = resolve;
+    });
+    const projectionGate = new Promise<void>((resolve) => {
+      releaseProjection = resolve;
+    });
+    const projection = vi.spyOn(
+      receiver,
+      'reconcileRfc64PublicCatalogFromSwmInventoryV1',
+    ).mockImplementation(async () => {
+      markProjectionEntered();
+      await projectionGate;
+      return null;
+    });
+    const persistenceClose = vi.spyOn(receiver, 'closeRfc64PersistenceV1');
+
+    const publishing = author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: AUTHOR_WALLET,
+      peers: [receiver.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await receiverCommitted;
+
+    let stopSettled = false;
+    const stopping = receiver.stop().finally(() => { stopSettled = true; });
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
+    expect(persistenceClose).not.toHaveBeenCalled();
+
+    releaseReceiverCompletion();
+    await projectionEntered;
+    await Promise.resolve();
+    expect(projection).toHaveBeenCalledOnce();
+    expect(stopSettled).toBe(false);
+    expect(persistenceClose).not.toHaveBeenCalled();
+
+    releaseProjection();
+    await expect(stopping).resolves.toBeUndefined();
+    await publishing;
+    agents.splice(agents.indexOf(receiver), 1);
+    expect(persistenceClose).toHaveBeenCalledOnce();
   }, 60_000);
 
   it('reads the exact staged head variant to dedupe a durably applied multi-row set', async () => {

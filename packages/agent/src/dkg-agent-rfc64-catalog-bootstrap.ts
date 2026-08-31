@@ -149,7 +149,7 @@ export interface Rfc64CatalogBootstrapPartitionV1 {
   }>;
 }
 
-interface BootstrapStateV1 {
+export interface BootstrapStateV1 {
   readonly retryIntervalMs?: number;
   readonly legacyRecoveryConfig: Rfc64CatalogBootstrapPartitionV1['legacyRecoveryConfig'];
   readonly targets: MutableTargetStatusV1[];
@@ -190,7 +190,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
     if (
       config === undefined
-      || this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>() !== undefined
+      || this.rfc64CatalogRuntimeV1.readBootstrapState() !== undefined
     ) return;
     const service = this.rfc64PublicCatalogServiceV1;
     const partition = partitionRfc64CatalogBootstrapV1(
@@ -252,7 +252,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       lastPassStartedAtMs: null,
       lastPassCompletedAtMs: null,
     };
-    this.rfc64CatalogRuntimeV1?.writeBootstrapState(state);
+    this.rfc64CatalogRuntimeV1.writeBootstrapState(state);
     runner.request();
   }
 
@@ -260,7 +260,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   readRfc64PublicCatalogBootstrapStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64PublicCatalogBootstrapStatusV1> | null {
-    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
+    const state = this.rfc64CatalogRuntimeV1.readBootstrapState();
     if (state === undefined) return null;
     return Object.freeze({
       running: state.runner.running,
@@ -274,16 +274,16 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
 
   /** Wait for the currently running startup/refresh pass only. */
   async whenRfc64PublicCatalogBootstrapIdleV1(this: DKGAgent): Promise<void> {
-    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
+    const state = this.rfc64CatalogRuntimeV1.readBootstrapState();
     await state?.runner.whenIdle();
   }
 
   /** Stop future retries and abort/drain the current pass before service close. */
   async closeRfc64PublicCatalogBootstrapV1(this: DKGAgent): Promise<void> {
-    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
+    const state = this.rfc64CatalogRuntimeV1.readBootstrapState();
     if (state === undefined) return;
     await state.runner.close();
-    this.rfc64CatalogRuntimeV1?.clearBootstrapState();
+    this.rfc64CatalogRuntimeV1.clearBootstrapState();
   }
 
   private async runRfc64PublicCatalogBootstrapPassV1(
