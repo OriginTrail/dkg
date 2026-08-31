@@ -7,18 +7,11 @@ import type {
   StorePressureSnapshot,
   TripleStoreQueryOptions,
   QueryResult,
-  SelectResult,
   ConstructResult,
-  AskResult,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
-import {
-  parseSparqlJsonSelectResponse,
-  parseSparqlJsonResponseText,
-  SparqlJsonResultsShapeError,
-} from './sparql-json-results.js';
-import { isOrdinaryDataRecord } from '../closed-data-snapshot.js';
+import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
@@ -29,8 +22,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -235,6 +230,7 @@ function createStoreOperationDeadline(
 export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
 
   rfc64SharedProjectionStreamV1(
     operation: Rfc64SharedProjectionStreamOperationV1,
@@ -283,6 +279,13 @@ export class BlazegraphStore implements TripleStore {
     options?: Pick<QueryOptions, 'signal'>,
   ) {
     return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   private runStoreWork<T>(
@@ -591,29 +594,7 @@ export class BlazegraphStore implements TripleStore {
       const text = options?.maxResponseBytes === undefined
         ? await deadline.waitFor(res.text())
         : await deadline.waitFor(readResponseTextBounded(res, options.maxResponseBytes));
-      const json = parseSparqlJsonResponseText(text);
-
-      if (
-        isAsk
-        || (
-          isOrdinaryDataRecord(json)
-          && Object.prototype.hasOwnProperty.call(json, 'boolean')
-        )
-      ) {
-        if (!isOrdinaryDataRecord(json) || typeof json.boolean !== 'boolean') {
-          throw new SparqlJsonResultsShapeError(
-            'SPARQL JSON ASK response.boolean must be a boolean',
-          );
-        }
-        return { type: 'boolean', value: json.boolean } satisfies AskResult;
-      }
-
-      const parsed = parseSparqlJsonSelectResponse(json);
-      return {
-        type: 'bindings',
-        bindings: parsed.bindings,
-        variables: parsed.variables,
-      } satisfies SelectResult;
+      return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
       },
     );
   }

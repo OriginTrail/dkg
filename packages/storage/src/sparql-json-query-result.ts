@@ -4,7 +4,8 @@ import {
   readOwnEnumerableDataProperty,
   snapshotDenseDataArray,
   snapshotExactOrdinaryDataRecord,
-} from '../closed-data-snapshot.js';
+} from './closed-data-snapshot.js';
+import type { AskResult, QueryResult, SelectResult } from './triple-store.js';
 
 type SparqlJsonLiteralTerm = {
   type: 'literal' | 'typed-literal';
@@ -44,6 +45,42 @@ export function parseSparqlJsonResponseText(text: string): unknown {
   } catch (cause) {
     throw new SparqlJsonResultsShapeError('SPARQL JSON response is not valid JSON', { cause });
   }
+}
+
+/** Decode one complete successful ASK or SELECT response into the public store result. */
+export function decodeSparqlJsonQueryResult(
+  text: string,
+  expectedKind: 'ask' | 'select',
+): QueryResult {
+  const response = parseSparqlJsonResponseText(text);
+  if (expectedKind === 'ask') {
+    const hasHead = isOrdinaryDataRecord(response)
+      && Object.prototype.hasOwnProperty.call(response, 'head');
+    const record = snapshotExactOrdinaryDataRecord(
+      response,
+      hasHead ? ['boolean', 'head'] : ['boolean'],
+      'SPARQL JSON ASK response',
+      malformed,
+    );
+    if (hasHead) {
+      snapshotExactOrdinaryDataRecord(
+        record.head,
+        [],
+        'SPARQL JSON ASK response.head',
+        malformed,
+      );
+    }
+    if (typeof record.boolean !== 'boolean') {
+      malformed('SPARQL JSON ASK response.boolean must be a boolean');
+    }
+    return Object.freeze({ type: 'boolean', value: record.boolean }) satisfies AskResult;
+  }
+  const parsed = parseSparqlJsonSelectResponse(response);
+  return Object.freeze({
+    type: 'bindings',
+    bindings: parsed.bindings,
+    variables: parsed.variables,
+  }) satisfies SelectResult;
 }
 
 function formatSparqlJsonTerm(term: AdapterSparqlJsonTerm): string {
