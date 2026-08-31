@@ -61,6 +61,7 @@ export {
   type Rfc64AuthorCommitCasLegacyInputV1,
   type Rfc64AuthorCommitCasSemanticInputV1,
   type Rfc64AuthorCommitCasResultV1,
+  type Rfc64AuthorCommitExactStateTransitionV1,
   type Rfc64AuthorCommitStateTransitionV1,
   type Rfc64AuthorCommitSubjectReplacementV1,
 } from './rfc64-author-commit-cas.js';

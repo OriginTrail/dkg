@@ -8,9 +8,11 @@ import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.j
 import {
   RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
   Rfc64ExactBindingsReadResultErrorV1,
+  executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
   type Rfc64ExactBindingsStoreRowV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
 import {
   normalizeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -180,6 +182,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
 
   async rfc64ExactBindingsReadV1(
     operation: Rfc64ExactBindingsReadOperationV1,
@@ -202,6 +205,13 @@ export class OxigraphWorkerStore implements TripleStore {
       }
       throw cause;
     }
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.

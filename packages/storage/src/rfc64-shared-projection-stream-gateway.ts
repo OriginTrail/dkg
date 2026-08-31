@@ -7,9 +7,9 @@ import {
   type Rfc64SharedProjectionStreamOperationV1,
   type Rfc64SharedProjectionStreamTemplateInputV1,
 } from '@origintrail-official/dkg-core';
-import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
 import { openLazyAbortableStream } from './abortable-stream-work-lifecycle.js';
+import { snapshotExactOrdinaryDataRecord } from './closed-data-snapshot.js';
 import {
   isRfc64SharedProjectionStreamCapabilityV1,
   type Rfc64SharedProjectionStreamCapabilityV1,
@@ -177,10 +177,11 @@ function snapshotOptions(input: unknown): Rfc64SharedProjectionStreamOptionsV1 {
     : ['operatorByteCeiling', 'timeoutMs'];
   let options: Readonly<Record<string, unknown>>;
   try {
-    options = snapshotExactDataRecord(
+    options = snapshotExactOrdinaryDataRecord(
       input,
       expectedKeys,
       'RFC-64 shared-projection stream options',
+      (message) => { throw new Error(message); },
     );
   } catch (cause) {
     fail(
