@@ -20,6 +20,7 @@ import {
   isRfc64SemanticReadCapabilityV1,
   type Rfc64SemanticReadCapabilityV1,
 } from './rfc64-semantic-read-capability.js';
+import { snapshotExactOrdinaryDataRecord } from './closed-data-snapshot.js';
 
 export const MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1 = 30_000;
 
@@ -134,11 +135,11 @@ export class SyncSemanticStoreV1 {
 }
 
 function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
-  const options = snapshotExactRecord(
+  const options = snapshotExactOrdinaryDataRecord(
     input,
     isRecordWithOwnKey(input, 'signal') ? ['signal', 'timeoutMs'] : ['timeoutMs'],
     'RFC-64 semantic read options',
-    'rfc64-semantic-read-options',
+    (message) => fail('rfc64-semantic-read-options', message),
   );
   if (
     typeof options.timeoutMs !== 'number'
@@ -158,38 +159,6 @@ function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
     timeoutMs: options.timeoutMs,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   }) as Rfc64SemanticReadOptionsV1;
-}
-
-function snapshotExactRecord(
-  input: unknown,
-  expectedKeys: readonly string[],
-  label: string,
-  code: Rfc64SemanticReadGatewayErrorCodeV1,
-): Readonly<Record<string, unknown>> {
-  if (
-    input === null
-    || typeof input !== 'object'
-    || Object.getPrototypeOf(input) !== Object.prototype
-  ) {
-    fail(code, `${label} must be a plain object`);
-  }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== expectedKeys.length
-    || expectedKeys.some((key) => !keys.includes(key))
-  ) {
-    fail(code, `${label} has an invalid field set`);
-  }
-  const result: Record<string, unknown> = {};
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail(code, `${label} must use enumerable data properties`);
-    }
-    result[key] = descriptor.value;
-  }
-  return Object.freeze(result);
 }
 
 function isRecordWithOwnKey(input: unknown, key: string): boolean {

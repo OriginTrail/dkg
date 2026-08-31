@@ -5,7 +5,7 @@ import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import {
   SparqlJsonResultsShapeError,
   formatSparqlJsonBindings,
-} from '../src/adapters/sparql-json-results.js';
+} from '../src/sparql-json-query-result.js';
 
 const lexical = 'line1\nline2\tcontrol:\u0001 del:\u007F quote:" slash:\\ café Δ';
 const escaped = 'line1\\nline2\\tcontrol:\\u0001 del:\\u007F quote:\\" slash:\\\\ café Δ';
@@ -97,6 +97,39 @@ describe('RDF binding literal escaping', () => {
       const result = await makeStore().query('SELECT ?plain ?language ?typed WHERE {}');
       expect(result.type).toBe('bindings');
       if (result.type === 'bindings') expect(result.bindings).toEqual(expectedBindings);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it.each([
+    ['SPARQL HTTP', () => new SparqlHttpStore({
+      queryEndpoint: 'http://binding.test/query',
+      updateEndpoint: 'http://binding.test/update',
+    })],
+    ['Blazegraph', () => new BlazegraphStore('http://binding.test/sparql')],
+  ])('%s rejects malformed successful ASK envelopes', async (_name, makeStore) => {
+    const originalFetch = globalThis.fetch;
+    try {
+      for (const payload of [{}, { boolean: 'false' }]) {
+        globalThis.fetch = (async () => new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        })) as typeof fetch;
+        await expect(makeStore().query('ASK { ?s ?p ?o }')).rejects.toThrow(
+          SparqlJsonResultsShapeError,
+        );
+      }
+      for (const value of [true, false]) {
+        globalThis.fetch = (async () => new Response(JSON.stringify({ boolean: value }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        })) as typeof fetch;
+        await expect(makeStore().query('ASK { ?s ?p ?o }')).resolves.toEqual({
+          type: 'boolean',
+          value,
+        });
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }

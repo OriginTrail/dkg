@@ -6,7 +6,7 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import type { QueryOptions, QueryResult, TripleStore } from './triple-store.js';
-import { SparqlJsonResultsShapeError } from './adapters/sparql-json-results.js';
+import { SparqlJsonResultsShapeError } from './sparql-json-query-result.js';
 import {
   readOwnEnumerableDataProperty,
   snapshotDenseDataArray,
