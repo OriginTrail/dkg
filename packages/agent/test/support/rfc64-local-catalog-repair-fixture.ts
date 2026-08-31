@@ -11,7 +11,6 @@ import {
   computeSwmAuthorInventoryScopeDigestV1,
   contextGraphAssertionUri,
   contextGraphMetaUri,
-  createOperationContext,
   type AssertionSeal,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
@@ -19,7 +18,6 @@ import {
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
-  type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {

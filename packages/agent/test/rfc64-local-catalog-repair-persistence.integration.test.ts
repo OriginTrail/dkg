@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  type ContextGraphIdV1,
   type Digest32V1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
