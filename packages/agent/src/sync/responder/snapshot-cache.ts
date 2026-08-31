@@ -88,7 +88,7 @@ interface CachedSnapshot {
 }
 
 interface RejectedSnapshot {
-  error: SyncRowSnapshotBudgetError;
+  error: SyncRowSnapshotBudgetError | SyncRowSnapshotFallbackError;
   cleanupTimer: ReturnType<typeof setTimeout>;
   refreshGeneration?: string;
 }
@@ -122,6 +122,38 @@ export class SyncRowSnapshotLimitError extends Error {
     this.inflightEntries = params.inflightEntries;
     this.activeEntries = activeEntries;
   }
+}
+
+/**
+ * A full immutable snapshot could not be built, but the same responder session
+ * can still be served safely through its bounded store-page loader.
+ *
+ * This is deliberately distinct from {@link SyncRowSnapshotBudgetError}: a
+ * backend deadline is not evidence that the graph crossed a row/byte budget,
+ * and must not be reported to operators as one.
+ */
+export class SyncRowSnapshotFallbackError extends Error {
+  readonly key: string;
+  readonly reason: 'store_timeout';
+
+  constructor(params: { key: string; reason: 'store_timeout'; cause?: unknown }) {
+    super(
+      `Sync responder snapshot requires bounded store paging (key=${params.key}, reason=${params.reason})`,
+      params.cause === undefined ? undefined : { cause: params.cause },
+    );
+    this.name = 'SyncRowSnapshotFallbackError';
+    this.key = params.key;
+    this.reason = params.reason;
+  }
+}
+
+function isRememberedSnapshotRejection(
+  error: unknown,
+): error is SyncRowSnapshotBudgetError | SyncRowSnapshotFallbackError {
+  return error instanceof SyncRowSnapshotFallbackError || (
+    error instanceof SyncRowSnapshotBudgetError
+    && (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')
+  );
 }
 
 function asAbortError(reason: unknown): Error {
@@ -211,7 +243,7 @@ export function createResponderSyncRowListMemo(
 
   const rememberRejected = (
     key: string,
-    error: SyncRowSnapshotBudgetError,
+    error: SyncRowSnapshotBudgetError | SyncRowSnapshotFallbackError,
     refreshGeneration?: string,
   ) => {
     deleteRejected(key);
@@ -453,10 +485,7 @@ export function createResponderSyncRowListMemo(
           // a response/heap safety bound. Remember intrinsic rejections exactly
           // like storeCached() does, so later pages in this responder session go
           // straight to bounded store paging instead of repeating the full load.
-          if (
-            error instanceof SyncRowSnapshotBudgetError &&
-            (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')
-          ) {
+          if (isRememberedSnapshotRejection(error)) {
             const stale = cached.get(key);
             if (stale) deleteCached(key, 'replaced');
             rememberRejected(key, error, options?.refreshGeneration);

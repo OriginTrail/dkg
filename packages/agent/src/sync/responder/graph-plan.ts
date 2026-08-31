@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   asGraphWriteRevisionSource,
+  isStoreOperationTimeoutError,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
@@ -24,6 +25,7 @@ import {
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
   SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  SyncRowSnapshotFallbackError,
 } from './snapshot-cache.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -2149,6 +2151,12 @@ function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudge
     (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes');
 }
 
+function isSnapshotPageFallbackError(
+  error: unknown,
+): error is SyncRowSnapshotBudgetError | SyncRowSnapshotFallbackError {
+  return isPerSnapshotBudgetError(error) || error instanceof SyncRowSnapshotFallbackError;
+}
+
 /**
  * Session-plan getter shared by the plan-backed lanes (exact-graph and TTL SWM
  * meta), owning the one lifecycle both must agree on:
@@ -2207,11 +2215,11 @@ function createSessionPlanGetter<T>(
 /**
  * Serve one responder page, owning the single budget-fallback policy for every
  * memoized phase. It tries the stable-snapshot cache first, but an
- * intrinsically-oversized snapshot (over the PER-snapshot row/byte budget) must
- * stay syncable, so it falls back to the session-less store-bounded page read
- * for this and every later page of the session. The memo remembers the
- * per-snapshot rejection for the session, so subsequent pages reach this
- * fallback without repeating the full materialization inside the memo.
+ * intrinsically-oversized snapshot (over the PER-snapshot row/byte budget), or
+ * a full snapshot query that exceeds the store deadline, must stay syncable.
+ * It falls back to the session-less store-bounded page read for this and every
+ * later page of the session. The memo remembers the typed rejection, so later
+ * pages do not repeat the same doomed full-snapshot query.
  *
  * GLOBAL (process-wide) budget pressure is deliberately NOT swallowed here: it
  * is not a `snapshot_rows`/`snapshot_bytes` error, so it propagates as the quiet
@@ -2299,9 +2307,10 @@ interface ResponderRowsPageOptions {
   /** Session snapshot loader; omitted phases build via the store-paged loader. */
   loadSnapshot?: () => Promise<readonly SyncRow[]>;
   /**
-   * Whether a PER-snapshot rows/bytes budget refusal degrades to the
-   * store-bounded page loader for this and every later page of the session
-   * (defaults to true; global budget pressure always propagates).
+   * Whether an intrinsic snapshot refusal (rows/bytes budget or typed store
+   * deadline) degrades to the store-bounded page loader for this and every
+   * later page of the session (defaults to true; global budget pressure always
+   * propagates).
    */
   fallbackOnPerSnapshotBudget?: boolean;
   /**
@@ -2346,7 +2355,7 @@ async function readResponderRowsPage(
       subjectAtomic,
     );
   } catch (error) {
-    if (!isPerSnapshotBudgetError(error) || !fallbackOnPerSnapshotBudget) throw error;
+    if (!isSnapshotPageFallbackError(error) || !fallbackOnPerSnapshotBudget) throw error;
     return loadStoreBoundedPage(safeOffset, safeLimit, signal);
   }
 }
@@ -3679,6 +3688,13 @@ async function readBoundedDurableMetaSnapshot(
         .filter((row): row is SyncRow => Boolean(row.s && row.p && row.o))
       : [];
   } catch (error) {
+    if (isStoreOperationTimeoutError(error)) {
+      throw new SyncRowSnapshotFallbackError({
+        key: cache.key,
+        reason: 'store_timeout',
+        cause: error,
+      });
+    }
     if (!(error instanceof StoreResponseTooLargeError)) throw error;
     const actualBytes = typeof error.actualBytes === 'bigint'
       ? Number(error.actualBytes > BigInt(Number.MAX_SAFE_INTEGER)

@@ -1,7 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  OxigraphStore,
+  StoreOperationTimeoutError,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import {
+  createResponderSyncRowListMemo,
   DurableMetaPageFrameError,
   readDurableMetaPage,
   serializeResponderRowsWithinByteBudget,
@@ -105,6 +111,58 @@ function assertNoDuplicatesOrGaps(pages: Row[][]): void {
 }
 
 describe('durable-meta subject-atomic paging (#1788)', () => {
+  it('remembers a full-snapshot store timeout and uses bounded pages for the session', async () => {
+    const backingStore = new OxigraphStore();
+    await backingStore.insert(Array.from({ length: 3 }, (_, index) => ({
+      graph: META,
+      subject: `did:dkg:activity:timeout-fallback-${index}`,
+      predicate: `${DKG_NS}label`,
+      object: `"row-${index}"`,
+    })));
+    let snapshotQueries = 0;
+    const query = vi.fn<TripleStore['query']>(async (sparql, options) => {
+      if (options?.source === 'sync.responder.readDurableMetaGraphSnapshot') {
+        snapshotQueries += 1;
+        throw new StoreOperationTimeoutError({
+          backend: 'test',
+          operation: 'query',
+          storeOperation: 'query',
+          timeoutMs: 30_000,
+        });
+      }
+      return backingStore.query(sparql, options);
+    });
+    const store = { query } as TripleStore;
+    const memo = createResponderSyncRowListMemo();
+    const cacheKey = 'durable-meta:timeout-fallback';
+
+    const first = await readDurableMetaPage({
+      store,
+      contextGraphId: CG,
+      registeredSubGraphNames: [],
+      offset: 0,
+      limit: 1,
+      rowListMemo: memo,
+      rowListCacheKey: cacheKey,
+    });
+    const second = await readDurableMetaPage({
+      store,
+      contextGraphId: CG,
+      registeredSubGraphNames: [],
+      offset: first.length,
+      limit: 1,
+      rowListMemo: memo,
+      rowListCacheKey: cacheKey,
+    });
+
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect(snapshotQueries).toBe(1);
+    expect(query.mock.calls.filter(([, options]) =>
+      options?.source === 'sync.responder.readDurableMetaRowsPage')).toHaveLength(2);
+    await backingStore.close();
+  });
+
   it('cached path: extends a page across the seal boundary, never splitting it', async () => {
     const limit = 10;
     const fillerA: Row[] = Array.from({ length: 5 }, (_, i) => ({
