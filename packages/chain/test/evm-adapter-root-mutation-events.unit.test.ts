@@ -194,6 +194,12 @@ function makeAdapter(options: {
     });
     const match = /\(([^)]+)\)$/.exec(label);
     const eventName = match?.[1] ?? '';
+    if (eventName === 'KnowledgeAssetRootMutations') {
+      // The combined topic-OR scan (review r6): the fake plays the provider,
+      // returning every recorded log in insertion order; production
+      // classification by topic0 narrows to the requested-and-declared set.
+      return Object.values(options.logsByEvent ?? {}).flat() as FakeLog[];
+    }
     return options.logsByEvent?.[eventName] ?? [];
   };
   // The root-mutation scan fetches RAW logs (`eth_getLogs` via `readProvider`)
@@ -388,9 +394,8 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
 
     await drain(adapter, [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
 
-    expect(scans.map((s) => s.label)).toEqual(
-      KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES.map((n) => `kas.getLogs(${n})`),
-    );
+    // ONE combined scan for the whole group (review r6) — not four.
+    expect(scans.map((s) => s.label)).toEqual(['kas.getLogs(KnowledgeAssetRootMutations)']);
     for (const scan of scans) {
       // `wideLogScan` owns the multi-RPC log timeout; `skipPreferred` keeps the
       // scan canonical-fresh so a lagging sticky endpoint cannot clamp
@@ -452,7 +457,7 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     // KCCreated scanned its own create/mint/transfer surfaces on the same
     // binding, then the root-mutation branch scanned its one name.
     expect(scans.some((s) => s.label.includes('KnowledgeAssetCreated'))).toBe(true);
-    expect(scans.some((s) => s.label === 'kas.getLogs(KnowledgeAssetMerkleRootAdded)')).toBe(true);
+    expect(scans.some((s) => s.label === 'kas.getLogs(KnowledgeAssetRootMutations)')).toBe(true);
   });
 });
 
@@ -505,6 +510,16 @@ describe('EVMChainAdapter.supportsEventTypes', () => {
     await expect(
       adapter.supportsEventTypes(['ContextGraphCreated', 'KnowledgeAssetUpdated', 'NoSuchEventAnywhere']),
     ).resolves.toEqual(['NoSuchEventAnywhere']);
+    // r6 divergence row: both public spellings of the name-claim event are
+    // served from ContextGraphNameRegistry, whose ABI spells the fragment
+    // `NameClaimed` — the probe must answer BOTH spellings as supported.
+    const nameAbi = [{
+      type: 'event', name: 'NameClaimed', anonymous: false,
+      inputs: [{ indexed: true, internalType: 'bytes32', name: 'nameHash', type: 'bytes32' }],
+    }];
+    const registry = new ethers.Contract('0x' + '44'.repeat(20), nameAbi as never);
+    (adapter as unknown as { contracts: Record<string, unknown> }).contracts['contextGraphNameRegistry'] = registry;
+    await expect(adapter.supportsEventTypes(['NameClaimed', 'ContextGraphNameClaimed'])).resolves.toEqual([]);
     // Served name whose ABI FRAGMENT is spelled differently (review r3):
     // `listenForEvents` serves the public name `KCCreated` by scanning the
     // greenfield `KnowledgeAssetCreated` fragment, so the probe must accept

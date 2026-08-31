@@ -44,7 +44,7 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
-import { KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES } from './evm-adapter-events.js';
+import { SERVED_EVENT_TYPES } from './evm-adapter-events.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
 
@@ -52,26 +52,13 @@ export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
  * Event names the mock's simulated V10 contract surface DECLARES, for
  * `supportsEventTypes` parity with the EVM adapter's ABI probe.
  *
- * Two sources, deliberately kept apart:
- * - the four KA root-mutation names come from the SAME join constant the EVM
- *   adapter serves and the poller lane subscribes with — one vocabulary, no
- *   second copy to drift;
- * - the scan names below mirror the branches `EVMChainAdapter.listenForEvents`
- *   dispatches on (see `evm-adapter-events.ts`), which is what "declared"
- *   means for events the mock replays through `pushEvent`.
+ * ONE source (review r6): the EVM adapter's `SERVED_EVENT_TYPES` — the keys
+ * of its event-ownership registry — so the mock cannot drift into a third
+ * representation of the served vocabulary. "Declared" for the mock means the
+ * public name is served by `listenForEvents`, exactly the parity the CH-8
+ * probe contract wants.
  */
-const MOCK_DECLARED_EVENT_TYPES: ReadonlySet<string> = new Set([
-  ...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
-  'KnowledgeBatchCreated',
-  'ContextGraphExpanded',
-  'KnowledgeAssetRegisteredToContextGraph',
-  'KCCreated',
-  'KnowledgeAssetCreated',
-  'NameClaimed',
-  'ContextGraphNameClaimed',
-  'ContextGraphCreated',
-  'RelayCapabilityUpdated',
-]);
+const MOCK_DECLARED_EVENT_TYPES: ReadonlySet<string> = new Set(SERVED_EVENT_TYPES);
 
 export interface MockChainAdapterOptions {
   /** Seed the first CG allocation for fixtures that model an existing registry. */

@@ -43,7 +43,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
-import { KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES } from '../src/evm-adapter-events.js';
+import { KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES, SERVED_EVENT_TYPES } from '../src/evm-adapter-events.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
 import { ethers } from 'ethers';
@@ -408,6 +408,10 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     await expect(
       mock.supportsEventTypes(KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES),
     ).resolves.toEqual([]);
+    // Full served vocabulary, not just the root-mutation consumer (review r6):
+    // the mock's declared set now DERIVES from the EVM adapter's registry keys,
+    // and this row is what fails if either side grows a private spelling.
+    await expect(mock.supportsEventTypes(SERVED_EVENT_TYPES)).resolves.toEqual([]);
     // Unknown names must come back as missing, not be absorbed: a caller that
     // probes for a typo'd event name needs to see the typo, and an
     // all-supported stub would make this row impossible to fail.

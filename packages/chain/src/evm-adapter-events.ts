@@ -64,6 +64,10 @@ export type KnowledgeAssetRootMutationEventType =
  */
 const EVENT_ABI_ALIASES: Readonly<Record<string, readonly string[]>> = Object.freeze({
   KCCreated: ['KnowledgeAssetCreated', 'KCCreated'],
+  // Served from ContextGraphNameRegistry, whose ABI spells the fragment
+  // `NameClaimed` (review r6 — the probe answered the two public spellings
+  // differently across the EVM and mock adapters until this row).
+  ContextGraphNameClaimed: ['NameClaimed', 'ContextGraphNameClaimed'],
 });
 
 const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> = Object.freeze({
@@ -81,6 +85,14 @@ const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> = Obj
   KnowledgeAssetMerkleRootsUpdated: 'knowledgeAssetStorage',
   KnowledgeAssetMerkleRootRemoved: 'knowledgeAssetStorage',
 });
+
+/**
+ * The full public event vocabulary `listenForEvents` serves — exactly the
+ * registry's keys, exported so other representations (the mock adapter's
+ * declared set) DERIVE from this one instead of restating it (review r6).
+ */
+export const SERVED_EVENT_TYPES: readonly string[] =
+  Object.freeze(Object.keys(EVENT_OWNING_CONTRACT));
 
 export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -199,21 +211,33 @@ export class EventsMethods extends EVMChainAdapterBase {
    * committed set from chain regardless.
    */
   private async *yieldKnowledgeAssetRootMutationLogs(
-    eventName: KnowledgeAssetRootMutationEventType,
+    requested: readonly KnowledgeAssetRootMutationEventType[],
     filter: EventFilter,
   ): AsyncIterable<ChainEvent> {
     const kaStorage = this.contracts.knowledgeAssetStorage;
-    if (!kaStorage || !this.contractHasEvent(kaStorage, eventName)) return;
+    if (!kaStorage) return;
+
+    // ONE topic-OR `eth_getLogs` for every requested-and-declared event
+    // (review r6): four sequential wide scans over the same contract and
+    // window quadruple the RPC cost of every active tick and re-scan, and
+    // make yielded order depend on the constant's ordering. A single OR
+    // filter — `topics: [[hash1, …]]` — asks the provider once and yields in
+    // PROVIDER LOG ORDER, which is the order a consumer's position compare
+    // expects to see anyway.
+    const nameByTopic = new Map<string, KnowledgeAssetRootMutationEventType>();
+    for (const eventName of requested) {
+      if (!this.contractHasEvent(kaStorage, eventName)) continue;
+      const topicHash = kaStorage.interface.getEvent(eventName)?.topicHash;
+      if (topicHash) nameByTopic.set(topicHash.toLowerCase(), eventName);
+    }
+    if (nameByTopic.size === 0) return;
 
     const address = await kaStorage.getAddress();
-    const topicHash = kaStorage.interface.getEvent(eventName)?.topicHash;
-    if (!topicHash) return;
-
     const logs = await this.readProvider(
-      `kas.getLogs(${eventName})`,
+      'kas.getLogs(KnowledgeAssetRootMutations)',
       (provider) => provider.getLogs({
         address,
-        topics: [topicHash],
+        topics: [[...nameByTopic.keys()]],
         fromBlock: filter.fromBlock ?? 0,
         toBlock: filter.toBlock ?? 'latest',
       }),
@@ -221,6 +245,9 @@ export class EventsMethods extends EVMChainAdapterBase {
     );
 
     for (const log of logs) {
+      const topic0 = log.topics[0]?.toLowerCase();
+      const eventName = topic0 == null ? undefined : nameByTopic.get(topic0);
+      if (!eventName) continue; // a provider answering outside the OR filter
       const kaIdTopic = log.topics[1];
       // The indexed id of a real EVM log is exactly one 32-byte word. A
       // wrong-sized topic from a malformed RPC must be SKIPPED, not
@@ -263,6 +290,7 @@ export class EventsMethods extends EVMChainAdapterBase {
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     await this.init();
 
+    let rootMutationGroupServed = false;
     for (const eventType of filter.eventTypes) {
       if (eventType === 'KnowledgeBatchCreated') {
         // V8-only event — emitted by archived KnowledgeAssetsStorage. When the
@@ -560,10 +588,13 @@ export class EventsMethods extends EVMChainAdapterBase {
       // subscription, instead of leaving a lane asking for a name nothing
       // produces — which looks exactly like "there were no such events".
       if ((KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES as readonly string[]).includes(eventType)) {
-        yield* this.yieldKnowledgeAssetRootMutationLogs(
-          eventType as KnowledgeAssetRootMutationEventType,
-          filter,
-        );
+        // The whole group is served by ONE combined scan on its first member
+        // (review r6); later members of the same filter are already covered.
+        if (rootMutationGroupServed) continue;
+        rootMutationGroupServed = true;
+        const requested = filter.eventTypes.filter((t): t is KnowledgeAssetRootMutationEventType =>
+          (KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES as readonly string[]).includes(t));
+        yield* this.yieldKnowledgeAssetRootMutationLogs(requested, filter);
       }
     }
   }
