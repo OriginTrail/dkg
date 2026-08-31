@@ -28,6 +28,17 @@ const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const REPO_ROOT = path.resolve(PACKAGE_ROOT, '../..');
 const DEFAULT_LLAMA_URL = 'http://127.0.0.1:8080/v1/chat/completions';
 
+export async function benchmarkClientInfo(packageRoot = PACKAGE_ROOT) {
+  const packageJson = JSON.parse(await fs.readFile(path.join(packageRoot, 'package.json'), 'utf8'));
+  if (typeof packageJson.version !== 'string' || packageJson.version.length === 0) {
+    throw new Error('DKG local-LLM package version is unavailable');
+  }
+  return {
+    name: 'dkg-local-llm-real-benchmark',
+    version: packageJson.version,
+  };
+}
+
 function timestampSlug() {
   return new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14).toLowerCase();
 }
@@ -398,7 +409,7 @@ async function main() {
     }
   });
 
-  const client = new Client({ name: 'dkg-local-llm-real-benchmark', version: '10.0.15' });
+  const client = new Client(await benchmarkClientInfo());
   const target = {
     graphId: options.graphId,
     assetName: options.assetName,

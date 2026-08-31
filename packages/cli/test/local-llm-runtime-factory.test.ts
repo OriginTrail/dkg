@@ -23,6 +23,7 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
 }));
 
 import { createDkgLocalLlmRuntimeSession } from '../src/local-llm-runtime-factory.js';
+import { DKG_CLI_PACKAGE_VERSION } from '../src/package-version.js';
 
 describe('local LLM runtime factory initialization lifecycle', () => {
   beforeEach(() => {
@@ -78,6 +79,10 @@ describe('local LLM runtime factory initialization lifecycle', () => {
       initializationTimeoutMs: 5_000,
     });
 
+    expect(sdk.Client).toHaveBeenCalledWith({
+      name: 'dkg-local-llm',
+      version: DKG_CLI_PACKAGE_VERSION,
+    });
     const connectSignal = sdk.client.connect.mock.calls[0][1]?.signal;
     const listSignal = sdk.client.listTools.mock.calls[0][1]?.signal;
     expect(connectSignal).toBeInstanceOf(AbortSignal);

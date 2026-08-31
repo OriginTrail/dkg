@@ -12,6 +12,7 @@ import {
   type McpClientLike,
   type ToolProfile,
 } from '@origintrail-official/dkg-local-llm';
+import { DKG_CLI_PACKAGE_VERSION } from './package-version.js';
 
 export interface DkgLocalLlmRuntimeSessionOptions {
   dkgHome: string;
@@ -92,7 +93,7 @@ export async function createDkgLocalLlmRuntimeSession(
     void trace.write('DKG MCP STDERR', line);
   });
 
-  const mcp = new Client({ name: 'dkg-local-llm', version: '10.0.15' });
+  const mcp = new Client({ name: 'dkg-local-llm', version: DKG_CLI_PACKAGE_VERSION });
   let closed = false;
   try {
     const initializationTimeoutMs = options.initializationTimeoutMs ?? 60_000;
