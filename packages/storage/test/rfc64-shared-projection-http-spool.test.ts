@@ -218,6 +218,25 @@ describe('RFC-64 shared-projection HTTP spool', () => {
     },
   );
 
+  it('keeps the canonical line ceiling independent from a wider wire allowance', async () => {
+    await expect(spoolRfc64SharedProjectionHttpResponseV1({
+      body: byteStream([LINE_A]),
+      operation: operation({ publicTripleCount: '1', protocolByteCeiling: 10 }),
+      byteCeiling: 10,
+      inputLineByteCeiling: 30,
+      wireByteCeiling: 30,
+    })).rejects.toThrow('protocol line ceiling');
+  });
+
+  it('rejects a backend wire allowance above the maximum UCHAR expansion', async () => {
+    await expect(spoolRfc64SharedProjectionHttpResponseV1({
+      body: byteStream([LINE_A]),
+      operation: operation({ publicTripleCount: '1', protocolByteCeiling: 10 }),
+      byteCeiling: 10,
+      wireByteCeiling: 61,
+    })).rejects.toThrow('wireByteCeiling must be an integer from 1 to 60');
+  });
+
   it('emits identical owned LF-terminated bytes from memory and spilled paths', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-spool-test-'));
     try {

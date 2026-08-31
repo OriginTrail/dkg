@@ -25,6 +25,7 @@ const DEFAULT_SORT_CHUNK_LINES_V1 = 16_384;
 const DEFAULT_MERGE_FAN_IN_V1 = 64;
 const MAX_PENDING_LINE_CHUNKS_V1 = 256;
 const MERGE_WRITE_BATCH_BYTES_V1 = 1024 * 1024;
+const MAX_WIRE_EXPANSION_FACTOR_V1 = 6;
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 export interface Rfc64SharedProjectionHttpSpoolOptionsV1 {
@@ -48,6 +49,8 @@ export interface Rfc64SharedProjectionHttpSpoolOptionsV1 {
   readonly sortChunkLines?: number;
   /** Separate pre-canonicalization resource guard; not the signed output cap. */
   readonly inputLineByteCeiling?: number;
+  /** Separate bounded backend-serialization allowance; not the signed output cap. */
+  readonly wireByteCeiling?: number;
   /** Maximum sorted runs opened at once during each external-merge pass. */
   readonly mergeFanIn?: number;
   /** Apply the managed Oxigraph terminal cancellation-trailer policy. */
@@ -81,6 +84,10 @@ export async function spoolRfc64SharedProjectionHttpResponseV1(
     ),
     'byteCeiling',
   );
+  const canonicalLineByteCeiling = Math.min(
+    DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxLineBytes,
+    options.operation.protocolByteCeiling,
+  );
   const sortChunkBytes = boundedPositiveInteger(
     options.sortChunkBytes ?? Math.min(DEFAULT_SORT_CHUNK_BYTES_V1, byteCeiling),
     byteCeiling,
@@ -91,13 +98,24 @@ export async function spoolRfc64SharedProjectionHttpResponseV1(
     DEFAULT_SORT_CHUNK_LINES_V1,
     'sortChunkLines',
   );
+  const maximumWireByteCeiling = multiplySafeInteger(
+    options.operation.protocolByteCeiling,
+    MAX_WIRE_EXPANSION_FACTOR_V1,
+    'protocolByteCeiling',
+  );
+  const wireByteCeiling = boundedPositiveInteger(
+    options.wireByteCeiling ?? options.operation.protocolByteCeiling,
+    maximumWireByteCeiling,
+    'wireByteCeiling',
+  );
   const inputLineByteCeiling = boundedPositiveInteger(
     options.inputLineByteCeiling
       ?? Math.min(
         DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxLineBytes,
         options.operation.protocolByteCeiling,
+        wireByteCeiling,
       ),
-    options.operation.protocolByteCeiling,
+    wireByteCeiling,
     'inputLineByteCeiling',
   );
   const mergeFanIn = boundedIntegerRange(
@@ -130,7 +148,7 @@ export async function spoolRfc64SharedProjectionHttpResponseV1(
   try {
     for await (const rawLine of readByteLines(
       options.body,
-      options.operation.protocolByteCeiling,
+      wireByteCeiling,
       inputLineByteCeiling,
       options.signal,
     )) {
@@ -150,6 +168,9 @@ export async function spoolRfc64SharedProjectionHttpResponseV1(
       const line = Buffer.allocUnsafe(content.byteLength + 1);
       line.set(content);
       line[line.byteLength - 1] = 0x0a;
+      if (content.byteLength > canonicalLineByteCeiling) {
+        invalid('one canonical CONSTRUCT response line exceeds the protocol line ceiling');
+      }
       count += 1n;
       if (count > expectedCount) {
         invalid('CONSTRUCT response exceeds the author-sealed triple count');
@@ -194,6 +215,16 @@ export async function spoolRfc64SharedProjectionHttpResponseV1(
     if (tempDirectory !== undefined) await removeTempDirectory(tempDirectory);
     throw cause;
   }
+}
+
+function multiplySafeInteger(value: number, factor: number, label: string): number {
+  const product = value * factor;
+  if (!Number.isSafeInteger(product) || product <= 0) {
+    throw new Rfc64SharedProjectionHttpSpoolErrorV1(
+      `${label} does not permit a safe backend wire allowance`,
+    );
+  }
+  return product;
 }
 
 async function collapseSortedRuns(

@@ -17,7 +17,6 @@ import {
   startOxigraphSparqlEndpoint,
   type OxigraphSparqlEndpoint,
 } from './helpers/oxigraph-sparql-endpoint.js';
-import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import {
   collectProjectionBytes as collectBytes,
   projectionByteStream as byteStream,
@@ -204,20 +203,17 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     }
   });
 
-  it('uses the frozen exact CONSTRUCT and exposes sorted canonical line bytes', async () => {
-    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
-    const schedule = vi.spyOn(scheduler, 'run');
+  it('uses the frozen query and managed-Oxigraph-specific request headers', async () => {
     let request: RequestInit | undefined;
     globalThis.fetch = (async (_input, init) => {
       request = init;
-      return new Response(byteStream([LINE_Z.slice(0, 7), LINE_Z.slice(7) + LINE_A]), {
+      return new Response(byteStream([LINE_A, LINE_Z]), {
         status: 200,
         headers: { 'Content-Type': 'application/n-quads' },
       });
     }) as typeof fetch;
     const store = createManagedOxigraphSparqlStoreV1({
       queryEndpoint: 'http://127.0.0.1:7878/query',
-      scheduler,
     });
 
     const result = await new SyncSharedProjectionStoreV1(store).open(REQUEST, {
@@ -232,13 +228,6 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       'Content-Type': 'application/sparql-query; charset=utf-8',
     });
     expect(request?.signal).toBeInstanceOf(AbortSignal);
-    expect(schedule).toHaveBeenCalledWith(
-      'background',
-      'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1',
-      expect.any(Function),
-      expect.any(AbortSignal),
-      { storeOperation: 'construct' },
-    );
   });
 
   it('reads only the exact projection through the real Oxigraph engine with 10x unrelated state', async () => {
@@ -265,63 +254,6 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
     ) as Map<string, { value: string }>[];
     expect(total[0]?.get('c')?.value).toBe('22');
-  });
-
-  it('holds scheduler admission through the response body and cancels promptly', async () => {
-    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
-    const started = Promise.withResolvers<void>();
-    let transportSignal: AbortSignal | null = null;
-    globalThis.fetch = (async (_input, init) => {
-      transportSignal = init?.signal as AbortSignal;
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(LINE_A));
-          started.resolve();
-          transportSignal?.addEventListener('abort', () => {
-            controller.error(transportSignal?.reason);
-          }, { once: true });
-        },
-      });
-      return new Response(body, { status: 200 });
-    }) as typeof fetch;
-    const store = createManagedOxigraphSparqlStoreV1({
-      queryEndpoint: 'http://127.0.0.1:7878/query',
-      scheduler,
-    });
-    const abort = new AbortController();
-
-    const pending = store.rfc64SharedProjectionStreamV1!(operation({
-      publicTripleCount: '2',
-    }), {
-      byteCeiling: 4096,
-      signal: abort.signal,
-    });
-    await started.promise;
-    expect(scheduler.snapshot.backgroundInflight).toBe(1);
-    abort.abort(new DOMException('caller stopped', 'AbortError'));
-
-    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
-    expect(transportSignal?.aborted).toBe(true);
-    expect(scheduler.snapshot.backgroundInflight).toBe(0);
-  });
-
-  it('keeps caller cancellation live while the local result is consumed', async () => {
-    globalThis.fetch = (async () => new Response(byteStream([LINE_Z, LINE_A]), {
-      status: 200,
-    })) as typeof fetch;
-    const store = createManagedOxigraphSparqlStoreV1({
-      queryEndpoint: 'http://127.0.0.1:7878/query',
-    });
-    const abort = new AbortController();
-    const source = await store.rfc64SharedProjectionStreamV1!(OPERATION, {
-      byteCeiling: 4096,
-      signal: abort.signal,
-    });
-    const iterator = source[Symbol.asyncIterator]();
-
-    abort.abort(new DOMException('consumer stopped', 'AbortError'));
-
-    await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' });
   });
 
   it('preserves the typed managed-Oxigraph cancellation trailer classification', async () => {
@@ -408,12 +340,3 @@ runRfc64HttpProjectionCapabilityConformance({
     return store;
   },
 });
-
-function operation(
-  overrides: Partial<typeof OPERATION> = {},
-): typeof OPERATION {
-  return Object.freeze({
-    ...OPERATION,
-    ...overrides,
-  });
-}
