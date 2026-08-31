@@ -20,7 +20,6 @@ import {
   type Rfc64AuthorCommitGraphReplacementPlanV1,
   type Rfc64AuthorCommitGuardPlanV1,
   type Rfc64AuthorCommitPredicateReplacementPlanV1,
-  type Rfc64AuthorCommitSemanticRoleV1,
   type Rfc64AuthorCommitSubjectReplacementPlanV1,
 } from './rfc64-author-commit-plan-codec.js';
 export type {
