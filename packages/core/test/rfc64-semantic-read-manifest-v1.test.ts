@@ -119,6 +119,7 @@ describe('RFC-64 semantic read manifest v1', () => {
       expect(operation.graphIri).toBe(fixture.expectedAddress.graphUri);
       expect(operation.subjectIri).toBe(fixture.expectedAddress.subject);
       expect('backend' in operation).toBe(false);
+
     }
   });
 
@@ -132,7 +133,7 @@ describe('RFC-64 semantic read manifest v1', () => {
     expect(new Set(emittedIds)).toEqual(new Set(RFC64_SEMANTIC_READ_QUERY_IDS_V1));
   });
 
-  it('renders one backend-neutral bounded query for compatible adapters', () => {
+  it('renders one backend-neutral bounded query for every semantic record', () => {
     for (const fixture of CASES) {
       const operation = compileRfc64SemanticReadOperationV1(fixture.coordinate);
       expect(operation.queryId).toBe(fixture.expectedQueryId);
@@ -177,6 +178,20 @@ describe('RFC-64 semantic read manifest v1', () => {
     );
   });
 
+  it('rejects correlated discriminants, raw queries, and other input adornment', () => {
+    expect(() => compileRfc64SemanticReadOperationV1({
+      ...CASES[0].coordinate,
+      queryId: 'SYNC_RAW_QUERY_V1',
+    })).toThrow(/coordinate is invalid/u);
+    expect(() => compileRfc64SemanticReadOperationV1({
+      ...CASES[0].coordinate,
+      sparql: 'SELECT * WHERE { ?s ?p ?o }',
+    })).toThrow(/coordinate is invalid/u);
+    expect(() => compileRfc64SemanticReadOperationV1({
+      coordinate: CASES[0].coordinate,
+    })).toThrow(/coordinate is invalid/u);
+  });
+
   it('normalizes every malformed coordinate through the manifest error contract', () => {
     for (const coordinate of [
       { ...CASES[0].coordinate, extra: true },
@@ -196,18 +211,17 @@ describe('RFC-64 semantic read manifest v1', () => {
     }
   });
 
-  it('rejects accessor-bearing coordinate fields without invoking the accessor', () => {
+  it('rejects accessor-bearing input fields without invoking the accessor', () => {
     let invoked = false;
-    const coordinate: Record<string, unknown> = { ...CASES[6].coordinate };
-    Object.defineProperty(coordinate, 'networkId', {
+    const input: Record<string, unknown> = { ...CASES[6].coordinate };
+    Object.defineProperty(input, 'recordType', {
       enumerable: true,
       get() {
         invoked = true;
-        return NETWORK;
+        return CASES[6].coordinate.recordType;
       },
     });
-    expect(() => compileRfc64SemanticReadOperationV1(coordinate))
-      .toThrow(Rfc64SemanticReadManifestErrorV1);
+    expect(() => compileRfc64SemanticReadOperationV1(input)).toThrow(/coordinate is invalid/u);
     expect(invoked).toBe(false);
   });
 });

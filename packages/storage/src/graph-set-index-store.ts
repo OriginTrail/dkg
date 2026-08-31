@@ -24,6 +24,7 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
+import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -586,7 +587,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     ) {
       return this.graphs;
     }
-    return raceAgainstAbort(
+    return raceStoreWorkAgainstAbort(
       this.refreshIndex(this.pendingFullRefresh ?? (this.graphs ? 'revalidate' : 'seed'), options),
       options?.signal,
     );
@@ -851,19 +852,4 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }

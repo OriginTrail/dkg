@@ -7,16 +7,11 @@ import type {
   StorePressureSnapshot,
   TripleStoreQueryOptions,
   QueryResult,
-  SelectResult,
   ConstructResult,
-  AskResult,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
-import {
-  formatSparqlJsonBindings,
-  type AdapterSparqlJsonSelectResponse,
-} from './sparql-json-results.js';
+import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
@@ -24,7 +19,9 @@ import {
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
+import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -223,6 +220,7 @@ function createStoreOperationDeadline(
  */
 export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
 
   private readonly url: string;
   private readonly operationTimeoutMs: number;
@@ -232,6 +230,13 @@ export class BlazegraphStore implements TripleStore {
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   private runStoreWork<T>(
@@ -555,20 +560,10 @@ export class BlazegraphStore implements TripleStore {
         'query',
       );
 
-      const json = options?.maxResponseBytes === undefined
-        ? await deadline.waitFor(
-            res.json() as Promise<AdapterSparqlJsonSelectResponse | BlazeAskResponse>,
-          )
-        : JSON.parse(await deadline.waitFor(
-            readResponseTextBounded(res, options.maxResponseBytes),
-          )) as AdapterSparqlJsonSelectResponse | BlazeAskResponse;
-
-      if (isAsk || 'boolean' in json) {
-        return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
-      }
-
-      const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
-      return { type: 'bindings', bindings } satisfies SelectResult;
+      const text = options?.maxResponseBytes === undefined
+        ? await deadline.waitFor(res.text())
+        : await deadline.waitFor(readResponseTextBounded(res, options.maxResponseBytes));
+      return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
       },
     );
   }
@@ -740,10 +735,6 @@ export class BlazegraphStore implements TripleStore {
 // =====================================================================
 // Blazegraph JSON result types
 // =====================================================================
-
-interface BlazeAskResponse {
-  boolean: boolean;
-}
 
 // =====================================================================
 // N-Quad serialisation / parsing helpers (shared with oxigraph adapter)

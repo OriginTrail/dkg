@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
+import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
+import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
+import type { Rfc64SemanticReadOperationV1 } from '@origintrail-official/dkg-core';
 import {
   normalizeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -151,6 +154,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
 
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.
@@ -254,6 +258,13 @@ export class OxigraphWorkerStore implements TripleStore {
     this.workerPath = workerPath;
     this.persistPath = persistPath;
     this.spawnWorker();
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   /**
@@ -530,7 +541,10 @@ export class OxigraphWorkerStore implements TripleStore {
     method: string,
     args: unknown[],
   ): Promise<T> {
-    while (this.respawnPromise) await this.respawnPromise;
+    while (this.respawnPromise) {
+      await raceStoreWorkAgainstAbort(this.respawnPromise, signal);
+    }
+    if (signal?.aborted) throw asAbortError(signal.reason);
     return this.postToWorker<T>(timeoutMs, signal, method, args);
   }
 

@@ -19,6 +19,10 @@ import {
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
+  Rfc64SemanticReadOperationV1,
+  Rfc64SemanticStoreRowV1,
+} from '@origintrail-official/dkg-core';
+import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
@@ -33,6 +37,8 @@ export interface Quad {
 export interface SelectResult {
   type: 'bindings';
   bindings: Array<Record<string, string>>;
+  /** SELECT projection reported by the backend when it exposes one. */
+  variables?: string[];
 }
 
 export interface ConstructResult {
@@ -121,6 +127,15 @@ export interface TripleStore {
    */
   getPressureSnapshot?(): StorePressureSnapshot | undefined;
 
+  /** Explicit opt-in for adapters covered by the RFC-64 semantic-read suite. */
+  readonly rfc64SemanticReadCertifiedV1?: boolean;
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<Readonly<{
+    rows: readonly Rfc64SemanticStoreRowV1[];
+  }>>;
+
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
@@ -138,7 +153,6 @@ export interface TripleStore {
     options?: QueryOptions,
   ): Promise<void>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
-
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;

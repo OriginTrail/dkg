@@ -1,3 +1,7 @@
+import {
+  XSD_STRING_DATATYPE,
+  parseRdfLiteralTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 import { isSafeIri } from './sparql-safe.js';
 import { isPlainRecord, snapshotExactDataRecord } from './sync-wire-objects.js';
 
@@ -64,6 +68,31 @@ export function typedRdfLiteralV1(value: string, datatypeIri: string): TypedRdfS
     { reason: { kind: 'invalid-iri', field: 'literal datatype' } },
   );
   return Object.freeze({ kind: 'literal' as const, value, datatypeIri });
+}
+
+/**
+ * Parse the flattened RDF term returned by a triple-store adapter into the
+ * same typed object model used by the canonical renderer.
+ */
+export function parseRenderedRdfStoreObjectV1(input: unknown): TypedRdfStoreObjectV1 {
+  if (typeof input !== 'string') {
+    throw new TypedRdfStoreRowErrorV1('row-term', 'rendered RDF object must be a string');
+  }
+  const literal = parseRdfLiteralTerm(input);
+  if (literal?.kind === 'plain') {
+    return typedRdfLiteralV1(literal.value, XSD_STRING_DATATYPE);
+  }
+  if (literal?.kind === 'typed') {
+    return typedRdfLiteralV1(literal.value, literal.datatype);
+  }
+  if (literal?.kind === 'language') {
+    throw new TypedRdfStoreRowErrorV1(
+      'row-term',
+      'typed RDF store objects cannot carry a language tag',
+    );
+  }
+  if (isSafeIri(input)) return typedRdfNamedNodeV1(input);
+  throw new TypedRdfStoreRowErrorV1('row-term', 'rendered RDF object is not an exact RDF term');
 }
 
 export function snapshotTypedRdfStoreRowV1(input: unknown): TypedRdfStoreRowV1 {

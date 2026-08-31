@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AbortableStoreWorkLifecycle,
   composeAbortSignals,
+  raceStoreWorkAgainstAbort,
 } from '../src/abortable-store-work-lifecycle.js';
 
 function abortCalls(spy: ReturnType<typeof vi.spyOn>): number {
@@ -9,6 +10,40 @@ function abortCalls(spy: ReturnType<typeof vi.spyOn>): number {
 }
 
 describe('AbortableStoreWorkLifecycle signal ownership', () => {
+  it('races store work against abort and always removes its listener', async () => {
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    await expect(raceStoreWorkAgainstAbort(Promise.resolve('done'), controller.signal))
+      .resolves.toBe('done');
+    expect(abortCalls(remove)).toBe(1);
+
+    const reason = new Error('cancelled');
+    controller.abort(reason);
+    await expect(raceStoreWorkAgainstAbort(Promise.resolve('late'), controller.signal))
+      .rejects.toBe(reason);
+  });
+
+  it('observes a late work rejection after pre-abort', async () => {
+    const controller = new AbortController();
+    const reason = new Error('already cancelled');
+    controller.abort(reason);
+    let rejectWork!: (cause: unknown) => void;
+    const work = new Promise<never>((_resolve, reject) => {
+      rejectWork = reject;
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (cause: unknown) => unhandled.push(cause);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(raceStoreWorkAgainstAbort(work, controller.signal)).rejects.toBe(reason);
+      rejectWork(new Error('late store failure'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('forwards the first abort reason and unlinks both source signals', () => {
     const caller = new AbortController();
     const generation = new AbortController();

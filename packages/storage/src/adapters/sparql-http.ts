@@ -27,17 +27,12 @@ import type {
   QueryOptions,
   UpdateOptions,
   QueryResult,
-  SelectResult,
   ConstructResult,
-  AskResult,
   StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import {
-  formatSparqlJsonBindings,
-  type AdapterSparqlJsonSelectResponse,
-} from './sparql-json-results.js';
+import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -66,10 +61,15 @@ import {
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { AbortableStoreWorkLifecycle, composeAbortSignals } from '../abortable-store-work-lifecycle.js';
+import {
+  AbortableStoreWorkLifecycle,
+  composeAbortSignals,
+  raceStoreWorkAgainstAbort,
+} from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
   isStoreOperationTimeoutError,
@@ -77,26 +77,12 @@ import {
 } from '../store-operation-timeout.js';
 import { readSparqlResponseText } from './sparql-response-policy.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
+import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }
 
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
@@ -263,6 +249,7 @@ export interface SparqlHttpStoreOptions {
 
 export class SparqlHttpStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  readonly rfc64SemanticReadCertifiedV1: boolean;
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
@@ -298,6 +285,7 @@ export class SparqlHttpStore implements TripleStore {
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
     this.managedOxigraph = options.managedOxigraph === true;
+    this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
     this.consistencyProfile = this.managedOxigraph
@@ -321,6 +309,16 @@ export class SparqlHttpStore implements TripleStore {
     if (options.auth) {
       this.headers['Authorization'] = options.auth;
     }
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    if (!this.rfc64SemanticReadCertifiedV1) {
+      throw new Error('RFC-64 semantic reads require a DKG-managed Oxigraph endpoint');
+    }
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   private runStoreWork<T>(
@@ -966,17 +964,7 @@ export class SparqlHttpStore implements TripleStore {
               managedOxigraph: this.managedOxigraph,
               operation: canonicalOperation,
             });
-            const json = JSON.parse(text) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
-
-            if (isAsk || 'boolean' in json) {
-              return {
-                type: 'boolean',
-                value: (json as W3CAskResponse).boolean,
-              } satisfies AskResult;
-            }
-
-            const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
-            return { type: 'bindings', bindings } satisfies SelectResult;
+            return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
           },
         );
       } finally {
@@ -1061,7 +1049,7 @@ export class SparqlHttpStore implements TripleStore {
 
     const refreshOptions = options?.source ? { source: options.source } : undefined;
     const inFlight = this.listGraphsInFlight ?? this.refreshListGraphsCache(refreshOptions);
-    const graphs = await raceAgainstAbort(inFlight, options?.signal);
+    const graphs = await raceStoreWorkAgainstAbort(inFlight, options?.signal);
     return [...graphs];
   }
 
@@ -1250,14 +1238,6 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
   } catch {
     return endpoint.split(/[?#]/, 1)[0];
   }
-}
-
-// ---------------------------------------------------------------------------
-// W3C SPARQL 1.1 JSON result types
-// ---------------------------------------------------------------------------
-
-interface W3CAskResponse {
-  boolean: boolean;
 }
 
 // ---------------------------------------------------------------------------

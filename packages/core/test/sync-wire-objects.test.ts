@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { assertExactKeys, isPlainRecord } from '../src/sync-wire-objects.js';
+import {
+  assertExactKeys,
+  isClosedDataRecord,
+  isPlainRecord,
+  snapshotExactDataRecord,
+} from '../src/sync-wire-objects.js';
 
 describe('RFC-64 sync wire object helpers', () => {
   it('accepts ordinary and null-prototype records', () => {
@@ -10,6 +15,24 @@ describe('RFC-64 sync wire object helpers', () => {
     expect(isPlainRecord({ value: 'ok' })).toBe(true);
     expect(isPlainRecord(nullPrototype)).toBe(true);
     expect(() => assertExactKeys(nullPrototype, ['value'], 'fixture')).not.toThrow();
+  });
+
+  it('makes the ordinary-only versus null-prototype policy explicit', () => {
+    const nullPrototype = Object.assign(Object.create(null), { value: 'ok' });
+    expect(isClosedDataRecord(nullPrototype, 'ordinary-or-null')).toBe(true);
+    expect(isClosedDataRecord(nullPrototype, 'ordinary-only')).toBe(false);
+    expect(() => snapshotExactDataRecord(
+      nullPrototype,
+      ['value'],
+      'fixture',
+      { prototypePolicy: 'ordinary-only' },
+    )).toThrow(/plain data object/u);
+    expect(snapshotExactDataRecord(
+      { value: 'ok' },
+      ['value'],
+      'fixture',
+      { prototypePolicy: 'ordinary-only' },
+    )).toEqual({ value: 'ok' });
   });
 
   it('rejects null, arrays, and class instances as non-plain records', () => {

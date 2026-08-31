@@ -36,7 +36,9 @@ import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
+import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -48,6 +50,7 @@ type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
   readonly queryCancellation = 'pre-dispatch' as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
 
   private store: OxStore;
   private persistPath: string | undefined;
@@ -69,6 +72,13 @@ export class OxigraphStore implements TripleStore {
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   /**
