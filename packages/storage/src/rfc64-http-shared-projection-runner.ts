@@ -11,17 +11,17 @@ import { readSparqlResponseText } from './adapters/sparql-response-policy.js';
 const SOURCE = 'rfc64.shared-projection.SYNC_KA_SHARED_PROJECTION_STREAM_V1';
 const MAX_DIAGNOSTIC_RESPONSE_BYTES = 64 * 1024;
 
-export interface ManagedOxigraphConstructRequestV1 {
-  readonly accept: 'application/n-quads, text/n-quads';
+export interface Rfc64HttpProjectionRequestV1 {
+  readonly accept: string;
   readonly priority: 'background';
   readonly source: typeof SOURCE;
   readonly sparql: string;
   readonly signal?: AbortSignal;
 }
 
-export interface ManagedOxigraphSharedProjectionTransportV1 {
+export interface Rfc64HttpProjectionTransportV1 {
   runConstruct<T>(
-    request: ManagedOxigraphConstructRequestV1,
+    request: Rfc64HttpProjectionRequestV1,
     consume: (
       response: Response,
       lifecycleSignal: AbortSignal | undefined,
@@ -33,19 +33,30 @@ export interface ManagedOxigraphSharedProjectionTransportV1 {
   ): Error;
 }
 
+export interface Rfc64HttpProjectionPolicyV1 {
+  /** Backend-specific media-type preference, retained byte-for-byte. */
+  readonly accept: string;
+  /** Preserve the adapter's established bounded diagnostic allowance. */
+  readonly diagnosticByteCeiling: (projectionByteCeiling: number) => number;
+  /** Detect the cancellation trailer emitted by DKG-managed Oxigraph. */
+  readonly managedOxigraph: boolean;
+}
+
 /**
- * Install the RFC-64 managed-Oxigraph projection workflow over a generic,
- * scheduler-owning streaming CONSTRUCT transport. Protocol response policy,
- * bounded error reads, and external spooling stay outside SparqlHttpStore.
+ * Install the common RFC-64 HTTP projection workflow over a scheduler-owning
+ * streaming CONSTRUCT transport. Adapters supply only transport, media type,
+ * error construction, and backend response policy; response validation,
+ * bounded diagnostics, cancellation, and spooling have one lifecycle owner.
  */
-export function createManagedOxigraphSharedProjectionRunnerV1(
-  transport: ManagedOxigraphSharedProjectionTransportV1,
+export function createRfc64HttpSharedProjectionRunnerV1(
+  transport: Rfc64HttpProjectionTransportV1,
+  policy: Rfc64HttpProjectionPolicyV1,
 ): Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1'] {
   return (
     operation: Rfc64SharedProjectionStreamOperationV1,
     options,
   ) => transport.runConstruct({
-    accept: 'application/n-quads, text/n-quads',
+    accept: policy.accept,
     priority: 'background',
     source: SOURCE,
     sparql: operation.sparql,
@@ -55,9 +66,9 @@ export function createManagedOxigraphSharedProjectionRunnerV1(
       const text = await readSparqlResponseText(response, {
         // Successful projection bytes are constrained by byteCeiling below.
         // Error evidence has an independent bounded allowance so a small
-        // projection cannot truncate the managed cancellation marker.
-        maxResponseBytes: MAX_DIAGNOSTIC_RESPONSE_BYTES,
-        managedOxigraph: true,
+        // projection cannot truncate a managed cancellation marker.
+        maxResponseBytes: policy.diagnosticByteCeiling(options.byteCeiling),
+        managedOxigraph: policy.managedOxigraph,
         operation: 'construct',
         tolerateReadFailure: true,
       });
@@ -75,7 +86,12 @@ export function createManagedOxigraphSharedProjectionRunnerV1(
       byteCeiling: options.byteCeiling,
       signal: lifecycleSignal,
       consumptionSignal: options.signal,
-      managedOxigraph: true,
+      managedOxigraph: policy.managedOxigraph,
     });
   });
+}
+
+/** Independent allowance used by managed Oxigraph to retain timeout evidence. */
+export function managedOxigraphDiagnosticByteCeilingV1(): number {
+  return MAX_DIAGNOSTIC_RESPONSE_BYTES;
 }
