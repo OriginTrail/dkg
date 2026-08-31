@@ -691,6 +691,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   let shuttingDown = false;
   let started = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let claimRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let detachWorkScheduler: (() => void) | null = null;
   let wakeRequested = false;
   let wakeLoop: Promise<void> | null = null;
@@ -712,6 +713,22 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     };
   }
 
+  function clearClaimRetryTimer(): void {
+    if (claimRetryTimer === null) return;
+    clearTimeout(claimRetryTimer);
+    claimRetryTimer = null;
+  }
+
+  function scheduleClaimRetry(delayMs: number): void {
+    if (!started || shuttingDown || claimRetryTimer !== null) return;
+    const timer = setTimeout(() => {
+      if (claimRetryTimer === timer) claimRetryTimer = null;
+      requestWake();
+    }, delayMs);
+    if (timer.unref) timer.unref();
+    claimRetryTimer = timer;
+  }
+
   async function tickSlot(slot: WorkerSlot): Promise<boolean> {
     if (shuttingDown || slot.inFlight) return false;
     if (!claimFailureBackoff.isDue()) return false;
@@ -719,8 +736,10 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     try {
       claimed = await config.agent.promoteQueue.claimNext(slot.workerId);
       claimFailureBackoff.reset();
+      clearClaimRetryTimer();
     } catch (err: unknown) {
       const delayMs = claimFailureBackoff.recordFailure();
+      scheduleClaimRetry(delayMs);
       bestEffortLog(
         log,
         `claimNext error on ${slot.workerId}; retrying in ${delayMs}ms: `
@@ -886,6 +905,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       shuttingDown = false;
       lifecycleAbortController = new AbortController();
       counters = freshCounters();
+      clearClaimRetryTimer();
       claimFailureBackoff.reset();
       let recovering = true;
       try {
@@ -915,6 +935,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           clearInterval(pollTimer);
           pollTimer = null;
         }
+        clearClaimRetryTimer();
         lifecycleAbortController.abort();
         lifecycleAbortController = null;
         started = false;
@@ -934,6 +955,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         clearInterval(pollTimer);
         pollTimer = null;
       }
+      clearClaimRetryTimer();
       const activeAtStop = activeShutdownSlotCount();
       if (activeAtStop === 0) {
         lifecycleAbortController?.abort();

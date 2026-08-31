@@ -1216,6 +1216,41 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.stop();
   });
 
+  it('automatically retries a failed claim when the backoff deadline arrives', async () => {
+    vi.useFakeTimers();
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'automatic-claim-retry',
+    });
+
+    await sup.start();
+    await queue.enqueue(makeRequest('automatic-claim-retry'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(claimCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(claimCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(claimCalls).toBe(2);
+    expect(logs.some((message) => message.includes('retrying in 500ms'))).toBe(true);
+
+    await sup.stop();
+  });
+
   it('resets claim backoff after the queue recovers', async () => {
     let now = 10_000;
     let claimCalls = 0;
