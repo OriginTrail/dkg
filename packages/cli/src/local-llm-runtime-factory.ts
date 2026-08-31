@@ -92,7 +92,7 @@ export async function createDkgLocalLlmRuntimeSession(
     void trace.write('DKG MCP STDERR', line);
   });
 
-  const mcp = new Client({ name: 'dkg-local-llm', version: '10.0.14' });
+  const mcp = new Client({ name: 'dkg-local-llm', version: '10.0.15' });
   let closed = false;
   try {
     const initializationTimeoutMs = options.initializationTimeoutMs ?? 60_000;

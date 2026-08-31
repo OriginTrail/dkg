@@ -398,7 +398,7 @@ async function main() {
     }
   });
 
-  const client = new Client({ name: 'dkg-local-llm-real-benchmark', version: '10.0.14' });
+  const client = new Client({ name: 'dkg-local-llm-real-benchmark', version: '10.0.15' });
   const target = {
     graphId: options.graphId,
     assetName: options.assetName,
