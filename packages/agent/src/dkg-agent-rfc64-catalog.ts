@@ -94,6 +94,7 @@ import {
 } from './rfc64/catalog-synchronization-evidence-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
+  type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
@@ -300,19 +301,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
     this.rfc64CatalogMutationCoordinatorV1.reopen();
-    if (rfc64CatalogKillSwitchActiveV1(this.config.rfc64CatalogRollout)) {
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
       this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
       return;
     }
-    const selectedContextGraphs = this.config.rfc64CatalogRollout.selectedContextGraphs;
     if (
-      selectedContextGraphs.length > 0
-      && selectedContextGraphs.every((contextGraphId) => (
-        !resolveRfc64CatalogAuthorityDecisionV1(
-          this.config.rfc64CatalogRollout,
-          contextGraphId,
-        ).track2Enabled
-      ))
+      !this.config.rfc64CatalogExecutionPlan.standaloneTrack2Enabled
+      && this.config.rfc64CatalogExecutionPlan.track2ContextGraphs.length === 0
     ) {
       this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
       return;
@@ -938,24 +933,42 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         readNativeResourceStats = () => nativeReceiver.resourceStats();
+        const synchronizeBoundedPublicRootCatalog:
+          Rfc64BoundedPublicRootCatalogNativeReceiverClientV1[
+            'synchronizeBoundedPublicRootCatalog'
+          ] = async (
+            remotePeerId,
+            announcement,
+            trustedCatalogScope,
+            deployment,
+            signal,
+          ) => {
+            const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(
+              remotePeerId,
+              announcement,
+              trustedCatalogScope,
+              deployment,
+              signal,
+            );
+            const current = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
+            const previous = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
+              evidence.catalogHeadDigest,
+            );
+            const observed = previous === undefined
+              ? current
+              : reduceRfc64CatalogSynchronizationEvidenceReplayV1(previous, current);
+            this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
+              evidence.catalogHeadDigest,
+              observed,
+            );
+            return evidence;
+          };
+        const nativeReceiverClient: Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 =
+          Object.freeze({
+            synchronizeBoundedPublicRootCatalog,
+          });
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
-          nativeReceiver: Object.freeze({
-            synchronizeBoundedPublicRootCatalog: async (...args) => {
-              const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(...args);
-              const current = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
-              const previous = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
-                evidence.catalogHeadDigest,
-              );
-              const observed = previous === undefined
-                ? current
-                : reduceRfc64CatalogSynchronizationEvidenceReplayV1(previous, current);
-              this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
-                evidence.catalogHeadDigest,
-                observed,
-              );
-              return evidence;
-            },
-          }),
+          nativeReceiver: nativeReceiverClient,
           inventory: persistence.inventory,
           resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
           resolveDeployment,

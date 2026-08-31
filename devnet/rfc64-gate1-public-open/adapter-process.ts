@@ -404,8 +404,9 @@ interface HarnessVerifiedControlObjectV1 {
 /**
  * Harness-only adversarial setup. Both signatures are cryptographically valid,
  * but the head claims the catalog author while naming an attacker-scoped
- * direct-author delegation. The product receiver must reject that exact scope
- * mismatch before activation or applied-head mutation.
+ * direct-author delegation. The product's scope-closed provider/receiver path
+ * must reject that exact mismatch before activation or applied-head mutation,
+ * without exposing whether the requested digest exists.
  */
 async function prepareForgedAuthorizationGenesis(
   currentAgent: DKGAgent,

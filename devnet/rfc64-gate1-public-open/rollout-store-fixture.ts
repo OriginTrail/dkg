@@ -12,9 +12,6 @@ import {
   type Quad,
   type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
-import blazegraphRuntimeContract from
-  '@origintrail-official/dkg/blazegraph-runtime-contract';
-
 import {
   parseRolloutStoreBackend,
   buildGate1RolloutStoreConfig,
@@ -53,11 +50,6 @@ const DEFAULT_STORE_DATA_DIRS = Object.freeze({
   author: Object.freeze(['author']),
   receiver: Object.freeze(['receiver']),
 });
-const blazegraphNamespaceCodec = Object.freeze({
-  assertNamespace: blazegraphRuntimeContract.assertBlazegraphNamespace,
-  renderNamespaceXml: blazegraphRuntimeContract.renderBlazegraphNamespaceXml,
-});
-
 export async function createRolloutStoreFixture(
   options: RolloutStoreFixtureOptions = {},
 ): Promise<RolloutStoreFixture> {
@@ -183,7 +175,6 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
     const namespaceManager = new BlazegraphNamespaceManager({
       namespaceApiUrl: blazegraphNamespaceApiUrlFromSparqlEndpoint(input.configuredUrl),
       fetchImpl: input.fetchImpl,
-      namespaceCodec: blazegraphNamespaceCodec,
       requestTimeoutMs: input.requestTimeoutMs,
     });
     const plan: Array<Readonly<{

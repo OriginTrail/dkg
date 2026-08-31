@@ -203,7 +203,10 @@ const blockedRfc64Modules = [
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
   'catalog-rollout-authority-v1.js',
-  'catalog-rollout-authority-state-v1.js',
+  'catalog-rollout-authority-reconciliation-v1.js',
+  'applied-catalog-authority-transition-v1.js',
+  'catalog-semantic-authority-transition-v1.js',
+  'public-catalog-native-errors-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',
@@ -260,6 +263,8 @@ const blockedRfc64Modules = [
   'swm-inventory-shadow-runtime-v1.js',
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',
+  'catalog-runtime-v1.js',
+  'coalescing-supervisor-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;
