@@ -14,7 +14,9 @@
       "import": "./blazegraph-namespace-contract.cjs",
       "require": "./blazegraph-namespace-contract.cjs",
       "default": "./blazegraph-namespace-contract.cjs"
-    }
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",

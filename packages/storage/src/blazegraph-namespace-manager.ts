@@ -3,23 +3,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import blazegraphNamespaceContract from '../blazegraph-namespace-contract.cjs';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const canonicalNamespaceCodec: BlazegraphNamespaceCodec = Object.freeze({
-  assertNamespace: blazegraphNamespaceContract.assertBlazegraphNamespace,
-  renderNamespaceXml: blazegraphNamespaceContract.renderBlazegraphNamespaceXml,
-});
 
 export interface BlazegraphNamespaceManagerOptions {
   readonly namespaceApiUrl: string;
   readonly fetchImpl?: typeof fetch;
-  /** Test seam only; production callers use the canonical storage-owned contract. */
-  readonly namespaceCodec?: BlazegraphNamespaceCodec;
   readonly requestTimeoutMs?: number;
-}
-
-/** One contract owns both path safety and the XML representation. */
-export interface BlazegraphNamespaceCodec {
-  assertNamespace(namespace: string): void;
-  renderNamespaceXml(namespace: string): string;
 }
 
 export interface BlazegraphNamespaceEnsureResult {
@@ -31,35 +19,16 @@ export interface BlazegraphNamespaceDisposeOptions {
   readonly reconcileAttempts?: number;
 }
 
-/**
- * One explicitly owned Blazegraph namespace. A lease is registered before its
- * create request is sent, so an indeterminate POST can always be reconciled by
- * DELETE even when the response was lost after Blazegraph committed it.
- */
-export class BlazegraphNamespaceLease {
+interface BlazegraphNamespaceHandle {
+  readonly namespace: string;
   readonly namespaceUrl: string;
   readonly sparqlUrl: string;
-
-  constructor(
-    readonly namespace: string,
-    private readonly manager: BlazegraphNamespaceManager,
-  ) {
-    this.namespaceUrl = manager.namespaceUrl(namespace);
-    this.sparqlUrl = `${this.namespaceUrl}/sparql`;
-  }
-
-  dispose(options: BlazegraphNamespaceDisposeOptions = {}): Promise<void> {
-    return this.manager.deleteNamespace(
-      this.namespaceUrl,
-      options.reconcileAttempts ?? 1,
-    );
-  }
 }
 
 /**
  * Canonical bounded lifecycle for Blazegraph namespaces.
  *
- * Production provisioning uses `ensure`, while isolated tests use leases and
+ * Production provisioning uses `ensure`, while isolated tests use immutable handles and
  * dispose them. Batch acquisition and disposal operate concurrently and report
  * every failure, so total cleanup latency is bounded by one namespace budget
  * rather than the number of namespaces.
@@ -67,7 +36,6 @@ export class BlazegraphNamespaceLease {
 export class BlazegraphNamespaceManager {
   readonly namespaceApiUrl: string;
   readonly #fetch: typeof fetch;
-  readonly #namespaceCodec: BlazegraphNamespaceCodec;
   readonly #requestTimeoutMs: number;
 
   constructor(options: BlazegraphNamespaceManagerOptions) {
@@ -77,12 +45,11 @@ export class BlazegraphNamespaceManager {
     }
     this.namespaceApiUrl = normalizeBlazegraphNamespaceApiUrl(options.namespaceApiUrl);
     this.#fetch = options.fetchImpl ?? fetch;
-    this.#namespaceCodec = options.namespaceCodec ?? canonicalNamespaceCodec;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   namespaceUrl(namespace: string): string {
-    this.#namespaceCodec.assertNamespace(namespace);
+    blazegraphNamespaceContract.assertBlazegraphNamespace(namespace);
     return `${this.namespaceApiUrl}/${encodeURIComponent(namespace)}`;
   }
 
@@ -113,22 +80,32 @@ export class BlazegraphNamespaceManager {
   async acquireMany(
     namespaces: readonly string[],
     signal?: AbortSignal,
-  ): Promise<readonly BlazegraphNamespaceLease[]> {
+  ): Promise<readonly BlazegraphNamespaceHandle[]> {
     if (namespaces.length === 0 || new Set(namespaces).size !== namespaces.length) {
-      throw new Error('Blazegraph namespace lease plan must be non-empty and unique');
+      throw new Error('Blazegraph namespace handle plan must be non-empty and unique');
     }
-    const leases = namespaces.map((namespace) => new BlazegraphNamespaceLease(namespace, this));
+    // Register every immutable cleanup handle before any POST starts. A lost
+    // create response is therefore still reconciled without exposing a
+    // manager-owning public lease object or a second lifecycle API.
+    const handles = namespaces.map((namespace) => {
+      const namespaceUrl = this.namespaceUrl(namespace);
+      return Object.freeze({
+        namespace,
+        namespaceUrl,
+        sparqlUrl: `${namespaceUrl}/sparql`,
+      });
+    });
     const outcomes = await Promise.allSettled(
-      leases.map(async (lease) => {
-        await this.#create(lease.namespace, signal);
-        return lease;
+      handles.map(async (handle) => {
+        await this.#create(handle.namespace, signal);
+        return handle;
       }),
     );
     const createFailures = rejectedReasons(outcomes);
-    if (createFailures.length === 0) return Object.freeze(leases);
+    if (createFailures.length === 0) return Object.freeze(handles);
 
     const cleanupOutcomes = await Promise.allSettled(
-      leases.map((lease) => lease.dispose({ reconcileAttempts: 3 })),
+      handles.map((handle) => this.#deleteNamespace(handle.namespaceUrl, 3)),
     );
     const cleanupFailures = rejectedReasons(cleanupOutcomes);
     if (cleanupFailures.length > 0) {
@@ -141,11 +118,14 @@ export class BlazegraphNamespaceManager {
   }
 
   async disposeAll(
-    leases: readonly BlazegraphNamespaceLease[],
+    handles: readonly BlazegraphNamespaceHandle[],
     options: BlazegraphNamespaceDisposeOptions = {},
   ): Promise<void> {
     const outcomes = await Promise.allSettled(
-      leases.map((lease) => lease.dispose(options)),
+      handles.map((handle) => this.#deleteNamespace(
+        handle.namespaceUrl,
+        options.reconcileAttempts ?? 1,
+      )),
     );
     const failures = rejectedReasons(outcomes);
     if (failures.length > 0) {
@@ -153,7 +133,7 @@ export class BlazegraphNamespaceManager {
     }
   }
 
-  async deleteNamespace(namespaceUrl: string, reconcileAttempts: number): Promise<void> {
+  async #deleteNamespace(namespaceUrl: string, reconcileAttempts: number): Promise<void> {
     const attempts = normalizeReconcileAttempts(reconcileAttempts, this.#requestTimeoutMs);
     const retryDelayMs = attempts === 1
       ? 0
@@ -186,7 +166,7 @@ export class BlazegraphNamespaceManager {
     const response = await this.#boundedFetch(this.namespaceApiUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/xml' },
-      body: this.#namespaceCodec.renderNamespaceXml(namespace),
+      body: blazegraphNamespaceContract.renderBlazegraphNamespaceXml(namespace),
     }, this.#requestTimeoutMs, signal);
     if (!response.ok) {
       let detail = '';

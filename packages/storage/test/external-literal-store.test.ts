@@ -15,6 +15,7 @@ import {
   type Rfc64AuthorCommitCasInputV1,
   type TripleStore,
 } from '../src/index.js';
+import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
 
 const SWM_GRAPH = 'did:dkg:context-graph:test/_shared_memory';
 const NON_SWM_GRAPH = 'did:dkg:context-graph:test';
@@ -277,7 +278,8 @@ describe('SharedMemoryLiteralBlobStore', () => {
     const committedBase = new OxigraphStore();
     const committedInner = overrideStore(committedBase, {
       rfc64AuthorCommitCasV1: async (input) => {
-        await committedBase.insert([...input.sharedProjectionQuads]);
+        const plan = normalizeRfc64AuthorCommitCasV1(input);
+        await committedBase.insert([...plan.graphReplacements[0]!.quads]);
         return 'committed';
       },
     });

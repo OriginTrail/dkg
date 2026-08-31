@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -18,6 +19,7 @@ import {
 import { cliRuntimeAssetManifest, copyCliRuntimeAssets } from '../../copy-cli-runtime-assets.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const require = createRequire(import.meta.url);
 const COPY_SCRIPT = path.join(REPO_ROOT, 'scripts', 'copy-cli-runtime-assets.mjs');
 const BLAZEGRAPH_METADATA_PARSER = path.join(REPO_ROOT, 'packages', 'cli', 'blazegraph-image-metadata.cjs');
 const BLAZEGRAPH_NAMESPACE_CONTRACT = path.join(
@@ -58,11 +60,6 @@ function withFixture(fn) {
     writePackage(root, 'packages/query', { name: '@origintrail-official/dkg-query', version: '1.2.3' });
     writePackage(root, 'packages/private-tool', { name: '@origintrail-official/private-tool', version: '1.2.3', private: true });
     writePackage(root, 'packages/other-scope', { name: '@example/other', version: '1.2.3' });
-    fs.mkdirSync(path.join(root, 'packages', 'storage'), { recursive: true });
-    fs.copyFileSync(
-      BLAZEGRAPH_NAMESPACE_CONTRACT,
-      path.join(root, 'packages', 'storage', 'blazegraph-namespace-contract.cjs'),
-    );
     return fn(root);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -250,7 +247,6 @@ test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', ()
     [
       'blazegraph-image-metadata.cjs',
       'blazegraph-image.json',
-      'blazegraph-namespace-contract.cjs',
       'blazegraph-runtime-contract.d.cts',
       'build-info.json',
       'network/mainnet-base.json',
@@ -267,7 +263,6 @@ test('passes when the cli tarball includes every required runtime asset', () => 
     { path: 'project.json' },
     { path: 'blazegraph-image.json' },
     { path: 'blazegraph-image-metadata.cjs' },
-    { path: 'blazegraph-namespace-contract.cjs' },
     { path: 'blazegraph-runtime-contract.d.cts' },
     { path: 'build-info.json' },
     { path: 'network\\testnet.json' },
@@ -298,13 +293,33 @@ test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops 
     fs.existsSync(path.join(root, 'packages', 'cli', 'blazegraph-image.json')),
     'blazegraph-image.json copied',
   );
-  assert.equal(
-    fs.readFileSync(path.join(root, 'packages', 'cli', 'blazegraph-namespace-contract.cjs'), 'utf8'),
-    fs.readFileSync(BLAZEGRAPH_NAMESPACE_CONTRACT, 'utf8'),
-    'storage-owned namespace contract copied exactly',
-  );
   assert.equal(fs.existsSync(path.join(cliNetwork, 'devnet.json')), false, 'stale overlay removed (mirror, not append)');
 }));
+
+test('CLI and storage published entries use one canonical namespace contract', () => {
+  const cliContract = require(BLAZEGRAPH_METADATA_PARSER);
+  const storageContract = require(BLAZEGRAPH_NAMESPACE_CONTRACT);
+  for (const input of ["Bob's Node / Main & Co", 'dkg.node_01', 'a'.repeat(160)]) {
+    assert.equal(
+      cliContract.normalizeBlazegraphNamespace(input),
+      storageContract.normalizeBlazegraphNamespace(input),
+    );
+  }
+  const namespace = storageContract.normalizeBlazegraphNamespace('Canonical Contract');
+  assert.equal(
+    cliContract.renderBlazegraphNamespaceXml(namespace),
+    storageContract.renderBlazegraphNamespaceXml(namespace),
+  );
+  assert.throws(
+    () => cliContract.assertBlazegraphNamespace('author:probe'),
+    /invalid/u,
+  );
+  assert.equal(
+    cliContract.normalizeBlazegraphNamespace,
+    storageContract.normalizeBlazegraphNamespace,
+    'the CLI facade must re-export the storage-owned implementation, not a copy',
+  );
+});
 
 test('copyCliRuntimeAssets fails loudly when a source asset is missing', () => withFixture((root) => {
   // network/ present but project.json absent
@@ -325,7 +340,6 @@ test('the manifest distinguishes copied assets from complete pack requirements',
   assert.deepEqual(copiedRuntimeAssets, [
     'project.json',
     'blazegraph-image.json',
-    'blazegraph-namespace-contract.cjs',
     'network/mainnet-base.json',
     'network/testnet.json',
   ]);
@@ -333,7 +347,6 @@ test('the manifest distinguishes copied assets from complete pack requirements',
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
-    'blazegraph-namespace-contract.cjs',
     'blazegraph-runtime-contract.d.cts',
     'network/mainnet-base.json',
     'network/testnet.json',
@@ -377,7 +390,6 @@ test('packages/cli ships the runtime assets in its published files list', () => 
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
-    'blazegraph-namespace-contract.cjs',
     'blazegraph-runtime-contract.d.cts',
     'build-info.json',
   ]) {
@@ -458,6 +470,61 @@ test('the packed CLI resolves the typed Blazegraph runtime subpath for a consume
   );
 }));
 
+test('the packed storage package preserves representative legacy dist imports', {
+  skip: NPM_AVAILABLE && TAR_AVAILABLE ? false : 'npm and tar are required',
+}, () => withFixture((root) => {
+  const packDir = path.join(root, 'storage-pack');
+  const extractedDir = path.join(root, 'storage-extracted');
+  const consumerDir = path.join(root, 'storage-consumer');
+  const installedPackageDir = path.join(
+    consumerDir,
+    'node_modules',
+    '@origintrail-official',
+    'dkg-storage',
+  );
+  fs.mkdirSync(packDir, { recursive: true });
+  fs.mkdirSync(extractedDir, { recursive: true });
+  fs.mkdirSync(path.dirname(installedPackageDir), { recursive: true });
+  const packed = spawnSync('npm', [
+    'pack',
+    path.join(REPO_ROOT, 'packages', 'storage'),
+    '--pack-destination',
+    packDir,
+    '--json',
+    '--ignore-scripts',
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+  assert.equal(packed.status, 0, `npm pack failed: ${packed.stderr}`);
+  const report = JSON.parse(packed.stdout);
+  const filename = (Array.isArray(report) ? report[0] : report)?.filename;
+  assert.equal(typeof filename, 'string', 'npm pack did not report a tarball filename');
+  const extracted = spawnSync('tar', [
+    '-xzf',
+    path.join(packDir, filename),
+    '-C',
+    extractedDir,
+  ], { encoding: 'utf8' });
+  assert.equal(extracted.status, 0, `tar extraction failed: ${extracted.stderr}`);
+  fs.renameSync(path.join(extractedDir, 'package'), installedPackageDir);
+
+  const consumerPath = path.join(consumerDir, 'consumer.mjs');
+  fs.writeFileSync(consumerPath, [
+    "const resolved = import.meta.resolve('@origintrail-official/dkg-storage/dist/triple-store.js');",
+    "if (!resolved.endsWith('/dist/triple-store.js')) throw new Error(`unexpected resolution: ${resolved}`);",
+    "const manifest = import.meta.resolve('@origintrail-official/dkg-storage/package.json');",
+    "if (!manifest.endsWith('/package.json')) throw new Error(`unexpected manifest: ${manifest}`);",
+    '',
+  ].join('\n'));
+  const consumed = spawnSync(process.execPath, [consumerPath], {
+    cwd: consumerDir,
+    encoding: 'utf8',
+  });
+  assert.equal(consumed.status, 0, `packed storage consumer failed: ${consumed.stderr}`);
+}));
+
 test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd)', () => withFixture((root) => {
   writeCliPackFixture(root);
   let seenCwd;
@@ -487,8 +554,22 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
   const cliDir = path.join(root, 'packages', 'cli');
   fs.mkdirSync(cliDir, { recursive: true });
   fs.copyFileSync(BLAZEGRAPH_METADATA_PARSER, path.join(cliDir, 'blazegraph-image-metadata.cjs'));
-  fs.copyFileSync(BLAZEGRAPH_NAMESPACE_CONTRACT, path.join(cliDir, 'blazegraph-namespace-contract.cjs'));
   fs.copyFileSync(BLAZEGRAPH_RUNTIME_TYPES, path.join(cliDir, 'blazegraph-runtime-contract.d.cts'));
+  const storageDir = path.join(
+    root,
+    'node_modules',
+    '@origintrail-official',
+    'dkg-storage',
+  );
+  fs.mkdirSync(storageDir, { recursive: true });
+  fs.copyFileSync(BLAZEGRAPH_NAMESPACE_CONTRACT, path.join(storageDir, 'blazegraph-namespace-contract.cjs'));
+  fs.writeFileSync(path.join(storageDir, 'package.json'), `${JSON.stringify({
+    name: '@origintrail-official/dkg-storage',
+    version: '0.0.0-fixture',
+    exports: {
+      './blazegraph-namespace-contract': './blazegraph-namespace-contract.cjs',
+    },
+  }, null, 2)}\n`);
   fs.writeFileSync(path.join(cliDir, 'build-info.json'), '{}\n'); // generated by release:build-info
   fs.writeFileSync(path.join(cliDir, 'package.json'), `${JSON.stringify({
     name: '@origintrail-official/dkg', version: '0.0.0-fixture', private: true,
@@ -497,7 +578,6 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
       'project.json',
       'blazegraph-image.json',
       'blazegraph-image-metadata.cjs',
-      'blazegraph-namespace-contract.cjs',
       'blazegraph-runtime-contract.d.cts',
       'build-info.json',
     ],
@@ -519,7 +599,6 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
-    'blazegraph-namespace-contract.cjs',
     'blazegraph-runtime-contract.d.cts',
     'build-info.json',
     'network/testnet.json',

@@ -490,6 +490,11 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.#candidate.deleteAppliedCatalogHeadV1(input);
   }
 
+  deleteAppliedCatalogHeadsV1(inputs: readonly DeleteAppliedCatalogHeadInputV1[]): void {
+    this.requireOpen();
+    this.#candidate.deleteAppliedCatalogHeadsV1(inputs);
+  }
+
   compareAndSwapAppliedCatalogHeadV1(
     input: CompareAndSwapAppliedCatalogHeadInputV1,
   ): AppliedCatalogHeadCasResultV1 {

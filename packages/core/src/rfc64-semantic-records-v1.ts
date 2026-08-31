@@ -92,18 +92,30 @@ type FieldSpecFor<T> = {
   }
 }[Extract<keyof T, string>];
 
-interface SemanticRecordDefinitionV1<T> {
-  readonly fields: readonly FieldSpecFor<T>[];
-  readonly coordinateKeys: readonly Extract<keyof T, string>[];
-  readonly deriveAddress: (value: T) => Rfc64SemanticAddressV1;
-  readonly validate?: (value: T) => void;
+type SemanticRecordCoordinateForV1<K extends Rfc64SemanticRecordTypeV1> = Extract<
+  Rfc64SemanticRecordCoordinateV1,
+  { readonly recordType: K }
+>;
+
+interface SemanticRecordDefinitionV1<K extends Rfc64SemanticRecordTypeV1> {
+  readonly fields: readonly FieldSpecFor<Rfc64SemanticRecordValuesV1[K]>[];
+  readonly coordinateKeys: readonly Exclude<
+    Extract<keyof SemanticRecordCoordinateForV1<K>, string>,
+    'recordType'
+  >[];
+  readonly deriveAddress: (
+    coordinate: SemanticRecordCoordinateForV1<K>,
+  ) => Rfc64SemanticAddressV1;
+  readonly validate?: (value: Rfc64SemanticRecordValuesV1[K]) => void;
 }
 
 function defineFields<T>() {
   return <const F extends readonly FieldSpecFor<T>[]>(fields: F): F => fields;
 }
 
-function defineRecord<T>(definition: SemanticRecordDefinitionV1<T>): SemanticRecordDefinitionV1<T> {
+function defineRecord<K extends Rfc64SemanticRecordTypeV1>(
+  definition: SemanticRecordDefinitionV1<K>,
+): SemanticRecordDefinitionV1<K> {
   return Object.freeze({ ...definition, fields: Object.freeze(definition.fields) });
 }
 
@@ -203,7 +215,7 @@ interface UntypedFieldSpecV1 {
 
 const P = RFC64_SEMANTIC_PREDICATES_V1;
 const RECORD_DEFINITIONS = Object.freeze({
-  CurrentAuthorCatalogRefV1: defineRecord<CurrentAuthorCatalogRefV1>({
+  CurrentAuthorCatalogRefV1: defineRecord<'CurrentAuthorCatalogRefV1'>({
     fields: defineFields<CurrentAuthorCatalogRefV1>()([
     { key: 'networkId', predicate: P.NETWORK_ID, codec: networkIdCodec },
     { key: 'contextGraphId', predicate: P.CONTEXT_GRAPH_ID, codec: contextGraphIdCodec },
@@ -235,7 +247,7 @@ const RECORD_DEFINITIONS = Object.freeze({
       }
     },
   }),
-  AppliedSubgraphSealV1: defineRecord<AppliedSubgraphSealV1>({
+  AppliedSubgraphSealV1: defineRecord<'AppliedSubgraphSealV1'>({
     fields: defineFields<AppliedSubgraphSealV1>()([
       { key: 'networkId', predicate: P.NETWORK_ID, codec: networkIdCodec },
       { key: 'contextGraphId', predicate: P.CONTEXT_GRAPH_ID, codec: contextGraphIdCodec },
@@ -249,7 +261,7 @@ const RECORD_DEFINITIONS = Object.freeze({
     coordinateKeys: ['networkId', 'contextGraphId', 'subGraphName'],
     deriveAddress: (value) => deriveRfc64SubgraphSemanticAddressesV1(value).appliedSeal,
   }),
-  SubgraphMutationGuardV1: defineRecord<SubgraphMutationGuardV1>({
+  SubgraphMutationGuardV1: defineRecord<'SubgraphMutationGuardV1'>({
     fields: defineFields<SubgraphMutationGuardV1>()([
       { key: 'networkId', predicate: P.NETWORK_ID, codec: networkIdCodec },
       { key: 'contextGraphId', predicate: P.CONTEXT_GRAPH_ID, codec: contextGraphIdCodec },
@@ -259,7 +271,7 @@ const RECORD_DEFINITIONS = Object.freeze({
     coordinateKeys: ['networkId', 'contextGraphId', 'subGraphName'],
     deriveAddress: (value) => deriveRfc64SubgraphSemanticAddressesV1(value).mutationGuard,
   }),
-  ContextGraphMutationGuardV1: defineRecord<ContextGraphMutationGuardV1>({
+  ContextGraphMutationGuardV1: defineRecord<'ContextGraphMutationGuardV1'>({
     fields: defineFields<ContextGraphMutationGuardV1>()([
       { key: 'networkId', predicate: P.NETWORK_ID, codec: networkIdCodec },
       { key: 'contextGraphId', predicate: P.CONTEXT_GRAPH_ID, codec: contextGraphIdCodec },
@@ -268,7 +280,7 @@ const RECORD_DEFINITIONS = Object.freeze({
     coordinateKeys: ['networkId', 'contextGraphId'],
     deriveAddress: (value) => deriveRfc64ContextGraphSemanticAddressesV1(value).mutationGuard,
   }),
-  SubgraphReconcileTargetGuardV1: defineRecord<SubgraphReconcileTargetGuardV1>({
+  SubgraphReconcileTargetGuardV1: defineRecord<'SubgraphReconcileTargetGuardV1'>({
     fields: defineFields<SubgraphReconcileTargetGuardV1>()([
     { key: 'networkId', predicate: P.NETWORK_ID, codec: networkIdCodec },
     { key: 'contextGraphId', predicate: P.CONTEXT_GRAPH_ID, codec: contextGraphIdCodec },
@@ -293,7 +305,7 @@ const RECORD_DEFINITIONS = Object.freeze({
     coordinateKeys: ['networkId', 'contextGraphId', 'subGraphName'],
     deriveAddress: (value) => deriveRfc64SubgraphSemanticAddressesV1(value).reconcileTarget,
   }),
-  AppliedSubgraphSetRefV1: defineRecord<AppliedSubgraphSetRefV1>({
+  AppliedSubgraphSetRefV1: defineRecord<'AppliedSubgraphSetRefV1'>({
     fields: defineFields<AppliedSubgraphSetRefV1>()([
     { key: 'networkId', predicate: P.NETWORK_ID, codec: networkIdCodec },
     { key: 'contextGraphId', predicate: P.CONTEXT_GRAPH_ID, codec: contextGraphIdCodec },
@@ -310,7 +322,7 @@ const RECORD_DEFINITIONS = Object.freeze({
     coordinateKeys: ['networkId', 'contextGraphId'],
     deriveAddress: (value) => deriveRfc64ContextGraphSemanticAddressesV1(value).appliedSetRef,
   }),
-  AppliedContextGraphSealV1: defineRecord<AppliedContextGraphSealV1>({
+  AppliedContextGraphSealV1: defineRecord<'AppliedContextGraphSealV1'>({
     fields: defineFields<AppliedContextGraphSealV1>()([
       { key: 'networkId', predicate: P.NETWORK_ID, codec: networkIdCodec },
       { key: 'contextGraphId', predicate: P.CONTEXT_GRAPH_ID, codec: contextGraphIdCodec },
@@ -326,9 +338,7 @@ const RECORD_DEFINITIONS = Object.freeze({
     deriveAddress: (value) => deriveRfc64ContextGraphSemanticAddressesV1(value).appliedSeal,
   }),
 } satisfies {
-  readonly [K in Rfc64SemanticRecordTypeV1]: SemanticRecordDefinitionV1<
-    Rfc64SemanticRecordValuesV1[K]
-  >;
+  readonly [K in Rfc64SemanticRecordTypeV1]: SemanticRecordDefinitionV1<K>;
 });
 
 export const RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1 = Object.freeze({
@@ -349,7 +359,6 @@ const RECORD_TYPES = new Set<Rfc64SemanticRecordTypeV1>(
 interface UntypedRecordDefinitionV1 {
   readonly fields: readonly UntypedFieldSpecV1[];
   readonly coordinateKeys: readonly string[];
-  readonly deriveAddress: (value: never) => Rfc64SemanticAddressV1;
   readonly validate?: (value: never) => void;
 }
 
@@ -561,7 +570,22 @@ function snapshotClosed(
 export function deriveRfc64SemanticRecordAddressFromCoordinateV1(
   coordinate: Rfc64SemanticRecordCoordinateV1,
 ): Rfc64SemanticAddressV1 {
-  return definitionFor(coordinate.recordType).deriveAddress(coordinate as never);
+  switch (coordinate.recordType) {
+    case 'CurrentAuthorCatalogRefV1':
+      return RECORD_DEFINITIONS.CurrentAuthorCatalogRefV1.deriveAddress(coordinate);
+    case 'AppliedSubgraphSealV1':
+      return RECORD_DEFINITIONS.AppliedSubgraphSealV1.deriveAddress(coordinate);
+    case 'SubgraphMutationGuardV1':
+      return RECORD_DEFINITIONS.SubgraphMutationGuardV1.deriveAddress(coordinate);
+    case 'ContextGraphMutationGuardV1':
+      return RECORD_DEFINITIONS.ContextGraphMutationGuardV1.deriveAddress(coordinate);
+    case 'SubgraphReconcileTargetGuardV1':
+      return RECORD_DEFINITIONS.SubgraphReconcileTargetGuardV1.deriveAddress(coordinate);
+    case 'AppliedSubgraphSetRefV1':
+      return RECORD_DEFINITIONS.AppliedSubgraphSetRefV1.deriveAddress(coordinate);
+    case 'AppliedContextGraphSealV1':
+      return RECORD_DEFINITIONS.AppliedContextGraphSealV1.deriveAddress(coordinate);
+  }
 }
 
 /** Validate untrusted input once, then delegate to the typed address primitive. */

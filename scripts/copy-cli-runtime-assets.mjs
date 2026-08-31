@@ -57,12 +57,6 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
   const sourceNetworkDir = path.join(rootDir, 'network');
   const sourceProjectJson = path.join(rootDir, 'project.json');
   const sourceBlazegraphImageJson = path.join(rootDir, 'blazegraph-image.json');
-  const sourceBlazegraphNamespaceContract = path.join(
-    rootDir,
-    'packages',
-    'storage',
-    'blazegraph-namespace-contract.cjs',
-  );
   const overlays = enumerateNetworkOverlays(sourceNetworkDir);
   if (overlays === null) {
     throw new Error(`copy-cli-runtime-assets: repo-root network/ directory not found at ${sourceNetworkDir}`);
@@ -80,23 +74,16 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
       `copy-cli-runtime-assets: valid repo-root blazegraph-image.json not found at ${sourceBlazegraphImageJson}`,
     );
   }
-  if (!fs.existsSync(sourceBlazegraphNamespaceContract)) {
-    throw new Error(
-      `copy-cli-runtime-assets: storage namespace contract not found at ${sourceBlazegraphNamespaceContract}`,
-    );
-  }
   return {
     rootDir,
     sourceNetworkDir,
     sourceProjectJson,
     sourceBlazegraphImageJson,
-    sourceBlazegraphNamespaceContract,
     networkJsonFiles: overlays,
     // Package-relative files this function materializes from repo-root sources.
     copiedRuntimeAssets: [
       'project.json',
       'blazegraph-image.json',
-      'blazegraph-namespace-contract.cjs',
       ...overlays.map((file) => `network/${file}`),
     ],
     // Complete publish contract. The parser is package-local source, while the
@@ -105,7 +92,6 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
       'project.json',
       'blazegraph-image.json',
       'blazegraph-image-metadata.cjs',
-      'blazegraph-namespace-contract.cjs',
       'blazegraph-runtime-contract.d.cts',
       ...overlays.map((file) => `network/${file}`),
     ],
@@ -125,17 +111,12 @@ export function copyCliRuntimeAssets({ rootDir = DEFAULT_ROOT_DIR } = {}) {
     sourceNetworkDir,
     sourceProjectJson,
     sourceBlazegraphImageJson,
-    sourceBlazegraphNamespaceContract,
     networkJsonFiles,
   } = cliRuntimeAssetManifest({ rootDir });
   const cliDir = path.join(rootDir, 'packages', 'cli');
   const targetNetworkDir = path.join(cliDir, 'network');
   const targetProjectJson = path.join(cliDir, 'project.json');
   const targetBlazegraphImageJson = path.join(cliDir, 'blazegraph-image.json');
-  const targetBlazegraphNamespaceContract = path.join(
-    cliDir,
-    'blazegraph-namespace-contract.cjs',
-  );
 
   fs.rmSync(targetNetworkDir, { recursive: true, force: true });
   fs.mkdirSync(targetNetworkDir, { recursive: true });
@@ -144,7 +125,6 @@ export function copyCliRuntimeAssets({ rootDir = DEFAULT_ROOT_DIR } = {}) {
   }
   fs.copyFileSync(sourceProjectJson, targetProjectJson);
   fs.copyFileSync(sourceBlazegraphImageJson, targetBlazegraphImageJson);
-  fs.copyFileSync(sourceBlazegraphNamespaceContract, targetBlazegraphNamespaceContract);
 
   return { rootDir, cliDir, networkJsonFiles };
 }

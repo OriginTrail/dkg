@@ -22,6 +22,8 @@ import {
 import {
   BlazegraphStore,
   executeRfc64ExactBindingsReadCapabilityV1,
+  isRfc64ExactBindingsReadCapabilityV1,
+  isRfc64SemanticReadCapabilityV1,
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   OxigraphStore,
   OxigraphWorkerStore,
@@ -163,6 +165,49 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it('keeps both certified read call shapes on every built-in adapter', async () => {
+    const current = FIXTURES[0];
+    const operation = compileRfc64SemanticReadOperationV2(current.coordinate);
+    const typedRows = projectRfc64SemanticRecordStoreRowsV1(current.record);
+    const quads = typedRows.map(renderRfc64SemanticStoreRowV1);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      head: { vars: ['p', 'o'] },
+      results: { bindings: typedRows.map(toSparqlJsonBinding) },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    }));
+    const embedded = new OxigraphStore();
+    const worker = new OxigraphWorkerStore();
+    const adapters: TripleStore[] = [
+      embedded,
+      worker,
+      new BlazegraphStore('http://rfc64-compat-blazegraph.test/sparql'),
+      new SparqlHttpStore({
+        queryEndpoint: 'http://rfc64-compat-oxigraph.test/query',
+        updateEndpoint: 'http://rfc64-compat-oxigraph.test/update',
+        managedOxigraph: true,
+      }),
+    ];
+    try {
+      await embedded.insert(quads);
+      await worker.insert(quads);
+      for (const adapter of adapters) {
+        expect(isRfc64ExactBindingsReadCapabilityV1(adapter)).toBe(true);
+        expect(isRfc64SemanticReadCapabilityV1(adapter)).toBe(true);
+        const exactRows = await adapter.rfc64ExactBindingsReadV1!(operation);
+        const legacy = await adapter.rfc64SemanticReadV1!(operation);
+        const byPredicate = (left: Rfc64SemanticStoreRowV1, right: Rfc64SemanticStoreRowV1) =>
+          left.predicateIri.localeCompare(right.predicateIri);
+        expect([...exactRows].sort(byPredicate)).toEqual([...typedRows].sort(byPredicate));
+        expect([...legacy.rows].sort(byPredicate)).toEqual([...typedRows].sort(byPredicate));
+      }
+    } finally {
+      await embedded.close();
+      await worker.close();
+    }
+  }, 15_000);
+
   it('normalizes Blazegraph SPARQL JSON terms into the same exact decoded record', async () => {
     const current = FIXTURES[0];
     const rows = projectRfc64SemanticRecordStoreRowsV1(current.record);
@@ -222,6 +267,23 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it.each([
+    ['invalid JSON', '{'],
+    ['a null top-level value', 'null'],
+  ])('classifies HTTP 200 with %s as a malformed semantic result', async (_label, body) => {
+    const current = FIXTURES[0];
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    }));
+    const error = await rejected(new SyncSemanticStoreV1(
+      new BlazegraphStore('http://rfc64-malformed-json.test/sparql'),
+    ).read(requestOf(current), { timeoutMs: 1_000 }));
+    expectGatewayResultError(error);
+    expect((error as Error & { cause: unknown }).cause)
+      .toBeInstanceOf(Rfc64SemanticReadCapabilityResultErrorV1);
+  });
+
   it('returns an explicit absent result without invoking the strict record decoder', async () => {
     const query = vi.fn(async (): Promise<QueryResult> => ({
       type: 'bindings',
@@ -275,7 +337,6 @@ describe('SyncSemanticStoreV1', () => {
 
   it('accepts a legacy semantic-only custom adapter during the compatibility window', async () => {
     const legacyRead = vi.fn(async () => ({
-      variables: ['p', 'o'],
       rows: [],
     }));
     const legacyStore = {
@@ -289,12 +350,11 @@ describe('SyncSemanticStoreV1', () => {
     expect(legacyRead).toHaveBeenCalledOnce();
   });
 
-  it('validates a legacy adapter projection before treating empty rows as absent', async () => {
+  it('rejects a legacy adapter response without the prior rows member', async () => {
     const legacyStore = {
       rfc64SemanticReadCertifiedV1: true,
       rfc64SemanticReadV1: vi.fn(async () => ({
-        variables: ['o', 'p'],
-        rows: [],
+        bindings: [],
       })),
     } as unknown as TripleStore;
     await expect(new SyncSemanticStoreV1(legacyStore).read(
@@ -451,6 +511,39 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it('times out a pending worker respawn with typed metadata and never dispatches', async () => {
+    const store = new OxigraphWorkerStore();
+    let releaseRespawn!: () => void;
+    const heldRespawn = new Promise<void>((resolve) => {
+      releaseRespawn = resolve;
+    });
+    const internals = store as unknown as {
+      respawnPromise: Promise<void> | null;
+      callWithTimeout: <T>(
+        timeoutMs: number,
+        signal: AbortSignal | undefined,
+        method: string,
+        ...args: unknown[]
+      ) => Promise<T>;
+      postToWorker: (...args: unknown[]) => Promise<unknown>;
+    };
+    internals.respawnPromise = heldRespawn;
+    const postToWorker = vi.spyOn(internals, 'postToWorker');
+    try {
+      await expect(internals.callWithTimeout(10, undefined, 'query', 'SELECT {}'))
+        .rejects.toMatchObject({
+          code: 'OXIGRAPH_WORKER_OP_TIMEOUT',
+          method: 'query',
+          timeoutMs: 10,
+        });
+      expect(postToWorker).not.toHaveBeenCalled();
+    } finally {
+      internals.respawnPromise = null;
+      releaseRespawn();
+      await store.close();
+    }
+  });
+
   it('reports the configured worker timeout after a respawn consumes part of the deadline', async () => {
     const store = new OxigraphWorkerStore();
     let releaseRespawn!: () => void;
@@ -531,6 +624,10 @@ describe('SyncSemanticStoreV1', () => {
       {
         type: 'bindings',
         bindings: [{ p: 'urn:test:p', o: '"value"@en' }],
+      },
+      {
+        type: 'bindings',
+        bindings: [{ p: 'urn:test:p', o: '"value"^^<not an iri>' }],
       },
       {
         type: 'bindings',
