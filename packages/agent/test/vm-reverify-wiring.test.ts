@@ -50,7 +50,7 @@ function stubNode(agent: DKGAgent): void {
 function capableChain(): MockChainAdapter {
   const chain = new MockChainAdapter();
   (chain as unknown as { supportsEventTypes: unknown }).supportsEventTypes =
-    (): string[] => [];
+    async (): Promise<string[]> => [];
   return chain;
 }
 
@@ -110,7 +110,7 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     delete process.env[RECONCILER_ENV];
     const { internals, intentFile } = await boot();
 
-    expect(internals.vmUpdateConvergenceState()).toEqual({ effective: true });
+    expect(await internals.vmUpdateConvergenceState()).toEqual({ effective: true });
     expect(
       existsSync(intentFile),
       'the file must not exist before the store is opened',
@@ -126,7 +126,7 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     delete process.env[INTENT_ENV];
     const { internals, intentFile } = await boot({ vmUpdateConvergenceEnabled: false });
 
-    expect(internals.vmUpdateConvergenceState()).toEqual({
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
       effective: false,
       reason: 'flag-off',
     });
@@ -145,7 +145,7 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     process.env[INTENT_ENV] = '0';
     const { internals, intentFile } = await boot({ vmUpdateConvergenceEnabled: true });
 
-    expect(internals.vmUpdateConvergenceState()).toMatchObject({
+    expect(await internals.vmUpdateConvergenceState()).toMatchObject({
       effective: false,
       reason: 'flag-off',
     });
@@ -160,7 +160,7 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     process.env[RECONCILER_ENV] = '0';
     const { internals, intentFile } = await boot({ vmUpdateConvergenceEnabled: true });
 
-    expect(internals.vmUpdateConvergenceState()).toEqual({
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
       effective: false,
       reason: 'reconcile-disabled',
     });
@@ -176,7 +176,7 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     process.env[RECONCILER_ENV] = '0';
     const { internals } = await boot();
 
-    expect(internals.vmUpdateConvergenceState()).toEqual({
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
       effective: false,
       reason: 'reconcile-disabled',
     });
@@ -192,7 +192,7 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     agents.push(agent);
     stubNode(agent);
 
-    expect((agent as any).vmUpdateConvergenceState()).toEqual({
+    expect(await (agent as any).vmUpdateConvergenceState()).toEqual({
       effective: false,
       reason: 'no-data-dir',
     });
@@ -206,7 +206,7 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     delete process.env[RECONCILER_ENV];
     const { internals, intentFile } = await boot({ chainAdapter: new MockChainAdapter() });
 
-    expect(internals.vmUpdateConvergenceState()).toEqual({
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
       effective: false,
       reason: 'abi-missing:KnowledgeAssetUpdated',
     });
@@ -230,6 +230,42 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     expect(order).toEqual(['worker-stop', 'store-close']);
     expect(internals.vmReverifyWorker).toBeUndefined();
     expect(internals.vmReverifyIntents).toBeUndefined();
+  }, 60_000);
+
+  it('fails CLOSED when the capability probe rejects — a transient probe is not proof', async () => {
+    // `supportsEventTypes` awaits lazily-resolved contract bindings, so it can
+    // reject when the Hub is unreachable at boot. Treating that as capable
+    // would subscribe a lane that yields nothing, forever, with no signal.
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    const chain = new MockChainAdapter();
+    (chain as unknown as { supportsEventTypes: unknown }).supportsEventTypes =
+      async (): Promise<string[]> => { throw new Error('hub unreachable'); };
+    const { internals, intentFile } = await boot({ chainAdapter: chain });
+
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
+      effective: false,
+      reason: 'abi-probe-failed',
+    });
+    await internals.prepareVmReverifyIntentStore();
+    expect(existsSync(intentFile)).toBe(false);
+  }, 60_000);
+
+  it('fails CLOSED on a probe that is not awaited into an array', async () => {
+    // The failure this row exists for: an UNAWAITED promise has no `.length`,
+    // and `undefined > 0` is false — so a gate that forgot the await would call
+    // every adapter capable. Anything that is not an array is refused.
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    const chain = new MockChainAdapter();
+    (chain as unknown as { supportsEventTypes: unknown }).supportsEventTypes =
+      (): unknown => ({ length: undefined });
+    const { internals } = await boot({ chainAdapter: chain });
+
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
+      effective: false,
+      reason: 'abi-probe-failed',
+    });
   }, 60_000);
 
   it('an INJECTED store is honoured and is never closed by the agent that borrowed it', async () => {

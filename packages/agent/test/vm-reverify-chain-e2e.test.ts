@@ -402,6 +402,7 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       await heldNames(host),
       'precondition: the host still serves the OLD version before the update',
     ).toEqual([NAME_V1]);
+    const stampBeforeRepair = await materializedStamp(host);
 
     // ── The on-chain UPDATE. ──
     const author = new Wallet(HARDHAT_KEYS.CORE_OP, ctx.provider);
@@ -487,6 +488,20 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       await countPending(host, CG),
       'a resolved intent must be deleted, not left to retry forever',
     ).toBe(0);
+
+    // ADR-W2R-8, the OTHER polarity. `inspectOnly` is passed on every drain
+    // call, and it must suppress the version stamp ONLY on the already-current
+    // path. A genuine PROMOTION still has to record its version — otherwise the
+    // node would materialize new content while claiming, forever, to be at the
+    // older version, and the next ordering decision would be made on a lie.
+    // SC-3 below asserts the same flag does NOT stamp when nothing was
+    // promoted; measuring only that side would leave "inspectOnly suppresses
+    // everything" indistinguishable from correct.
+    const stampAfterRepair = await materializedStamp(host);
+    expect(
+      stampAfterRepair?.blockNumber ?? -1,
+      'a repair that PROMOTED content must still advance the materialization stamp',
+    ).toBeGreaterThan(stampBeforeRepair?.blockNumber ?? -1);
   }, 300_000);
 
   // ─────────────────────────────────────────────────────────────────────────

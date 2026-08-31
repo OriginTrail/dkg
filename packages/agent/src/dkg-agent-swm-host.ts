@@ -2924,32 +2924,56 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * The `reason` is what makes a disabled node diagnosable instead of merely
    * quiet, so it is produced HERE rather than reconstructed by the status route.
    */
-  vmUpdateConvergenceState(
+  async vmUpdateConvergenceState(
     this: DKGAgent,
-  ): { effective: boolean; reason?: string } {
+  ): Promise<{ effective: boolean; reason?: string }> {
     if (!this.vmReconcileEnabled()) return { effective: false, reason: 'reconcile-disabled' };
     if (!resolveVmUpdateConvergenceEnabled(this.config.vmUpdateConvergenceEnabled)) {
       return { effective: false, reason: 'flag-off' };
     }
     if (!this.config.dataDir) return { effective: false, reason: 'no-data-dir' };
     const requested: string[] = [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES];
-    // `supportsEventTypes` is an OPTIONAL adapter capability (PR-A). Read it
-    // structurally so this gate compiles against adapters that do not declare
-    // it and treats them, correctly, as supporting none of the four.
+    // `supportsEventTypes` is an OPTIONAL adapter capability (PR-A) and is
+    // ASYNC — contract bindings resolve lazily from the Hub, so a probe that
+    // did not await `init()` would see no bindings and report every name
+    // missing. Read structurally, because an adapter that predates the branch
+    // must gate to "supports none of the four" rather than fail to compile.
     const supportsEventTypes = (
-      this.chain as { supportsEventTypes?: (names: readonly string[]) => string[] }
+      this.chain as {
+        supportsEventTypes?: (names: readonly string[]) => Promise<string[]> | string[];
+      }
     ).supportsEventTypes;
-    const missing = typeof supportsEventTypes === 'function'
-      ? supportsEventTypes.call(this.chain, requested)
-      : requested;
+    if (typeof supportsEventTypes !== 'function') {
+      return { effective: false, reason: `abi-missing:${requested[0]}` };
+    }
+    // Only a PRESENT, ARRAY-SHAPED, EMPTY missing-list means capable. Every
+    // other answer fails closed, and each failure names itself.
+    //
+    // The awaited call is the reason this whole resolver is async: awaiting a
+    // non-promise is harmless, whereas NOT awaiting a promise yields an object
+    // whose `.length` is `undefined`, and `undefined > 0` is false — so the
+    // pre-await version of this gate reported EVERY adapter capable, including
+    // ones that can serve none of the four. That is the one failure direction
+    // a capability gate must never have, and it is invisible: the feature would
+    // simply subscribe to a lane that yields nothing, forever.
+    let missing: unknown;
+    try {
+      missing = await supportsEventTypes.call(this.chain, requested);
+    } catch {
+      // A transient probe failure (the Hub unreachable at boot) is not proof of
+      // capability. Off for this process, and named so an operator can tell it
+      // apart from a genuinely legacy ABI.
+      return { effective: false, reason: 'abi-probe-failed' };
+    }
+    if (!Array.isArray(missing)) return { effective: false, reason: 'abi-probe-failed' };
     if (missing.length > 0) {
-      return { effective: false, reason: `abi-missing:${missing[0]}` };
+      return { effective: false, reason: `abi-missing:${String(missing[0])}` };
     }
     return { effective: true };
   }
 
-  vmUpdateConvergenceEnabled(this: DKGAgent): boolean {
-    return this.vmUpdateConvergenceState().effective;
+  async vmUpdateConvergenceEnabled(this: DKGAgent): Promise<boolean> {
+    return (await this.vmUpdateConvergenceState()).effective;
   }
 
   /**

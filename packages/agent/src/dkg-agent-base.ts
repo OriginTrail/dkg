@@ -1841,7 +1841,7 @@ export class DKGAgentBase {
     // type for the open call. Reordering these two is an equivalent mutation;
     // deleting the gate is not, and has its own test.
     if (!this.config.dataDir) return;
-    if (!(this as unknown as DKGAgent).vmUpdateConvergenceEnabled()) return;
+    if (!(await (this as unknown as DKGAgent).vmUpdateConvergenceEnabled())) return;
     this.vmReverifyIntents = await openSqliteVmReverifyIntentStore(this.config.dataDir);
   }
 
