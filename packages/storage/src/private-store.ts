@@ -7,7 +7,12 @@ import {
   isSafeIri,
   type GraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import { tryReplaceGraphAtomically, type TripleStore, type Quad } from './triple-store.js';
+import {
+  deleteByPatternWithoutCount,
+  tryReplaceGraphAtomically,
+  type TripleStore,
+  type Quad,
+} from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
 import {
   readExactGraphPaged,
@@ -386,7 +391,7 @@ export class PrivateContentStore {
           // commitment marker. Repeated stores under the SAME commitment fall
           // through to the append+dedup path below (chunked/retry-safe).
           await this.deleteRootPrivateSlice(graphUri, rootEntity);
-          await this.store.deleteByPattern({ graph: graphUri, subject: markerSubject });
+          await deleteByPatternWithoutCount(this.store, { graph: graphUri, subject: markerSubject });
           await this.store.insert([{
             subject: markerSubject,
             predicate: PRIVATE_COMMITMENT_PRED,
@@ -446,7 +451,7 @@ export class PrivateContentStore {
       predicate,
       graph: graphUri,
     });
-    await this.store.deleteByPattern({ graph: graphUri, subject });
+    await deleteByPatternWithoutCount(this.store, { graph: graphUri, subject });
     await this.store.insert([{
       subject,
       predicate,
@@ -489,7 +494,7 @@ export class PrivateContentStore {
 
     const graphUri = this.privateStagingGraph(contextGraphId, shareOperationId, subGraphName);
     const subject = privateStageSubject(contextGraphId, shareOperationId, rootEntity, subGraphName);
-    await this.store.deleteByPattern({ graph: graphUri, subject });
+    await deleteByPatternWithoutCount(this.store, { graph: graphUri, subject });
   }
 
   async getPrivateTriples(
@@ -563,7 +568,7 @@ export class PrivateContentStore {
    */
   private async deleteRootPrivateSlice(graphUri: string, rootEntity: string): Promise<void> {
     assertSafeIri(rootEntity);
-    await this.store.deleteByPattern({ graph: graphUri, subject: rootEntity });
+    await deleteByPatternWithoutCount(this.store, { graph: graphUri, subject: rootEntity });
     await this.store.deleteBySubjectPrefix(graphUri, `${rootEntity}/.well-known/genid/`);
   }
 

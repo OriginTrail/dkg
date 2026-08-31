@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './agent-identity.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
 export * from './context-graph-join-policy.js';
@@ -163,9 +164,11 @@ export {
 // deep-import it from `../src/node.js`.
 export {
   type Network,
+  type PeerConnectionNetwork,
   type NodeIdentity,
   type Address,
   type DialOpts,
+  type PeerConnectOpts,
   type ProtocolHandler,
   LibP2PNetwork,
   canonicalPeerIdString,
@@ -175,8 +178,15 @@ export {
   StubNetworkStateRegistry,
   type AgentDirectoryLookup,
   type PeerResolverDeps,
+  type PeerConnectionOutcome,
+  connectLibp2pCandidate,
+  parseLibp2pConnectCandidate,
+  Libp2pConnectCandidateParseError,
+  type Libp2pConnectCandidate,
+  type Libp2pConnectHost,
   type PeerResolverLogger,
   type ResolveOpts,
+  type ConnectOpts,
   PeerResolver,
   dkgGossipMsgId,
   dkgGossipMsgIdRaw,

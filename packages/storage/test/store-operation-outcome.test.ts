@@ -5,12 +5,20 @@ import {
   StoreSchedulerBusyError,
   UnsupportedTripleStoreCapabilityError,
   hasStoreOperationOutcome,
+  isReadOnlyStoreOperation,
   isStoreOperation,
   isStoreOperationNotStarted,
   isStoreOperationTimeoutError,
 } from '../src/index.js';
 
 describe('store operation outcome protocol', () => {
+  it('owns the canonical read-only operation taxonomy', () => {
+    expect(isReadOnlyStoreOperation('query')).toBe(true);
+    expect(isReadOnlyStoreOperation('listGraphsByPrefix')).toBe(true);
+    expect(isReadOnlyStoreOperation('replaceGraph')).toBe(false);
+    expect(isReadOnlyStoreOperation('update')).toBe(false);
+  });
+
   it('recognizes the timeout, scheduler, and capability producers', () => {
     const failures = [
       new StoreOperationTimeoutError({
