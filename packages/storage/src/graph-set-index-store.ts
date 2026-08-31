@@ -544,6 +544,14 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     }
     await this.ensureGraphSet(options);
     const graphs = this.ensureSortedGraphs();
+    // startsWith() is defined over UTF-16 code units, while this catalog is
+    // ordered by Unicode code point. A prefix ending in a high surrogate can
+    // split an astral code point, so its matches are not guaranteed to be one
+    // contiguous code-point-sorted range. Preserve exact JS prefix semantics
+    // with the rare O(n) fallback; all scalar-aligned prefixes keep O(log n+k).
+    if (endsWithHighSurrogate(prefix)) {
+      return graphs.filter((graph) => graph.startsWith(prefix));
+    }
     const matches: string[] = [];
     for (let index = lowerBound(graphs, prefix); index < graphs.length; index += 1) {
       const graph = graphs[index]!;
@@ -834,6 +842,12 @@ function lowerBound(values: readonly string[], target: string): number {
     else high = middle;
   }
   return low;
+}
+
+function endsWithHighSurrogate(value: string): boolean {
+  if (value.length === 0) return false;
+  const lastCodeUnit = value.charCodeAt(value.length - 1);
+  return lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF;
 }
 
 /** Filter falsy entries and de-duplicate a caller-supplied graph-URI hint list. */

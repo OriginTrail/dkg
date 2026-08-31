@@ -282,6 +282,36 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(1);
   });
 
+  it('matches the startsWith oracle for ranges and surrogate-splitting prefixes', async () => {
+    const root = 'did:dkg:context-graph:prefix-range';
+    const sourceGraphs = [
+      `${root}/a`,
+      `${root}/a/1`,
+      `${root}/a/2`,
+      `${root}/b`,
+      '\uE000',
+      '𐀀',
+      '𐀀/child',
+    ];
+    // The surrogate-splitting case is a JavaScript-string API invariant even
+    // though RDF serializers reject such deliberately malformed IRIs.
+    const inner = { listGraphs: async () => sourceGraphs } as unknown as OxigraphStore;
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100_000 });
+    const catalog = await store.listGraphsSorted();
+
+    for (const candidatePrefix of [
+      `${root}/a`,
+      `${root}/a/`,
+      `${root}/missing`,
+      '\uD800',
+      '𐀀',
+    ]) {
+      await expect(store.listGraphsByPrefix(candidatePrefix)).resolves.toEqual(
+        catalog.filter((graph) => graph.startsWith(candidatePrefix)),
+      );
+    }
+  });
+
   it('honors enabled false for direct callers by passing graph reads through', async () => {
     const inner = new OxigraphStore();
     const counting = new CountingStore(inner);

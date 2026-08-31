@@ -1683,6 +1683,30 @@ describe('sync responder pagination interleaving', () => {
     expect(listGraphs).not.toHaveBeenCalled();
   });
 
+  it('does not traverse through an outer visibility decorator for a sorted catalog', async () => {
+    const visible = 'did:dkg:context-graph:visibility-boundary/data';
+    const hidden = 'did:dkg:context-graph:visibility-boundary/hidden';
+    const base = new OxigraphStore();
+    await base.insert([q(visible, 1), q(hidden, 2)]);
+    const indexed = new GraphSetIndexStore(base, { revalidateMs: 100_000 });
+    let outerListGraphsCalls = 0;
+    const store = {
+      // Deliberately documented traversal surface: the sorted capability must
+      // still stop here because this decorator changes listGraphs semantics.
+      innerStore: indexed,
+      listGraphs: async () => {
+        outerListGraphsCalls += 1;
+        return (await indexed.listGraphs()).filter((graph) => graph !== hidden);
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const snapshot = await memo.get({ refresh: true });
+    expect(snapshot.graphs).toContain(visible);
+    expect(snapshot.graphs).not.toContain(hidden);
+    expect(outerListGraphsCalls).toBe(1);
+  });
+
   it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {
     const oldGraphs = deferred<string[]>();
     const newGraphs = deferred<string[]>();
