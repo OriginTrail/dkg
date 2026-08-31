@@ -25,6 +25,7 @@ import {
   makeHandler,
   poll,
   rootMutation,
+  forceScan,
 } from './chain-event-poller-harness.js';
 
 describe('ChainEventPoller — kaRootMutations subscription', () => {
@@ -252,7 +253,7 @@ describe('ChainEventPoller — construction', () => {
       expect(warned.some((m) => m.includes("'onCollectionUpdated' was removed"))).toBe(true);
       expect(warned.some((m) => m.includes('onKnowledgeAssetRootMutated'))).toBe(true);
 
-      await poller.pollNow();
+      await forceScan(poller);
       expect(chain.filters).toHaveLength(0); // the legacy key enables no lane
     } finally {
       spy.mockRestore();

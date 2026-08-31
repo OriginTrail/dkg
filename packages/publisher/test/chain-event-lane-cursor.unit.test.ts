@@ -21,6 +21,7 @@ import {
   makeHandler,
   poll,
   rootMutation,
+  forceScan,
 } from './chain-event-poller-harness.js';
 
 describe('kaRootMutations — cursor restore and failure recovery', () => {
@@ -100,7 +101,7 @@ describe('kaRootMutations — cursor restore and failure recovery', () => {
     }
   });
   it('does not persist a cursor for a scan that failed', async () => {
-    // The runner catches per-lane scan errors, so `pollNow` settles normally.
+    // The runner catches per-lane scan errors, so the forced scan settles normally.
     // What must not happen is a SILENT advance: a driven scan that failed must
     // leave the cursor exactly where a driven scan that never ran would.
     const chain = makeChain(50_000);
@@ -117,14 +118,14 @@ describe('kaRootMutations — cursor restore and failure recovery', () => {
     });
 
     chain.failNextScan();
-    await poller.pollNow();
+    await forceScan(poller);
 
     expect(chain.filters).toHaveLength(1);
     expect(saveCalls).toEqual([]);
 
     // Positive control: the very same drive persists when the scan succeeds,
     // so the empty `saveCalls` above is about the failure and not about
-    // `pollNow` never persisting anything.
+    // the forced scan never persisting anything.
     //
     // 49 950, not the head: the failed scan rewound the cursor from the seed
     // (41 000) to 40 950, so the recovery scan starts at 40 951 and is capped
@@ -132,7 +133,7 @@ describe('kaRootMutations — cursor restore and failure recovery', () => {
     // reach the head — which is the intended trade and worth pinning, since a
     // rewind large enough to push catch-up past a page every time would turn a
     // transient failure into a permanently lagging lane.
-    await poller.pollNow();
+    await forceScan(poller);
     expect(saveCalls).toEqual([{ lane: 'kaRootMutations', block: 40_951 + MAX_RANGE - 1 }]);
   });
 });
@@ -336,11 +337,11 @@ describe('kaRootMutations — observability', () => {
         } : {}),
         onKnowledgeAssetRootMutated: async (e) => { seen.push(e.kaId); },
       });
-      await poller.pollNow();
+      await forceScan(poller);
       // A second manual drive proves failure bookkeeping and schedules were
       // not corrupted by the throwing result hook of the first.
       chain.setHead(50_010);
-      await poller.pollNow();
+      await forceScan(poller);
       return { seen, saved };
     }
 

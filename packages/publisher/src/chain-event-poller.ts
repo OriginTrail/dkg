@@ -185,14 +185,6 @@ export class ChainEventPoller {
    * the catch handler we attach) BEFORE the chain goes away.
    */
   private inFlightPoll: Promise<void> | null = null;
-  /** Serializes manual `pollNow()` callers; see the method's comment. */
-  private manualPollChain: Promise<void> = Promise.resolve();
-  /**
-   * Set at the top of `stop()` (review r6): queued manual polls that have
-   * not STARTED become safe no-ops instead of racing the caller's provider
-   * teardown, and new `pollNow()` calls are refused outright.
-   */
-  private stopping = false;
 
   /**
    * The in-flight `stop()` drain, when one is running. `start()` serializes
@@ -249,9 +241,6 @@ export class ChainEventPoller {
     }
     if (this.running) return; // a concurrent start won the race during the await
     this.running = true;
-    // stop() is NOT terminal: the public lifecycle supports start-stop-start
-    // reuse, so the manual-poll latch re-arms with the poller (review r10).
-    this.stopping = false;
 
     const ctx = createOperationContext('system');
 
@@ -292,61 +281,6 @@ export class ChainEventPoller {
     if (pending) await pending;
   }
 
-  /**
-   * Scan NOW, regardless of where each lane sits in its cadence, and settle
-   * before returning.
-   *
-   * A plain `poll()` is not enough to drive the poller by hand: a lane that
-   * caught up re-arms `nextRunAtMs` to `now + cadenceMs`, so a `poll()` issued
-   * inside that window filters the lane out as not-due and scans nothing. The
-   * caller then observes no dispatch and cannot tell "the event is not on
-   * chain" from "the lane was not due yet".
-   *
-   * Unlike the interval tick, a rejection is not swallowed here — a caller that
-   * asked for a scan explicitly wants to know if the poll itself failed. (Note
-   * that a PER-LANE scan failure is still handled inside the runner, which logs
-   * it and applies the lane's backoff; what surfaces here is a failure of the
-   * poll as a whole.)
-   */
-  async pollNow(): Promise<void> {
-    // Check-and-register is made atomic by chaining on a reservation taken
-    // SYNCHRONOUSLY, before any await (review r3): two concurrent callers
-    // otherwise both observe no in-flight poll, both clear the schedules, and
-    // two scans mutate the same lane state — dispatching every event twice and
-    // racing cursor/failure bookkeeping. Each caller still gets its OWN scan
-    // (the second runs after the first settles), and each caller sees only its
-    // own scan's rejection — the swallowing `.catch` on the stored chain keeps
-    // one caller's failure from poisoning the queue.
-    if (this.stopping) {
-      return Promise.reject(new Error('ChainEventPoller is stopped; pollNow() refused'));
-    }
-    const run = this.manualPollChain.then(() => this.runManualPoll());
-    this.manualPollChain = run.catch(() => {});
-    return run;
-  }
-
-  private async runManualPoll(): Promise<void> {
-    // A queued manual poll that had not started when `stop()` began is
-    // CANCELLED (resolves without scanning) — documented shutdown semantics:
-    // stop() drains started work and discards queued work, so no adapter
-    // call can begin after stop() has resolved.
-    if (this.stopping) return;
-    await this.waitForCurrentPoll();
-    // Re-check after the await (review r13): stop() can begin while this
-    // queued manual poll waits behind an interval scan. The guard above is
-    // STALE across the suspension — proceeding would start fresh RPC work
-    // during the drain, violating the documented cancel semantics and letting
-    // stop() hang on a scan that began after shutdown.
-    if (this.stopping) return;
-    this.laneRunner.clearActiveLaneSchedules();
-    const pending = this.laneRunner.poll();
-    // Registered as the in-flight poll so a concurrent interval tick skips
-    // rather than stacking a second scan on the same lanes — and so `stop()`
-    // awaits the ACTUAL active scan. The swallowing `.catch` is on the DERIVED
-    // promise only; `pending` itself still rejects into the caller below.
-    this.inFlightPoll = pending.catch(() => {}).finally(() => { this.inFlightPoll = null; });
-    await pending;
-  }
 
   /**
    * Per-lane liveness (last scanned block, chain head and wall clock at the
@@ -381,18 +315,11 @@ export class ChainEventPoller {
   }
 
   private async drainAndStop(): Promise<void> {
-    this.stopping = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
     this.running = false;
-    // Drain the ENTIRE manual queue (review r6): the serialized chain settles
-    // only after every queued entry has either completed or been cancelled by
-    // the `stopping` flag above — without this await, a queued manual scan
-    // could START after stop() returned and race the provider teardown that
-    // callers legitimately perform next.
-    try { await this.manualPollChain; } catch { /* chain is pre-swallowed */ }
     const pending = this.inFlightPoll;
     if (pending) {
       // The `.catch(() => {})` chain at the call sites already swallows
