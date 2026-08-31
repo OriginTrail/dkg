@@ -727,6 +727,13 @@ describe('provisionBlazegraphDocker', () => {
     expect(longNamespace).toHaveLength(128);
     expect(longNamespace).toMatch(/^a{115}-[0-9a-f]{12}$/u);
     expect(() => blazegraphRuntimeContract.assertBlazegraphNamespace(longNamespace)).not.toThrow();
+    const commonPrefix = 'a'.repeat(160);
+    const first = normaliseBlazegraphNamespace(`${commonPrefix}-first-tail`);
+    const second = normaliseBlazegraphNamespace(`${commonPrefix}-second-tail`);
+    expect(first).toHaveLength(128);
+    expect(second).toHaveLength(128);
+    expect(first).not.toBe(second);
+    expect(normaliseBlazegraphNamespace(`${commonPrefix}-first-tail`)).toBe(first);
   });
 });
 

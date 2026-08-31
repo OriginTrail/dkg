@@ -1,14 +1,10 @@
 import {
-  isSafeIri,
+  parseRenderedRdfStoreObjectV1,
   type CanonicalAuthorSealStoreRowV1,
   type Rfc64AuthorSealReadOperationV1,
   type Rfc64SemanticReadOperationV2,
   type Rfc64SemanticStoreObjectV1,
 } from '@origintrail-official/dkg-core';
-import {
-  XSD_STRING_DATATYPE,
-  parseRdfLiteralTerm,
-} from '@origintrail-official/dkg-rdf-utils';
 
 import {
   findTripleStoreCapability,
@@ -16,7 +12,7 @@ import {
   type QueryResult,
   type TripleStore,
 } from './triple-store.js';
-import { SparqlJsonResultsShapeError } from './adapters/sparql-json-results.js';
+import { SparqlJsonResultsShapeError } from './sparql-json-query-result.js';
 
 export const RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1 =
   'RFC64_EXACT_BINDINGS_RESULT_V1' as const;
@@ -90,8 +86,9 @@ export function executeRfc64SemanticReadCapabilityV1(
   store: Pick<TripleStore, 'query'>,
   operation: Rfc64SemanticReadOperationV2,
   options: Pick<QueryOptions, 'signal'> = {},
-): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
-  return executeRfc64ExactBindingsReadCapabilityV1(store, operation, options);
+): Promise<Rfc64SemanticReadCapabilityResultV1> {
+  return executeRfc64ExactBindingsReadCapabilityV1(store, operation, options)
+    .then((rows) => Object.freeze({ rows }));
 }
 
 export function isRfc64ExactBindingsReadCapabilityV1(
@@ -103,7 +100,6 @@ export function isRfc64ExactBindingsReadCapabilityV1(
 
 /** Legacy semantic-only capability retained for the compatibility window. */
 export interface Rfc64SemanticReadCapabilityResultV1 {
-  readonly variables: readonly string[];
   readonly rows: readonly Rfc64ExactBindingsStoreRowV1[];
 }
 
@@ -161,12 +157,8 @@ export function isRfc64SemanticReadCapabilityV1(
 
 function normalizeLegacySemanticReadCapabilityResultV1(
   result: unknown,
-  operation: Rfc64SemanticReadOperationV2,
+  _operation: Rfc64SemanticReadOperationV2,
 ): readonly Rfc64ExactBindingsStoreRowV1[] {
-  const variables = ownDataValue(result, 'variables');
-  if (!isExactOrdinaryArray(variables, operation.resultVariables)) {
-    invalid('semantic read returned the wrong result projection');
-  }
   const rows = ownDataValue(result, 'rows');
   if (!Array.isArray(rows) || Object.getPrototypeOf(rows) !== Array.prototype) {
     invalid('semantic read rows must be an ordinary Array');
@@ -180,23 +172,6 @@ function normalizeLegacySemanticReadCapabilityResultV1(
     invalid('semantic read rows must be dense and unadorned');
   }
   return rows;
-}
-
-function isExactOrdinaryArray(input: unknown, expected: readonly string[]): boolean {
-  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) return false;
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== input.length + 1
-    || !keys.includes('length')
-    || input.length !== expected.length
-  ) return false;
-  for (let index = 0; index < expected.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
-      || descriptor.value !== expected[index]) return false;
-  }
-  return true;
 }
 
 function hasDataValue(candidate: unknown, key: string, expected: unknown): boolean {
@@ -304,31 +279,11 @@ function assertProjectionIfPresent(
 }
 
 function parseStoreObject(input: string): Rfc64SemanticStoreObjectV1 {
-  const literal = parseRdfLiteralTerm(input);
-  if (literal?.kind === 'plain') {
-    return Object.freeze({
-      kind: 'literal',
-      value: literal.value,
-      datatypeIri: XSD_STRING_DATATYPE,
-    });
+  try {
+    return parseRenderedRdfStoreObjectV1(input);
+  } catch (cause) {
+    invalid('exact-bindings record object is not an exact RDF term', cause);
   }
-  if (literal?.kind === 'typed') {
-    return Object.freeze({
-      kind: 'literal',
-      value: literal.value,
-      datatypeIri: literal.datatype,
-    });
-  }
-  if (literal?.kind === 'language') {
-    invalid('exact-bindings record literals cannot carry a language tag');
-  }
-  const namedNode = input.startsWith('<') && input.endsWith('>')
-    ? input.slice(1, -1)
-    : input;
-  if (isSafeIri(namedNode)) {
-    return Object.freeze({ kind: 'named-node', value: namedNode });
-  }
-  invalid('exact-bindings record object is not an exact RDF term');
 }
 
 function ownDataValue(input: unknown, key: string): unknown {
@@ -342,6 +297,6 @@ function ownDataValue(input: unknown, key: string): unknown {
   return descriptor.value;
 }
 
-function invalid(message: string): never {
-  throw new Rfc64ExactBindingsReadResultErrorV1(message);
+function invalid(message: string, cause?: unknown): never {
+  throw new Rfc64ExactBindingsReadResultErrorV1(message, { cause });
 }

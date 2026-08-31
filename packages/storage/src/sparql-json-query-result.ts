@@ -1,4 +1,11 @@
 import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import {
+  isOrdinaryDataRecord,
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactOrdinaryDataRecord,
+} from './closed-data-snapshot.js';
+import type { AskResult, QueryResult, SelectResult } from './triple-store.js';
 
 type SparqlJsonLiteralTerm = {
   type: 'literal' | 'typed-literal';
@@ -25,10 +32,55 @@ export interface ParsedSparqlJsonSelectResponse {
 }
 
 export class SparqlJsonResultsShapeError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
     this.name = 'SparqlJsonResultsShapeError';
   }
+}
+
+/** Decode one successful SPARQL JSON response into the same shape-error domain. */
+export function parseSparqlJsonResponseText(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (cause) {
+    throw new SparqlJsonResultsShapeError('SPARQL JSON response is not valid JSON', { cause });
+  }
+}
+
+/** Decode one complete successful ASK or SELECT response into the public store result. */
+export function decodeSparqlJsonQueryResult(
+  text: string,
+  expectedKind: 'ask' | 'select',
+): QueryResult {
+  const response = parseSparqlJsonResponseText(text);
+  if (expectedKind === 'ask') {
+    const hasHead = isOrdinaryDataRecord(response)
+      && Object.prototype.hasOwnProperty.call(response, 'head');
+    const record = snapshotExactOrdinaryDataRecord(
+      response,
+      hasHead ? ['boolean', 'head'] : ['boolean'],
+      'SPARQL JSON ASK response',
+      malformed,
+    );
+    if (hasHead) {
+      snapshotExactOrdinaryDataRecord(
+        record.head,
+        [],
+        'SPARQL JSON ASK response.head',
+        malformed,
+      );
+    }
+    if (typeof record.boolean !== 'boolean') {
+      malformed('SPARQL JSON ASK response.boolean must be a boolean');
+    }
+    return Object.freeze({ type: 'boolean', value: record.boolean }) satisfies AskResult;
+  }
+  const parsed = parseSparqlJsonSelectResponse(response);
+  return Object.freeze({
+    type: 'bindings',
+    bindings: parsed.bindings,
+    variables: parsed.variables,
+  }) satisfies SelectResult;
 }
 
 function formatSparqlJsonTerm(term: AdapterSparqlJsonTerm): string {
@@ -78,7 +130,7 @@ export function parseSparqlJsonSelectResponse(
     'SPARQL JSON results.bindings',
   );
   const bindings = rows.map((input, rowIndex) => {
-    if (!isOrdinaryRecord(input)) {
+    if (!isOrdinaryDataRecord(input)) {
       malformed(`SPARQL JSON binding ${rowIndex} must be a plain object`);
     }
     const row = input as Record<string, unknown>;
@@ -100,7 +152,7 @@ export function parseSparqlJsonSelectResponse(
 
 function ownDataRecord(input: unknown, key: string, label: string): Record<string, unknown> {
   const value = ownDataValue(input, key, label);
-  if (!isOrdinaryRecord(value)) {
+  if (!isOrdinaryDataRecord(value)) {
     malformed(`${label}.${key} must be an object`);
   }
   return value as Record<string, unknown>;
@@ -115,37 +167,20 @@ function denseStringArray(input: unknown, label: string): string[] {
 }
 
 function denseArray(input: unknown, label: string): unknown[] {
-  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
-    malformed(`${label} must be an ordinary array`);
-  }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== input.length + 1
-    || !keys.includes('length')
-  ) {
-    malformed(`${label} must be dense and unadorned`);
-  }
-  const result: unknown[] = [];
-  for (let index = 0; index < input.length; index += 1) {
-    result.push(ownDataValue(input, String(index), label));
-  }
-  return result;
+  return [...snapshotDenseDataArray(input, label, malformed)];
 }
 
 function snapshotTerm(input: unknown, rowIndex: number, variable: string): AdapterSparqlJsonTerm {
   const label = `SPARQL JSON binding ${rowIndex}.${variable}`;
-  if (!isOrdinaryRecord(input)) malformed(`${label} must be a plain term object`);
+  if (!isOrdinaryDataRecord(input)) malformed(`${label} must be a plain term object`);
   const term = input as Record<string, unknown>;
   const type = ownDataValue(term, 'type', label);
   const value = ownDataValue(term, 'value', label);
   if (typeof type !== 'string' || typeof value !== 'string') {
     malformed(`${label} type and value must be strings`);
   }
-  const keys = Reflect.ownKeys(term);
-  if (keys.some((key) => typeof key !== 'string')) malformed(`${label} has invalid fields`);
   if (type === 'uri' || type === 'bnode') {
-    assertExactKeys(keys as string[], ['type', 'value'], label);
+    snapshotExactOrdinaryDataRecord(term, ['type', 'value'], label, malformed);
     return { type, value };
   }
   if (type !== 'literal' && type !== 'typed-literal') {
@@ -159,7 +194,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string): Adapt
     : hasDatatype
       ? ['datatype', 'type', 'value']
       : ['type', 'value'];
-  assertExactKeys(keys as string[], expected, label);
+  snapshotExactOrdinaryDataRecord(term, expected, label, malformed);
   if (hasLanguage) {
     const language = ownDataValue(term, 'xml:lang', label);
     if (typeof language !== 'string' || language.length === 0) {
@@ -177,27 +212,8 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string): Adapt
   return { type, value };
 }
 
-function assertExactKeys(actual: string[], expected: string[], label: string): void {
-  if (actual.length !== expected.length || expected.some((key) => !actual.includes(key))) {
-    malformed(`${label} has invalid fields`);
-  }
-}
-
-function isOrdinaryRecord(input: unknown): input is Record<string, unknown> {
-  return input !== null
-    && typeof input === 'object'
-    && Object.getPrototypeOf(input) === Object.prototype;
-}
-
 function ownDataValue(input: unknown, key: string, label: string): unknown {
-  if (input === null || typeof input !== 'object') {
-    malformed(`${label} must be an object`);
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(input, key);
-  if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-    malformed(`${label}.${key} must be an enumerable data property`);
-  }
-  return descriptor.value;
+  return readOwnEnumerableDataProperty(input, key, label, malformed);
 }
 
 function malformed(message: string): never {

@@ -9,6 +9,13 @@ import {
   computeContextGraphPolicyObjectDigestV1,
 } from '@origintrail-official/dkg-core';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
+import {
+  SyncSemanticStoreV1,
+  SyncSharedProjectionStoreV1,
+  asChangelogReader,
+  createManagedOxigraphRuntimeStoreConfigV1,
+  createTripleStore,
+} from '@origintrail-official/dkg-storage';
 
 const PRIVATE_RFC64_CONTEXT_GRAPH =
   '0x1111111111111111111111111111111111111111/private-daemon-wiring';
@@ -94,9 +101,12 @@ const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
   chainResetWipe: vi.fn(),
   createServer: vi.fn(),
+  checkExternalStoreReachable: vi.fn(),
+  checkOrSetStoreIdentity: vi.fn(),
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
   startPublisherRuntimeWithOutcome: vi.fn(),
+  startManagedOxigraph: vi.fn(),
 }));
 
 vi.mock('node:http', () => ({
@@ -126,6 +136,20 @@ vi.mock('../src/daemon/chain-reset-wipe.js', async importOriginal => {
   return {
     ...actual,
     chainResetWipe: mocks.chainResetWipe,
+  };
+});
+
+vi.mock('../src/daemon/oxigraph-managed.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/oxigraph-managed.js')>();
+  return { ...actual, startManagedOxigraph: mocks.startManagedOxigraph };
+});
+
+vi.mock('../src/daemon/store-health-check.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/store-health-check.js')>();
+  return {
+    ...actual,
+    checkExternalStoreReachable: mocks.checkExternalStoreReachable,
+    checkOrSetStoreIdentity: mocks.checkOrSetStoreIdentity,
   };
 });
 
@@ -170,6 +194,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   let stderrWrite: typeof process.stderr.write = process.stderr.write;
   let uncaughtExceptionListeners: NodeJS.UncaughtExceptionListener[] = [];
   let unhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] = [];
+  let exitListeners: NodeJS.ExitListener[] = [];
   let sigintListeners: NodeJS.SignalsListener[] = [];
   let sigtermListeners: NodeJS.SignalsListener[] = [];
 
@@ -181,6 +206,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     stderrWrite = process.stderr.write;
     uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
     unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+    exitListeners = process.listeners('exit') as NodeJS.ExitListener[];
     sigintListeners = process.listeners('SIGINT') as NodeJS.SignalsListener[];
     sigtermListeners = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
 
@@ -193,6 +219,17 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         retryable: false,
         operatorActionRequired: true,
       },
+    });
+    mocks.startManagedOxigraph.mockResolvedValue(null);
+    mocks.checkExternalStoreReachable.mockResolvedValue({
+      ok: true,
+      backend: 'sparql-http',
+      endpoint: 'http://127.0.0.1:7878/query',
+    });
+    mocks.checkOrSetStoreIdentity.mockResolvedValue({
+      ok: true,
+      action: 'matched',
+      nodeName: 'storage-ack-timing-core-test',
     });
     mocks.loadNetworkConfig.mockResolvedValue({
       networkName: 'DKG V10 Gnosis Mainnet',
@@ -227,13 +264,20 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     for (const listener of uncaughtExceptionListeners) process.on('uncaughtException', listener);
     process.removeAllListeners('unhandledRejection');
     for (const listener of unhandledRejectionListeners) process.on('unhandledRejection', listener);
+    process.removeAllListeners('exit');
+    for (const listener of exitListeners) process.on('exit', listener);
     process.removeAllListeners('SIGINT');
     for (const listener of sigintListeners) process.on('SIGINT', listener);
     process.removeAllListeners('SIGTERM');
     for (const listener of sigtermListeners) process.on('SIGTERM', listener);
     if (originalDkgHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = originalDkgHome;
-    if (tempHome) await rm(tempHome, { recursive: true, force: true });
+    if (tempHome) await rm(tempHome, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
     tempHome = undefined;
   });
 
@@ -308,6 +352,50 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       receiptTimeoutMs: 1_200_000,
     });
   });
+
+  it.each([false, true])(
+    'preserves managed RFC-64 store authority through DKGAgent.create when changelog=%s',
+    async (changelog) => {
+      const managedStore = createManagedOxigraphRuntimeStoreConfigV1({
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://127.0.0.1:7878/query',
+          updateEndpoint: 'http://127.0.0.1:7878/update',
+          managedByDkg: true,
+        },
+        graphSetIndex: true,
+      });
+      mocks.startManagedOxigraph.mockResolvedValue({
+        handle: {
+          queryEndpoint: 'http://127.0.0.1:7878/query',
+          updateEndpoint: 'http://127.0.0.1:7878/update',
+          getRecoveryState: () => ({ recovering: false }),
+          killSync: vi.fn(),
+        },
+        storeConfig: managedStore,
+        largeLiteralStorage: {
+          enabled: true,
+          directory: join(tempHome!, 'literal-blobs'),
+        },
+      });
+
+      const createArg = await captureCreateArg({
+        store: {
+          backend: 'oxigraph-server',
+          options: {},
+          changelog,
+        },
+      });
+      const store = await createTripleStore(createArg.storeConfig);
+      try {
+        expect(() => new SyncSharedProjectionStoreV1(store)).not.toThrow();
+        expect(() => new SyncSemanticStoreV1(store)).not.toThrow();
+        expect(asChangelogReader(store) !== null).toBe(changelog);
+      } finally {
+        await store.close();
+      }
+    },
+  );
 
   it('merges configured and network-default context graphs into the automatic sync scope', async () => {
     mocks.loadNetworkConfig.mockResolvedValue({

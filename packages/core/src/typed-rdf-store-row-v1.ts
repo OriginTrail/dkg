@@ -99,6 +99,73 @@ export function parseRenderedRdfStoreObjectV1(input: unknown): TypedRdfStoreObje
   throw new TypedRdfStoreRowErrorV1('row-term', 'rendered RDF object is not an exact RDF term');
 }
 
+/**
+ * Snapshot and decode flattened adapter rows at the typed RDF boundary. The
+ * collection and every row are captured without invoking accessors or
+ * re-reading mutable slots.
+ */
+export function snapshotDenseRenderedRdfStoreRowsV1(
+  input: unknown,
+  options: Readonly<{ readonly allowedLengths: readonly number[] }>,
+): readonly TypedRdfStoreRowV1[] {
+  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
+    throw new TypedRdfStoreRowErrorV1('row-schema', 'rendered RDF rows must be an ordinary Array');
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
+  const length = lengthDescriptor
+    && Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
+    && Number.isSafeInteger(lengthDescriptor.value)
+    ? lengthDescriptor.value as number
+    : -1;
+  if (!options.allowedLengths.includes(length)) {
+    throw new TypedRdfStoreRowErrorV1(
+      'row-cardinality',
+      `rendered RDF rows require ${options.allowedLengths.join(' or ')} rows`,
+    );
+  }
+  const ownKeys = Reflect.ownKeys(input);
+  if (
+    ownKeys.some((key) => typeof key !== 'string')
+    || ownKeys.length !== length + 1
+    || !ownKeys.includes('length')
+  ) {
+    throw new TypedRdfStoreRowErrorV1('row-schema', 'rendered RDF rows must be dense and unadorned');
+  }
+  const rows: TypedRdfStoreRowV1[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
+    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new TypedRdfStoreRowErrorV1(
+        'row-schema',
+        'rendered RDF rows must contain enumerable data properties',
+      );
+    }
+    const row = snapshotClosed(
+      descriptor.value,
+      ['graph', 'object', 'predicate', 'subject'],
+      `rendered RDF row ${index}`,
+    );
+    if (
+      typeof row.graph !== 'string'
+      || typeof row.object !== 'string'
+      || typeof row.predicate !== 'string'
+      || typeof row.subject !== 'string'
+    ) {
+      throw new TypedRdfStoreRowErrorV1(
+        'row-schema',
+        `rendered RDF row ${index} fields must be strings`,
+      );
+    }
+    rows.push(Object.freeze({
+      graphIri: row.graph,
+      object: parseRenderedRdfStoreObjectV1(row.object),
+      predicateIri: row.predicate,
+      subjectIri: row.subject,
+    }));
+  }
+  return Object.freeze(rows);
+}
+
 export function snapshotTypedRdfStoreRowV1(input: unknown): TypedRdfStoreRowV1 {
   const row = snapshotClosed(input, ['graphIri', 'object', 'predicateIri', 'subjectIri'], 'typed RDF store row');
   for (const key of ['subjectIri', 'predicateIri', 'graphIri'] as const) {

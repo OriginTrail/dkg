@@ -63,7 +63,6 @@ import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
-  ResolvedRfc64CatalogActivationConfigV1,
   ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
@@ -1897,11 +1896,7 @@ export type ResolvedDKGAgentConfig =
     syncReconcilerTiming: SyncReconcilerTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
-    /** Immutable restart-stable D17/D18 authority selection for this boot. */
-    rfc64CatalogRollout: Pick<
-      ResolvedRfc64CatalogActivationConfigV1,
-      'enabled' | 'selectedContextGraphs' | 'rollout'
-    >;
+    /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
     rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
       .Rfc64CatalogExecutionPlanV1;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;

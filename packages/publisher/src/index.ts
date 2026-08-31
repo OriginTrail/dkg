@@ -60,7 +60,6 @@ export {
   type KnowledgeAssetOperationPublicSnapshot,
 } from './workspace-resolution.js';
 export {
-  stageKnowledgeAssetSharedWorkingMemoryV1,
   type StageKnowledgeAssetSharedWorkingMemoryInputV1,
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';

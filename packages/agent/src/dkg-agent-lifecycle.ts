@@ -675,8 +675,7 @@ import {
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 import {
-  resolveRfc64CatalogAuthorityDecisionV1,
-  rfc64LegacySyncAuthorityActiveForContextGraphV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
   rfc64ExecutionPlanAllowsLegacySyncV1,
 } from
   './rfc64/public-catalog-activation-config-v1.js';
@@ -2027,7 +2026,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
           this.store,
-          this.config.rfc64CatalogRollout,
+          this.config.rfc64CatalogExecutionPlan,
         );
       }
       await this.prepareFinalizationRecoveryStore();
@@ -5181,8 +5180,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
-      if (!rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        this.config.rfc64CatalogRollout,
+      if (!rfc64ExecutionPlanAllowsLegacySyncV1(
+        this.config.rfc64CatalogExecutionPlan,
         contextGraphId,
       )) {
         this.log.debug(
@@ -5774,8 +5773,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const requestedContextGraphCount = contextGraphIds.length;
     contextGraphIds = contextGraphIds.filter((contextGraphId) => (
-      rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        this.config.rfc64CatalogRollout,
+      rfc64ExecutionPlanAllowsLegacySyncV1(
+        this.config.rfc64CatalogExecutionPlan,
         contextGraphId,
       )
     ));
@@ -10023,8 +10022,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
       const partitionedRows = rows.map((row) => Object.freeze({
         row,
-        authority: resolveRfc64CatalogAuthorityDecisionV1(
-          this.config.rfc64CatalogRollout,
+        authority: resolveRfc64CatalogExecutionPlanAuthorityV1(
+          this.config.rfc64CatalogExecutionPlan,
           row.id,
         ),
       }));
