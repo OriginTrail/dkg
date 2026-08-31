@@ -77,7 +77,11 @@ import {
 } from '../store-operation-timeout.js';
 import { readSparqlResponseText } from './sparql-response-policy.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
-import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
+import {
+  executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
+  type Rfc64ExactBindingsReadOperationV1,
+} from '../rfc64-exact-bindings-read-capability.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -249,7 +253,8 @@ export interface SparqlHttpStoreOptions {
 
 export class SparqlHttpStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
-  readonly rfc64SemanticReadCertifiedV1: boolean;
+  readonly rfc64ExactBindingsReadCertifiedV1: true | false;
+  readonly rfc64SemanticReadCertifiedV1: true | false;
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
@@ -285,6 +290,7 @@ export class SparqlHttpStore implements TripleStore {
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
     this.managedOxigraph = options.managedOxigraph === true;
+    this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
@@ -309,6 +315,16 @@ export class SparqlHttpStore implements TripleStore {
     if (options.auth) {
       this.headers['Authorization'] = options.auth;
     }
+  }
+
+  rfc64ExactBindingsReadV1(
+    operation: Rfc64ExactBindingsReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    if (!this.rfc64ExactBindingsReadCertifiedV1) {
+      throw new Error('RFC-64 exact reads require a DKG-managed Oxigraph endpoint');
+    }
+    return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
   }
 
   rfc64SemanticReadV1(

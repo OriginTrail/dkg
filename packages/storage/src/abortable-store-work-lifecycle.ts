@@ -9,32 +9,48 @@ export interface AbortSignalScope {
   dispose(): void;
 }
 
+export interface StoreWorkTimeoutRace {
+  readonly timeoutMs: number;
+  readonly timeoutError: () => Error;
+}
+
 const NOOP_DISPOSE = () => {};
 
 /** Race store work against cancellation while preserving the abort reason. */
 export function raceStoreWorkAgainstAbort<T>(
   work: Promise<T>,
   signal: AbortSignal | undefined,
+  timeout?: StoreWorkTimeoutRace,
 ): Promise<T> {
-  if (!signal) return work;
+  if (!signal && (!timeout || timeout.timeoutMs <= 0)) return work;
   return new Promise<T>((resolve, reject) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (action: () => void) => {
       if (settled) return;
       settled = true;
-      signal.removeEventListener('abort', onAbort);
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       action();
     };
-    const onAbort = () => finish(() => reject(normalizeAbortReason(signal.reason)));
-    signal.addEventListener('abort', onAbort, { once: true });
+    const onAbort = () => finish(() => reject(normalizeAbortReason(signal?.reason)));
+    signal?.addEventListener('abort', onAbort, { once: true });
     // Attach both handlers before observing pre-abort so every started promise
     // remains consumed even when cancellation wins the race immediately.
     work.then(
       (value) => finish(() => resolve(value)),
       (cause) => finish(() => reject(cause)),
     );
-    if (signal.aborted) {
+    if (signal?.aborted) {
       onAbort();
+      return;
+    }
+    if (timeout && timeout.timeoutMs > 0) {
+      timer = setTimeout(
+        () => finish(() => reject(timeout.timeoutError())),
+        timeout.timeoutMs,
+      );
+      if (typeof timer.unref === 'function') timer.unref();
     }
   });
 }

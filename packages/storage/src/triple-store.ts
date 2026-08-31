@@ -19,13 +19,17 @@ import {
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
-  Rfc64SemanticReadOperationV1,
-  Rfc64SemanticStoreRowV1,
-} from '@origintrail-official/dkg-core';
-import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
+import type {
+  CanonicalAuthorSealStoreRowV1,
+  Rfc64SemanticReadOperationV1,
+} from '@origintrail-official/dkg-core';
+import type {
+  Rfc64ExactBindingsReadOperationV1,
+  Rfc64SemanticReadCapabilityResultV1,
+} from './rfc64-exact-bindings-read-capability.js';
 
 export interface Quad {
   subject: string;
@@ -127,15 +131,6 @@ export interface TripleStore {
    */
   getPressureSnapshot?(): StorePressureSnapshot | undefined;
 
-  /** Explicit opt-in for adapters covered by the RFC-64 semantic-read suite. */
-  readonly rfc64SemanticReadCertifiedV1?: boolean;
-  rfc64SemanticReadV1?(
-    operation: Rfc64SemanticReadOperationV1,
-    options?: Pick<QueryOptions, 'signal'>,
-  ): Promise<Readonly<{
-    rows: readonly Rfc64SemanticStoreRowV1[];
-  }>>;
-
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
@@ -153,6 +148,19 @@ export interface TripleStore {
     options?: QueryOptions,
   ): Promise<void>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+  /** Execute one member of the certified closed RFC-64 exact-bindings union. */
+  readonly rfc64ExactBindingsReadCertifiedV1?: boolean;
+  rfc64ExactBindingsReadV1?(
+    operation: Rfc64ExactBindingsReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
+  /** Legacy semantic-only capability retained for the V1 compatibility window. */
+  readonly rfc64SemanticReadCertifiedV1?: boolean;
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<Rfc64SemanticReadCapabilityResultV1>;
+
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;

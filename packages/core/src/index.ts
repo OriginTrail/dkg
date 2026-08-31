@@ -74,6 +74,7 @@ export * from './swm-author-inventory-v1.js';
 export * from './rfc64-semantic-addresses-v1.js';
 export * from './rfc64-semantic-records-v1.js';
 export * from './rfc64-semantic-read-manifest-v1.js';
+export * from './rfc64-author-seal-read-manifest-v1.js';
 export {
   isClosedDataRecord,
   readOwnEnumerableDataProperty,

@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
-  Rfc64SemanticRecordErrorV1,
   compileRfc64SemanticReadOperationV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
@@ -21,9 +20,13 @@ import {
 
 import {
   BlazegraphStore,
+  executeRfc64ExactBindingsReadCapabilityV1,
+  isRfc64ExactBindingsReadCapabilityV1,
+  isRfc64SemanticReadCapabilityV1,
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   OxigraphStore,
   OxigraphWorkerStore,
+  Rfc64SemanticReadCapabilityResultErrorV1,
   SparqlHttpStore,
   Rfc64SemanticReadGatewayErrorV1,
   SyncSemanticStoreV1,
@@ -31,10 +34,6 @@ import {
   type QueryResult,
   type TripleStore,
 } from '../src/index.js';
-import {
-  Rfc64SemanticReadCapabilityResultErrorV1,
-  executeRfc64SemanticReadCapabilityV1,
-} from '../src/rfc64-semantic-read-capability.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
 const CONTEXT_GRAPH = (
@@ -164,6 +163,49 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it('keeps both certified read call shapes on every built-in adapter', async () => {
+    const current = FIXTURES[0];
+    const operation = compileRfc64SemanticReadOperationV1(current.coordinate);
+    const typedRows = projectRfc64SemanticRecordStoreRowsV1(current.record);
+    const quads = typedRows.map(renderRfc64SemanticStoreRowV1);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      head: { vars: ['p', 'o'] },
+      results: { bindings: typedRows.map(toSparqlJsonBinding) },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    }));
+    const embedded = new OxigraphStore();
+    const worker = new OxigraphWorkerStore();
+    const adapters: TripleStore[] = [
+      embedded,
+      worker,
+      new BlazegraphStore('http://rfc64-compat-blazegraph.test/sparql'),
+      new SparqlHttpStore({
+        queryEndpoint: 'http://rfc64-compat-oxigraph.test/query',
+        updateEndpoint: 'http://rfc64-compat-oxigraph.test/update',
+        managedOxigraph: true,
+      }),
+    ];
+    try {
+      await embedded.insert(quads);
+      await worker.insert(quads);
+      for (const adapter of adapters) {
+        expect(isRfc64ExactBindingsReadCapabilityV1(adapter)).toBe(true);
+        expect(isRfc64SemanticReadCapabilityV1(adapter)).toBe(true);
+        const exactRows = await adapter.rfc64ExactBindingsReadV1!(operation);
+        const legacy = await adapter.rfc64SemanticReadV1!(operation);
+        const byPredicate = (left: Rfc64SemanticStoreRowV1, right: Rfc64SemanticStoreRowV1) =>
+          left.predicateIri.localeCompare(right.predicateIri);
+        expect([...exactRows].sort(byPredicate)).toEqual([...typedRows].sort(byPredicate));
+        expect([...legacy.rows].sort(byPredicate)).toEqual([...typedRows].sort(byPredicate));
+      }
+    } finally {
+      await embedded.close();
+      await worker.close();
+    }
+  }, 15_000);
+
   it('normalizes Blazegraph SPARQL JSON terms into the same exact decoded record', async () => {
     const current = FIXTURES[0];
     const rows = projectRfc64SemanticRecordStoreRowsV1(current.record);
@@ -276,7 +318,7 @@ describe('SyncSemanticStoreV1', () => {
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('LIMIT 4'),
       expect.objectContaining({
-        source: 'rfc64.semantic.SYNC_MUTATION_GUARD_GET_V1',
+        source: 'rfc64.exact-bindings.SYNC_MUTATION_GUARD_GET_V1',
         priority: 'background',
         maxResponseBytes: MAX_RFC64_SEMANTIC_RECORD_RESPONSE_BYTES_V1,
       }),
@@ -312,6 +354,50 @@ describe('SyncSemanticStoreV1', () => {
     expect(() => new SyncSemanticStoreV1(getterBacked as unknown as TripleStore))
       .toThrow(/no certified RFC-64 semantic read capability/u);
     expect(getterInvoked).toBe(false);
+  });
+
+  it('accepts a legacy semantic-only custom adapter during the compatibility window', async () => {
+    const legacyRead = vi.fn(async () => ({
+      rows: [],
+    }));
+    const legacyStore = {
+      rfc64SemanticReadCertifiedV1: true,
+      rfc64SemanticReadV1: legacyRead,
+    } as unknown as TripleStore;
+    await expect(new SyncSemanticStoreV1(legacyStore).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    )).resolves.toEqual({ kind: 'absent' });
+    expect(legacyRead).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a legacy adapter response without the prior rows member', async () => {
+    const legacyStore = {
+      rfc64SemanticReadCertifiedV1: true,
+      rfc64SemanticReadV1: vi.fn(async () => ({
+        bindings: [],
+      })),
+    } as unknown as TripleStore;
+    await expect(new SyncSemanticStoreV1(legacyStore).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    )).rejects.toMatchObject({ code: 'rfc64-semantic-read-result' });
+  });
+
+  it('preserves legacy semantic adapter result-error classification', async () => {
+    const legacyError = new Rfc64SemanticReadCapabilityResultErrorV1('malformed result');
+    const legacyStore = {
+      rfc64SemanticReadCertifiedV1: true,
+      rfc64SemanticReadV1: vi.fn(async () => {
+        throw legacyError;
+      }),
+    } as unknown as TripleStore;
+    const error = await rejected(new SyncSemanticStoreV1(legacyStore).read(
+      requestOf(FIXTURES[0]),
+      { timeoutMs: 1_000 },
+    ));
+    expectGatewayResultError(error);
+    expect((error as Error & { cause: unknown }).cause).toBe(legacyError);
   });
 
   it('certifies only DKG-managed Oxigraph HTTP stores', async () => {
@@ -445,6 +531,79 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it('times out a pending worker respawn with typed metadata and never dispatches', async () => {
+    const store = new OxigraphWorkerStore();
+    let releaseRespawn!: () => void;
+    const heldRespawn = new Promise<void>((resolve) => {
+      releaseRespawn = resolve;
+    });
+    const internals = store as unknown as {
+      respawnPromise: Promise<void> | null;
+      callWithTimeout: <T>(
+        timeoutMs: number,
+        signal: AbortSignal | undefined,
+        method: string,
+        ...args: unknown[]
+      ) => Promise<T>;
+      postToWorker: (...args: unknown[]) => Promise<unknown>;
+    };
+    internals.respawnPromise = heldRespawn;
+    const postToWorker = vi.spyOn(internals, 'postToWorker');
+    try {
+      await expect(internals.callWithTimeout(10, undefined, 'query', 'SELECT {}'))
+        .rejects.toMatchObject({
+          code: 'OXIGRAPH_WORKER_OP_TIMEOUT',
+          method: 'query',
+          timeoutMs: 10,
+        });
+      expect(postToWorker).not.toHaveBeenCalled();
+    } finally {
+      internals.respawnPromise = null;
+      releaseRespawn();
+      await store.close();
+    }
+  });
+
+  it('reports the configured worker timeout after a respawn consumes part of the deadline', async () => {
+    const store = new OxigraphWorkerStore();
+    let releaseRespawn!: () => void;
+    const heldRespawn = new Promise<void>((resolve) => {
+      releaseRespawn = resolve;
+    });
+    const internals = store as unknown as {
+      respawnPromise: Promise<void> | null;
+      callWithTimeout: <T>(
+        timeoutMs: number,
+        signal: AbortSignal | undefined,
+        method: string,
+        ...args: unknown[]
+      ) => Promise<T>;
+      postToWorker: (...args: unknown[]) => Promise<unknown>;
+    };
+    internals.respawnPromise = heldRespawn;
+    vi.spyOn(performance, 'now')
+      .mockReturnValueOnce(0)
+      .mockReturnValue(300);
+    const postToWorker = vi.spyOn(internals, 'postToWorker').mockResolvedValue(undefined);
+    try {
+      const pending = internals.callWithTimeout<void>(1_000, undefined, 'query', 'SELECT {}');
+      internals.respawnPromise = null;
+      releaseRespawn();
+      await pending;
+      expect(postToWorker).toHaveBeenCalledWith(
+        700,
+        undefined,
+        'query',
+        ['SELECT {}'],
+        1_000,
+      );
+    } finally {
+      internals.respawnPromise = null;
+      releaseRespawn();
+      await store.close();
+    }
+  });
+
   it('detects an elapsed deadline after a blocking pre-dispatch backend returns', async () => {
     const query = vi.fn(async (): Promise<QueryResult> => {
       const end = performance.now() + 15;
@@ -488,6 +647,10 @@ describe('SyncSemanticStoreV1', () => {
       },
       {
         type: 'bindings',
+        bindings: [{ p: 'urn:test:p', o: '"value"^^<not an iri>' }],
+      },
+      {
+        type: 'bindings',
         bindings: Array.from({ length: 6 }, () => ({ p: 'urn:test:p', o: '"v"' })),
       },
     ] as QueryResult[]) {
@@ -496,32 +659,6 @@ describe('SyncSemanticStoreV1', () => {
       expectGatewayResultError(error);
       expect((error as Error & { cause: unknown }).cause)
         .toBeInstanceOf(Rfc64SemanticReadCapabilityResultErrorV1);
-    }
-  });
-
-  it('maps incomplete, duplicate, and noncanonical records to the gateway result contract', async () => {
-    const current = FIXTURES[3];
-    const rendered = projectRfc64SemanticRecordStoreRowsV1(current.record)
-      .map(renderRfc64SemanticStoreRowV1);
-    const bindings = rendered.map((row) => ({ p: row.predicate, o: row.object }));
-    const networkIndex = rendered.findIndex((row) => row.predicate.endsWith('networkId'));
-    expect(networkIndex).toBeGreaterThanOrEqual(0);
-    const noncanonical = bindings.map((row, index) => index === networkIndex
-      ? { ...row, o: '"otp network"' }
-      : row);
-    for (const rows of [
-      bindings.slice(0, 1),
-      [bindings[0]!, ...bindings],
-      noncanonical,
-    ]) {
-      const gateway = new SyncSemanticStoreV1(certifiedStore(async () => ({
-        type: 'bindings',
-        bindings: rows,
-      })));
-      const error = await rejected(gateway.read(requestOf(current), { timeoutMs: 1_000 }));
-      expectGatewayResultError(error);
-      expect((error as Error & { cause: unknown }).cause)
-        .toBeInstanceOf(Rfc64SemanticRecordErrorV1);
     }
   });
 
@@ -625,11 +762,12 @@ function certifiedStore(
 ): TripleStore {
   const store = {
     query,
-    rfc64SemanticReadCertifiedV1: true as const,
-    rfc64SemanticReadV1(operation, options) {
-      return executeRfc64SemanticReadCapabilityV1(store, operation, options);
+    rfc64ExactBindingsReadCertifiedV1: true as const,
+    rfc64ExactBindingsReadV1(operation, options) {
+      return executeRfc64ExactBindingsReadCapabilityV1(store, operation, options);
     },
-  } satisfies Pick<TripleStore, 'query' | 'rfc64SemanticReadCertifiedV1' | 'rfc64SemanticReadV1'>;
+  } satisfies Pick<TripleStore, 'query' | 'rfc64ExactBindingsReadCertifiedV1'
+    | 'rfc64ExactBindingsReadV1'>;
   return store as unknown as TripleStore;
 }
 

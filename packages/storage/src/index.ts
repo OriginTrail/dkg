@@ -159,9 +159,28 @@ export {
   type Rfc64SemanticReadResultV1,
 } from './rfc64-semantic-read-gateway.js';
 export {
+  Rfc64ExactBindingsReadResultErrorV1,
+  Rfc64SemanticReadCapabilityResultErrorV1,
+  executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
+  isRfc64ExactBindingsReadCapabilityV1,
   isRfc64SemanticReadCapabilityV1,
+  RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
+  type Rfc64ExactBindingsReadCapabilityV1,
+  type Rfc64ExactBindingsReadOperationV1,
+  type Rfc64ExactBindingsStoreRowV1,
+  type Rfc64SemanticReadCapabilityResultV1,
   type Rfc64SemanticReadCapabilityV1,
-} from './rfc64-semantic-read-capability.js';
+} from './rfc64-exact-bindings-read-capability.js';
+export {
+  MAX_RFC64_AUTHOR_SEAL_READ_TIMEOUT_MS_V1,
+  Rfc64AuthorSealReadGatewayErrorV1,
+  SyncAuthorSealStoreV1,
+  type Rfc64AuthorSealReadGatewayErrorCodeV1,
+  type Rfc64AuthorSealReadOptionsV1,
+  type Rfc64AuthorSealReadRequestV1,
+  type Rfc64AuthorSealReadResultV1,
+} from './rfc64-author-seal-read-gateway.js';
 export {
   resolveGraphScopedOrLegacyMetadata,
   type GraphScopedOrLegacyMetadata,
