@@ -5225,7 +5225,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       appliedHeadStatus: 'existing',
       finalizedSwmRetirementLifecycleReceipts: [{
         kaUal: finalizedSeal.kaUal,
-        vmMaterializationStatus: 'existing',
+        vmMaterializationStatus: 'materialized',
         swmReconciliationOutcome: 'retired',
       }],
     });

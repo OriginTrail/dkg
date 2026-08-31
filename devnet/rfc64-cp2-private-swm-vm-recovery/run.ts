@@ -373,7 +373,7 @@ async function execute(): Promise<void> {
       'private recovered finalized chain ordinal set',
     );
     const decodedLifecycle = assertPrivateColdRetirementLifecycleV1(
-      synchronization.finalizedSwmRetirementLifecycleReceipts,
+      synchronization,
       {
         catalogHeadDigest: headDigest as Digest32V1,
         inventoryDigest: requiredString(

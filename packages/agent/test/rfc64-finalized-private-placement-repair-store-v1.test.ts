@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,10 +15,20 @@ import type {
   SwmAuthorInventoryScopeV1,
 } from '@origintrail-official/dkg-core';
 
-import { openRfc64FinalizedPrivatePlacementRepairStoreV1 } from
+import {
+  openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1,
+} from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import { openInventoryV1 } from '../src/rfc64/inventory-v1/index.js';
+import {
+  RFC64_FINALIZED_PRIVATE_PLACEMENT_REPAIR_STORE_DIRECTORY_NAME_V1,
+  resolveRfc64FinalizedPrivatePlacementRepairStorePathV1,
+} from '../src/rfc64/persistence-layout-v1.js';
+import { getRfc64PersistenceRootOwnershipForInventoryV1 } from
+  '../src/rfc64/persistence-root-ownership-v1-internal.js';
 
 const roots: string[] = [];
+const inventories: Array<Awaited<ReturnType<typeof openInventoryV1>>> = [];
 const repair = Object.freeze({
   version: 1 as const,
   contextGraphId: 'finalized-private-repair' as ContextGraphIdV1,
@@ -40,33 +50,54 @@ const repair = Object.freeze({
 });
 
 afterEach(async () => {
+  for (const inventory of inventories.splice(0)) inventory.close();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true })));
 });
 
+async function openOwnedRepairStore(dataDir: string) {
+  const inventory = await openInventoryV1(dataDir);
+  inventories.push(inventory);
+  const ownership = getRfc64PersistenceRootOwnershipForInventoryV1(inventory);
+  const store = await openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(
+    ownership,
+  );
+  return Object.freeze({ inventory, ownership, store });
+}
+
 describe('RFC-64 finalized-private placement repair store', () => {
   it('durably retains confirmation until an exact completed repair deletes it', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-repair-'));
-    roots.push(root);
-    const first = await openRfc64FinalizedPrivatePlacementRepairStoreV1(root);
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-repair-'));
+    roots.push(dataDir);
+    const owned = await openOwnedRepairStore(dataDir);
+    const first = owned.store;
 
     await first.put(repair);
     await first.put(repair);
     expect(first.list()).toEqual([repair]);
 
-    const restarted = await openRfc64FinalizedPrivatePlacementRepairStoreV1(root);
+    const restarted =
+      await openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(
+        owned.ownership,
+      );
     expect(restarted.list()).toEqual([repair]);
     await restarted.delete(repair);
 
-    const completed = await openRfc64FinalizedPrivatePlacementRepairStoreV1(root);
+    const completed =
+      await openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(
+        owned.ownership,
+      );
     expect(completed.list()).toEqual([]);
   });
 
   it('fails closed when marker bytes change before deletion', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-tamper-'));
-    roots.push(root);
-    const opened = await openRfc64FinalizedPrivatePlacementRepairStoreV1(root);
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-tamper-'));
+    roots.push(dataDir);
+    const owned = await openOwnedRepairStore(dataDir);
+    const opened = owned.store;
     await opened.put(repair);
-    const directory = join(root, 'finalized-private-placement-repairs-v1');
+    const directory = resolveRfc64FinalizedPrivatePlacementRepairStorePathV1(
+      owned.ownership.assertHeldAndGetRootPathV1(),
+    );
     const [filename] = await readdir(directory);
     if (filename === undefined) throw new Error('repair marker was not written');
     const markerPath = join(directory, filename);
@@ -75,7 +106,95 @@ describe('RFC-64 finalized-private placement repair store', () => {
 
     await expect(opened.delete(repair)).rejects.toThrow('changed before delete');
     await expect(readFile(markerPath)).resolves.not.toHaveLength(0);
-    const recovered = await openRfc64FinalizedPrivatePlacementRepairStoreV1(root);
+    const recovered =
+      await openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(
+        owned.ownership,
+      );
     expect(recovered.list()).toEqual([repair]);
+  });
+
+  it('recovers temp-only and removes redundant temp-plus-final crash artifacts', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-crash-'));
+    roots.push(dataDir);
+    const owned = await openOwnedRepairStore(dataDir);
+    await owned.store.put(repair);
+    const rootPath = owned.ownership.assertHeldAndGetRootPathV1();
+    const directory = resolveRfc64FinalizedPrivatePlacementRepairStorePathV1(rootPath);
+    const [filename] = await readdir(directory);
+    if (filename === undefined) throw new Error('repair marker was not written');
+    const markerPath = join(directory, filename);
+    const markerBytes = await readFile(markerPath);
+    const tempName = `.${filename}.${'ab'.repeat(16)}.tmp`;
+    const tempPath = join(directory, tempName);
+
+    // Process exit after placement-repair.temp-fsynced: only the exact temp survives.
+    await writeFile(tempPath, markerBytes, { mode: 0o600 });
+    await chmod(tempPath, 0o600);
+    await rm(markerPath);
+    const recoveredTempOnly =
+      await openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(
+        owned.ownership,
+      );
+    expect(recoveredTempOnly.list()).toEqual([repair]);
+    expect(await readdir(directory)).toEqual([filename]);
+
+    // Process exit after placement-repair.published-no-replace: both links survive.
+    await writeFile(tempPath, markerBytes, { mode: 0o600 });
+    await chmod(tempPath, 0o600);
+    const recoveredTempPlusFinal =
+      await openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(
+        owned.ownership,
+      );
+    expect(recoveredTempPlusFinal.list()).toEqual([repair]);
+    expect(await readdir(directory)).toEqual([filename]);
+  });
+
+  it('rejects opening after the canonical persistence ownership is released', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-owner-'));
+    roots.push(dataDir);
+    const owned = await openOwnedRepairStore(dataDir);
+    owned.inventory.close();
+    const inventoryIndex = inventories.indexOf(owned.inventory);
+    if (inventoryIndex >= 0) inventories.splice(inventoryIndex, 1);
+
+    await expect(
+      openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(owned.ownership),
+    ).rejects.toThrow('closed');
+  });
+
+  it('uses the canonical repair namespace under the owned RFC-64 root', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-layout-'));
+    roots.push(dataDir);
+    const owned = await openOwnedRepairStore(dataDir);
+    await owned.store.put(repair);
+
+    await expect(readdir(join(
+      owned.ownership.assertHeldAndGetRootPathV1(),
+      RFC64_FINALIZED_PRIVATE_PLACEMENT_REPAIR_STORE_DIRECTORY_NAME_V1,
+    ))).resolves.toHaveLength(1);
+  });
+
+  it('rejects a non-canonical store-shaped temporary marker', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-temp-tamper-'));
+    roots.push(dataDir);
+    const owned = await openOwnedRepairStore(dataDir);
+    await owned.store.put(repair);
+    const directory = resolveRfc64FinalizedPrivatePlacementRepairStorePathV1(
+      owned.ownership.assertHeldAndGetRootPathV1(),
+    );
+    const [filename] = await readdir(directory);
+    if (filename === undefined) throw new Error('repair marker was not written');
+    const markerBytes = await readFile(join(directory, filename));
+    const tempPath = join(directory, `.${filename}.${'cd'.repeat(16)}.tmp`);
+    await writeFile(
+      tempPath,
+      Buffer.concat([markerBytes.subarray(0, -1), Buffer.from(' \n')]),
+      { mode: 0o600 },
+    );
+    await chmod(tempPath, 0o600);
+
+    await expect(
+      openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(owned.ownership),
+    ).rejects.toThrow('temporary marker identity is invalid');
   });
 });

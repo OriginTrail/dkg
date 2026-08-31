@@ -2,7 +2,6 @@
 
 import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
-import { join } from 'node:path';
 
 import {
   assertAssertionCoordinateV1,
@@ -25,14 +24,20 @@ import {
   assertRfc64ExistingDirectoryV1,
   createRfc64DurableFileStoreV1,
 } from './durable-file-store-v1.js';
+import {
+  RFC64_FINALIZED_PRIVATE_PLACEMENT_REPAIR_STORE_DIRECTORY_NAME_V1,
+  resolveRfc64FinalizedPrivatePlacementRepairStorePathV1,
+} from './persistence-layout-v1.js';
+import type { Rfc64PersistenceRootOwnershipV1 } from
+  './persistence-root-ownership-v1-internal.js';
 import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
   './swm-author-inventory-producer-v1.js';
 
-const DIRECTORY_V1 = 'finalized-private-placement-repairs-v1';
 const MAX_MARKER_BYTES_V1 = 8 * 1024;
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const MARKER_FILENAME_V1 = /^[0-9a-f]{64}\.json$/u;
+const TEMP_MARKER_FILENAME_V1 = /^\.([0-9a-f]{64}\.json)\.[0-9a-f]{32}\.tmp$/u;
 
 export interface Rfc64FinalizedPrivatePlacementRepairV1
   extends Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 {
@@ -53,11 +58,20 @@ export interface Rfc64FinalizedPrivatePlacementRepairStoreV1 {
   delete(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void>;
 }
 
-export async function openRfc64FinalizedPrivatePlacementRepairStoreV1(
-  persistenceRoot: string,
+/** Open only with package-internal authority backed by the live persistence lease. */
+export async function openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(
+  ownership: Rfc64PersistenceRootOwnershipV1,
 ): Promise<Rfc64FinalizedPrivatePlacementRepairStoreV1> {
+  const persistenceRoot = ownership.assertHeldAndGetRootPathV1();
+  await assertRfc64ExistingDirectoryV1(
+    persistenceRoot,
+    'RFC-64 persistence root',
+    { access: 'owner-only' },
+  );
   const durableFiles = createRfc64DurableFileStoreV1<'placement-repair'>(persistenceRoot);
-  const directoryPath = join(persistenceRoot, DIRECTORY_V1);
+  const directoryPath = resolveRfc64FinalizedPrivatePlacementRepairStorePathV1(
+    persistenceRoot,
+  );
   let entries: Array<{ readonly name: string; isFile(): boolean }>;
   let directoryExists = true;
   try {
@@ -76,13 +90,31 @@ export async function openRfc64FinalizedPrivatePlacementRepairStoreV1(
       { access: 'owner-only' },
     );
   }
-  const repairs = new Map<string, Readonly<Rfc64FinalizedPrivatePlacementRepairV1>>();
-  for (const entry of entries) {
-    if (!entry.isFile() || !MARKER_FILENAME_V1.test(entry.name)) {
+  const markerEntries: typeof entries = [];
+  const tempEntries: Array<{
+    readonly entry: (typeof entries)[number];
+    readonly targetFilename: string;
+  }> = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isFile()) {
       throw new Error('RFC-64 finalized-private placement repair directory is malformed');
     }
+    if (MARKER_FILENAME_V1.test(entry.name)) {
+      markerEntries.push(entry);
+      continue;
+    }
+    const tempMatch = TEMP_MARKER_FILENAME_V1.exec(entry.name);
+    if (tempMatch?.[1] !== undefined) {
+      tempEntries.push({ entry, targetFilename: tempMatch[1] });
+      continue;
+    }
+    throw new Error('RFC-64 finalized-private placement repair directory is malformed');
+  }
+
+  const repairs = new Map<string, Readonly<Rfc64FinalizedPrivatePlacementRepairV1>>();
+  for (const entry of markerEntries) {
     const bytes = await durableFiles.readOptionalBoundedBytes({
-      relativePath: `${DIRECTORY_V1}/${entry.name}`,
+      relativePath: markerRelativePathV1(entry.name),
       maxBytes: MAX_MARKER_BYTES_V1,
       label: 'RFC-64 finalized-private placement repair marker',
     });
@@ -95,6 +127,55 @@ export async function openRfc64FinalizedPrivatePlacementRepairStoreV1(
     }
     repairs.set(entry.name, repair);
   }
+  for (const { entry, targetFilename } of tempEntries) {
+    const tempRelativePath = markerRelativePathV1(entry.name);
+    const bytes = await durableFiles.readOptionalBoundedBytes({
+      relativePath: tempRelativePath,
+      maxBytes: MAX_MARKER_BYTES_V1,
+      label: 'RFC-64 finalized-private placement repair temporary marker',
+    });
+    if (bytes === null) {
+      throw new Error(
+        'RFC-64 finalized-private placement repair temporary marker disappeared during open',
+      );
+    }
+    const repair = parseRepairV1(bytes);
+    if (
+      markerFilenameV1(repair) !== targetFilename
+      || !bytesEqualV1(bytes, encodeRepairV1(repair))
+    ) {
+      throw new Error(
+        'RFC-64 finalized-private placement repair temporary marker identity is invalid',
+      );
+    }
+    await durableFiles.putExactBytes({
+      relativePath: markerRelativePathV1(targetFilename),
+      bytes,
+      maxBytes: MAX_MARKER_BYTES_V1,
+      label: 'RFC-64 finalized-private placement repair marker',
+      kind: 'placement-repair',
+    });
+    const deleted = await durableFiles.deleteExactBytes({
+      relativePath: tempRelativePath,
+      expectedBytes: bytes,
+      maxBytes: MAX_MARKER_BYTES_V1,
+      label: 'RFC-64 finalized-private placement repair temporary marker',
+      kind: 'placement-repair',
+    });
+    if (!deleted) {
+      throw new Error(
+        'RFC-64 finalized-private placement repair temporary marker disappeared during recovery',
+      );
+    }
+    const current = repairs.get(targetFilename);
+    if (
+      current !== undefined
+      && !bytesEqualV1(encodeRepairV1(current), bytes)
+    ) {
+      throw new Error('RFC-64 finalized-private placement repair recovery conflicts');
+    }
+    repairs.set(targetFilename, repair);
+  }
 
   return Object.freeze({
     list: () => Object.freeze([...repairs.entries()]
@@ -104,7 +185,7 @@ export async function openRfc64FinalizedPrivatePlacementRepairStoreV1(
       const repair = snapshotRepairV1(input);
       const filename = markerFilenameV1(repair);
       await durableFiles.putExactBytes({
-        relativePath: `${DIRECTORY_V1}/${filename}`,
+        relativePath: markerRelativePathV1(filename),
         bytes: encodeRepairV1(repair),
         maxBytes: MAX_MARKER_BYTES_V1,
         label: 'RFC-64 finalized-private placement repair marker',
@@ -121,7 +202,7 @@ export async function openRfc64FinalizedPrivatePlacementRepairStoreV1(
         throw new Error('RFC-64 finalized-private placement repair deletion conflicts');
       }
       const deleted = await durableFiles.deleteExactBytes({
-        relativePath: `${DIRECTORY_V1}/${filename}`,
+        relativePath: markerRelativePathV1(filename),
         expectedBytes: encodeRepairV1(repair),
         maxBytes: MAX_MARKER_BYTES_V1,
         label: 'RFC-64 finalized-private placement repair marker',
@@ -216,6 +297,10 @@ function markerFilenameV1(
   repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
 ): string {
   return `${createHash('sha256').update(encodeRepairV1(repair)).digest('hex')}.json`;
+}
+
+function markerRelativePathV1(filename: string): string {
+  return `${RFC64_FINALIZED_PRIVATE_PLACEMENT_REPAIR_STORE_DIRECTORY_NAME_V1}/${filename}`;
 }
 
 function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {

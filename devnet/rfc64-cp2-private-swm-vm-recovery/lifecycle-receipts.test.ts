@@ -20,12 +20,7 @@ const FIXED_POST_READ_DIGEST =
 
 function receipt(overrides: Record<string, unknown> = {}) {
   return {
-    kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-    committedHead: {
-      kind: 'rfc64-public-catalog-native-committed-head-token-v1',
-      catalogHeadDigest: HEAD,
-      inventoryDigest: INVENTORY,
-    },
+    kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v2',
     contextGraphId: CONTEXT_GRAPH,
     kaUal: UAL,
     assertionVersion: '1',
@@ -33,6 +28,18 @@ function receipt(overrides: Record<string, unknown> = {}) {
     vmPostReadDigest: FIXED_POST_READ_DIGEST,
     vmMaterializationStatus: 'materialized',
     swmReconciliationOutcome: 'retired',
+    ...overrides,
+  };
+}
+
+function synchronization(
+  receipts: unknown = [receipt()],
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    catalogHeadDigest: HEAD,
+    inventoryDigest: INVENTORY,
+    finalizedSwmRetirementLifecycleReceipts: receipts,
     ...overrides,
   };
 }
@@ -66,18 +73,18 @@ describe('private cold retirement lifecycle certification', () => {
     );
   });
 
-  it('accepts and freezes only the exact cold root-lane PASS evidence', () => {
-    const decoded = assertPrivateColdRetirementLifecycleV1([receipt()], expected());
+  it('accepts the production V2 receipts from exactInventoryReadback and binds their head', () => {
+    const decoded = assertPrivateColdRetirementLifecycleV1(synchronization(), expected());
     assert.deepEqual(decoded.receipts, [receipt()]);
     assert.equal(decoded.byUal.get(UAL)?.vmGraphIri, VM_GRAPH);
     assert.equal(Object.isFrozen(decoded.receipts), true);
-    assert.equal(Object.isFrozen(decoded.receipts[0]?.committedHead), true);
+    assert.equal(Object.isFrozen(decoded.receipts[0]), true);
   });
 
   it('rejects malformed, duplicate, out-of-order, and non-root evidence', () => {
     assert.throws(
       () => assertPrivateColdRetirementLifecycleV1({}, expected()),
-      /exact bounded asset set/u,
+      /head digest is missing/u,
     );
     const secondUal = `${UAL.slice(0, -1)}2`;
     const twoExpected = {
@@ -88,19 +95,25 @@ describe('private cold retirement lifecycle certification', () => {
       ]),
     };
     assert.throws(
-      () => assertPrivateColdRetirementLifecycleV1([receipt(), receipt()], twoExpected),
+      () => assertPrivateColdRetirementLifecycleV1(
+        synchronization([receipt(), receipt()]),
+        twoExpected,
+      ),
       /unexpected or duplicate KA UAL/u,
     );
     assert.throws(
       () => assertPrivateColdRetirementLifecycleV1(
-        [receipt({ kaUal: secondUal, vmGraphIri: 'urn:dkg:vm:2' }), receipt()],
+        synchronization([
+          receipt({ kaUal: secondUal, vmGraphIri: 'urn:dkg:vm:2' }),
+          receipt(),
+        ]),
         twoExpected,
       ),
       /canonical UAL order/u,
     );
     assert.throws(
       () => assertPrivateColdRetirementLifecycleV1(
-        [receipt({ subGraphName: 'unrelated-slice' })],
+        synchronization([receipt({ subGraphName: 'unrelated-slice' })]),
         expected(),
       ),
       /unexpected or missing fields/u,
@@ -109,8 +122,6 @@ describe('private cold retirement lifecycle certification', () => {
 
   it('rejects every lifecycle state that cannot certify CP2 PASS', () => {
     const invalid = [
-      { committedHead: { ...receipt().committedHead, catalogHeadDigest: `0x${'44'.repeat(32)}` } },
-      { committedHead: { ...receipt().committedHead, inventoryDigest: `0x${'55'.repeat(32)}` } },
       { contextGraphId: 'different-private-context' },
       { assertionVersion: '2' },
       { vmGraphIri: 'urn:dkg:vm:different' },
@@ -121,9 +132,24 @@ describe('private cold retirement lifecycle certification', () => {
     ];
     for (const mutation of invalid) {
       assert.throws(
-        () => assertPrivateColdRetirementLifecycleV1([receipt(mutation)], expected()),
+        () => assertPrivateColdRetirementLifecycleV1(
+          synchronization([receipt(mutation)]),
+          expected(),
+        ),
       );
     }
+    assert.throws(
+      () => assertPrivateColdRetirementLifecycleV1(
+        synchronization([receipt()], { catalogHeadDigest: `0x${'44'.repeat(32)}` }),
+        expected(),
+      ),
+    );
+    assert.throws(
+      () => assertPrivateColdRetirementLifecycleV1(
+        synchronization([receipt()], { inventoryDigest: `0x${'55'.repeat(32)}` }),
+        expected(),
+      ),
+    );
     assert.throws(
       () => computeFinalizedVmPostReadDigestFromHarnessReadbackV1(`${PROJECTION}\n`),
       /exactly one trailing LF/u,

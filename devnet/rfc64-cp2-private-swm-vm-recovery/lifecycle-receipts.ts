@@ -6,13 +6,8 @@ const POST_READ_DIGEST_DOMAIN_V1 = ethers.toUtf8Bytes(
   'OT-RFC-64:finalized-vm-post-read:v1\0',
 );
 
-export interface PrivateColdRetirementLifecycleReceiptV1 {
-  readonly kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1';
-  readonly committedHead: Readonly<{
-    readonly kind: 'rfc64-public-catalog-native-committed-head-token-v1';
-    readonly catalogHeadDigest: Digest32V1;
-    readonly inventoryDigest: Digest32V1;
-  }>;
+export interface PrivateColdRetirementLifecycleReceiptV2 {
+  readonly kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v2';
   readonly contextGraphId: string;
   readonly kaUal: string;
   readonly assertionVersion: string;
@@ -42,23 +37,38 @@ export function assertPrivateColdRetirementLifecycleV1(
   input: unknown,
   expected: Readonly<PrivateColdRetirementLifecycleExpectationV1>,
 ): Readonly<{
-  readonly receipts: readonly Readonly<PrivateColdRetirementLifecycleReceiptV1>[];
-  readonly byUal: ReadonlyMap<string, Readonly<PrivateColdRetirementLifecycleReceiptV1>>;
+  readonly receipts: readonly Readonly<PrivateColdRetirementLifecycleReceiptV2>[];
+  readonly byUal: ReadonlyMap<string, Readonly<PrivateColdRetirementLifecycleReceiptV2>>;
 }> {
+  const synchronization = requiredRecord(input, 'private cold synchronization evidence');
+  exactDigest(
+    ownValue(synchronization, 'catalogHeadDigest', 'private synchronization head digest'),
+    expected.catalogHeadDigest,
+    'private synchronization head digest',
+  );
+  exactDigest(
+    ownValue(synchronization, 'inventoryDigest', 'private synchronization inventory digest'),
+    expected.inventoryDigest,
+    'private synchronization inventory digest',
+  );
+  const receiptsInput = ownValue(
+    synchronization,
+    'finalizedSwmRetirementLifecycleReceipts',
+    'private synchronization lifecycle receipts',
+  );
   if (
-    !Array.isArray(input)
-    || input.length > MAX_RECEIPTS
-    || input.length !== expected.byUal.size
+    !Array.isArray(receiptsInput)
+    || receiptsInput.length > MAX_RECEIPTS
+    || receiptsInput.length !== expected.byUal.size
   ) {
     throw new TypeError('private cold retirement lifecycle must be the exact bounded asset set');
   }
-  const byUal = new Map<string, Readonly<PrivateColdRetirementLifecycleReceiptV1>>();
+  const byUal = new Map<string, Readonly<PrivateColdRetirementLifecycleReceiptV2>>();
   let previousUal: string | undefined;
-  const receipts = input.map((value, index) => {
+  const receipts = receiptsInput.map((value, index) => {
     const label = `private cold lifecycle ${index}`;
     const receipt = exactRecord(value, [
       'kind',
-      'committedHead',
       'contextGraphId',
       'kaUal',
       'assertionVersion',
@@ -76,34 +86,12 @@ export function assertPrivateColdRetirementLifecycleV1(
       throw new Error(`${label} is out of canonical UAL order at ${kaUal}`);
     }
     previousUal = kaUal;
-    const committedHead = exactRecord(receipt.committedHead, [
-      'kind',
-      'catalogHeadDigest',
-      'inventoryDigest',
-    ], `${label} committed head`);
     const decoded = Object.freeze({
       kind: exactString(
         receipt.kind,
-        'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
+        'rfc64-finalized-swm-retirement-lifecycle-receipt-v2',
         `${label} kind`,
       ),
-      committedHead: Object.freeze({
-        kind: exactString(
-          committedHead.kind,
-          'rfc64-public-catalog-native-committed-head-token-v1',
-          `${label} committed-head kind`,
-        ),
-        catalogHeadDigest: exactDigest(
-          committedHead.catalogHeadDigest,
-          expected.catalogHeadDigest,
-          `${label} committed-head digest`,
-        ),
-        inventoryDigest: exactDigest(
-          committedHead.inventoryDigest,
-          expected.inventoryDigest,
-          `${label} committed inventory`,
-        ),
-      }),
       contextGraphId: exactString(
         receipt.contextGraphId,
         expected.contextGraphId,
@@ -137,11 +125,26 @@ export function assertPrivateColdRetirementLifecycleV1(
         'retired',
         `${label} SWM reconciliation outcome`,
       ),
-    }) satisfies PrivateColdRetirementLifecycleReceiptV1;
+    }) satisfies PrivateColdRetirementLifecycleReceiptV2;
     byUal.set(kaUal, decoded);
     return decoded;
   });
   return Object.freeze({ receipts: Object.freeze(receipts), byUal });
+}
+
+function requiredRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function ownValue(record: Record<string, unknown>, key: string, label: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
+    throw new TypeError(`${label} is missing`);
+  }
+  return descriptor.value;
 }
 
 /** Independently derive the production v1 post-read digest from canonical N-Quads. */

@@ -108,7 +108,10 @@ function isBenignExactHeadLifecycleReplayV1(
   return previous?.vmMaterializationStatus === 'materialized'
     && previous.swmReconciliationOutcome === 'retired'
     && current.vmMaterializationStatus === 'existing'
-    && current.swmReconciliationOutcome === 'already-retired-finalized'
+    && (
+      current.swmReconciliationOutcome === 'retired'
+      || current.swmReconciliationOutcome === 'already-retired-finalized'
+    )
     && previous.kind === current.kind
     && previous.contextGraphId === current.contextGraphId
     && previous.subGraphName === current.subGraphName

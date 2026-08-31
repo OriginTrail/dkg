@@ -102,6 +102,28 @@ describe('RFC-64 catalog synchronization evidence', () => {
     ]);
   });
 
+  it('preserves original materialization proof when replay re-retires the SWM twin', () => {
+    const originalReceipt = receipt();
+    const replayReceipt = {
+      ...originalReceipt,
+      vmMaterializationStatus: 'existing' as const,
+      swmReconciliationOutcome: 'retired' as const,
+    };
+    const replay = reduceRfc64CatalogSynchronizationEvidenceReplayV1(
+      snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([originalReceipt])),
+      snapshotRfc64CatalogSynchronizationEvidenceV1({
+        ...evidence([replayReceipt]),
+        appliedHeadStatus: 'existing' as const,
+      }),
+    );
+
+    expect(replay.finalizedSwmRetirementLifecycleReceipts).toEqual([{
+      ...originalReceipt,
+      vmMaterializationStatus: 'materialized',
+      swmReconciliationOutcome: 'retired',
+    }]);
+  });
+
   it.each([
     ['content mismatch', { swmReconciliationOutcome: 'content-mismatch' as const }],
     ['VM change', { swmReconciliationOutcome: 'vm-changed' as const }],

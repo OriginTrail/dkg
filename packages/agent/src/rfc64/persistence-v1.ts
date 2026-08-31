@@ -19,7 +19,7 @@ import { openRfc64KaBundleStoreForOwnedPersistenceRootV1 } from './ka-bundle-sto
 import { resolveRfc64PersistenceRootV1 } from './persistence-layout-v1.js';
 import { getRfc64PersistenceRootOwnershipForInventoryV1 } from './persistence-root-ownership-v1-internal.js';
 import {
-  openRfc64FinalizedPrivatePlacementRepairStoreV1,
+  openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairStoreV1,
 } from './finalized-private-placement-repair-store-v1.js';
@@ -183,7 +183,7 @@ export async function openRfc64PersistenceV1(
     controlObjectStore = await openRfc64ControlObjectStoreForOwnedPersistenceRootV1(ownership);
     kaBundleStore = await openRfc64KaBundleStoreForOwnedPersistenceRootV1(ownership);
     const finalizedPrivatePlacementRepairs =
-      await openRfc64FinalizedPrivatePlacementRepairStoreV1(rootPath);
+      await openRfc64FinalizedPrivatePlacementRepairStoreForOwnedPersistenceRootV1(ownership);
     return new OwnedRfc64PersistenceV1(
       rootPath,
       inventory,
