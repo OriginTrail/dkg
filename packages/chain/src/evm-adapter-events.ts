@@ -74,6 +74,124 @@ export class EventsMethods extends EVMChainAdapterBase {
     );
   }
 
+  /**
+   * Does this bound contract's ABI declare an event by this name?
+   *
+   * Lifted out of the `KCCreated` branch so every branch that reaches for an
+   * event a LEGACY binding may not declare asks the same question. Calling
+   * `contract.filters.<name>()` on an ABI without that fragment throws, and a
+   * throw inside `listenForEvents` aborts the whole scan — so a node bound to
+   * an older `DKGKnowledgeAssets` would lose the events it CAN serve because
+   * of one it cannot.
+   */
+  private contractHasEvent(contract: ethers.Contract, name: string): boolean {
+    return contract.interface.fragments.some(
+      (f) => f.type === 'event' && (f as { name?: string }).name === name,
+    );
+  }
+
+  /**
+   * Which of `names` this adapter's CURRENTLY BOUND contracts cannot produce.
+   *
+   * Returns the MISSING names (empty array = all supported), so a caller gates
+   * on `.length === 0` and can name the specific absent event in its
+   * diagnostics instead of reporting an opaque "unsupported".
+   *
+   * Async, and awaits `init()`: contract bindings are resolved lazily from the
+   * Hub on first use. A synchronous variant called at wiring time — before any
+   * scan has run — would see no bindings at all and report every name missing,
+   * which reads exactly like a genuinely legacy ABI. A feature gate would then
+   * disable itself on a perfectly capable node, and nothing in the resulting
+   * diagnostics would distinguish the two.
+   */
+  async supportsEventTypes(names: readonly string[]): Promise<string[]> {
+    await this.init();
+    const kaStorage = this.contracts.knowledgeAssetStorage;
+    if (!kaStorage) return [...names];
+    return names.filter((name) => !this.contractHasEvent(kaStorage, name));
+  }
+
+  /**
+   * The four `DKGKnowledgeAssets` root-mutation events, one name per call.
+   *
+   * Mirrors the `KnowledgeAssetRegisteredToContextGraph` template above —
+   * notably it goes through `queryFilterWithFailover`, whose `wideLogScan`
+   * policy and `skipPreferred` carve-out are load-bearing: a scan pinned to a
+   * lagging sticky endpoint would return fewer logs while the runner still
+   * persisted `lastBlock = head`, and the events in `(backendTip, head]` would
+   * be skipped forever with no trace.
+   *
+   * `kaId` is read from `topics[1]` — the indexed `uint256 id` all four events
+   * share — NOT from `parseLog`. The id is the only field a consumer needs to
+   * identify the mutated asset, and reading it from the topic keeps it
+   * available even when the non-indexed payload fails to decode (a fabricated
+   * or truncated log from an untrusted RPC, or an ABI whose non-indexed
+   * arguments drifted). `parseLog` is then best-effort, for `merkleRoot` /
+   * `author` only.
+   *
+   * `KnowledgeAssetMerkleRootsUpdated` is never parsed: it carries a dynamic
+   * `MerkleRoot[]`, i.e. unbounded decode work driven by an untrusted payload,
+   * and no consumer wants the array — the repair path re-reads the committed
+   * set from chain regardless.
+   */
+  private async *yieldKnowledgeAssetRootMutationLogs(
+    eventName: KnowledgeAssetRootMutationEventType,
+    filter: EventFilter,
+  ): AsyncIterable<ChainEvent> {
+    const kaStorage = this.contracts.knowledgeAssetStorage;
+    if (!kaStorage || !this.contractHasEvent(kaStorage, eventName)) return;
+
+    const logs = await this.queryFilterWithFailover(
+      kaStorage,
+      `kas.queryFilter(${eventName})`,
+      kaStorage.filters[eventName](),
+      filter.fromBlock ?? 0,
+      filter.toBlock,
+    );
+
+    for (const log of logs) {
+      const kaIdTopic = log.topics[1];
+      if (kaIdTopic == null) continue;
+      let kaId: string;
+      try {
+        kaId = ethers.getBigInt(kaIdTopic).toString();
+      } catch {
+        // A log whose indexed id is not a 32-byte word is not one of ours.
+        // Skipping costs a consumer nothing; THROWING would abort the scan,
+        // hold the lane cursor, and stall every later event behind one
+        // malformed log — a deterministic stall, not a retryable one.
+        continue;
+      }
+
+      const data: Record<string, unknown> = {
+        kaId,
+        txHash: log.transactionHash,
+        txIndex: log.transactionIndex,
+        logIndex: log.index,
+        blockHash: log.blockHash,
+      };
+
+      if (eventName !== 'KnowledgeAssetMerkleRootsUpdated') {
+        try {
+          const parsed = kaStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+          if (parsed) {
+            if (typeof parsed.args['merkleRoot'] === 'string') {
+              data['merkleRoot'] = parsed.args['merkleRoot'];
+            }
+            if (typeof parsed.args['author'] === 'string') {
+              data['author'] = parsed.args['author'];
+            }
+          }
+        } catch {
+          // Best-effort enrichment only — `kaId` above is already sufficient
+          // to identify the asset, and a consumer re-reads the roots anyway.
+        }
+      }
+
+      yield { type: eventName, blockNumber: log.blockNumber, data };
+    }
+  }
+
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     await this.init();
 
@@ -184,12 +302,7 @@ export class EventsMethods extends EVMChainAdapterBase {
           const fromB = filter.fromBlock ?? 0;
           const toB = filter.toBlock ?? 'latest';
 
-          const hasEvent = (name: string) =>
-            kaStorage.interface.fragments.some(
-              (f) => f.type === 'event' && (f as { name?: string }).name === name,
-            );
-
-          const isGreenfield = hasEvent('KnowledgeAssetCreated');
+          const isGreenfield = this.contractHasEvent(kaStorage, 'KnowledgeAssetCreated');
           const createEventName = isGreenfield
             ? 'KnowledgeAssetCreated'
             : 'KnowledgeAssetCreated';
@@ -204,7 +317,7 @@ export class EventsMethods extends EVMChainAdapterBase {
           // this map stays empty there and the per-log fallback below derives
           // the (single-KA) range + owner from the create id + Transfer.
           const mintByTx = new Map<string, { publisherAddress: string; startKAId: string; endKAId: string }>();
-          if (hasEvent('KnowledgeAssetsMinted')) {
+          if (this.contractHasEvent(kaStorage, 'KnowledgeAssetsMinted')) {
             const mintFilter = kaStorage.filters.KnowledgeAssetsMinted();
             const mintLogs = await this.queryFilterWithFailover(
               kaStorage, 'kas.queryFilter(KnowledgeAssetsMinted)', mintFilter, fromB, toB,
@@ -370,6 +483,19 @@ export class EventsMethods extends EVMChainAdapterBase {
             }
           }
         }
+      }
+
+      // Chain-triggered re-verification of a held Knowledge Asset (#2435).
+      // One membership test rather than four near-identical branches, so the
+      // adapter and the poller lane that subscribes to it are gated by the
+      // SAME constant: removing a name stops both the yield and the
+      // subscription, instead of leaving a lane asking for a name nothing
+      // produces — which looks exactly like "there were no such events".
+      if ((KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES as readonly string[]).includes(eventType)) {
+        yield* this.yieldKnowledgeAssetRootMutationLogs(
+          eventType as KnowledgeAssetRootMutationEventType,
+          filter,
+        );
       }
     }
   }

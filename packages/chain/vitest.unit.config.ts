@@ -20,6 +20,12 @@ export default defineConfig({
     include: [
       'test/**/*.unit.test.ts',
       'test/conviction-cost-covered-decode.test.ts',
+      // ABI topic-hash + canonical-signature pinning for the events the adapter
+      // parses — pure keccak/`Interface` work, no chain. It matched only the
+      // default (Hardhat) config's glob, so the unit command answered
+      // "No test files found" for it and every event selector it pins went
+      // unchecked on the fast lane.
+      'test/evm-event-decode.test.ts',
       'test/evm-adapter-pca-rpc.unit.test.ts',
       'test/evm-adapter-pca-enrich.test.ts',
       'test/filter-error-console-suppressor.test.ts',
