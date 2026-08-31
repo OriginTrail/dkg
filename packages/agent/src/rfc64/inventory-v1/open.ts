@@ -47,10 +47,13 @@ import {
   INVENTORY_V1_LEGACY_USER_VERSION,
   INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
   INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
+  INVENTORY_V1_MIGRATE_V3_TO_V4_SQL,
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
   INVENTORY_V1_V2_USER_OBJECTS,
   INVENTORY_V1_V2_USER_VERSION,
+  INVENTORY_V1_V3_USER_OBJECTS,
+  INVENTORY_V1_V3_USER_VERSION,
   normalizeInventoryV1SchemaSql,
 } from './sql.js';
 import {
@@ -68,6 +71,7 @@ import {
   type CandidateSessionV1,
   type CandidateSessionGcBatchResultV1,
   type CompareAndSwapAppliedCatalogHeadInputV1,
+  type DeleteAppliedCatalogHeadInputV1,
   type CompareAndSwapSwmAuthorInventoryInputV1,
   type Rfc64InventoryV1CandidateApi,
   type SwmAuthorInventoryCasResultV1,
@@ -479,6 +483,34 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.readAppliedCatalogHeadV1(catalogScopeDigest, authorAddress);
   }
 
+  listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[] {
+    this.requireOpen();
+    return this.#candidate.listAppliedCatalogHeadsV1();
+  }
+
+  isStagedCatalogHeadV1(
+    catalogScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+    currentCatalogHeadDigest: Digest32V1,
+  ): boolean {
+    this.requireOpen();
+    return this.#candidate.isStagedCatalogHeadV1(
+      catalogScopeDigest,
+      authorAddress,
+      currentCatalogHeadDigest,
+    );
+  }
+
+  deleteAppliedCatalogHeadV1(input: DeleteAppliedCatalogHeadInputV1): void {
+    this.requireOpen();
+    this.#candidate.deleteAppliedCatalogHeadV1(input);
+  }
+
+  deleteAppliedCatalogHeadsV1(inputs: readonly DeleteAppliedCatalogHeadInputV1[]): void {
+    this.requireOpen();
+    this.#candidate.deleteAppliedCatalogHeadsV1(inputs);
+  }
+
   compareAndSwapAppliedCatalogHeadV1(
     input: CompareAndSwapAppliedCatalogHeadInputV1,
   ): AppliedCatalogHeadCasResultV1 {
@@ -502,6 +534,25 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   ): SwmAuthorInventoryCasResultV1 {
     this.requireOpen();
     return this.#candidate.compareAndSwapSwmAuthorInventoryV1(input);
+  }
+
+  listFinalizedPrivatePlacementRepairs() {
+    this.requireOpen();
+    return this.#candidate.listFinalizedPrivatePlacementRepairs();
+  }
+
+  putFinalizedPrivatePlacementRepair(repair: Parameters<
+    Rfc64InventoryV1CandidateApi['putFinalizedPrivatePlacementRepair']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.putFinalizedPrivatePlacementRepair(repair);
+  }
+
+  deleteFinalizedPrivatePlacementRepair(repair: Parameters<
+    Rfc64InventoryV1CandidateApi['deleteFinalizedPrivatePlacementRepair']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.deleteFinalizedPrivatePlacementRepair(repair);
   }
 
   private requireOpen(): DatabaseSyncV1 {
@@ -1180,12 +1231,21 @@ const INVENTORY_SCHEMA_MIGRATIONS_V1: readonly InventorySchemaMigrationV1[] = Ob
   }),
   Object.freeze({
     fromVersion: INVENTORY_V1_V2_USER_VERSION,
-    toVersion: INVENTORY_V1_USER_VERSION,
+    toVersion: INVENTORY_V1_V3_USER_VERSION,
     fromLabel: 'v2',
     toLabel: 'v3',
     fromObjects: INVENTORY_V1_V2_USER_OBJECTS,
-    toObjects: INVENTORY_V1_USER_OBJECTS,
+    toObjects: INVENTORY_V1_V3_USER_OBJECTS,
     sql: INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
+  }),
+  Object.freeze({
+    fromVersion: INVENTORY_V1_V3_USER_VERSION,
+    toVersion: INVENTORY_V1_USER_VERSION,
+    fromLabel: 'v3',
+    toLabel: 'v4',
+    fromObjects: INVENTORY_V1_V3_USER_OBJECTS,
+    toObjects: INVENTORY_V1_USER_OBJECTS,
+    sql: INVENTORY_V1_MIGRATE_V3_TO_V4_SQL,
   }),
 ]);
 

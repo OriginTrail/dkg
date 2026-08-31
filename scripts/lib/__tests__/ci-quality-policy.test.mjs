@@ -152,7 +152,7 @@ test('shared JUnit runner creates reports and propagates child failures', (t) =>
     '--lane', 'rdf-utils', '--', 'test/rdf-literal.test.ts',
   ]);
   assert.equal(passed, 0);
-  assert.match(fs.readFileSync(reportPath, 'utf8'), /<testsuites[^>]*tests="13"/);
+  assert.match(fs.readFileSync(reportPath, 'utf8'), /<testsuites[^>]*tests="19"/);
 
   const failed = runVitestJunit([
     '--lane', 'rdf-utils', '--', 'test/does-not-exist.test.ts',

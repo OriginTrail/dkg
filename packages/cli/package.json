@@ -15,6 +15,12 @@
     "./daemon/plugin-api": {
       "types": "./dist/daemon/plugin-api.d.ts",
       "import": "./dist/daemon/plugin-api.js"
+    },
+    "./blazegraph-runtime-contract": {
+      "types": "./blazegraph-runtime-contract.d.cts",
+      "import": "./blazegraph-image-metadata.cjs",
+      "require": "./blazegraph-image-metadata.cjs",
+      "default": "./blazegraph-image-metadata.cjs"
     }
   },
   "scripts": {
@@ -73,6 +79,8 @@
     "project.json",
     "blazegraph-image.json",
     "blazegraph-image-metadata.cjs",
+    "blazegraph-namespace-contract.cjs",
+    "blazegraph-runtime-contract.d.cts",
     "markitdown-build-info.json",
     "markitdown-targets.json",
     "build-info.json",

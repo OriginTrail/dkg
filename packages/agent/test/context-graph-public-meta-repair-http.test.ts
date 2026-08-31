@@ -133,6 +133,7 @@ describe('creator-owned public metadata repair over SPARQL HTTP', () => {
       });
       expect(facts).toEqual({
         type: 'bindings',
+        variables: ['predicate', 'object'],
         bindings: [{
           predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
           object: '"private"',

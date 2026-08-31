@@ -6,6 +6,7 @@ import {
   knowledgeAssetLayerGraphUri,
   readVerifiedCatalogSealBindingV1,
   type ContextGraphPolicyV1,
+  type Digest32V1,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
@@ -14,14 +15,20 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
-import { createRfc64CatalogAppliedHeadCoordinatorV1 } from
-  '../src/rfc64/catalog-applied-head-coordinator-v1.js';
+import {
+  createRfc64CatalogAppliedHeadCoordinatorV1,
+} from '../src/rfc64/catalog-applied-head-coordinator-v1.js';
 import {
   reconcileFinalizedSwmTwinFromCatalogProjection,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import type {
+  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
+  Rfc64PublicCatalogNativeCommittedHeadTokenV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import type {
+  Rfc64FinalizedVmAgentPrecommitTransactionV1,
+} from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   acceptedRfc64VmPolicySnapshot,
   rfc64FinalizedVmPrecommitPlan,
@@ -136,10 +143,45 @@ function transaction(events: string[] = []): Rfc64PublicCatalogNativePrecommitTr
   };
 }
 
+function finalizedTransaction(
+  plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+  events: string[] = [],
+): Rfc64FinalizedVmAgentPrecommitTransactionV1 {
+  const primary = transaction(events);
+  return Object.freeze({
+    kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+    materializationReceipts: Object.freeze(plan.rows.map((row, index) => {
+      const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
+      return Object.freeze({
+        kaId: binding.kaId,
+        ordinal: String(index) as never,
+        ual: binding.seal.kaUal,
+        status: 'materialized' as const,
+        vmGraphIri: `urn:rfc64:test:vm:${index}`,
+        tripleCount: binding.seal.publicTripleCount,
+        postReadDigest: `0x${String(index + 1).padStart(64, '0')}` as Digest32V1,
+      });
+    })),
+    commit: primary.commit,
+    rollback: primary.rollback,
+  });
+}
+
+function committedHeadToken(
+  plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+): Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1> {
+  return Object.freeze({
+    kind: 'rfc64-public-catalog-native-committed-head-token-v1',
+    catalogHeadDigest: plan.catalogHeadDigest,
+    inventoryDigest: plan.inventoryDigest,
+  });
+}
+
 describe('RFC-64 catalog applied-head coordinator', () => {
   it('keeps transaction finalization separate from the post-head phase', async () => {
     const events: string[] = [];
-    const primary = transaction(events);
+    const plan = rfc64FinalizedVmPrecommitPlan();
+    const primary = finalizedTransaction(plan, events);
     const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
       acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
         acceptedRfc64VmPolicySnapshot().policy.source,
@@ -152,20 +194,21 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     });
 
     const lifecycle = await handler(
-      rfc64FinalizedVmPrecommitPlan(),
+      plan,
       new AbortController().signal,
     );
     expect(lifecycle.kind).toBe('rfc64-public-catalog-native-applied-head-lifecycle-v1');
-    expect(lifecycle.transaction).toBe(primary);
+    expect(lifecycle.transaction).not.toBe(primary);
     expect(events).toEqual([]);
     await lifecycle.transaction!.commit();
     expect(events).toEqual(['primary-commit']);
-    await lifecycle.afterAppliedHead!();
+    await lifecycle.afterAppliedHead!(committedHeadToken(plan));
     expect(events).toEqual(['primary-commit']);
   });
 
   it('forwards rollback causes through the production wrapper without retiring', async () => {
-    const primary = transaction();
+    const plan = rfc64FinalizedVmPrecommitPlan();
+    const primary = finalizedTransaction(plan);
     const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
       acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
         acceptedRfc64VmPolicySnapshot().policy.source,
@@ -177,13 +220,196 @@ describe('RFC-64 catalog applied-head coordinator', () => {
       retire: vi.fn(async () => {}),
     });
     const lifecycle = await handler(
-      rfc64FinalizedVmPrecommitPlan(),
+      plan,
       new AbortController().signal,
     );
     const cause = new Error('applied-head CAS rejected');
     await lifecycle.transaction!.rollback(cause);
 
     expect(primary.rollback).toHaveBeenCalledWith(cause);
+  });
+
+  it('rolls back every malformed finalized VM receipt set before commit or retirement', async () => {
+    const store = new OxigraphStore();
+    const first = await seedExactStaleTwin(store, { kaNumber: 1n, marker: 'receipt-first' });
+    const second = await seedExactStaleTwin(store, { kaNumber: 2n, marker: 'receipt-second' });
+    const combinedPlan = Object.freeze({
+      ...first.plan,
+      rows: Object.freeze([...first.plan.rows, ...second.plan.rows]),
+    });
+    const valid = finalizedTransaction(combinedPlan).materializationReceipts;
+    const [firstReceipt, secondReceipt] = valid;
+    if (firstReceipt === undefined || secondReceipt === undefined) {
+      throw new Error('two-row receipt fixture is incomplete');
+    }
+    const cases = [
+      {
+        name: 'wrong kind',
+        kind: 'not-a-finalized-vm-transaction',
+        receipts: valid,
+      },
+      {
+        name: 'count mismatch',
+        kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+        receipts: [firstReceipt],
+      },
+      {
+        name: 'duplicate UAL',
+        kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+        receipts: [firstReceipt, Object.freeze({ ...secondReceipt, ual: firstReceipt.ual })],
+      },
+      {
+        name: 'missing UAL',
+        kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+        receipts: [firstReceipt, Object.freeze({ ...secondReceipt, ual: 'did:dkg:missing' })],
+      },
+      {
+        name: 'wrong kaId',
+        kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+        receipts: [Object.freeze({ ...firstReceipt, kaId: '999' as never }), secondReceipt],
+      },
+      {
+        name: 'wrong tripleCount',
+        kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+        receipts: [Object.freeze({ ...firstReceipt, tripleCount: '999' as never }), secondReceipt],
+      },
+    ] as const;
+
+    for (const malformed of cases) {
+      const markerGraph = `urn:rfc64:receipt-rollback:${malformed.name.replaceAll(' ', '-')}`;
+      const predecessor = [{
+        subject: markerGraph,
+        predicate: 'urn:rfc64:value',
+        object: '"predecessor"',
+        graph: markerGraph,
+      }];
+      await store.insert(predecessor);
+      const commit = vi.fn(async () => {});
+      const rollback = vi.fn(async () => {
+        await store.dropGraph(markerGraph);
+        await store.insert(predecessor);
+      });
+      const retire = vi.fn(async () => {});
+      const finalizedVmPrecommit = vi.fn(async () => {
+        await store.dropGraph(markerGraph);
+        await store.insert([{
+          ...predecessor[0]!,
+          object: '"uncommitted-target"',
+        }]);
+        return {
+          kind: malformed.kind,
+          materializationReceipts: malformed.receipts,
+          commit,
+          rollback,
+        } as unknown as Rfc64FinalizedVmAgentPrecommitTransactionV1;
+      });
+      const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+        acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+          acceptedRfc64VmPolicySnapshot().policy.source,
+        ),
+        finalizedPolicyPrecommit: vi.fn(),
+        finalizedVmPrecommit,
+        store,
+        writeLocks: new Map(),
+        retire,
+      });
+
+      await expect(handler(combinedPlan, new AbortController().signal)).rejects.toThrow();
+      expect(rollback, malformed.name).toHaveBeenCalledOnce();
+      expect(commit, malformed.name).not.toHaveBeenCalled();
+      expect(retire, malformed.name).not.toHaveBeenCalled();
+      await expect(store.query(
+        `SELECT ?value WHERE { GRAPH <${markerGraph}> { <${markerGraph}> `
+          + '<urn:rfc64:value> ?value } }',
+      ), malformed.name).resolves.toEqual({
+        type: 'bindings',
+        bindings: [{ value: '"predecessor"' }],
+      });
+    }
+    await store.close();
+  });
+
+  it('reports both malformed receipt validation and rollback failure', async () => {
+    const plan = rfc64FinalizedVmPrecommitPlan();
+    const store = new OxigraphStore();
+    const validationFailureTransaction = {
+      kind: 'not-a-finalized-vm-transaction',
+      materializationReceipts: [],
+      commit: vi.fn(),
+      rollback: vi.fn(async () => { throw new Error('rollback failed'); }),
+    } as unknown as Rfc64FinalizedVmAgentPrecommitTransactionV1;
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(),
+      finalizedVmPrecommit: vi.fn(async () => validationFailureTransaction),
+      store,
+      writeLocks: new Map(),
+      retire: vi.fn(),
+    });
+
+    const failure = await handler(plan, new AbortController().signal).catch(
+      (cause: unknown) => cause,
+    );
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toHaveLength(2);
+    await store.close();
+  });
+
+  it('refuses SWM retirement after VM commit when the durable-head token is absent or wrong', async () => {
+    const store = new OxigraphStore();
+    const staleTwin = await seedExactStaleTwin(store, { marker: 'missing-token' });
+    const primary = finalizedTransaction(staleTwin.plan);
+    const retire = vi.fn(async () => {});
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(async () => primary),
+      finalizedVmPrecommit: vi.fn(async () => primary),
+      store,
+      writeLocks: new Map(),
+      retire,
+    });
+    const lifecycle = await handler(staleTwin.plan, new AbortController().signal);
+    await lifecycle.transaction!.commit();
+
+    await expect((lifecycle.afterAppliedHead as (token?: unknown) => Promise<void>)())
+      .rejects.toThrow('without the exact durable applied-head token');
+    await expect(lifecycle.afterAppliedHead!({
+      ...committedHeadToken(staleTwin.plan),
+      inventoryDigest: `0x${'00'.repeat(32)}` as never,
+    })).rejects.toThrow('without the exact durable applied-head token');
+    expect(retire).not.toHaveBeenCalled();
+    await store.close();
+  });
+
+  it('refuses early SWM retirement before the finalized VM transaction commits', async () => {
+    const store = new OxigraphStore();
+    const staleTwin = await seedExactStaleTwin(store, { marker: 'early-retirement' });
+    const primary = finalizedTransaction(staleTwin.plan);
+    const retire = vi.fn(async ({ swmGraph }: { readonly swmGraph: string }) => {
+      await store.dropGraph(swmGraph);
+    });
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(async () => primary),
+      finalizedVmPrecommit: vi.fn(async () => primary),
+      store,
+      writeLocks: new Map(),
+      retire,
+    });
+    const lifecycle = await handler(staleTwin.plan, new AbortController().signal);
+
+    await expect(lifecycle.afterAppliedHead!(committedHeadToken(staleTwin.plan))).rejects.toThrow(
+      'refusing finalized SWM retirement before the VM transaction commit',
+    );
+    expect(retire).not.toHaveBeenCalled();
+    await expect(store.hasGraph(staleTwin.swmGraph)).resolves.toBe(true);
+    await store.close();
   });
 
   it('reconciles independent post-head twins concurrently and waits for every row', async () => {
@@ -201,12 +427,17 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const completed: string[] = [];
+    const combinedPlan = Object.freeze({
+      ...first.plan,
+      rows: Object.freeze([...first.plan.rows, ...second.plan.rows]),
+    });
+    const primary = finalizedTransaction(combinedPlan);
     const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
       acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
         acceptedRfc64VmPolicySnapshot().policy.source,
       ),
-      finalizedPolicyPrecommit: vi.fn(async () => transaction()),
-      finalizedVmPrecommit: vi.fn(async () => transaction()),
+      finalizedPolicyPrecommit: vi.fn(async () => primary),
+      finalizedVmPrecommit: vi.fn(async () => primary),
       store,
       writeLocks: new Map(),
       retire: vi.fn(async ({ swmGraph }) => {
@@ -217,11 +448,9 @@ describe('RFC-64 catalog applied-head coordinator', () => {
         completed.push(swmGraph);
       }),
     });
-    const lifecycle = await handler(Object.freeze({
-      ...first.plan,
-      rows: Object.freeze([...first.plan.rows, ...second.plan.rows]),
-    }), new AbortController().signal);
-    const afterAppliedHead = lifecycle.afterAppliedHead!();
+    const lifecycle = await handler(combinedPlan, new AbortController().signal);
+    await lifecycle.transaction!.commit();
+    const afterAppliedHead = lifecycle.afterAppliedHead!(committedHeadToken(combinedPlan));
 
     try {
       await firstEntered;
@@ -232,8 +461,86 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     } finally {
       releaseFirst();
     }
-    await afterAppliedHead;
+    const postHeadEvidence = await afterAppliedHead;
+    if (postHeadEvidence === undefined) {
+      throw new Error('finalized lifecycle did not return its retirement evidence');
+    }
+    const recorded = postHeadEvidence.finalizedSwmRetirementLifecycleReceipts;
     expect(completed).toEqual(expect.arrayContaining([first.swmGraph, second.swmGraph]));
+    expect(recorded).toHaveLength(2);
+    expect(recorded.map((receipt) => receipt.kaUal).sort()).toEqual(
+      combinedPlan.rows.map((row) => readVerifiedCatalogSealBindingV1(
+        row.sealBinding,
+      ).seal.kaUal).sort(),
+    );
+    const expectedPostReadByUal = new Map(primary.materializationReceipts.map(
+      ({ ual, postReadDigest }) => [ual, postReadDigest],
+    ));
+    expect(postHeadEvidence.committedHead).toEqual(committedHeadToken(combinedPlan));
+    for (const receipt of recorded) {
+      expect(receipt.vmPostReadDigest).toBe(expectedPostReadByUal.get(receipt.kaUal));
+      expect(receipt.swmReconciliationOutcome).toBe('retired');
+    }
+    await store.close();
+  });
+
+  it('drains every started twin before propagating failure and records no partial evidence', async () => {
+    const store = new OxigraphStore();
+    const gated = await seedExactStaleTwin(store, {
+      kaNumber: 1n,
+      marker: 'drained-gated-twin',
+    });
+    const rejected = await seedExactStaleTwin(store, {
+      kaNumber: 2n,
+      marker: 'drained-rejected-twin',
+    });
+    const combinedPlan = Object.freeze({
+      ...gated.plan,
+      rows: Object.freeze([...gated.plan.rows, ...rejected.plan.rows]),
+    });
+    const primary = finalizedTransaction(combinedPlan);
+    let signalGatedEntered!: () => void;
+    const gatedEntered = new Promise<void>((resolve) => { signalGatedEntered = resolve; });
+    let releaseGated!: () => void;
+    const gatedRelease = new Promise<void>((resolve) => { releaseGated = resolve; });
+    let signalRejectedEntered!: () => void;
+    const rejectedEntered = new Promise<void>((resolve) => { signalRejectedEntered = resolve; });
+    let gatedFinished = false;
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(async () => primary),
+      finalizedVmPrecommit: vi.fn(async () => primary),
+      store,
+      writeLocks: new Map(),
+      retire: vi.fn(async ({ swmGraph }) => {
+        if (swmGraph === gated.swmGraph) {
+          signalGatedEntered();
+          await gatedRelease;
+          gatedFinished = true;
+          return;
+        }
+        signalRejectedEntered();
+        throw new Error('one finalized SWM retirement failed');
+      }),
+    });
+    const lifecycle = await handler(combinedPlan, new AbortController().signal);
+    await lifecycle.transaction!.commit();
+    const afterAppliedHead = lifecycle.afterAppliedHead!(committedHeadToken(combinedPlan));
+    let settled = false;
+    void afterAppliedHead.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    await Promise.all([gatedEntered, rejectedEntered]);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    releaseGated();
+
+    await expect(afterAppliedHead).rejects.toThrow('one finalized SWM retirement failed');
+    expect(gatedFinished).toBe(true);
     await store.close();
   });
 

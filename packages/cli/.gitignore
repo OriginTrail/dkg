@@ -6,4 +6,5 @@
 network/
 project.json
 blazegraph-image.json
+blazegraph-namespace-contract.cjs
 build-info.json

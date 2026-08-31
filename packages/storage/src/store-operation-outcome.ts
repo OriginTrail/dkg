@@ -14,6 +14,7 @@ export const STORE_OPERATIONS = [
   'replaceGraph',
   'replaceGraphAndSubject',
   'replaceSubject',
+  'rfc64AuthorCommitCasV1',
   'listGraphs',
   'listGraphsByPrefix',
   'deleteBySubjectPrefix',
@@ -74,4 +75,12 @@ export function hasStoreOperationOutcome(
   return shaped.storeOperationOutcomeTag === STORE_OPERATION_OUTCOME_TAG
     && shaped.storeOperation === storeOperation
     && shaped.outcome === outcome;
+}
+
+/** True only when the canonical outcome contract proves this operation never started. */
+export function isStoreOperationNotStarted(
+  error: unknown,
+  storeOperation: StoreOperation,
+): boolean {
+  return hasStoreOperationOutcome(error, storeOperation, 'not_started');
 }

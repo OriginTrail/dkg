@@ -55,7 +55,6 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
-  snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
@@ -79,13 +78,22 @@ import {
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
   Rfc64PublicCatalogNativeReceiverV1,
-  type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
-import { createRfc64CatalogAppliedHeadCoordinatorV1 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import {
+  createRfc64CatalogAppliedHeadCoordinatorV1,
+} from './rfc64/catalog-applied-head-coordinator-v1.js';
+import type { Rfc64CatalogAppliedHeadEvidenceV1 } from
+  './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
+import {
+  reduceRfc64CatalogSynchronizationEvidenceReplayV1,
+  snapshotRfc64CatalogSynchronizationEvidenceV1,
+  type Rfc64CatalogSynchronizationEvidenceV1,
+} from './rfc64/catalog-synchronization-evidence-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
+  type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
@@ -102,6 +110,11 @@ import {
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
+import {
+  projectRfc64CatalogReceiverAuthorityV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
+  type Rfc64CatalogAuthorityPolicyV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -280,13 +293,84 @@ export type PublishOpenAuthorCatalogSuccessorAssetResultV1 =
 export type PublishOpenAuthorCatalogExactSetSuccessorResultV1 =
   PublishAuthorCatalogExactSetSuccessorResultV1;
 
+export interface Rfc64CatalogRuntimeSelectionStatusV1 {
+  readonly subscriptionDriven: boolean;
+  readonly eligibleContextGraphs: readonly string[];
+  readonly selectedContextGraphs: readonly string[];
+}
+
 export class Rfc64CatalogMethods extends DKGAgentBase {
+  /**
+   * Receiver authority is the configured manifest policy projected through the
+   * canonical live subscription registry on edges. Cores deliberately retain
+   * manifest-wide receiver activity.
+   */
+  resolveRfc64CatalogReceiverAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64CatalogAuthorityPolicyV1 {
+    const configured = resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
+      contextGraphId,
+    );
+    const active = configured.eligible && (
+      (this.config.nodeRole ?? 'edge') === 'core'
+      || this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
+    );
+    return projectRfc64CatalogReceiverAuthorityV1(
+      configured,
+      { active },
+    );
+  }
+
+  /** Serving and explicit repair authority is independent of edge receipt. */
+  resolveRfc64CatalogServingAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64CatalogAuthorityPolicyV1 {
+    return resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
+      contextGraphId,
+    );
+  }
+
+  /** Safe runtime selection projection for daemon status and release harnesses. */
+  readRfc64CatalogRuntimeSelectionV1(
+    this: DKGAgent,
+  ): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
+    const eligibleContextGraphs = Object.freeze(
+      Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority).sort(),
+    );
+    const subscriptionDriven = (this.config.nodeRole ?? 'edge') === 'edge';
+    return Object.freeze({
+      subscriptionDriven,
+      eligibleContextGraphs,
+      selectedContextGraphs: subscriptionDriven
+        ? Object.freeze(eligibleContextGraphs.filter((contextGraphId) => (
+          this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
+        )))
+        : eligibleContextGraphs,
+    });
+  }
+
   /**
    * Construct + start the public catalog service on the production router.
    * No-op when RFC-64 persistence is dormant (no `dataDir`) or already started.
    */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
+    this.rfc64CatalogMutationCoordinatorV1.reopen();
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
+      this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
+      return;
+    }
+    if (
+      !this.config.rfc64CatalogExecutionPlan.standaloneTrack2Enabled
+      && this.config.rfc64CatalogExecutionPlan.track2ContextGraphs.length === 0
+    ) {
+      this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
+      return;
+    }
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return;
     const verifyIssuerSignature = verifyControlEnvelopeIssuerSignatureV1;
@@ -296,6 +380,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
+      resolveContextGraphAuthority: (contextGraphId, direction) =>
+        direction === 'serving'
+          ? this.resolveRfc64CatalogServingAuthorityV1(contextGraphId)
+          : this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+      runCatalogMutationExclusive: (scope, operation, signal) =>
+        this.rfc64CatalogMutationCoordinatorV1.run(scope, operation, signal),
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -306,6 +396,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
+        onHeadApplied: (announcement) => {
+          const authorAddress = announcement.authorAddress.toLowerCase();
+          if (!this.listLocalAgents().some(
+            ({ agentAddress }) => agentAddress.toLowerCase() === authorAddress,
+          )) return;
+          this.requestRfc64SwmCatalogProjectionV1({
+            contextGraphId: announcement.contextGraphId,
+            authorAddress: authorAddress as EvmAddressV1,
+            ctx,
+          });
+        },
         onError: (announcement, error) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
@@ -319,6 +420,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this.log.info(ctx, 'RFC-64 public author-catalog transport started');
   }
 
+  /** Fence receiver admission while keeping local authoring transports live. */
+  async closeRfc64PublicCatalogReceiverAdmissionV1(this: DKGAgent): Promise<void> {
+    await this.rfc64PublicCatalogServiceV1?.closeReceiverAdmissionAndDrain();
+  }
+
   /** Stop serving and drain in-flight receiver work. Idempotent + undefined-safe. */
   async closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
     const service = this.rfc64PublicCatalogServiceV1;
@@ -326,8 +432,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     try {
       await service?.close();
     } finally {
-      this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-      this.rfc64PublicCatalogReconciliationFailuresV1.clear();
+      try {
+        // Service close fences remote admission. The explicit coordinator then
+        // waits for any non-cooperative physical mutation that outlived an
+        // aborted caller before persistence can be released.
+        await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+      } finally {
+        this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+        this.rfc64PublicCatalogReconciliationFailuresV1.clear();
+      }
     }
   }
 
@@ -483,6 +596,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     params: PublishOpenAuthorCatalogExactSetSuccessorParamsV1,
   ): Promise<PublishOpenAuthorCatalogExactSetSuccessorResultV1> {
+    this.assertRfc64CatalogAuthoringAuthorityV1();
     const service = this.requireRfc64PublicCatalogServiceV1();
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
@@ -493,6 +607,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       params.previousHead,
     );
     const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
+    this.assertRfc64CatalogAuthoringAuthorityV1(scope.contextGraphId);
     if (scope.subGraphName !== null) {
       throw new Error('RFC-64 public/open compatibility successor requires the root lane');
     }
@@ -505,6 +620,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     params: PublishAuthorCatalogExactSetSuccessorParamsV1,
   ): Promise<PublishAuthorCatalogExactSetSuccessorResultV1> {
+    this.assertRfc64CatalogAuthoringAuthorityV1();
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
       throw new Error('RFC-64 persistence is not available');
@@ -513,18 +629,35 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return this.publishAuthorCatalogExactSetSuccessorFromHistoryV1(params, history);
   }
 
+  /** Reject a disabled successor before any durable mutation. */
+  private assertRfc64CatalogAuthoringAuthorityV1(
+    this: DKGAgent,
+    contextGraphId?: string,
+  ): void {
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
+      throw new Error('RFC-64 catalog authoring is disabled by the Track-2 kill switch');
+    }
+    if (
+      contextGraphId !== undefined
+      && !this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).authoringAllowed
+    ) {
+      throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
+    }
+  }
+
   private async publishAuthorCatalogExactSetSuccessorFromHistoryV1(
     this: DKGAgent,
     params: PublishAuthorCatalogExactSetSuccessorParamsV1,
     history: BoundedAuthorCatalogHistoryV1,
   ): Promise<PublishAuthorCatalogExactSetSuccessorResultV1> {
-    const service = this.requireRfc64PublicCatalogServiceV1();
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(params.peers);
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
       throw new Error('RFC-64 persistence is not available');
     }
     const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
+    this.assertRfc64CatalogAuthoringAuthorityV1(scope.contextGraphId);
+    const service = this.requireRfc64PublicCatalogServiceV1();
     const heldPolicy = service.acceptedPolicySnapshotForCatalogScope(scope);
     const policyDigest = heldPolicy.policyDigest;
     const authorAddress = params.author.address.toLowerCase() as EvmAddressV1;
@@ -687,11 +820,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   readRfc64PublicCatalogSynchronizationEvidenceV1(
     this: DKGAgent,
     catalogHeadDigest: Digest32V1,
-  ): Rfc64PublicCatalogNativeSynchronizationEvidenceV1 | null {
+  ): Rfc64CatalogSynchronizationEvidenceV1 | null {
     const evidence = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
       catalogHeadDigest,
     );
-    return evidence === undefined ? null : Object.freeze({ ...evidence });
+    return evidence ?? null;
   }
 
   /**
@@ -841,7 +974,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ),
           logInfo: (ctx, message) => this.log.info(ctx, message),
         });
-        const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
+        const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1<
+          Rfc64CatalogAppliedHeadEvidenceV1
+        >({
           headTransport: clients.headTransport,
           contentTransport: clients.contentTransport,
           controlObjects: persistence.controlObjects,
@@ -853,17 +988,42 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         readNativeResourceStats = () => nativeReceiver.resourceStats();
+        const synchronizeBoundedPublicRootCatalog:
+          Rfc64BoundedPublicRootCatalogNativeReceiverClientV1[
+            'synchronizeBoundedPublicRootCatalog'
+          ] = async (
+            remotePeerId,
+            announcement,
+            trustedCatalogScope,
+            deployment,
+            signal,
+          ) => {
+            const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(
+              remotePeerId,
+              announcement,
+              trustedCatalogScope,
+              deployment,
+              signal,
+            );
+            const current = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
+            const previous = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
+              evidence.catalogHeadDigest,
+            );
+            const observed = previous === undefined
+              ? current
+              : reduceRfc64CatalogSynchronizationEvidenceReplayV1(previous, current);
+            this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
+              evidence.catalogHeadDigest,
+              observed,
+            );
+            return evidence;
+          };
+        const nativeReceiverClient: Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 =
+          Object.freeze({
+            synchronizeBoundedPublicRootCatalog,
+          });
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
-          nativeReceiver: Object.freeze({
-            synchronizeBoundedPublicRootCatalog: async (...args) => {
-              const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(...args);
-              this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
-                evidence.catalogHeadDigest,
-                evidence,
-              );
-              return evidence;
-            },
-          }),
+          nativeReceiver: nativeReceiverClient,
           inventory: persistence.inventory,
           resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
           resolveDeployment,

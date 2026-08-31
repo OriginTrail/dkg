@@ -8,6 +8,7 @@ export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
 export * from './ka-content-scope.js';
+export * from './rfc64-shared-projection-address-v1.js';
 export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
@@ -71,6 +72,21 @@ export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
 export * from './swm-author-inventory-v1.js';
+export * from './rfc64-semantic-addresses-v1.js';
+export * from './rfc64-semantic-records-v1.js';
+export * from './rfc64-semantic-read-manifest-v1.js';
+export * from './rfc64-author-seal-read-manifest-v1.js';
+export * from './rfc64-shared-projection-stream-manifest-v1.js';
+export {
+  isClosedDataRecord,
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+  type ClosedDataPrototypePolicy,
+  type ClosedDataReject,
+  type ClosedDataSnapshotOptions,
+} from './sync-wire-objects.js';
+export * from './typed-rdf-store-row-v1.js';
 export * from './event-bus.js';
 export * from './backpressure-observability.js';
 export {
@@ -405,6 +421,7 @@ export {
   renderCanonicalAuthorSealStoreRowV1,
   canonicalizeAuthorSealStoreRoundTripRowV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   type Hex32V1,
   type PositiveDecimalU64V1,

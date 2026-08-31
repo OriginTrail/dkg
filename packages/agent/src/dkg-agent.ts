@@ -14,7 +14,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
-  computeACKDigest,
+  computeACKDigest, computeContextGraphPolicyObjectDigestV1,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeGossipEnvelope,
@@ -64,7 +64,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig, type EvmAddressV1, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -424,10 +424,27 @@ import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
 } from './dkg-agent-rfc64-catalog.js';
 import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
-import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
-import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
+import { Rfc64SwmCatalogProjectionMethods } from
+  './dkg-agent-rfc64-swm-catalog-projection.js';
 import {
+  bindRfc64SwmCatalogProjectionOwnerV1,
+  Rfc64SwmCatalogProjectionOwnerV1,
+  Rfc64SwmCatalogProjectionSupervisorMethods,
+} from
+  './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+import {
+  bindRfc64CatalogBootstrapOwnerV1,
+  partitionRfc64CatalogBootstrapV1,
+  Rfc64CatalogBootstrapMethods,
+  Rfc64CatalogBootstrapOwnerV1,
+} from './dkg-agent-rfc64-catalog-bootstrap.js';
+import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
+import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
+import {
+  resolveRfc64RuntimeCatalogBootstrapConfigV1,
+  resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogActivationsV1,
+  resolveRfc64CatalogAuthoringPolicyV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -828,6 +845,100 @@ export class DKGAgent extends DKGAgentBase {
       writeLocks,
       publicSnapshotStore,
     );
+    const resolveCatalogPartition = () => {
+      const bootstrap = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+        this.config.rfc64CatalogBootstrap,
+        this.config.rfc64PublicCatalogBootstrap,
+      );
+      return bootstrap === undefined
+        ? undefined
+        : partitionRfc64CatalogBootstrapV1(
+          bootstrap,
+          this.config.rfc64CatalogExecutionPlan,
+        );
+    };
+    const bootstrapOwner = bindRfc64CatalogBootstrapOwnerV1(
+      this,
+      new Rfc64CatalogBootstrapOwnerV1({
+        resolvePartition: resolveCatalogPartition,
+        resolveReceiverAuthority: (contextGraphId) => (
+          this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)
+        ),
+        acceptTrack2Policies: (policies) => {
+          if (policies.length === 0) return;
+          const service = this.rfc64PublicCatalogServiceV1;
+          if (service === undefined) {
+            throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
+          }
+          for (const accepted of policies) {
+            const { policyEnvelope } = accepted;
+            service.acceptPolicySnapshot({
+              policy: policyEnvelope.payload,
+              policyDigest: computeContextGraphPolicyObjectDigestV1(policyEnvelope),
+              roster: accepted.rosterEnvelope?.payload,
+            });
+          }
+        },
+        connectToPeerId: (peerId, options) => this.connectToPeerId(peerId, options),
+        queueRecoveryPlan: (plan, onError, delayMs) => {
+          const authorizedPlan = this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
+            plan,
+            this.config.syncReconcilerTiming.stalenessThresholdMs,
+          );
+          if (authorizedPlan !== null) {
+            this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+              authorizedPlan,
+              onError,
+              delayMs,
+            );
+          }
+        },
+        synchronizeTarget: (params) => (
+          this.synchronizeRfc64CatalogRolloutFromProvidersV1(params)
+        ),
+        warn: (ctx, message) => this.log.warn(ctx, message),
+      }),
+    );
+    const projectionOwner = bindRfc64SwmCatalogProjectionOwnerV1(
+      this,
+      new Rfc64SwmCatalogProjectionOwnerV1({
+        resolvePartition: resolveCatalogPartition,
+        listLocalAuthorAddresses: () => this.listLocalAgents().map(
+          ({ agentAddress }) => agentAddress.toLowerCase() as EvmAddressV1,
+        ),
+        acceptsPublicRootLane: (contextGraphId) => {
+          const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
+          return lane?.projectionLifecycle === 'immediate-exact-set';
+        },
+        acceptsFinalizedPrivateLane: (contextGraphId) => (
+          this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
+            ?.projectionLifecycle === 'confirmation-gated-append'
+        ),
+        listFinalizedPrivateRepairs: () => (
+          this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
+        ),
+        repairFinalizedPrivatePlacement: async (repair) => {
+          await this.repairRfc64FinalizedPrivateCatalogPlacementV1(repair);
+        },
+        reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
+        warn: (ctx, message) => this.log.warn(ctx, message),
+      }),
+    );
+    this.rfc64CatalogRuntimeV1 = new Rfc64CatalogRuntimeV1({
+      inventoryObservers: {
+        open: () => this.openRfc64SwmInventoryObserversV1(),
+        close: () => this.closeRfc64SwmInventoryObserversV1(),
+      },
+      service: {
+        start: (ctx) => this.startRfc64PublicCatalogServiceV1(ctx),
+        close: () => this.closeRfc64PublicCatalogServiceV1(),
+      },
+      receiverAdmission: {
+        close: () => this.closeRfc64PublicCatalogReceiverAdmissionV1(),
+      },
+      bootstrap: bootstrapOwner,
+      projection: projectionOwner,
+    });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
       admission: {
         selectedPublicContextGraphIds: () => this.config.syncContextGraphs ?? [],
@@ -841,10 +952,19 @@ export class DKGAgent extends DKGAgentBase {
           ),
         selectedPublicAdmissionSnapshot: (peerId) =>
           this.selectedSwmBootstrapAdmission.snapshot(peerId),
-        configuredRecoveryPlan: (peerId) => resolveRfc64PeerSwmRecoveryPlanV1(
-          this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-          peerId,
-        ),
+        configuredRecoveryPlan: (peerId) => {
+          const plan = resolveRfc64PeerSwmRecoveryPlanV1(
+            this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+            peerId,
+          );
+          return Object.freeze({
+            ...plan,
+            targets: Object.freeze(plan.targets.filter(({ contextGraphId }) => (
+              this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)
+                .legacySyncAllowed
+            ))),
+          });
+        },
         isCatalogReady: (peerId) =>
           this.isRfc64CatalogBootstrapSwmRecoveryReadyV1(peerId),
         isPeerAccepted: (peerId) =>
@@ -944,14 +1064,19 @@ export class DKGAgent extends DKGAgentBase {
       legacyAutoPublish: normalizedConfig.rfc64PublicCatalogAutoPublish,
       legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
+    const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
+      configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
+      standaloneTrack2ContextGraphs:
+        normalizedConfig.rfc64PublicCatalogActivation === undefined
+          ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
+            ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+          ) ?? [])
+          : [],
+      activation: catalogActivation,
+    });
     const config: StorageAckNormalizedDKGAgentConfig = {
       ...normalizedConfig,
-      syncContextGraphs: [
-        ...new Set([
-          ...(normalizedConfig.syncContextGraphs ?? []),
-          ...catalogActivation.selectedPublicContextGraphs,
-        ]),
-      ],
+      syncContextGraphs: [...rfc64CatalogExecutionPlan.legacyContextGraphs],
     };
     // RFC-64 bootstrap owns durable catalog and control-object state. Reject
     // an impossible ephemeral configuration before constructing a store or
@@ -997,8 +1122,6 @@ export class DKGAgent extends DKGAgentBase {
             activationPeerAgentBindings!.get(remotePeerId) ?? null
           ),
         }));
-    const rfc64PublicCatalogAutoPublishPolicy =
-      rfc64PublicCatalogControls.autoPublishPolicy;
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
       catalogActivation.bootstrap,
@@ -1009,6 +1132,11 @@ export class DKGAgent extends DKGAgentBase {
         ? rfc64PublicCatalogBootstrap
         : undefined,
     );
+    const rfc64CatalogAuthoringPolicy = resolveRfc64CatalogAuthoringPolicyV1({
+      selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
+      legacyPublicFallback: rfc64PublicCatalogControls.autoPublishPolicy,
+      acceptedPolicies: rfc64CatalogBootstrap?.acceptedPolicies ?? [],
+    });
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -1088,7 +1216,8 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
       rfc64CatalogBootstrap,
-      rfc64PublicCatalogAutoPublishPolicy,
+      rfc64CatalogAuthoringPolicy,
+      rfc64CatalogExecutionPlan,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       syncReconcilerTiming: resolveSyncReconcilerTiming(config),
@@ -2151,8 +2280,11 @@ export class DKGAgent extends DKGAgentBase {
     // router, node, and control-object store are all still live — before
     // node.stop() below and before closeRfc64PersistenceV1() releases the store.
     try {
-      await this.closeRfc64PublicCatalogBootstrapV1();
-      await this.closeRfc64PublicCatalogServiceV1();
+      // Fence and drain every projection producer while projection admission
+      // and authoring transports remain live. Receiver close then proves that
+      // no later applied-head callback can enqueue work. Only after both
+      // producer classes are quiet may the projection owner drain and close.
+      await this.rfc64CatalogRuntimeV1.close();
     } catch (err) {
       this.log.warn(
         createOperationContext('connect'),
@@ -3561,8 +3693,13 @@ export class DKGAgent extends DKGAgentBase {
     this._promoteQueueConfig = config;
   }
 
+  /** Compatibility observation surface; lifecycle ownership lives in the runtime. */
+  whenRfc64CatalogSupervisorsIdleV1(): Promise<void> {
+    return this.rfc64CatalogRuntimeV1.whenIdle();
+  }
+
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods]);

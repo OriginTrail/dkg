@@ -157,6 +157,20 @@ describe('RFC-64 finalized VM agent precommit', () => {
       rows: Object.freeze([placement]),
     }), new AbortController().signal);
 
+    expect(transaction).toMatchObject({
+      kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+      materializationReceipts: [{
+        kaId: rfc64VmPackKaId(1n),
+        ordinal: '0',
+        ual: rfc64VmUal(1n),
+        status: 'materialized',
+        vmGraphIri: vmGraph,
+        tripleCount: '1',
+      }],
+    });
+    expect(Object.isFrozen(transaction?.materializationReceipts)).toBe(true);
+    expect(Object.isFrozen(transaction?.materializationReceipts[0])).toBe(true);
+
     await expect(store.hasGraph(swmGraph)).resolves.toBe(true);
     await expect(store.hasGraph(vmGraph)).resolves.toBe(true);
     await transaction?.commit();
@@ -170,7 +184,10 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
     const getKnowledgeAssetStorageAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
     const getKnowledgeAssetsLifecycleAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
-    const materialize = vi.fn();
+    const materialize = Object.assign(vi.fn(), {
+      commit: vi.fn(),
+      rollback: vi.fn(async () => {}),
+    });
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
