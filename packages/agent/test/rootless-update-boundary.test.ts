@@ -3,10 +3,12 @@ import {
   AUTHOR_SCHEME_VERSION_V1,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  TypedEventBus,
   buildUpdateAuthorAttestationTypedData,
   contextGraphDataUri,
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
+  generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
@@ -19,6 +21,7 @@ import {
   type SharedMemoryGraphScope,
 } from '@origintrail-official/dkg-storage';
 import {
+  DKGPublisher,
   computeFlatKCRootV10,
   computePrivateRootV10,
   resolveKnowledgeAssetOperationPublicQuads,
@@ -114,20 +117,30 @@ async function updateAttestation(
   };
 }
 
-function makeAgentLike(
+async function makeAgentLike(
   store: OxigraphStore,
   onPublisherUpdate: (kaId: bigint, options: Record<string, any>) => Promise<any>,
   currentOwner = CURRENT_OWNER,
 ) {
+  const writeLocks = new Map<string, Promise<void>>();
+  const chain = {
+    chainId: CHAIN_ID,
+    getEvmChainId: async () => EVM_CHAIN_ID,
+    getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
+    getKnowledgeAssetOwner: async () => currentOwner,
+    hasContractCode: async () => false,
+  };
+  const publisher = new DKGPublisher({
+    store,
+    chain: chain as never,
+    eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(),
+    writeLocks,
+  });
+  publisher.updateKnowledgeAssetFromSharedMemory = onPublisherUpdate as never;
   return {
     store,
-    chain: {
-      chainId: CHAIN_ID,
-      getEvmChainId: async () => EVM_CHAIN_ID,
-      getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
-      getKnowledgeAssetOwner: async () => currentOwner,
-      hasContractCode: async () => false,
-    },
+    chain,
     log: {
       info: () => undefined,
       warn: () => undefined,
@@ -135,8 +148,8 @@ function makeAgentLike(
       debug: () => undefined,
     },
     node: { peerId: { toString: () => 'peer-rootless-update' } },
-    writeLocks: new Map<string, Promise<void>>(),
-    publisher: { updateKnowledgeAssetFromSharedMemory: onPublisherUpdate },
+    writeLocks,
+    publisher,
     getContextGraphOnChainId: async () => null,
     createV10UpdateACKProvider: () => undefined,
     _resolveEncryptInlinePayload: async () => undefined,
@@ -170,7 +183,7 @@ describe('DKGAgent rootless update boundary', () => {
     await store.insert([q('urn:stale', 'urn:value', '"stale"', historicalAlias)]);
 
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async (kaId, options) => {
+    const agent = await makeAgentLike(store, async (kaId, options) => {
       publisherCalls += 1;
       expect(kaId).toBe(KA_ID);
       expect(options).toMatchObject({
@@ -237,7 +250,7 @@ describe('DKGAgent rootless update boundary', () => {
     const { attestation } = await updateAttestation(publicQuads);
     attestation.expectedNewMerkleRoot = new Uint8Array(32).fill(0xff);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -293,7 +306,7 @@ describe('DKGAgent rootless update boundary', () => {
     await privateStore.replaceKnowledgeAssetPrivateTriples(CG, nextScope, priorPrivate);
 
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -327,7 +340,7 @@ describe('DKGAgent rootless update boundary', () => {
     const publicQuads = [q('urn:update:contract', 'urn:value', '"replacement"')];
     const { attestation } = await updateAttestation(publicQuads);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -381,7 +394,7 @@ describe('DKGAgent rootless update boundary', () => {
     await privateStore.replaceKnowledgeAssetPrivateTriples(CG, nextScope, priorPrivate);
 
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -418,7 +431,7 @@ describe('DKGAgent rootless update boundary', () => {
       publicQuads,
       privateQuads,
     );
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       throw new Error('simulated crash after chain write-ahead');
     });
 
@@ -465,7 +478,7 @@ describe('DKGAgent rootless update boundary', () => {
     const plain = [q('urn:update:named', 'urn:value', '"blocked"')];
     const { attestation } = await updateAttestation(plain);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -500,7 +513,7 @@ describe('DKGAgent rootless update boundary', () => {
     let firstPublisherEntered!: () => void;
     const firstEntered = new Promise<void>((resolve) => { firstPublisherEntered = resolve; });
     const stagedByCall: Quad[][] = [];
-    const agent = makeAgentLike(store, async (kaId) => {
+    const agent = await makeAgentLike(store, async (kaId) => {
       const staged = await loadSharedMemoryQuadsForScope(
         store,
         swmBucket,
@@ -559,7 +572,7 @@ describe('DKGAgent rootless update boundary', () => {
     const privateQuads = [q('urn:private:only', 'urn:secret', '"updated"')];
     const { canonical, privateRoot, attestation } = await updateAttestation([], privateQuads);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async (kaId, options) => {
+    const agent = await makeAgentLike(store, async (kaId, options) => {
       publisherCalls += 1;
       expect(kaId).toBe(KA_ID);
       expect(options.publicTripleCount).toBe(0);
@@ -605,7 +618,7 @@ describe('DKGAgent rootless update boundary', () => {
     const publicQuads = [q('urn:update:asset', 'urn:value', '"two"')];
     const { attestation } = await updateAttestation(publicQuads);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -631,7 +644,7 @@ describe('DKGAgent rootless update boundary', () => {
     const publicQuads = [q('urn:update:asset', 'urn:value', '"two"')];
     const { attestation } = await updateAttestation(publicQuads);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
