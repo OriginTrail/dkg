@@ -100,10 +100,10 @@ describe('ChainEventPoller lane runner and cursors', () => {
 
     const state = poller as unknown as {
       timer: ReturnType<typeof setInterval> | null;
-      pollsInFlight: number;
+      inFlightPoll: Promise<void> | null;
     };
     expect(state.timer).toBeNull();
-    expect(state.pollsInFlight).toBe(0);
+    expect(state.inFlightPoll).toBeNull();
     expect(filters).toEqual([]);
   });
 
