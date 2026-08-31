@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   persistDaemonShutdownPolicy,
+  readPersistedDaemonShutdownPolicy,
+  removePersistedDaemonShutdownPolicy,
   resolveDaemonShutdownWaitTimeoutMs,
   waitForDaemonExit,
 } from '../src/daemon/shutdown-wait.js';
@@ -44,6 +46,22 @@ describe('daemon lifecycle shutdown wait', () => {
     temporaryHomes.push(dkgHome);
     process.env.DKG_HOME = dkgHome;
     await expect(resolveDaemonShutdownWaitTimeoutMs(process.pid)).resolves.toBe(301_000);
+  });
+
+  it('lets only the owning PID consume and remove persisted policy', async () => {
+    const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-policy-owner-'));
+    temporaryHomes.push(dkgHome);
+    process.env.DKG_HOME = dkgHome;
+    await persistDaemonShutdownPolicy(resolveShutdownPolicy('60000'));
+
+    await expect(readPersistedDaemonShutdownPolicy(process.pid + 1)).resolves.toBeNull();
+    await removePersistedDaemonShutdownPolicy(process.pid + 1);
+    await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toEqual({
+      hardTimeoutMs: 60_000,
+    });
+
+    await removePersistedDaemonShutdownPolicy(process.pid);
+    await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toBeNull();
   });
 
   it('reports a shutdown longer than 10s as successful within its configured budget', async () => {

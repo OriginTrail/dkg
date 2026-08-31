@@ -285,7 +285,10 @@ import {
   raceShutdownWithTimeout,
 } from './shutdown.js';
 import { resolveShutdownPolicy, type ShutdownPolicy } from './shutdown-policy.js';
-import { persistDaemonShutdownPolicy } from './shutdown-wait.js';
+import {
+  persistDaemonShutdownPolicy,
+  removePersistedDaemonShutdownPolicy,
+} from './shutdown-wait.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
@@ -990,20 +993,26 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       + `Lifecycle commands will use the maximum bounded wait.`,
     );
   });
-  const config = await loadConfig();
-  configureKaPublishLifecycleDebugLogging(config);
-  const startedAt = Date.now();
-
-  // Write PID early so the CLI detects the process is alive while
-  // initialization (sync, on-chain identity, profile publish) proceeds.
-  // Wrapped in try/finally so the PID file is cleaned up if boot fails.
-  await writePid(process.pid);
   try {
+    const config = await loadConfig();
+    configureKaPublishLifecycleDebugLogging(config);
+    const startedAt = Date.now();
+
+    // Write PID early so the CLI detects the process is alive while
+    // initialization (sync, on-chain identity, profile publish) proceeds.
+    await writePid(process.pid);
     await runDaemonInner(foreground, config, startedAt, shutdownPolicy);
   } catch (err) {
-    await removePid().catch(() => {});
+    await removeOwnedDaemonRuntimeState().catch(() => {});
     throw err;
   }
+}
+
+async function removeOwnedDaemonRuntimeState(): Promise<void> {
+  await Promise.all([
+    removePid(),
+    removePersistedDaemonShutdownPolicy(process.pid),
+  ]);
 }
 
 function configureKaPublishLifecycleDebugLogging(config: Pick<DkgConfig, 'logging'>): void {
@@ -1285,7 +1294,7 @@ async function runDaemonInnerWithStartupOwnership(
       return;
     }
     log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
-    removePid()
+    removeOwnedDaemonRuntimeState()
       .catch(() => {})
       .finally(() => {
         void exitAfterFatalLogDrain({
@@ -1782,7 +1791,7 @@ async function runDaemonInnerWithStartupOwnership(
       } catch (err: any) {
         log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
       }
-      await removePid().catch(() => {});
+      await removeOwnedDaemonRuntimeState().catch(() => {});
       process.exit(1);
       return;
     }
@@ -2380,7 +2389,7 @@ async function runDaemonInnerWithStartupOwnership(
             } catch (err: any) {
               log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
             }
-            await removePid().catch(() => {});
+            await removeOwnedDaemonRuntimeState().catch(() => {});
             process.exit(1);
             return;
           }
@@ -3796,8 +3805,8 @@ async function runDaemonInnerWithStartupOwnership(
     // window is already refused — which is not observable from here.
     await beginGracefulShutdown({ state: daemonState, removeApiPort, log });
     const cleanupStateFiles = async () => {
-      await removePid().catch((err: any) =>
-        log(`PID cleanup error: ${err?.message ?? String(err)}`),
+      await removeOwnedDaemonRuntimeState().catch((err: any) =>
+        log(`Runtime state cleanup error: ${err?.message ?? String(err)}`),
       );
       await removeApiPort().catch((err: any) =>
         log(`API port cleanup error: ${err?.message ?? String(err)}`),

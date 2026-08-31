@@ -7,6 +7,8 @@ import { executeStopCommand } from '../src/commands/lifecycle.js';
 import {
   completeDaemonShutdown,
   persistDaemonShutdownPolicy,
+  readPersistedDaemonShutdownPolicy,
+  removePersistedDaemonShutdownPolicy,
   resolveDaemonShutdownWaitTimeoutMs,
   waitForDaemonExit,
 } from '../src/daemon/shutdown-wait.js';
@@ -52,11 +54,13 @@ describe('lifecycle command shutdown waits', () => {
         completeShutdown: (pid) => completeDaemonShutdown(pid, {
           resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
           waitForExit: simulation.wait,
+          removePersistedPolicy: removePersistedDaemonShutdownPolicy,
           log: (message) => logs.push(message),
           error: (message) => logs.push(message),
         }),
         log: (message) => logs.push(message),
       })).resolves.toBe(true);
+      await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toBeNull();
     } finally {
       if (savedDkgHome === undefined) delete process.env.DKG_HOME;
       else process.env.DKG_HOME = savedDkgHome;
@@ -80,6 +84,7 @@ describe('lifecycle command shutdown waits', () => {
       completeShutdown: (pid) => completeDaemonShutdown(pid, {
         resolveWaitTimeoutMs: async () => 61_000,
         waitForExit: simulation.wait,
+        removePersistedPolicy: async () => {},
         log: () => {},
         error: () => {},
       }),
@@ -100,6 +105,7 @@ describe('lifecycle command shutdown waits', () => {
       completeShutdown: (pid) => completeDaemonShutdown(pid, {
         resolveWaitTimeoutMs: async () => 1_250,
         waitForExit: simulation.wait,
+        removePersistedPolicy: async () => {},
         log: () => {},
         error: (message) => errors.push(message),
       }),

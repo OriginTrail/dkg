@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { dkgDir, ensureDkgDir, isProcessRunning } from '../config.js';
 import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
@@ -28,7 +28,7 @@ export async function persistDaemonShutdownPolicy(policy: ShutdownPolicy): Promi
 
 /** Read only state written from a validated worker policy. */
 export async function readPersistedDaemonShutdownPolicy(
-  expectedPid?: number,
+  expectedPid: number,
 ): Promise<ShutdownPolicy | null> {
   try {
     const parsed = JSON.parse(await readFile(daemonShutdownPolicyStatePath(), 'utf8')) as {
@@ -39,7 +39,7 @@ export async function readPersistedDaemonShutdownPolicy(
     if (
       parsed.version !== 1
       || !Number.isSafeInteger(parsed.pid)
-      || (expectedPid !== undefined && parsed.pid !== expectedPid)
+      || parsed.pid !== expectedPid
       || !Number.isSafeInteger(parsed.hardTimeoutMs)
     ) return null;
     return resolveShutdownPolicy(String(parsed.hardTimeoutMs));
@@ -48,11 +48,28 @@ export async function readPersistedDaemonShutdownPolicy(
   }
 }
 
+/** Remove only the policy owned by the worker being retired. */
+export async function removePersistedDaemonShutdownPolicy(expectedPid: number): Promise<void> {
+  try {
+    const parsed = JSON.parse(await readFile(daemonShutdownPolicyStatePath(), 'utf8')) as {
+      version?: unknown;
+      pid?: unknown;
+    };
+    if (parsed.version !== 1 || parsed.pid !== expectedPid) return;
+    await unlink(daemonShutdownPolicyStatePath());
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? (error as NodeJS.ErrnoException).code
+      : undefined;
+    if (code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+  }
+}
+
 /**
  * The worker may use its entire graceful-shutdown budget and then the bounded
  * forced-cleanup hook before exiting. Lifecycle commands must allow both.
  */
-export async function resolveDaemonShutdownWaitTimeoutMs(expectedPid?: number): Promise<number> {
+export async function resolveDaemonShutdownWaitTimeoutMs(expectedPid: number): Promise<number> {
   const persisted = await readPersistedDaemonShutdownPolicy(expectedPid);
   return (persisted?.hardTimeoutMs ?? MAX_SHUTDOWN_HARD_TIMEOUT_MS)
     + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS;
@@ -90,6 +107,7 @@ export async function waitForDaemonExit(
 export interface CompleteDaemonShutdownDependencies {
   resolveWaitTimeoutMs(pid: number): Promise<number>;
   waitForExit(pid: number, timeoutMs: number): Promise<boolean>;
+  removePersistedPolicy(pid: number): Promise<void>;
   log(message: string): void;
   error(message: string): void;
 }
@@ -97,6 +115,7 @@ export interface CompleteDaemonShutdownDependencies {
 const defaultCompleteDaemonShutdownDependencies: CompleteDaemonShutdownDependencies = {
   resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
   waitForExit: (pid, timeoutMs) => waitForDaemonExit(pid, { timeoutMs }),
+  removePersistedPolicy: removePersistedDaemonShutdownPolicy,
   log: (message) => console.log(message),
   error: (message) => console.error(message),
 };
@@ -112,6 +131,11 @@ export async function completeDaemonShutdown(
   }
   const timeoutMs = await dependencies.resolveWaitTimeoutMs(pid);
   if (await dependencies.waitForExit(pid, timeoutMs)) {
+    await dependencies.removePersistedPolicy(pid).catch((error) => {
+      dependencies.error(
+        `Shutdown policy cleanup error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
     dependencies.log('Stopped.');
     return true;
   }
