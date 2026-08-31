@@ -521,6 +521,42 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await receiver.close();
   });
 
+  it('requeues the same head when resubscribed while its cancelled run settles', async () => {
+    const firstEntered = deferred<void>();
+    const releaseFirst = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const current = announcement();
+    const peers: string[] = [];
+    let attempts = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      attempts += 1;
+      if (attempts === 1) {
+        firstEntered.resolve();
+        return releaseFirst.promise;
+      }
+      return 'applied';
+    }));
+
+    const cancelled = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+    await firstEntered.promise;
+    receiver.cancelContextGraph(current.contextGraphId);
+    const replacement = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+    releaseFirst.resolve('applied');
+
+    await expect(cancelled).resolves.toMatchObject({ outcome: 'closed' });
+    await expect(replacement).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(peers).toEqual(['peerA', 'peerA']);
+    expect(receiver.stats()).toMatchObject({ applied: 1, inFlight: 0, queued: 0 });
+    await receiver.close();
+  });
+
   it('settles queued, deferred, and active cancellation through one lifecycle owner', async () => {
     const activeEntered = deferred<void>();
     const attemptedContextGraphs: string[] = [];

@@ -9472,15 +9472,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     previousSubscribed: boolean,
     nextSubscribed: boolean,
   ): void {
-    if (
-      previousSubscribed === nextSubscribed
-      || !this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).eligible
-    ) return;
-    if (!nextSubscribed) {
+    const eligible = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).eligible;
+    const manifestWide = (this.config.nodeRole ?? 'edge') === 'core';
+    // A core is manifest-selected independently of its ordinary subscription
+    // record.  React only when the effective receiver capability changes: an
+    // unsubscribe must not fence a core's in-flight catalog reconciliation.
+    const wasReceiverActive = eligible && (manifestWide || previousSubscribed);
+    const isReceiverActive = eligible && (manifestWide || nextSubscribed);
+    if (wasReceiverActive === isReceiverActive) return;
+    if (!isReceiverActive) {
       this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
     }
     this.invalidateRfc64PublicCatalogBootstrapPassV1(contextGraphId);
-    if (nextSubscribed && this.rfc64PublicCatalogServiceV1 !== undefined) {
+    if (isReceiverActive && this.rfc64PublicCatalogServiceV1 !== undefined) {
       // Re-entering the idempotent start boundary also dirties an existing
       // failed repair for this newly active CG, including retryIntervalMs=0.
       this.startRfc64SwmCatalogProjectionSupervisorV1(

@@ -265,8 +265,7 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   /** Every exact head and its queued/deferred/terminal task lifecycle. */
   readonly #tasks = new Rfc64ReceiverTaskLifecycleV1<ReceiverTaskV1>();
-  /** One semantic writer per exact author-catalog scope. */
-  readonly #activeScopeKeys = new Set<string>();
+  /** Execution promises only; task state and scope ownership live in #tasks. */
   readonly #active = new Set<Promise<void>>();
   readonly #closing = new AbortController();
   #closed = false;
@@ -275,7 +274,6 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #admissionDeferralMs: number;
   readonly #maxAdmissionDeferrals: number;
   readonly #isDeferrableError: (error: unknown) => boolean;
-  readonly #deferralTimers = new Set<ReturnType<typeof setTimeout>>();
   #isolatedCompletionSequence = 0;
 
   #scheduled = 0;
@@ -536,8 +534,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
     this.#closed = true;
     this.#tasks.abortAll(new Error('RFC-64 public catalog receiver closing'));
-    for (const timer of this.#deferralTimers) clearTimeout(timer);
-    this.#deferralTimers.clear();
+    this.#tasks.clearDeferredTimers();
     this.#tasks.finalizeNonRunning(
       (task) => createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
@@ -564,7 +561,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       droppedProviders: this.#droppedProviders,
       admissionDeferred: this.#admissionDeferred,
       deferred: this.#tasks.deferredCount,
-      inFlight: this.#active.size,
+      inFlight: this.#tasks.activeCount,
       queued: this.#tasks.queuedCount,
       providerAttempts: this.#providerAttempts,
       providerSwitches: this.#providerSwitches,
@@ -576,12 +573,10 @@ export class Rfc64PublicCatalogReceiverV1 {
   #pump(): void {
     while (
       !this.#closed
-      && this.#active.size < this.#maxConcurrent
+      && this.#tasks.activeCount < this.#maxConcurrent
       && this.#tasks.queuedCount > 0
     ) {
-      const task = this.#tasks.takeNextRunnable(
-        (candidate) => !this.#activeScopeKeys.has(candidate.scopeKey),
-      );
+      const task = this.#tasks.takeNextRunnable();
       if (task === undefined) return;
       if (task.cancellation.signal.aborted) {
         this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
@@ -590,8 +585,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         }));
         continue;
       }
-      this.#activeScopeKeys.add(task.scopeKey);
-      task.running = true;
+      this.#tasks.begin(task);
       const run = this.#runTask(task).then((outcome) => {
         // A deferral releases the concurrency slot AND the semantic scope lock
         // before waiting, and keeps the pending key so a duplicate announcement
@@ -680,9 +674,8 @@ export class Rfc64PublicCatalogReceiverV1 {
             break;
         }
       }).finally(() => {
-        task.running = false;
+        this.#tasks.finishRunning(task);
         this.#active.delete(run);
-        this.#activeScopeKeys.delete(task.scopeKey);
         if (!this.#closed) this.#pump();
         if (this.#isIdle()) this.#resolveIdle();
       });
@@ -719,16 +712,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
     // Registered BEFORE the timer is armed: between these two statements the
     // task must never be invisible to the idle predicate.
-    if (!this.#tasks.defer(task)) {
-      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
-        outcome: 'closed',
-        providerAttempts: task.providerAttempts ?? 0,
-      }));
-      return;
-    }
-    const timer = setTimeout(() => {
-      this.#deferralTimers.delete(timer);
-      this.#tasks.removeDeferred(task);
+    if (!this.#tasks.defer(task, this.#admissionDeferralMs, () => {
       if (
         this.#closed
         || this.#closing.signal.aborted
@@ -742,10 +726,13 @@ export class Rfc64PublicCatalogReceiverV1 {
         return;
       }
       if (this.#tasks.requeue(task)) this.#pump();
-    }, this.#admissionDeferralMs);
-    // Never hold the process open for a retry.
-    (timer as { unref?: () => void }).unref?.();
-    this.#deferralTimers.add(timer);
+    })) {
+      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: task.providerAttempts ?? 0,
+      }));
+      return;
+    }
   }
 
   async #runTask(task: ReceiverTaskV1): Promise<ReceiverTaskOutcomeV1> {
@@ -934,7 +921,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   }
 
   #isIdle(): boolean {
-    return this.#active.size === 0 && this.#tasks.isIdle;
+    return this.#tasks.isIdle;
   }
 
   #resolveIdle(): void {

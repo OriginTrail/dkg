@@ -9,6 +9,7 @@ import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
 /** Mutable task state owned by the receiver lifecycle scheduler. */
 export interface Rfc64ReceiverLifecycleTaskV1 {
   readonly key: string;
+  readonly scopeKey: string;
   readonly contextGraphId: string;
   readonly cancellation: AbortController;
   completionWaiters?: Array<(result: Rfc64PublicCatalogReceiverCompletionV1) => void>;
@@ -19,11 +20,11 @@ export interface Rfc64ReceiverLifecycleTaskV1 {
 /**
  * One owner for receiver task membership and terminal settlement.
  *
- * A task may be queued, deferred, or active (`running`). The receiver owns the
- * active promise and scope lock, while this lifecycle object owns every task's
- * pending-key identity, queue/deferred transition, cancellation, and exactly-
- * once completion settlement. Keeping those invariants here prevents each
- * scheduler branch from open-coding a slightly different cleanup sequence.
+ * A task may be queued, deferred, or active (`running`). This scheduler owns
+ * every mutable transition: pending-key identity, scope lock, timer, active
+ * membership, cancellation, and exactly-once completion settlement. The
+ * receiver supplies the reconciliation body only, so it cannot independently
+ * mutate task membership or idleness.
  */
 export class Rfc64ReceiverTaskLifecycleV1<
   TTask extends Rfc64ReceiverLifecycleTaskV1,
@@ -31,6 +32,9 @@ export class Rfc64ReceiverTaskLifecycleV1<
   readonly #queue: TTask[] = [];
   readonly #pendingByKey = new Map<string, TTask>();
   readonly #deferred = new Set<TTask>();
+  readonly #active = new Set<TTask>();
+  readonly #activeScopeKeys = new Set<string>();
+  readonly #deferredTimers = new Map<TTask, ReturnType<typeof setTimeout>>();
 
   get queuedCount(): number {
     return this.#queue.length;
@@ -40,8 +44,12 @@ export class Rfc64ReceiverTaskLifecycleV1<
     return this.#deferred.size;
   }
 
+  get activeCount(): number {
+    return this.#active.size;
+  }
+
   get isIdle(): boolean {
-    return this.#queue.length === 0 && this.#deferred.size === 0;
+    return this.#queue.length === 0 && this.#deferred.size === 0 && this.#active.size === 0;
   }
 
   pending(key: string): TTask | undefined {
@@ -60,21 +68,45 @@ export class Rfc64ReceiverTaskLifecycleV1<
     return true;
   }
 
-  defer(task: TTask): boolean {
+  defer(task: TTask, delayMs: number, onReady: () => void): boolean {
     if (task.settled === true || task.cancellation.signal.aborted) return false;
     this.#deferred.add(task);
+    const timer = setTimeout(() => {
+      this.#deferredTimers.delete(task);
+      this.#deferred.delete(task);
+      onReady();
+    }, delayMs);
+    (timer as { unref?: () => void }).unref?.();
+    this.#deferredTimers.set(task, timer);
     return true;
   }
 
   removeDeferred(task: TTask): boolean {
+    const timer = this.#deferredTimers.get(task);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#deferredTimers.delete(task);
+    }
     return this.#deferred.delete(task);
   }
 
-  takeNextRunnable(canRun: (task: TTask) => boolean): TTask | undefined {
-    const index = this.#queue.findIndex(canRun);
+  takeNextRunnable(): TTask | undefined {
+    const index = this.#queue.findIndex((task) => !this.#activeScopeKeys.has(task.scopeKey));
     if (index < 0) return undefined;
     const [task] = this.#queue.splice(index, 1);
     return task;
+  }
+
+  begin(task: TTask): void {
+    this.#active.add(task);
+    this.#activeScopeKeys.add(task.scopeKey);
+    task.running = true;
+  }
+
+  finishRunning(task: TTask): void {
+    task.running = false;
+    this.#active.delete(task);
+    this.#activeScopeKeys.delete(task.scopeKey);
   }
 
   cancelContextGraph(
@@ -102,6 +134,11 @@ export class Rfc64ReceiverTaskLifecycleV1<
     }
   }
 
+  clearDeferredTimers(): void {
+    for (const timer of this.#deferredTimers.values()) clearTimeout(timer);
+    this.#deferredTimers.clear();
+  }
+
   finalizeNonRunning(
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
     beforeSettle: (task: TTask) => void,
@@ -123,7 +160,7 @@ export class Rfc64ReceiverTaskLifecycleV1<
     task.settled = true;
     const queueIndex = this.#queue.indexOf(task);
     if (queueIndex >= 0) this.#queue.splice(queueIndex, 1);
-    this.#deferred.delete(task);
+    this.removeDeferred(task);
     if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
     beforeSettle(task);
     const waiters = task.completionWaiters?.splice(0) ?? [];

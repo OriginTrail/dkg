@@ -223,19 +223,51 @@ describe('RFC-64 rollout authority integration', () => {
   });
 
   it('retains manifest-wide RFC-64 selection on core nodes', async () => {
+    const providerPeerId = '12D3KooWCoreManifestWideCatalogProvider';
+    let synchronize!: ReturnType<typeof vi.spyOn>;
     const core = await startAgent(
       'core-manifest-selection',
-      activation('catalog'),
+      {
+        ...activation('catalog'),
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          }],
+        },
+      },
       undefined,
       undefined,
-      undefined,
+      (agent) => {
+        synchronize = vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
+          .mockResolvedValue(null);
+      },
       { nodeRole: 'core', syncContextGraphs: [] },
     );
+    await core.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(core.readRfc64CatalogRuntimeSelectionV1()).toEqual({
       subscriptionDriven: false,
       eligibleContextGraphs: [CONTEXT_GRAPH_ID],
       selectedContextGraphs: [CONTEXT_GRAPH_ID],
     });
+    expect(synchronize).toHaveBeenCalledWith(expect.objectContaining({
+      remotePeerIds: [providerPeerId],
+      scope: expect.objectContaining({
+        authorAddress: AUTHOR,
+        contextGraphId: CONTEXT_GRAPH_ID,
+      }),
+    }));
+
+    // An ordinary host-only transition cannot abort manifest-wide core work.
+    const deactivate = vi.spyOn(
+      (core as any).rfc64PublicCatalogServiceV1,
+      'deactivateReceiverContextGraph',
+    );
+    core.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    core.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await core.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(deactivate).not.toHaveBeenCalled();
+    expect(synchronize).toHaveBeenCalledTimes(1);
   });
 
   it('enforces legacy, shadow, catalog, and kill-switch authority at startup', async () => {
