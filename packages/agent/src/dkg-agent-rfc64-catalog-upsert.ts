@@ -179,7 +179,13 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
   ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
-    return this.reconcileRfc64PublicRootCatalogExactSetCoreV1(params);
+    const result = await this.reconcileRfc64PublicRootCatalogExactSetCoreV1(params);
+    return Object.freeze({
+      status: result.status,
+      appliedHead: result.appliedHead,
+      successorsApplied: result.successorsApplied,
+      targetAssetCount: result.targetAssetCount,
+    });
   }
 
   /** Typed projection boundary; direct exact-set callers remain source-neutral. */

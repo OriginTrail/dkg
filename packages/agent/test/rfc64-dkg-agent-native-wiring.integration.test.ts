@@ -2315,15 +2315,22 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     };
 
-    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+    const firstResult = await author.reconcileRfc64PublicRootCatalogExactSetV1({
       ...common,
       assets: [secondAsset, firstAsset],
-    })).resolves.toMatchObject({
+    });
+    expect(firstResult).toMatchObject({
       status: 'advanced',
       successorsApplied: 2,
       targetAssetCount: 2,
       appliedHead: { catalogVersion: '2', inventoryRowCount: '2' },
     });
+    expect(Object.keys(firstResult).sort()).toEqual([
+      'appliedHead',
+      'status',
+      'successorsApplied',
+      'targetAssetCount',
+    ]);
     await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
       ...common,
       assets: [firstAsset, secondAsset],
