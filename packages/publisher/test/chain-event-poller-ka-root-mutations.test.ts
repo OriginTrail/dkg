@@ -474,20 +474,41 @@ describe('ChainEventPoller — pollNow', () => {
     expect(chain.filters[1].toBlock).toBe(50_010);
   });
 
-  it('propagates a scan failure to its caller', async () => {
+  it('does not persist a cursor for a scan that failed', async () => {
+    // The runner catches per-lane scan errors, so `pollNow` settles normally.
+    // What must not happen is a SILENT advance: a driven scan that failed must
+    // leave the cursor exactly where a driven scan that never ran would.
     const chain = makeChain(50_000);
+    const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     const poller = new ChainEventPoller({
       chain: chain.adapter,
       publishHandler: makeHandler(),
       intervalMs: CADENCE_MS,
+      cursorPersistence: {
+        async loadLane() { return undefined; },
+        async saveLane(lane, block) { saveCalls.push({ lane, block }); },
+      } satisfies LaneCursorPersistence,
       onKnowledgeAssetRootMutated: async () => { /* sink */ },
     });
 
-    // The lane runner catches per-lane scan errors, so `pollNow` resolves; what
-    // must NOT happen is a silent advance.
     chain.failNextScan();
-    await expect(poller.pollNow()).resolves.toBeUndefined();
+    await poller.pollNow();
+
     expect(chain.filters).toHaveLength(1);
+    expect(saveCalls).toEqual([]);
+
+    // Positive control: the very same drive persists when the scan succeeds,
+    // so the empty `saveCalls` above is about the failure and not about
+    // `pollNow` never persisting anything.
+    //
+    // 49 950, not the head: the failed scan rewound the cursor from the seed
+    // (41 000) to 40 950, so the recovery scan starts at 40 951 and is capped
+    // at one MAX_RANGE page. The rewind therefore costs one extra poll to
+    // reach the head — which is the intended trade and worth pinning, since a
+    // rewind large enough to push catch-up past a page every time would turn a
+    // transient failure into a permanently lagging lane.
+    await poller.pollNow();
+    expect(saveCalls).toEqual([{ lane: 'kaRootMutations', block: 40_951 + MAX_RANGE - 1 }]);
   });
 });
 
@@ -496,6 +517,10 @@ describe('ChainEventPoller — lane health instruments', () => {
     let now = 0;
     const polls: Array<{ lane: ChainEventPollerLane; result: ChainEventLanePollResult }> = [];
     const lags: Array<{ lane: ChainEventPollerLane; lagBlocks: number }> = [];
+    // Captured from the PRODUCTION call sites, not from the objects this test
+    // builds: an assertion over `Object.keys` of a literal written here would
+    // only confirm what this test itself wrote.
+    const rawArgCounts: number[] = [];
     const chain = makeChain(50_000);
     const poller = new ChainEventPoller({
       chain: chain.adapter,
@@ -503,8 +528,14 @@ describe('ChainEventPoller — lane health instruments', () => {
       intervalMs: CADENCE_MS,
       clock: () => now,
       metrics: {
-        recordPoll: (lane, result) => { polls.push({ lane, result }); },
-        recordCursorLagBlocks: (lane, lagBlocks) => { lags.push({ lane, lagBlocks }); },
+        recordPoll: function (...args) {
+          rawArgCounts.push(args.length);
+          polls.push({ lane: args[0], result: args[1] });
+        },
+        recordCursorLagBlocks: function (...args) {
+          rawArgCounts.push(args.length);
+          lags.push({ lane: args[0], lagBlocks: args[1] });
+        },
       },
       onKnowledgeAssetRootMutated: async () => { /* sink */ },
     });
@@ -529,9 +560,11 @@ describe('ChainEventPoller — lane health instruments', () => {
       { lane: 'kaRootMutations', lagBlocks: 0 },
       { lane: 'kaRootMutations', lagBlocks: 100 },
     ]);
-    // The recorder's signature admits no other attribute — a KA id, context
-    // graph id or transaction hash has nowhere to go.
-    expect(Object.keys(polls[0]).sort()).toEqual(['lane', 'result']);
+    // Every production call site passed exactly two arguments — no third
+    // channel through which a KA id, context-graph id or transaction hash
+    // could reach a metric attribute.
+    expect(rawArgCounts.length).toBeGreaterThan(0);
+    expect(new Set(rawArgCounts)).toEqual(new Set([2]));
   });
 
   it('exposes the last scanned head and time per active lane', async () => {
