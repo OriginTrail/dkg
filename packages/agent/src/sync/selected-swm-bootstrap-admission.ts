@@ -23,6 +23,7 @@ export interface SelectedSwmBootstrapContextGraphSummary {
 
 interface SelectedSwmBootstrapAdmissionState extends SelectedSwmBootstrapAdmissionSnapshot {
   readonly generation: number;
+  readonly terminalAtMs: number | null;
 }
 
 function canonicalScope(contextGraphIds: readonly string[]): readonly string[] {
@@ -51,11 +52,13 @@ export class SelectedSwmBootstrapAdmission {
     remotePeer: string,
     contextGraphIds: readonly string[],
     phase: SelectedSwmBootstrapPhase,
+    terminalAtMs: number | null = null,
   ): SelectedSwmBootstrapAdmissionState {
     const state = Object.freeze({
       contextGraphIds: canonicalScope(contextGraphIds),
       phase,
       generation: this.#nextGeneration += 1,
+      terminalAtMs,
     });
     this.#byPeer.set(remotePeer, state);
     return state;
@@ -80,6 +83,36 @@ export class SelectedSwmBootstrapAdmission {
   }
 
   /**
+   * Re-open an unchanged terminal scope only after its freshness window has
+   * elapsed. RFC-64 bootstrap snapshots can race a live share: suppressing an
+   * exact terminal scope forever would leave that missed write unrecoverable,
+   * while re-opening it on every catalog poll would create a sync storm.
+   */
+  requestRefresh(
+    remotePeer: string,
+    contextGraphIds: readonly string[],
+    minimumTerminalAgeMs: number,
+    nowMs = Date.now(),
+  ): boolean {
+    const scope = canonicalScope(contextGraphIds);
+    if (scope.length === 0) return false;
+    const current = this.#byPeer.get(remotePeer);
+    if (
+      current === undefined
+      || current.phase !== 'terminal'
+      || !sameScope(current.contextGraphIds, scope)
+    ) {
+      return this.request(remotePeer, scope);
+    }
+    const minimumAge = Math.max(0, Math.floor(minimumTerminalAgeMs));
+    if (current.terminalAtMs === null || nowMs - current.terminalAtMs < minimumAge) {
+      return false;
+    }
+    this.#replace(remotePeer, scope, 'retry-required');
+    return true;
+  }
+
+  /**
    * Claim one concrete transfer generation before it enters peer single-flight.
    * A later queued transfer or operator scope change supersedes this owner, so
    * its older completion cannot clear the newer retry requirement.
@@ -100,7 +133,10 @@ export class SelectedSwmBootstrapAdmission {
     });
   }
 
-  markTransferTerminal(owner: SelectedSwmBootstrapTransferOwner): boolean {
+  markTransferTerminal(
+    owner: SelectedSwmBootstrapTransferOwner,
+    terminalAtMs = Date.now(),
+  ): boolean {
     const current = this.#byPeer.get(owner.remotePeer);
     if (
       current === undefined
@@ -110,6 +146,7 @@ export class SelectedSwmBootstrapAdmission {
     this.#byPeer.set(owner.remotePeer, Object.freeze({
       ...current,
       phase: 'terminal',
+      terminalAtMs,
     }));
     return true;
   }

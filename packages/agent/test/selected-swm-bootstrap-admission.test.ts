@@ -38,6 +38,21 @@ describe('SelectedSwmBootstrapAdmission', () => {
     });
   });
 
+  it('reopens an unchanged terminal scope only after its freshness window', () => {
+    const admission = new SelectedSwmBootstrapAdmission();
+    const owner = admission.beginTransfer(PEER, ['cg-a']);
+    expect(admission.markTransferTerminal(owner, 1_000)).toBe(true);
+
+    expect(admission.requestRefresh(PEER, ['cg-a'], 10_000, 10_999)).toBe(false);
+    expect(admission.snapshot(PEER)?.phase).toBe('terminal');
+    expect(admission.requestRefresh(PEER, ['cg-a'], 10_000, 11_000)).toBe(true);
+    expect(admission.snapshot(PEER)).toEqual({
+      contextGraphIds: ['cg-a'],
+      phase: 'retry-required',
+    });
+    expect(admission.markTransferTerminal(owner, 11_001)).toBe(false);
+  });
+
   it('does not let an older in-flight completion suppress a newer scope', () => {
     const admission = new SelectedSwmBootstrapAdmission();
 

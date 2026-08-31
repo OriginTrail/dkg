@@ -279,6 +279,10 @@ export class OxigraphStore implements TripleStore {
     return matches.length;
   }
 
+  async deleteByPatternWithoutCount(pattern: Partial<DKGQuad>): Promise<void> {
+    await this.deleteByPattern(pattern);
+  }
+
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     throwIfAborted(options?.signal);
     // The embedded Oxigraph binding executes synchronously, so a caller abort

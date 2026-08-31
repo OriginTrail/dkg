@@ -1,6 +1,7 @@
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
+  toAgentDid,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -418,6 +419,5 @@ function isZeroEthAddress(address: string): boolean {
 }
 
 function agentDid(address: string): string {
-  const subject = /^0x[0-9a-fA-F]{40}$/.test(address) ? address.toLowerCase() : address;
-  return `did:dkg:agent:${subject}`;
+  return toAgentDid(address);
 }

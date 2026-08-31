@@ -5,12 +5,14 @@
 // call, so a route regression would not be caught by the helper unit test alone.
 // Driven in-process via handleKnowledgeAssetsRoutes with a stub agent — no
 // daemon / storage / native deps.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -298,6 +300,54 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
         retryAction: 'retry_same_knowledge_asset',
         retryKnowledgeAssetName: 'partial-vm',
       });
+    });
+  });
+
+  it('preserves partial-create context for a replay-safe SWM store timeout', async () => {
+    const timeout = new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'replaceGraph',
+      timeoutMs: 30_000,
+      outcome: 'indeterminate',
+    });
+    const agent = publishAgent({
+      assertion: {
+        history: async () => null,
+        create: async () => {},
+        write: async () => {},
+        finalize: async () => ({
+          merkleRoot: new Uint8Array(32),
+          authorAddress: '0x0000000000000000000000000000000000000001',
+        }),
+        promote: async () => {
+          throw classifyExactSwmGraphReplaceFailure(timeout);
+        },
+      },
+    });
+    const { res, done } = runKaCtx(
+      'POST',
+      '/api/knowledge-assets',
+      agent,
+      {
+        contextGraphId: 'cg-1',
+        name: 'partial-swm-replay-safe',
+        quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+        alsoShareSwm: true,
+      },
+    );
+
+    await done;
+    expectStoreUnavailableResponse(res, {
+      code: 'STORE_OPERATION_TIMEOUT',
+      outcome: 'indeterminate',
+    });
+    expect(JSON.parse(res.body)).toMatchObject({
+      created: true,
+      name: 'partial-swm-replay-safe',
+      status: 'wm-sealed',
+      phase: 'swm-share',
+      retryAction: 'retry_same_knowledge_asset',
+      retryKnowledgeAssetName: 'partial-swm-replay-safe',
     });
   });
 

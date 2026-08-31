@@ -1309,6 +1309,21 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({ jobId: 'lift job 7' });
   });
 
+  it('publisherRetryJob serializes a safe exact job selection and rejects unsafe ids before HTTP', async () => {
+    const calls = track({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+    await client.publisherRetryJob('lift-job-7');
+    expect(calls[0].url).toBe(`${base}/api/publisher/retry`);
+    expect(calls[0].opts.method).toBe('POST');
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({ status: 'failed', jobId: 'lift-job-7' });
+
+    await expect(client.publisherRetryJob('')).rejects.toThrow('jobId must be 1-256 characters');
+    await expect(client.publisherRetryJob('lift job 7')).rejects
+      .toThrow('contain only ASCII letters');
+    await expect(client.publisherRetryJob('a'.repeat(257))).rejects
+      .toThrow('jobId must be 1-256 characters');
+    expect(calls).toHaveLength(1);
+  });
+
   // GH#2270 follow-up (🟡 3824484894) — the escape-hatch option is the CHANGED public behaviour,
   // and only the unchanged default was covered. Removing or inverting the conditional spread would
   // have sent the plain body while every existing row stayed green — and the plain body is exactly
