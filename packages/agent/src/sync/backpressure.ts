@@ -537,6 +537,24 @@ export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
   );
 }
 
+/**
+ * Operator switch for W2 (#2435): chain-triggered re-verification of an
+ * already-held Knowledge Asset whose on-chain Merkle root changed.
+ *
+ * This is only the OPERATOR half of the decision. The effective gate also
+ * requires the background reconciler, a `dataDir` to put the intent file in,
+ * and a chain adapter that can actually yield the four root-mutation events —
+ * combined in `DKGAgent.vmUpdateConvergenceState()`, which is the single place
+ * they meet so a runtime gate and the operator-facing status cannot disagree.
+ */
+export function resolveVmUpdateConvergenceEnabled(configValue?: boolean): boolean {
+  return resolveBooleanSwitch(
+    configValue,
+    'DKG_VM_UPDATE_CONVERGENCE_ENABLED',
+    true,
+  );
+}
+
 function parseIntegerEnv(name: string): number | undefined {
   const raw = process.env[name]?.trim();
   if (!raw) return undefined;

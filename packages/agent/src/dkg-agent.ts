@@ -2186,6 +2186,17 @@ export class DKGAgent extends DKGAgentBase {
       await this.syncVerifyWorker.close();
       this.syncVerifyWorker = undefined;
     }
+    // W2 (#2435): the re-verify worker is stopped above, so its intent file has
+    // no writer left. Close it before the finalization inbox — it is the newer,
+    // narrower lifetime and nothing else depends on it.
+    let reverifyCloseFailed = false;
+    let reverifyCloseFailure: unknown;
+    try {
+      await this.closeVmReverifyIntentStore();
+    } catch (error) {
+      reverifyCloseFailed = true;
+      reverifyCloseFailure = error;
+    }
     // Finalization consumers are now stopped. Checkpoint and close their
     // separate inbox before releasing the RFC-64 persistence lifetime.
     let recoveryCloseFailed = false;
@@ -2230,14 +2241,25 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     this.started = false;
-    if (recoveryCloseFailed && inventoryCloseFailed) {
+    // Every durable owner is reported, and the pre-existing pair keeps its
+    // exact message. A store that failed to close is a durability fact; folding
+    // the new one into a silent `catch` would make a corrupt intent file look
+    // like a clean shutdown.
+    const closeFailures = [
+      ...(recoveryCloseFailed ? [recoveryCloseFailure] : []),
+      ...(inventoryCloseFailed ? [inventoryCloseFailure] : []),
+      ...(reverifyCloseFailed ? [reverifyCloseFailure] : []),
+    ];
+    if (recoveryCloseFailed && inventoryCloseFailed && !reverifyCloseFailed) {
       throw new AggregateError(
         [recoveryCloseFailure, inventoryCloseFailure],
         'Finalization inbox and RFC-64 persistence both failed to close',
       );
     }
-    if (recoveryCloseFailed) throw recoveryCloseFailure;
-    if (inventoryCloseFailed) throw inventoryCloseFailure;
+    if (closeFailures.length > 1) {
+      throw new AggregateError(closeFailures, 'Durable agent stores failed to close');
+    }
+    if (closeFailures.length === 1) throw closeFailures[0];
   }
 
   /**

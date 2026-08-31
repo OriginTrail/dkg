@@ -358,6 +358,19 @@ export interface ChainReconciledKCInput {
   authorAddress?: string;
   subGraphName?: string;
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
+  /**
+   * Inspect WITHOUT stamping (#2435, ADR-W2R-8).
+   *
+   * The already-current path normally records `materializedVersion` at the
+   * pinned chain head. That is right for a caller reconciling the graph, and
+   * wrong for a caller that is merely CHECKING one asset because a chain event
+   * mentioned it: gossip ordering (`shouldApplyMaterialization`) rejects a
+   * write whose block stamp is below the stored one, so a check that stamps the
+   * head can make a genuinely newer assertion — delivered a moment later at a
+   * lower block — permanently unapplicable. An inspection must be able to
+   * observe state without changing what the node will later accept.
+   */
+  inspectOnly?: boolean;
 }
 
 export type ChainReconciledKCOutcome =
@@ -1415,6 +1428,7 @@ export class FinalizationHandler {
     batchId: bigint;
     versionBlock: number;
     subGraphName?: string;
+    inspectOnly?: boolean;
   }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
     const resolution = await resolveConfirmedGraphScopedVm(this.store, {
       contextGraphId: input.contextGraphId,
@@ -1437,11 +1451,13 @@ export class FinalizationHandler {
       return 'no-swm';
     }
 
-    await this.advanceExactGraphScopedVersion({
-      contextGraphId: input.contextGraphId,
-      scope: resolution.scope,
-      materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
-    });
+    if (!input.inspectOnly) {
+      await this.advanceExactGraphScopedVersion({
+        contextGraphId: input.contextGraphId,
+        scope: resolution.scope,
+        materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
+      });
+    }
     this.log.info(
       ctx,
       `Chain-reconcile: exact confirmed VM state survives without a workspace head for ${input.ual}`,
@@ -1540,6 +1556,7 @@ export class FinalizationHandler {
     authorAddress?: string;
     subGraphName?: string;
     trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
+    inspectOnly?: boolean;
   }, ctx: OperationContext): Promise<
     | 'promoted'
     | 'already-confirmed'
@@ -1604,6 +1621,7 @@ export class FinalizationHandler {
           batchId,
           versionBlock,
           ...(subGraphName ? { subGraphName } : {}),
+          ...(input.inspectOnly ? { inspectOnly: true } : {}),
         }, ctx)) ?? 'no-swm';
       }
       // Named recovery carries receipt/seal-validated immutable evidence. A
@@ -1619,6 +1637,7 @@ export class FinalizationHandler {
         batchId,
         versionBlock,
         ...(subGraphName ? { subGraphName } : {}),
+        ...(input.inspectOnly ? { inspectOnly: true } : {}),
       }, ctx);
     }
 
@@ -1718,11 +1737,13 @@ export class FinalizationHandler {
         subGraphName,
       });
       if (metadataState === 'matching') {
-        await this.advanceExactGraphScopedVersion({
-          contextGraphId,
-          scope,
-          materializedVersion,
-        });
+        if (!input.inspectOnly) {
+          await this.advanceExactGraphScopedVersion({
+            contextGraphId,
+            scope,
+            materializedVersion,
+          });
+        }
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
@@ -1740,11 +1761,13 @@ export class FinalizationHandler {
           subGraphName,
         });
         if (failClosedMetadataState === 'matching') {
-          await this.advanceExactGraphScopedVersion({
-            contextGraphId,
-            scope,
-            materializedVersion,
-          });
+          if (!input.inspectOnly) {
+            await this.advanceExactGraphScopedVersion({
+              contextGraphId,
+              scope,
+              materializedVersion,
+            });
+          }
           this.log.info(
             ctx,
             `Chain-reconcile: ${ual} retains fail-closed access without assertion evidence`,
@@ -3167,6 +3190,7 @@ export class FinalizationHandler {
       authorAddress,
       subGraphName,
       trustedAssertionEvidence,
+      ...(input.inspectOnly ? { inspectOnly: true } : {}),
     }, ctx);
     if (graphScopedOutcome !== undefined) {
       return { outcome: graphScopedOutcome, legacyEligible: false, input };

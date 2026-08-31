@@ -288,6 +288,7 @@ import {
   type ExactAssetCommitment,
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
+import { EXACT_ASSET_FETCH_ADMISSION_PRIORITY } from './sync/exact-asset-fetch.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
@@ -2029,6 +2030,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.prepareRfc64PersistenceV1();
     try {
       await this.prepareFinalizationRecoveryStore();
+      // W2 (#2435). Opened in the same window and under the same ownership as
+      // the finalization inbox, but in its OWN file and only when the feature
+      // is effectively on — see `prepareVmReverifyIntentStore`.
+      await this.prepareVmReverifyIntentStore();
       // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
       // so the local store is clean before this node serves or syncs anything.
       // Marker-gated (runs once per data dir), never throws, no-op on stores
@@ -2044,6 +2049,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       await this.node.start();
     } catch (cause) {
       const failures: unknown[] = [cause];
+      try {
+        await this.closeVmReverifyIntentStore();
+      } catch (closeCause) {
+        failures.push(closeCause);
+      }
       try {
         await this.closeFinalizationRecoveryStore();
       } catch (closeCause) {
@@ -6093,6 +6103,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      /**
+       * Sync-admission priority for this fetch. Defaults to the operator
+       * route's `vm-recovery` priority; the automatic re-verify drain passes a
+       * lower one so background convergence cannot displace operator work.
+       */
+      admissionPriority?: number;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -6102,6 +6118,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      admissionPriority?: number;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
@@ -6118,7 +6135,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         exactAssetSelection: selection,
         stopOnBackoffWorthyFailure: true,
-        priority: 1_000,
+        priority: options.admissionPriority ?? EXACT_ASSET_FETCH_ADMISSION_PRIORITY,
         source: 'vm-recovery',
         signal: options.signal,
         isCurrent: options.isCurrent,

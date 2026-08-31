@@ -97,7 +97,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -517,7 +517,10 @@ import type { DKGAgent } from './dkg-agent.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
-import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+import {
+  resolveSyncReconcilerEnabled,
+  resolveVmUpdateConvergenceEnabled,
+} from './sync/backpressure.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
 
@@ -2873,6 +2876,57 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Effective activation of W2 (#2435) — chain-triggered re-verification of an
+   * already-held KA whose on-chain root changed — together with the REASON it
+   * is off.
+   *
+   * One resolver, four conditions, in the order an operator would ask them:
+   *
+   *  - the background reconciler is the thing this rides on. With it off, W2
+   *    off is the intended reading, not an accident;
+   *  - the operator switch (config, `DKG_VM_UPDATE_CONVERGENCE_ENABLED` wins);
+   *  - a `dataDir`, because an intent that does not survive a restart is not an
+   *    intent — the whole point is convergence across the downtime that caused
+   *    the divergence;
+   *  - a chain adapter that can actually yield all four root-mutation events.
+   *    An adapter that cannot is not partially useful here: subscribing to a
+   *    subset means silently missing every mutation of the other kinds, which
+   *    is precisely the failure this feature exists to end. Missing the method
+   *    entirely (an adapter that predates the branch) counts as missing all
+   *    four — fail closed, and say which one.
+   *
+   * The `reason` is what makes a disabled node diagnosable instead of merely
+   * quiet, so it is produced HERE rather than reconstructed by the status route.
+   */
+  vmUpdateConvergenceState(
+    this: DKGAgent,
+  ): { effective: boolean; reason?: string } {
+    if (!this.vmReconcileEnabled()) return { effective: false, reason: 'reconcile-disabled' };
+    if (!resolveVmUpdateConvergenceEnabled(this.config.vmUpdateConvergenceEnabled)) {
+      return { effective: false, reason: 'flag-off' };
+    }
+    if (!this.config.dataDir) return { effective: false, reason: 'no-data-dir' };
+    const requested: string[] = [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES];
+    // `supportsEventTypes` is an OPTIONAL adapter capability (PR-A). Read it
+    // structurally so this gate compiles against adapters that do not declare
+    // it and treats them, correctly, as supporting none of the four.
+    const supportsEventTypes = (
+      this.chain as { supportsEventTypes?: (names: readonly string[]) => string[] }
+    ).supportsEventTypes;
+    const missing = typeof supportsEventTypes === 'function'
+      ? supportsEventTypes.call(this.chain, requested)
+      : requested;
+    if (missing.length > 0) {
+      return { effective: false, reason: `abi-missing:${missing[0]}` };
+    }
+    return { effective: true };
+  }
+
+  vmUpdateConvergenceEnabled(this: DKGAgent): boolean {
+    return this.vmUpdateConvergenceState().effective;
+  }
+
+  /**
    * RFC-64 catalogs are authoritative only for SWM. A selected public policy
    * still expresses operator intent to keep that CG's finalized VM locally,
    * but the VM inventory itself must come from the chain reconciler.
@@ -3199,7 +3253,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     localCgId: string,
     requestedUals: readonly string[],
-    options: { peerIds?: readonly string[] } = {},
+    options: {
+      peerIds?: readonly string[];
+      /**
+       * Check without stamping `materializedVersion` on an already-current
+       * asset (#2435, ADR-W2R-8). Defaults off, so the operator route keeps its
+       * existing behaviour exactly.
+       */
+      inspectOnly?: boolean;
+      /**
+       * Admission priority for the peer fetches this call issues. Defaults to
+       * the operator route's `vm-recovery` priority; the automatic re-verify
+       * drain lowers it so background convergence can never displace work an
+       * operator asked for (ADR-W2R-9).
+       */
+      admissionPriority?: number;
+    } = {},
   ): Promise<ContextGraphAssetFetchResult> {
     if (this.started && (!this.vmReconcileRuntimeReady || this.graphScopedStoreClosed)) {
       throw new VmReconcileQueueClosedError();
@@ -3267,6 +3336,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           batchId: item.batchId,
           versionBlock: item.versionBlock,
           authorAddress: item.authorAddress,
+          ...(options.inspectOnly ? { inspectOnly: true } : {}),
         }, ctx);
         if (outcome === 'promoted') return 'materialized';
         if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';
@@ -3306,7 +3376,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           peerId,
           localCgId,
           [...uals],
-          { signal, isCurrent },
+          {
+            signal,
+            isCurrent,
+            ...(options.admissionPriority === undefined
+              ? {}
+              : { admissionPriority: options.admissionPriority }),
+          },
         );
       },
       flush: async () => {

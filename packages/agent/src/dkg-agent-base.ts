@@ -19,6 +19,10 @@ import {
   openSqliteFinalizationRecoveryStore,
 } from './finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
+import {
+  openSqliteVmReverifyIntentStore,
+} from './vm-reverify-intent-sqlite-store.js';
+import type { VmReverifyIntentStore } from './vm-reverify-intent-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
@@ -1159,6 +1163,12 @@ export class DKGAgentBase {
    * protected by it. Agents without dataDir remain deliberately dormant.
    */
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
+  /**
+   * W2 (#2435) durable re-verification intents. `undefined` unless the feature
+   * is effectively on — its absence IS the kill switch, so every consumer must
+   * read it optionally rather than assume a store exists.
+   */
+  vmReverifyIntents?: VmReverifyIntentStore;
   /** Explicit owner for finalization persistence and network identity lifetimes. */
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /**
@@ -1804,6 +1814,27 @@ export class DKGAgentBase {
     this.finalizationRuntime.attachRecoveryStore(store);
   }
 
+  /**
+   * Open the W2 re-verification intent file — but ONLY when the feature is
+   * effectively on (#2435, ADR-W2R-6).
+   *
+   * The gate is on the OPEN, not merely on the writes, and that is the whole
+   * point: with the switch off this release must leave a `dataDir` byte-for-byte
+   * as the base release left it, so a rollback is a non-event. An injected store
+   * (tests) is used as-is and no file is touched.
+   */
+  protected async prepareVmReverifyIntentStore(): Promise<void> {
+    if (this.vmReverifyIntents) return;
+    const injected = this.config.vmReverifyIntentStore;
+    if (injected) {
+      this.vmReverifyIntents = injected;
+      return;
+    }
+    if (!this.config.dataDir) return;
+    if (!(this as unknown as DKGAgent).vmUpdateConvergenceEnabled()) return;
+    this.vmReverifyIntents = await openSqliteVmReverifyIntentStore(this.config.dataDir);
+  }
+
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
   protected async yieldRfc64InventoryV1StartupBatch(): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1824,6 +1855,21 @@ export class DKGAgentBase {
     await this.finalizationHandler?.stopRecoveryWorker();
     const store = this.finalizationRuntime.detachRecoveryStore();
     await store?.close();
+  }
+
+  /**
+   * Release the intent file. Detached before closing so a failed close cannot
+   * be retried against a half-closed handle, and so a restart in the same
+   * process opens a fresh one.
+   *
+   * An INJECTED store belongs to whoever injected it (a test that keeps
+   * asserting on it across a restart), so it is only detached, never closed.
+   */
+  protected async closeVmReverifyIntentStore(): Promise<void> {
+    const store = this.vmReverifyIntents;
+    this.vmReverifyIntents = undefined;
+    if (!store || store === this.config.vmReverifyIntentStore) return;
+    await store.close();
   }
 
   async getFinalizationRecoveryHealth(): Promise<FinalizationRecoveryHealth> {
