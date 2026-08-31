@@ -13,6 +13,8 @@ import {
   chainDiscoveryScanOptions as barrelChainDiscoveryScanOptions,
   createChainDiscoveryScanRunner as barrelCreateChainDiscoveryScanRunner,
 } from '../src/daemon.js';
+import * as daemonBarrel from '../src/daemon.js';
+import * as daemonIndexBarrel from '../src/daemon/index.js';
 
 describe('chainDiscoveryScanOptions', () => {
   it('preserves daemon barrel exports and the original run-based helper input', () => {
@@ -22,6 +24,13 @@ describe('chainDiscoveryScanOptions', () => {
       mode: 'incremental',
       pageBudget: 30,
     });
+  });
+
+  it('keeps scan state-machine reducers out of daemon barrels', () => {
+    for (const barrel of [daemonBarrel, daemonIndexBarrel]) {
+      expect(barrel).not.toHaveProperty('resolveManagedChainDiscoveryScanAttempt');
+      expect(barrel).not.toHaveProperty('transitionManagedChainDiscoveryScanState');
+    }
   });
 
   it('preserves bounded cursor seeding in the original helper', () => {

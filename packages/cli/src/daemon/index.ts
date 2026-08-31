@@ -2,7 +2,7 @@
 //
 // The original `packages/cli/src/daemon.ts` became unmanageable at
 // ~10.5k lines. This directory hosts the sub-modules it was cut into;
-// the barrel re-exports every public symbol so consumers can import
+// the barrel re-exports the intended public surface so consumers can import
 // from `./daemon/index.js` without depending on the internal file
 // layout.
 //
@@ -19,6 +19,13 @@ export * from './auto-update.js';
 export * from './openclaw.js';
 export * from './local-agents.js';
 export * from './lifecycle.js';
-export * from './chain-discovery-scan-runner.js';
+export {
+  CHAIN_FULL_SCAN_EVERY,
+  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  chainDiscoveryScanOptions,
+  createChainDiscoveryScanRunner,
+  type LegacyChainDiscoveryScanOptionsInput,
+  type ChainDiscoveryScanOptions,
+} from './chain-discovery-scan-runner.js';
 export * from './memory-tool-context.js';
 export * from './handle-request.js';

@@ -1,7 +1,7 @@
 // Split-refactor barrel: every helper that used to live inline in
 // this 10.5k-line file now lives under `./daemon/*.ts`. External
-// consumers (cli.ts, tests) import from `./daemon.js`, so we re-
-// export every public symbol here. See `./daemon/index.ts` for the
+// consumers (cli.ts, tests) import from `./daemon.js`, so we preserve
+// the intended public surface here. See `./daemon/index.ts` for the
 // per-module barrel used inside the refactor.
 
 export {
@@ -19,7 +19,14 @@ export * from './daemon/openclaw.js';
 export * from './daemon/hermes.js';
 export * from './daemon/local-agents.js';
 export * from './daemon/lifecycle.js';
-export * from './daemon/chain-discovery-scan-runner.js';
+export {
+  CHAIN_FULL_SCAN_EVERY,
+  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  chainDiscoveryScanOptions,
+  createChainDiscoveryScanRunner,
+  type LegacyChainDiscoveryScanOptionsInput,
+  type ChainDiscoveryScanOptions,
+} from './daemon/chain-discovery-scan-runner.js';
 export * from './daemon/memory-tool-context.js';
 export * from './daemon/handle-request.js';
 export * from './daemon/shutdown.js';

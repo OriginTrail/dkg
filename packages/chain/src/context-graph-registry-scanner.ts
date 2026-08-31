@@ -58,6 +58,9 @@ type PreparedScan =
       acknowledge(nextBlock: number): Promise<void>;
     });
 
+type PreparedTipScan = Extract<PreparedScan, { kind: 'tip' }>;
+type QueryRegistryPage = (lo: number, hi: number) => Promise<ContextGraphOnChain[]>;
+
 type RegistryScannerInput = {
   registry: Contract;
   registryAddress: string;
@@ -168,9 +171,67 @@ export class ContextGraphRegistryScanner {
   async *pages(
     scanPlan: ContextGraphRegistryScanPlan,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
-    const eventFilter = this.input.registry.filters.NameClaimed();
     const prepared = await this.prepare(scanPlan);
-    const { start, head, scanProviders, degradedFromGenesis } = prepared;
+    if (prepared.kind === 'tip') {
+      yield* this.tipPages(prepared);
+      return;
+    }
+    yield* this.rangePages(prepared);
+  }
+
+  private createPageQuery(
+    scanProviders: ReadonlyArray<EvmEventLogScanProvider>,
+  ): QueryRegistryPage {
+    const eventFilter = this.input.registry.filters.NameClaimed();
+    const pageSession = this.input.createPageSession(scanProviders);
+    return async (lo: number, hi: number): Promise<ContextGraphOnChain[]> => {
+      const pageResults: ContextGraphOnChain[] = [];
+      for (const log of await pageSession.query(eventFilter, lo, hi)) {
+        const parsed = this.input.registry.interface.parseLog({
+          topics: [...log.topics],
+          data: log.data,
+        });
+        if (!parsed || parsed.name !== 'NameClaimed') continue;
+        pageResults.push({
+          contextGraphId: String(parsed.args.nameHash),
+          creator: String(parsed.args.creator),
+          accessPolicy: Number(parsed.args.accessPolicy),
+          blockNumber: log.blockNumber,
+          metadataRevealed: false,
+        });
+      }
+      return pageResults;
+    };
+  }
+
+  private async *tipPages(
+    prepared: PreparedTipScan,
+  ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
+    const queryPage = this.createPageQuery(prepared.scanProviders);
+    const currentTipStart = Math.max(0, prepared.head - this.input.pageSize + 1);
+    try {
+      yield* this.rangePages(prepared, queryPage);
+    } catch (err) {
+      const failedFromBlock = err instanceof ContextGraphChainScanPartialError
+        ? err.failedFromBlock
+        : prepared.start;
+      if (failedFromBlock >= currentTipStart) throw err;
+
+      // Keep the stale gap pending, but independently surface the bounded
+      // current-tip window without acknowledging progress past that gap.
+      const contextGraphs = await queryPage(currentTipStart, prepared.head);
+      yield {
+        contextGraphs,
+        ack: async () => {},
+      };
+    }
+  }
+
+  private async *rangePages(
+    prepared: PreparedScan,
+    queryPage: QueryRegistryPage = this.createPageQuery(prepared.scanProviders),
+  ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
+    const { start, head, degradedFromGenesis } = prepared;
     const pageBudget = 'pageBudget' in prepared ? prepared.pageBudget : undefined;
     if (start > head) {
       if (prepared.kind === 'historicalSeed') await prepared.acknowledge(head + 1);
@@ -197,26 +258,6 @@ export class ContextGraphRegistryScanner {
     }
 
     const results: ContextGraphOnChain[] = [];
-    const pageSession = this.input.createPageSession(scanProviders);
-    const queryPage = async (lo: number, hi: number): Promise<ContextGraphOnChain[]> => {
-      const pageResults: ContextGraphOnChain[] = [];
-      for (const log of await pageSession.query(eventFilter, lo, hi)) {
-        const parsed = this.input.registry.interface.parseLog({
-          topics: [...log.topics],
-          data: log.data,
-        });
-        if (!parsed || parsed.name !== 'NameClaimed') continue;
-        pageResults.push({
-          contextGraphId: String(parsed.args.nameHash),
-          creator: String(parsed.args.creator),
-          accessPolicy: Number(parsed.args.accessPolicy),
-          blockNumber: log.blockNumber,
-          metadataRevealed: false,
-        });
-      }
-      return pageResults;
-    };
-    const currentTipStart = Math.max(0, head - this.input.pageSize + 1);
     let scannedAnyPage = false;
     for (let lo = start; lo <= head; lo += this.input.pageSize) {
       const hi = Math.min(lo + this.input.pageSize - 1, head);
@@ -224,19 +265,6 @@ export class ContextGraphRegistryScanner {
       try {
         pageResults = await queryPage(lo, hi);
       } catch (err) {
-        // A persisted tip cursor is gap-safe progress, not permission for an
-        // unavailable old page to suppress recent discovery forever. Probe the
-        // bounded current-tip window independently, but deliberately do not
-        // acknowledge it: the failed gap remains the next catch-up attempt.
-        if (prepared.kind === 'tip' && lo < currentTipStart) {
-          const currentPageResults = await queryPage(currentTipStart, head);
-          results.push(...currentPageResults);
-          yield {
-            contextGraphs: currentPageResults,
-            ack: async () => {},
-          };
-          return;
-        }
         if (prepared.kind !== 'stateless' && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
           throw new ContextGraphChainScanPartialError(
