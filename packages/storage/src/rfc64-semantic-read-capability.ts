@@ -7,6 +7,10 @@ import {
 
 import type { QueryOptions, QueryResult, TripleStore } from './triple-store.js';
 import { SparqlJsonResultsShapeError } from './adapters/sparql-json-results.js';
+import {
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+} from './closed-data-snapshot.js';
 
 export interface Rfc64SemanticReadCapabilityResultV1 {
   readonly rows: readonly Rfc64SemanticStoreRowV1[];
@@ -77,24 +81,17 @@ function normalizeRfc64SemanticReadResultV1(
     invalid('semantic read returned the wrong result projection');
   }
 
-  const bindings = ownDataValue(result, 'bindings');
-  if (!Array.isArray(bindings) || Object.getPrototypeOf(bindings) !== Array.prototype) {
-    invalid('semantic read bindings must be an ordinary Array');
-  }
+  const bindings = snapshotDenseDataArray(
+    ownDataValue(result, 'bindings'),
+    'semantic read bindings',
+    invalid,
+  );
   if (bindings.length > operation.rowCeiling) {
     invalid('semantic read exceeded its row ceiling');
   }
-  const keys = Reflect.ownKeys(bindings);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== bindings.length + 1
-    || !keys.includes('length')
-  ) {
-    invalid('semantic read bindings must be dense and unadorned');
-  }
   const rows: Rfc64SemanticStoreRowV1[] = [];
   for (let index = 0; index < bindings.length; index += 1) {
-    const binding = ownDataValue(bindings, String(index));
+    const binding = bindings[index];
     const predicate = ownDataValue(binding, 'p');
     const object = ownDataValue(binding, 'o');
     if (typeof predicate !== 'string' || typeof object !== 'string') {
@@ -120,20 +117,13 @@ function normalizeRfc64SemanticReadResultV1(
 }
 
 function snapshotProjection(input: unknown): string[] {
-  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
-    invalid('semantic read result projection must be an ordinary Array');
-  }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.some((key) => typeof key !== 'string')
-    || keys.length !== input.length + 1
-    || !keys.includes('length')
-  ) {
-    invalid('semantic read result projection must be dense and unadorned');
-  }
+  const snapshot = snapshotDenseDataArray(
+    input,
+    'semantic read result projection',
+    invalid,
+  );
   const result: string[] = [];
-  for (let index = 0; index < input.length; index += 1) {
-    const value = ownDataValue(input, String(index));
+  for (const value of snapshot) {
     if (typeof value !== 'string') invalid('semantic read result variables must be strings');
     result.push(value);
   }
@@ -153,14 +143,7 @@ function ownOptionalDataValue(input: unknown, key: string): unknown {
 }
 
 function ownDataValue(input: unknown, key: string): unknown {
-  if (input === null || typeof input !== 'object') {
-    invalid('semantic read result must be an object');
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(input, key);
-  if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-    invalid(`semantic read result ${key} must be a data property`);
-  }
-  return descriptor.value;
+  return readOwnEnumerableDataProperty(input, key, 'semantic read result', invalid);
 }
 
 function dataPropertyValue(input: object, key: string): unknown {

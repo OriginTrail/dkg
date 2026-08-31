@@ -15,8 +15,10 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
 import {
   parseSparqlJsonSelectResponse,
-  type AdapterSparqlJsonSelectResponse,
+  parseSparqlJsonResponseText,
+  SparqlJsonResultsShapeError,
 } from './sparql-json-results.js';
+import { isOrdinaryDataRecord } from '../closed-data-snapshot.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
@@ -546,19 +548,27 @@ export class BlazegraphStore implements TripleStore {
         'query',
       );
 
-      const json = options?.maxResponseBytes === undefined
-        ? await deadline.waitFor(
-            res.json() as Promise<AdapterSparqlJsonSelectResponse | BlazeAskResponse>,
-          )
-        : JSON.parse(await deadline.waitFor(
-            readResponseTextBounded(res, options.maxResponseBytes),
-          )) as AdapterSparqlJsonSelectResponse | BlazeAskResponse;
+      const text = options?.maxResponseBytes === undefined
+        ? await deadline.waitFor(res.text())
+        : await deadline.waitFor(readResponseTextBounded(res, options.maxResponseBytes));
+      const json = parseSparqlJsonResponseText(text);
 
-      if (isAsk || 'boolean' in json) {
-        return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
+      if (
+        isAsk
+        || (
+          isOrdinaryDataRecord(json)
+          && Object.prototype.hasOwnProperty.call(json, 'boolean')
+        )
+      ) {
+        if (!isOrdinaryDataRecord(json) || typeof json.boolean !== 'boolean') {
+          throw new SparqlJsonResultsShapeError(
+            'SPARQL JSON ASK response.boolean must be a boolean',
+          );
+        }
+        return { type: 'boolean', value: json.boolean } satisfies AskResult;
       }
 
-      const parsed = parseSparqlJsonSelectResponse(json as AdapterSparqlJsonSelectResponse);
+      const parsed = parseSparqlJsonSelectResponse(json);
       return {
         type: 'bindings',
         bindings: parsed.bindings,
@@ -735,10 +745,6 @@ export class BlazegraphStore implements TripleStore {
 // =====================================================================
 // Blazegraph JSON result types
 // =====================================================================
-
-interface BlazeAskResponse {
-  boolean: boolean;
-}
 
 // =====================================================================
 // N-Quad serialisation / parsing helpers (shared with oxigraph adapter)

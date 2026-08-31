@@ -36,8 +36,10 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
   parseSparqlJsonSelectResponse,
-  type AdapterSparqlJsonSelectResponse,
+  parseSparqlJsonResponseText,
+  SparqlJsonResultsShapeError,
 } from './sparql-json-results.js';
+import { isOrdinaryDataRecord } from '../closed-data-snapshot.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -951,16 +953,27 @@ export class SparqlHttpStore implements TripleStore {
               managedOxigraph: this.managedOxigraph,
               operation: canonicalOperation,
             });
-            const json = JSON.parse(text) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
+            const json = parseSparqlJsonResponseText(text);
 
-            if (isAsk || 'boolean' in json) {
+            if (
+              isAsk
+              || (
+                isOrdinaryDataRecord(json)
+                && Object.prototype.hasOwnProperty.call(json, 'boolean')
+              )
+            ) {
+              if (!isOrdinaryDataRecord(json) || typeof json.boolean !== 'boolean') {
+                throw new SparqlJsonResultsShapeError(
+                  'SPARQL JSON ASK response.boolean must be a boolean',
+                );
+              }
               return {
                 type: 'boolean',
-                value: (json as W3CAskResponse).boolean,
+                value: json.boolean,
               } satisfies AskResult;
             }
 
-            const parsed = parseSparqlJsonSelectResponse(json as AdapterSparqlJsonSelectResponse);
+            const parsed = parseSparqlJsonSelectResponse(json);
             return {
               type: 'bindings',
               bindings: parsed.bindings,
@@ -1239,14 +1252,6 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
   } catch {
     return endpoint.split(/[?#]/, 1)[0];
   }
-}
-
-// ---------------------------------------------------------------------------
-// W3C SPARQL 1.1 JSON result types
-// ---------------------------------------------------------------------------
-
-interface W3CAskResponse {
-  boolean: boolean;
 }
 
 // ---------------------------------------------------------------------------
