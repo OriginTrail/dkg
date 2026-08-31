@@ -89,6 +89,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
           });
       },
     });
+    agent.subscribeToContextGraph(CONTEXT_GRAPH_ID);
 
     await vi.waitFor(() => {
       expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)

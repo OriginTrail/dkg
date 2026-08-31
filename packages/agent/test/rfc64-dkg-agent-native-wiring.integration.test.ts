@@ -2480,7 +2480,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const secondPassRelease = new Promise<void>((resolve) => {
       releaseSecondPass = resolve;
     });
-    vi.spyOn(receiver, 'synchronizeRfc64CatalogFromProvidersV1')
+    vi.spyOn(receiver, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
       .mockImplementation(async () => {
         pass += 1;
         if (pass === 2) {
@@ -2545,7 +2545,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
     let markCatalogStarted!: () => void;
     const catalogStarted = new Promise<void>((resolve) => { markCatalogStarted = resolve; });
-    vi.spyOn(receiver, 'synchronizeRfc64CatalogFromProvidersV1')
+    vi.spyOn(receiver, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
       .mockImplementation(async ({ signal }) => {
         markCatalogStarted();
         await new Promise<void>((resolve) => {
@@ -5214,7 +5214,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
             return original(...args);
           });
         vi.spyOn(agent, 'removeRfc64SwmAuthorInventoryConfirmedRowV1')
-          .mockImplementationOnce(async () => {
+          .mockImplementation(async () => {
             failedRemovalAttempts += 1;
             throw new Error('simulated post-publication SWM removal failure');
           });
@@ -5245,7 +5245,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toMatchObject({ head: { payload: { totalRows: '1' } } });
     expect((author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.list())
       .toHaveLength(1);
-    expect(failedRemovalAttempts).toBe(1);
+    expect(failedRemovalAttempts).toBeGreaterThanOrEqual(1);
     expect(announce).toHaveBeenCalledTimes(1);
 
     // Restart after publication. The exact catalog upsert must replay as

@@ -99,6 +99,8 @@ describe('RFC-64 SQL-1 durable applied-head CAS', () => {
     const legacy = new DatabaseSync(path);
     legacy.exec(`
       PRAGMA journal_mode = DELETE;
+      DROP TABLE rfc64_staged_catalog_heads_v1;
+      DROP TABLE rfc64_finalized_private_placement_repairs_v1;
       DROP TABLE rfc64_swm_author_inventory_rows_v1;
       DROP TABLE rfc64_swm_author_inventory_heads_v1;
       DROP TABLE rfc64_applied_catalog_heads_v1;
