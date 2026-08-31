@@ -80,6 +80,24 @@ function clampNodeTimerMs(value: number): number {
   return Math.min(value, MAX_NODE_TIMER_MS);
 }
 
+function resolveManagedOxigraphCacheDir(
+  options: Record<string, unknown> | undefined,
+  dataDir: string,
+): string {
+  return typeof options?.cacheDir === 'string' && options.cacheDir.trim()
+    ? options.cacheDir
+    : join(dataDir, 'oxigraph');
+}
+
+function resolveManagedOxigraphStartupCacheDir(
+  config: ConfigLike,
+  dataDir: string,
+): string | null {
+  return config.store?.backend === MANAGED_OXIGRAPH_BACKEND
+    ? resolveManagedOxigraphCacheDir(config.store.options, dataDir)
+    : null;
+}
+
 interface ManagedOxigraphTimeoutCapabilities {
   nativeTimeoutSafe: boolean;
   implicitHttpDeadlineMs?: number;
@@ -273,10 +291,7 @@ export function planManagedOxigraph(
       : join(dataDir, 'oxigraph-data');
   // Honour an operator `cacheDir` override (preserved by the wizard/flag flow)
   // the same way `location` is; fall back to the default binary cache dir.
-  const cacheDir =
-    typeof options.cacheDir === 'string' && options.cacheDir.trim()
-      ? options.cacheDir
-      : join(dataDir, 'oxigraph');
+  const cacheDir = resolveManagedOxigraphCacheDir(options, dataDir);
 
   const largeLiteralStorage = {
     enabled: config.largeLiteralStorage?.enabled ?? true,
@@ -363,12 +378,12 @@ export interface StartManagedOxigraphOptions {
 export async function startManagedOxigraph(
   opts: StartManagedOxigraphOptions,
 ): Promise<ManagedOxigraphResult | null> {
-  const initialPlan = planManagedOxigraph(opts.config, opts.dataDir, opts.platform);
-  if (!initialPlan) return null;
+  const cacheDir = resolveManagedOxigraphStartupCacheDir(opts.config, opts.dataDir);
+  if (cacheDir === null) return null;
   const log = opts.log ?? (() => {});
 
   const binary = await resolveOxigraphBinary({
-    cacheDir: initialPlan.cacheDir,
+    cacheDir,
     platform: opts.platform,
     arch: opts.arch,
     log,
@@ -382,7 +397,8 @@ export async function startManagedOxigraph(
     opts.dataDir,
     opts.platform,
     binary.version,
-  )!;
+  );
+  if (plan === null) return null;
 
   const handle = await startOxigraphServer({
     binaryPath: binary.path,
