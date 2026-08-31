@@ -182,23 +182,6 @@ export function resolveManagedChainDiscoveryScanAttempt(input: {
   }
 }
 
-/** Compatibility wrapper over the attempt's co-located transition model. */
-export function transitionManagedChainDiscoveryScanState(input: {
-  state: ActiveManagedChainDiscoveryScanState;
-  watermarkSeeded: boolean;
-  outcome: 'success' | 'failure';
-  fullScanEvery?: number;
-}): ManagedChainDiscoveryScanState {
-  const attempt = resolveManagedChainDiscoveryScanAttempt({
-    state: input.state,
-    watermarkSeeded: input.watermarkSeeded,
-    fullScanEvery: input.fullScanEvery,
-  });
-  return input.outcome === 'success'
-    ? attempt.nextOnSuccess
-    : attempt.nextOnFailure;
-}
-
 function safeLog(log: (message: string) => void, message: string): void {
   try {
     log(message);

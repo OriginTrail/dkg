@@ -29,7 +29,6 @@ describe('chainDiscoveryScanOptions', () => {
   it('keeps scan state-machine reducers out of daemon barrels', () => {
     for (const barrel of [daemonBarrel, daemonIndexBarrel]) {
       expect(barrel).not.toHaveProperty('resolveManagedChainDiscoveryScanAttempt');
-      expect(barrel).not.toHaveProperty('transitionManagedChainDiscoveryScanState');
     }
   });
 
