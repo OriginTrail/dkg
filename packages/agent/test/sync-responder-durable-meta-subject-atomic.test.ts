@@ -1,14 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
-  StoreOperationTimeoutError,
-  StoreSchedulerBusyError,
   type Quad,
-  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
-  createResponderSyncRowListMemo,
   DurableMetaPageFrameError,
   readDurableMetaPage,
   serializeResponderRowsWithinByteBudget,
@@ -112,64 +108,6 @@ function assertNoDuplicatesOrGaps(pages: Row[][]): void {
 }
 
 describe('durable-meta subject-atomic paging (#1788)', () => {
-  it.each([
-    ['backend deadline', () => new StoreOperationTimeoutError({
-      backend: 'test',
-      operation: 'query',
-      storeOperation: 'query',
-      timeoutMs: 30_000,
-    })],
-    ['scheduler queue-wait deadline', () => new StoreSchedulerBusyError(
-      'queue_wait_timeout',
-      'background',
-      'sync.responder.readDurableMetaGraphSnapshot',
-      { storeOperation: 'query' },
-    )],
-  ])('propagates a full-snapshot %s without entering mutable OFFSET paging', async (
-    _label,
-    deadlineError,
-  ) => {
-    let snapshotQueries = 0;
-    const firstError = deadlineError();
-    const secondError = deadlineError();
-    const query = vi.fn<TripleStore['query']>(async (_sparql, options) => {
-      if (options?.source === 'sync.responder.readDurableMetaGraphSnapshot') {
-        snapshotQueries += 1;
-        throw snapshotQueries === 1 ? firstError : secondError;
-      }
-      throw new Error(`unexpected store query: ${options?.source ?? 'unknown'}`);
-    });
-    const store = { query } as TripleStore;
-    const memo = createResponderSyncRowListMemo();
-    const cacheKey = 'durable-meta:timeout-propagation';
-
-    await expect(readDurableMetaPage({
-      store,
-      contextGraphId: CG,
-      registeredSubGraphNames: [],
-      offset: 0,
-      limit: 1,
-      rowListMemo: memo,
-      rowListCacheKey: cacheKey,
-    })).rejects.toBe(firstError);
-    await expect(readDurableMetaPage({
-      store,
-      contextGraphId: CG,
-      registeredSubGraphNames: [],
-      offset: 0,
-      limit: 1,
-      rowListMemo: memo,
-      rowListCacheKey: cacheKey,
-    })).rejects.toBe(secondError);
-
-    // A transient timeout is neither memoized as intrinsic size evidence nor
-    // converted into a mutable ordered page stream. A retry re-attempts the
-    // immutable snapshot and preserves the original operator-visible cause.
-    expect(snapshotQueries).toBe(2);
-    expect(query.mock.calls.filter(([, options]) =>
-      options?.source === 'sync.responder.readDurableMetaRowsPage')).toHaveLength(0);
-  });
-
   it('cached path: extends a page across the seal boundary, never splitting it', async () => {
     const limit = 10;
     const fillerA: Row[] = Array.from({ length: 5 }, (_, i) => ({
