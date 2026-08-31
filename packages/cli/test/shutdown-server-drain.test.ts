@@ -1,4 +1,4 @@
-import { createServer, get, type Server, type ServerResponse } from 'node:http';
+import { createServer, get, type Server } from 'node:http';
 import { describe, expect, it } from 'vitest';
 
 import { raceShutdownWithTimeout } from '../src/daemon/shutdown.js';
@@ -6,6 +6,11 @@ import {
   buildProducerQuiescentTeardownSteps,
   runProducerQuiescentTeardown,
 } from '../src/daemon/teardown.js';
+import {
+  closeDaemonHttpServer,
+  createDaemonSseRegistry,
+  type DaemonSseRegistry,
+} from '../src/daemon/http-lifecycle.js';
 import {
   openEventStream,
   startLiveDaemon,
@@ -40,12 +45,11 @@ function requestBody(port: number): Promise<string> {
 function shutdownCleanup(
   server: Server,
   stopDependencies: () => void,
-  longLivedResponses?: Set<ServerResponse>,
+  sseClients: DaemonSseRegistry = createDaemonSseRegistry(),
 ): Promise<void> {
   const noop = async () => undefined;
   return runProducerQuiescentTeardown(buildProducerQuiescentTeardownSteps({
-    server,
-    longLivedResponses,
+    closeHttpServer: () => closeDaemonHttpServer(server, sseClients),
     closeLocalLlm: noop,
     drainCatchupJobs: async () => undefined,
     flushTelemetry: noop,
@@ -89,7 +93,7 @@ describe('HTTP callback draining during bounded shutdown', () => {
   }, 90_000);
 
   it('ends tracked SSE streams before draining and reaches dependency cleanup', async () => {
-    const sseClients = new Set<ServerResponse>();
+    const sseClients = createDaemonSseRegistry();
     let markConnected!: () => void;
     const connected = new Promise<void>((resolve) => { markConnected = resolve; });
     const downstreamSteps: string[] = [];
@@ -116,8 +120,7 @@ describe('HTTP callback draining during bounded shutdown', () => {
 
     const noop = async () => undefined;
     const cleanup = runProducerQuiescentTeardown(buildProducerQuiescentTeardownSteps({
-      server,
-      longLivedResponses: sseClients,
+      closeHttpServer: () => closeDaemonHttpServer(server, sseClients),
       closeLocalLlm: noop,
       drainCatchupJobs: async () => undefined,
       flushTelemetry: noop,

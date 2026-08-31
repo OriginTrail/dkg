@@ -25,17 +25,19 @@
  */
 
 import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
-import {
-  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
-  SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
-} from './shutdown-policy.js';
+import { DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS } from './shutdown-policy.js';
 
 export {
   DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
   MIN_SHUTDOWN_HARD_TIMEOUT_MS,
   MAX_SHUTDOWN_HARD_TIMEOUT_MS,
-  SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
 } from './shutdown-policy.js';
+
+/**
+ * Per-callsite budget for the best-effort forced-cleanup hook that runs after
+ * the hard timeout. Kept with the shutdown race that consumes it.
+ */
+export const SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS = 1_000;
 
 /** Backward-compatible name for the unchanged fleet default. */
 export const SHUTDOWN_HARD_TIMEOUT_MS = DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;

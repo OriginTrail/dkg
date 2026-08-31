@@ -11,7 +11,6 @@
 import {
   createServer,
   type IncomingMessage,
-  type ServerResponse,
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -244,6 +243,7 @@ import {
   closeDaemonBackingStoresAfterTeardown,
   runProducerQuiescentTeardown,
 } from './teardown.js';
+import { closeDaemonHttpServer, createDaemonSseRegistry } from './http-lifecycle.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -2815,7 +2815,7 @@ async function runDaemonInnerWithStartupOwnership(
   // Connected node-UI SSE dashboard clients. Declared here (before the metrics
   // collector) so the presence gate below can consult it; the /api/events
   // handler further down populates it.
-  const sseClients = new Set<ServerResponse>();
+  const sseClients = createDaemonSseRegistry();
 
   // Metrics presence gate (#1066 Item 1): the metric COUNT getters are
   // full-store scans, so the collector skips them when nothing is consuming
@@ -3124,9 +3124,7 @@ async function runDaemonInnerWithStartupOwnership(
   function sseBroadcast(event: string, payload: Record<string, unknown>) {
     const data = JSON.stringify(payload);
     const msg = `event: ${event}\ndata: ${data}\n\n`;
-    for (const client of sseClients) {
-      try { client.write(msg); } catch { sseClients.delete(client); }
-    }
+    sseClients.broadcast(msg);
   }
   function emitMemoryGraphChanged(event: MemoryGraphChangedEvent) {
     if (!event.contextGraphId) return;
@@ -3814,8 +3812,7 @@ async function runDaemonInnerWithStartupOwnership(
         // shutdown, where previously it was skipped.
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
-            server,
-            longLivedResponses: sseClients,
+            closeHttpServer: () => closeDaemonHttpServer(server, sseClients),
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,

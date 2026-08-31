@@ -42,22 +42,25 @@
  */
 
 import { connect, type Socket } from 'node:net';
+import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
 
-import {
-  DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
-  LIVENESS_PROBE_TIMEOUT_MS,
-} from './shutdown-policy.js';
-
-export {
-  DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
-  LIVENESS_PROBE_TIMEOUT_MS,
-} from './shutdown-policy.js';
+/** Default per-probe TCP-connect timeout. */
+export const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
+export const DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS = 30_000;
 
 /** Default tick — 30s. Picked to be longer than typical request handling but short enough that a 5-failure quorum triggers within ~2.5 min. */
 export const LIVENESS_PROBE_INTERVAL_MS = 30_000;
 
 /** Default trigger threshold — 5 consecutive failures. With 30s tick → ~2.5 min unresponsive before SIGKILL. */
 export const LIVENESS_CONSECUTIVE_FAILURES_TO_KILL = 5;
+
+/** Derive watchdog grace from the already-validated worker hard timeout. */
+export function resolveLivenessShutdownGraceMs(hardTimeoutMs: number): number {
+  return Math.max(
+    DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
+    hardTimeoutMs + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS + LIVENESS_PROBE_TIMEOUT_MS,
+  );
+}
 
 /**
  * One-shot probe: connect to `host:port`, return `true` on success, `false`

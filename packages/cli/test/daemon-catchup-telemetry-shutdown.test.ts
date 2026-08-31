@@ -1188,11 +1188,8 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
       drainArgs,
       log,
       deps: {
-        server: {
-          close: (callback: (error?: Error) => void) => {
-            calls.push('server.close');
-            callback();
-          },
+        closeHttpServer: async () => {
+          calls.push('closeHttpServer');
         },
         closeLocalLlm: async () => {
           calls.push('closeLocalLlm');
@@ -1251,7 +1248,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
     // No slot fans out: the three background workers are their own steps, so
     // the sequencer's per-step guard covers each of them individually.
     expect(dispatched).toEqual([
-      ['closeServer', ['server.close']],
+      ['closeServer', ['closeHttpServer']],
       ['closeLocalLlm', ['closeLocalLlm']],
       ['drainCatchupJobs', ['drainCatchupJobs']],
       ['flushTelemetry', ['flushTelemetry']],

@@ -35,19 +35,16 @@ describe('shutdown constants', () => {
 });
 
 describe('resolveShutdownPolicy', () => {
-  it('preserves defaults and derives a supervisor grace that cannot preempt the worker', () => {
+  it('preserves defaults and validates only the worker hard-timeout policy', () => {
     expect(resolveShutdownPolicy(undefined)).toEqual({
       hardTimeoutMs: 15_000,
-      supervisorGraceMs: 30_000,
     });
     expect(resolveShutdownPolicy(String(MIN_SHUTDOWN_HARD_TIMEOUT_MS)).hardTimeoutMs).toBe(5_000);
     expect(resolveShutdownPolicy(String(MAX_SHUTDOWN_HARD_TIMEOUT_MS))).toEqual({
       hardTimeoutMs: 300_000,
-      supervisorGraceMs: 306_000,
     });
     expect(resolveShutdownPolicy('60000')).toEqual({
       hardTimeoutMs: 60_000,
-      supervisorGraceMs: 66_000,
     });
   });
 

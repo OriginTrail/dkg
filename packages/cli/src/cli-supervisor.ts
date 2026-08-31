@@ -6,7 +6,10 @@ import {
 } from './config.js';
 import { DAEMON_EXIT_CODE_RESTART, decodeForcedExitCode } from './daemon.js';
 import {
-  isLivenessProbeEnabled, startLivenessWatcher, LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
+  isLivenessProbeEnabled,
+  startLivenessWatcher,
+  LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
+  resolveLivenessShutdownGraceMs,
 } from './daemon/supervisor-liveness.js';
 import {
   resolveShutdownPolicy,
@@ -34,9 +37,9 @@ interface SupervisorLivenessConfig {
 function resolveSupervisorLivenessConfig(env: NodeJS.ProcessEnv): SupervisorLivenessConfig {
   return {
     enabled: isLivenessProbeEnabled(env.DKG_SUPERVISOR_LIVENESS_PROBE),
-    shutdownGraceMs: resolveShutdownPolicy(
-      env.DKG_SHUTDOWN_HARD_TIMEOUT_MS,
-    ).supervisorGraceMs,
+    shutdownGraceMs: resolveLivenessShutdownGraceMs(
+      resolveShutdownPolicy(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS).hardTimeoutMs,
+    ),
   };
 }
 

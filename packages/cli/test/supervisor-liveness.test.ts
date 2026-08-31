@@ -32,6 +32,7 @@ import {
   LIVENESS_PROBE_INTERVAL_MS,
   LIVENESS_PROBE_TIMEOUT_MS,
   DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
+  resolveLivenessShutdownGraceMs,
 } from '../src/daemon/supervisor-liveness.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
@@ -79,9 +80,9 @@ describe('module constants', () => {
   });
 
   it('never lets supervisor shutdown grace preempt the worker hard timeout', () => {
-    expect(resolveShutdownPolicy(undefined).supervisorGraceMs).toBe(30_000);
-    expect(resolveShutdownPolicy('60000').supervisorGraceMs).toBe(66_000);
-    expect(resolveShutdownPolicy('300000').supervisorGraceMs).toBe(306_000);
+    expect(resolveLivenessShutdownGraceMs(resolveShutdownPolicy(undefined).hardTimeoutMs)).toBe(30_000);
+    expect(resolveLivenessShutdownGraceMs(resolveShutdownPolicy('60000').hardTimeoutMs)).toBe(66_000);
+    expect(resolveLivenessShutdownGraceMs(resolveShutdownPolicy('300000').hardTimeoutMs)).toBe(306_000);
   });
 });
 
