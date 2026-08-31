@@ -23,13 +23,10 @@ import {
   knowledgeAssetLayerGraphUri,
   contextGraphSharedMemoryMetaUri,
 } from '@origintrail-official/dkg-core';
-// Deep dist import: `storeKnowledgeAssetWorkspaceHead` is not re-exported from
-// the publisher package index, and seeding through the real production writers
-// keeps these fixtures byte-identical to what publish/share persists.
 import {
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
-} from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
+} from '@origintrail-official/dkg-publisher';
 
 let _fileSnapshot: string;
 beforeAll(async () => {

@@ -12,6 +12,7 @@ import {
   readDurableDataPage,
   readDurableMetaPage,
 } from '../src/sync/responder/graph-plan.js';
+import { createGraphMembershipSnapshot } from '../src/sync/graph-membership-snapshot.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const CG_ID = 'exact-asset-responder';
@@ -61,7 +62,7 @@ describe('exact asset responder', () => {
     });
     const data = await readDurableDataPage({
       store,
-      graphList: [requested.graph, alreadyPresent.graph],
+      graphMembership: createGraphMembershipSnapshot([requested.graph, alreadyPresent.graph]),
       contextGraphId: CG_ID,
       sinceBatchId: null,
       offset: 0,

@@ -177,7 +177,11 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
       inclusion: { txHash: '0xabc', blockNumber: 42 },
     });
     await pub.update(jobId, 'finalized', {
-      finalization: { confirmedByChain: true, finalizedAtMs: time, proofRef: '' },
+      finalization: {
+        mode: 'published',
+        txHash: '0xabc',
+        ual: 'did:dkg:mock/test/1',
+      },
     });
 
     let stats = await pub.getStats();
@@ -270,7 +274,11 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
     expect((await pub.getStatus(jobId))?.status).toBe('included');
 
     await pub.update(jobId, 'finalized', {
-      finalization: { confirmedByChain: true, finalizedAtMs: time, proofRef: '' },
+      finalization: {
+        mode: 'published',
+        txHash: '0xabc123',
+        ual: 'did:dkg:mock/test/1',
+      },
     });
     expect((await pub.getStatus(jobId))?.status).toBe('finalized');
 
