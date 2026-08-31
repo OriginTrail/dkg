@@ -5,7 +5,7 @@ import {
   RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1,
   RFC64_SEMANTIC_READ_QUERY_IDS_V1,
   RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1,
-  compileRfc64SemanticReadOperationV2,
+  compileRfc64SemanticReadOperationV1,
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
   deriveRfc64SubgraphSemanticAddressesV1,
@@ -114,7 +114,7 @@ const CASES: readonly {
 describe('RFC-64 semantic read manifest v1', () => {
   it('compiles one backend-neutral operation for every certified store route', () => {
     for (const fixture of CASES) {
-      const operation = compileRfc64SemanticReadOperationV2(fixture.coordinate);
+      const operation = compileRfc64SemanticReadOperationV1(fixture.coordinate);
       expect(operation.queryId).toBe(fixture.expectedQueryId);
       expect(operation.graphIri).toBe(fixture.expectedAddress.graphUri);
       expect(operation.subjectIri).toBe(fixture.expectedAddress.subject);
@@ -128,13 +128,13 @@ describe('RFC-64 semantic read manifest v1', () => {
       new Set(Object.keys(RFC64_SEMANTIC_RECORD_ROW_COUNTS_V1)),
     );
     const emittedIds = CASES.map(({ coordinate }) =>
-      compileRfc64SemanticReadOperationV2(coordinate).queryId);
+      compileRfc64SemanticReadOperationV1(coordinate).queryId);
     expect(new Set(emittedIds)).toEqual(new Set(RFC64_SEMANTIC_READ_QUERY_IDS_V1));
   });
 
   it('renders one backend-neutral bounded query for compatible adapters', () => {
     for (const fixture of CASES) {
-      const operation = compileRfc64SemanticReadOperationV2(fixture.coordinate);
+      const operation = compileRfc64SemanticReadOperationV1(fixture.coordinate);
       expect(operation.queryId).toBe(fixture.expectedQueryId);
       expect(operation.graphIri).toBe(fixture.expectedAddress.graphUri);
       expect(operation.subjectIri).toBe(fixture.expectedAddress.subject);
@@ -159,7 +159,7 @@ describe('RFC-64 semantic read manifest v1', () => {
   });
 
   it('freezes the exact current-author query vector', () => {
-    const operation = compileRfc64SemanticReadOperationV2(CASES[0].coordinate);
+    const operation = compileRfc64SemanticReadOperationV1(CASES[0].coordinate);
     expect(operation.sparql).toBe(
       'SELECT ?p ?o\n'
       + 'WHERE {\n'
@@ -185,7 +185,7 @@ describe('RFC-64 semantic read manifest v1', () => {
     ]) {
       let failure: unknown;
       try {
-        compileRfc64SemanticReadOperationV2(coordinate);
+        compileRfc64SemanticReadOperationV1(coordinate);
       } catch (cause) {
         failure = cause;
       }
@@ -206,7 +206,7 @@ describe('RFC-64 semantic read manifest v1', () => {
         return NETWORK;
       },
     });
-    expect(() => compileRfc64SemanticReadOperationV2(coordinate))
+    expect(() => compileRfc64SemanticReadOperationV1(coordinate))
       .toThrow(Rfc64SemanticReadManifestErrorV1);
     expect(invoked).toBe(false);
   });

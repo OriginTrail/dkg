@@ -29,7 +29,7 @@ export const RFC64_SEMANTIC_READ_CONCURRENCY_CLASS_V1 =
   'rfc64-semantic-control-v1' as const;
 
 /** Backend-neutral semantic read operation used by new consumers. */
-export interface Rfc64SemanticReadOperationV2 {
+export interface Rfc64SemanticReadOperationV1 {
   readonly queryId: Rfc64SemanticReadQueryIdV1;
   readonly recordType: Rfc64SemanticRecordTypeV1;
   readonly coordinate: Rfc64SemanticRecordCoordinateV1;
@@ -65,9 +65,9 @@ export class Rfc64SemanticReadManifestErrorV1 extends Error {
  * matching query ID and canonical address. Backend routing is intentionally
  * absent from this contract.
  */
-export function compileRfc64SemanticReadOperationV2(
+export function compileRfc64SemanticReadOperationV1(
   input: unknown,
-): Rfc64SemanticReadOperationV2 {
+): Rfc64SemanticReadOperationV1 {
   let coordinate: Rfc64SemanticRecordCoordinateV1;
   try {
     coordinate = snapshotRfc64SemanticRecordCoordinateV1(input);
