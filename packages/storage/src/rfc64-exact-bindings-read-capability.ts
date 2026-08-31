@@ -1,14 +1,10 @@
 import {
-  isSafeIri,
+  parseRenderedRdfStoreObjectV1,
   type CanonicalAuthorSealStoreRowV1,
   type Rfc64AuthorSealReadOperationV1,
   type Rfc64SemanticReadOperationV2,
   type Rfc64SemanticStoreObjectV1,
 } from '@origintrail-official/dkg-core';
-import {
-  XSD_STRING_DATATYPE,
-  parseRdfLiteralTerm,
-} from '@origintrail-official/dkg-rdf-utils';
 
 import {
   findTripleStoreCapability,
@@ -304,31 +300,11 @@ function assertProjectionIfPresent(
 }
 
 function parseStoreObject(input: string): Rfc64SemanticStoreObjectV1 {
-  const literal = parseRdfLiteralTerm(input);
-  if (literal?.kind === 'plain') {
-    return Object.freeze({
-      kind: 'literal',
-      value: literal.value,
-      datatypeIri: XSD_STRING_DATATYPE,
-    });
+  try {
+    return parseRenderedRdfStoreObjectV1(input);
+  } catch (cause) {
+    invalid('exact-bindings record object is not an exact RDF term', cause);
   }
-  if (literal?.kind === 'typed') {
-    return Object.freeze({
-      kind: 'literal',
-      value: literal.value,
-      datatypeIri: literal.datatype,
-    });
-  }
-  if (literal?.kind === 'language') {
-    invalid('exact-bindings record literals cannot carry a language tag');
-  }
-  const namedNode = input.startsWith('<') && input.endsWith('>')
-    ? input.slice(1, -1)
-    : input;
-  if (isSafeIri(namedNode)) {
-    return Object.freeze({ kind: 'named-node', value: namedNode });
-  }
-  invalid('exact-bindings record object is not an exact RDF term');
 }
 
 function ownDataValue(input: unknown, key: string): unknown {
@@ -342,6 +318,6 @@ function ownDataValue(input: unknown, key: string): unknown {
   return descriptor.value;
 }
 
-function invalid(message: string): never {
-  throw new Rfc64ExactBindingsReadResultErrorV1(message);
+function invalid(message: string, cause?: unknown): never {
+  throw new Rfc64ExactBindingsReadResultErrorV1(message, { cause });
 }

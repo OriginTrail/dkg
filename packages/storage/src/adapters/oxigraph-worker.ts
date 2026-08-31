@@ -20,6 +20,7 @@ import {
   deserializeWorkerErrorV1,
   type WorkerResponseV1,
 } from '../worker-error-protocol.js';
+import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -103,39 +104,6 @@ function asAbortError(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
-function waitForRespawnOrAbort(
-  respawn: Promise<void>,
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-  timeoutError: () => Error,
-): Promise<void> {
-  if (signal?.aborted) return Promise.reject(asAbortError(signal.reason));
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (action: () => void) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-      action();
-    };
-    const onAbort = () => finish(() => reject(asAbortError(signal?.reason)));
-    signal?.addEventListener('abort', onAbort, { once: true });
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => finish(() => reject(timeoutError())), timeoutMs);
-      if (typeof timer.unref === 'function') timer.unref();
-    }
-    respawn.then(
-      () => finish(resolve),
-      (cause) => finish(() => reject(cause)),
-    );
-  });
-}
 /**
  * Side-effect-free read methods. ONLY these are bounded by the per-op timeout:
  * rejecting a read after the bound is a clean, determinate failure (nothing was
@@ -626,11 +594,13 @@ export class OxigraphWorkerStore implements TripleStore {
       if (deadlineAt !== undefined && remainingMs <= 0) {
         throw createOxigraphWorkerTimeoutError(method, timeoutMs);
       }
-      await waitForRespawnOrAbort(
+      await raceStoreWorkAgainstAbort(
         this.respawnPromise,
         signal,
-        remainingMs,
-        () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+        {
+          timeoutMs: remainingMs,
+          timeoutError: () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+        },
       );
     }
     if (signal?.aborted) throw asAbortError(signal.reason);
@@ -801,7 +771,7 @@ export class OxigraphWorkerStore implements TripleStore {
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
     return this.runTrackedWrite(
       { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
-      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', input),
+      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', manifest),
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
