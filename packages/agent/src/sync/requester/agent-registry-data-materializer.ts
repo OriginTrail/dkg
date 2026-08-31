@@ -9,9 +9,9 @@ import {
 } from '../oversize-filter.js';
 import {
   authoritativeSnapshotPage,
-  reconcileAgentRegistrySnapshot,
   type AuthoritativeGraphSnapshotMaterializer,
 } from './authoritative-graph-snapshot.js';
+import type { AgentRegistrySnapshotReconciler } from './agent-registry-reconciler.js';
 import type {
   DurableDataMaterializer,
   DurableStagedSnapshotMaterializationRequest,
@@ -22,6 +22,7 @@ export interface AgentRegistryDataMaterializerDependencies {
   readonly remotePeerId: string;
   readonly store: TripleStore;
   readonly snapshots: AuthoritativeGraphSnapshotMaterializer;
+  readonly reconciler: AgentRegistrySnapshotReconciler;
   readonly insertNonRegistryQuads: (
     quads: readonly Quad[],
     signal?: AbortSignal,
@@ -85,13 +86,12 @@ export function createAgentRegistryDataMaterializer(
             filtered.dropped,
             'durable-sync:authoritative-agents',
           );
-          return reconcileAgentRegistrySnapshot({
+          return dependencies.reconciler.reconcile({
             store: dependencies.store,
             graphUri,
             remotePeerId: dependencies.remotePeerId,
             quads: filtered.kept,
             insertForwarded: (quads, options) => dependencies.store.insert(quads, options),
-            authenticatedFreshness: dependencies.snapshots.profileFreshness,
             options: {
               priority: 'background',
               source: 'agent.durableSync.agentRegistryReconcile',

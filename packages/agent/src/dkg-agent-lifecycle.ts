@@ -272,6 +272,7 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import {
+  alignSyncPageResponderSessionWithCheckpoint,
   deleteSyncPageCheckpoint,
   fetchSyncPages,
   SyncPageSizeProfileCache,
@@ -6405,6 +6406,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           remotePeerId,
           store: this.store,
           snapshots: this.authoritativeAgentSnapshots,
+          reconciler: this.agentRegistrySnapshotReconciler,
           insertNonRegistryQuads: (quads, operationSignal) =>
             this.insertSyncedQuadsAndInvalidateListCache([...quads], {
               priority: 'background',
@@ -6686,6 +6688,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             checkpoint.responderSessionOffset,
           );
         }
+        alignSyncPageResponderSessionWithCheckpoint(durableCheckpointStore, key);
       },
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),

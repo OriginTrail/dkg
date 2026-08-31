@@ -16,8 +16,12 @@ import {
 } from '../src/sync/checkpoint/state.js';
 import {
   AuthoritativeGraphSnapshotMaterializer,
-  reconcileAgentRegistrySnapshot,
+  type AuthoritativeSnapshotCheckpointTransition,
 } from '../src/sync/requester/authoritative-graph-snapshot.js';
+import {
+  AgentRegistrySnapshotReconciler,
+  reconcileAgentRegistrySnapshot,
+} from '../src/sync/requester/agent-registry-reconciler.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
 const contextGraphId = SYSTEM_CONTEXT_GRAPHS.AGENTS;
@@ -77,6 +81,7 @@ async function graphQuads(store: OxigraphStore): Promise<Quad[]> {
 async function createHarness(responses: SyncPageResult[], initial: Quad[] = []) {
   const syncCheckpoints = new MemorySyncCheckpointStore();
   const authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(syncCheckpoints);
+  const agentRegistrySnapshotReconciler = new AgentRegistrySnapshotReconciler();
   const store = new OxigraphStore();
   await store.insert(initial);
   const replaceSubjectPrefix = vi.spyOn(store, 'replaceSubjectPrefix');
@@ -87,6 +92,7 @@ async function createHarness(responses: SyncPageResult[], initial: Quad[] = []) 
     store,
     syncCheckpoints,
     authoritativeAgentSnapshots,
+    agentRegistrySnapshotReconciler,
     fetchSyncPages: async (
       _ctx: unknown,
       _peerId: string,
@@ -169,8 +175,8 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
       retainablePrefix: true,
       completeSnapshot: false,
       commit: vi.fn(),
-      transitionCheckpoint: (decision) => {
-        expect(decision).toBe('advance');
+      transitionCheckpoint: (transition) => {
+        expect(transition.kind).toBe('advance');
         checkpoints.set(checkpointKey, 1, Date.now(), 1);
       },
     });
@@ -221,6 +227,104 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
 
     expect(materializer.retainedTriples(checkpointKey)).toBe(0);
     expect(checkpoints.get(checkpointKey)).toBeUndefined();
+  });
+
+  it('restores the retained prefix coordinate after a failed final commit and resumes the suffix', async () => {
+    const checkpoints = new MemorySyncCheckpointStore();
+    const materializer = new AuthoritativeGraphSnapshotMaterializer(checkpoints);
+    const prefixQuad = quad(ownedRoot, peerIdPredicate, `"${remotePeerId}"`);
+    const suffixQuad = quad(ownedRoot, multiaddrPredicate, '"/ip4/retry"');
+    const prefix = page({
+      quads: [prefixQuad],
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      completed: false,
+      timedOut: true,
+    });
+    const expiresAt = Date.now() + 60_000;
+    checkpoints.setResponderSession(
+      checkpointKey,
+      'commit-retry-session',
+      expiresAt,
+      Date.now(),
+      undefined,
+      undefined,
+      1,
+    );
+    await materializer.materialize({
+      page: prefix,
+      verifiedQuads: prefix.quads,
+      retainablePrefix: true,
+      completeSnapshot: false,
+      commit: vi.fn(),
+      transitionCheckpoint: (transition) => {
+        if (transition.kind === 'advance') checkpoints.set(checkpointKey, 1, Date.now(), 1);
+      },
+    });
+
+    const suffix = page({
+      quads: [suffixQuad],
+      resumedFromOffset: 1,
+      nextOffset: 2,
+      completed: true,
+      timedOut: false,
+    });
+    const exposeFetchedRawCoordinate = () => checkpoints.setResponderSession(
+      checkpointKey,
+      'commit-retry-session',
+      expiresAt,
+      Date.now(),
+      undefined,
+      undefined,
+      2,
+    );
+    const transitionCheckpoint = (transition: AuthoritativeSnapshotCheckpointTransition) => {
+      if (transition.kind === 'restore') {
+        checkpoints.set(
+          checkpointKey,
+          transition.nextOffset,
+          Date.now(),
+          transition.rawNextOffset,
+        );
+      } else if (transition.kind === 'advance') {
+        checkpoints.delete(checkpointKey);
+      }
+    };
+    exposeFetchedRawCoordinate();
+
+    await expect(materializer.materialize({
+      page: suffix,
+      verifiedQuads: suffix.quads,
+      retainablePrefix: true,
+      completeSnapshot: true,
+      commit: async () => { throw new Error('injected final commit failure'); },
+      transitionCheckpoint,
+    })).rejects.toThrow('injected final commit failure');
+
+    expect(checkpoints.get(checkpointKey)).toMatchObject({
+      offset: 1,
+      responderSessionId: 'commit-retry-session',
+      responderSessionOffset: 1,
+    });
+    materializer.prepareFetch(checkpointKey);
+    expect(materializer.retainedTriples(checkpointKey)).toBe(1);
+
+    exposeFetchedRawCoordinate();
+    await expect(materializer.materialize({
+      page: suffix,
+      verifiedQuads: suffix.quads,
+      retainablePrefix: true,
+      completeSnapshot: true,
+      commit: async (quads) => {
+        expect(quads).toEqual([prefixQuad, suffixQuad]);
+        return quads.length;
+      },
+      transitionCheckpoint,
+    })).resolves.toMatchObject({
+      kind: 'committed-snapshot',
+      committedTriples: 2,
+    });
+    expect(materializer.retainedTriples(checkpointKey)).toBe(0);
   });
 
   it('prunes only expired retained snapshots and their paired requester checkpoints', async () => {
@@ -295,8 +399,8 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
         retainablePrefix: true,
         completeSnapshot: false,
         commit: vi.fn(),
-        transitionCheckpoint: (decision) => {
-          if (decision === 'advance') {
+        transitionCheckpoint: (transition) => {
+          if (transition.kind === 'advance') {
             checkpoints.set(checkpointKey, index + 1, Date.now(), index + 1);
           }
         },
@@ -353,8 +457,8 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
         retainablePrefix: true,
         completeSnapshot: false,
         commit: vi.fn(),
-        transitionCheckpoint: (decision) => {
-          if (decision === 'advance') checkpoints.set(key, 1, Date.now(), 1);
+        transitionCheckpoint: (transition) => {
+          if (transition.kind === 'advance') checkpoints.set(key, 1, Date.now(), 1);
         },
       });
     };
@@ -515,6 +619,43 @@ describe('authority-scoped AGENTS durable snapshot materialization', () => {
     expect(await harness.live()).toEqual(expect.arrayContaining(current));
     expect(await harness.live()).not.toContainEqual(poisoned);
     expect(await harness.live()).not.toContainEqual(poisonedChild);
+  });
+
+  it('treats an existing descendant-only tree as an existing profile root', async () => {
+    const store = new OxigraphStore();
+    const wallet = new ethers.Wallet(`0x${'99'.repeat(32)}`);
+    const peerId = '12D3KooWDescendantOnlyPeer';
+    const root = `did:dkg:agent:${wallet.address.toLowerCase()}`;
+    const existingDescendant = quad(
+      `${root}/.well-known/genid/cap1`,
+      'https://schema.org/name',
+      '"existing-descendant"',
+    );
+    await store.insert([existingDescendant]);
+    const incoming = profile(
+      root,
+      peerId,
+      '2026-08-30T00:00:00.000Z',
+      '/ip4/forwarded',
+    );
+    incoming.push(
+      quad(root, peerBindingVersionPredicate, '"1"'),
+      quad(
+        root,
+        peerIdProofPredicate,
+        `"${signAgentPeerIdBinding(wallet.address, peerId, wallet.privateKey)}"`,
+      ),
+    );
+
+    expect(await reconcileAgentRegistrySnapshot({
+      store,
+      graphUri: graph,
+      remotePeerId,
+      quads: incoming,
+      insertForwarded: (quads, options) => store.insert(quads, options),
+      invalidate: vi.fn(),
+    })).toBe(0);
+    expect(await graphQuads(store)).toEqual([existingDescendant]);
   });
 
   it('ignores an unproven wallet-root squat and lets a proven wallet owner supersede poison', async () => {

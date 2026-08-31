@@ -232,7 +232,16 @@ export interface DurableDataMaterializationRequest {
 export interface DurableStagedSnapshotMaterializationRequest
   extends DurableDataMaterializationRequest {
   /** Strategy-owned synchronous transition paired with retained DATA state. */
-  readonly transitionCheckpoint: (decision: 'advance' | 'discard') => void;
+  readonly transitionCheckpoint: (
+    transition:
+      | { readonly kind: 'advance' }
+      | { readonly kind: 'discard' }
+      | {
+          readonly kind: 'restore';
+          readonly nextOffset: number;
+          readonly rawNextOffset: number;
+        },
+  ) => void;
 }
 
 export type DurableDataMaterializationOutcome =
@@ -1344,9 +1353,16 @@ async function runDurableSyncWithBudget(
         const materialized: DurableDataMaterializationOutcome = stagedSnapshot
           ? await dataMaterializer.materialize({
               ...baseRequest,
-              transitionCheckpoint: (decision) => {
-                if (decision === 'discard') {
+              transitionCheckpoint: (transition) => {
+                if (transition.kind === 'discard') {
                   deleteCheckpoint(effectiveDataResult.checkpointKey);
+                  return;
+                }
+                if (transition.kind === 'restore') {
+                  setCheckpoint(effectiveDataResult.checkpointKey, {
+                    offset: transition.nextOffset,
+                    responderSessionOffset: transition.rawNextOffset,
+                  });
                   return;
                 }
                 recordPhaseOutcome(effectiveDataResult, {

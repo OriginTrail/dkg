@@ -28,6 +28,7 @@ import { ContextGraphMembershipPersistScheduler } from './context-graph-membersh
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import { AuthoritativeGraphSnapshotMaterializer } from './sync/requester/authoritative-graph-snapshot.js';
+import { AgentRegistrySnapshotReconciler } from './sync/requester/agent-registry-reconciler.js';
 import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
 import type {
   Rfc64AuthorizedSwmRecoveryPlanV1,
@@ -1699,6 +1700,8 @@ export class DKGAgentBase {
   protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
   /** Private, resumable staging for mutable authoritative graph snapshots. */
   protected authoritativeAgentSnapshots!: AuthoritativeGraphSnapshotMaterializer;
+  /** Authentication, freshness, and storage policy for completed AGENTS snapshots. */
+  protected agentRegistrySnapshotReconciler!: AgentRegistrySnapshotReconciler;
   protected changelogCursors: ChangelogCursorStore = new MemoryChangelogCursorStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
   /** Agent-owned retained selected-SWM transfers, created lazily and drained before store close. */
@@ -1801,6 +1804,7 @@ export class DKGAgentBase {
     this.authoritativeAgentSnapshots = new AuthoritativeGraphSnapshotMaterializer(
       this.syncCheckpoints,
     );
+    this.agentRegistrySnapshotReconciler = new AgentRegistrySnapshotReconciler();
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
   }
 
