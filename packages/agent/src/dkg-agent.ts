@@ -878,7 +878,17 @@ export class DKGAgent extends DKGAgentBase {
         },
         connectToPeerId: (peerId, options) => this.connectToPeerId(peerId, options),
         queueRecoveryPlan: (plan, onError, delayMs) => {
-          this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(plan, onError, delayMs);
+          const authorizedPlan = this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
+            plan,
+            this.config.syncReconcilerTiming.stalenessThresholdMs,
+          );
+          if (authorizedPlan !== null) {
+            this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+              authorizedPlan,
+              onError,
+              delayMs,
+            );
+          }
         },
         synchronizeTarget: (params) => (
           this.synchronizeRfc64CatalogRolloutFromProvidersV1(params)
