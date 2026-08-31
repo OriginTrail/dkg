@@ -644,6 +644,45 @@ describe('ChainEventPoller — pollNow', () => {
     expect(filters[1].toBlock).toBe(50_010);
   });
 
+  it('stop() during a manual poll drains the queue: no scan starts after stop resolves (review r6)', async () => {
+    let now = 0;
+    let scansStarted = 0;
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((r) => { releaseFirst = r; });
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => 50_000,
+      listenForEvents: async function* (): AsyncIterable<ChainEvent> {
+        scansStarted += 1;
+        if (scansStarted === 1) await firstGate; // hold the FIRST scan open across stop()
+        for (const evt of [] as ChainEvent[]) yield evt;
+      },
+    } as unknown as ChainAdapter;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+
+    const p1 = poller.pollNow();          // starts scanning, blocked on the gate
+    const p2 = poller.pollNow();          // queued behind p1
+    await new Promise((r) => setTimeout(r, 10));
+    const stopped = poller.stop();        // stop() begins while p1 is mid-scan
+    releaseFirst();
+    await stopped;
+
+    const startedAtStop = scansStarted;
+    await Promise.allSettled([p1, p2]);
+    // p2 was queued but unstarted when stop() began: it must have been
+    // CANCELLED, not started — and nothing may start after stop() resolved.
+    expect(startedAtStop).toBe(1);
+    expect(scansStarted).toBe(1);
+    // A pollNow() issued after stop() is refused loudly rather than queued.
+    await expect(poller.pollNow()).rejects.toThrow(/stopped/);
+  });
+
   it("passing the removed 'onCollectionUpdated' key warns loudly and enables no lane (review r3)", async () => {
     // A JavaScript consumer of the old key would otherwise fail silently. The
     // observable behaviour is unchanged from before the rename — the old lane

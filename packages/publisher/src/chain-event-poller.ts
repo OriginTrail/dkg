@@ -279,6 +279,12 @@ export class ChainEventPoller {
   private inFlightPoll: Promise<void> | null = null;
   /** Serializes manual `pollNow()` callers; see the method's comment. */
   private manualPollChain: Promise<void> = Promise.resolve();
+  /**
+   * Set at the top of `stop()` (review r6): queued manual polls that have
+   * not STARTED become safe no-ops instead of racing the caller's provider
+   * teardown, and new `pollNow()` calls are refused outright.
+   */
+  private stopping = false;
 
   /** Max blocks to scan per poll — stays within typical RPC range limits. */
   private static readonly MAX_RANGE = 9_000;
@@ -385,12 +391,20 @@ export class ChainEventPoller {
     // (the second runs after the first settles), and each caller sees only its
     // own scan's rejection — the swallowing `.catch` on the stored chain keeps
     // one caller's failure from poisoning the queue.
+    if (this.stopping) {
+      return Promise.reject(new Error('ChainEventPoller is stopped; pollNow() refused'));
+    }
     const run = this.manualPollChain.then(() => this.runManualPoll());
     this.manualPollChain = run.catch(() => {});
     return run;
   }
 
   private async runManualPoll(): Promise<void> {
+    // A queued manual poll that had not started when `stop()` began is
+    // CANCELLED (resolves without scanning) — documented shutdown semantics:
+    // stop() drains started work and discards queued work, so no adapter
+    // call can begin after stop() has resolved.
+    if (this.stopping) return;
     await this.waitForCurrentPoll();
     this.laneRunner.clearActiveLaneSchedules();
     const pending = this.laneRunner.poll();
@@ -425,11 +439,18 @@ export class ChainEventPoller {
    * void; they just lose the in-flight-await guarantee.
    */
   async stop(): Promise<void> {
+    this.stopping = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
     this.running = false;
+    // Drain the ENTIRE manual queue (review r6): the serialized chain settles
+    // only after every queued entry has either completed or been cancelled by
+    // the `stopping` flag above — without this await, a queued manual scan
+    // could START after stop() returned and race the provider teardown that
+    // callers legitimately perform next.
+    try { await this.manualPollChain; } catch { /* chain is pre-swallowed */ }
     const pending = this.inFlightPoll;
     if (pending) {
       // The `.catch(() => {})` chain at the call sites already swallows
