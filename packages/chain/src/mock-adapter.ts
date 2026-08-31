@@ -54,11 +54,22 @@ export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
  *
  * ONE source (review r6): the EVM adapter's `SERVED_EVENT_TYPES` — the keys
  * of its event-ownership registry — so the mock cannot drift into a third
- * representation of the served vocabulary. "Declared" for the mock means the
- * public name is served by `listenForEvents`, exactly the parity the CH-8
- * probe contract wants.
+ * representation of the served vocabulary.
+ *
+ * "Declared" for the mock means the real probe would say yes (review r8):
+ * served by `listenForEvents` AND declarable by a shipped client ABI. The
+ * roster still routes `ContextGraphExpanded` for the mock's legacy emissions,
+ * but no ABI under `packages/chain/abi/**` carries that fragment, so the REAL
+ * probe fails closed on it — and the mock's probe mirrors that judgement
+ * rather than its own emitting ability: a developer gating a feature on this
+ * answer offline must not enable what production can never deliver. The
+ * cross-adapter parity test pins the exception list against the measured EVM
+ * probe, so it cannot rot in either direction.
  */
-const MOCK_DECLARED_EVENT_TYPES: ReadonlySet<string> = new Set(SERVED_EVENT_TYPES);
+const EVM_UNDECLARABLE_EVENT_TYPES: ReadonlySet<string> = new Set(['ContextGraphExpanded']);
+const MOCK_DECLARED_EVENT_TYPES: ReadonlySet<string> = new Set(
+  SERVED_EVENT_TYPES.filter((name) => !EVM_UNDECLARABLE_EVENT_TYPES.has(name)),
+);
 
 export interface MockChainAdapterOptions {
   /** Seed the first CG allocation for fixtures that model an existing registry. */

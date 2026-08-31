@@ -42,11 +42,41 @@
  * red until parity is restored or a documented exemption is added.
  */
 import { describe, it, expect } from 'vitest';
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { loadAbi } from '../src/evm-adapter-abi.js';
 import { KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES, SERVED_EVENT_TYPES } from '../src/evm-adapter-events.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
 import { ethers } from 'ethers';
+
+/**
+ * The EVM adapter with its FIVE owning contracts bound offline from the
+ * SHIPPED client ABIs — so `supportsEventTypes` below is the REAL probe over
+ * the real fragments, not a stub (review r8). Nothing dials: the probe only
+ * inspects `contract.interface`.
+ */
+function makeOfflineEvmAdapter(): EVMChainAdapter {
+  const config: EVMAdapterConfig = {
+    rpcUrl: 'http://127.0.0.1:59998',
+    privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+    hubAddress: '0x0000000000000000000000000000000000000001',
+    chainId: 'evm:31337',
+    staticNetwork: false,
+  };
+  const adapter = new EVMChainAdapter(config);
+  const priv = adapter as unknown as { init: () => Promise<void>; contracts: Record<string, unknown> };
+  priv.init = async () => { /* offline */ };
+  const bind = (abiName: string, fill: string): ethers.Contract =>
+    new ethers.Contract('0x' + fill.repeat(20), loadAbi(abiName));
+  priv.contracts = {
+    knowledgeAssetStorage: bind('DKGKnowledgeAssets', '11'),
+    knowledgeAssetsStorage: bind('KnowledgeAssetsStorage', '12'),
+    contextGraphStorage: bind('ContextGraphStorage', '13'),
+    contextGraphNameRegistry: bind('ContextGraphNameRegistry', '14'),
+    profileStorage: bind('ProfileStorage', '15'),
+  };
+  return adapter;
+}
 
 /** Collect all own method names across the whole prototype chain, minus `constructor`. */
 function collectMethodNames(ctor: Function): Set<string> {
@@ -408,16 +438,41 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     await expect(
       mock.supportsEventTypes(KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES),
     ).resolves.toEqual([]);
-    // Full served vocabulary, not just the root-mutation consumer (review r6):
-    // the mock's declared set now DERIVES from the EVM adapter's registry keys,
-    // and this row is what fails if either side grows a private spelling.
-    await expect(mock.supportsEventTypes(SERVED_EVENT_TYPES)).resolves.toEqual([]);
+    // The full-vocabulary comparison lives in the cross-adapter row below
+    // (review r8): asserting the mock against the very list its declared set
+    // derives from was a tautology — `new Set(X)` holds all of X.
     // Unknown names must come back as missing, not be absorbed: a caller that
     // probes for a typo'd event name needs to see the typo, and an
     // all-supported stub would make this row impossible to fail.
     await expect(
       mock.supportsEventTypes(['KnowledgeAssetUpdated', 'NoSuchEventOnAnyAbi']),
     ).resolves.toEqual(['NoSuchEventOnAnyAbi']);
+  });
+
+  it('the REAL EVM ABI probe and the mock probe agree over the full served vocabulary (review r8)', async () => {
+    // Both probes MEASURED, neither derived: the EVM adapter is bound offline
+    // with the shipped client ABIs, the mock answers from its declared set.
+    const evm = makeOfflineEvmAdapter();
+    const mock = new MockChainAdapter();
+
+    const evmMissing = await evm.supportsEventTypes(SERVED_EVENT_TYPES);
+    const mockMissing = await mock.supportsEventTypes(SERVED_EVENT_TYPES);
+    expect(evmMissing).toEqual(mockMissing);
+
+    // The one name the parity currently rests on an exception for:
+    // `ContextGraphExpanded` is served by a scan branch and emitted by the
+    // mock's legacy simulations, but NO shipped client ABI declares the
+    // fragment — so the real probe fails closed and the mock mirrors that
+    // judgement. This literal pin is what forces the mock's exception list
+    // to be revisited if the fragment ever ships (the row above would then
+    // fail on `evmMissing = []` vs `mockMissing = ['ContextGraphExpanded']`).
+    expect(evmMissing).toEqual(['ContextGraphExpanded']);
+
+    // The four names the kaRootMutations feature gates on are supported by
+    // the MEASURED probe on both adapters.
+    await expect(
+      evm.supportsEventTypes(KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES),
+    ).resolves.toEqual([]);
   });
 
   it('method arity (declared parameter count) is within 1 of EVMChainAdapter for each shared method', () => {

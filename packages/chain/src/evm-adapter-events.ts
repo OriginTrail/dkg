@@ -70,7 +70,11 @@ const EVENT_ABI_ALIASES: Readonly<Record<string, readonly string[]>> = Object.fr
   ContextGraphNameClaimed: ['NameClaimed', 'ContextGraphNameClaimed'],
 });
 
-const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> = Object.freeze({
+// The `satisfies` clause makes a root-mutation name WITHOUT an ownership row
+// a compile error (review r8): adding a fifth name to
+// `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES` breaks this file until the row
+// exists, instead of silently probing "unserved" for a name the scan serves.
+const EVENT_OWNING_CONTRACT_ROWS = {
   KnowledgeBatchCreated: 'knowledgeAssetsStorage', // V8 archive binding
   ContextGraphExpanded: 'contextGraphStorage',
   KnowledgeAssetRegisteredToContextGraph: 'contextGraphStorage',
@@ -84,7 +88,11 @@ const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> = Obj
   KnowledgeAssetMerkleRootAdded: 'knowledgeAssetStorage',
   KnowledgeAssetMerkleRootsUpdated: 'knowledgeAssetStorage',
   KnowledgeAssetMerkleRootRemoved: 'knowledgeAssetStorage',
-});
+} as const satisfies Record<KnowledgeAssetRootMutationEventType, keyof ContractCache> &
+  Record<string, keyof ContractCache>;
+
+const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> =
+  Object.freeze(EVENT_OWNING_CONTRACT_ROWS);
 
 /**
  * The full public event vocabulary `listenForEvents` serves — exactly the
