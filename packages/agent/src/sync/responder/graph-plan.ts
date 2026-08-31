@@ -24,6 +24,7 @@ import {
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
   SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  isSyncRowSnapshotPagingRequiredError,
 } from './snapshot-cache.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -924,12 +925,8 @@ export async function readSwmMetaPage(params: {
           cache,
         )
         : undefined,
-      // The per-snapshot budget fallback MUST stay enabled here (#1847): it
-      // degrades to the bounded plan-paged reader above, never to the deleted
-      // global-sort query. This policy used to be a positional boolean, and
-      // passing `params.cutoffIso == null` in that position is the exact defect
-      // that made every 64,000-row `_meta` CG permanently unsyncable on mainnet.
-      fallbackOnPerSnapshotBudget: true,
+      // Intrinsic snapshot-size refusals always degrade to the bounded
+      // plan-paged reader above, never to the deleted global-sort query (#1847).
     },
   );
 }
@@ -2130,11 +2127,6 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   );
 }
 
-function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudgetError {
-  return error instanceof SyncRowSnapshotBudgetError &&
-    (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes');
-}
-
 /**
  * Session-plan getter shared by the plan-backed lanes (exact-graph and TTL SWM
  * meta), owning the one lifecycle both must agree on:
@@ -2194,10 +2186,10 @@ function createSessionPlanGetter<T>(
  * Serve one responder page, owning the single budget-fallback policy for every
  * memoized phase. It tries the stable-snapshot cache first, but an
  * intrinsically-oversized snapshot (over the PER-snapshot row/byte budget) must
- * stay syncable, so it falls back to the session-less store-bounded page read
- * for this and every later page of the session. The memo remembers the
- * per-snapshot rejection for the session, so subsequent pages reach this
- * fallback without repeating the full materialization inside the memo.
+ * stay syncable, so it falls back to the store-bounded page read for this and
+ * every later page of the session. Transient store errors propagate: they are
+ * not proof of intrinsic size, and OFFSET paging cannot provide an immutable
+ * session view when the underlying graph may change between requests.
  *
  * GLOBAL (process-wide) budget pressure is deliberately NOT swallowed here: it
  * is not a `snapshot_rows`/`snapshot_bytes` error, so it propagates as the quiet
@@ -2275,21 +2267,9 @@ async function loadStorePagedSnapshot(
   }
 }
 
-/**
- * Optional behavior of {@link readResponderRowsPage}, named instead of
- * positional: a bare boolean in this helper's signature is how the #1847
- * production defect happened (`params.cutoffIso == null` read as the fallback
- * policy), so call sites must now spell the policy out.
- */
 interface ResponderRowsPageOptions {
   /** Session snapshot loader; omitted phases build via the store-paged loader. */
   loadSnapshot?: () => Promise<readonly SyncRow[]>;
-  /**
-   * Whether a PER-snapshot rows/bytes budget refusal degrades to the
-   * store-bounded page loader for this and every later page of the session
-   * (defaults to true; global budget pressure always propagates).
-   */
-  fallbackOnPerSnapshotBudget?: boolean;
   /**
    * Extend a served page forward so it ends on a `(g, s)` subject boundary,
    * never mid-subject (#1788). Only the durable-meta lane sets this: its rows
@@ -2313,7 +2293,6 @@ async function readResponderRowsPage(
   options?: ResponderRowsPageOptions,
 ): Promise<SyncRow[]> {
   const loadSnapshot = options?.loadSnapshot;
-  const fallbackOnPerSnapshotBudget = options?.fallbackOnPerSnapshotBudget ?? true;
   const subjectAtomic = options?.subjectAtomic ?? false;
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
@@ -2332,7 +2311,7 @@ async function readResponderRowsPage(
       subjectAtomic,
     );
   } catch (error) {
-    if (!isPerSnapshotBudgetError(error) || !fallbackOnPerSnapshotBudget) throw error;
+    if (!isSyncRowSnapshotPagingRequiredError(error)) throw error;
     return loadStoreBoundedPage(safeOffset, safeLimit, signal);
   }
 }

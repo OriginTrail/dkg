@@ -84,6 +84,7 @@ export default defineConfig({
       "test/sync-responder-log-volume.test.ts",
       "test/sync-responder-snapshot-cache.test.ts",
       "test/sync-responder-durable-meta-subject-atomic.test.ts",
+      "test/sync-responder-snapshot-failure-policy.test.ts",
       "test/sync-responder-cursor.test.ts",
       "test/sync-responder-oversized-fallback.test.ts",
       "test/sync-responder-swm-meta-ceiling.test.ts",
