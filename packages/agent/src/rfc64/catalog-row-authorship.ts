@@ -548,6 +548,53 @@ export function readVerifiedAuthorCatalogRowAuthorshipV1(
   return VERIFIED_AUTHOR_CATALOG_ROW_AUTHORSHIPS_V1.get(value as object)!;
 }
 
+/**
+ * Expand one fully verified row capability across the other rows in the exact
+ * same signed bucket. The anchor already closes the delegation, head, path,
+ * bucket signature, scope, and packed-author binding for the bucket object.
+ * Requiring the identical bucket digest makes it safe to avoid repeating that
+ * fixed proof for every row while retaining row-specific digest capabilities.
+ */
+export function deriveVerifiedAuthorCatalogBucketRowAuthorshipsV1(
+  anchor: unknown,
+  catalogBucket: SignedAuthorCatalogBucketEnvelopeV1,
+): readonly VerifiedAuthorCatalogRowAuthorshipV1[] {
+  assertVerifiedAuthorCatalogRowAuthorshipV1(anchor);
+  const anchorSnapshot = VERIFIED_AUTHOR_CATALOG_ROW_AUTHORSHIPS_V1.get(anchor as object)!;
+  const bucket = snapshotCatalogBucket(catalogBucket);
+  if (
+    bucket.objectDigest !== anchorSnapshot.bucketObjectDigest
+    || bucket.payload.bucketId !== anchorSnapshot.bucketId
+    || !bucket.payload.rows.some((row) => (
+      computeAuthorCatalogRowDigestV1(anchorSnapshot.catalogScopeDigest, row)
+      === anchorSnapshot.catalogRowDigest
+    ))
+  ) {
+    fail(
+      'AUTHORSHIP_BUCKET_BINDING_MISMATCH',
+      'bulk authorship derivation requires the anchor\'s exact signed bucket',
+    );
+  }
+  return Object.freeze(bucket.payload.rows.map((candidate) => {
+    const row = snapshotCatalogRow(candidate);
+    if ((BigInt(row.kaId) >> 96n) !== BigInt(anchorSnapshot.authorAddress)) {
+      fail(
+        'AUTHORSHIP_ROW_BINDING_MISMATCH',
+        'bulk authorship row high 160 bits do not equal the verified bucket author',
+      );
+    }
+    return mintVerifiedAuthorship({
+      ...anchorSnapshot,
+      catalogRowDigest: computeAuthorCatalogRowDigestV1(
+        anchorSnapshot.catalogScopeDigest,
+        row,
+      ),
+      transferIdentityDigest: computeKaTransferIdentityDigestV1(row.transfer),
+      row,
+    });
+  }));
+}
+
 function snapshotTopLevelInput(
   input: VerifyAuthorCatalogRowAuthorshipInputV1,
 ): VerifyAuthorCatalogRowAuthorshipInputV1 {
