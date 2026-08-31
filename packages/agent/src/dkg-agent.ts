@@ -453,7 +453,10 @@ import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { Rfc64SwmRecoveryCoordinatorV1 } from
   './rfc64/swm-recovery-coordinator-v1.js';
-import { resolveRfc64PeerSwmRecoveryPlanV1 } from
+import {
+  resolveRfc64PeerSwmRecoveryPlanV1,
+  resolveRfc64SwmRecoveryLaneV1,
+} from
   './rfc64/swm-recovery-plan-v1.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
@@ -941,7 +944,14 @@ export class DKGAgent extends DKGAgentBase {
     });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
       admission: {
-        selectedPublicContextGraphIds: () => this.config.syncContextGraphs ?? [],
+        selectedPublicContextGraphIds: () => (
+          this.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs.filter(
+            (contextGraphId) => resolveRfc64SwmRecoveryLaneV1(
+              this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+              contextGraphId,
+            ) === 'selected-public',
+          )
+        ),
         requestSelectedPublicAdmission: (peerId, contextGraphIds) =>
           this.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds),
         refreshSelectedPublicAdmission: (peerId, contextGraphIds, minimumTerminalAgeMs) =>
@@ -959,10 +969,11 @@ export class DKGAgent extends DKGAgentBase {
           );
           return Object.freeze({
             ...plan,
-            targets: Object.freeze(plan.targets.filter(({ contextGraphId }) => (
-              this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)
-                .legacySyncAllowed
-            ))),
+            targets: Object.freeze(plan.targets.filter(({ contextGraphId }) => {
+              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+              return authority.legacySyncAllowed
+                || (authority.active && authority.track2Enabled);
+            })),
           });
         },
         isCatalogReady: (peerId) =>

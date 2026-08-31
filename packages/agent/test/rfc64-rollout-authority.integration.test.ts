@@ -8,6 +8,7 @@ import { multiaddr } from '@multiformats/multiaddr';
 import {
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
+  createOperationContext,
   computeAuthorCatalogScopeDigestV1,
   computeNetworkId,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
@@ -409,6 +410,54 @@ describe('RFC-64 rollout authority integration', () => {
       expect.any(Function),
       0,
     );
+  });
+
+  it('keeps selected complete-provider recovery live under catalog authority', async () => {
+    const providerPeerId = '12D3KooWCatalogCompleteProvider';
+    let connect!: ReturnType<typeof vi.spyOn>;
+    let queue!: ReturnType<typeof vi.spyOn>;
+    const catalog = await startAgent('catalog-complete-provider', {
+      ...activation('catalog'),
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: policyEnvelope(),
+          targets: [],
+          completeSwmProviders: [providerPeerId],
+        }],
+      },
+    }, undefined, undefined, (agent) => {
+      connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
+      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+        .mockReturnValue(true);
+    });
+    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs)
+      .toEqual([CONTEXT_GRAPH_ID]);
+    expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
+    expect(queue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'rfc64-authorized-swm-recovery-v1',
+        providerPeerId,
+        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+      }),
+      expect.any(Function),
+      0,
+    );
+    await expect(catalog.planSharedMemorySyncContextGraphs(
+      providerPeerId,
+      [CONTEXT_GRAPH_ID],
+      createOperationContext('sync'),
+    )).resolves.toEqual({ targets: [] });
+    await expect(catalog.planSharedMemorySyncContextGraphs(
+      providerPeerId,
+      [CONTEXT_GRAPH_ID],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({
+      targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+    });
   });
 
   it.each(['legacy', 'shadow'] as const)(

@@ -4623,11 +4623,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
   ): readonly string[] {
-    const selected = new Set(this.config.syncContextGraphs ?? []);
+    const selected = new Set(
+      this.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs,
+    );
     return resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
       this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
       remotePeer,
-    ).filter((contextGraphId) => selected.has(contextGraphId));
+    ).filter((contextGraphId) => (
+      selected.has(contextGraphId)
+      && resolveRfc64SwmRecoveryLaneV1(
+        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+        contextGraphId,
+      ) === 'selected-public'
+    ));
   }
 
   /**
@@ -4640,7 +4648,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Rfc64SelectedSwmGraphSyncStatus {
-    const selected = (this.config.syncContextGraphs ?? []).includes(contextGraphId);
+    const selected = this.readRfc64CatalogRuntimeSelectionV1()
+      .selectedContextGraphs.includes(contextGraphId)
+      && resolveRfc64SwmRecoveryLaneV1(
+        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+        contextGraphId,
+      ) === 'selected-public';
     const providerPeerIds = [
       ...new Set(this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)),
     ];
@@ -5057,13 +5070,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const validatedRecoveryPlan = recoveryPlan === undefined
       ? null
       : this.rfc64SwmRecoveryCoordinatorV1.revalidate(recoveryPlan);
+    const selectedPublicContextGraphIds = this.selectedSwmBootstrapContextGraphIdsForPeer(
+      remotePeer,
+    );
     const requestedScope: SelectedSharedMemoryRequestedScope = validatedRecoveryPlan === null
       ? {
         kind: 'selected-public',
         targets: sharedMemoryPlanTargets(
           await this.planSharedMemorySyncContextGraphs(
             remotePeer,
-            this.config.syncContextGraphs ?? [],
+            selectedPublicContextGraphIds,
             createOperationContext('sync'),
             { requireCompleteProviderMatch: true },
           ),
@@ -5172,18 +5188,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
-      if (!this.resolveRfc64CatalogReceiverAuthorityV1(
+      const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+      const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
         contextGraphId,
-      ).legacySyncAllowed) {
+      );
+      const acceptedRecoveryLane = resolveRfc64SwmRecoveryLaneV1(
+        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+        contextGraphId,
+      );
+      const selectedCatalogRecovery = options.requireCompleteProviderMatch === true
+        && acceptedRecoveryLane === 'selected-public'
+        && authority.active
+        && authority.track2Enabled
+        && remotePeerId !== undefined
+        && completeSwmProviders.includes(remotePeerId);
+      if (!authority.legacySyncAllowed && !selectedCatalogRecovery) {
         this.log.debug(
           ctx,
           `Skipping legacy SWM planning for catalog-authoritative CG "${contextGraphId.slice(0, 28)}"`,
         );
         continue;
       }
-      const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
-        contextGraphId,
-      );
       if (
         completeSwmProviders.length === 0
         && !(await this.canUseSharedMemoryForContextGraph(contextGraphId))
@@ -5191,10 +5216,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.log.warn(ctx, `Skipping SWM sync for unauthorized or unconfirmed context graph "${contextGraphId}"`);
         continue;
       }
-      const acceptedRecoveryLane = resolveRfc64SwmRecoveryLaneV1(
-        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-        contextGraphId,
-      );
       if (
         acceptedRecoveryLane === 'ordinary-private'
         || await this.isPrivateContextGraph(contextGraphId)

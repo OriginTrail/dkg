@@ -379,6 +379,9 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           agent.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds)
         ),
       },
+      readRfc64CatalogRuntimeSelectionV1: () => ({
+        selectedContextGraphs: [publicCg],
+      }),
       selectedSwmBootstrapContextGraphIdsForPeer:
         LifecycleSyncMethods.prototype.selectedSwmBootstrapContextGraphIdsForPeer,
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -478,6 +481,9 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           agent.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds)
         ),
       },
+      readRfc64CatalogRuntimeSelectionV1: () => ({
+        selectedContextGraphs: [publicCg],
+      }),
       selectedSwmBootstrapContextGraphIdsForPeer:
         LifecycleSyncMethods.prototype.selectedSwmBootstrapContextGraphIdsForPeer,
       getPeerProtocols: async () => [PROTOCOL_SYNC],

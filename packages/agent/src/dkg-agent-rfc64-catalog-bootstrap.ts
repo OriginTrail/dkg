@@ -145,7 +145,7 @@ export interface Rfc64CatalogBootstrapPartitionV1 {
   readonly retryIntervalMs?: number;
   readonly track2Policies: readonly Rfc64CatalogBootstrapPolicyV1[];
   readonly track2Targets: readonly Rfc64CatalogBootstrapTargetPlanV1[];
-  readonly legacyRecoveryConfig: Readonly<{
+  readonly recoveryConfig: Readonly<{
     readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
     readonly retryIntervalMs?: number;
   }>;
@@ -153,7 +153,7 @@ export interface Rfc64CatalogBootstrapPartitionV1 {
 
 interface BootstrapStateV1 {
   readonly retryIntervalMs?: number;
-  readonly legacyRecoveryConfig: Rfc64CatalogBootstrapPartitionV1['legacyRecoveryConfig'];
+  readonly recoveryConfig: Rfc64CatalogBootstrapPartitionV1['recoveryConfig'];
   readonly targets: MutableTargetStatusV1[];
   readonly runner: Rfc64CoalescingSupervisorV1;
   pass: number;
@@ -206,13 +206,13 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     const partition = this.#dependencies.resolvePartition();
     if (partition === undefined) return;
     this.#dependencies.acceptTrack2Policies(partition.track2Policies);
-    const hasLegacyRecoveryProviders = partition.legacyRecoveryConfig.acceptedPolicies.some(
+    const hasRecoveryProviders = partition.recoveryConfig.acceptedPolicies.some(
       ({ completeSwmProviders = [] }) => completeSwmProviders.length > 0,
     );
-    if (partition.track2Policies.length === 0 && !hasLegacyRecoveryProviders) return;
+    if (partition.track2Policies.length === 0 && !hasRecoveryProviders) return;
     this.#catalogPhaseReady = false;
     this.#configuredRecoveryProviders = new Set(
-      partition.legacyRecoveryConfig.acceptedPolicies.flatMap(
+      partition.recoveryConfig.acceptedPolicies.flatMap(
         ({ completeSwmProviders = [] }) => completeSwmProviders,
       ),
     );
@@ -230,7 +230,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     });
     state = {
       retryIntervalMs: partition.retryIntervalMs,
-      legacyRecoveryConfig: partition.legacyRecoveryConfig,
+      recoveryConfig: partition.recoveryConfig,
       targets: partition.track2Targets.map(newPendingTargetV1),
       runner,
       pass: 0,
@@ -290,16 +290,22 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     state.pass += 1;
     state.lastPassStartedAtMs = Date.now();
     try {
-      const activeLegacyPolicies = state.legacyRecoveryConfig.acceptedPolicies.filter(
-        ({ policyEnvelope }) => this.#dependencies.resolveReceiverAuthority(
-          policyEnvelope.payload.contextGraphId,
-        ).legacySyncAllowed,
+      const activeRecoveryPolicies = state.recoveryConfig.acceptedPolicies.filter(
+        ({ policyEnvelope }) => {
+          const authority = this.#dependencies.resolveReceiverAuthority(
+            policyEnvelope.payload.contextGraphId,
+          );
+          // Legacy/shadow recovery remains available through the ordinary lane.
+          // Catalog mode uses the separately admitted complete-provider lane,
+          // which is Track-2 work and must follow live edge selection.
+          return authority.legacySyncAllowed || authority.track2Enabled;
+        },
       );
-      const activeLegacyRecoveryConfig = Object.freeze({
-        ...state.legacyRecoveryConfig,
-        acceptedPolicies: Object.freeze(activeLegacyPolicies),
+      const activeRecoveryConfig = Object.freeze({
+        ...state.recoveryConfig,
+        acceptedPolicies: Object.freeze(activeRecoveryPolicies),
       });
-      const completeSwmProviders = [...new Set(activeLegacyPolicies.flatMap(
+      const completeSwmProviders = [...new Set(activeRecoveryPolicies.flatMap(
         ({ completeSwmProviders: providers = [] }) => providers,
       ))];
       const connectedCompleteSwmProviders = new Set<string>();
@@ -330,7 +336,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
       for (const providerPeerId of connectedCompleteSwmProviders) {
         this.#dependencies.queueRecoveryPlan(
           resolveRfc64PeerSwmRecoveryPlanV1(
-            activeLegacyRecoveryConfig,
+            activeRecoveryConfig,
             providerPeerId,
           ),
           (_peerId, error) => {
@@ -485,9 +491,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    if (!this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) {
-      return Object.freeze([]);
-    }
     const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
       this.config.rfc64CatalogBootstrap,
       this.config.rfc64PublicCatalogBootstrap,
@@ -554,7 +557,7 @@ export function partitionRfc64CatalogBootstrapV1(
 ): Rfc64CatalogBootstrapPartitionV1 {
   const track2Policies: Rfc64CatalogBootstrapPolicyV1[] = [];
   const track2Targets: Rfc64CatalogBootstrapTargetPlanV1[] = [];
-  const legacyPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
+  const recoveryPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
   for (const accepted of config.acceptedPolicies) {
     const { policyEnvelope, targets, completeSwmProviders = [] } = accepted;
     const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
@@ -562,7 +565,10 @@ export function partitionRfc64CatalogBootstrapV1(
       policyEnvelope.payload.contextGraphId,
     );
     const mode = authority.mode;
-    if (authority.legacySyncAllowed) legacyPolicies.push(accepted);
+    // Complete-provider recovery is an explicit RFC-64 lane in catalog mode,
+    // not legacy gossip authority. Preserve every policy here and apply live
+    // receiver authority in each bootstrap pass.
+    recoveryPolicies.push(accepted);
     if (!authority.track2Enabled) continue;
     track2Policies.push(accepted);
     for (const target of targets) {
@@ -593,8 +599,8 @@ export function partitionRfc64CatalogBootstrapV1(
     ...retry,
     track2Policies: Object.freeze(track2Policies),
     track2Targets: Object.freeze(track2Targets),
-    legacyRecoveryConfig: Object.freeze({
-      acceptedPolicies: Object.freeze(legacyPolicies),
+    recoveryConfig: Object.freeze({
+      acceptedPolicies: Object.freeze(recoveryPolicies),
       ...retry,
     }),
   });
