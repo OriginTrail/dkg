@@ -450,6 +450,18 @@ CREATE TABLE rfc64_staged_catalog_heads_v1 (
   ) ON DELETE CASCADE
 ) WITHOUT ROWID, STRICT`;
 
+/** Durable finalized-private placement work owned by the inventory database. */
+export const INVENTORY_V1_FINALIZED_PRIVATE_PLACEMENT_REPAIRS_TABLE_SQL = `
+CREATE TABLE rfc64_finalized_private_placement_repairs_v1 (
+  repair_digest BLOB NOT NULL CHECK (
+    typeof(repair_digest) = 'blob' AND length(repair_digest) = 32
+  ),
+  repair_json TEXT NOT NULL CHECK (
+    typeof(repair_json) = 'text' AND length(repair_json) > 0 AND length(repair_json) <= 8192
+  ),
+  PRIMARY KEY (repair_digest)
+) WITHOUT ROWID, STRICT`;
+
 export const INVENTORY_V1_LEGACY_DDL = [
   INVENTORY_V1_LOADS_TABLE_SQL,
   INVENTORY_V1_ROWS_TABLE_SQL,
@@ -461,6 +473,7 @@ export const INVENTORY_V1_DDL = [
   INVENTORY_V1_SWM_AUTHOR_HEADS_TABLE_SQL,
   INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL,
   INVENTORY_V1_STAGED_HEADS_TABLE_SQL,
+  INVENTORY_V1_FINALIZED_PRIVATE_PLACEMENT_REPAIRS_TABLE_SQL,
 ].join(';\n\n').concat(';');
 
 export const INVENTORY_V1_LEGACY_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
@@ -490,8 +503,10 @@ export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Objec
   rfc64_staged_catalog_heads_v1: normalizeInventoryV1SchemaSql(
     INVENTORY_V1_STAGED_HEADS_TABLE_SQL,
   ),
+  rfc64_finalized_private_placement_repairs_v1: normalizeInventoryV1SchemaSql(
+    INVENTORY_V1_FINALIZED_PRIVATE_PLACEMENT_REPAIRS_TABLE_SQL,
+  ),
 });
-
 export const INVENTORY_V1_MIGRATE_V1_TO_V2_SQL = `
 ${INVENTORY_V1_APPLIED_HEADS_TABLE_SQL};
 PRAGMA user_version = ${INVENTORY_V1_V2_USER_VERSION};`;
@@ -503,6 +518,7 @@ PRAGMA user_version = ${INVENTORY_V1_V3_USER_VERSION};`;
 
 export const INVENTORY_V1_MIGRATE_V3_TO_V4_SQL = `
 ${INVENTORY_V1_STAGED_HEADS_TABLE_SQL};
+${INVENTORY_V1_FINALIZED_PRIVATE_PLACEMENT_REPAIRS_TABLE_SQL};
 PRAGMA user_version = ${INVENTORY_V1_USER_VERSION};`;
 
 export function normalizeInventoryV1SchemaSql(sql: string): string {

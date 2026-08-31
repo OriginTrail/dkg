@@ -904,9 +904,20 @@ export class DKGAgent extends DKGAgentBase {
         listLocalAuthorAddresses: () => this.listLocalAgents().map(
           ({ agentAddress }) => agentAddress.toLowerCase() as EvmAddressV1,
         ),
-        acceptsPublicRootLane: (contextGraphId) => (
-          this.resolveRfc64AcceptedPublicRootLaneV1(contextGraphId, null) !== null
+        acceptsPublicRootLane: (contextGraphId) => {
+          const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
+          return lane?.projectionLifecycle === 'immediate-exact-set';
+        },
+        acceptsFinalizedPrivateLane: (contextGraphId) => (
+          this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
+            ?.projectionLifecycle === 'confirmation-gated-append'
         ),
+        listFinalizedPrivateRepairs: () => (
+          this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
+        ),
+        repairFinalizedPrivatePlacement: async (repair) => {
+          await this.repairRfc64FinalizedPrivateCatalogPlacementV1(repair);
+        },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
         warn: (ctx, message) => this.log.warn(ctx, message),
       }),

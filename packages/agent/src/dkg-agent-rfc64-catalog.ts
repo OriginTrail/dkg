@@ -86,8 +86,9 @@ import {
   createRfc64CatalogAppliedHeadCoordinatorV1,
 } from './rfc64/catalog-applied-head-coordinator-v1.js';
 import type { Rfc64CatalogAppliedHeadEvidenceV1 } from
-  './rfc64/catalog-applied-head-evidence-v1.js';
+  './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
 import {
+  reduceRfc64CatalogSynchronizationEvidenceReplayV1,
   snapshotRfc64CatalogSynchronizationEvidenceV1,
   type Rfc64CatalogSynchronizationEvidenceV1,
 } from './rfc64/catalog-synchronization-evidence-v1.js';
@@ -948,7 +949,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               deployment,
               signal,
             );
-            const observed = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
+            const current = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
+            const previous = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
+              evidence.catalogHeadDigest,
+            );
+            const observed = previous === undefined
+              ? current
+              : reduceRfc64CatalogSynchronizationEvidenceReplayV1(previous, current);
             this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
               evidence.catalogHeadDigest,
               observed,

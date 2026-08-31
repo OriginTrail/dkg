@@ -536,6 +536,25 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapSwmAuthorInventoryV1(input);
   }
 
+  listFinalizedPrivatePlacementRepairs() {
+    this.requireOpen();
+    return this.#candidate.listFinalizedPrivatePlacementRepairs();
+  }
+
+  putFinalizedPrivatePlacementRepair(repair: Parameters<
+    Rfc64InventoryV1CandidateApi['putFinalizedPrivatePlacementRepair']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.putFinalizedPrivatePlacementRepair(repair);
+  }
+
+  deleteFinalizedPrivatePlacementRepair(repair: Parameters<
+    Rfc64InventoryV1CandidateApi['deleteFinalizedPrivatePlacementRepair']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.deleteFinalizedPrivatePlacementRepair(repair);
+  }
+
   private requireOpen(): DatabaseSyncV1 {
     if (this.#database === null) {
       throw new InventoryV1OpenError('database-closed', 'inventory database is closed');

@@ -75,6 +75,10 @@ import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher'
 import { ethers } from 'ethers';
 
 import { parseNQuads } from '../dkg-agent-utils.js';
+import type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
+  './public-catalog-native-committed-head-token-v1.js';
+export type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
+  './public-catalog-native-committed-head-token-v1.js';
 import { assertRfc64ExactIssuerSignatureProofV1 } from './catalog-transport-wire-v1-internal.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
@@ -221,16 +225,6 @@ export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
   /** Finalize rollback-capable side effects after the exact head is durable. */
   commit(): void | Promise<void>;
   rollback(cause?: unknown): Promise<void>;
-}
-
-/**
- * Exact durable-head evidence created by the receiver only after the target
- * head and inventory digest survive their post-commit read.
- */
-export interface Rfc64PublicCatalogNativeCommittedHeadTokenV1 {
-  readonly kind: 'rfc64-public-catalog-native-committed-head-token-v1';
-  readonly catalogHeadDigest: Digest32V1;
-  readonly inventoryDigest: Digest32V1;
 }
 
 /** Neutral operation-owned extension returned only after post-head work settles. */

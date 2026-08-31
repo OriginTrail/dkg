@@ -20,12 +20,15 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64CatalogWorkloadOwnerV1 } from './rfc64/catalog-runtime-v1.js';
 import { Rfc64CoalescingSupervisorV1 } from
   './rfc64/coalescing-supervisor-v1.js';
+import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
+  './rfc64/finalized-private-placement-repair-store-v1.js';
 import {
   boundedRfc64SupervisorErrorV1,
   rfc64SupervisorErrorMessageV1,
 } from './rfc64/supervisor-status-v1.js';
 
 const MAX_CONCURRENT_REPAIRS_V1 = 4;
+const FINALIZED_PRIVATE_RETRY_INTERVAL_MS_V1 = 5_000;
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
   | 'pending'
@@ -71,6 +74,8 @@ interface ProjectionSupervisorStateV1 {
   readonly retryIntervalMs?: number;
   readonly repairs: MutableAuthorRepairStatusV1[];
   readonly runner: Rfc64CoalescingSupervisorV1;
+  readonly finalizedPrivateRunner: Rfc64CoalescingSupervisorV1;
+  readonly finalizedPrivateAttemptWaiters: Map<string, Set<() => void>>;
   pass: number;
   lastPassStartedAtMs: number | null;
   lastPassCompletedAtMs: number | null;
@@ -80,10 +85,23 @@ type ProjectionReconciliationV1 = Awaited<ReturnType<
   DKGAgent['reconcileRfc64PublicCatalogFromSwmInventoryV1']
 >>;
 
+export interface Rfc64FinalizedPrivatePlacementRepairRequestV1 {
+  readonly accepted: boolean;
+  /** Settles after this exact repair's first admitted attempt, independent of other work. */
+  readonly whenAttempted: Promise<void>;
+}
+
 interface ProjectionOwnerDependenciesV1 {
   readonly resolvePartition: () => Rfc64CatalogBootstrapPartitionV1 | undefined;
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
   readonly acceptsPublicRootLane: (contextGraphId: ContextGraphIdV1) => boolean;
+  readonly acceptsFinalizedPrivateLane: (contextGraphId: ContextGraphIdV1) => boolean;
+  readonly listFinalizedPrivateRepairs: () => readonly Readonly<
+    Rfc64FinalizedPrivatePlacementRepairV1
+  >[];
+  readonly repairFinalizedPrivatePlacement: (
+    repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+  ) => Promise<void>;
   readonly reconcile: (params: Readonly<{
     readonly contextGraphId: ContextGraphIdV1;
     readonly authorAddress: EvmAddressV1;
@@ -105,10 +123,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
   start(ctx: OperationContext): void {
     this.#admissionClosed = false;
     const partition = this.#dependencies.resolvePartition();
-    if (partition === undefined) return;
     const localAuthors = this.#dependencies.listLocalAuthorAddresses();
     const repairKeys = new Set<string>();
-    const repairs = partition.track2Policies.flatMap(
+    const repairs = (partition?.track2Policies ?? []).flatMap(
       ({ policyEnvelope }): MutableAuthorRepairStatusV1[] => {
         const contextGraphId = policyEnvelope.payload.contextGraphId as ContextGraphIdV1;
         if (!this.#dependencies.acceptsPublicRootLane(contextGraphId)) return [];
@@ -120,10 +137,11 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         });
       },
     );
-    if (repairs.length === 0) return;
+    const hasFinalizedPrivateRepairs = this.#dependencies.listFinalizedPrivateRepairs().length > 0;
+    if (repairs.length === 0 && !hasFinalizedPrivateRepairs) return;
     const existing = this.#state;
     if (existing !== undefined) {
-      if (existing.runner.closed) return;
+      if (existing.runner.closed || existing.finalizedPrivateRunner.closed) return;
       for (const repair of repairs) {
         if (existing.repairs.some((candidate) => (
           candidate.contextGraphId === repair.contextGraphId
@@ -131,11 +149,19 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         ))) continue;
         existing.repairs.push(repair);
       }
-      existing.runner.request();
+      if (repairs.length > 0) existing.runner.request();
+      if (hasFinalizedPrivateRepairs) existing.finalizedPrivateRunner.request();
       return;
     }
-    this.#state = this.#createState(partition.retryIntervalMs, repairs, ctx);
-    this.#state.runner.request();
+    const retryIntervalMs = partition?.retryIntervalMs;
+    this.#state = this.#createState(
+      retryIntervalMs,
+      retryIntervalMs ?? FINALIZED_PRIVATE_RETRY_INTERVAL_MS_V1,
+      repairs,
+      ctx,
+    );
+    if (repairs.length > 0) this.#state.runner.request();
+    if (hasFinalizedPrivateRepairs) this.#state.finalizedPrivateRunner.request();
   }
 
   request(params: Readonly<{
@@ -149,6 +175,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     if (state === undefined) {
       state = this.#createState(
         this.#dependencies.resolvePartition()?.retryIntervalMs,
+        this.#dependencies.resolvePartition()?.retryIntervalMs
+          ?? FINALIZED_PRIVATE_RETRY_INTERVAL_MS_V1,
         [],
         params.ctx,
       );
@@ -168,11 +196,47 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     return state.runner.request();
   }
 
+  /** Enqueue one already-durable chain-confirmed private placement transition. */
+  requestFinalizedPrivate(params: Readonly<{
+    readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
+    readonly ctx: OperationContext;
+  }>): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
+    const rejected = (): Rfc64FinalizedPrivatePlacementRepairRequestV1 => Object.freeze({
+      accepted: false,
+      whenAttempted: Promise.resolve(),
+    });
+    if (this.#admissionClosed) return rejected();
+    if (!this.#dependencies.acceptsFinalizedPrivateLane(params.repair.contextGraphId)) {
+      return rejected();
+    }
+    let state = this.#state;
+    if (state === undefined) {
+      const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs
+        ?? FINALIZED_PRIVATE_RETRY_INTERVAL_MS_V1;
+      state = this.#createState(retryIntervalMs, retryIntervalMs, [], params.ctx);
+      this.#state = state;
+    }
+    if (state.finalizedPrivateRunner.closed) return rejected();
+    const key = finalizedPrivateRepairKeyV1(params.repair);
+    let settleAttempt!: () => void;
+    const whenAttempted = new Promise<void>((resolve) => { settleAttempt = resolve; });
+    const waiters = state.finalizedPrivateAttemptWaiters.get(key) ?? new Set<() => void>();
+    waiters.add(settleAttempt);
+    state.finalizedPrivateAttemptWaiters.set(key, waiters);
+    if (!state.finalizedPrivateRunner.request()) {
+      waiters.delete(settleAttempt);
+      if (waiters.size === 0) state.finalizedPrivateAttemptWaiters.delete(key);
+      settleAttempt();
+      return rejected();
+    }
+    return Object.freeze({ accepted: true, whenAttempted });
+  }
+
   status(): Readonly<Rfc64SwmCatalogProjectionSupervisorStatusV1> | null {
     const state = this.#state;
     if (state === undefined) return null;
     return Object.freeze({
-      running: state.runner.running,
+      running: state.runner.running || state.finalizedPrivateRunner.running,
       pass: state.pass,
       retryIntervalMs: state.retryIntervalMs ?? 0,
       lastPassStartedAtMs: state.lastPassStartedAtMs,
@@ -184,19 +248,26 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
   }
 
   async whenIdle(): Promise<void> {
-    await this.#state?.runner.whenIdle();
+    const state = this.#state;
+    if (state === undefined) return;
+    await Promise.all([state.runner.whenIdle(), state.finalizedPrivateRunner.whenIdle()]);
   }
 
   async close(): Promise<void> {
     this.#admissionClosed = true;
     const state = this.#state;
     if (state === undefined) return;
-    await state.runner.close();
+    await Promise.all([state.runner.close(), state.finalizedPrivateRunner.close()]);
+    for (const waiters of state.finalizedPrivateAttemptWaiters.values()) {
+      for (const settle of waiters) settle();
+    }
+    state.finalizedPrivateAttemptWaiters.clear();
     this.#state = undefined;
   }
 
   #createState(
     retryIntervalMs: number | undefined,
+    finalizedPrivateRetryIntervalMs: number,
     repairs: MutableAuthorRepairStatusV1[],
     ctx: OperationContext,
   ): ProjectionSupervisorStateV1 {
@@ -215,10 +286,23 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       },
       closingMessage: 'RFC-64 SWM catalog projection closing',
     });
+    const finalizedPrivateRunner = new Rfc64CoalescingSupervisorV1({
+      retryIntervalMs: finalizedPrivateRetryIntervalMs,
+      runPass: (signal) => this.#runFinalizedPrivatePass(state, signal),
+      onError: (error) => {
+        this.#dependencies.warn(
+          ctx,
+          `RFC-64 finalized-private repair pass failed: ${rfc64SupervisorErrorMessageV1(error)}`,
+        );
+      },
+      closingMessage: 'RFC-64 finalized-private placement repair closing',
+    });
     state = {
       retryIntervalMs,
       repairs,
       runner,
+      finalizedPrivateRunner,
+      finalizedPrivateAttemptWaiters: new Map(),
       pass: 0,
       lastPassStartedAtMs: null,
       lastPassCompletedAtMs: null,
@@ -240,6 +324,33 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     } finally {
       state.lastPassCompletedAtMs = Date.now();
     }
+  }
+
+  async #runFinalizedPrivatePass(
+    state: ProjectionSupervisorStateV1,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const repairs = this.#dependencies.listFinalizedPrivateRepairs();
+    await mapWithConcurrency(repairs, MAX_CONCURRENT_REPAIRS_V1, async (repair) => {
+      const key = finalizedPrivateRepairKeyV1(repair);
+      try {
+        if (signal.aborted) return;
+        await this.#dependencies.repairFinalizedPrivatePlacement(repair);
+      } catch (error) {
+        if (!signal.aborted) {
+          this.#dependencies.warn(
+            createOperationContext('system'),
+            `RFC-64 finalized-private placement repair failed for ${repair.contextGraphId} / ${repair.kaUal}: ${boundedRfc64SupervisorErrorV1(error)}`,
+          );
+        }
+      } finally {
+        const waiters = state.finalizedPrivateAttemptWaiters.get(key);
+        if (waiters !== undefined) {
+          state.finalizedPrivateAttemptWaiters.delete(key);
+          for (const settle of waiters) settle();
+        }
+      }
+    });
   }
 
   async #reconcile(repair: MutableAuthorRepairStatusV1, signal: AbortSignal): Promise<void> {
@@ -327,6 +438,18 @@ function newPendingRepairV1(
   };
 }
 
+function finalizedPrivateRepairKeyV1(
+  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+): string {
+  return JSON.stringify([
+    repair.contextGraphId,
+    repair.authorAddress,
+    repair.kaUal,
+    repair.assertionVersion,
+    repair.sealDigest,
+  ]);
+}
+
 export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   /** Seed bounded local-author projection work from selected catalog scopes. */
   startRfc64SwmCatalogProjectionSupervisorV1(
@@ -355,6 +478,19 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     return projectionOwnerV1(this).request({
       contextGraphId: params.contextGraphId,
       authorAddress,
+      ctx: params.ctx ?? createOperationContext('system'),
+    });
+  }
+
+  requestRfc64FinalizedPrivateCatalogPlacementRepairV1(
+    this: DKGAgent,
+    params: Readonly<{
+      readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
+      readonly ctx?: OperationContext;
+    }>,
+  ): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
+    return projectionOwnerV1(this).requestFinalizedPrivate({
+      repair: params.repair,
       ctx: params.ctx ?? createOperationContext('system'),
     });
   }
