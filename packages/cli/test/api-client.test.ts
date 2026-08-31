@@ -325,7 +325,10 @@ describe('ApiClient', () => {
       delete process.env.DKG_API_PORT;
       await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
       await writeFile(join(tempDir, 'auth.token'), 'local-token\n', 'utf8');
-      const { fetch, calls } = createRejectingFetch(new TypeError('fetch failed'));
+      const { fetch, calls } = createRejectingFetch(Object.assign(
+        new TypeError('request transport failed'),
+        { cause: { code: 'ECONNREFUSED' } },
+      ));
       globalThis.fetch = fetch;
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });

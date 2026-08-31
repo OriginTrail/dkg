@@ -180,9 +180,13 @@ export function createDaemonShutdownCoordinator(
 
   return {
     async stopViaApi(requestShutdown) {
-      const pid = await io.runtimeState.readPid();
+      const requestedOwnerPid = await io.runtimeState.readPid();
       await requestShutdown();
-      return complete(pid);
+      // A supervised worker can restart while the HTTP request is in flight.
+      // Prefer the owner that exists after the request so success cannot be
+      // reported merely because the worker observed before it has exited.
+      const activeOwnerPid = await io.runtimeState.readPid();
+      return complete(activeOwnerPid ?? requestedOwnerPid);
     },
 
     async stopViaSignal() {

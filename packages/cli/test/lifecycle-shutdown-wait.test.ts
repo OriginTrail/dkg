@@ -141,4 +141,35 @@ describe('lifecycle command shutdown waits', () => {
     })).rejects.toBe(unauthorized);
     expect(waitCalls).toBe(0);
   });
+
+  it('waits for a replacement worker that claims runtime state during the API request', async () => {
+    let runtimePid = 42;
+    const waitedPids: number[] = [];
+    const errors: string[] = [];
+    const coordinator = createDaemonShutdownCoordinator({
+      runtimeState: {
+        readPid: async () => runtimePid,
+        resolveWaitTimeoutMs: async () => 1_250,
+        release: async () => {},
+      },
+      isRunning: () => true,
+      kill: () => {},
+      waitForExit: async (pid) => {
+        waitedPids.push(pid);
+        return false;
+      },
+    });
+
+    await expect(executeStopCommand({
+      connectApi: async () => ({ shutdown: async () => { runtimePid = 43; } }),
+      coordinator,
+      log: () => {},
+      error: (message) => errors.push(message),
+    })).resolves.toBe(false);
+
+    expect(waitedPids).toEqual([43]);
+    expect(errors).toEqual([
+      'Daemon is still running after the configured shutdown deadline (1250ms).',
+    ]);
+  });
 });
