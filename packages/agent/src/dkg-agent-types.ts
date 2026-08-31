@@ -580,7 +580,7 @@ export interface PeerDiagnostics {
  * Per-peer sync-reconciler backoff state. `failures` is the count of
  * consecutive reconciler attempts that did NOT produce a successful sync;
  * `nextRetryAt` is the epoch-ms before which the reconciler skips this peer.
- * Reset on a successful sync (`onPeerSynced`) and on `connection:close`.
+ * Reset on a successful sync (`onSyncAccounting`) and on `connection:close`.
  * See `SYNC_BACKOFF_BASE_MS`.
  */
 export type SyncReconcilerBackoff = {
@@ -778,6 +778,27 @@ export interface ContextGraphSubscriptionRecord {
   syncScoped: boolean;
 }
 
+export interface VmReconcilePeerTopologyPeer {
+  peerId: string;
+  core: boolean;
+}
+
+export type VmReconcilePeerTopology =
+  | { kind: 'unreadable' }
+  | {
+    kind: 'readable';
+    preferredPeerId: string | null;
+    privateOnly: boolean;
+    /** Ranked provider order; array position is the rank. */
+    peers: VmReconcilePeerTopologyPeer[];
+  };
+
+/** Historical proof attached to a cached miss, separate from live topology. */
+export interface VmReconcilePeerTopologyEvidence {
+  topology: VmReconcilePeerTopology;
+  cleanMissPeerIds: string[];
+}
+
 export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
@@ -829,7 +850,16 @@ export interface VmReconcileNegativeRecord {
   nextRetryAt: number;
   swmGen: string;
   candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  /**
+   * Legacy serialized topology contract. Required during the v1-to-v2
+   * migration so existing custom stores can keep reading and persisting the
+   * field they were compiled against.
+   */
   peerTopologyKey: string;
+  /** Typed topology used by v2-aware stores; absent when loading a legacy row. */
+  peerTopology?: VmReconcilePeerTopology;
+  /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
+  cleanMissPeerIds?: string[];
 }
 
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */

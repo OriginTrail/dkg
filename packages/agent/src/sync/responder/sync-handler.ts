@@ -679,7 +679,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmMetaPage({
             store,
-            graphList: await graphListMemo.get({
+            graphMembership: await graphListMemo.get({
               refresh: session?.refreshRowList ?? offset === 0,
               refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
               signal,
@@ -719,7 +719,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmDataPage({
             store,
-            graphList: await graphListMemo.get({
+            graphMembership: await graphListMemo.get({
               refresh: session?.refreshRowList ?? offset === 0,
               refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
               signal,
@@ -843,7 +843,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
         const rows = await readDurableDataPage({
           store,
-          graphList: await graphListMemo.get({
+          graphMembership: await graphListMemo.get({
             refresh: session?.refreshRowList ?? offset === 0,
             refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
             signal,

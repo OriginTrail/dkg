@@ -19,6 +19,7 @@ import {
   type Digest32V1,
   type EvmAddressV1,
 } from './sync-wire-scalars.js';
+import { snapshotSelectedDataRecord } from './sync-wire-objects.js';
 
 export const RFC64_SUBGRAPH_KEY_DOMAIN_V1 = 'dkg-subgraph-key-v1\n' as const;
 
@@ -177,11 +178,13 @@ export function deriveRfc64ContextGraphSemanticAddressesV1(
 }
 
 function snapshotSemanticScope(scope: Rfc64SemanticScopeV1): Readonly<Rfc64SemanticScopeV1> {
-  if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) {
-    throw new Error('RFC-64 semantic scope must be an object');
-  }
-  const networkId = ownDataProperty(scope, 'networkId');
-  const contextGraphId = ownDataProperty(scope, 'contextGraphId');
+  const snapshot = snapshotSelectedDataRecord(
+    scope,
+    ['networkId', 'contextGraphId'] as const,
+    'RFC-64 semantic scope',
+  );
+  const networkId = snapshot.networkId;
+  const contextGraphId = snapshot.contextGraphId;
   assertNetworkIdV1(networkId);
   assertAuthorLaneContextGraphIdV1(contextGraphId);
   return Object.freeze({ networkId, contextGraphId });
@@ -190,27 +193,37 @@ function snapshotSemanticScope(scope: Rfc64SemanticScopeV1): Readonly<Rfc64Seman
 function snapshotSubgraphSemanticScope(
   scope: Rfc64SubgraphSemanticScopeV1,
 ): Readonly<Rfc64SubgraphSemanticScopeV1> {
-  const base = snapshotSemanticScope(scope);
-  const subGraphName = ownDataProperty(scope, 'subGraphName');
+  const snapshot = snapshotSelectedDataRecord(
+    scope,
+    ['networkId', 'contextGraphId', 'subGraphName'] as const,
+    'RFC-64 subgraph semantic scope',
+  );
+  const { networkId, contextGraphId, subGraphName } = snapshot;
+  assertNetworkIdV1(networkId);
+  assertAuthorLaneContextGraphIdV1(contextGraphId);
   if (subGraphName !== null) assertAuthorLaneSubGraphNameV1(subGraphName);
-  return Object.freeze({ ...base, subGraphName });
+  return Object.freeze({ networkId, contextGraphId, subGraphName });
 }
 
 function snapshotAuthorSemanticScope(
   scope: Rfc64AuthorSemanticScopeV1,
 ): Readonly<Rfc64AuthorSemanticScopeV1> {
-  const base = snapshotSubgraphSemanticScope(scope);
-  const authorAddress = ownDataProperty(scope, 'authorAddress');
+  const snapshot = snapshotSelectedDataRecord(
+    scope,
+    ['networkId', 'contextGraphId', 'subGraphName', 'authorAddress'] as const,
+    'RFC-64 author semantic scope',
+  );
+  const {
+    networkId,
+    contextGraphId,
+    subGraphName,
+    authorAddress,
+  } = snapshot;
+  assertNetworkIdV1(networkId);
+  assertAuthorLaneContextGraphIdV1(contextGraphId);
+  if (subGraphName !== null) assertAuthorLaneSubGraphNameV1(subGraphName);
   assertCanonicalEvmAddress(authorAddress, 'authorAddress');
-  return Object.freeze({ ...base, authorAddress });
-}
-
-function ownDataProperty<T extends object, K extends keyof T>(value: T, key: K): T[K] {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-    throw new Error(`RFC-64 semantic scope ${String(key)} must be an enumerable data property`);
-  }
-  return descriptor.value as T[K];
+  return Object.freeze({ networkId, contextGraphId, subGraphName, authorAddress });
 }
 
 function semanticGraphBase(contextGraphId: ContextGraphIdV1): string {

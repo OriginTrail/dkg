@@ -1,5 +1,5 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, GraphManager } from '@origintrail-official/dkg-storage';
 import type {
   EventBus,
   KAUpdateRequestMsg,
@@ -405,7 +405,7 @@ export class UpdateHandler {
           for (const g of swmGraphs) {
             await this.deleteEntityTriples(g, m.rootEntity);
           }
-          await this.store.deleteByPattern({ graph: swmMeta, subject: m.rootEntity });
+          await deleteByPatternWithoutCount(this.store, { graph: swmMeta, subject: m.rootEntity });
           // Detach the root from its WorkspaceOperation rows (and drop ops
           // that reference nothing else) so the PROTOCOL_SYNC TTL branch
           // stops serving the drained content to late subscribers.
@@ -424,7 +424,7 @@ export class UpdateHandler {
                 `ASK { GRAPH <${swmMeta}> { <${op}> (<http://dkg.io/ontology/rootEntity>|<http://dkg.io/ontology/entity>) ?r } }`,
               );
               if (remaining.type === 'boolean' && remaining.value === false) {
-                await this.store.deleteByPattern({ graph: swmMeta, subject: op });
+                await deleteByPatternWithoutCount(this.store, { graph: swmMeta, subject: op });
               }
             }
           }
@@ -933,7 +933,7 @@ export class UpdateHandler {
    * Avoids prefix collision (e.g. "urn:x:foo" must not delete "urn:x:foobar").
    */
   private async deleteEntityTriples(graph: string, rootEntity: string): Promise<void> {
-    await this.store.deleteByPattern({ graph, subject: rootEntity });
+    await deleteByPatternWithoutCount(this.store, { graph, subject: rootEntity });
     const skolemPrefix = rootEntity + SKOLEM_INFIX;
     await this.store.deleteBySubjectPrefix(graph, skolemPrefix);
   }

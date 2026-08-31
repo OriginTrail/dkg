@@ -190,6 +190,22 @@ describe('SharedMemoryLiteralBlobStore', () => {
     expect(await inner.countQuads(SWM_GRAPH)).toBe(0);
   });
 
+  it('translates no-count pattern deletes with the original large literal term', async () => {
+    const blobDir = await tempBlobDir();
+    const inner = new OxigraphStore();
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const largeLiteral = `"${'fast-pattern-delete'.repeat(8)}"`;
+
+    await store.insert([
+      quad('http://ex.org/fast-delete-1', largeLiteral, SWM_GRAPH),
+      quad('http://ex.org/fast-delete-2', largeLiteral, SWM_GRAPH),
+    ]);
+
+    await store.deleteByPatternWithoutCount({ object: largeLiteral, graph: SWM_GRAPH });
+
+    expect(await inner.countQuads(SWM_GRAPH)).toBe(0);
+  });
+
   it('fails loudly when hydrating a missing or corrupt blob', async () => {
     const blobDir = await tempBlobDir();
     const store = new SharedMemoryLiteralBlobStore(new OxigraphStore(), { blobDir, thresholdBytes: 20 });

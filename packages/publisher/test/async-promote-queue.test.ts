@@ -79,19 +79,14 @@ describe('TripleStoreAsyncPromoteQueue', () => {
    */
   function makeFlushBlockingStore(base: OxigraphStore): {
     store: TripleStore;
-    arm: () => void;
-    flushStarted: Promise<void>;
-    releaseFlush: () => void;
+    arm: () => { flushStarted: Promise<void>; releaseFlush: () => void };
   } {
-    let blockNextFlush = false;
-    let flushStartedResolve!: () => void;
-    let releaseFlushResolve!: () => void;
-    const flushStarted = new Promise<void>((resolve) => {
-      flushStartedResolve = resolve;
-    });
-    const flushRelease = new Promise<void>((resolve) => {
-      releaseFlushResolve = resolve;
-    });
+    let activeGate: {
+      flushStarted: Promise<void>;
+      flushStartedResolve: () => void;
+      flushRelease: Promise<void>;
+      releaseFlush: () => void;
+    } | null = null;
     const store: TripleStore = {
       createGraph: (graphUri) => base.createGraph(graphUri),
       dropGraph: (graphUri) => base.dropGraph(graphUri),
@@ -105,10 +100,11 @@ describe('TripleStoreAsyncPromoteQueue', () => {
       countQuads: (graphUri) => base.countQuads(graphUri),
       close: () => base.close(),
       flush: async () => {
-        if (blockNextFlush) {
-          flushStartedResolve();
-          await flushRelease;
-          blockNextFlush = false;
+        const gate = activeGate;
+        if (gate) {
+          gate.flushStartedResolve();
+          await gate.flushRelease;
+          if (activeGate === gate) activeGate = null;
         }
         await base.flush?.();
       },
@@ -116,10 +112,18 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     return {
       store,
       arm: () => {
-        blockNextFlush = true;
+        if (activeGate) throw new Error('flush gate is already armed');
+        let flushStartedResolve!: () => void;
+        let releaseFlush!: () => void;
+        const flushStarted = new Promise<void>((resolve) => {
+          flushStartedResolve = resolve;
+        });
+        const flushRelease = new Promise<void>((resolve) => {
+          releaseFlush = resolve;
+        });
+        activeGate = { flushStarted, flushStartedResolve, flushRelease, releaseFlush };
+        return { flushStarted, releaseFlush };
       },
-      flushStarted,
-      releaseFlush: () => releaseFlushResolve(),
     };
   }
 
@@ -432,16 +436,16 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
   it('5b. list({ state: ["running"] }) waits for an in-flight claim flush before exposing the running row', async () => {
     const base = new OxigraphStore();
-    const { store: blockingStore, arm, flushStarted, releaseFlush } = makeFlushBlockingStore(base);
-    const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
+    const controlled = makeFlushBlockingStore(base);
+    const queue = new TripleStoreAsyncPromoteQueue(controlled.store, {
       now: () => now,
       idGenerator: () => `job-${++idCounter}`,
     });
 
     await queue.enqueue(makeRequest());
-    arm();
+    const gate = controlled.arm();
     const claimPromise = queue.claimNext('worker-1');
-    await flushStarted;
+    await gate.flushStarted;
 
     let listSettled = false;
     const listPromise = queue.list({ state: ['running'] }).finally(() => {
@@ -450,7 +454,7 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(listSettled).toBe(false);
 
-    releaseFlush();
+    gate.releaseFlush();
     const [claimed, running] = await Promise.all([claimPromise, listPromise]);
     expect(claimed?.state).toBe('running');
     expect(running).toHaveLength(1);
@@ -459,16 +463,17 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
   it('5c. getStats() waits for an in-flight claim flush before counting the running row', async () => {
     const base = new OxigraphStore();
-    const { store: blockingStore, arm, flushStarted, releaseFlush } = makeFlushBlockingStore(base);
+    const controlled = makeFlushBlockingStore(base);
+    const blockingStore = controlled.store;
     const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
       now: () => now,
       idGenerator: () => `job-${++idCounter}`,
     });
 
     await queue.enqueue(makeRequest());
-    arm();
+    const gate = controlled.arm();
     const claimPromise = queue.claimNext('worker-1');
-    await flushStarted;
+    await gate.flushStarted;
 
     let statsSettled = false;
     const statsPromise = queue.getStats().finally(() => {
@@ -477,7 +482,7 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(statsSettled).toBe(false);
 
-    releaseFlush();
+    gate.releaseFlush();
     const [claimed, stats] = await Promise.all([claimPromise, statsPromise]);
     expect(claimed?.state).toBe('running');
     expect(stats.running).toBe(1);
@@ -588,6 +593,28 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(claimed?.lease?.claimToken).toMatch(/^worker-1:/);
   });
 
+  it('10a. default lease remains active past the recovery budget and expires after 15 minutes', async () => {
+    const queue = createQueue();
+    const jobId = await queue.enqueue(makeRequest());
+    const firstClaim = await queue.claimNext('worker-1');
+
+    expect(firstClaim?.jobId).toBe(jobId);
+    const firstClaimToken = firstClaim!.lease!.claimToken;
+
+    advance(11 * 60 * 1000);
+    await expect(queue.claimNext('worker-2')).resolves.toBeNull();
+    const stillRunning = await queue.getStatus(jobId);
+    expect(stillRunning?.state).toBe('running');
+    expect(stillRunning?.lease?.claimToken).toBe(firstClaimToken);
+
+    advance((4 * 60 * 1000) + 1);
+    const reclaimed = await queue.claimNext('worker-2');
+    expect(reclaimed?.jobId).toBe(jobId);
+    expect(reclaimed?.state).toBe('running');
+    expect(reclaimed?.lease?.workerId).toBe('worker-2');
+    expect(reclaimed?.lease?.claimToken).not.toBe(firstClaimToken);
+  });
+
   it('11. claimNext() returns null when paused; resume() restores', async () => {
     const queue = createQueue();
     await queue.enqueue(makeRequest());
@@ -642,8 +669,114 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(sources).toEqual([
       'publisher.asyncPromote.recoverExpired',
       'publisher.asyncPromote.claimNext.candidates',
-      'publisher.asyncPromote.claimNext.running',
     ]);
+  });
+
+  it('signals the scheduler only after enqueue and recovery persistence completes', async () => {
+    const controlled = makeFlushBlockingStore(store);
+    const queue = new TripleStoreAsyncPromoteQueue(controlled.store, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+    const notifications: string[] = [];
+    const detach = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('wake'),
+    });
+
+    const enqueueGate = controlled.arm();
+    const enqueueing = queue.enqueue(makeRequest());
+    await enqueueGate.flushStarted;
+    expect(notifications).toEqual([]);
+    enqueueGate.releaseFlush();
+    const jobId = await enqueueing;
+    expect(notifications).toEqual(['wake']);
+
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: 'fatal',
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+    });
+    expect(notifications).toEqual(['wake']);
+
+    const recoveryGate = controlled.arm();
+    const recovering = queue.recover(jobId);
+    await recoveryGate.flushStarted;
+    expect(notifications).toEqual(['wake']);
+    recoveryGate.releaseFlush();
+    await recovering;
+    expect(notifications).toEqual(['wake', 'wake']);
+
+    detach();
+    await queue.enqueue(makeRequest({ assertionName: 'after-unsubscribe' }));
+    expect(notifications).toEqual(['wake', 'wake']);
+  });
+
+  it('does not signal the scheduler when enqueue persistence rejects', async () => {
+    const rejectingStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'flush') return async () => { throw new Error('flush rejected'); };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const queue = new TripleStoreAsyncPromoteQueue(rejectingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+    const notifications: string[] = [];
+    queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('wake'),
+    });
+
+    await expect(queue.enqueue(makeRequest())).rejects.toThrow('flush rejected');
+    expect(notifications).toEqual([]);
+  });
+
+  it('keeps committed enqueue and recovery successful when the scheduler throws', async () => {
+    const queue = createQueue();
+    let notifications = 0;
+    queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => {
+        notifications += 1;
+        throw new Error('scheduler crashed');
+      },
+    });
+
+    const jobId = await queue.enqueue(makeRequest());
+    expect((await queue.getStatus(jobId))?.state).toBe('queued');
+
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: 'fatal',
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+    });
+    await expect(queue.recover(jobId)).resolves.toBeUndefined();
+    expect((await queue.getStatus(jobId))?.state).toBe('queued');
+    expect(notifications).toBe(2);
+  });
+
+  it('hands scheduler ownership over atomically and ignores stale detach', async () => {
+    const queue = createQueue();
+    const notifications: string[] = [];
+    const detachSuperseded = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('superseded'),
+    });
+    const detachCurrent = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('current'),
+    });
+
+    await queue.enqueue(makeRequest({ assertionName: 'first' }));
+    detachSuperseded();
+    await queue.enqueue(makeRequest({ assertionName: 'second' }));
+    expect(notifications).toEqual(['current', 'current']);
+
+    detachCurrent();
+    await queue.enqueue(makeRequest({ assertionName: 'detached' }));
+    expect(notifications).toEqual(['current', 'current']);
   });
 
   it('13. claimNext() does NOT pick a second job for the same (cgId, subGraphName, assertionName) while one is running', async () => {

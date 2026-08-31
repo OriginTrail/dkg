@@ -168,6 +168,24 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     expect((await statusOf(control, terminalJobId)).status).toBe('failed');
   });
 
+  it('POST /api/publisher/retry can select one exact failed job without sweeping the rest', async () => {
+    const control = newControl();
+    const selectedJobId = await failWithUnmetQuorum(control);
+    const untouchedJobId = await failWithUnmetQuorum(control, 'untouched');
+
+    const res = await request(
+      control,
+      'POST',
+      '/api/publisher/retry',
+      JSON.stringify({ status: 'failed', jobId: selectedJobId }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+    expect((await statusOf(control, selectedJobId)).status).toBe('accepted');
+    expect((await statusOf(control, untouchedJobId)).status).toBe('failed');
+  });
+
   it('GET /api/publisher/job serves retryState beside a byte-identical job', async () => {
     const control = newControl();
     const jobId = await failWithUnmetQuorum(control);
