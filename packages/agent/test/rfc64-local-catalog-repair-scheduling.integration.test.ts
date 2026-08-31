@@ -250,4 +250,3 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     expect(maxActive).toBe(4);
   }, 30_000);
 });
-

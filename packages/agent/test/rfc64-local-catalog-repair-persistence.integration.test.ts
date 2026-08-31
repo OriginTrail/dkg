@@ -200,4 +200,3 @@ describe('RFC-64 durable local SWM catalog projection repair', () => {
     }
   }, 30_000);
 });
-

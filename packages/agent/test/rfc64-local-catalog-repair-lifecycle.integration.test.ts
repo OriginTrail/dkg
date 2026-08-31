@@ -339,4 +339,3 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     expect(persistenceClose).toHaveBeenCalledOnce();
   }, 30_000);
 });
-
