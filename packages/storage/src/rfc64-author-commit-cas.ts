@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
+import {
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+} from '@origintrail-official/dkg-core/closed-data-snapshot';
 import type { Quad } from './triple-store.js';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
@@ -369,6 +374,14 @@ function normalizeLegacyRfc64AuthorCommitCasV1(
     expectedObject: input.expectedCurrentHeadObject,
     nextObject: input.nextCurrentHeadObject,
   });
+  const currentHeadGuard = Object.freeze({
+    guardKind: currentHead.guardKind,
+    role: currentHead.role,
+    graphUri: currentHead.graphUri,
+    subject: currentHead.subject,
+    predicate: currentHead.predicate,
+    expectedObject: currentHead.expectedObject,
+  });
   validateLegacyInput(input, currentHead, stateGuards, stateReplacements);
   const graphReplacements = Object.freeze([Object.freeze({
     role: 'sharedProjection' as const,
@@ -382,7 +395,7 @@ function normalizeLegacyRfc64AuthorCommitCasV1(
     subject: input.authorSealSubject,
     quads: input.authorSealQuads,
   }), ...stateReplacements]);
-  const guards = Object.freeze([currentHead, ...stateGuards]);
+  const guards = Object.freeze([currentHeadGuard, ...stateGuards]);
   return finalizeNormalizedPlan(
     'legacy',
     graphReplacements,
@@ -475,23 +488,377 @@ function importNormalizedPlan(
   input: NormalizedRfc64AuthorCommitCasV1,
 ): NormalizedRfc64AuthorCommitCasV1 {
   if (NORMALIZED_RFC64_AUTHOR_COMMIT_PLANS.has(input)) return input;
+  const plan = snapshotExactDataRecord(input, [
+    'graphReplacements',
+    'guards',
+    'planKind',
+    'predicateReplacements',
+    'referencedGraphs',
+    'semanticQuads',
+    'sourceKind',
+    'subjectReplacements',
+    'touchedGraphs',
+  ], 'RFC-64 author commit plan');
   if (
-    input.planKind !== 'rfc64-author-commit-plan-v1'
-    || (input.sourceKind !== 'legacy' && input.sourceKind !== 'semantic')
-    || !Array.isArray(input.graphReplacements)
-    || !Array.isArray(input.subjectReplacements)
-    || !Array.isArray(input.predicateReplacements)
-    || !Array.isArray(input.guards)
+    plan.planKind !== 'rfc64-author-commit-plan-v1'
+    || (plan.sourceKind !== 'legacy' && plan.sourceKind !== 'semantic')
   ) {
     throw new Error('RFC-64 author commit plan is malformed');
   }
   return finalizeNormalizedPlan(
-    input.sourceKind,
-    input.graphReplacements,
-    input.subjectReplacements,
-    input.predicateReplacements,
-    input.guards,
+    plan.sourceKind,
+    plan.graphReplacements as readonly Rfc64AuthorCommitGraphReplacementPlanV1[],
+    plan.subjectReplacements as readonly Rfc64AuthorCommitSubjectReplacementPlanV1[],
+    plan.predicateReplacements as readonly Rfc64AuthorCommitPredicateReplacementPlanV1[],
+    plan.guards as readonly Rfc64AuthorCommitGuardPlanV1[],
   );
+}
+
+function snapshotPlanArray(
+  input: unknown,
+  label: string,
+  maximumLength: number,
+): readonly unknown[] {
+  const values = snapshotDenseDataArray(input, `RFC-64 author commit ${label}`);
+  if (values.length > maximumLength) {
+    throw new Error(`RFC-64 author commit plan has too many ${label}`);
+  }
+  return values;
+}
+
+function snapshotQuadArray(input: unknown, label: string): readonly Quad[] {
+  const values = snapshotDenseDataArray(input, label);
+  return Object.freeze(values.map((value, index) => {
+    const quad = snapshotExactDataRecord(
+      value,
+      ['graph', 'object', 'predicate', 'subject'],
+      `${label}[${index}]`,
+    );
+    if (
+      typeof quad.graph !== 'string'
+      || typeof quad.object !== 'string'
+      || typeof quad.predicate !== 'string'
+      || typeof quad.subject !== 'string'
+    ) {
+      throw new Error(`${label}[${index}] must contain string quad terms`);
+    }
+    return Object.freeze({
+      graph: quad.graph,
+      object: quad.object,
+      predicate: quad.predicate,
+      subject: quad.subject,
+    });
+  }));
+}
+
+function snapshotGraphReplacement(
+  input: unknown,
+  index: number,
+): Rfc64AuthorCommitGraphReplacementPlanV1 {
+  const label = `RFC-64 author commit graph replacement ${index}`;
+  const value = snapshotExactDataRecord(input, ['graphUri', 'quads', 'role'], label);
+  if (value.role !== 'sharedProjection' || typeof value.graphUri !== 'string') {
+    throw new Error(`${label} has an invalid role or graph`);
+  }
+  return Object.freeze({
+    role: value.role,
+    graphUri: value.graphUri,
+    quads: snapshotQuadArray(value.quads, `${label}.quads`),
+  });
+}
+
+function snapshotSubjectReplacement(
+  input: unknown,
+  index: number,
+): Rfc64AuthorCommitSubjectReplacementPlanV1 {
+  const label = `RFC-64 author commit subject replacement ${index}`;
+  const value = snapshotExactDataRecord(
+    input,
+    ['graphUri', 'quads', 'role', 'roleIndex', 'subject'],
+    label,
+  );
+  if (
+    !isSemanticRole(value.role)
+    || value.role === 'sharedProjection'
+    || typeof value.roleIndex !== 'number'
+    || !Number.isSafeInteger(value.roleIndex)
+    || value.roleIndex < 0
+    || typeof value.graphUri !== 'string'
+    || typeof value.subject !== 'string'
+  ) {
+    throw new Error(`${label} has invalid fields`);
+  }
+  return Object.freeze({
+    role: value.role,
+    roleIndex: value.roleIndex,
+    graphUri: value.graphUri,
+    subject: value.subject,
+    quads: snapshotQuadArray(value.quads, `${label}.quads`),
+  });
+}
+
+function snapshotGuard(input: unknown, index: number): Rfc64AuthorCommitGuardPlanV1 {
+  const label = `RFC-64 author commit guard ${index}`;
+  const guardKind = readOwnEnumerableDataProperty(input, 'guardKind', label);
+  const keys = guardKind === 'exact-subject'
+    ? ['expectedObject', 'expectedQuads', 'graphUri', 'guardKind', 'predicate', 'role', 'subject']
+    : ['expectedObject', 'graphUri', 'guardKind', 'predicate', 'role', 'subject'];
+  const value = snapshotExactDataRecord(input, keys, label);
+  if (
+    (guardKind !== 'predicate-value' && guardKind !== 'exact-subject')
+    || !isGuardRole(value.role)
+    || typeof value.graphUri !== 'string'
+    || typeof value.subject !== 'string'
+    || typeof value.predicate !== 'string'
+    || (value.expectedObject !== null && typeof value.expectedObject !== 'string')
+  ) {
+    throw new Error(`${label} has invalid fields`);
+  }
+  if (guardKind === 'predicate-value') {
+    return Object.freeze({
+      guardKind,
+      role: value.role,
+      graphUri: value.graphUri,
+      subject: value.subject,
+      predicate: value.predicate,
+      expectedObject: value.expectedObject as string | null,
+    });
+  }
+  return Object.freeze({
+    guardKind,
+    role: value.role,
+    graphUri: value.graphUri,
+    subject: value.subject,
+    predicate: value.predicate,
+    expectedObject: value.expectedObject as string | null,
+    expectedQuads: value.expectedQuads === null
+      ? null
+      : snapshotQuadArray(value.expectedQuads, `${label}.expectedQuads`),
+  });
+}
+
+function snapshotPredicateReplacement(
+  input: unknown,
+  index: number,
+): Rfc64AuthorCommitPredicateReplacementPlanV1 {
+  const label = `RFC-64 author commit predicate replacement ${index}`;
+  const value = snapshotExactDataRecord(input, [
+    'expectedObject',
+    'graphUri',
+    'guardKind',
+    'nextObject',
+    'predicate',
+    'role',
+    'subject',
+  ], label);
+  if (
+    value.guardKind !== 'predicate-value'
+    || !isGuardRole(value.role)
+    || typeof value.graphUri !== 'string'
+    || typeof value.subject !== 'string'
+    || typeof value.predicate !== 'string'
+    || (value.expectedObject !== null && typeof value.expectedObject !== 'string')
+    || typeof value.nextObject !== 'string'
+  ) {
+    throw new Error(`${label} has invalid fields`);
+  }
+  return Object.freeze({
+    guardKind: value.guardKind,
+    role: value.role,
+    graphUri: value.graphUri,
+    subject: value.subject,
+    predicate: value.predicate,
+    expectedObject: value.expectedObject as string | null,
+    nextObject: value.nextObject,
+  });
+}
+
+function isSemanticRole(value: unknown): value is Rfc64AuthorCommitSemanticRoleV1 {
+  return typeof value === 'string' && [
+    'sharedProjection',
+    'authorSeal',
+    'currentHead',
+    'kaStateDigest',
+    'subgraphMutationGeneration',
+    'contextGraphMutationGeneration',
+    'appliedSet',
+    'sealInvalidation',
+  ].includes(value);
+}
+
+function isGuardRole(value: unknown): value is Rfc64AuthorCommitGuardRoleV1 {
+  return isSemanticRole(value)
+    && value !== 'sharedProjection'
+    && value !== 'authorSeal'
+    && value !== 'sealInvalidation';
+}
+
+const SEMANTIC_STATE_ROLES = Object.freeze([
+  'currentHead',
+  'subgraphMutationGeneration',
+  'contextGraphMutationGeneration',
+  'appliedSet',
+] as const);
+
+const LEGACY_STATE_ROLES = Object.freeze([
+  'kaStateDigest',
+  'subgraphMutationGeneration',
+  'contextGraphMutationGeneration',
+  'appliedSet',
+] as const);
+
+function validateNormalizedPlanTopology(
+  sourceKind: NormalizedRfc64AuthorCommitCasV1['sourceKind'],
+  graphReplacements: readonly Rfc64AuthorCommitGraphReplacementPlanV1[],
+  subjectReplacements: readonly Rfc64AuthorCommitSubjectReplacementPlanV1[],
+  predicateReplacements: readonly Rfc64AuthorCommitPredicateReplacementPlanV1[],
+  guards: readonly Rfc64AuthorCommitGuardPlanV1[],
+): void {
+  const projection = graphReplacements[0]!;
+  const authorSeal = requireSingleRole(subjectReplacements, 'authorSeal');
+  if (authorSeal.roleIndex !== 0) {
+    throw new Error('RFC-64 author seal replacement must use role index zero');
+  }
+  if (sourceKind === 'semantic') {
+    if (subjectReplacements.length !== SEMANTIC_STATE_ROLES.length + 1) {
+      throw new Error('RFC-64 semantic author commit has an invalid replacement topology');
+    }
+    if (guards.length !== SEMANTIC_STATE_ROLES.length) {
+      throw new Error('RFC-64 semantic author commit has an invalid guard topology');
+    }
+    const transitions = SEMANTIC_STATE_ROLES.map((role) => {
+      const replacement = requireSingleRole(subjectReplacements, role);
+      const guard = requireSingleRole(guards, role);
+      if (replacement.roleIndex !== 0 || guard.guardKind !== 'exact-subject') {
+        throw new Error(`RFC-64 semantic ${role} requires one exact guarded replacement`);
+      }
+      assertGuardReplacementCoordinates(guard, replacement);
+      return Object.freeze({
+        graphUri: guard.graphUri,
+        subject: guard.subject,
+        predicate: guard.predicate,
+        expectedObject: guard.expectedObject,
+        expectedQuads: guard.expectedQuads,
+        quads: replacement.quads,
+      }) satisfies Rfc64AuthorCommitExactStateTransitionV1;
+    });
+    const [currentHead, subgraphMutationGeneration, contextGraphMutationGeneration, appliedSet]
+      = transitions;
+    const semanticInput = Object.freeze({
+      sharedProjectionGraph: projection.graphUri,
+      sharedProjectionQuads: projection.quads,
+      authorSealGraph: authorSeal.graphUri,
+      authorSealSubject: authorSeal.subject,
+      authorSealQuads: authorSeal.quads,
+      currentHead: currentHead!,
+      subgraphMutationGeneration: subgraphMutationGeneration!,
+      contextGraphMutationGeneration: contextGraphMutationGeneration!,
+      appliedSet: appliedSet!,
+    }) satisfies Rfc64AuthorCommitCasSemanticInputV1;
+    validateSemanticInput(
+      semanticInput,
+      SEMANTIC_STATE_ROLES.map((role) => requireSingleRole(guards, role)),
+      SEMANTIC_STATE_ROLES.map((role) => requireSingleRole(subjectReplacements, role)),
+    );
+    return;
+  }
+
+  if (guards.length !== LEGACY_STATE_ROLES.length + 1) {
+    throw new Error('RFC-64 legacy author commit has an invalid guard topology');
+  }
+  const currentHead = predicateReplacements[0]!;
+  if (currentHead.role !== 'currentHead') {
+    throw new Error('RFC-64 legacy author commit requires one current-head predicate replacement');
+  }
+  const currentHeadGuard = requireSingleRole(guards, 'currentHead');
+  if (
+    currentHeadGuard.guardKind !== 'predicate-value'
+    || !sameGuardCoordinates(currentHeadGuard, currentHead)
+  ) {
+    throw new Error('RFC-64 legacy current-head replacement does not match its guard');
+  }
+  const stateReplacements = LEGACY_STATE_ROLES.map((role) => {
+    const replacement = requireSingleRole(subjectReplacements, role);
+    const guard = requireSingleRole(guards, role);
+    if (replacement.roleIndex !== 0 || guard.guardKind !== 'predicate-value') {
+      throw new Error(`RFC-64 legacy ${role} requires one predicate guarded replacement`);
+    }
+    assertGuardReplacementCoordinates(guard, replacement);
+    return replacement;
+  });
+  const sealInvalidations = subjectReplacements.filter(
+    (replacement) => replacement.role === 'sealInvalidation',
+  );
+  if (
+    subjectReplacements.length !== 1 + stateReplacements.length + sealInvalidations.length
+    || sealInvalidations.some((replacement, index) => replacement.roleIndex !== index)
+  ) {
+    throw new Error('RFC-64 legacy author commit has an invalid replacement topology');
+  }
+  const transition = (role: (typeof LEGACY_STATE_ROLES)[number]) => {
+    const replacement = requireSingleRole(subjectReplacements, role);
+    const guard = requireSingleRole(guards, role);
+    return Object.freeze({
+      graphUri: guard.graphUri,
+      subject: guard.subject,
+      predicate: guard.predicate,
+      expectedObject: guard.expectedObject,
+      quads: replacement.quads,
+    }) satisfies Rfc64AuthorCommitStateTransitionV1;
+  };
+  const legacyInput = Object.freeze({
+    sharedProjectionGraph: projection.graphUri,
+    sharedProjectionQuads: projection.quads,
+    authorSealGraph: authorSeal.graphUri,
+    authorSealSubject: authorSeal.subject,
+    authorSealQuads: authorSeal.quads,
+    currentHeadGraph: currentHead.graphUri,
+    currentHeadSubject: currentHead.subject,
+    currentHeadPredicate: currentHead.predicate,
+    expectedCurrentHeadObject: currentHead.expectedObject,
+    nextCurrentHeadObject: currentHead.nextObject,
+    kaStateDigest: transition('kaStateDigest'),
+    subgraphMutationGeneration: transition('subgraphMutationGeneration'),
+    contextGraphMutationGeneration: transition('contextGraphMutationGeneration'),
+    appliedSet: transition('appliedSet'),
+    sealInvalidations,
+  }) satisfies Rfc64AuthorCommitCasLegacyInputV1;
+  validateLegacyInput(
+    legacyInput,
+    currentHead,
+    LEGACY_STATE_ROLES.map((role) => requireSingleRole(guards, role)),
+    [...stateReplacements, ...sealInvalidations],
+  );
+}
+
+function requireSingleRole<T extends Readonly<{ role: Rfc64AuthorCommitSemanticRoleV1 }>>(
+  values: readonly T[],
+  role: Rfc64AuthorCommitSemanticRoleV1,
+): T {
+  const matches = values.filter((value) => value.role === role);
+  if (matches.length !== 1) {
+    throw new Error(`RFC-64 author commit plan requires exactly one ${role} operation`);
+  }
+  return matches[0]!;
+}
+
+function assertGuardReplacementCoordinates(
+  guard: Rfc64AuthorCommitGuardPlanV1,
+  replacement: Rfc64AuthorCommitSubjectReplacementPlanV1,
+): void {
+  if (guard.graphUri !== replacement.graphUri || guard.subject !== replacement.subject) {
+    throw new Error(`RFC-64 ${guard.role} guard and replacement coordinates disagree`);
+  }
+}
+
+function sameGuardCoordinates(
+  left: Rfc64AuthorCommitPredicateValueGuardV1,
+  right: Rfc64AuthorCommitPredicateValueGuardV1,
+): boolean {
+  return left.graphUri === right.graphUri
+    && left.subject === right.subject
+    && left.predicate === right.predicate
+    && left.expectedObject === right.expectedObject;
 }
 
 function finalizeNormalizedPlan(
@@ -501,34 +868,54 @@ function finalizeNormalizedPlan(
   predicateReplacementsInput: readonly Rfc64AuthorCommitPredicateReplacementPlanV1[],
   guardsInput: readonly Rfc64AuthorCommitGuardPlanV1[],
 ): NormalizedRfc64AuthorCommitCasV1 {
-  if (graphReplacementsInput.length !== 1) {
+  const rawGraphReplacements = snapshotPlanArray(
+    graphReplacementsInput,
+    'graph replacements',
+    1,
+  );
+  const rawSubjectReplacements = snapshotPlanArray(
+    subjectReplacementsInput,
+    'subject replacements',
+    RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1 + 1,
+  );
+  const rawPredicateReplacements = snapshotPlanArray(
+    predicateReplacementsInput,
+    'predicate replacements',
+    1,
+  );
+  const rawGuards = snapshotPlanArray(
+    guardsInput,
+    'guards',
+    RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1 + 1,
+  );
+  if (rawGraphReplacements.length !== 1) {
     throw new Error('RFC-64 author commit plan requires exactly one shared projection');
   }
   if (
-    (sourceKind === 'semantic' && predicateReplacementsInput.length !== 0)
-    || (sourceKind === 'legacy' && predicateReplacementsInput.length !== 1)
+    (sourceKind === 'semantic' && rawPredicateReplacements.length !== 0)
+    || (sourceKind === 'legacy' && rawPredicateReplacements.length !== 1)
   ) {
     throw new Error('RFC-64 author commit plan source kind does not match its operations');
   }
-  const freezeQuads = (quads: readonly Quad[]): readonly Quad[] => Object.freeze(
-    quads.map((quad) => Object.freeze({ ...quad })),
+  const graphReplacements = Object.freeze(rawGraphReplacements.map(
+    (replacement, index) => snapshotGraphReplacement(replacement, index),
+  ));
+  const subjectReplacements = Object.freeze(rawSubjectReplacements.map(
+    (replacement, index) => snapshotSubjectReplacement(replacement, index),
+  ));
+  const guards = Object.freeze(rawGuards.map(
+    (guard, index) => snapshotGuard(guard, index),
+  ));
+  const predicateReplacements = Object.freeze(rawPredicateReplacements.map(
+    (replacement, index) => snapshotPredicateReplacement(replacement, index),
+  ));
+  validateNormalizedPlanTopology(
+    sourceKind,
+    graphReplacements,
+    subjectReplacements,
+    predicateReplacements,
+    guards,
   );
-  const graphReplacements = Object.freeze(graphReplacementsInput.map((replacement) =>
-    Object.freeze({ ...replacement, quads: freezeQuads(replacement.quads) })));
-  const subjectReplacements = Object.freeze(subjectReplacementsInput.map((replacement) =>
-    Object.freeze({ ...replacement, quads: freezeQuads(replacement.quads) })));
-  const guards = Object.freeze(guardsInput.map((guard) => Object.freeze(
-    guard.guardKind === 'exact-subject'
-      ? {
-        ...guard,
-        expectedQuads: guard.expectedQuads === null
-          ? null
-          : freezeQuads(guard.expectedQuads),
-      }
-      : { ...guard },
-  )));
-  const predicateReplacements = Object.freeze(predicateReplacementsInput.map((replacement) =>
-    Object.freeze({ ...replacement })));
   const touchedGraphs = Object.freeze([...new Set([
     ...graphReplacements.map(({ graphUri }) => graphUri),
     ...subjectReplacements.map(({ graphUri }) => graphUri),

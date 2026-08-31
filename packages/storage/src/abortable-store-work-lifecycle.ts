@@ -9,10 +9,14 @@ export interface AbortSignalScope {
   dispose(): void;
 }
 
+export interface StoreWorkTimeoutRace {
+  readonly timeoutMs: number;
+  readonly timeoutError: () => Error;
+}
+
 export interface StoreWorkRaceOptions<T> {
   readonly onLateResult?: (value: T) => void | Promise<void>;
-  readonly timeoutMs?: number;
-  readonly timeoutError?: () => Error;
+  readonly timeout?: StoreWorkTimeoutRace;
 }
 
 const NOOP_DISPOSE = () => {};
@@ -62,7 +66,7 @@ export function raceStoreWorkAgainstAbort<T>(
   signal: AbortSignal | undefined,
   options: StoreWorkRaceOptions<T> = {},
 ): Promise<T> {
-  const timeoutMs = options.timeoutMs ?? 0;
+  const timeoutMs = options.timeout?.timeoutMs ?? 0;
   if (!signal && timeoutMs <= 0) return work;
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -96,11 +100,8 @@ export function raceStoreWorkAgainstAbort<T>(
       return;
     }
     if (timeoutMs > 0) {
-      if (!options.timeoutError) {
-        throw new Error('store-work timeout requires timeoutError');
-      }
       timer = setTimeout(
-        () => finish(() => reject(options.timeoutError!())),
+        () => finish(() => reject(options.timeout!.timeoutError())),
         timeoutMs,
       );
       if (typeof timer.unref === 'function') timer.unref();

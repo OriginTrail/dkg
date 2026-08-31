@@ -126,8 +126,10 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     process.on('unhandledRejection', onUnhandled);
     try {
       await expect(raceStoreWorkAgainstAbort(work, undefined, {
-        timeoutMs: 5,
-        timeoutError: () => timeout,
+        timeout: {
+          timeoutMs: 5,
+          timeoutError: () => timeout,
+        },
       })).rejects.toBe(timeout);
       rejectWork(new Error('late store failure'));
       await new Promise<void>((resolve) => setImmediate(resolve));

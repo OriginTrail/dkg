@@ -61,6 +61,7 @@ import {
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -94,7 +95,6 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
@@ -395,7 +395,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ) {
     if (!this.rfc64SemanticReadCertifiedV1) {
@@ -990,9 +990,10 @@ export class SparqlHttpStore implements TripleStore {
     storeOperation?: StoreOperation,
   ): Promise<QueryResult> {
     const trimmed = sparql.trim();
-    const upper = trimmed.toUpperCase();
-    const isAsk = upper.startsWith('ASK');
-    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    const classified = classifySparqlOperation(trimmed);
+    const isAsk = classified.kind === 'read' && classified.form === 'ASK';
+    const isConstruct = classified.kind === 'read'
+      && (classified.form === 'CONSTRUCT' || classified.form === 'DESCRIBE');
     const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
     return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
