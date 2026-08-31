@@ -230,6 +230,8 @@ export async function postJson(
 export interface EventStream {
   /** All SSE frames received so far (excluding heartbeat comments). */
   events: Array<{ event: string; data: any }>;
+  /** Settles when the real response body ends or the local reader is aborted. */
+  closed: Promise<void>;
   /**
    * Resolve with the first frame (past or future) matching `predicate`, or
    * reject after `timeoutMs`. Lets a test perform an op then await its event.
@@ -255,6 +257,8 @@ export async function openEventStream(daemon: LiveDaemon): Promise<EventStream> 
 
   const events: Array<{ event: string; data: any }> = [];
   const waiters: Array<{ predicate: (f: any) => boolean; resolve: (f: any) => void }> = [];
+  let markClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { markClosed = resolve; });
 
   const pushFrame = (frame: { event: string; data: any }) => {
     events.push(frame);
@@ -295,10 +299,12 @@ export async function openEventStream(daemon: LiveDaemon): Promise<EventStream> 
         }
       }
     } catch { /* aborted on close() */ }
+    finally { markClosed(); }
   })();
 
   return {
     events,
+    closed,
     waitFor(predicate, timeoutMs = 8000) {
       const existing = events.find(predicate);
       if (existing) return Promise.resolve(existing);

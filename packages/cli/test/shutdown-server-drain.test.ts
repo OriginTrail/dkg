@@ -6,6 +6,12 @@ import {
   buildProducerQuiescentTeardownSteps,
   runProducerQuiescentTeardown,
 } from '../src/daemon/teardown.js';
+import {
+  openEventStream,
+  startLiveDaemon,
+  stopLiveDaemon,
+  type LiveDaemon,
+} from './helpers/live-daemon.js';
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -53,6 +59,35 @@ function shutdownCleanup(
 }
 
 describe('HTTP callback draining during bounded shutdown', () => {
+  it('ends the real daemon SSE stream and exits cleanly before its hard timeout', async () => {
+    let daemon: LiveDaemon | undefined;
+    let stream: Awaited<ReturnType<typeof openEventStream>> | undefined;
+    try {
+      daemon = await startLiveDaemon({
+        authEnabled: false,
+        extraConfig: { chain: { type: 'mock' } },
+        env: { DKG_SHUTDOWN_HARD_TIMEOUT_MS: '5000' },
+      });
+      stream = await openEventStream(daemon);
+      const exited = new Promise<number | null>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('daemon did not exit before deadline')), 6_000);
+        daemon!.child.once('exit', (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+      });
+      const shutdownStartedAt = Date.now();
+
+      expect(daemon.child.kill('SIGTERM')).toBe(true);
+      await expect(stream.closed).resolves.toBeUndefined();
+      await expect(exited).resolves.toBe(0);
+      expect(Date.now() - shutdownStartedAt).toBeLessThan(5_000);
+    } finally {
+      stream?.close();
+      await stopLiveDaemon(daemon);
+    }
+  }, 90_000);
+
   it('ends tracked SSE streams before draining and reaches dependency cleanup', async () => {
     const sseClients = new Set<ServerResponse>();
     let markConnected!: () => void;
