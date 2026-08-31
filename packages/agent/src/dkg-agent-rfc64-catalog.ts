@@ -55,7 +55,6 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
-  snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
@@ -339,9 +338,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   readRfc64CatalogRuntimeSelectionV1(
     this: DKGAgent,
   ): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
-    const eligibleContextGraphs = Object.freeze([
-      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
-    ].sort());
+    const eligibleContextGraphs = Object.freeze(
+      Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority).sort(),
+    );
     const subscriptionDriven = (this.config.nodeRole ?? 'edge') === 'edge';
     return Object.freeze({
       subscriptionDriven,
