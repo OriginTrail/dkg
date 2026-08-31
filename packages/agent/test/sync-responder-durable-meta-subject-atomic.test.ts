@@ -3,6 +3,7 @@ import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -111,7 +112,20 @@ function assertNoDuplicatesOrGaps(pages: Row[][]): void {
 }
 
 describe('durable-meta subject-atomic paging (#1788)', () => {
-  it('remembers a full-snapshot store timeout and uses bounded pages for the session', async () => {
+  it.each([
+    ['backend deadline', () => new StoreOperationTimeoutError({
+      backend: 'test',
+      operation: 'query',
+      storeOperation: 'query',
+      timeoutMs: 30_000,
+    })],
+    ['scheduler queue-wait deadline', () => new StoreSchedulerBusyError(
+      'queue_wait_timeout',
+      'background',
+      'sync.responder.readDurableMetaGraphSnapshot',
+      { storeOperation: 'query' },
+    )],
+  ])('remembers a full-snapshot %s and uses bounded pages for the session', async (_label, deadlineError) => {
     const backingStore = new OxigraphStore();
     await backingStore.insert(Array.from({ length: 3 }, (_, index) => ({
       graph: META,
@@ -123,12 +137,7 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
     const query = vi.fn<TripleStore['query']>(async (sparql, options) => {
       if (options?.source === 'sync.responder.readDurableMetaGraphSnapshot') {
         snapshotQueries += 1;
-        throw new StoreOperationTimeoutError({
-          backend: 'test',
-          operation: 'query',
-          storeOperation: 'query',
-          timeoutMs: 30_000,
-        });
+        throw deadlineError();
       }
       return backingStore.query(sparql, options);
     });

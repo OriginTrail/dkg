@@ -13,6 +13,7 @@ import {
   asGraphWriteRevisionSource,
   isStoreOperationTimeoutError,
   StoreResponseTooLargeError,
+  StoreSchedulerBusyError,
   type QueryOptions,
   type TripleStore,
   type ChangelogReader,
@@ -3688,7 +3689,10 @@ async function readBoundedDurableMetaSnapshot(
         .filter((row): row is SyncRow => Boolean(row.s && row.p && row.o))
       : [];
   } catch (error) {
-    if (isStoreOperationTimeoutError(error)) {
+    if (
+      isStoreOperationTimeoutError(error)
+      || (error instanceof StoreSchedulerBusyError && error.reason === 'queue_wait_timeout')
+    ) {
       throw new SyncRowSnapshotFallbackError({
         key: cache.key,
         reason: 'store_timeout',
