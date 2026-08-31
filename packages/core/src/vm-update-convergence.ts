@@ -41,12 +41,11 @@ import {
   fail,
 } from './vm-update-errors.js';
 import {
-  canonicalBlockNumber,
-  canonicalDigest32,
   canonicalEventPositionV1,
   compareEventPosition,
   sameEventIdentity,
   type FinalizedEventPositionV1,
+  type LooseEventPositionInputV1,
 } from './finalized-event-position-v1.js';
 
 // The error plumbing and the exact-event-position model were EXTRACTED to
@@ -59,12 +58,35 @@ export {
 } from './vm-update-errors.js';
 export type { VmUpdateErrorCodeV1 } from './vm-update-errors.js';
 export {
-  canonicalBlockNumber,
-  canonicalDigest32,
   canonicalEventPositionV1,
   compareEventPosition,
   sameEventIdentity,
 } from './finalized-event-position-v1.js';
+
+export function canonicalDigest32(value: unknown, label = 'digest'): Digest32V1 {
+  const text = boundedString(value, label);
+  return adapt(label, () => {
+    assertCanonicalDigest(text, label);
+    return text;
+  });
+}
+
+/** A non-negative safe integer; block numbers and log indices are numbers on this wire. */
+export function canonicalBlockNumber(value: unknown, label = 'blockNumber'): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    fail('noncanonical-scalar', `${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+/**
+ * VM-typed adaptation of the NEUTRAL position validator (review r17): W2's
+ * callers keep their `noncanonical-scalar` error contract while unrelated
+ * consumers of `canonicalEventPositionV1` no longer receive VM terminology.
+ */
+function vmEventPosition(input: LooseEventPositionInputV1, label: string): FinalizedEventPositionV1 {
+  return adapt(label, () => canonicalEventPositionV1(input, label));
+}
 export type {
   FinalizedEventPositionV1,
   LooseEventPositionInputV1,
@@ -424,7 +446,7 @@ export function canonicalFinalizedUpdate(
     kaId: canonicalUnsignedDecimal(input.kaId, 'update.kaId').toString(),
     author: canonicalNullableAuthorAddress(input.author, 'update.author'),
     merkleRoot: canonicalDigest32(input.merkleRoot, 'update.merkleRoot'),
-    ...canonicalEventPositionV1(input, 'update'),
+    ...vmEventPosition(input, 'update'),
   });
 }
 
@@ -470,7 +492,7 @@ export function orderedLogCommitment(logs: readonly RawLogV1[]): Digest32V1 {
 
   for (const entry of dense) {
     const log = entry as RawLogV1;
-    const position = canonicalEventPositionV1(log.position, 'log');
+    const position = vmEventPosition(log.position, 'log');
     if (previous !== undefined) {
       const order = compareEventPosition(previous, position);
       if (order > 0) fail('page-malformed', 'logs are not in ascending chain order');
@@ -672,7 +694,7 @@ export function canonicalCoverageCursor(
   const resumeAfter =
     input.resumeAfter === undefined
       ? undefined
-      : Object.freeze(canonicalEventPositionV1(input.resumeAfter, 'cursor.resumeAfter'));
+      : Object.freeze(vmEventPosition(input.resumeAfter, 'cursor.resumeAfter'));
   const scanned =
     input.scannedThroughUnattested === undefined
       ? undefined

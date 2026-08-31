@@ -14,6 +14,7 @@ import {
   buildScopedKnowledgeAssetUal,
   canonicalCoverageCursor,
   canonicalDigest32,
+  canonicalEventPositionV1,
   canonicalEvmAddress,
   canonicalFinalizedUpdate,
   canonicalNullableAuthorAddress,
@@ -174,6 +175,34 @@ describe('canonical scalars', () => {
     expect(codeOf(() => canonicalEvmAddress(mixed))).toBe('noncanonical-scalar');
     expect(codeOf(() => canonicalNullableAuthorAddress(mixed))).toBe('noncanonical-scalar');
     expect(codeOf(() => canonicalDigest32(`0x${'AB'.repeat(32)}`))).toBe('noncanonical-scalar');
+  });
+
+  it('canonicalEventPositionV1 throws NEUTRAL errors; W2 adapts them into its typed code (review r17)', () => {
+    // The position validator is a reusable core seam: a publisher validating
+    // a malformed hash must not receive VM-update terminology.
+    try {
+      canonicalEventPositionV1({
+        blockNumber: 1, blockHash: 'nope',
+        transactionHash: `0x${'ab'.repeat(32)}`, transactionIndex: 0, logIndex: 0,
+      });
+      expect.unreachable('a malformed blockHash must throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).name).toBe('Error');
+      expect((err as Error).message).not.toContain('vm-update');
+      expect((err as Error).message).toContain('position.blockHash');
+    }
+    // …while W2's own page validation still surfaces its typed code, because
+    // the VM boundary adapts the neutral failure exactly as it does for the
+    // shipped scalar assertions.
+    expect(codeOf(() => canonicalFinalizedUpdate({
+      kind: 'lifecycle-update',
+      kaId: '7',
+      author: null,
+      merkleRoot: `0x${'cd'.repeat(32)}`,
+      blockNumber: 1, blockHash: 'nope',
+      transactionHash: `0x${'ab'.repeat(32)}`, transactionIndex: 0, logIndex: 0,
+    }))).toBe('noncanonical-scalar');
   });
 
   it('rejects the leading-zero decimal alias', () => {

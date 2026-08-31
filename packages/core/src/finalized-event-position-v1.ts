@@ -1,16 +1,14 @@
 /**
  * The exact-event-identity model: a finalized event's chain position, its
  * canonical (trust-boundary) validator, ordering and identity. Extracted from
- * `vm-update-convergence.ts` (PR #2436 review r16) as the reusable seam that
- * publishers and agents consume without depending on the full VM-convergence
- * module; that module re-exports these names, so the public core surface is
- * unchanged.
+ * `vm-update-convergence.ts` (PR #2436 review r16); NEUTRAL by design (review
+ * r17): this module throws plain labeled `Error`s in the same house style as
+ * `sync-wire-scalars.ts`, so a publisher validating a position is not handed
+ * VM-update terminology. VM convergence adapts these failures into its own
+ * typed `VmUpdateConvergenceError` at its boundary, exactly as it already
+ * does for the shipped scalar assertions.
  */
-import {
-  assertCanonicalDigest,
-  type Digest32V1,
-} from './sync-wire-scalars.js';
-import { adapt, boundedString, fail } from './vm-update-errors.js';
+import { assertCanonicalDigest, type Digest32V1 } from './sync-wire-scalars.js';
 
 export interface FinalizedEventPositionV1 {
   blockNumber: number;
@@ -29,18 +27,19 @@ export interface FinalizedEventPositionV1 {
  */
 export type LooseEventPositionInputV1 = { readonly [K in keyof FinalizedEventPositionV1]: unknown };
 
-export function canonicalDigest32(value: unknown, label = 'digest'): Digest32V1 {
-  const text = boundedString(value, label);
-  return adapt(label, () => {
-    assertCanonicalDigest(text, label);
-    return text;
-  });
+/** A canonical 32-byte digest field of a position; length-bounded BEFORE the
+ *  shipped regex so an absurd string cannot buy a proportional scan. */
+function positionDigest(value: unknown, label: string): Digest32V1 {
+  if (typeof value !== 'string' || value.length !== 66) {
+    throw new Error(`${label} must be a lowercase 32-byte 0x digest`);
+  }
+  assertCanonicalDigest(value, label);
+  return value;
 }
 
-/** A non-negative safe integer; block numbers and log indices are numbers on this wire. */
-export function canonicalBlockNumber(value: unknown, label = 'blockNumber'): number {
+function positionIndex(value: unknown, label: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    fail('noncanonical-scalar', `${label} must be a non-negative safe integer`);
+    throw new Error(`${label} must be a non-negative safe integer`);
   }
   return value;
 }
@@ -51,22 +50,18 @@ export function canonicalBlockNumber(value: unknown, label = 'blockNumber'): num
  * boundary rather than restating `Number.isInteger`-style checks that drift
  * from core's canonical rules (safe integers, lowercase 32-byte digests).
  * Accepts the loose input shape and returns the proven one — the direction a
- * trust boundary is supposed to point.
+ * trust boundary is supposed to point. Throws NEUTRAL labeled errors.
  */
 export function canonicalEventPositionV1(
   input: LooseEventPositionInputV1,
   label = 'position',
 ): FinalizedEventPositionV1 {
-  return canonicalPosition(input, label);
-}
-
-function canonicalPosition(input: LooseEventPositionInputV1, label: string): FinalizedEventPositionV1 {
   return {
-    blockNumber: canonicalBlockNumber(input.blockNumber, `${label}.blockNumber`),
-    blockHash: canonicalDigest32(input.blockHash, `${label}.blockHash`),
-    transactionHash: canonicalDigest32(input.transactionHash, `${label}.transactionHash`),
-    transactionIndex: canonicalBlockNumber(input.transactionIndex, `${label}.transactionIndex`),
-    logIndex: canonicalBlockNumber(input.logIndex, `${label}.logIndex`),
+    blockNumber: positionIndex(input.blockNumber, `${label}.blockNumber`),
+    blockHash: positionDigest(input.blockHash, `${label}.blockHash`),
+    transactionHash: positionDigest(input.transactionHash, `${label}.transactionHash`),
+    transactionIndex: positionIndex(input.transactionIndex, `${label}.transactionIndex`),
+    logIndex: positionIndex(input.logIndex, `${label}.logIndex`),
   };
 }
 
