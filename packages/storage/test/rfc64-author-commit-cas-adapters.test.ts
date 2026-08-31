@@ -4,8 +4,10 @@ import {
   OxigraphStore,
   SparqlHttpStore,
   createTripleStore,
+  tryReplaceGraphAtomically,
   tryReplaceSubjectAtomically,
   tryRfc64AuthorCommitCasV1,
+  UnsupportedTripleStoreCapabilityError,
   type TripleStore,
 } from '../src/index.js';
 import {
@@ -96,6 +98,23 @@ describe('RFC-64 author commit remote adapters', () => {
       namespaceOwnedButUncertified,
       authorCommitInput(),
     )).resolves.toBeNull();
+    const unmanagedCapabilityQuad = {
+      subject: 'urn:test:rfc64:uncertified-subject',
+      predicate: 'urn:test:rfc64:uncertified-predicate',
+      object: '"uncertified"',
+      graph: 'urn:test:rfc64:uncertified-graph',
+    };
+    await expect(tryReplaceGraphAtomically(
+      namespaceOwnedButUncertified,
+      unmanagedCapabilityQuad.graph,
+      [unmanagedCapabilityQuad],
+    )).resolves.toBe(false);
+    await expect(tryReplaceSubjectAtomically(
+      namespaceOwnedButUncertified,
+      unmanagedCapabilityQuad.graph,
+      unmanagedCapabilityQuad.subject,
+      [unmanagedCapabilityQuad],
+    )).resolves.toBe(false);
     await namespaceOwnedButUncertified.close();
     const transactionalButReplicaUnsafe = new SparqlHttpStore({
       queryEndpoint: 'http://unsupported.invalid/query-replica',
@@ -107,6 +126,25 @@ describe('RFC-64 author commit remote adapters', () => {
       authorCommitInput(),
     )).resolves.toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('propagates indeterminate and mismatched capability failures from the public CAS helper', async () => {
+    const indeterminate = new Error('response lost after commit');
+    const indeterminateStore = {
+      rfc64AuthorCommitCasV1: async () => { throw indeterminate; },
+    } as unknown as TripleStore;
+    await expect(tryRfc64AuthorCommitCasV1(indeterminateStore, authorCommitInput()))
+      .rejects.toBe(indeterminate);
+
+    const mismatchedCapability = new UnsupportedTripleStoreCapabilityError(
+      'replaceSubject',
+      'TestDecorator',
+    );
+    const mismatchedStore = {
+      rfc64AuthorCommitCasV1: async () => { throw mismatchedCapability; },
+    } as unknown as TripleStore;
+    await expect(tryRfc64AuthorCommitCasV1(mismatchedStore, authorCommitInput()))
+      .rejects.toBe(mismatchedCapability);
   });
 
   it('preserves receipt certification through the managed factory decorator stack', async () => {
