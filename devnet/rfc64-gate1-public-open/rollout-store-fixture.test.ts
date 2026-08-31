@@ -4,12 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { renderBlazegraphNamespaceXml } from '@origintrail-official/dkg-storage';
+import {
+  createTripleStore,
+  renderBlazegraphNamespaceXml,
+} from '@origintrail-official/dkg-storage';
 
 import {
   cleanupRolloutStoreFixture,
   createRolloutStoreFixture,
   type RolloutStoreFixture,
+  type RolloutStoreFactory,
 } from './rollout-store-fixture.js';
 import {
   createBlazegraphRolloutStoreBinding,
@@ -19,6 +23,9 @@ import {
 } from './rollout-store-config.js';
 
 const BLAZEGRAPH_URL = 'http://127.0.0.1:9999/bigdata/namespace/kb/sparql';
+const MOCK_REMOTE_STORE_FACTORY: RolloutStoreFactory = async () => (
+  createTripleStore({ backend: 'oxigraph' })
+);
 
 test('loads the canonical Blazegraph namespace contract from storage', () => {
   const namespaceXml = renderBlazegraphNamespaceXml(
@@ -51,6 +58,8 @@ test('round-trips complete Oxigraph and Blazegraph store bindings through the pr
     ),
     blazegraph,
   );
+  assert.deepEqual(Object.keys(oxigraph).sort(), ['sentinelGraph', 'tripleStore']);
+  assert.deepEqual(Object.keys(blazegraph).sort(), ['sentinelGraph', 'tripleStore']);
 });
 
 test('bounds a Blazegraph namespace request that never returns', async () => {
@@ -112,6 +121,7 @@ test('bounds cleanup when Blazegraph accepts namespaces but never deletes them',
     blazegraphTestUrl: BLAZEGRAPH_URL,
     fetchImpl,
     requestTimeoutMs: 20,
+    storeFactory: MOCK_REMOTE_STORE_FACTORY,
     storeDataDirs: { author: ['/tmp/author'], receiver: ['/tmp/receiver'] },
   });
   const startedAt = Date.now();
@@ -126,10 +136,15 @@ test('bounds cleanup when Blazegraph accepts namespaces but never deletes them',
 
 test('isolates fresh Blazegraph data directories and reuses restart endpoints', async () => {
   const fetchImpl: typeof fetch = async () => new Response('', { status: 201 });
+  const openedConfigs: Array<Parameters<RolloutStoreFactory>[0]> = [];
   const fixture = await createRolloutStoreFixture({
     backendInput: 'blazegraph',
     blazegraphTestUrl: BLAZEGRAPH_URL,
     fetchImpl,
+    storeFactory: async (config) => {
+      openedConfigs.push(config);
+      return MOCK_REMOTE_STORE_FACTORY(config);
+    },
     storeDataDirs: {
       author: ['/tmp/author'],
       receiver: ['/tmp/receiver-a', '/tmp/receiver-b'],
@@ -138,21 +153,29 @@ test('isolates fresh Blazegraph data directories and reuses restart endpoints', 
   const first = fixture.bindingForRole('receiver', '/tmp/receiver-a');
   const restarted = fixture.bindingForRole('receiver', '/tmp/receiver-a');
   const fresh = fixture.bindingForRole('receiver', '/tmp/receiver-b');
+  const author = fixture.bindingForRole('author', '/tmp/author');
   if (
-    first.backend !== 'blazegraph'
-    || restarted.backend !== 'blazegraph'
-    || fresh.backend !== 'blazegraph'
+    first.tripleStore.backend !== 'blazegraph'
+    || restarted.tripleStore.backend !== 'blazegraph'
+    || fresh.tripleStore.backend !== 'blazegraph'
   ) {
     throw new Error('Blazegraph fixture returned a non-Blazegraph binding');
   }
   assert.equal(
-    first.endpoint,
-    restarted.endpoint,
+    first.tripleStore.options.url,
+    restarted.tripleStore.options.url,
   );
   assert.notEqual(
-    first.endpoint,
-    fresh.endpoint,
+    first.tripleStore.options.url,
+    fresh.tripleStore.options.url,
   );
+  assert.equal(openedConfigs.length, 3);
+  for (const binding of [author, first, fresh]) {
+    assert.ok(
+      openedConfigs.includes(binding.tripleStore),
+      'sentinel seeding must open each canonical binding config directly',
+    );
+  }
   assert.throws(
     () => fixture.bindingForRole('receiver', '/tmp/receiver-c'),
     /no registered receiver store/u,
@@ -167,7 +190,6 @@ test('removes every temporary root when remote fixture cleanup fails', async () 
   ]);
   const roots = [...createdRoots];
   const failingFixture = {
-    backend: 'blazegraph',
     bindingForRole: () => createBlazegraphRolloutStoreBinding({
       endpoint: BLAZEGRAPH_URL,
       sentinelGraph: 'urn:dkg:rfc64:rollout-store-sentinel:cleanup',

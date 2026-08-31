@@ -11,31 +11,22 @@ export const ROLLOUT_STORE_SENTINEL_GRAPH_ENV = 'DKG_RFC64_GATE1_STORE_SENTINEL_
 
 const ROLLOUT_BLAZEGRAPH_TIMEOUT_MS = 30_000;
 
-export type OxigraphRolloutStoreBinding = Readonly<{
-  backend: 'oxigraph';
-  sentinelGraph: string;
-  storePath: string;
-  tripleStore: TripleStoreConfig & Readonly<{
-    backend: 'oxigraph-persistent';
-    options: Readonly<{ path: string }>;
-  }>;
+export type OxigraphRolloutStoreConfig = TripleStoreConfig & Readonly<{
+  backend: 'oxigraph-persistent';
+  options: Readonly<{ path: string }>;
 }>;
 
-export type BlazegraphRolloutStoreBinding = Readonly<{
+export type BlazegraphRolloutStoreConfig = TripleStoreConfig & Readonly<{
   backend: 'blazegraph';
-  endpoint: string;
-  sentinelGraph: string;
-  tripleStore: TripleStoreConfig & Readonly<{
-    backend: 'blazegraph';
-    options: Readonly<{ timeout: number; url: string }>;
-  }>;
+  options: Readonly<{ timeout: number; url: string }>;
 }>;
 
-/** One complete, valid store selection. Optional environment values never
- * escape the parser into fixture or adapter code. */
-export type RolloutStoreBinding =
-  | OxigraphRolloutStoreBinding
-  | BlazegraphRolloutStoreBinding;
+/** One complete, valid store selection. The discriminated TripleStoreConfig is
+ * the only store identity; adapter paths and endpoints are never duplicated. */
+export type RolloutStoreBinding = Readonly<{
+  sentinelGraph: string;
+  tripleStore: OxigraphRolloutStoreConfig | BlazegraphRolloutStoreConfig;
+}>;
 
 export type RolloutStoreEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -48,12 +39,10 @@ export function parseRolloutStoreBackend(input: string | undefined): RolloutStor
 export function createOxigraphRolloutStoreBinding(input: Readonly<{
   dataDir: string;
   sentinelGraph: string;
-}>): OxigraphRolloutStoreBinding {
+}>): RolloutStoreBinding {
   const storePath = join(input.dataDir, 'store.nq');
   return Object.freeze({
-    backend: 'oxigraph',
     sentinelGraph: assertSafeIri(input.sentinelGraph),
-    storePath,
     tripleStore: Object.freeze({
       backend: 'oxigraph-persistent',
       options: Object.freeze({ path: storePath }),
@@ -64,13 +53,11 @@ export function createOxigraphRolloutStoreBinding(input: Readonly<{
 export function createBlazegraphRolloutStoreBinding(input: Readonly<{
   endpoint: string;
   sentinelGraph: string;
-}>): BlazegraphRolloutStoreBinding {
+}>): RolloutStoreBinding {
   if (input.endpoint.length === 0) {
     throw new Error(`Blazegraph rollout certification requires ${ROLLOUT_BLAZEGRAPH_URL_ENV}`);
   }
   return Object.freeze({
-    backend: 'blazegraph',
-    endpoint: input.endpoint,
     sentinelGraph: assertSafeIri(input.sentinelGraph),
     tripleStore: Object.freeze({
       backend: 'blazegraph',
@@ -85,17 +72,25 @@ export function createBlazegraphRolloutStoreBinding(input: Readonly<{
 export function rolloutStoreBindingToEnv(
   binding: RolloutStoreBinding,
 ): Readonly<Record<string, string>> {
-  if (binding.backend === 'oxigraph') {
+  if (binding.tripleStore.backend === 'oxigraph-persistent') {
     return Object.freeze({
-      [ROLLOUT_STORE_BACKEND_ENV]: binding.backend,
+      [ROLLOUT_STORE_BACKEND_ENV]: 'oxigraph',
       [ROLLOUT_STORE_SENTINEL_GRAPH_ENV]: binding.sentinelGraph,
     });
   }
   return Object.freeze({
-    [ROLLOUT_STORE_BACKEND_ENV]: binding.backend,
-    [ROLLOUT_BLAZEGRAPH_URL_ENV]: binding.endpoint,
+    [ROLLOUT_STORE_BACKEND_ENV]: 'blazegraph',
+    [ROLLOUT_BLAZEGRAPH_URL_ENV]: binding.tripleStore.options.url,
     [ROLLOUT_STORE_SENTINEL_GRAPH_ENV]: binding.sentinelGraph,
   });
+}
+
+export function rolloutStoreBackendForBinding(
+  binding: RolloutStoreBinding,
+): RolloutStoreBackend {
+  return binding.tripleStore.backend === 'oxigraph-persistent'
+    ? 'oxigraph'
+    : 'blazegraph';
 }
 
 export function rolloutStoreBindingFromEnv(

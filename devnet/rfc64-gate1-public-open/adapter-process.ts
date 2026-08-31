@@ -43,6 +43,7 @@ import {
   parseGate1RolloutAdapterConfig,
 } from './rollout-adapter-fixture.js';
 import {
+  rolloutStoreBackendForBinding,
   rolloutStoreBindingFromEnv,
 } from './rollout-store-config.js';
 
@@ -58,7 +59,7 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 const dataDir = resolve(dataDirInput);
 const role: 'author' | 'receiver' = roleInput;
 const storeBinding = rolloutStoreBindingFromEnv(process.env, dataDir);
-const storeBackend = storeBinding.backend;
+const storeBackend = rolloutStoreBackendForBinding(storeBinding);
 const storeSentinelGraph = storeBinding.sentinelGraph;
 const pinnedMasterKeyHex = masterKeyHex;
 const rolloutConfig = parseGate1RolloutAdapterConfig(process.env);

@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { assertSafeIri } from '@origintrail-official/dkg-core';
@@ -9,26 +9,22 @@ import {
   quadsToNQuads,
   readExactGraphPaged,
   type Quad,
+  type TripleStore,
   type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
 import {
-  parseRolloutStoreBackend,
   createBlazegraphRolloutStoreBinding,
   createOxigraphRolloutStoreBinding,
-  type RolloutStoreBackend,
+  parseRolloutStoreBackend,
+  rolloutStoreBackendForBinding,
   type RolloutStoreBinding,
 } from './rollout-store-config.js';
 
 export { parseRolloutStoreBackend, type RolloutStoreBackend } from './rollout-store-config.js';
 export type RolloutStoreRole = 'author' | 'receiver';
-type RolloutNamespaceHandle = Readonly<{
-  namespace: string;
-  namespaceUrl: string;
-  sparqlUrl: string;
-}>;
+export type RolloutStoreFactory = (config: TripleStoreConfig) => Promise<TripleStore>;
 
 export interface RolloutStoreFixture {
-  readonly backend: RolloutStoreBackend;
   bindingForRole(role: RolloutStoreRole, dataDir: string): RolloutStoreBinding;
   assertGraphExact(
     role: RolloutStoreRole,
@@ -46,30 +42,67 @@ export interface RolloutStoreFixtureOptions {
   readonly requestTimeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly storeDataDirs?: Readonly<Record<RolloutStoreRole, readonly string[]>>;
+  /** Test seam for mocked remote stores. Normal callers use createTripleStore. */
+  readonly storeFactory?: RolloutStoreFactory;
 }
+
+type RolloutStoreSlot = Readonly<{
+  dataDir: string;
+  key: string;
+  namespace: string;
+  role: RolloutStoreRole;
+  roleIndex: number;
+  sentinelGraph: string;
+}>;
+
+type ProvisionedRolloutStores = Readonly<{
+  bindingByStore: ReadonlyMap<string, RolloutStoreBinding>;
+  dispose: () => Promise<void>;
+}>;
 
 const DEFAULT_MANAGEMENT_TIMEOUT_MS = 30_000;
 const DEFAULT_STORE_DATA_DIRS = Object.freeze({
   author: Object.freeze(['author']),
   receiver: Object.freeze(['receiver']),
 });
+
 export async function createRolloutStoreFixture(
   options: RolloutStoreFixtureOptions = {},
 ): Promise<RolloutStoreFixture> {
   const backend = parseRolloutStoreBackend(options.backendInput);
-  const storeDataDirs = normalizeStoreDataDirs(options.storeDataDirs);
-  if (backend === 'oxigraph') return OxigraphRolloutStoreFixture.create(storeDataDirs);
-  const configuredUrl = options.blazegraphTestUrl;
-  if (configuredUrl === undefined || configuredUrl.length === 0) {
-    throw new Error('Blazegraph rollout certification requires BLAZEGRAPH_TEST_URL');
+  const slots = createRolloutStoreSlots(normalizeStoreDataDirs(options.storeDataDirs));
+  const storeFactory = options.storeFactory ?? createTripleStore;
+  const provisioned = backend === 'oxigraph'
+    ? await provisionOxigraphRolloutStores(slots)
+    : await provisionBlazegraphRolloutStores({
+      configuredUrl: requiredBlazegraphUrl(options.blazegraphTestUrl),
+      fetchImpl: options.fetchImpl ?? fetch,
+      requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_MANAGEMENT_TIMEOUT_MS,
+      signal: options.signal,
+      slots,
+    });
+
+  try {
+    await Promise.all([...provisioned.bindingByStore.values()].map(
+      (binding) => seedStoreSentinel(binding, storeFactory),
+    ));
+  } catch (cause) {
+    try {
+      await provisioned.dispose();
+    } catch (cleanupCause) {
+      throw new AggregateError(
+        [cause, cleanupCause],
+        `${backend} rollout store sentinel setup and cleanup failed`,
+      );
+    }
+    throw cause;
   }
-  return BlazegraphRolloutStoreFixture.create({
-    configuredUrl,
-    fetchImpl: options.fetchImpl ?? fetch,
-    requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_MANAGEMENT_TIMEOUT_MS,
-    signal: options.signal,
-    storeDataDirs,
-  });
+
+  return new CanonicalRolloutStoreFixture(
+    provisioned.bindingByStore,
+    storeFactory,
+    provisioned.dispose,
+  );
 }
 
 export async function cleanupRolloutStoreFixture(
@@ -89,37 +122,17 @@ export async function cleanupRolloutStoreFixture(
   }
 }
 
-class OxigraphRolloutStoreFixture implements RolloutStoreFixture {
-  readonly backend = 'oxigraph' as const;
-
-  private constructor(
+class CanonicalRolloutStoreFixture implements RolloutStoreFixture {
+  constructor(
     private readonly bindingByStore: ReadonlyMap<string, RolloutStoreBinding>,
+    private readonly storeFactory: RolloutStoreFactory,
+    private readonly disposeProvisionedStores: () => Promise<void>,
   ) {}
-
-  static async create(
-    storeDataDirs: Readonly<Record<RolloutStoreRole, readonly string[]>>,
-  ): Promise<OxigraphRolloutStoreFixture> {
-    const bindingByStore = new Map<string, RolloutStoreBinding>();
-    const nonce = fixtureNonce();
-    for (const role of ['author', 'receiver'] as const) {
-      for (const [index, dataDir] of storeDataDirs[role].entries()) {
-        await mkdir(dataDir, { recursive: true, mode: 0o700 });
-        const graph = sentinelGraph(nonce, role, index);
-        const binding = createOxigraphRolloutStoreBinding({
-          dataDir,
-          sentinelGraph: graph,
-        });
-        await seedStoreSentinel(binding.tripleStore, binding.sentinelGraph);
-        bindingByStore.set(roleDataDirKey(role, dataDir), binding);
-      }
-    }
-    return new OxigraphRolloutStoreFixture(bindingByStore);
-  }
 
   bindingForRole(role: RolloutStoreRole, dataDir: string): RolloutStoreBinding {
     const binding = this.bindingByStore.get(roleDataDirKey(role, dataDir));
     if (binding === undefined) {
-      throw new Error(`Oxigraph rollout fixture has no registered ${role} store for ${dataDir}`);
+      throw new Error(`rollout fixture has no registered ${role} store for ${dataDir}`);
     }
     return binding;
   }
@@ -130,150 +143,30 @@ class OxigraphRolloutStoreFixture implements RolloutStoreFixture {
     graphUri: string,
     expectedQuads: readonly Quad[],
   ): Promise<void> {
-    const persisted = await readFile(join(dataDir, 'store.nq'), 'utf8');
-    const graphTerm = `<${assertSafeIri(graphUri)}>`;
-    const actualLines = persisted.split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.endsWith(` ${graphTerm} .`))
-      .sort();
-    const expectedLines = quadsToNQuads(expectedQuads.map((quad) => ({
-      ...quad,
-      graph: graphUri,
-    }))).split('\n').map((line) => line.trim()).filter(Boolean).sort();
-    if (JSON.stringify(actualLines) !== JSON.stringify(expectedLines)) {
-      throw new Error(
-        `Oxigraph ${role} graph ${graphUri} differs from the exact persisted projection`,
+    const binding = this.bindingForRole(role, dataDir);
+    const backend = rolloutStoreBackendForBinding(binding);
+    if (backend === 'blazegraph') {
+      await assertPathMissing(
+        join(dataDir, 'store.nq'),
+        `Blazegraph ${role} unexpectedly created an Oxigraph fallback store`,
       );
     }
-  }
-
-  async dispose(): Promise<void> {}
-}
-
-class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
-  readonly backend = 'blazegraph' as const;
-
-  private constructor(
-    private readonly bindingByStore: ReadonlyMap<string, RolloutStoreBinding>,
-    private readonly namespaceManager: BlazegraphNamespaceManager,
-    private readonly namespaceHandles: readonly RolloutNamespaceHandle[],
-    private readonly requestTimeoutMs: number,
-  ) {}
-
-  static async create(input: Readonly<{
-    configuredUrl: string;
-    fetchImpl: typeof fetch;
-    requestTimeoutMs: number;
-    signal?: AbortSignal;
-    storeDataDirs: Readonly<Record<RolloutStoreRole, readonly string[]>>;
-  }>): Promise<BlazegraphRolloutStoreFixture> {
-    const nonce = fixtureNonce();
-    const namespaceManager = new BlazegraphNamespaceManager({
-      namespaceApiUrl: blazegraphNamespaceApiUrlFromSparqlEndpoint(input.configuredUrl),
-      fetchImpl: input.fetchImpl,
-      requestTimeoutMs: input.requestTimeoutMs,
-    });
-    const plan: Array<Readonly<{
-      key: string;
-      namespace: string;
-      role: RolloutStoreRole;
-      roleIndex: number;
-    }>> = [];
-    for (const role of ['author', 'receiver'] as const) {
-      for (const [index, dataDir] of input.storeDataDirs[role].entries()) {
-        plan.push(Object.freeze({
-          key: roleDataDirKey(role, dataDir),
-          namespace: `rfc64-rollout-${nonce}-${role}-${index}`,
-          role,
-          roleIndex: index,
-        }));
-      }
-    }
-    const handles = await namespaceManager.acquireMany(
-      plan.map((entry) => entry.namespace),
-      input.signal,
-    );
-    const bindingByStore = new Map<string, RolloutStoreBinding>();
-    for (const [index, entry] of plan.entries()) {
-      const endpoint = handles[index]?.sparqlUrl;
-      if (endpoint === undefined) throw new Error(`missing namespace handle for ${entry.key}`);
-      bindingByStore.set(entry.key, createBlazegraphRolloutStoreBinding({
-        endpoint,
-        sentinelGraph: sentinelGraph(nonce, entry.role, entry.roleIndex),
-      }));
-    }
+    const observer = await this.storeFactory(binding.tripleStore);
     try {
-      await Promise.all([...bindingByStore.entries()].map(async ([key, binding]) => {
-        if (binding.backend !== 'blazegraph') {
-          throw new Error(`non-Blazegraph binding registered for ${key}`);
-        }
-        await seedBlazegraphStoreSentinel(
-          binding.endpoint,
-          binding.sentinelGraph,
-          input.fetchImpl,
-          input.requestTimeoutMs,
-          input.signal,
-        );
-      }));
-    } catch (cause) {
-      try {
-        await namespaceManager.disposeAll(handles, { reconcileAttempts: 3 });
-      } catch (cleanupCause) {
-        throw new AggregateError(
-          [cause, cleanupCause],
-          'Blazegraph rollout store sentinel setup and cleanup failed',
-        );
-      }
-      throw cause;
-    }
-    return new BlazegraphRolloutStoreFixture(
-      bindingByStore,
-      namespaceManager,
-      handles,
-      input.requestTimeoutMs,
-    );
-  }
-
-  bindingForRole(role: RolloutStoreRole, dataDir: string): RolloutStoreBinding {
-    const binding = this.bindingByStore.get(roleDataDirKey(role, dataDir));
-    if (binding === undefined) {
-      throw new Error(`Blazegraph rollout fixture has no registered ${role} store for ${dataDir}`);
-    }
-    return binding;
-  }
-
-  async assertGraphExact(
-    role: RolloutStoreRole,
-    dataDir: string,
-    graphUri: string,
-    expectedQuads: readonly Quad[],
-  ): Promise<void> {
-    await assertPathMissing(
-      join(dataDir, 'store.nq'),
-      `Blazegraph ${role} unexpectedly created an Oxigraph fallback store`,
-    );
-    const binding = this.bindingByStore.get(roleDataDirKey(role, dataDir));
-    if (binding?.backend !== 'blazegraph') {
-      throw new Error(`Blazegraph ${role} endpoint is not registered`);
-    }
-    const observer = await createTripleStore({
-      backend: 'blazegraph',
-      options: { url: binding.endpoint, timeout: this.requestTimeoutMs },
-    });
-    try {
-      const actual = await readExactGraphPaged(observer, graphUri, {
+      const safeGraphUri = assertSafeIri(graphUri);
+      const actual = await readExactGraphPaged(observer, safeGraphUri, {
         expectedQuadCount: expectedQuads.length,
         maxQuadCount: expectedQuads.length,
-        outputGraph: graphUri,
+        outputGraph: safeGraphUri,
       });
-      const actualLines = quadsToNQuads(actual).split('\n').filter(Boolean).sort();
-      const expectedLines = quadsToNQuads(expectedQuads.map((quad) => ({
+      const actualLines = canonicalQuadLines(actual);
+      const expectedLines = canonicalQuadLines(expectedQuads.map((quad) => ({
         ...quad,
-        graph: assertSafeIri(graphUri),
-      }))).split('\n').filter(Boolean).sort();
+        graph: safeGraphUri,
+      })));
       if (JSON.stringify(actualLines) !== JSON.stringify(expectedLines)) {
         throw new Error(
-          `Blazegraph ${role} graph ${graphUri} differs from the exact persisted projection`,
+          `${backend} ${role} graph ${safeGraphUri} differs from the exact persisted projection`,
         );
       }
     } finally {
@@ -282,8 +175,86 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
   }
 
   async dispose(): Promise<void> {
-    await this.namespaceManager.disposeAll(this.namespaceHandles);
+    await this.disposeProvisionedStores();
   }
+}
+
+async function provisionOxigraphRolloutStores(
+  slots: readonly RolloutStoreSlot[],
+): Promise<ProvisionedRolloutStores> {
+  const bindingByStore = new Map<string, RolloutStoreBinding>();
+  for (const slot of slots) {
+    await mkdir(slot.dataDir, { recursive: true, mode: 0o700 });
+    bindingByStore.set(slot.key, createOxigraphRolloutStoreBinding({
+      dataDir: slot.dataDir,
+      sentinelGraph: slot.sentinelGraph,
+    }));
+  }
+  return Object.freeze({
+    bindingByStore,
+    dispose: async () => undefined,
+  });
+}
+
+async function provisionBlazegraphRolloutStores(input: Readonly<{
+  configuredUrl: string;
+  fetchImpl: typeof fetch;
+  requestTimeoutMs: number;
+  signal?: AbortSignal;
+  slots: readonly RolloutStoreSlot[];
+}>): Promise<ProvisionedRolloutStores> {
+  const namespaceManager = new BlazegraphNamespaceManager({
+    namespaceApiUrl: blazegraphNamespaceApiUrlFromSparqlEndpoint(input.configuredUrl),
+    fetchImpl: input.fetchImpl,
+    requestTimeoutMs: input.requestTimeoutMs,
+  });
+  const handles = await namespaceManager.acquireMany(
+    input.slots.map((slot) => slot.namespace),
+    input.signal,
+  );
+  const dispose = async (): Promise<void> => namespaceManager.disposeAll(handles);
+  try {
+    const bindingByStore = new Map<string, RolloutStoreBinding>();
+    for (const [index, slot] of input.slots.entries()) {
+      const endpoint = handles[index]?.sparqlUrl;
+      if (endpoint === undefined) throw new Error(`missing namespace handle for ${slot.key}`);
+      bindingByStore.set(slot.key, createBlazegraphRolloutStoreBinding({
+        endpoint,
+        sentinelGraph: slot.sentinelGraph,
+      }));
+    }
+    return Object.freeze({ bindingByStore, dispose });
+  } catch (cause) {
+    try {
+      await dispose();
+    } catch (cleanupCause) {
+      throw new AggregateError(
+        [cause, cleanupCause],
+        'Blazegraph rollout store provisioning and cleanup failed',
+      );
+    }
+    throw cause;
+  }
+}
+
+function createRolloutStoreSlots(
+  storeDataDirs: Readonly<Record<RolloutStoreRole, readonly string[]>>,
+): readonly RolloutStoreSlot[] {
+  const nonce = fixtureNonce();
+  const slots: RolloutStoreSlot[] = [];
+  for (const role of ['author', 'receiver'] as const) {
+    for (const [roleIndex, dataDir] of storeDataDirs[role].entries()) {
+      slots.push(Object.freeze({
+        dataDir,
+        key: roleDataDirKey(role, dataDir),
+        namespace: `rfc64-rollout-${nonce}-${role}-${roleIndex}`,
+        role,
+        roleIndex,
+        sentinelGraph: sentinelGraph(nonce, role, roleIndex),
+      }));
+    }
+  }
+  return Object.freeze(slots);
 }
 
 function fixtureNonce(): string {
@@ -295,11 +266,12 @@ function sentinelGraph(nonce: string, role: RolloutStoreRole, index: number): st
 }
 
 async function seedStoreSentinel(
-  config: TripleStoreConfig,
-  graph: string,
+  binding: RolloutStoreBinding,
+  storeFactory: RolloutStoreFactory,
 ): Promise<void> {
-  const store = await createTripleStore(config);
+  const store = await storeFactory(binding.tripleStore);
   try {
+    const graph = binding.sentinelGraph;
     await store.insert([{
       subject: `${graph}:subject`,
       predicate: 'urn:dkg:rfc64:rollout-store-sentinel:ready',
@@ -311,32 +283,15 @@ async function seedStoreSentinel(
   }
 }
 
-async function seedBlazegraphStoreSentinel(
-  endpoint: string,
-  graph: string,
-  fetchImpl: typeof fetch,
-  timeoutMs: number,
-  callerSignal?: AbortSignal,
-): Promise<void> {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const signal = callerSignal === undefined
-    ? timeout
-    : AbortSignal.any([callerSignal, timeout]);
-  const body = quadsToNQuads([{
-    subject: `${graph}:subject`,
-    predicate: 'urn:dkg:rfc64:rollout-store-sentinel:ready',
-    object: '"true"',
-    graph,
-  }]);
-  const response = await fetchImpl(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'text/x-nquads' },
-    body,
-    signal,
-  });
-  if (!response.ok) {
-    throw new Error(`failed to seed Blazegraph rollout store sentinel: HTTP ${response.status}`);
+function canonicalQuadLines(quads: readonly Quad[]): string[] {
+  return quadsToNQuads(quads).split('\n').map((line) => line.trim()).filter(Boolean).sort();
+}
+
+function requiredBlazegraphUrl(value: string | undefined): string {
+  if (value === undefined || value.length === 0) {
+    throw new Error('Blazegraph rollout certification requires BLAZEGRAPH_TEST_URL');
   }
+  return value;
 }
 
 function normalizeStoreDataDirs(
@@ -348,10 +303,10 @@ function normalizeStoreDataDirs(
   };
   for (const [role, dataDirs] of Object.entries(normalized)) {
     if (dataDirs.length < 1 || new Set(dataDirs).size !== dataDirs.length) {
-      throw new Error(`Blazegraph rollout ${role} data directories must be non-empty and unique`);
+      throw new Error(`rollout ${role} data directories must be non-empty and unique`);
     }
     if (dataDirs.some((dataDir) => dataDir.length === 0)) {
-      throw new Error(`Blazegraph rollout ${role} data directory must be non-empty`);
+      throw new Error(`rollout ${role} data directory must be non-empty`);
     }
   }
   return Object.freeze({
