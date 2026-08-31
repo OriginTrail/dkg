@@ -361,6 +361,19 @@ describe('SyncSharedProjectionStoreV1', () => {
     expect(returned).toBe(true);
   });
 
+  it('preserves a timeout when synchronous iterator cleanup throws', async () => {
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(async () => sourceWithThrowingReturn(
+        () => new Promise<IteratorResult<Quad>>(() => undefined),
+      )),
+    ).open(REQUEST, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 5,
+    });
+
+    await expect(collect(result.bytes)).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
   it('forwards an independent caller cancellation during a pending adapter open', async () => {
     let observedSignal: AbortSignal | undefined;
     const started = Promise.withResolvers<void>();
@@ -388,6 +401,43 @@ describe('SyncSharedProjectionStoreV1', () => {
     expect(observedSignal?.reason).toMatchObject({ name: 'AbortError' });
   });
 
+  it('preserves caller cancellation when synchronous iterator cleanup throws', async () => {
+    const started = Promise.withResolvers<void>();
+    const controller = new AbortController();
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(async () => sourceWithThrowingReturn(() => {
+        started.resolve();
+        return new Promise<IteratorResult<Quad>>(() => undefined);
+      })),
+    ).open(REQUEST, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    });
+    const pending = collect(result.bytes);
+    await started.promise;
+    controller.abort(new DOMException('caller cancelled', 'AbortError'));
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('preserves validation failures when synchronous iterator cleanup throws', async () => {
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(async () => sourceWithThrowingReturn(async () => ({
+        done: false,
+        value: { ...QUADS[0], graph: 'urn:other' },
+      }))),
+    ).open(REQUEST, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 1000,
+    });
+
+    await expect(collect(result.bytes)).rejects.toMatchObject({
+      code: 'rfc64-shared-projection-stream-result',
+      message: expect.stringMatching(/outside the authenticated projection graph/u),
+    });
+  });
+
   it('closes the backend iterator when a consumer stops before completeness', async () => {
     let sourceClosed = false;
     const source = async function* () {
@@ -407,6 +457,24 @@ describe('SyncSharedProjectionStoreV1', () => {
     expect((await iterator.next()).done).toBe(false);
     await iterator.return?.();
     expect(sourceClosed).toBe(true);
+  });
+
+  it('suppresses synchronous iterator cleanup failures on early consumer return', async () => {
+    let delivered = false;
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(async () => sourceWithThrowingReturn(async () => {
+        if (delivered) return { done: true, value: undefined };
+        delivered = true;
+        return { done: false, value: QUADS[0] };
+      })),
+    ).open(REQUEST, {
+      operatorByteCeiling: 4096,
+      timeoutMs: 1000,
+    });
+    const iterator = result.bytes[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+
+    await expect(iterator.return?.()).resolves.toMatchObject({ done: true });
   });
 
   it('refuses stores without an explicit certified stream capability', () => {
@@ -475,6 +543,21 @@ function fakeStore(
 
 async function* streamQuads(quads: readonly Quad[]): AsyncGenerator<Quad> {
   for (const quad of quads) yield { ...quad };
+}
+
+function sourceWithThrowingReturn(
+  next: () => Promise<IteratorResult<Quad>>,
+): AsyncIterable<Quad> {
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        next,
+        return() {
+          throw new Error('synchronous iterator cleanup failed');
+        },
+      };
+    },
+  };
 }
 
 function joinLines(quads: readonly Quad[]): Uint8Array {
