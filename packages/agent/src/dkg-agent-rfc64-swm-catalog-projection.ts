@@ -75,11 +75,9 @@ interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
 type ResolvedRfc64CatalogAuthoringLaneV1 =
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'public';
-    readonly workspaceVisibility: 'public-only';
   }>
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'private';
-    readonly workspaceVisibility: 'restricted-only';
   }>;
 
 type Rfc64CatalogAuthoringLaneDecisionV1 =
@@ -94,7 +92,7 @@ export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(
   lane: ResolvedRfc64CatalogAuthoringLaneV1,
   accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined,
 ): boolean {
-  return lane.workspaceVisibility === 'public-only'
+  return lane.kind === 'public'
     ? accessPolicy === 'public'
     : accessPolicy === 'ownerOnly' || accessPolicy === 'allowList';
 }
@@ -381,12 +379,10 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ? Object.freeze({
         ...commonLane,
         kind: 'public',
-        workspaceVisibility: 'public-only',
       })
       : Object.freeze({
         ...commonLane,
         kind: 'private',
-        workspaceVisibility: 'restricted-only',
       });
     return Object.freeze({
       status: 'active',
