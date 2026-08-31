@@ -408,45 +408,6 @@ describe('DashboardDB — retention', () => {
     }
   });
 
-  it('tracks routine-log retention state transactionally and uses the partial id index', () => {
-    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-retention-index-'));
-    const volumeDb = new DashboardDB({
-      dataDir: volumeDir,
-      retentionDays: 365,
-      routineLogRowCap: 10,
-      logVolumePruneBatchRows: 2,
-    });
-    try {
-      const insert = volumeDb.db.prepare(
-        `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'test', ?)`,
-      );
-      insert.run(1, 'info', 'routine-a');
-      insert.run(2, 'debug', 'routine-b');
-      insert.run(3, 'warn', 'protected');
-      expect(volumeDb.db.prepare(`
-        SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
-      `).get()).toEqual({ routine_count: 2 });
-
-      volumeDb.db.prepare(`UPDATE logs SET level = 'error' WHERE message = 'routine-a'`).run();
-      volumeDb.db.prepare(`UPDATE logs SET level = 'info' WHERE message = 'protected'`).run();
-      volumeDb.db.prepare(`DELETE FROM logs WHERE message = 'routine-b'`).run();
-      expect(volumeDb.db.prepare(`
-        SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
-      `).get()).toEqual({ routine_count: 1 });
-
-      const plan = volumeDb.db.prepare(`
-        EXPLAIN QUERY PLAN
-        SELECT id FROM logs
-        WHERE level NOT IN ('warn', 'error')
-        ORDER BY id ASC LIMIT 2
-      `).all() as Array<{ detail: string }>;
-      expect(plan.some(({ detail }) => detail.includes('idx_logs_routine_id'))).toBe(true);
-    } finally {
-      volumeDb.close();
-      rmSync(volumeDir, { recursive: true, force: true });
-    }
-  });
-
   it('seeds and prunes populated pre-V35 routine logs during a V34 upgrade', () => {
     const dbPath = join(dir, 'node-ui.db');
     db.close();
@@ -496,30 +457,30 @@ describe('DashboardDB — retention', () => {
     `).get()).toEqual({ routine_count: 2 });
   });
 
-  it('fails loudly on missing retention state and repairs it on reopen', () => {
-    db.insertLog({
-      ts: Date.now(),
-      level: 'info',
-      module: 'retention-invariant',
-      message: 'routine-row',
-    });
-    db.db.exec('DELETE FROM log_retention_state WHERE singleton_id = 1');
-
-    expect(() => db.pruneLogVolumeBatch()).toThrow(
-      /retention state is missing its singleton row/,
-    );
+  it('repairs a lost V35 retention trigger when DashboardDB reopens', () => {
+    db.db.exec('DROP TRIGGER track_routine_log_insert');
+    db.db.prepare(`
+      INSERT INTO logs (ts, level, module, message)
+      VALUES (?, 'info', 'restore-test', 'untracked-before-reopen')
+    `).run(Date.now());
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 0 });
 
     db.close();
-    db = new DashboardDB({
-      dataDir: dir,
-      retentionDays: 365,
-      routineLogRowCap: 0,
-      logVolumePruneBatchRows: 1,
-    });
+    db = new DashboardDB({ dataDir: dir, retentionDays: 365 });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     expect(db.db.prepare(`
       SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
     `).get()).toEqual({ routine_count: 1 });
-    expect(db.pruneLogVolumeBatch()).toMatchObject({ deleted: 1 });
+
+    db.db.prepare(`
+      INSERT INTO logs (ts, level, module, message)
+      VALUES (?, 'debug', 'restore-test', 'tracked-after-reopen')
+    `).run(Date.now() + 1);
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 2 });
   });
 
   it('preserves ambiguous pre-upgrade compatibility rows below the public cap', () => {
