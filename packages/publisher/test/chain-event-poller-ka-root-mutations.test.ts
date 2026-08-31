@@ -858,6 +858,49 @@ describe('ChainEventPoller — pollNow', () => {
     await poller.pollNow();
     expect(saveCalls).toEqual([{ lane: 'kaRootMutations', block: 40_951 + MAX_RANGE - 1 }]);
   });
+
+  it('a throwing metrics sink never affects delivery, cursor persistence, or later scans (review r11)', async () => {
+    // Metrics are observers, not participants: run the SAME drive twice, once
+    // with sinks that always throw and once with none, and require identical
+    // deliveries and identical persisted cursors. The lag hook fires before
+    // the scan and the result hook after it, so an unisolated throw in either
+    // would abort delivery or skip persistence after state advanced.
+    async function drive(withThrowingSinks: boolean): Promise<{ seen: string[]; saved: number[] }> {
+      const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_990)]);
+      const seen: string[] = [];
+      const saved: number[] = [];
+      const poller = new ChainEventPoller({
+        chain: chain.adapter,
+        publishHandler: makeHandler(),
+        intervalMs: CADENCE_MS,
+        clock: () => 0,
+        cursorPersistence: {
+          async loadLane() { return undefined; },
+          async saveLane(_lane, block) { saved.push(block); },
+        } satisfies LaneCursorPersistence,
+        ...(withThrowingSinks ? {
+          metrics: {
+            laneScan: () => { throw new Error('exporter down'); },
+            laneCursorLag: () => { throw new Error('exporter down'); },
+          },
+        } : {}),
+        onKnowledgeAssetRootMutated: async (e) => { seen.push(e.kaId); },
+      });
+      await poller.pollNow();
+      // A second manual drive proves failure bookkeeping and schedules were
+      // not corrupted by the throwing result hook of the first.
+      chain.setHead(50_010);
+      await poller.pollNow();
+      return { seen, saved };
+    }
+
+    const throwing = await drive(true);
+    const clean = await drive(false);
+    expect(throwing.seen).toEqual(clean.seen);
+    expect(throwing.seen.length).toBeGreaterThan(0);
+    expect(throwing.saved).toEqual(clean.saved);
+    expect(throwing.saved.length).toBeGreaterThan(0);
+  });
 });
 
 describe('ChainEventPoller — lane health instruments', () => {
