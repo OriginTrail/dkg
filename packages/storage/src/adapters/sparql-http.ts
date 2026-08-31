@@ -36,8 +36,10 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
   parseSparqlJsonSelectResponse,
-  type AdapterSparqlJsonSelectResponse,
+  parseSparqlJsonResponseText,
+  SparqlJsonResultsShapeError,
 } from './sparql-json-results.js';
+import { isOrdinaryDataRecord } from '../closed-data-snapshot.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -69,7 +71,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { AbortableStoreWorkLifecycle, composeAbortSignals } from '../abortable-store-work-lifecycle.js';
+import {
+  AbortableStoreWorkLifecycle,
+  composeAbortSignals,
+  raceStoreWorkAgainstAbort,
+} from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
   isStoreOperationTimeoutError,
@@ -95,21 +101,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }
 
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
@@ -1025,16 +1016,27 @@ export class SparqlHttpStore implements TripleStore {
               managedOxigraph: this.managedOxigraph,
               operation: canonicalOperation,
             });
-            const json = JSON.parse(text) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
+            const json = parseSparqlJsonResponseText(text);
 
-            if (isAsk || 'boolean' in json) {
+            if (
+              isAsk
+              || (
+                isOrdinaryDataRecord(json)
+                && Object.prototype.hasOwnProperty.call(json, 'boolean')
+              )
+            ) {
+              if (!isOrdinaryDataRecord(json) || typeof json.boolean !== 'boolean') {
+                throw new SparqlJsonResultsShapeError(
+                  'SPARQL JSON ASK response.boolean must be a boolean',
+                );
+              }
               return {
                 type: 'boolean',
-                value: (json as W3CAskResponse).boolean,
+                value: json.boolean,
               } satisfies AskResult;
             }
 
-            const parsed = parseSparqlJsonSelectResponse(json as AdapterSparqlJsonSelectResponse);
+            const parsed = parseSparqlJsonSelectResponse(json);
             return {
               type: 'bindings',
               bindings: parsed.bindings,
@@ -1124,7 +1126,7 @@ export class SparqlHttpStore implements TripleStore {
 
     const refreshOptions = options?.source ? { source: options.source } : undefined;
     const inFlight = this.listGraphsInFlight ?? this.refreshListGraphsCache(refreshOptions);
-    const graphs = await raceAgainstAbort(inFlight, options?.signal);
+    const graphs = await raceStoreWorkAgainstAbort(inFlight, options?.signal);
     return [...graphs];
   }
 
@@ -1333,14 +1335,6 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
   } catch {
     return endpoint.split(/[?#]/, 1)[0];
   }
-}
-
-// ---------------------------------------------------------------------------
-// W3C SPARQL 1.1 JSON result types
-// ---------------------------------------------------------------------------
-
-interface W3CAskResponse {
-  boolean: boolean;
 }
 
 // ---------------------------------------------------------------------------

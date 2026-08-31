@@ -18,7 +18,7 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     await expect(raceStoreWorkAgainstAbort(
       Promise.resolve('late'),
       preAborted.signal,
-      lateCleanup,
+      { onLateResult: lateCleanup },
     )).rejects.toBe(preAbortReason);
     await Promise.resolve();
     expect(lateCleanup).toHaveBeenCalledWith('late');
@@ -58,11 +58,13 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     const cancelled = new AbortController();
     const cancelledRemove = vi.spyOn(cancelled.signal, 'removeEventListener');
     const cleanup = vi.fn();
-    const raced = raceStoreWorkAgainstAbort(lateWork, cancelled.signal, cleanup);
+    const raced = raceStoreWorkAgainstAbort(lateWork, cancelled.signal, {
+      onLateResult: cleanup,
+    });
     cancelled.abort(new Error('cancelled'));
     await expect(raced).rejects.toThrow('cancelled');
     resolveLate('owned-resource');
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(cleanup).toHaveBeenCalledWith('owned-resource');
     expect(abortCalls(cancelledRemove)).toBe(1);
   });
@@ -80,6 +82,53 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     process.on('unhandledRejection', onUnhandled);
     try {
       await expect(raceStoreWorkAgainstAbort(work, controller.signal)).rejects.toBe(reason);
+      rejectWork(new Error('late store failure'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('consumes synchronous and asynchronous late-result cleanup failures', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (cause: unknown) => unhandled.push(cause);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      for (const onLateResult of [
+        () => { throw new Error('synchronous cleanup failure'); },
+        async () => { throw new Error('asynchronous cleanup failure'); },
+      ]) {
+        let resolveWork!: (value: string) => void;
+        const work = new Promise<string>((resolve) => { resolveWork = resolve; });
+        const controller = new AbortController();
+        const reason = new Error('cancelled');
+        const raced = raceStoreWorkAgainstAbort(work, controller.signal, { onLateResult });
+        controller.abort(reason);
+        await expect(raced).rejects.toBe(reason);
+        resolveWork('late resource');
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('owns deadline cleanup and consumes work that settles after timeout', async () => {
+    let rejectWork!: (cause: unknown) => void;
+    const work = new Promise<never>((_resolve, reject) => {
+      rejectWork = reject;
+    });
+    const timeout = new Error('bounded wait expired');
+    const unhandled: unknown[] = [];
+    const onUnhandled = (cause: unknown) => unhandled.push(cause);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(raceStoreWorkAgainstAbort(work, undefined, {
+        timeoutMs: 5,
+        timeoutError: () => timeout,
+      })).rejects.toBe(timeout);
       rejectWork(new Error('late store failure'));
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(unhandled).toEqual([]);
