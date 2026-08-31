@@ -37,7 +37,7 @@ async function objectsFor(store: OxigraphStore, subject: string): Promise<string
  * Wrap a real OxigraphStore, counting `replaceSubject` calls and control-graph
  * `deleteByPattern` calls. `mode` selects the capability behaviour (mirrors the per-queue
  * atomicity suites): `real` delegates to the real atomic replace; `absent` exposes no
- * capability; `refuse` raises a clean capability refusal (SparqlHttpStore atomicUpdates:false).
+ * capability; `refuse` raises a clean capability refusal (best-effort SparqlHttpStore).
  */
 function countingStore(
   inner: OxigraphStore,

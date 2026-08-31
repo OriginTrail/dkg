@@ -45,8 +45,13 @@ export class GraphSetCatalogState {
     return true;
   }
 
-  sorted(): SortedGraphCatalog {
-    if (!this.members) return createSortedUniqueStringCatalog([]);
+  /**
+   * Return the ordered view only when it still describes the membership set
+   * observed by the caller. An invalidation between an async cache read and
+   * enumeration must be retried, not represented as an ordinary empty catalog.
+   */
+  sortedFor(members: ReadonlySet<string>): SortedGraphCatalog | null {
+    if (this.members !== members) return null;
     this.ordered ??= createSortedUniqueStringCatalog(this.members);
     return this.ordered;
   }

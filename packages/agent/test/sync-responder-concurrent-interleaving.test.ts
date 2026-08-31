@@ -1663,26 +1663,40 @@ describe('sync responder pagination interleaving', () => {
   it('uses the outer sorted catalog without exposing reserved decorator graphs', async () => {
     const visible = 'did:dkg:context-graph:sorted-boundary/data';
     const reserved = 'did:dkg:context-graph:sorted-boundary/internal';
+    const added = 'did:dkg:context-graph:sorted-boundary/added';
     const base = new OxigraphStore();
     await base.insert([q(visible, 1), q(reserved, 2)]);
     const indexed = new GraphSetIndexStore(base, { revalidateMs: 100_000 });
     const visibleStore = new ChangelogStore(indexed, { reservedGraphs: [reserved] });
+    // Initialize the changelog plane before measuring identity so its one-time
+    // reserved graph creation is not confused with a content-only mutation.
+    await visibleStore.insert([q(visible, 3)]);
     const listGraphs = vi.spyOn(visibleStore, 'listGraphs').mockRejectedValue(
       new Error('unsorted graph enumeration must not be selected'),
     );
     const store = createListContextGraphsCacheInvalidatingStore(visibleStore, () => undefined);
     const memo = createResponderGraphListMemo(store);
 
+    const initialCatalog = await store.listGraphsSorted!();
+
     const initial = await memo.get({ refresh: true });
     expect(initial.graphs).toContain(visible);
     expect(initial.graphs).not.toContain(reserved);
     expect(listGraphs).not.toHaveBeenCalled();
 
-    await store.insert([q(visible, 3)]);
+    await store.insert([q(visible, 4)]);
+    const contentOnlyCatalog = await store.listGraphsSorted!();
+    expect(contentOnlyCatalog).toBe(initialCatalog);
     const contentOnly = await memo.get({ refresh: true });
     expect(contentOnly).toBe(initial);
     expect(contentOnly.graphs).not.toContain(reserved);
     expect(listGraphs).not.toHaveBeenCalled();
+
+    await store.insert([q(added, 5)]);
+    const changedCatalog = await store.listGraphsSorted!();
+    expect(changedCatalog).not.toBe(initialCatalog);
+    expect(changedCatalog).toContain(added);
+    expect(changedCatalog).not.toContain(reserved);
   });
 
   it('does not traverse through an outer visibility decorator for a sorted catalog', async () => {

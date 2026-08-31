@@ -31,7 +31,10 @@ export interface RandomSamplingExactRepairDependencies {
   readonly timeoutMs?: number;
   readonly createTimeoutSignal?: (timeoutMs: number) => AbortSignal;
   resolveStorageAddress(signal: AbortSignal): Promise<string>;
-  resolveLocalContextGraphId(onChainContextGraphId: bigint): string | undefined;
+  resolveLocalContextGraphId(
+    onChainContextGraphId: bigint,
+    signal: AbortSignal,
+  ): string | undefined | Promise<string | undefined>;
   resolveCandidatePeerIds(
     localContextGraphId: string,
     signal: AbortSignal,
@@ -76,7 +79,7 @@ async function executeRandomSamplingExactRepair(
 ): Promise<RandomSamplingRepairMaterial> {
   throwIfAborted(signal);
 
-  const localContextGraphId = deps.resolveLocalContextGraphId(input.cgId);
+  const localContextGraphId = await deps.resolveLocalContextGraphId(input.cgId, signal);
   if (!localContextGraphId) {
     throw new Error(`Random Sampling repair cannot resolve local CG ${input.cgId}`);
   }

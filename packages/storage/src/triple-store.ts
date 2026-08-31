@@ -18,6 +18,22 @@ import {
   type ChangelogStoreOptions,
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './rfc64-author-commit-cas.js';
+import type {
+  CanonicalAuthorSealStoreRowV1,
+  Rfc64SharedProjectionStreamOperationV1,
+  Rfc64SemanticReadOperationV1,
+} from '@origintrail-official/dkg-core';
+import type {
+  Rfc64ExactBindingsReadOperationV1,
+  Rfc64SemanticReadCapabilityResultV1,
+} from './rfc64-exact-bindings-read-capability.js';
+import {
+  getManagedOxigraphRuntimeConstructionAuthorityV1,
+} from './managed-oxigraph-runtime-store.js';
 
 export interface Quad {
   subject: string;
@@ -29,6 +45,8 @@ export interface Quad {
 export interface SelectResult {
   type: 'bindings';
   bindings: Array<Record<string, string>>;
+  /** SELECT projection reported by the backend when it exposes one. */
+  variables?: string[];
 }
 
 export interface ConstructResult {
@@ -85,6 +103,12 @@ export interface QueryOptions {
 
 export type TripleStoreQueryOptions = QueryOptions;
 
+export interface Rfc64SharedProjectionStreamCapabilityOptionsV1 {
+  /** Gateway-derived minimum of signed, operator, and protocol ceilings. */
+  readonly byteCeiling: number;
+  readonly signal?: AbortSignal;
+}
+
 /**
  * Options for a server-side `update()`. A superset of {@link QueryOptions} with an
  * index-maintenance hint — kept OFF the read-path `QueryOptions` so it can't be set
@@ -134,6 +158,24 @@ export interface TripleStore {
     options?: QueryOptions,
   ): Promise<void>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+  /** Execute one member of the certified closed RFC-64 exact-bindings union. */
+  readonly rfc64ExactBindingsReadCertifiedV1?: boolean;
+  rfc64ExactBindingsReadV1?(
+    operation: Rfc64ExactBindingsReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
+  /** Legacy semantic-only capability retained for the V1 compatibility window. */
+  readonly rfc64SemanticReadCertifiedV1?: boolean;
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<Rfc64SemanticReadCapabilityResultV1>;
+  /** Certified exact, non-materialized RFC-64 shared-projection stream. */
+  readonly rfc64SharedProjectionStreamCertifiedV1?: boolean;
+  rfc64SharedProjectionStreamV1?(
+    operation: Rfc64SharedProjectionStreamOperationV1,
+    options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  ): Promise<AsyncIterable<Uint8Array>>;
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
@@ -184,6 +226,19 @@ export interface TripleStore {
     quads: Quad[],
     options?: QueryOptions,
   ): Promise<void>;
+  /**
+   * RFC-64 `SYNC_AUTHOR_COMMIT_CAS_V1`: atomically replace one complete shared
+   * projection, its author-seal subject, the guarded author current-head
+   * pointer, and bounded mutation/applied-set subjects.
+   *
+   * Implementations MUST refuse before mutation unless the whole generated
+   * update is one backend transaction. `conflict` proves no semantic target was
+   * changed; execution failures remain indeterminate and propagate.
+   */
+  rfc64AuthorCommitCasV1?(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -400,6 +455,34 @@ export async function tryReplaceSubjectAtomically(
   }
 }
 
+/**
+ * Attempt the certified RFC-64 author-publication CAS boundary.
+ *
+ * `null` is a clean capability refusal raised before mutation. A returned
+ * `conflict` is also known not to have mutated semantic targets. Every other
+ * failure propagates because the backend may have committed before its
+ * response was lost.
+ */
+export async function tryRfc64AuthorCommitCasV1(
+  store: TripleStore,
+  input: Rfc64AuthorCommitCasInputV1,
+  options: QueryOptions = {},
+): Promise<Rfc64AuthorCommitCasResultV1 | null> {
+  const commit = store.rfc64AuthorCommitCasV1;
+  if (typeof commit !== 'function') return null;
+  try {
+    return await commit.call(store, input, options);
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError
+      && error.capability === 'rfc64AuthorCommitCasV1'
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
 
 // Backends that talk to a remote SPARQL endpoint over HTTP rather than
@@ -492,6 +575,7 @@ export interface TripleStoreConfig {
 
 type AdapterFactory = (
   options?: Record<string, unknown>,
+  constructionAuthority?: object,
 ) => Promise<TripleStore>;
 
 const adapterRegistry = new Map<string, AdapterFactory>();
@@ -513,7 +597,8 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
-  const store = await factory(resolveAdapterOptions(config));
+  const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
+  const store = await factory(resolveAdapterOptions(config), constructionAuthority);
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
@@ -542,12 +627,14 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   ) {
     return config.options;
   }
-  // `managedByDkg` has two independent meanings in SparqlHttpStore: it owns
-  // the adapter-local graph-list cache and it identifies the transactional
-  // daemon-managed Oxigraph endpoint. The outer GraphSetIndexStore replaces
-  // only the cache, so preserve the endpoint's atomic-update capability when
-  // clearing the cache-ownership flag.
-  return { ...config.options, managedByDkg: false, atomicUpdates: true };
+  // The outer GraphSetIndexStore replaces the adapter-local graph-list cache,
+  // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
+  // process carries separate storage-issued runtime provenance; never derive
+  // that consistency proof from persisted namespace ownership.
+  return Object.freeze({
+    ...config.options,
+    managedByDkg: false,
+  });
 }
 
 function wrapGraphSetIndex(

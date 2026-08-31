@@ -7,6 +7,7 @@ import {
   hasStoreOperationOutcome,
   isReadOnlyStoreOperation,
   isStoreOperation,
+  isStoreOperationNotStarted,
   isStoreOperationTimeoutError,
 } from '../src/index.js';
 
@@ -33,12 +34,20 @@ describe('store operation outcome protocol', () => {
 
     for (const failure of failures) {
       expect(hasStoreOperationOutcome(failure, 'replaceGraph', 'not_started')).toBe(true);
+      expect(isStoreOperationNotStarted(failure, 'replaceGraph')).toBe(true);
       expect(failure).toMatchObject({
         storeOperationOutcomeTag: STORE_OPERATION_OUTCOME_TAG,
         storeOperation: 'replaceGraph',
         outcome: 'not_started',
       });
     }
+
+    const rfcRefusal = new UnsupportedTripleStoreCapabilityError(
+      'rfc64AuthorCommitCasV1',
+      'TestStore',
+    );
+    expect(isStoreOperationNotStarted(rfcRefusal, 'rfc64AuthorCommitCasV1')).toBe(true);
+    expect(isStoreOperationNotStarted(rfcRefusal, 'replaceGraph')).toBe(false);
   });
 
   it('rejects incidental matching properties without the stable protocol tag', () => {

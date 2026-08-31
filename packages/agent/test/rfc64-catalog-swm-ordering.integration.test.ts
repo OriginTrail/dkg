@@ -160,7 +160,7 @@ describe('RFC-64 catalog and SWM ordering', () => {
     let releaseCatalog!: () => void;
     const catalogStarted = new Promise<void>((resolve) => { markCatalogStarted = resolve; });
     const catalogRelease = new Promise<void>((resolve) => { releaseCatalog = resolve; });
-    vi.spyOn(receiver, 'synchronizeRfc64CatalogFromProvidersV1')
+    vi.spyOn(receiver, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
       .mockImplementation(async ({ signal }) => {
         markCatalogStarted();
         await Promise.race([

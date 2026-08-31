@@ -65,6 +65,7 @@ export interface KnowledgeAssetOperationPublicSnapshot {
   readonly quads: Quad[];
   readonly kaUal: string;
   readonly assertionVersion: string;
+  readonly publicQuadsDigest: string;
   readonly publisherPeerId?: string;
 }
 
@@ -953,6 +954,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
     quads,
     kaUal: actualScope.ual,
     assertionVersion: actualScope.assertionVersion,
+    publicQuadsDigest: expectedDigest,
     publisherPeerId: stripLiteral(row?.['publisherPeerId'])?.trim() || undefined,
   };
 }
