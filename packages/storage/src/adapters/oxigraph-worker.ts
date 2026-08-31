@@ -12,7 +12,7 @@ import {
   type Rfc64ExactBindingsReadOperationV1,
   type Rfc64ExactBindingsStoreRowV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
+import type { Rfc64SemanticReadOperationV1 } from '@origintrail-official/dkg-core';
 import {
   normalizeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -208,7 +208,7 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ) {
     return executeRfc64SemanticReadCapabilityV1(this, operation, options);
@@ -608,8 +608,10 @@ export class OxigraphWorkerStore implements TripleStore {
         this.respawnPromise,
         signal,
         {
-          timeoutMs: remainingMs,
-          timeoutError: () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+          timeout: {
+            timeoutMs: remainingMs,
+            timeoutError: () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+          },
         },
       );
     }
@@ -733,6 +735,9 @@ export class OxigraphWorkerStore implements TripleStore {
       () => this.call<number>('deleteByPattern', pattern),
     );
   }
+  async deleteByPatternWithoutCount(pattern: Partial<Quad>): Promise<void> {
+    await this.deleteByPattern(pattern);
+  }
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -781,7 +786,10 @@ export class OxigraphWorkerStore implements TripleStore {
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
     return this.runTrackedWrite(
       { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
-      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', manifest),
+      () => this.call<Rfc64AuthorCommitCasResultV1>(
+        'rfc64AuthorCommitCasNormalizedV1',
+        manifest,
+      ),
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {

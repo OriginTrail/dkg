@@ -7,7 +7,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
-import type { LiftJob, RawLiftRequest } from '../src/lift-job.js';
+import type { LiftJob, LiftJobBroadcast, RawLiftRequest } from '../src/lift-job.js';
 import {
   AsyncLiftClaimCoordinator,
   classifyLiftJobOwnershipMode,
@@ -21,7 +21,12 @@ import {
   stageKnowledgeAssetShareSnapshot,
 } from './_helpers/ka-vm-publish.js';
 import {
+  CONTROL_PAYLOAD,
+  DEFAULT_CONTROL_GRAPH_URI,
   DEFAULT_WALLET_LOCK_GRAPH_URI,
+  jobSubject,
+  literal,
+  serializeJob,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
@@ -122,13 +127,137 @@ describe('async-lift claim fencing', () => {
     }).claimCoordinator;
 
     await expect(coordinator.runJobTransaction(firstId, async (transaction) => {
-      if (transaction.kind === 'missing') throw new Error('expected first job');
+      if (transaction.kind !== 'present') throw new Error('expected first job');
       // The scope is bound to job-a even though job-b has the same broad LiftJob type.
       return await transaction.scope.commit(secondBefore, 'reaccept');
     })).rejects.toThrow('cannot replace LiftJob job-a with job-b');
 
     expect(await publisher.getStatus(firstId)).toEqual(firstBefore);
     expect(await publisher.getStatus(secondId)).toEqual(secondBefore);
+  });
+
+  it('rejects an illegal same-job transition at the coordinator persistence boundary', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-illegal-transition',
+      now: () => now,
+    });
+    const before = await publisher.getStatus(jobId);
+    if (!before || before.status !== 'accepted') throw new Error('expected accepted job');
+    const illegal: LiftJobBroadcast = {
+      ...before,
+      status: 'broadcast',
+      claim: {
+        walletId: 'wallet-a',
+        claimToken: 'claim-illegal',
+        claimLeaseExpiresAt: now + 60_000,
+      },
+      validation: KA_VM_VALIDATION,
+      broadcast: {
+        txHash: KA_VM_EXECUTOR_TX_HASH,
+        walletId: 'wallet-a',
+        nonce: 4,
+      },
+      timestamps: {
+        ...before.timestamps,
+        claimedAt: now,
+        validatedAt: now,
+        broadcastAt: now,
+        updatedAt: now,
+      },
+    };
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    await expect(coordinator.runJobTransaction(jobId, async (transaction) => {
+      if (transaction.kind !== 'present') throw new Error('expected job');
+      return await transaction.scope.commit(illegal, 'broadcast');
+    })).rejects.toThrow(
+      'Invalid LiftJob transition: accepted -> broadcast. Allowed: claimed, failed',
+    );
+
+    expect(await publisher.getStatus(jobId)).toEqual(before);
+  });
+
+  it('fails closed before an ordinary cancel callback can mutate a malformed job', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-corrupt-cancel',
+      now: () => now,
+    });
+    const job = await publisher.getStatus(jobId);
+    if (!job || job.status !== 'accepted') throw new Error('expected accepted job');
+    const corrupt = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal('{not-json') }
+        : entry,
+    );
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(corrupt);
+    const readRawPayload = async () => await store.query(
+      `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`,
+    );
+    const before = await readRawPayload();
+
+    await expect(publisher.cancel(jobId)).rejects.toThrow('Malformed persisted LiftJob payload');
+
+    expect(await readRawPayload()).toEqual(before);
+    await expect(publisher.getStatus(jobId)).rejects.toThrow('Malformed persisted LiftJob payload');
+  });
+
+  it('closes a transaction scope after removing its job', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-removed-scope',
+      now: () => now,
+    });
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    await coordinator.runJobTransaction(jobId, async (transaction) => {
+      if (transaction.kind !== 'present') throw new Error('expected job');
+      const { current, scope } = transaction;
+      await scope.commitRemoval();
+      await expect(scope.commit(current, 'reaccept')).rejects.toThrow(
+        `LiftJob transition scope for ${jobId} is closed`,
+      );
+    });
+
+    expect(await publisher.getStatus(jobId)).toBeNull();
+  });
+
+  it('constructs compatibility authority with recovery operations only', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-compatibility-scope',
+      now: () => now,
+      overrides: {
+        status: 'broadcast',
+        claim: { walletId: 'wallet-legacy' },
+        timestamps: { acceptedAt: now, claimedAt: now, broadcastAt: now, updatedAt: now },
+      } as never,
+    });
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    await coordinator.runJobTransaction(jobId, async (transaction) => {
+      if (transaction.kind !== 'compatibility') throw new Error('expected compatibility job');
+      expect(Object.keys(transaction.scope).sort()).toEqual([
+        'commitProofFailure',
+        'commitProofFinalization',
+        'commitReaccept',
+        'commitRecoveryReset',
+        'commitRemoval',
+      ]);
+      expect('commit' in transaction.scope).toBe(false);
+      expect('commitProofInclusion' in transaction.scope).toBe(false);
+      await transaction.scope.commitRemoval();
+    });
+
+    expect(await publisher.getStatus(jobId)).toBeNull();
   });
 
   it('classifies every lift-job state through one ownership policy', async () => {
@@ -180,6 +309,21 @@ describe('async-lift claim fencing', () => {
         errorPayloadRef: 'urn:error:tx-reverted',
       }),
     } satisfies LiftJob;
+    const signerlessHeldFailure = {
+      ...validated,
+      status: 'failed',
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'broadcast',
+        code: 'rpc_unavailable',
+        message: 'Legacy transaction signer was not persisted',
+        errorPayloadRef: 'urn:error:legacy-signer-unknown',
+      }),
+      recovery: {
+        action: 'reset_to_accepted',
+        recoveredFromStatus: 'broadcast',
+        txHashChecked: `0x${'ab'.repeat(32)}`,
+      },
+    } as LiftJob;
     const cases = [
       ['accepted', accepted, 'released'],
       ['claimed', claimed, 'lease-bound'],
@@ -188,6 +332,7 @@ describe('async-lift claim fencing', () => {
       ['included', included, 'proof-bound'],
       ['finalized', finalized, 'released'],
       ['failed-held', heldFailure, 'proof-bound'],
+      ['failed-held-without-signer', signerlessHeldFailure, 'lease-bound'],
       ['failed-proven-ineffective', releasedFailure, 'released'],
     ] satisfies ReadonlyArray<readonly [string, LiftJob, LiftJobOwnershipMode]>;
 
@@ -196,6 +341,100 @@ describe('async-lift claim fencing', () => {
     )).toEqual(Object.fromEntries(
       cases.map(([name, , expected]) => [name, expected]),
     ));
+  });
+
+  it('leases a signer-less legacy proof hold only until its claim expires', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-signerless-proof-hold',
+      now: () => now,
+    });
+    await publisher.claimNext('wallet-a');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    const validated = await publisher.getStatus(jobId);
+    if (!validated || validated.status !== 'validated') throw new Error('expected validated job');
+    const held = {
+      ...validated,
+      status: 'failed',
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'broadcast',
+        code: 'rpc_unavailable',
+        message: 'Legacy transaction signer was not persisted',
+        errorPayloadRef: 'urn:error:legacy-signer-unknown',
+      }),
+      recovery: {
+        action: 'reset_to_accepted',
+        recoveredFromStatus: 'broadcast',
+        txHashChecked: `0x${'cd'.repeat(32)}`,
+      },
+    } as LiftJob;
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(held, DEFAULT_CONTROL_GRAPH_URI));
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    expect(classifyLiftJobOwnershipMode(held)).toBe('lease-bound');
+    await expect(coordinator.sweepStaleOwnership()).resolves.toEqual([]);
+
+    now += 5 * 60_000 + 1;
+    await expect(coordinator.sweepStaleOwnership()).resolves.toEqual(['wallet-a']);
+    const persisted = await publisher.getStatus(jobId);
+    expect(persisted).toMatchObject({
+      status: 'failed',
+      recovery: {
+        txHashChecked: `0x${'cd'.repeat(32)}`,
+      },
+    });
+    expect(persisted?.recovery && 'walletIdChecked' in persisted.recovery).toBe(false);
+  });
+
+  it('fails closed when an active wallet lock points to a malformed job payload', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-corrupt-active',
+      now: () => now,
+    });
+    await publisher.claimNext('wallet-a');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-a', nonce: 4 },
+    });
+    const valid = await publisher.getStatus(jobId);
+    if (!valid || valid.status !== 'broadcast') throw new Error('expected broadcast job');
+    await seedLegacyRawLiftTestJob(store, {
+      ...rawLiftRequest(),
+      shareOperationId: 'share-op-waiting',
+    }, {
+      idGenerator: () => 'job-waiting',
+      now: () => now,
+    });
+
+    const corrupt = serializeJob(valid, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal('{not-json') }
+        : entry,
+    );
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(corrupt);
+
+    await expect(publisher.getStatus(jobId)).rejects.toThrow('Malformed persisted LiftJob payload');
+    await expect(publisher.recover()).rejects.toThrow('Malformed persisted LiftJob payload');
+    await expect(publisher.clearTerminalJob(jobId)).resolves.toEqual({
+      outcome: 'rejected',
+      reason: 'malformed',
+    });
+    await expect(publisher.claimNext('wallet-a')).rejects.toThrow(
+      'Malformed persisted LiftJob payload',
+    );
+
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(valid, DEFAULT_CONTROL_GRAPH_URI));
+    await expect(publisher.claimNext('wallet-a')).resolves.toBeNull();
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'broadcast',
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-a' },
+    });
   });
 
   it('does not recover a live pre-broadcast claim owned by another publisher instance', async () => {
@@ -261,6 +500,10 @@ describe('async-lift claim fencing', () => {
       status: 'finalized',
       finalization: { mode: 'noop' },
     });
+    const finalized = await publisher.getStatus(jobId);
+    expect(finalized).not.toHaveProperty('broadcast');
+    expect(finalized).not.toHaveProperty('inclusion');
+    expect(finalized).not.toHaveProperty('failure');
   });
 
   it('does not let an expired worker fail a job reclaimed by the same wallet', async () => {

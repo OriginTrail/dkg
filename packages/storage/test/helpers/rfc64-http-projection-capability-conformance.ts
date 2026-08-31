@@ -137,6 +137,60 @@ export function runRfc64HttpProjectionCapabilityConformance(
       await vi.waitFor(() => expect(scheduler.snapshot.backgroundInflight).toBe(0));
     });
 
+    it('retains scheduler admission until an oversized declared error body is cancelled', async () => {
+      const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
+      const cancellationStarted = Promise.withResolvers<void>();
+      const releaseCancellation = Promise.withResolvers<void>();
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          cancellationStarted.resolve();
+          return releaseCancellation.promise;
+        },
+      });
+      globalThis.fetch = (async () => new Response(body, {
+        status: 503,
+        headers: { 'Content-Length': '100000' },
+      })) as typeof fetch;
+      const store = options.createStore(scheduler, 1_000);
+
+      const pending = store.rfc64SharedProjectionStreamV1(FIXTURE.operation, {
+        byteCeiling: 4096,
+      });
+      let settled = false;
+      void pending.then(
+        () => { settled = true; },
+        () => { settled = true; },
+      );
+      await cancellationStarted.promise;
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(scheduler.snapshot.backgroundInflight).toBe(1);
+
+      releaseCancellation.resolve();
+      await expect(pending).rejects.toBeInstanceOf(Error);
+      await vi.waitFor(() => expect(scheduler.snapshot.backgroundInflight).toBe(0));
+    });
+
+    it('enforces the caller byte ceiling before exposing a successful response stream', async () => {
+      const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
+      let cancelled = false;
+      globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(LINE_A));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }), { status: 200 })) as typeof fetch;
+      const store = options.createStore(scheduler, 1_000);
+
+      await expect(store.rfc64SharedProjectionStreamV1(oneTripleOperation(), {
+        byteCeiling: 10,
+      })).rejects.toThrow('effective projection byte ceiling');
+      expect(cancelled).toBe(true);
+      await vi.waitFor(() => expect(scheduler.snapshot.backgroundInflight).toBe(0));
+    });
+
     it('keeps caller cancellation live after the spool releases its scheduler slot', async () => {
       const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
       globalThis.fetch = (async () => new Response(byteStream([LINE_Z, LINE_A]), {

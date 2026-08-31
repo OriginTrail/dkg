@@ -17,7 +17,9 @@ import {
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
   deriveRfc64SubgraphSemanticAddressesV1,
+  type Rfc64SemanticScopeV1,
   type Rfc64SemanticAddressV1,
+  type Rfc64SubgraphSemanticScopeV1,
 } from './rfc64-semantic-addresses-v1.js';
 import {
   assertCanonicalChainId,
@@ -92,10 +94,25 @@ type FieldSpecFor<T> = {
   }
 }[Extract<keyof T, string>];
 
-type SemanticRecordCoordinateForV1<K extends Rfc64SemanticRecordTypeV1> = Extract<
-  Rfc64SemanticRecordCoordinateV1,
-  { readonly recordType: K }
->;
+/**
+ * The public coordinate contract deliberately groups records that share one
+ * scope so callers may construct a coordinate from a union-valued record type.
+ * Definitions need the distributed, per-record view to preserve correlation
+ * between K and its exact coordinate keys.
+ */
+type SemanticRecordCoordinateForV1<K extends Rfc64SemanticRecordTypeV1> =
+  K extends 'CurrentAuthorCatalogRefV1'
+    ? Readonly<{ recordType: K; authorAddress: EvmAddressV1 }> & Rfc64SubgraphSemanticScopeV1
+    : K extends
+        | 'AppliedSubgraphSealV1'
+        | 'SubgraphMutationGuardV1'
+        | 'SubgraphReconcileTargetGuardV1'
+      ? Readonly<{ recordType: K }> & Rfc64SubgraphSemanticScopeV1
+      : Readonly<{ recordType: K }> & Rfc64SemanticScopeV1;
+
+type DistributedSemanticRecordCoordinateV1 = {
+  readonly [K in Rfc64SemanticRecordTypeV1]: SemanticRecordCoordinateForV1<K>;
+}[Rfc64SemanticRecordTypeV1];
 
 interface SemanticRecordDefinitionV1<K extends Rfc64SemanticRecordTypeV1> {
   readonly fields: readonly FieldSpecFor<Rfc64SemanticRecordValuesV1[K]>[];
@@ -570,21 +587,25 @@ function snapshotClosed(
 export function deriveRfc64SemanticRecordAddressFromCoordinateV1(
   coordinate: Rfc64SemanticRecordCoordinateV1,
 ): Rfc64SemanticAddressV1 {
-  switch (coordinate.recordType) {
+  // Runtime validation already proved the grouped public coordinate shape.
+  // Distribute it internally so the switch preserves the recordType/address
+  // correlation without narrowing the source-compatible public type.
+  const distributed = coordinate as DistributedSemanticRecordCoordinateV1;
+  switch (distributed.recordType) {
     case 'CurrentAuthorCatalogRefV1':
-      return RECORD_DEFINITIONS.CurrentAuthorCatalogRefV1.deriveAddress(coordinate);
+      return RECORD_DEFINITIONS.CurrentAuthorCatalogRefV1.deriveAddress(distributed);
     case 'AppliedSubgraphSealV1':
-      return RECORD_DEFINITIONS.AppliedSubgraphSealV1.deriveAddress(coordinate);
+      return RECORD_DEFINITIONS.AppliedSubgraphSealV1.deriveAddress(distributed);
     case 'SubgraphMutationGuardV1':
-      return RECORD_DEFINITIONS.SubgraphMutationGuardV1.deriveAddress(coordinate);
+      return RECORD_DEFINITIONS.SubgraphMutationGuardV1.deriveAddress(distributed);
     case 'ContextGraphMutationGuardV1':
-      return RECORD_DEFINITIONS.ContextGraphMutationGuardV1.deriveAddress(coordinate);
+      return RECORD_DEFINITIONS.ContextGraphMutationGuardV1.deriveAddress(distributed);
     case 'SubgraphReconcileTargetGuardV1':
-      return RECORD_DEFINITIONS.SubgraphReconcileTargetGuardV1.deriveAddress(coordinate);
+      return RECORD_DEFINITIONS.SubgraphReconcileTargetGuardV1.deriveAddress(distributed);
     case 'AppliedSubgraphSetRefV1':
-      return RECORD_DEFINITIONS.AppliedSubgraphSetRefV1.deriveAddress(coordinate);
+      return RECORD_DEFINITIONS.AppliedSubgraphSetRefV1.deriveAddress(distributed);
     case 'AppliedContextGraphSealV1':
-      return RECORD_DEFINITIONS.AppliedContextGraphSealV1.deriveAddress(coordinate);
+      return RECORD_DEFINITIONS.AppliedContextGraphSealV1.deriveAddress(distributed);
   }
 }
 

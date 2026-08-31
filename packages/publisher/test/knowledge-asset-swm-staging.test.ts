@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  TRUST_LEVEL_PREDICATE,
   TypedEventBus,
+  WORKSPACE_OWNER_PREDICATE,
   generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -99,7 +101,7 @@ describe('knowledge-asset SWM staging', () => {
       consumedPublicQuads = options.quads;
       return { status: 'tentative' };
     }) as never;
-    await publisherA.updateKnowledgeAssetFromSharedMemory(7n, {
+    await publisherA.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(7n, {
       contextGraphId: CONTEXT_GRAPH_ID,
       privateQuads: [],
       contentScopeVersion: 2,
@@ -111,6 +113,94 @@ describe('knowledge-asset SWM staging', () => {
     });
     expect(consumedPublicQuads).toMatchObject(A);
     expect(replaceCalls).toBe(2);
+  });
+
+  it('keeps staged and live updates on the same filtered SWM Merkle input', async () => {
+    const store = new OxigraphStore();
+    const publisher = new DKGPublisher({
+      store,
+      chain: { chainId: 'none' } as never,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+    const content = A[0]!;
+    const staged = await publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      shareOperationId: 'filtered-operation',
+      quads: [
+        content,
+        { subject: 'urn:asset', predicate: TRUST_LEVEL_PREDICATE, object: '"2"', graph: '' },
+        { subject: 'urn:asset', predicate: WORKSPACE_OWNER_PREDICATE, object: 'urn:agent', graph: '' },
+      ],
+      privateTripleCount: 0,
+    });
+    expect(staged.tripleCount).toBe(1);
+
+    const consumed: readonly Quad[][] = [];
+    publisher.update = (async (_kaId: bigint, options: { quads: readonly Quad[] }) => {
+      consumed.push(options.quads);
+      return { status: 'tentative' };
+    }) as never;
+    const updateOptions = {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      privateQuads: [],
+      contentScopeVersion: 2,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    } as const;
+    await publisher.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(7n, {
+      ...updateOptions,
+      stagedOperation: staged,
+    });
+    await publisher.updateKnowledgeAssetFromSharedMemory(7n, updateOptions);
+
+    expect(consumed).toHaveLength(2);
+    expect(consumed[0]).toEqual(consumed[1]);
+    expect(consumed[0]).toEqual([{ ...content, graph: '' }]);
+  });
+
+  it('rejects an older staged reference when its operation id is restaged with equal-count RDF', async () => {
+    const store = new OxigraphStore();
+    const publisher = new DKGPublisher({
+      store,
+      chain: { chainId: 'none' } as never,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+    const first = await publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      shareOperationId: 'reused-operation',
+      quads: A,
+      privateTripleCount: 0,
+    });
+    await publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      shareOperationId: 'reused-operation',
+      quads: B,
+      privateTripleCount: 0,
+    });
+    publisher.update = (async () => {
+      throw new Error('stale reference must fail before publishing');
+    }) as never;
+
+    await expect(publisher.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(7n, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      privateQuads: [],
+      contentScopeVersion: 2,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      publicTripleCount: A.length,
+      privateTripleCount: 0,
+      stagedOperation: first,
+    })).rejects.toThrow(/immutable reference/u);
   });
 });
 

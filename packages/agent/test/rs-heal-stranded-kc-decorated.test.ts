@@ -247,6 +247,44 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     await wrapped.close();
   });
 
+  it('forwards no-count deletes and invalidates caches only after success', async () => {
+    const failure = new Error('injected no-count delete failure');
+    let rejectDelete = false;
+    const countedDelete = vi.fn(async () => 1);
+    const noCountDelete = vi.fn(async () => {
+      if (rejectDelete) throw failure;
+    });
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'deleteByPattern') return countedDelete;
+        if (prop === 'deleteByPatternWithoutCount') return noCountDelete;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let invalidations = 0;
+    let projectionInvalidations = 0;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      adapter,
+      () => { invalidations += 1; },
+      () => { projectionInvalidations += 1; },
+    );
+    const pattern = { graph: 'urn:test:no-count', subject: 'urn:test:subject' };
+    const options: QueryOptions = { source: 'test.no-count', priority: 'background' };
+
+    await expect(wrapped.deleteByPatternWithoutCount?.(pattern, options)).resolves.toBeUndefined();
+    expect(noCountDelete).toHaveBeenCalledWith(pattern, options);
+    expect(countedDelete).not.toHaveBeenCalled();
+    expect(invalidations).toBe(1);
+    expect(projectionInvalidations).toBe(1);
+
+    rejectDelete = true;
+    await expect(wrapped.deleteByPatternWithoutCount?.(pattern, options)).rejects.toBe(failure);
+    expect(invalidations).toBe(1);
+    expect(projectionInvalidations).toBe(1);
+    await wrapped.close();
+  });
+
   it('invalidates caches for query updates with dotted PREFIX labels', async () => {
     const adapter = new OxigraphStore();
     const queryStore = new Proxy(adapter, {

@@ -137,7 +137,7 @@ async function makeAgentLike(
     keypair: await generateEd25519Keypair(),
     writeLocks,
   });
-  publisher.updateKnowledgeAssetFromSharedMemory = onPublisherUpdate as never;
+  publisher.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1 = onPublisherUpdate as never;
   return {
     store,
     chain,
@@ -183,6 +183,8 @@ describe('DKGAgent rootless update boundary', () => {
     await store.insert([q('urn:stale', 'urn:value', '"stale"', historicalAlias)]);
 
     let publisherCalls = 0;
+    let lastStagedReference: unknown;
+    const interleavedPublicQuads = [q('urn:update:interleaved', 'urn:value', '"three"')];
     const agent = await makeAgentLike(store, async (kaId, options) => {
       publisherCalls += 1;
       expect(kaId).toBe(KA_ID);
@@ -194,15 +196,38 @@ describe('DKGAgent rootless update boundary', () => {
         privateTripleCount: canonical.privateQuads.length,
       });
       expect(options.privateMerkleRoot).toEqual(privateRoot);
+      expect(options.stagedOperation).toBe(lastStagedReference);
+      const operationA = options.stagedOperation;
 
-      const staged = await loadSharedMemoryQuadsForScope(
+      await agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+        contextGraphId: CG,
+        shareOperationId: 'interleaved-operation-b',
+        kaUal: UAL,
+        assertionVersion: '2',
+        quads: interleavedPublicQuads,
+        privateTripleCount: 0,
+      });
+      const liveAfterInterleave = await loadSharedMemoryQuadsForScope(
         store,
         swmBucket,
         'all',
         scope,
       );
-      expect(staged.map(({ graph: _graph, ...quad }) => quad)).toEqual(
-        canonical.publicQuads.map(({ graph: _graph, ...quad }) => quad),
+      expect(liveAfterInterleave.map(({ graph: _graph, ...quad }) => quad))
+        .toEqual(interleavedPublicQuads.map(({ graph: _graph, ...quad }) => quad));
+      const stagedA = await resolveKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: operationA.contextGraphId,
+        shareOperationId: operationA.shareOperationId,
+        kaUal: operationA.kaUal,
+        assertionVersion: operationA.assertionVersion,
+      });
+      const byTriple = (left: Omit<Quad, 'graph'>, right: Omit<Quad, 'graph'>) =>
+        `${left.subject}\u0000${left.predicate}\u0000${left.object}`
+          .localeCompare(`${right.subject}\u0000${right.predicate}\u0000${right.object}`);
+      expect(stagedA.quads.map(({ graph: _graph, ...quad }) => quad).sort(byTriple)).toEqual(
+        canonical.publicQuads.map(({ graph: _graph, ...quad }) => quad).sort(byTriple),
       );
       return {
         kaId,
@@ -210,9 +235,17 @@ describe('DKGAgent rootless update boundary', () => {
         merkleRoot: attestation.expectedNewMerkleRoot,
         kaManifest: [],
         status: 'tentative',
-        publicQuads: staged,
+        publicQuads: stagedA.quads,
       };
     });
+    const realStage = agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1.bind(
+      agent.publisher,
+    );
+    agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1 = async (input) => {
+      const staged = await realStage(input);
+      lastStagedReference = staged;
+      return staged;
+    };
 
     const result = await (PublishMethods.prototype as any).update.call(
       agent,
@@ -225,7 +258,7 @@ describe('DKGAgent rootless update boundary', () => {
 
     expect(result.status).toBe('tentative');
     expect(publisherCalls).toBe(1);
-    expect(await store.countQuads(canonicalSwm)).toBe(canonical.publicQuads.length);
+    expect(await store.countQuads(canonicalSwm)).toBe(interleavedPublicQuads.length);
     expect(await store.countQuads(historicalAlias)).toBe(0);
     const privateStore = new PrivateContentStore(store, graphManager);
     expect(await privateStore.getKnowledgeAssetPrivateTriples(

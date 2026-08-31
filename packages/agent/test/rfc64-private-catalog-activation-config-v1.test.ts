@@ -20,6 +20,8 @@ import {
   rfc64CatalogRolloutModeForContextGraphV1,
   rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64CatalogAuthorityDecisionV1,
+  resolveRfc64CatalogExecutionPlanV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
@@ -181,13 +183,18 @@ describe('RFC-64 private catalog activation', () => {
     const resolverAgent = {
       config: {
         rfc64CatalogBootstrap: bootstrap,
-        rfc64CatalogRollout: {
-          selectedContextGraphs: [PRIVATE_CG],
-          rollout: {
-            killSwitch: false,
-            contextGraphModes: { [PRIVATE_CG]: 'shadow' },
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+            enabled: true,
+            selectedContextGraphs: [PRIVATE_CG],
+            selectedPublicContextGraphs: [],
+            rollout: {
+              killSwitch: false,
+              contextGraphModes: { [PRIVATE_CG]: 'shadow' },
+            },
           },
-        },
+        }),
       },
     } as unknown as DKGAgent;
 
@@ -635,6 +642,31 @@ describe('RFC-64 private catalog activation', () => {
         targets: [],
       }],
     })).toThrow(/configured twice/u);
+  });
+
+  it('keeps a legacy public bootstrap graph active beside selected catalog rollout', () => {
+    const plan = resolveRfc64CatalogExecutionPlanV1({
+      configuredContextGraphs: [],
+      standaloneTrack2ContextGraphs: [PUBLIC_CG],
+      activation: {
+        enabled: true,
+        selectedContextGraphs: [PRIVATE_CG],
+        selectedPublicContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          contextGraphModes: { [PRIVATE_CG]: 'catalog' },
+        },
+      },
+    });
+
+    expect(plan.track2ContextGraphs).toEqual([PRIVATE_CG, PUBLIC_CG]);
+    expect(resolveRfc64CatalogExecutionPlanAuthorityV1(plan, PUBLIC_CG)).toMatchObject({
+      selected: false,
+      mode: 'catalog',
+      track2Enabled: true,
+      legacySyncAllowed: true,
+      authoringAllowed: true,
+    });
   });
 
   it('enforces the policy limit in the daemon additive/legacy bootstrap merge', () => {

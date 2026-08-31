@@ -43,7 +43,11 @@
  * - public data is copied into a newly allocated graph-scoped WM graph while
  *   private draft data stays intact under its stable lifecycle key.
  */
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import {
   ASSERTION_SEAL_PREDICATES,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -533,7 +537,7 @@ async function createGraphScopedDraft(
   lifecycleRows: LifecycleRow[],
 ): Promise<void> {
   for (const subject of new Set(lifecycleRows.map((row) => row.s))) {
-    await host.store.deleteByPattern({ graph: uris.metaGraph, subject });
+    await deleteByPatternWithoutCount(host.store, { graph: uris.metaGraph, subject });
   }
   await host.createGraphScopedDraft(
     request.contextGraphId,
@@ -594,7 +598,7 @@ async function completeMarker(
   uris: MigrationUris,
   targetGraph: string,
 ): Promise<void> {
-  await store.deleteByPattern({
+  await deleteByPatternWithoutCount(store, {
     graph: uris.backupGraph,
     subject: uris.markerSubject,
     predicate: STATE_PRED,

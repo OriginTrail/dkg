@@ -30,7 +30,7 @@ import {
 } from './async-lift-publisher-utils.js';
 import { knowledgeAssetAgentAddressesEqual } from '@origintrail-official/dkg-core';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
-import type { LiftJob, LiftJobFailureCode } from './lift-job.js';
+import type { LiftJobFailureCode, PersistedLiftJob } from './lift-job.js';
 // Type-only, and erased at emit — the reverse edge (types importing `LiftJobRetryProjection`
 // from here) is type-only too, so nothing circular survives into the JavaScript. The verdict
 // vocabulary stays defined once, beside the resolver contract that produces it.
@@ -196,7 +196,7 @@ export function isAutomaticallyRetryableLiftJob(
  * A failure that proves its transaction had no effect (reverted, refused pre-acceptance) is not
  * held, so it supersedes normally and the KA can be published again.
  */
-export function isOccupyingLifecycleJob(job: LiftJob): boolean {
+export function isOccupyingLifecycleJob(job: PersistedLiftJob): boolean {
   if (!isTerminalLiftJobState(job.status)) return true;
   return isFailedJob(job) && (job.failure.retryable || isHeldForChainProof(job));
 }
@@ -229,20 +229,20 @@ export function isOccupyingLifecycleJob(job: LiftJob): boolean {
  * admission must answer for: held records first (they block), then the newest.
  */
 export function selectLifecycleBindingJobs(
-  jobs: readonly LiftJob[],
-  lifecycleKeyOf: (job: LiftJob) => string | null,
-): Map<string, LiftJob[]> {
-  const groups = new Map<string, LiftJob[]>();
+  jobs: readonly PersistedLiftJob[],
+  lifecycleKeyOf: (job: PersistedLiftJob) => string | null,
+): Map<string, PersistedLiftJob[]> {
+  const groups = new Map<string, PersistedLiftJob[]>();
   for (const job of jobs) {
     const key = lifecycleKeyOf(job);
     if (key === null) continue;
     groups.set(key, [...(groups.get(key) ?? []), job]);
   }
 
-  const binding = new Map<string, LiftJob[]>();
+  const binding = new Map<string, PersistedLiftJob[]>();
   for (const [key, group] of groups) {
     const newest = group.reduce((a, b) => (compareAcceptedJobs(a, b) >= 0 ? a : b));
-    const held = (job: LiftJob): boolean => isFailedJob(job) && isHeldForChainProof(job);
+    const held = (job: PersistedLiftJob): boolean => isFailedJob(job) && isHeldForChainProof(job);
     binding.set(key, group
       .filter((job) => isOccupyingLifecycleJob(job)
         && !(isFailedJob(job) && !held(job) && compareAcceptedJobs(job, newest) < 0))
@@ -260,7 +260,7 @@ export function selectLifecycleBindingJobs(
  * finalizes them from chain). A `retry_recovery`-failed job is therefore treated as
  * NONTERMINAL-for-cleanup.
  */
-export function isClearableTerminalLiftJob(job: LiftJob): boolean {
+export function isClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
   return isTerminalLiftJobState(job.status)
     && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
 }
@@ -361,7 +361,7 @@ export function resolveHeldJobSettlementCapability(wiring: {
  * stamp is denied instead, which is the conservative answer and the one this doc has always
  * claimed.
  */
-function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
+function ownsLiftJobAdmissionLane(job: PersistedLiftJob, agentAddress: string | undefined): boolean {
   if (!agentAddress) return false;
   const admittedBy = job.admission?.byAgentAddress;
   if (typeof admittedBy !== 'string' || admittedBy.length === 0) return false;
@@ -390,7 +390,7 @@ function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined
  * The caller must also be entitled to it — see {@link ownsLiftJobAdmissionLane}.
  */
 export function isTargetedClearableLiftJob(
-  job: LiftJob,
+  job: PersistedLiftJob,
   options: {
     /**
      * The override as the CALLER made it: who requested it, not whether someone decided they
@@ -423,7 +423,7 @@ export function isTargetedClearableLiftJob(
  * reverted and unfunded attempts keeps working. Nothing is lost either way: the #1829 journal is
  * append-only and a clear never touches it, so the txHash outlives the job record.
  */
-export function isBulkClearableTerminalLiftJob(job: LiftJob): boolean {
+export function isBulkClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
   return isClearableTerminalLiftJob(job) && !(isFailedJob(job) && isHeldForChainProof(job));
 }
 
@@ -561,7 +561,7 @@ function waitingReasonOf(
  * nothing is eligible, and it is not waiting on a retry.
  */
 export function deriveLiftJobRetryProjection(
-  job: LiftJob,
+  job: PersistedLiftJob,
   options: { readonly autoRetryEnabled: boolean },
 ): LiftJobRetryProjection {
   if (!isFailedJob(job)) return { autoRetryEligible: false };

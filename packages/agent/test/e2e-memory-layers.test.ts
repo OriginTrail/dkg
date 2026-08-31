@@ -17,7 +17,10 @@ import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, rever
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
-import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import {
+  SWM_CURRENT_ASSERTION_PRED,
+  TripleStoreAsyncLiftPublisher,
+} from '@origintrail-official/dkg-publisher';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
 import {
@@ -664,8 +667,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
 
     let updateHookForwarded: unknown = 'unset';
     const updateFired: string[] = [];
-    const realUpdate = underlying.updateKnowledgeAssetFromSharedMemory.bind(underlying);
-    underlying.updateKnowledgeAssetFromSharedMemory = async (kaId: bigint, options: any) => {
+    const realUpdate = underlying.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1.bind(underlying);
+    underlying.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1 = async (kaId: bigint, options: any) => {
       const original = options.onPublishConfirmed;
       updateHookForwarded = original;
       return realUpdate(kaId, {
@@ -1214,6 +1217,77 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(processed?.finalization?.mode).toBe('noop');
     expect(preflight).toHaveBeenCalled();
     expect(executor).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('queued async VM preflight accepts an exact durable SWM head when its best-effort lifecycle pointer is absent', async () => {
+    const agent = await createAgent('QueuedAsyncVmMissingSwmPointerBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Missing SWM Pointer E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-missing-swm-pointer';
+    const root = `${ENTITY_BASE}:queued-async-missing-swm-pointer`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Missing SWM Pointer"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    // Reproduce the exact managed-store interruption seen by the local matrix:
+    // promotion, its complete-share marker and immutable graph head committed,
+    // but the explicitly best-effort lifecycle projection did not.
+    const agentAddress = agent.defaultAgentAddress ?? agent.peerId;
+    await (agent as any).store.deleteByPattern({
+      subject: assertionLifecycleUri(CG_ID, agentAddress, name),
+      predicate: SWM_CURRENT_ASSERTION_PRED,
+      graph: contextGraphMetaUri(CG_ID),
+    });
+    const incompleteProjection = await agent.assertion.history(CG_ID, name);
+    expect(incompleteProjection?.swmCurrentAssertion).toBeUndefined();
+    expect(incompleteProjection?.currentShareOperationId).toBe(intent.shareOperationId);
+
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
+      .resolves.toEqual({ action: 'execute' });
+  }, 60_000);
+
+  it('queued async VM preflight rejects a present SWM lifecycle pointer that mismatches the queued seal', async () => {
+    const agent = await createAgent('QueuedAsyncVmMismatchedSwmPointerBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Mismatched SWM Pointer E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-mismatched-swm-pointer';
+    const root = `${ENTITY_BASE}:queued-async-mismatched-swm-pointer`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Mismatched SWM Pointer"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    const queuedSealBare = intent.sealMerkleRoot.replace(/^0x/, '');
+    const mismatchedSwmRoot = `${queuedSealBare[0] === '0' ? '1' : '0'}${queuedSealBare.slice(1)}`;
+    const agentAddress = agent.defaultAgentAddress ?? agent.peerId;
+    const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, name);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    await (agent as any).store.deleteByPattern({
+      subject: lifecycleUri,
+      predicate: SWM_CURRENT_ASSERTION_PRED,
+      graph: metaGraph,
+    });
+    await (agent as any).store.insert([{
+      subject: lifecycleUri,
+      predicate: SWM_CURRENT_ASSERTION_PRED,
+      object: `"${mismatchedSwmRoot}"`,
+      graph: metaGraph,
+    }]);
+
+    const contradictoryProjection = await agent.assertion.history(CG_ID, name);
+    expect(contradictoryProjection?.swmCurrentAssertion).toBe(mismatchedSwmRoot);
+    expect(contradictoryProjection?.currentShareOperationId).toBe(intent.shareOperationId);
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
+      .rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
   }, 60_000);
 
   it('async VM publish fails stale when the named KA is shared again before execution', async () => {
@@ -2810,7 +2884,7 @@ describe('Query views', () => {
     // rejection-stops-the-send for the update path is proven at the publisher's own boundary in
     // `pre-broadcast-signal-await.test.ts`, and this row pins callback identity only.
     const realPublisher = (agent as any).publisher;
-    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromSharedMemory')
+    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromStagedSharedWorkingMemoryV1')
       .mockResolvedValue({ status: 'failed', kaManifest: [] } as never);
     const recorder = () => {};
     try {

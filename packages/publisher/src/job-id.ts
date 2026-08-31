@@ -11,6 +11,9 @@
 // '"' '{' '}' '|' '^' '`', control chars).
 export const SAFE_JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 export const SAFE_JOB_ID_MAX_LENGTH = 256;
+export const SAFE_JOB_ID_ERROR =
+  `jobId must be 1-${SAFE_JOB_ID_MAX_LENGTH} characters, start with an ASCII letter or digit, `
+  + 'and contain only ASCII letters, digits, ".", "_", ":", or "-"';
 
 /**
  * True iff `jobId` is safe to interpolate into a control-plane SPARQL IRI. A by-jobId
