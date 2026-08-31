@@ -6,7 +6,6 @@ import {
   type DecodedRfc64SemanticRecordV1,
   type Rfc64SemanticRecordCoordinateV1,
 } from '@origintrail-official/dkg-core';
-import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
 import {
   composeAbortSignals,
@@ -21,6 +20,7 @@ import {
   isRfc64SemanticReadCapabilityV1,
   type Rfc64SemanticReadCapabilityV1,
 } from './rfc64-semantic-read-capability.js';
+import { snapshotExactOrdinaryDataRecord } from './closed-data-snapshot.js';
 
 export const MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1 = 30_000;
 
@@ -135,11 +135,11 @@ export class SyncSemanticStoreV1 {
 }
 
 function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
-  const options = snapshotExactRecord(
+  const options = snapshotExactOrdinaryDataRecord(
     input,
     isRecordWithOwnKey(input, 'signal') ? ['signal', 'timeoutMs'] : ['timeoutMs'],
     'RFC-64 semantic read options',
-    'rfc64-semantic-read-options',
+    (message) => fail('rfc64-semantic-read-options', message),
   );
   if (
     typeof options.timeoutMs !== 'number'
@@ -159,19 +159,6 @@ function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {
     timeoutMs: options.timeoutMs,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   }) as Rfc64SemanticReadOptionsV1;
-}
-
-function snapshotExactRecord(
-  input: unknown,
-  expectedKeys: readonly string[],
-  label: string,
-  code: Rfc64SemanticReadGatewayErrorCodeV1,
-): Readonly<Record<string, unknown>> {
-  try {
-    return snapshotExactDataRecord(input, expectedKeys, label);
-  } catch (cause) {
-    fail(code, `${label} has an invalid field set`, cause);
-  }
 }
 
 function isRecordWithOwnKey(input: unknown, key: string): boolean {
