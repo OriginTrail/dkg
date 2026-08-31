@@ -4,8 +4,6 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 
 import {
-  assertCanonicalGraphScopedAuthorSealV1,
-  buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
@@ -34,6 +32,15 @@ import {
   type Gate1TransferEvidence,
 } from './model.js';
 import { assertGate1ProductCapabilities } from './product-capabilities.js';
+import {
+  GATE1_AUTHOR_ADDRESS as AUTHOR_ADDRESS,
+  GATE1_AUTHOR_PRIVATE_KEY as AUTHOR_PRIVATE_KEY,
+  GATE1_DEPLOYMENT as DEPLOYMENT,
+  GATE1_NETWORK_ID as NETWORK_ID,
+  GATE1_PROJECTION_NQUADS as PROJECTION_NQUADS,
+  GATE1_ROLE_MASTER_KEYS as ROLE_MASTER_KEYS,
+  createGate1AuthorSealV1 as authorSeal,
+} from './fixture.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
@@ -41,39 +48,16 @@ const DEFAULT_RAW_ARTIFACT = join(import.meta.dirname, 'artifacts/gate1-result.j
 const DEFAULT_VERDICT_ARTIFACT = join(import.meta.dirname, 'artifacts/gate1-verdict.json');
 const PROCESS_TIMEOUT_MS = 60_000;
 
-const NETWORK_ID = 'otp:20430';
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/gate-1';
 const FORGED_CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/gate-1-forged-authorization';
-const AUTHOR_PRIVATE_KEY = `0x${'64'.repeat(32)}`;
 const ATTACKER_PRIVATE_KEY = `0x${'65'.repeat(32)}`;
-const AUTHOR_WALLET = new ethers.Wallet(AUTHOR_PRIVATE_KEY);
-const AUTHOR_ADDRESS = AUTHOR_WALLET.address.toLowerCase();
 const ATTACKER_ADDRESS = new ethers.Wallet(ATTACKER_PRIVATE_KEY).address.toLowerCase();
-const KAV10_ADDRESS = '0x4444444444444444444444444444444444444444';
-const DEPLOYMENT = Object.freeze({
-  networkId: NETWORK_ID,
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: KAV10_ADDRESS,
-});
-const KA_NUMBER = 7n;
-const KA_ID = ((BigInt(AUTHOR_ADDRESS) << 96n) | KA_NUMBER).toString();
-const KA_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR_ADDRESS}/${KA_NUMBER}`;
-const ASSERTION_ROOT =
-  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f';
-const PROJECTION_NQUADS =
-  '<https://example.org/alice> <https://schema.org/age> '
-    + '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
-    + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
 const GENESIS_ISSUED_AT = '1773900000000';
 const POSITIVE_ISSUED_AT = '1773900001000';
 const FORGED_ISSUED_AT = '1773900003000';
 const DELEGATION_EFFECTIVE_AT = '1773899999000';
 const DELEGATION_EXPIRES_AT = '1774000000000';
-const ROLE_MASTER_KEYS = Object.freeze({
-  author: '1a'.repeat(32),
-  receiver: '2b'.repeat(32),
-});
 
 async function execute(): Promise<void> {
   const headBefore = readCleanRepositoryHead(REPO_ROOT);
@@ -778,40 +762,6 @@ function verifiedControlObjectCount(
     synchronization.verifiedControlObjectCount,
     `${label}.verifiedControlObjectCount`,
   );
-}
-
-async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
-  const typedData = buildAuthorAttestationTypedData({
-    chainId: BigInt(DEPLOYMENT.assertedAtChainId),
-    kav10Address: DEPLOYMENT.assertedAtKav10Address,
-    merkleRoot: ethers.getBytes(ASSERTION_ROOT),
-    authorAddress: AUTHOR_ADDRESS,
-    reservedKaId: BigInt(KA_ID),
-  });
-  const signature = ethers.Signature.from(await AUTHOR_WALLET.signTypedData(
-    typedData.domain,
-    typedData.types,
-    typedData.message,
-  ));
-  const seal = {
-    assertionMerkleRoot: ASSERTION_ROOT,
-    authorAddress: AUTHOR_ADDRESS,
-    authorAttestationR: signature.r,
-    authorAttestationVS: signature.yParityAndS,
-    authorSchemeVersion: '1',
-    assertedAtChainId: DEPLOYMENT.assertedAtChainId,
-    assertedAtKav10Address: KAV10_ADDRESS,
-    reservedKaId: KA_ID,
-    assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
-    contentScopeVersion: '2',
-    kaUal: KA_UAL,
-    assertionVersion: '1',
-    publicTripleCount: '2',
-    privateTripleCount: '0',
-    privateMerkleRoot: null,
-  } as unknown as CanonicalGraphScopedAuthorSealV1;
-  assertCanonicalGraphScopedAuthorSealV1(seal);
-  return seal;
 }
 
 function stagedHeadRef(output: Record<string, unknown>, label: string): Record<string, unknown> {

@@ -684,7 +684,16 @@ describe('DKGAgent.update inline encryption routing', () => {
       createV10UpdateACKProvider: recorder(() => undefined),
       node: { peerId: { toString: () => 'peer-1' } },
       publisher: {
-        updateKnowledgeAssetFromSharedMemory: publisherUpdate,
+        stageKnowledgeAssetSharedWorkingMemoryV1: recorder(async (input: any) => ({
+          contextGraphId: input.contextGraphId,
+          shareOperationId: input.shareOperationId,
+          kaUal: input.kaUal,
+          assertionVersion: String(input.assertionVersion),
+          ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+          swmGraph: 'urn:test:staged-swm',
+          tripleCount: input.quads.length,
+        })),
+        updateKnowledgeAssetFromStagedSharedWorkingMemoryV1: publisherUpdate,
       },
       _resolveEncryptInlinePayload: recorder(async () => updateEncryptInlinePayload),
       _resolveEncryptInlineChunked: recorder(async () => updateEncryptInlineChunked),

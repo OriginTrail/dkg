@@ -60,6 +60,10 @@ export {
   type KnowledgeAssetOperationPublicSnapshot,
 } from './workspace-resolution.js';
 export {
+  type StageKnowledgeAssetSharedWorkingMemoryInputV1,
+  type StagedKnowledgeAssetSharedWorkingMemoryV1,
+} from './knowledge-asset-swm-staging.js';
+export {
   computeTripleHash,
   computePublicRoot,
   computePrivateRoot,
