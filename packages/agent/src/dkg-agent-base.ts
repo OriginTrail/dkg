@@ -118,7 +118,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -555,6 +555,30 @@ export function createListContextGraphsCacheInvalidatingStore(
             // non-CG graph (e.g. the control-plane graph), so no hot-path churn.
             () => markProjectionDirty?.(undefined, graphUri),
           )
+      : undefined,
+    // RFC-64 author publication moves a complete public-SWM projection and
+    // its bounded semantic control state through one backend CAS. Preserve the
+    // capability through this cache-invalidation decorator and invalidate only
+    // after a proven commit; a clean guard conflict changes nothing.
+    rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
+      ? async (input, options) => {
+          try {
+            return await invalidateAfterMutation(
+              () => innerStore.rfc64AuthorCommitCasV1!(input, options),
+              result => result === 'committed',
+              () => markProjectionDirty?.(),
+            );
+          } catch (error) {
+            // A rejected CAS may have committed before its response was lost.
+            // Only an outcome-tagged pre-dispatch refusal proves caches remain
+            // valid; every indeterminate failure dirties both cache layers.
+            if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
+              invalidate();
+              markProjectionDirty?.();
+            }
+            throw error;
+          }
+        }
       : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);

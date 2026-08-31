@@ -22,6 +22,7 @@ export {
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   tryReplaceSubjectAtomically,
+  tryRfc64AuthorCommitCasV1,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
@@ -36,11 +37,25 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+/**
+ * Stable caller contract for one bounded RFC-64 author commit. Compilation,
+ * receipt execution, normalization, and decorator mapping stay module-internal.
+ */
+export {
+  RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
+  RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1,
+  RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+  type Rfc64AuthorCommitStateTransitionV1,
+  type Rfc64AuthorCommitSubjectReplacementV1,
+} from './rfc64-author-commit-cas.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
+  isRfc64AuthorCommitCasCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {
@@ -68,6 +83,7 @@ export {
   STORE_OPERATION_OUTCOME_TAG,
   STORE_OPERATIONS,
   hasStoreOperationOutcome,
+  isStoreOperationNotStarted,
   isReadOnlyStoreOperation,
   isStoreOperation,
   type StoreOperation,
@@ -139,6 +155,7 @@ export {
 export {
   SparqlHttpStore,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
+  type SparqlHttpConsistencyProfile,
   type SparqlHttpStoreOptions,
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,

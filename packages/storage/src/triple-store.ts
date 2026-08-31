@@ -18,6 +18,10 @@ import {
   type ChangelogStoreOptions,
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './rfc64-author-commit-cas.js';
 
 export interface Quad {
   subject: string;
@@ -184,6 +188,19 @@ export interface TripleStore {
     quads: Quad[],
     options?: QueryOptions,
   ): Promise<void>;
+  /**
+   * RFC-64 `SYNC_AUTHOR_COMMIT_CAS_V1`: atomically replace one complete shared
+   * projection, its author-seal subject, the guarded author current-head
+   * pointer, and bounded mutation/applied-set subjects.
+   *
+   * Implementations MUST refuse before mutation unless the whole generated
+   * update is one backend transaction. `conflict` proves no semantic target was
+   * changed; execution failures remain indeterminate and propagate.
+   */
+  rfc64AuthorCommitCasV1?(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -400,6 +417,34 @@ export async function tryReplaceSubjectAtomically(
   }
 }
 
+/**
+ * Attempt the certified RFC-64 author-publication CAS boundary.
+ *
+ * `null` is a clean capability refusal raised before mutation. A returned
+ * `conflict` is also known not to have mutated semantic targets. Every other
+ * failure propagates because the backend may have committed before its
+ * response was lost.
+ */
+export async function tryRfc64AuthorCommitCasV1(
+  store: TripleStore,
+  input: Rfc64AuthorCommitCasInputV1,
+  options: QueryOptions = {},
+): Promise<Rfc64AuthorCommitCasResultV1 | null> {
+  const commit = store.rfc64AuthorCommitCasV1;
+  if (typeof commit !== 'function') return null;
+  try {
+    return await commit.call(store, input, options);
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError
+      && error.capability === 'rfc64AuthorCommitCasV1'
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
 
 // Backends that talk to a remote SPARQL endpoint over HTTP rather than
@@ -542,12 +587,14 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   ) {
     return config.options;
   }
-  // `managedByDkg` has two independent meanings in SparqlHttpStore: it owns
-  // the adapter-local graph-list cache and it identifies the transactional
-  // daemon-managed Oxigraph endpoint. The outer GraphSetIndexStore replaces
-  // only the cache, so preserve the endpoint's atomic-update capability when
-  // clearing the cache-ownership flag.
-  return { ...config.options, managedByDkg: false, atomicUpdates: true };
+  // The outer GraphSetIndexStore replaces the adapter-local graph-list cache,
+  // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
+  // process carries the separate runtime-only `managedOxigraph` capability;
+  // never derive that consistency proof from persisted namespace ownership.
+  return {
+    ...config.options,
+    managedByDkg: false,
+  };
 }
 
 function wrapGraphSetIndex(

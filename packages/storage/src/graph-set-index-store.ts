@@ -15,8 +15,15 @@ import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
-import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
-import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
+import {
+  isAtomicGraphReplaceStagingGraph,
+} from './atomic-graph-replace.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './rfc64-author-commit-cas.js';
+import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
+import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -36,6 +43,7 @@ export type GraphSetMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'rfc64AuthorCommitCasV1'
   | 'query'
   | 'update';
 
@@ -46,6 +54,7 @@ type TouchedGraphMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'rfc64AuthorCommitCasV1'
   | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
@@ -409,7 +418,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // replace dispatch. A nested post-commit probe can also be rejected by
       // the scheduler, but its storeOperation does not match replaceGraph and
       // therefore still dirties this index.
-      if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraph')) {
+      if (!isStoreOperationNotStarted(error, 'replaceGraph')) {
         this.scheduleFullRefresh('replaceGraph');
       }
       throw error;
@@ -442,7 +451,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         options,
       );
     } catch (error) {
-      if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraphAndSubject')) {
+      if (!isStoreOperationNotStarted(error, 'replaceGraphAndSubject')) {
         this.scheduleFullRefresh('replaceGraphAndSubject');
       }
       throw error;
@@ -475,13 +484,48 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // A committed subject replace could add/remove the graph's first/last row;
       // dirty the index so a lazy rebuild re-derives membership — unless this was
       // a clean preflight capability refusal, where nothing was mutated.
-      if (!isAtomicReplaceOperationNotStarted(error, 'replaceSubject')) {
+      if (!isStoreOperationNotStarted(error, 'replaceSubject')) {
         this.scheduleFullRefresh('replaceSubject');
       }
       throw error;
     }
     this.bumpMutation();
     await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'GraphSetIndexStore',
+      );
+    }
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(input, options);
+    // Prepare every fallible index-maintenance input before dispatch. Once the
+    // inner capability reports `committed`, only best-effort observation and
+    // index maintenance may remain; malformed caller input must never create a
+    // committed backend mutation that this decorator cannot account for.
+    const touchedGraphs = rfc64AuthorCommitTouchedGraphs(input);
+    let result: Rfc64AuthorCommitCasResultV1;
+    try {
+      result = await this.inner.rfc64AuthorCommitCasV1(input, options);
+    } catch (error) {
+      if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
+        this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
+      }
+      throw error;
+    }
+    if (result === 'conflict') return result;
+    this.bumpMutation();
+    await this.maintainTouchedGraphs(
+      touchedGraphs,
+      'rfc64AuthorCommitCasV1',
+      options,
+    );
+    return result;
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
@@ -765,6 +809,10 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // Observability hooks must not make already-committed store writes fail.
     }
   }
+}
+
+function rfc64AuthorCommitTouchedGraphs(input: Rfc64AuthorCommitCasInputV1): string[] {
+  return [...normalizeRfc64AuthorCommitCasV1(input).touchedGraphs];
 }
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {

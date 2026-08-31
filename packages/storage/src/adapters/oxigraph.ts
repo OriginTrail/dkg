@@ -25,6 +25,12 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import {
+  buildRfc64AuthorCommitCasUpdateV1,
+  executeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+} from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import {
   assertQuadLiteralsMutf8Safe,
@@ -431,6 +437,37 @@ export class OxigraphStore implements TripleStore {
     this.store.update(buildAtomicSubjectReplaceUpdate(graphUri, subject, quads));
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: TripleStoreQueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    throwIfAborted(options?.signal);
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    const guarded = plan.semanticQuads.filter(
+      (quad) => !(quad.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(quad.graph)),
+    );
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.rfc64AuthorCommitCasV1',
+      });
+    }
+    return executeRfc64AuthorCommitCasV1({
+      executeUpdate: () => this.store.update(plan.update),
+      readReceipt: () => this.store.query(plan.receiptAsk),
+      cleanup: () => {
+        try {
+          this.store.update(plan.cleanup);
+        } finally {
+          this.scheduleFlush();
+        }
+      },
+      onCommitted: () => {
+        this.writeGen.recordWrite({ kind: 'graphs', graphs: [...plan.touchedGraphs] });
+      },
+    });
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {

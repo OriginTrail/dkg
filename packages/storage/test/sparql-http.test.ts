@@ -648,6 +648,7 @@ describe('SparqlHttpStore (test server)', () => {
       const managed = new SparqlHttpStore({
         queryEndpoint: 'http://managed-oxigraph.test/query',
         managedByDkg: true,
+        managedOxigraph: true,
         onClientTimeout,
       });
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
@@ -700,6 +701,7 @@ describe('SparqlHttpStore (test server)', () => {
       const managed = new SparqlHttpStore({
         queryEndpoint: 'http://managed-oxigraph.test/query',
         managedByDkg: true,
+        managedOxigraph: true,
       });
       await expect(
         managed.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
@@ -725,6 +727,7 @@ describe('SparqlHttpStore (test server)', () => {
       const managed = new SparqlHttpStore({
         queryEndpoint: 'http://managed-oxigraph.test/query',
         managedByDkg: true,
+        managedOxigraph: true,
       });
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
         code: 'STORE_OPERATION_TIMEOUT',
@@ -1121,7 +1124,7 @@ describe('SparqlHttpStore (test server)', () => {
     const atomicStore = new SparqlHttpStore({
       queryEndpoint: queryUrl,
       updateEndpoint: updateUrl,
-      atomicUpdates: true,
+      consistencyProfile: 'atomic-update',
     });
     await atomicStore.replaceGraph('http://ex.org/g1', [{
       subject: 'http://ex.org/new',
@@ -1187,7 +1190,7 @@ describe('SparqlHttpStore (test server)', () => {
         const failedStore = new SparqlHttpStore({
           queryEndpoint: 'http://cleanup.test/query',
           updateEndpoint: 'http://cleanup.test/update',
-          atomicUpdates: true,
+          consistencyProfile: 'atomic-update',
         });
         const before = new Map(testCase.affected.map((scope) => [
           scope,
@@ -1253,6 +1256,7 @@ describe('SparqlHttpStore (test server)', () => {
       queryEndpoint: queryUrl,
       updateEndpoint: updateUrl,
       managedByDkg: true,
+      managedOxigraph: true,
     });
     await expect(tryReplaceGraphAtomically(managedStore, 'http://ex.org/g1', replacement))
       .resolves.toBe(true);
@@ -1264,7 +1268,7 @@ describe('SparqlHttpStore (test server)', () => {
     const atomicStore = new SparqlHttpStore({
       queryEndpoint: queryUrl,
       updateEndpoint: updateUrl,
-      atomicUpdates: true,
+      consistencyProfile: 'atomic-update',
     });
     const ok = await tryReplaceSubjectAtomically(atomicStore, 'http://ex.org/g1', 'http://ex.org/job', [{
       subject: 'http://ex.org/job',
@@ -1307,6 +1311,7 @@ describe('SparqlHttpStore (test server)', () => {
       queryEndpoint: queryUrl,
       updateEndpoint: updateUrl,
       managedByDkg: true,
+      managedOxigraph: true,
     });
     await expect(tryReplaceSubjectAtomically(managedStore, 'http://ex.org/g1', 'http://ex.org/job', replacement))
       .resolves.toBe(true);
@@ -1354,7 +1359,7 @@ describe('SparqlHttpStore (test server)', () => {
       const failedStore = new SparqlHttpStore({
         queryEndpoint: queryUrl,
         updateEndpoint: updateUrl.replace('/update', '/error-update'),
-        atomicUpdates: true,
+        consistencyProfile: 'atomic-update',
       });
       const before = failedStore.getWriteRevision('');
       await expect(testCase.attempt(failedStore)).rejects.toThrow();
@@ -1383,7 +1388,7 @@ describe('SparqlHttpStore (test server)', () => {
       const pendingStore = new SparqlHttpStore({
         queryEndpoint: 'http://pending.test/query',
         updateEndpoint: 'http://pending.test/update',
-        atomicUpdates: true,
+        consistencyProfile: 'atomic-update',
       });
       const graph = 'http://ex.org/pending-commit';
       const quads = [{
@@ -1497,7 +1502,7 @@ describe('SparqlHttpStore (test server)', () => {
         const pendingStore = new SparqlHttpStore({
           queryEndpoint: 'http://tracked.test/query',
           updateEndpoint: 'http://tracked.test/update',
-          atomicUpdates: true,
+          consistencyProfile: 'atomic-update',
         });
         const before = pendingStore.getWriteRevision(testCase.scope);
         const mutation = testCase.attempt(pendingStore);
@@ -1578,7 +1583,6 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://managed-oxigraph.test/query',
         updateEndpoint: 'http://managed-oxigraph.test/update',
         managedOxigraph: true,
-        atomicUpdates: true,
         getRecoveryState: () => ({ recovering: true, generation: 1 }),
       });
       const before = recoveringStore.getWriteRevision(graph);

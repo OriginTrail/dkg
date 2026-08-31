@@ -35,6 +35,12 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import {
+  buildRfc64AuthorCommitCasUpdateV1,
+  executeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+} from '../rfc64-author-commit-cas.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
@@ -473,6 +479,34 @@ export class BlazegraphStore implements TripleStore {
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
       'replaceSubject',
     );
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    const { signal: _callerSignal, ...cleanupOptions } = options ?? {};
+    assertQuadLiteralsMutf8Safe(plan.semanticQuads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'BlazegraphStore.rfc64AuthorCommitCasV1',
+    });
+    return executeRfc64AuthorCommitCasV1({
+      executeUpdate: () => this.sparqlUpdate(
+        plan.update,
+        { ...options, source: options?.source ?? 'blazegraph.rfc64AuthorCommitCasV1' },
+        'rfc64AuthorCommitCasV1',
+      ),
+      readReceipt: () => this.query(plan.receiptAsk, {
+        ...options,
+        source: 'blazegraph.rfc64AuthorCommitCasV1.receipt',
+      }),
+      cleanup: () => this.sparqlUpdate(
+        plan.cleanup,
+        { ...cleanupOptions, source: 'blazegraph.rfc64AuthorCommitCasV1.cleanup' },
+        'rfc64AuthorCommitCasV1',
+      ),
+    });
   }
 
   // -------------------------------------------------------------------

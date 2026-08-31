@@ -54,6 +54,12 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import {
+  buildRfc64AuthorCommitCasUpdateV1,
+  executeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+} from '../rfc64-author-commit-cas.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import {
   assertQuadLiteralsMutf8Safe,
@@ -187,6 +193,11 @@ export interface SparqlHttpRecoveryState {
   generation: number;
 }
 
+export type SparqlHttpConsistencyProfile =
+  | 'best-effort'
+  | 'atomic-update'
+  | 'atomic-readback';
+
 export interface SparqlHttpStoreOptions {
   /** SPARQL query endpoint URL (required). */
   queryEndpoint: string;
@@ -208,19 +219,31 @@ export interface SparqlHttpStoreOptions {
    * index/revalidation owner.
    */
   managedByDkg?: boolean;
-  /** Runtime-only marker for a daemon-supervised Oxigraph endpoint. */
+  /**
+   * Runtime-only marker issued by the daemon supervisor for the Oxigraph
+   * process it launched. This is deliberately independent of
+   * `managedByDkg`, which only describes namespace/cache ownership and may be
+   * present in persisted operator configuration.
+   */
   managedOxigraph?: boolean;
   /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
   onClientTimeout?: (operation: string) => void;
   /** Runtime-only managed-server state used to classify restart collateral. */
   getRecoveryState?: () => SparqlHttpRecoveryState;
   /**
-   * Declare that the endpoint executes a whole multi-operation SPARQL Update
-   * request as one transaction (SPARQL 1.1 only RECOMMENDS this). Required for
-   * `replaceGraph`: without it the staged DROP/INSERT/MOVE could be applied
-   * partially, violating the old-graph-or-new-graph contract, so the
-   * capability fails closed. Daemon-owned endpoints (`managedByDkg`) are
-   * oxigraph-server, which is known transactional, and imply this flag.
+   * Certified endpoint guarantees. `atomic-update` means a whole
+   * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
+   * that a query issued after a completed update observes that update, as
+   * required by receipt-bearing CAS. Daemon-owned Oxigraph endpoints imply
+   * `atomic-readback`; all other endpoints default to `best-effort`.
+   */
+  consistencyProfile?: SparqlHttpConsistencyProfile;
+  /**
+   * @deprecated Use `consistencyProfile: 'atomic-update'` instead.
+   *
+   * This compatibility alias preserves the pre-profile public API. It grants
+   * transactional update capability only; receipt-bearing CAS still requires
+   * `atomic-readback` or a daemon-certified managed Oxigraph endpoint.
    */
   atomicUpdates?: boolean;
   /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
@@ -249,7 +272,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly managedOxigraph: boolean;
   private readonly onClientTimeout?: (operation: string) => void;
   private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
-  private readonly atomicUpdates: boolean;
+  private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
 
   private readonly now: () => number;
@@ -274,10 +297,12 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
-    this.managedOxigraph = options.managedOxigraph === true || this.managedByDkg;
+    this.managedOxigraph = options.managedOxigraph === true;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
-    this.atomicUpdates = options.atomicUpdates === true || this.managedOxigraph;
+    this.consistencyProfile = this.managedOxigraph
+      ? 'atomic-readback'
+      : resolveConsistencyProfile(options);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -659,7 +684,7 @@ export class SparqlHttpStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (!this.atomicUpdates) {
+    if (!this.supportsConsistency('atomic-update')) {
       // A generic SPARQL endpoint may apply the staged DROP/INSERT/MOVE
       // operations non-transactionally, which can strand the target graph in a
       // partial state — the one outcome replaceGraph must never produce. Fail
@@ -694,7 +719,7 @@ export class SparqlHttpStore implements TripleStore {
     metadataQuads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (!this.atomicUpdates) {
+    if (!this.supportsConsistency('atomic-update')) {
       throw new UnsupportedTripleStoreCapabilityError(
         'replaceGraphAndSubject',
         'SparqlHttpStore',
@@ -730,7 +755,7 @@ export class SparqlHttpStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (!this.atomicUpdates) {
+    if (!this.supportsConsistency('atomic-update')) {
       // A generic endpoint may apply DELETE WHERE; INSERT DATA as separate
       // operations, re-exposing the transient-empty subject. Fail closed before
       // any request so callers take their non-atomic delete-then-insert fallback.
@@ -747,6 +772,53 @@ export class SparqlHttpStore implements TripleStore {
       options: { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
       operation: 'replaceSubject',
     });
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (!this.supportsConsistency('atomic-readback')) {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'SparqlHttpStore',
+      );
+    }
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    const { signal: _callerSignal, ...cleanupOptions } = options ?? {};
+    assertQuadLiteralsMutf8Safe(plan.semanticQuads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.rfc64AuthorCommitCasV1',
+    });
+    return executeRfc64AuthorCommitCasV1({
+      executeUpdate: () => this.runRemoteGraphMutation({
+        // The transactional request always mutates private receipt/staging
+        // graphs, while semantic graphs change only when the receipt is true.
+        scope: { kind: 'graphs', graphs: [plan.receiptGraph] },
+        update: plan.update,
+        options: { ...options, source: options?.source ?? 'sparql-http.rfc64AuthorCommitCasV1' },
+        operation: 'rfc64AuthorCommitCasV1',
+      }),
+      readReceipt: () => this.query(plan.receiptAsk, {
+        ...options,
+        source: 'sparql-http.rfc64AuthorCommitCasV1.receipt',
+      }),
+      cleanup: () => this.postCleanupUpdate(
+        plan.cleanup,
+        { ...cleanupOptions, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' },
+        'rfc64AuthorCommitCasV1',
+      ),
+      onCommitted: () => {
+        this.writeGen.recordWrite({ kind: 'graphs', graphs: [...plan.touchedGraphs] });
+      },
+    });
+  }
+
+  private supportsConsistency(
+    required: Exclude<SparqlHttpConsistencyProfile, 'best-effort'>,
+  ): boolean {
+    return this.consistencyProfile === 'atomic-readback'
+      || this.consistencyProfile === required;
   }
 
   /**
@@ -1101,6 +1173,38 @@ export class SparqlHttpStore implements TripleStore {
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }
+}
+
+function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {
+  if (value === undefined) return 'best-effort';
+  if (value === 'best-effort' || value === 'atomic-update' || value === 'atomic-readback') {
+    return value;
+  }
+  throw new Error(
+    'sparql-http consistencyProfile must be best-effort, atomic-update, or atomic-readback',
+  );
+}
+
+function resolveConsistencyProfile(
+  options: Pick<SparqlHttpStoreOptions, 'consistencyProfile' | 'atomicUpdates'>,
+): SparqlHttpConsistencyProfile {
+  const profile = normalizeConsistencyProfile(options.consistencyProfile);
+  if (options.atomicUpdates === undefined) return profile;
+
+  const legacyProfile: SparqlHttpConsistencyProfile = options.atomicUpdates
+    ? 'atomic-update'
+    : 'best-effort';
+  if (options.consistencyProfile === undefined) return legacyProfile;
+
+  const compatible = options.atomicUpdates
+    ? profile === 'atomic-update' || profile === 'atomic-readback'
+    : profile === 'best-effort';
+  if (!compatible) {
+    throw new Error(
+      'sparql-http atomicUpdates conflicts with consistencyProfile; remove the deprecated alias',
+    );
+  }
+  return profile;
 }
 
 function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {
