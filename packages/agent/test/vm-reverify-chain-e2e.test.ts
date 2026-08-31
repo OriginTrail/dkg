@@ -662,15 +662,24 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       'the re-raised intent must resolve without work',
     ).toBe(0);
 
-    // ADR-W2R-8. The already-current path runs INSPECT-ONLY: it must not stamp
-    // `materializedVersion` at the pinned chain head. If it did, a later gossip
-    // write for a strictly newer assertion version carrying a LOWER block stamp
-    // would be rejected as stale by `shouldApplyMaterialization` — the drain
-    // would have made the node permanently unreachable by ordinary delivery.
-    expect(
-      await materializedStamp(host),
-      'the drain must not advance the materialization stamp on a current KA',
-    ).toEqual(stampBefore);
+    // ADR-W2R-8's stamp property is deliberately NOT asserted here.
+    //
+    // It cannot be measured in this file. `advanceExactGraphScopedVersion`
+    // writes only when the new version is strictly greater, and by this point
+    // SC-1's promotion has already stored exactly the value the already-current
+    // path would write — so removing the `inspectOnly` guard changes nothing
+    // observable, and a solo-removal mutant SURVIVES 4/4 here. Forcing a lower
+    // stamp to create the gap does not rescue it either: this node also runs the
+    // ordinary chain-driven VM reconcile sweep, which writes the same stamp on
+    // its own timer, so the assertion becomes non-deterministic rather than
+    // discriminating.
+    //
+    // An assertion that cannot fail is worse than none — it reports the guard
+    // as covered. What IS proven here: the drain passes `inspectOnly` on every
+    // call (unit mutant, killed). What is NOT: that the handler honours it.
+    // That needs a fixture where nothing else can write the stamp, and is
+    // recorded as owed rather than faked.
+    void stampBefore;
   }, 300_000);
 
   // ─────────────────────────────────────────────────────────────────────────
