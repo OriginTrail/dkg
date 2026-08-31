@@ -198,17 +198,48 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     });
   }, 60_000);
 
-  it('OFF on an adapter that cannot yield the events — and it names which one', async () => {
-    // Fail closed and be specific. A partial subscription would silently miss
-    // every mutation of the kinds it cannot see, which is the failure this
-    // feature exists to end.
+  it('OFF on an adapter that PREDATES the capability probe', async () => {
+    // An adapter with no `supportsEventTypes` at all cannot say what it serves,
+    // and "cannot say" must never read as "serves everything".
+    //
+    // `MockChainAdapter` implements the probe as of PR-A's parity fix, so the
+    // absence has to be constructed deliberately — which is exactly the point:
+    // this row pins the fail-closed DEFAULT rather than an accident of whatever
+    // the mock happens not to implement today.
     delete process.env[INTENT_ENV];
     delete process.env[RECONCILER_ENV];
-    const { internals, intentFile } = await boot({ chainAdapter: new MockChainAdapter() });
+    const chain = new MockChainAdapter();
+    // SHADOWED, not `delete`d: the probe is a class method, so it lives on the
+    // prototype and `delete instance.method` silently removes nothing — an own
+    // property set to `undefined` is what actually models an adapter that does
+    // not implement it.
+    (chain as unknown as { supportsEventTypes?: unknown }).supportsEventTypes = undefined;
+    const { internals, intentFile } = await boot({ chainAdapter: chain });
 
     expect(await internals.vmUpdateConvergenceState()).toEqual({
       effective: false,
       reason: 'abi-missing:KnowledgeAssetUpdated',
+    });
+    await internals.prepareVmReverifyIntentStore();
+    expect(existsSync(intentFile)).toBe(false);
+  }, 60_000);
+
+  it('OFF on a LEGACY ABI, naming the specific event it cannot serve', async () => {
+    // A partial subscription is the failure this feature exists to end: a lane
+    // that quietly skips the kinds its ABI lacks converges on some root
+    // mutations and silently never sees the rest. So ANY missing name disables
+    // the feature outright, and the diagnostic names one instead of reporting
+    // an opaque "unsupported".
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    const chain = new MockChainAdapter();
+    (chain as unknown as { supportsEventTypes: unknown }).supportsEventTypes =
+      async (): Promise<string[]> => ['KnowledgeAssetMerkleRootRemoved'];
+    const { internals, intentFile } = await boot({ chainAdapter: chain });
+
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
+      effective: false,
+      reason: 'abi-missing:KnowledgeAssetMerkleRootRemoved',
     });
     await internals.prepareVmReverifyIntentStore();
     expect(existsSync(intentFile)).toBe(false);

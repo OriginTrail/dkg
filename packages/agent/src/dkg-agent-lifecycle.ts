@@ -289,6 +289,7 @@ import {
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
 import { EXACT_ASSET_FETCH_ADMISSION_PRIORITY } from './sync/exact-asset-fetch.js';
+import { VmReverifyWorker } from './vm-reverify-worker.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
@@ -3174,8 +3175,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               await this.handleKARegisteredNudge(onChainId, kaId, ctx);
             }
           : undefined,
+        // W2 (#2435). Gated on the STORE's existence rather than on a second
+        // evaluation of the effective flag: the store is opened only when the
+        // feature is effectively on, so binding the callback to it makes
+        // "lane subscribed but nowhere to record the event" unrepresentable
+        // instead of merely unlikely.
+        //
+        // Unlike every sibling callback here, this one's rejections are NOT
+        // swallowed by the lane — a rejection holds the cursor and re-scans the
+        // window. That is the contract `handleKaRootMutationEvent` is written
+        // against, and why it classifies transient from deterministic failure
+        // rather than throwing on everything.
+        onKnowledgeAssetRootMutated: this.vmReverifyIntents
+          ? async (event) => {
+              await this.handleKaRootMutationEvent(event, ctx);
+            }
+          : undefined,
       });
       await this.chainPoller.start();
+
+      // The drain. Started after the lane so an event ingested during startup
+      // finds a worker to kick; `closeVmReverifyIntentStore` stops it before
+      // closing the file it writes to.
+      if (this.vmReverifyIntents && !this.vmReverifyWorker) {
+        const reverifyIntents = this.vmReverifyIntents;
+        this.vmReverifyWorker = new VmReverifyWorker({
+          intents: reverifyIntents,
+          fetchContextGraphAssets: (localCgId, uals, options) =>
+            this.fetchContextGraphAssets(localCgId, uals, options),
+          log: {
+            info: (message) => this.log.info(ctx, message),
+            warn: (message) => this.log.warn(ctx, message),
+          },
+        });
+        this.vmReverifyWorker.start();
+        this.log.info(ctx, 'VM re-verify drain started (#2435)');
+      }
       this.log.info(ctx, `Chain event poller started`);
     }
 
