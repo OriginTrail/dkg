@@ -280,12 +280,7 @@ async function execute(): Promise<void> {
       statsBeforeForged.notFound,
       'statsBeforeForged.notFound',
     );
-    const statsAfterForged = await readReceiverStatsWhen(
-      receiver,
-      'after-forged',
-      (stats) => requiredSafeInteger(stats.notFound, 'statsAfterForged.notFound')
-        === notFoundBeforeForged + 1,
-    );
+    const statsAfterForged = await readReceiverStats(receiver, 'after-forged');
     exact(
       requiredSafeInteger(statsAfterForged.notFound, 'statsAfterForged.notFound'),
       notFoundBeforeForged + 1,
@@ -653,25 +648,6 @@ async function readReceiverStats(
     await receiver.request('receiverStats', `${label}-receiver-stats-v1`, 'operation-completed'),
     `${label} receiver stats`,
   );
-}
-
-async function readReceiverStatsWhen(
-  receiver: Gate1AgentChild,
-  label: string,
-  predicate: (stats: Record<string, unknown>) => boolean,
-): Promise<Record<string, unknown>> {
-  const deadline = Date.now() + 5_000;
-  let stats = await readReceiverStats(receiver, label);
-  while (!predicate(stats) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    await receiver.request(
-      'awaitReceiverIdle',
-      `${label}-settle-${Date.now()}`,
-      'receiver-idle',
-    );
-    stats = await readReceiverStats(receiver, label);
-  }
-  return stats;
 }
 
 async function readSemanticGraph(

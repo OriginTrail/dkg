@@ -37,6 +37,7 @@ import {
   BlazegraphNamespaceManager,
   blazegraphNamespaceApiUrlFromBaseUrl,
   normalizeBlazegraphNamespace,
+  type BlazegraphNamespaceEnsureResult,
 } from '@origintrail-official/dkg-storage';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
@@ -231,10 +232,6 @@ function sanitiseContainerName(namespace: string): string {
 
 export function normaliseBlazegraphNamespace(namespace: string): string {
   return normalizeBlazegraphNamespace(namespace);
-}
-
-function sparqlUrlForNamespace(baseUrl: string, namespace: string): string {
-  return `${baseUrl}/bigdata/namespace/${encodeURIComponent(namespace)}/sparql`;
 }
 
 async function findFreePort(
@@ -453,7 +450,7 @@ async function reconcileNamespace(opts: {
   namespace: string;
   fetch: typeof globalThis.fetch;
   log: (msg: string) => void;
-}): Promise<boolean> {
+}): Promise<BlazegraphNamespaceEnsureResult> {
   const manager = new BlazegraphNamespaceManager({
     namespaceApiUrl: blazegraphNamespaceApiUrlFromBaseUrl(opts.url),
     fetchImpl: opts.fetch,
@@ -464,7 +461,7 @@ async function reconcileNamespace(opts: {
   } else {
     opts.log(`  Namespace "${opts.namespace}" already exists.`);
   }
-  return result.created;
+  return result;
 }
 
 async function finaliseReusedContainer(opts: {
@@ -491,19 +488,19 @@ async function finaliseReusedContainer(opts: {
     timeoutMs: opts.pollTimeoutMs,
     log: opts.log,
   });
-  const namespaceCreated = await reconcileNamespace({
+  const namespaceResult = await reconcileNamespace({
     url,
     namespace: opts.namespace,
     fetch: opts.fetch,
     log: opts.log,
   });
   return {
-    url: sparqlUrlForNamespace(url, opts.namespace),
+    url: namespaceResult.sparqlUrl,
     port,
     containerName: opts.spec.containerName,
     managedByDkg: true,
     reused: true,
-    namespaceCreated,
+    namespaceCreated: namespaceResult.created,
   };
 }
 
@@ -601,15 +598,15 @@ export async function provisionBlazegraphDocker(
 
   const url = `http://127.0.0.1:${chosenPort}`;
   await waitForBlazegraphReady({ url, fetch, intervalMs: pollIntervalMs, timeoutMs: pollTimeoutMs, log });
-  const namespaceCreated = await reconcileNamespace({ url, namespace, fetch, log });
+  const namespaceResult = await reconcileNamespace({ url, namespace, fetch, log });
 
   return {
-    url: sparqlUrlForNamespace(url, namespace),
+    url: namespaceResult.sparqlUrl,
     port: chosenPort,
     containerName,
     managedByDkg: true,
     reused: false,
-    namespaceCreated,
+    namespaceCreated: namespaceResult.created,
   };
 }
 

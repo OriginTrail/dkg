@@ -22,7 +22,7 @@
  * No real Docker, no real fetch, no real ports. Everything's
  * injectable; tests run in <50 ms.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   copyFileSync,
   existsSync,
@@ -38,6 +38,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import blazegraphRuntimeContract from
   '@origintrail-official/dkg/blazegraph-runtime-contract';
+import { BlazegraphNamespaceManager } from '@origintrail-official/dkg-storage';
 import { runtimeAssetPaths } from '../src/runtime-assets.js';
 import {
   provisionBlazegraphDocker,
@@ -350,6 +351,37 @@ describe('provisionBlazegraphDocker', () => {
     expect(createCall).toBeDefined();
     expect(String(createCall?.init?.body)).toContain('<entry key="com.bigdata.rdf.sail.namespace">mynode</entry>');
     expect(String(createCall?.init?.body)).toContain('quads">true');
+  });
+
+  it('returns the canonical endpoint supplied by the namespace manager', async () => {
+    const canonicalSparqlUrl = 'http://namespace-manager.test/canonical/sparql';
+    const ensure = vi.spyOn(BlazegraphNamespaceManager.prototype, 'ensure')
+      .mockResolvedValueOnce({ created: false, sparqlUrl: canonicalSparqlUrl });
+    const { runner } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: () => dockerInspectRunning() },
+      ],
+    });
+    const { fn } = mockFetch((url) => (
+      url.endsWith('/bigdata/status')
+        ? new Response('ok', { status: 200 })
+        : new Response(null, { status: 500 })
+    ));
+
+    try {
+      const result = await provisionBlazegraphDocker({
+        namespace: 'mynode',
+        docker: runner,
+        fetch: fn,
+        isPortFree: async () => true,
+        log: () => {},
+      });
+      expect(result.url).toBe(canonicalSparqlUrl);
+      expect(result.namespaceCreated).toBe(false);
+    } finally {
+      ensure.mockRestore();
+    }
   });
 
   it('starts an existing stopped container instead of recreating', async () => {
