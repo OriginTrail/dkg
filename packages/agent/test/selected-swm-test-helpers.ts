@@ -286,6 +286,10 @@ export interface SelectedProviderSelectionAgent {
   lastSyncProgressAt: Map<string, number>;
   syncReconcilerBackoff: Map<string, unknown>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
+  rfc64SwmRecoveryCoordinatorV1: {
+    admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;
+  };
+  selectedSwmBootstrapContextGraphIdsForPeer: (peerId: string) => readonly string[];
   getPeerProtocols: () => Promise<string[]>;
   planSharedMemorySyncContextGraphs: (
     peerId?: string,
@@ -314,11 +318,60 @@ export interface SelectedProviderSelectionAgent {
   closeSelectedSwmMetaTransfers: () => Promise<void>;
 }
 
-export const callTrySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer as unknown as (
+export async function callTrySyncFromPeer(
   this: SelectedProviderSelectionAgent,
   remotePeer: string,
-  onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
-) => Promise<unknown>;
+  onSyncAccounting?: (outcome: {
+    reconcilerDisposition: 'clear' | 'retry' | 'defer';
+    fresh: boolean;
+    progress: boolean;
+  }) => void,
+): Promise<unknown> {
+  const agent = this as SelectedProviderSelectionAgent & {
+    trySelectedSwmRetryFromPeer:
+      typeof LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
+    trySyncFromPeer: typeof LifecycleSyncMethods.prototype.trySyncFromPeer;
+    getSyncReconcilerProbe: () => Promise<{
+      protocolsKey: string | null;
+      connectionKey: string | null;
+    }>;
+  };
+  agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
+  agent.trySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer;
+  agent.getSyncReconcilerProbe = async () => ({
+    protocolsKey: null,
+    connectionKey: null,
+  });
+  const applyAccounting = agent.applySyncOnConnectAccounting;
+  if (onSyncAccounting) {
+    agent.applySyncOnConnectAccounting = (
+      _peerId: string,
+      outcome: Parameters<typeof onSyncAccounting>[0],
+    ) => { onSyncAccounting(outcome); };
+  }
+  const runner = (
+    LifecycleSyncMethods.prototype as unknown as {
+      createSyncOnConnectPeerJobRunner: (
+        this: SelectedProviderSelectionAgent,
+        peerId: string,
+        options: {
+          initialProbe: { protocolsKey: string | null; connectionKey: string | null };
+        },
+      ) => {
+        runAutomaticSelectedThenOrdinary: () => Promise<unknown>;
+        finish: () => void;
+      };
+    }
+  ).createSyncOnConnectPeerJobRunner.call(agent, remotePeer, {
+    initialProbe: { protocolsKey: null, connectionKey: null },
+  });
+  try {
+    return await runner.runAutomaticSelectedThenOrdinary();
+  } finally {
+    runner.finish();
+    agent.applySyncOnConnectAccounting = applyAccounting;
+  }
+}
 
 export interface AdmissionProbe {
   readonly contextGraphId: string;

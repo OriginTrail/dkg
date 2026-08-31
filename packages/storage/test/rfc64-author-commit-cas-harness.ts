@@ -1,5 +1,6 @@
 import type {
   Quad,
+  Rfc64AuthorCommitCasLegacyInputV1,
   Rfc64AuthorCommitCasSemanticInputV1,
   TripleStore,
 } from '../src/index.js';
@@ -71,6 +72,38 @@ export function authorCommitInput(
       quads: [quad(APPLIED_SET, P_APPLIED, NEW_HEAD, STATE_GRAPH)],
     },
     ...overrides,
+  };
+}
+
+export function legacyAuthorCommitInput(): Rfc64AuthorCommitCasLegacyInputV1 {
+  const current = authorCommitInput();
+  const kaStateSubject = 'urn:test:rfc64:ka-state';
+  return {
+    sharedProjectionGraph: current.sharedProjectionGraph,
+    sharedProjectionQuads: current.sharedProjectionQuads,
+    authorSealGraph: current.authorSealGraph,
+    authorSealSubject: current.authorSealSubject,
+    authorSealQuads: current.authorSealQuads,
+    currentHeadGraph: current.currentHead.graphUri,
+    currentHeadSubject: current.currentHead.subject,
+    currentHeadPredicate: current.currentHead.predicate,
+    expectedCurrentHeadObject: current.currentHead.expectedObject,
+    nextCurrentHeadObject: current.currentHead.quads[0]!.object,
+    kaStateDigest: {
+      graphUri: STATE_GRAPH,
+      subject: kaStateSubject,
+      predicate: P_VALUE,
+      expectedObject: '"old-ka-state"',
+      quads: [quad(kaStateSubject, P_VALUE, '"new-ka-state"', STATE_GRAPH)],
+    },
+    subgraphMutationGeneration: current.subgraphMutationGeneration,
+    contextGraphMutationGeneration: current.contextGraphMutationGeneration,
+    appliedSet: current.appliedSet,
+    sealInvalidations: [{
+      graphUri: SEAL_GRAPH,
+      subject: INVALIDATED_SEAL,
+      quads: [],
+    }],
   };
 }
 

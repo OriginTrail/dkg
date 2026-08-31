@@ -38,7 +38,13 @@
  *
  * See also: `dkgv10-spec/production_mainnet/07_IN_PROCESS_PEER_RESOLVER.md`.
  */
-import type { Network, NodeIdentity, Address } from './network.js';
+import type {
+  Network,
+  PeerConnectionNetwork,
+  NodeIdentity,
+  Address,
+} from './network.js';
+import { PeerConnectionUnresolvedError } from './network.js';
 import type { NetworkStateRegistry } from './network-state-registry.js';
 
 /**
@@ -168,6 +174,17 @@ export interface ResolveOpts {
   signal?: AbortSignal;
 }
 
+export interface ConnectOpts extends ResolveOpts {
+  /** Per-address cap used by the transport's ordered candidate walk. */
+  candidateTimeoutMs?: number;
+  /** Optional diagnostic sink for transport candidate selection. */
+  log?: (message: string) => void;
+}
+
+export type PeerConnectionOutcome =
+  | { status: 'connected'; resolvedAddresses: Address[] }
+  | { status: 'unresolved'; resolvedAddresses: [] };
+
 const DEFAULT_PER_STEP_TIMEOUT_MS = 5_000;
 const DEFAULT_AGENT_DIRECTORY_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 /**
@@ -185,6 +202,10 @@ const AGENT_DIRECTORY_CLOCK_SKEW_ALLOWANCE_MS = 5 * 60 * 1000;
 const SILENT_LOGGER: PeerResolverLogger = {
   warn: () => undefined,
 };
+
+function supportsPeerConnection(network: Network): network is PeerConnectionNetwork {
+  return typeof (network as { connectPeer?: unknown }).connectPeer === 'function';
+}
 
 export class PeerResolver {
   private readonly network: Network;
@@ -439,6 +460,41 @@ export class PeerResolver {
 
   isHealthy(_addr: Address): boolean {
     return true;
+  }
+
+  /**
+   * Resolve and connect through one canonical boundary. Every production
+   * resolver consumer uses this method so address ordering, relay preconnect,
+   * cancellation, and identity fallback cannot drift between call sites.
+   * Even an empty resolver result reaches the Network boundary so libp2p can
+   * reuse peer-store identity information. The explicit outcome prevents a
+   * genuine miss from being mistaken for a successful connection.
+   */
+  async connect(peerId: NodeIdentity, opts: ConnectOpts = {}): Promise<PeerConnectionOutcome> {
+    const addresses = await this.resolve(peerId, opts);
+    if (opts.signal?.aborted) {
+      throw new DOMException('Peer connection aborted', 'AbortError');
+    }
+    try {
+      if (!supportsPeerConnection(this.network)) {
+        throw new Error('Network transport does not implement the peer-connection capability');
+      }
+      await this.network.connectPeer(peerId, addresses, {
+        signal: opts.signal,
+        candidateTimeoutMs: opts.candidateTimeoutMs,
+        log: opts.log,
+      });
+      return { status: 'connected', resolvedAddresses: addresses };
+    } catch (error) {
+      if (
+        !opts.signal?.aborted
+        && addresses.length === 0
+        && error instanceof PeerConnectionUnresolvedError
+      ) {
+        return { status: 'unresolved', resolvedAddresses: [] };
+      }
+      throw error;
+    }
   }
 }
 

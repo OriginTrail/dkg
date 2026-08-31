@@ -30,4 +30,22 @@ describe('legacy sync graph namespace eligibility', () => {
     expect(isLegacySyncGraphCandidateV1(graph, contextGraphId, 'durable-data')).toBe(false);
     expect(isLegacySyncGraphCandidateV1(graph, contextGraphId, 'changelog')).toBe(false);
   });
+
+  it('preserves raw path depth when classifying first-level metadata', () => {
+    expect(isLegacySyncGraphCandidateV1(
+      `${cg}/child//_meta`,
+      contextGraphId,
+      'durable-data',
+    )).toBe(true);
+    expect(isLegacySyncGraphCandidateV1(
+      `${cg}//_meta`,
+      contextGraphId,
+      'durable-data',
+    )).toBe(false);
+    expect(isLegacySyncGraphCandidateV1(
+      `${cg}//_meta`,
+      contextGraphId,
+      'changelog',
+    )).toBe(false);
+  });
 });

@@ -65,6 +65,27 @@ export function snapshotDenseDataArray(
   return snapshot;
 }
 
+/** Snapshot selected enumerable data fields without invoking property accessors. */
+export function snapshotSelectedDataRecord<const Keys extends readonly string[]>(
+  value: unknown,
+  selected: Keys,
+  label: string,
+): Readonly<Record<Keys[number], unknown>> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} must be a data object`);
+  }
+
+  const snapshot: Record<string, unknown> = Object.create(null);
+  for (const key of selected) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new Error(`${label} ${key} must be an enumerable data property`);
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return Object.freeze(snapshot) as Readonly<Record<Keys[number], unknown>>;
+}
+
 /** Snapshot one closed plain record without invoking accessors or re-reading fields. */
 export function snapshotExactDataRecord<const Keys extends readonly string[]>(
   value: unknown,

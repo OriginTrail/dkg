@@ -21,6 +21,15 @@ const FIXTURE = createRfc64SharedProjectionTestFixture({
 const PROJECTION_BYTES = FIXTURE.projectionBytes;
 const REQUEST = FIXTURE.request;
 const OPERATION = FIXTURE.operation;
+const UNICODE_FIXTURE = createRfc64SharedProjectionTestFixture({
+  contextGraphId: CONTEXT_GRAPH,
+  assertionCoordinate: 'live-blazegraph-unicode',
+  triples: [{
+    subject: 'urn:café',
+    predicate: 'urn:predicate:😀',
+    object: 'urn:object:😀',
+  }],
+});
 const UNRELATED_GRAPHS = Array.from(
   { length: 4 },
   (_, index) => `urn:rfc64-live-blazegraph:${Date.now()}:${index}`,
@@ -77,14 +86,40 @@ describe.skipIf(!BLAZEGRAPH_URL)('RFC-64 shared-projection stream (live Blazegra
     await expect(collect(result.bytes)).rejects.toBe(reason);
   });
 
+  it('normalizes live BMP and supplementary-plane IRIs into canonical bytes', async () => {
+    // Both fixtures intentionally bind the same KA slot/version, so reset that
+    // exact authenticated graph before replacing the ASCII oracle contents.
+    await store.dropGraph(UNICODE_FIXTURE.operation.graphIri).catch(() => undefined);
+    await store.insert(UNICODE_FIXTURE.triples.map(({ subject, predicate, object }) => (
+      quad(subject, object, UNICODE_FIXTURE.operation.graphIri, predicate)
+    )));
+
+    const result = await new SyncSharedProjectionStoreV1(store).open(
+      UNICODE_FIXTURE.request,
+      {
+        operatorByteCeiling: 4096,
+        timeoutMs: 5_000,
+      },
+    );
+
+    expect(await collect(result.bytes)).toEqual(UNICODE_FIXTURE.projectionBytes);
+    expect(await store.countQuads(UNICODE_FIXTURE.operation.graphIri)).toBe(1);
+  }, 30_000);
+
   async function cleanup(): Promise<void> {
     await Promise.all([
       store.dropGraph(OPERATION.graphIri).catch(() => undefined),
+      store.dropGraph(UNICODE_FIXTURE.operation.graphIri).catch(() => undefined),
       ...UNRELATED_GRAPHS.map((graph) => store.dropGraph(graph).catch(() => undefined)),
     ]);
   }
 });
 
-function quad(subject: string, object: string, graph: string): Quad {
-  return Object.freeze({ subject, predicate: 'urn:p', object, graph });
+function quad(
+  subject: string,
+  object: string,
+  graph: string,
+  predicate = 'urn:p',
+): Quad {
+  return Object.freeze({ subject, predicate, object, graph });
 }

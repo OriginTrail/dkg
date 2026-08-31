@@ -135,16 +135,10 @@ type Rfc64ContextGraphSemanticRecordTypeV1 =
 export type Rfc64SemanticRecordCoordinateV1 =
   | ({ readonly recordType: 'CurrentAuthorCatalogRefV1'; readonly authorAddress: EvmAddressV1 }
     & Rfc64SubgraphSemanticScopeV1)
-  | {
-      readonly [K in Rfc64SubgraphSemanticRecordTypeV1]: {
-        readonly recordType: K;
-      } & Rfc64SubgraphSemanticScopeV1;
-    }[Rfc64SubgraphSemanticRecordTypeV1]
-  | {
-      readonly [K in Rfc64ContextGraphSemanticRecordTypeV1]: {
-        readonly recordType: K;
-      } & Rfc64SemanticScopeV1;
-    }[Rfc64ContextGraphSemanticRecordTypeV1];
+  | ({ readonly recordType: Rfc64SubgraphSemanticRecordTypeV1 }
+    & Rfc64SubgraphSemanticScopeV1)
+  | ({ readonly recordType: Rfc64ContextGraphSemanticRecordTypeV1 }
+    & Rfc64SemanticScopeV1);
 
 export type Rfc64SemanticStoreObjectV1 = TypedRdfStoreObjectV1;
 export type Rfc64SemanticStoreRowV1 = TypedRdfStoreRowV1;

@@ -370,7 +370,7 @@ export class ProtocolRouter {
     }
     // Thread the router's `peerResolver` into the pool unless the
     // caller already supplied a `primePeer` hook. Without this, the
-    // pool would skip resolver priming and regress first-contact
+    // pool would skip address discovery and regress first-contact
     // delivery to cold peers (Codex PR #560 review). The router's
     // own one-shot path already primes per RFC 07 §3.2; this just
     // keeps the pooled path on parity.

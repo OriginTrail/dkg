@@ -202,7 +202,7 @@ describe('RFC-64 rollout authority integration', () => {
       },
     }, undefined, undefined, (agent) => {
       connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-      queue = vi.spyOn(agent, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
         .mockReturnValue(true);
     });
     await legacy.whenRfc64PublicCatalogBootstrapIdleV1();

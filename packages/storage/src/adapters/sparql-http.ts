@@ -84,10 +84,11 @@ import {
   createManagedOxigraphRuntimeStoreConfigV1,
   getManagedOxigraphRuntimeConstructionAuthorityV1,
   isManagedOxigraphRuntimeConstructionAuthorityV1,
+  snapshotManagedOxigraphRuntimeOptionsV1,
 } from '../managed-oxigraph-runtime-store.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
-  managedOxigraphDiagnosticByteCeilingV1,
+  RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1,
   type Rfc64HttpProjectionRequestV1,
 } from '../rfc64-http-shared-projection-runner.js';
 import {
@@ -269,6 +270,7 @@ export class SparqlHttpStore implements TripleStore {
    */
   readonly rfc64SharedProjectionStreamV1?:
     Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1'];
+  readonly rfc64SharedProjectionStreamCertifiedV1: true | false;
   readonly rfc64ExactBindingsReadCertifiedV1: true | false;
   readonly rfc64SemanticReadCertifiedV1: true | false;
 
@@ -311,6 +313,7 @@ export class SparqlHttpStore implements TripleStore {
     this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
       constructionAuthority,
     );
+    this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
@@ -344,11 +347,7 @@ export class SparqlHttpStore implements TripleStore {
           status,
           excerpt,
         ),
-      }, {
-        accept: 'application/n-quads, text/n-quads',
-        diagnosticByteCeiling: managedOxigraphDiagnosticByteCeilingV1,
-        managedOxigraph: true,
-      });
+      }, RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1);
     }
   }
 
@@ -673,6 +672,26 @@ export class SparqlHttpStore implements TripleStore {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern.countBefore',
     });
+    await this.applyDeleteByPattern(pattern, options);
+    const after = await this.countQuads(graphUri, {
+      ...options,
+      source: options?.source ?? 'sparql-http.deleteByPattern.countAfter',
+    });
+    return Math.max(0, before - after);
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<DKGQuad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    await this.applyDeleteByPattern(pattern, options);
+  }
+
+  private async applyDeleteByPattern(
+    pattern: Partial<DKGQuad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    const graphUri = pattern.graph;
     const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
     const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
     const o = pattern.object ? formatTerm(pattern.object) : '?o';
@@ -696,11 +715,6 @@ export class SparqlHttpStore implements TripleStore {
       },
       operation: 'deleteByPattern',
     });
-    const after = await this.countQuads(graphUri, {
-      ...options,
-      source: options?.source ?? 'sparql-http.deleteByPattern.countAfter',
-    });
-    return Math.max(0, before - after);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -990,10 +1004,12 @@ export class SparqlHttpStore implements TripleStore {
     storeOperation?: StoreOperation,
   ): Promise<QueryResult> {
     const trimmed = sparql.trim();
-    const classified = classifySparqlOperation(trimmed);
-    const isAsk = classified.kind === 'read' && classified.form === 'ASK';
-    const isConstruct = classified.kind === 'read'
-      && (classified.form === 'CONSTRUCT' || classified.form === 'DESCRIBE');
+    // PREFIX / BASE prologues precede the query form. Use the shared scanner
+    // so graph-producing queries negotiate N-Quads instead of SPARQL JSON.
+    const operation = classifySparqlOperation(trimmed);
+    const isAsk = operation.kind === 'read' && operation.form === 'ASK';
+    const isConstruct = operation.kind === 'read'
+      && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
     return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
@@ -1238,13 +1254,10 @@ export function createManagedOxigraphSparqlStoreV1(
 ): SparqlHttpStore {
   const config = createManagedOxigraphRuntimeStoreConfigV1({
     backend: 'sparql-http',
-    options: {
-      ...options,
-      managedByDkg: true,
-    },
+    options: snapshotManagedOxigraphRuntimeOptionsV1(options, true),
   });
   return new SparqlHttpStore(
-    { ...options, managedByDkg: config.options.managedByDkg === true },
+    config.options as unknown as SparqlHttpStoreOptions,
     getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
 }

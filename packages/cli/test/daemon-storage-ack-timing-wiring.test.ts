@@ -14,7 +14,6 @@ import {
   SyncSharedProjectionStoreV1,
   asChangelogReader,
   createManagedOxigraphRuntimeStoreConfigV1,
-  createTripleStore,
 } from '@origintrail-official/dkg-storage';
 
 const PRIVATE_RFC64_CONTEXT_GRAPH =
@@ -162,6 +161,9 @@ vi.mock('../src/publisher-runner.js', async importOriginal => {
 });
 
 const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { DKGAgent: RealDKGAgent } = await vi.importActual<
+  typeof import('@origintrail-official/dkg-agent')
+>('@origintrail-official/dkg-agent');
 
 function createFakeServer() {
   const server = {
@@ -379,21 +381,38 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         },
       });
 
-      const createArg = await captureCreateArg({
+      await captureCreateArg({
         store: {
           backend: 'oxigraph-server',
           options: {},
           changelog,
         },
+      }, async (createArg) => {
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = (async (_input, init) => {
+          const body = String(init?.body ?? '');
+          if (/\bSELECT\b/iu.test(body)) {
+            return new Response(JSON.stringify({
+              head: { vars: ['network'] },
+              results: { bindings: [] },
+            }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/sparql-results+json' },
+            });
+          }
+          return new Response(null, { status: 204 });
+        }) as typeof fetch;
+        let agent: Awaited<ReturnType<typeof RealDKGAgent.create>> | undefined;
+        try {
+          agent = await RealDKGAgent.create(createArg);
+          expect(() => new SyncSharedProjectionStoreV1(agent.store)).not.toThrow();
+          expect(() => new SyncSemanticStoreV1(agent.store)).not.toThrow();
+          expect(asChangelogReader(agent.store) !== null).toBe(changelog);
+        } finally {
+          await agent?.stop().catch(() => {});
+          globalThis.fetch = originalFetch;
+        }
       });
-      const store = await createTripleStore(createArg.storeConfig);
-      try {
-        expect(() => new SyncSharedProjectionStoreV1(store)).not.toThrow();
-        expect(() => new SyncSemanticStoreV1(store)).not.toThrow();
-        expect(asChangelogReader(store) !== null).toBe(changelog);
-      } finally {
-        await store.close();
-      }
     },
   );
 
