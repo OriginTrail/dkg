@@ -24,9 +24,11 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import type {
   CanonicalAuthorSealStoreRowV1,
+  Rfc64SemanticReadOperationV2,
 } from '@origintrail-official/dkg-core';
 import type {
   Rfc64ExactBindingsReadOperationV1,
+  Rfc64SemanticReadCapabilityResultV1,
 } from './rfc64-exact-bindings-read-capability.js';
 import {
   getManagedOxigraphRuntimeConstructionAuthorityV1,
@@ -142,6 +144,12 @@ export interface TripleStore {
     operation: Rfc64ExactBindingsReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
+  /** Legacy semantic-only capability retained for the V1 compatibility window. */
+  readonly rfc64SemanticReadCertifiedV1?: boolean;
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<Rfc64SemanticReadCapabilityResultV1>;
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;

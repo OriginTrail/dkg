@@ -62,7 +62,7 @@ export function decodeNTriplesUcharEscapes(
       index += 1;
       continue;
     }
-    const token = scanNTriplesEscape(value, index, surrogatePolicy);
+    const token = scanNTriplesEscape(value, index, surrogatePolicy, false);
     if (token.kind !== 'uchar') {
       if (!preserveInvalid) return null;
       decoded += value.slice(index, token.nextIndex);
@@ -221,10 +221,15 @@ function scanNTriplesEscape(
   value: string,
   start: number,
   surrogatePolicy: NTriplesSurrogatePolicy,
+  decodeEchar = true,
 ): NTriplesEscapeToken {
   const marker = value[start + 1];
   const echar = marker === undefined ? undefined : NTRIPLES_ECHAR_VALUES[marker];
   if (echar !== undefined) {
+    // UCHAR-only legacy scans did not consume the second character of an ECHAR.
+    // Advancing one byte preserves their overlapping-match behavior: in `\\u0041`
+    // the first slash remains literal and the second begins the valid UCHAR.
+    if (!decodeEchar) return { kind: 'invalid', nextIndex: start + 1 };
     return { kind: 'echar', decoded: echar, nextIndex: start + 2 };
   }
   const digits = marker === 'u' ? 4 : marker === 'U' ? 8 : 0;
