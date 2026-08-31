@@ -194,7 +194,13 @@ describe('RFC-64 certified author commit CAS v1', () => {
       },
       mapObject: async (value, context) => {
         objectRoles.push(`${context.role}:${context.kind}`);
-        return value === null ? null : `<urn:test:mapped:${context.role}:${context.kind}>`;
+        const predecessorIndex = {
+          currentHead: 7,
+          subgraphMutationGeneration: 8,
+          contextGraphMutationGeneration: 9,
+          appliedSet: 10,
+        }[context.role];
+        return value === null ? null : `"mapped:${context.role}:0:${predecessorIndex}"`;
       },
     });
 
@@ -235,12 +241,12 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(subject('contextGraphMutationGeneration').quads[0]?.object)
       .toBe('"mapped:contextGraphMutationGeneration:0:5"');
     expect(subject('appliedSet').quads[0]?.object).toBe('"mapped:appliedSet:0:6"');
-    expect(guard('currentHead').expectedObject).toBe('<urn:test:mapped:currentHead:expected>');
+    expect(guard('currentHead').expectedObject).toBe('"mapped:currentHead:0:7"');
     expect(guard('subgraphMutationGeneration').expectedObject)
-      .toBe('<urn:test:mapped:subgraphMutationGeneration:expected>');
+      .toBe('"mapped:subgraphMutationGeneration:0:8"');
     expect(guard('contextGraphMutationGeneration').expectedObject)
-      .toBe('<urn:test:mapped:contextGraphMutationGeneration:expected>');
-    expect(guard('appliedSet').expectedObject).toBe('<urn:test:mapped:appliedSet:expected>');
+      .toBe('"mapped:contextGraphMutationGeneration:0:9"');
+    expect(guard('appliedSet').expectedObject).toBe('"mapped:appliedSet:0:10"');
     const currentHeadGuard = guard('currentHead');
     expect(currentHeadGuard.guardKind).toBe('exact-subject');
     if (currentHeadGuard.guardKind !== 'exact-subject') throw new Error('expected exact guard');
@@ -254,6 +260,19 @@ describe('RFC-64 certified author commit CAS v1', () => {
       STATE_GRAPH,
     ]);
     expect(manifest.referencedGraphs).toEqual(manifest.touchedGraphs);
+  });
+
+  it('rejects a deserialized semantic plan that drops its mandatory guards', () => {
+    const legitimate = normalizeRfc64AuthorCommitCasV1(authorCommitInput());
+    const forged = {
+      ...structuredClone(legitimate),
+      guards: [],
+    } as unknown as Rfc64AuthorCommitCasInputV1;
+
+    expect(() => normalizeRfc64AuthorCommitCasV1(forged))
+      .toThrow(/invalid guard topology/u);
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(structuredClone(legitimate)))
+      .not.toThrow();
   });
 
   it('maps the exported legacy contract through the operation-only canonical plan', async () => {

@@ -12,7 +12,7 @@ import {
   type Rfc64ExactBindingsReadOperationV1,
   type Rfc64ExactBindingsStoreRowV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
+import type { Rfc64SemanticReadOperationV1 } from '@origintrail-official/dkg-core';
 import {
   normalizeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -208,7 +208,7 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ) {
     return executeRfc64SemanticReadCapabilityV1(this, operation, options);
@@ -608,8 +608,10 @@ export class OxigraphWorkerStore implements TripleStore {
         this.respawnPromise,
         signal,
         {
-          timeoutMs: remainingMs,
-          timeoutError: () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+          timeout: {
+            timeoutMs: remainingMs,
+            timeoutError: () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+          },
         },
       );
     }
