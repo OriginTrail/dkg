@@ -137,6 +137,9 @@ export class ChainEventLaneRunner {
   private readonly log: Logger;
   private readonly cursorStore?: LaneCursorStore;
   private readonly metrics?: ChainEventLaneMetrics;
+
+  /** Non-throwing recorder boundary around every metrics invocation (r11). */
+  private readonly recordMetric: (record: () => void) => void;
   private readonly laneState = new Map<ChainEventPollerLane, ChainEventPollerLaneState>();
   private readonly restoredLanes = new Set<ChainEventPollerLane>();
 
@@ -148,6 +151,22 @@ export class ChainEventLaneRunner {
     this.log = config.log;
     this.cursorStore = createLaneCursorStore(config.cursorPersistence);
     this.metrics = config.metrics;
+    this.recordMetric = (record: () => void): void => {
+      // Metrics are OBSERVERS, not participants (review r11): an exception
+      // from an injected sink must never abort a scan, turn a completed scan
+      // into a failure after lane state has advanced, or re-enter failure
+      // bookkeeping that would call the same throwing hook again. A broken
+      // exporter is an observability problem; the warn line below is its own
+      // channel for noticing it.
+      try {
+        record();
+      } catch (cause) {
+        this.log.warn(
+          createOperationContext('system'),
+          `metrics sink threw; ignoring: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      }
+    };
   }
 
   async restoreCurrentlyActive(ctx: OperationContext): Promise<void> {
@@ -352,7 +371,7 @@ export class ChainEventLaneRunner {
 
     if (head != null) {
       state.lastScanHead = head;
-      this.metrics?.laneCursorLag(lane.spec.name, Math.max(0, head - state.lastBlock));
+      this.recordMetric(() => this.metrics?.laneCursorLag(lane.spec.name, Math.max(0, head - state.lastBlock)));
     }
     state.lastScanAtMs = now;
 
@@ -480,18 +499,18 @@ export class ChainEventLaneRunner {
   private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {
     const state = lane.state;
     if (outcome.kind === 'noWork') {
-      this.metrics?.laneScan(lane.spec.name, 'noWork');
+      this.recordMetric(() => this.metrics?.laneScan(lane.spec.name, 'noWork'));
       state.nextRunAtMs = outcome.now + lane.spec.cadenceMs;
       return;
     }
     if (outcome.kind === 'success') {
-      this.metrics?.laneScan(lane.spec.name, 'success');
+      this.recordMetric(() => this.metrics?.laneScan(lane.spec.name, 'success'));
       state.failureBackoffMs = undefined;
       state.nextRunAtMs = outcome.caughtUp ? outcome.now + lane.spec.cadenceMs : undefined;
       return;
     }
 
-    this.metrics?.laneScan(lane.spec.name, 'failure');
+    this.recordMetric(() => this.metrics?.laneScan(lane.spec.name, 'failure'));
     const previous = state.failureBackoffMs;
     const next = previous == null
       ? Math.max(FAILURE_BACKOFF_INITIAL_MS, lane.spec.cadenceMs)

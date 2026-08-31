@@ -655,12 +655,13 @@ describe('ChainEventPoller — pollNow', () => {
 
   it('stop() during a manual poll drains the queue: no scan starts after stop resolves (review r6)', async () => {
     let now = 0;
+    let head = 50_000;
     let scansStarted = 0;
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((r) => { releaseFirst = r; });
     const adapter = {
       chainId: 'mock:0',
-      getBlockNumber: async () => 50_000,
+      getBlockNumber: async () => head,
       listenForEvents: async function* (): AsyncIterable<ChainEvent> {
         scansStarted += 1;
         if (scansStarted === 1) await firstGate; // hold the FIRST scan open across stop()
@@ -676,8 +677,12 @@ describe('ChainEventPoller — pollNow', () => {
     });
 
     const p1 = poller.pollNow();          // starts scanning, blocked on the gate
+    await new Promise((r) => setTimeout(r, 10)); // p1 is INSIDE the gate with its
+                                          // window already computed (..50_000)
     const p2 = poller.pollNow();          // queued behind p1
-    await new Promise((r) => setTimeout(r, 10));
+    head = 50_010;                        // FRESH work for p2: an uncancelled
+                                          // entry must be adapter-visible, not
+                                          // an invisible caught-up noWork
     const stopped = poller.stop();        // stop() begins while p1 is mid-scan
     releaseFirst();
     await stopped;
@@ -722,6 +727,89 @@ describe('ChainEventPoller — pollNow', () => {
     // The next manual poll still runs and resolves: the queue recovered.
     await expect(poller.pollNow()).resolves.toBeUndefined();
     expect(runnerCalls).toBe(2);
+  });
+
+  it('start-stop-start re-arms pollNow: the stopping latch is not terminal (review r10)', async () => {
+    // The public lifecycle explicitly supports restart; a latch that never
+    // resets would leave the restarted poller with a permanently refusing
+    // manual API -- contradictory state the review named.
+    const { adapter, filters, setHead } = makeChain(50_000);
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      clock: () => 0,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    await poller.stop();
+    await expect(poller.pollNow()).rejects.toThrow(/stopped/);
+
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    setHead(50_010);
+    await expect(poller.pollNow()).resolves.toBeUndefined();
+    const last = filters[filters.length - 1];
+    expect(last.fromBlock).toBe(50_001);
+    expect(last.toBlock).toBe(50_010);
+    await poller.stop();
+  });
+
+  it('a start() issued while stop() is still draining serializes behind it (review r10)', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let scans = 0;
+    let head = 50_000;
+    const setHead = (next: number): void => { head = next; };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => head,
+      listenForEvents: async function* (): AsyncIterable<ChainEvent> {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        scans += 1;
+        if (scans === 1) await gate; // hold the pre-stop scan open
+        active -= 1;
+        for (const evt of [] as ChainEvent[]) yield evt;
+      },
+    } as unknown as ChainAdapter;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      clock: () => 0,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+
+    const p1 = poller.pollNow();          // scanning, blocked on the gate
+    await new Promise((r) => setTimeout(r, 10)); // p1 inside the gate; its window
+                                          // (..50_000) is already computed
+    const p2 = poller.pollNow();          // queued behind p1 BEFORE stop()
+    setHead(50_010);                      // fresh work, so an uncancelled p2
+                                          // shows up as a real adapter scan
+    const stopped = poller.stop();        // drains p1, discards p2
+    const restarted = poller.start();     // must WAIT for the drain, not re-arm over it
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    await Promise.allSettled([p1, p2, stopped, restarted]);
+
+    // stop()'s discard contract survives a concurrent restart: p2 was queued
+    // before stop() and must have been CANCELLED, not revived by start()
+    // resetting the latch while the drain was still walking the queue.
+    expect(scans).toBe(1);
+    await poller.waitForCurrentPoll();
+
+    // Never two scans in flight -- a start() that jumped the drain would have
+    // issued its immediate first poll while p1 was still gated.
+    expect(maxActive).toBe(1);
+    // And the restart is REAL: the manual API works again and scans the
+    // window p2 never took.
+    await expect(poller.pollNow()).resolves.toBeUndefined();
+    expect(scans).toBe(2);
+    await poller.stop();
   });
 
   it("passing the removed 'onCollectionUpdated' key warns loudly and enables no lane (review r3)", async () => {
@@ -787,6 +875,49 @@ describe('ChainEventPoller — pollNow', () => {
     // transient failure into a permanently lagging lane.
     await poller.pollNow();
     expect(saveCalls).toEqual([{ lane: 'kaRootMutations', block: 40_951 + MAX_RANGE - 1 }]);
+  });
+
+  it('a throwing metrics sink never affects delivery, cursor persistence, or later scans (review r11)', async () => {
+    // Metrics are observers, not participants: run the SAME drive twice, once
+    // with sinks that always throw and once with none, and require identical
+    // deliveries and identical persisted cursors. The lag hook fires before
+    // the scan and the result hook after it, so an unisolated throw in either
+    // would abort delivery or skip persistence after state advanced.
+    async function drive(withThrowingSinks: boolean): Promise<{ seen: string[]; saved: number[] }> {
+      const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_990)]);
+      const seen: string[] = [];
+      const saved: number[] = [];
+      const poller = new ChainEventPoller({
+        chain: chain.adapter,
+        publishHandler: makeHandler(),
+        intervalMs: CADENCE_MS,
+        clock: () => 0,
+        cursorPersistence: {
+          async loadLane() { return undefined; },
+          async saveLane(_lane, block) { saved.push(block); },
+        } satisfies LaneCursorPersistence,
+        ...(withThrowingSinks ? {
+          metrics: {
+            laneScan: () => { throw new Error('exporter down'); },
+            laneCursorLag: () => { throw new Error('exporter down'); },
+          },
+        } : {}),
+        onKnowledgeAssetRootMutated: async (e) => { seen.push(e.kaId); },
+      });
+      await poller.pollNow();
+      // A second manual drive proves failure bookkeeping and schedules were
+      // not corrupted by the throwing result hook of the first.
+      chain.setHead(50_010);
+      await poller.pollNow();
+      return { seen, saved };
+    }
+
+    const throwing = await drive(true);
+    const clean = await drive(false);
+    expect(throwing.seen).toEqual(clean.seen);
+    expect(throwing.seen.length).toBeGreaterThan(0);
+    expect(throwing.saved).toEqual(clean.saved);
+    expect(throwing.saved.length).toBeGreaterThan(0);
   });
 });
 

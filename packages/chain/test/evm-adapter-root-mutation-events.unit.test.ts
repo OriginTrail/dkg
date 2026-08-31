@@ -457,6 +457,49 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(req?.toBlock).toBe(9_000);
   });
 
+  it('each yielded event carries the position of ITS OWN log (review r10)', async () => {
+    // Every other row shares one set of position constants, so a regression
+    // that stamped the FIRST log's transaction hash and indexes onto all four
+    // events would have stayed green while later mutations de-duplicated and
+    // ordered against the wrong position.
+    const iface = new Interface(KA_ABI as never);
+    const distinct = (n: number): Partial<FakeLog> => ({
+      blockNumber: 4_000 + n,
+      blockHash: '0x' + n.toString(16).padStart(2, '0').repeat(32),
+      transactionHash: '0x' + (0x30 + n).toString(16).repeat(32),
+      transactionIndex: 10 + n,
+      index: 20 + n,
+    });
+    const { adapter } = makeAdapter({
+      logsByEvent: {
+        KnowledgeAssetUpdated: [encodeLog(iface, 'KnowledgeAssetUpdated', [KA_ID, AUTHOR, 'op-1', ROOT, 4_096n, 10n], distinct(1))],
+        KnowledgeAssetMerkleRootAdded: [encodeLog(iface, 'KnowledgeAssetMerkleRootAdded', [KA_ID, ROOT], distinct(2))],
+        KnowledgeAssetMerkleRootsUpdated: [encodeLog(iface, 'KnowledgeAssetMerkleRootsUpdated', [KA_ID, [[AUTHOR, ROOT, 1_700_000_000n]]], distinct(3))],
+        KnowledgeAssetMerkleRootRemoved: [encodeLog(iface, 'KnowledgeAssetMerkleRootRemoved', [KA_ID, ROOT], distinct(4))],
+      },
+    });
+
+    const events = await drain(adapter, [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+
+    expect(events).toHaveLength(4);
+    const byType = new Map(events.map((e) => [e.type, e]));
+    const expected: ReadonlyArray<readonly [number, string]> = [
+      [1, 'KnowledgeAssetUpdated'],
+      [2, 'KnowledgeAssetMerkleRootAdded'],
+      [3, 'KnowledgeAssetMerkleRootsUpdated'],
+      [4, 'KnowledgeAssetMerkleRootRemoved'],
+    ];
+    for (const [n, type] of expected) {
+      const e = byType.get(type);
+      expect(e, type).toBeDefined();
+      expect(e?.blockNumber, type).toBe(4_000 + n);
+      expect(e?.data['blockHash'], type).toBe('0x' + n.toString(16).padStart(2, '0').repeat(32));
+      expect(e?.data['txHash'], type).toBe('0x' + (0x30 + n).toString(16).repeat(32));
+      expect(e?.data['txIndex'], type).toBe(10 + n);
+      expect(e?.data['logIndex'], type).toBe(20 + n);
+    }
+  });
+
   it('a legacy ABI without the four events yields nothing and does not throw', async () => {
     // `contract.filters.<name>()` on an ABI lacking the fragment throws, and a
     // throw inside `listenForEvents` aborts the WHOLE scan — the node would
