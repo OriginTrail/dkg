@@ -139,6 +139,8 @@ export interface VmReverifyTransitionInput {
   /** When this generation first attempted anything; absent before attempt 1. */
   firstAttemptAt?: number;
   now: number;
+  /** Park budget; the worker passes its resolved (env-overridable) value. */
+  parkAfterMs?: number;
 }
 
 function retry(
@@ -188,6 +190,7 @@ function isLifecycleClosure(error: unknown): boolean {
 
 export function planTransition(input: VmReverifyTransitionInput): VmReverifyTransition {
   const { kind, item, error, observedBlock, attemptNumber, firstAttemptAt, now } = input;
+  const parkAfterMs = input.parkAfterMs ?? VM_REVERIFY_PARK_AFTER_MS;
 
   if (error !== undefined) {
     if (isLifecycleClosure(error)) return { action: 'leave', reason: 'lifecycle-closed' };
@@ -219,10 +222,7 @@ export function planTransition(input: VmReverifyTransitionInput): VmReverifyTran
     if (kind === 'root-removed') {
       return { action: 'abandon', reason: 'version-regression-unsupported' };
     }
-    if (
-      firstAttemptAt !== undefined
-      && now - firstAttemptAt >= VM_REVERIFY_PARK_AFTER_MS
-    ) {
+    if (firstAttemptAt !== undefined && now - firstAttemptAt >= parkAfterMs) {
       return { action: 'abandon', reason: 'no-peer-has-version' };
     }
     return retry('unresolved', 'unresolved', attemptNumber);

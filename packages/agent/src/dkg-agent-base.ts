@@ -23,6 +23,7 @@ import {
   openSqliteVmReverifyIntentStore,
 } from './vm-reverify-intent-sqlite-store.js';
 import type { VmReverifyIntentStore } from './vm-reverify-intent-store.js';
+import type { VmReverifyWorker } from './vm-reverify-worker.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
@@ -1169,6 +1170,11 @@ export class DKGAgentBase {
    * read it optionally rather than assume a store exists.
    */
   vmReverifyIntents?: VmReverifyIntentStore;
+  /**
+   * W2 (#2435) drain. Like the store above, its absence is the kill switch —
+   * the ingest kicks it optionally and never assumes it exists.
+   */
+  vmReverifyWorker?: VmReverifyWorker;
   /** Explicit owner for finalization persistence and network identity lifetimes. */
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /**

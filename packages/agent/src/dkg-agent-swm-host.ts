@@ -96,7 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, resolveGraphScopedOrLegacyMetadata, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -125,6 +125,7 @@ import {
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   readMaterializedVersion, shouldApplyMaterialization, withMaterializationLock,
   type MaterializedVersion,
+  type KnowledgeAssetRootMutationEventV1,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -523,6 +524,23 @@ import {
 } from './sync/backpressure.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
+
+/**
+ * Marks a failure that came from the triple store's own `query`, so the W2
+ * ingest can tell a TRANSIENT store rejection from a DETERMINISTIC metadata
+ * parse failure.
+ *
+ * Both surface from `resolveGraphScopedOrLegacyMetadata` as a bare `Error` with
+ * no code, and they need opposite handling: one must hold the lane cursor, the
+ * other must let it advance. Tagging at the boundary the error crosses is the
+ * only discriminator here that does not depend on message text.
+ */
+class VmReverifyIngestStoreQueryError extends Error {
+  constructor(readonly cause: unknown) {
+    super('VM re-verify ingest store query failed');
+    this.name = 'VmReverifyIngestStoreQueryError';
+  }
+}
 
 type VmReconcileEngineResult = Awaited<ReturnType<typeof reconcileContextGraph>>;
 type VmReconcileTargetBase = {
@@ -3220,6 +3238,157 @@ export class SwmHostModeMethods extends DKGAgentBase {
       void this.vmReconcileDispatcher.triggerLive(localCgId);
     }
     return localCgId;
+  }
+
+  /**
+   * Ingest one on-chain Knowledge-Asset root mutation (#2435).
+   *
+   * The chain event lane calls this for every `KnowledgeAssetUpdated`,
+   * `…MerkleRootAdded`, `…MerkleRootsUpdated` and `…MerkleRootRemoved` log it
+   * scans. The job is small and deliberately CHEAP — map the on-chain KA id to
+   * a UAL, ask the local store whether we hold it, and record a durable intent
+   * — because it runs once per event on every node, with no per-CG topic to
+   * narrow the stream. No chain reads happen here: the storage address comes
+   * from an already-resolved contract binding, and everything else the repair
+   * needs is re-read later by the drain.
+   *
+   * THE FAILURE CLASSIFICATION IS THE POINT.
+   *
+   * The lane does not swallow this callback's rejections: a rejection holds the
+   * lane cursor and re-scans the same window on the next poll. That is exactly
+   * right for a TRANSIENT failure and catastrophic for a DETERMINISTIC one — a
+   * single KA with malformed local metadata would re-throw on every poll, and
+   * the lane would stop advancing forever, silently, for every CG on the node.
+   *
+   * So: transient conditions (shutdown, a store query that rejected, an intent
+   * write that failed) propagate; deterministic ones (an unparseable event, a
+   * KA we do not hold, malformed local metadata, a legacy pre-V2 holding) are
+   * counted and dropped so the cursor moves past them. Dropping is safe here in
+   * a way it is not elsewhere: the repair is idempotent and chain-authoritative,
+   * so any later mutation of the same asset raises the intent again.
+   */
+  async handleKaRootMutationEvent(
+    this: DKGAgent,
+    event: KnowledgeAssetRootMutationEventV1,
+    ctx: OperationContext,
+  ): Promise<void> {
+    // Shutdown, or a store rotation in progress. Transient by construction:
+    // holding the cursor here re-delivers the event after the restart, which is
+    // precisely the downtime case this feature exists to cover.
+    if (this.graphScopedStoreClosed || !this.vmReconcileRuntimeReady) {
+      throw new VmReconcileQueueClosedError();
+    }
+    const intents = this.vmReverifyIntents;
+    if (!intents) {
+      // The lane is only wired when the store is open, so the sole realistic
+      // path here is teardown ordering — transient, same as above.
+      throw new VmReconcileQueueClosedError();
+    }
+
+    const storageAddress = this.chain.getDKGKnowledgeAssetsAddress
+      ? await this.chain.getDKGKnowledgeAssetsAddress()
+      : undefined;
+    if (!storageAddress) {
+      this.log.warn(
+        ctx,
+        `vm-reverify ingest dropped ka=${event.kaId}: chain adapter exposes no Knowledge Asset storage address`,
+      );
+      return;
+    }
+
+    let ual: string;
+    try {
+      ual = buildReconciledKnowledgeAssetUal(
+        this.chain.chainId,
+        storageAddress,
+        BigInt(event.kaId),
+      );
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `vm-reverify ingest dropped an unparseable event ka=${event.kaId}: `
+        + `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+
+    // Do we hold it? `resolveGraphScopedOrLegacyMetadata` is the canonical
+    // fail-closed reader; the third argument is required and returning `null`
+    // from it means "no legacy fallback for this caller".
+    //
+    // It THROWS both for a store-query rejection (transient) and for malformed
+    // V2 metadata (deterministic), with the same `Error` class and no code —
+    // and the two need opposite handling. Rather than re-implement the query
+    // here to separate them, or match on message text, tag failures at the
+    // boundary they come from: anything raised inside `store.query` is wrapped,
+    // so what escapes unwrapped is a parse failure by construction.
+    let resolved: Awaited<ReturnType<typeof resolveGraphScopedOrLegacyMetadata<null>>>;
+    try {
+      resolved = await resolveGraphScopedOrLegacyMetadata<null>(
+        {
+          query: async (statement: string, options?: QueryOptions) => {
+            try {
+              return await this.store.query(statement, options);
+            } catch (cause) {
+              throw new VmReverifyIngestStoreQueryError(cause);
+            }
+          },
+        },
+        ual,
+        async () => null,
+        { source: 'agent.vmReverify.ingest' },
+      );
+    } catch (err) {
+      if (err instanceof VmReverifyIngestStoreQueryError) throw err.cause;
+      this.log.warn(
+        ctx,
+        `vm-reverify ingest dropped ual=${ual}: malformed local Knowledge Asset metadata `
+        + `(${err instanceof Error ? err.message : String(err)})`,
+      );
+      return;
+    }
+
+    if (resolved.kind !== 'graph') {
+      // Not held, or held as a pre-V2 legacy row. Legacy holdings are a stated
+      // non-goal: they have no graph-scoped identity for the exact fetch to
+      // address, and durable sync plus the ordinal sweep still cover them.
+      this.log.info(
+        ctx,
+        `vm-reverify ingest skipped ual=${ual}: ${resolved.kind === 'legacy' ? 'legacy holding' : 'not held'}`,
+      );
+      return;
+    }
+
+    const localCgId = resolved.metadata.contextGraphId;
+    const subscription = this.subscribedContextGraphs.get(localCgId);
+    if (!subscription?.subscribed && !subscription?.coreHosted) {
+      this.log.info(
+        ctx,
+        `vm-reverify ingest skipped ual=${ual}: context graph "${localCgId}" is neither subscribed nor hosted`,
+      );
+      return;
+    }
+
+    // An intent-write failure is I/O and propagates: losing the record is the
+    // one outcome that would silently restore the original defect.
+    const outcome = await intents.upsert({
+      ual,
+      localCgId,
+      kaId: event.kaId,
+      kind: event.kind,
+      position: event.position,
+    });
+    // Nothing changed means a duplicate or re-scanned log. It must cost no log
+    // line and no drain slot, or the periodic wide re-scan would manufacture
+    // work proportional to the rescan window rather than to real mutations.
+    if (outcome === 'unchanged') return;
+
+    this.log.info(
+      ctx,
+      `vm-reverify ingest ${outcome} cg=${localCgId} ka=${event.kaId} ual=${ual} `
+      + `kind=${event.kind} block=${event.position.blockNumber}`,
+    );
+    this.vmReverifyWorker?.kick();
   }
 
   /**
