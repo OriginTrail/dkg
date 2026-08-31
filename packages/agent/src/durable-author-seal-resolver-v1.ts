@@ -47,6 +47,7 @@ export async function resolveDurableGraphScopedAuthorSealCandidateV1(
     ),
   ])));
   const metaGraph = contextGraphMetaUri(params.contextGraphId);
+  // sparql-scan-allow: R4 -- exact CG meta graph and at most two exact assertion IRIs are bound by VALUES
   const sealResult = await params.store.query(
     `CONSTRUCT { ?assertion ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { VALUES ?assertion { ${assertionUris.map((assertionUri) => `<${assertSafeIri(assertionUri)}>`).join(' ')} } ?assertion ?p ?o } }`,
     { source: params.source, signal: params.signal },
