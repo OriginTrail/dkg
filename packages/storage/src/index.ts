@@ -86,7 +86,7 @@ export {
   DEFAULT_GRAPH_SET_REVALIDATE_MS,
   DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS,
   GraphSetIndexStore,
-  asSortedGraphSetSource,
+  loadSortedGraphCatalog,
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
   type GraphSetMutationSource,

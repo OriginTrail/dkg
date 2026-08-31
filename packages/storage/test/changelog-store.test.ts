@@ -334,6 +334,23 @@ describe('ChangelogStore — restart reseed & reserved-graph hiding', () => {
     expect(await log.hasGraph(CHANGELOG_GRAPH)).toBe(false);
     await base.close();
   });
+
+  it('normalizes an unsorted inner catalog while excluding reserved graphs', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    await log.insert([
+      q('http://ex.org/z', G2),
+      q('http://ex.org/a', G1),
+      q('http://ex.org/duplicate', G1),
+    ]);
+
+    const graphs = await log.listGraphsSorted();
+    expect(graphs).toEqual([G1, G2]);
+    expect(Object.isFrozen(graphs)).toBe(true);
+    expect(new Set(graphs).size).toBe(graphs.length);
+    expect(graphs).not.toContain(CHANGELOG_GRAPH);
+    await base.close();
+  });
 });
 
 describe('ChangelogStore — opaque update handling', () => {

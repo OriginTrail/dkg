@@ -1,14 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
-  createSortedUniqueStringCatalog,
-  filterSortedUniqueStringCatalog,
-  isSparqlUpdateOperation,
-} from '@origintrail-official/dkg-core';
-import type { SortedGraphCatalog, SortedGraphSetSource } from './graph-set-index-store.js';
-import {
-  deleteByPatternWithoutCount,
-  findTripleStoreCapability,
-} from './triple-store.js';
+  loadSortedGraphCatalog, type SortedGraphCatalog, type SortedGraphSetSource,
+} from './graph-set-index-store.js';
+import { SortedGraphCatalogProjection } from './sorted-graph-catalog-projection.js';
+import { deleteByPatternWithoutCount, findTripleStoreCapability } from './triple-store.js';
 import type {
   Quad,
   QueryOptions,
@@ -216,10 +212,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
   private readonly eraGuard?: ChangelogEraGuard;
-  private visibleSortedGraphs: {
-    source: SortedGraphCatalog;
-    value: SortedGraphCatalog;
-  } | null = null;
+  private readonly visibleSortedGraphs: SortedGraphCatalogProjection;
 
   /** Last durably committed seq (0 = none). Next seq is `seq + 1`. */
   private seq = 0;
@@ -245,6 +238,9 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
     this.reserved = reserved;
+    this.visibleSortedGraphs = new SortedGraphCatalogProjection(
+      (graph) => !this.reserved.has(graph),
+    );
     this.onAppend = options.onAppend;
     this.eraGuard = options.eraGuard;
   }
@@ -533,19 +529,8 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
-    // This decorator owns reserved-graph visibility, so it must explicitly
-    // compose the inner catalog rather than let callers discover through it.
-    const innerSorted = typeof (this.inner as Partial<SortedGraphSetSource>).listGraphsSorted
-      === 'function'
-      ? this.inner as TripleStore & SortedGraphSetSource
-      : null;
-    const source = innerSorted
-      ? await innerSorted.listGraphsSorted(options)
-      : createSortedUniqueStringCatalog(await this.inner.listGraphs(options));
-    if (this.visibleSortedGraphs?.source === source) return this.visibleSortedGraphs.value;
-    const value = filterSortedUniqueStringCatalog(source, (graph) => !this.isReservedGraph(graph));
-    this.visibleSortedGraphs = { source, value };
-    return value;
+    // Explicitly project here because this boundary owns reserved-graph visibility.
+    return this.visibleSortedGraphs.project(await loadSortedGraphCatalog(this.inner, options));
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {

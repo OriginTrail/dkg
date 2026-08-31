@@ -11,14 +11,13 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   asGraphWriteRevisionSource,
-  asSortedGraphSetSource,
+  loadSortedGraphCatalog,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
   type ChangelogReader,
   type ChangeOp,
   type GraphWriteRevision,
-  type SortedGraphCatalog,
 } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
@@ -42,7 +41,6 @@ import { isIriTerm } from '../iri-term.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
 import { compareCodePoint } from '@origintrail-official/dkg-core';
 import {
-  createGraphMembershipSnapshot,
   createGraphMembershipSnapshotFromSortedCatalog,
   type GraphMembershipSnapshot,
 } from '../graph-membership-snapshot.js';
@@ -246,7 +244,6 @@ export function createResponderGraphListMemo(
   ttlMs = 10_000,
 ): GraphListMemo {
   const writeRevisionSource = asGraphWriteRevisionSource(store);
-  const sortedGraphSetSource = asSortedGraphSetSource(store);
   type Revision = GraphWriteRevision | string | undefined;
   const currentRevision = (refreshGeneration: string | undefined): Revision =>
     writeRevisionSource?.getWriteRevision('') ?? refreshGeneration;
@@ -316,31 +313,17 @@ export function createResponderGraphListMemo(
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
       const graphOptions = syncResponderStoreOptions(undefined, 'sync.responder.listGraphs');
-      type GraphListing =
-        | { graphs: SortedGraphCatalog; sorted: true }
-        | { graphs: string[]; sorted: false };
-      const graphList: Promise<GraphListing> = sortedGraphSetSource
-        ? sortedGraphSetSource.listGraphsSorted(graphOptions).then((graphs) => ({
-          graphs,
-          sorted: true as const,
-        }))
-        : store.listGraphs(graphOptions).then((graphs) => ({
-          graphs,
-          sorted: false as const,
-        }));
-      const load = graphList
-        .then((listing) => {
+      const load = loadSortedGraphCatalog(store, graphOptions)
+        .then((graphs) => {
           // Content writes advance the store revision even when named-graph
           // membership is unchanged. Reuse the immutable index in that case:
           // enumeration stays freshness-safe, while sorting, Set construction,
           // and every downstream membership index remain stable.
           const snapshot = (
-            lastSnapshot?.graphs === listing.graphs || lastSnapshot?.matches(listing.graphs)
+            lastSnapshot?.graphs === graphs || lastSnapshot?.matches(graphs)
           )
             ? lastSnapshot
-            : listing.sorted
-              ? createGraphMembershipSnapshotFromSortedCatalog(listing.graphs)
-              : createGraphMembershipSnapshot(listing.graphs);
+            : createGraphMembershipSnapshotFromSortedCatalog(graphs);
           lastSnapshot = snapshot;
           cached = {
             value: snapshot,

@@ -111,15 +111,22 @@ export interface SortedGraphSetSource {
 export type SortedGraphCatalog = SortedUniqueStringCatalog;
 
 /**
- * Resolve only at the public store boundary. Traversing through a decorator
- * could bypass graph-visibility semantics owned by that decorator.
+ * Load one immutable, unique, code-point-sorted catalog at the supplied store
+ * boundary. Capability discovery deliberately does not traverse decorators:
+ * an outer store may own graph-visibility semantics that its inner store does
+ * not, so only the supplied object may provide the sorted fast path.
  */
-export function asSortedGraphSetSource(store: unknown): SortedGraphSetSource | null {
-  return typeof store === 'object'
-    && store !== null
-    && typeof (store as Partial<SortedGraphSetSource>).listGraphsSorted === 'function'
-    ? store as SortedGraphSetSource
+export async function loadSortedGraphCatalog(
+  store: TripleStore,
+  options?: QueryOptions,
+): Promise<SortedGraphCatalog> {
+  const sortedSource = typeof (store as Partial<SortedGraphSetSource>).listGraphsSorted
+    === 'function'
+    ? store as TripleStore & SortedGraphSetSource
     : null;
+  return sortedSource
+    ? sortedSource.listGraphsSorted(options)
+    : createSortedUniqueStringCatalog(await store.listGraphs(options));
 }
 
 /** Internal/test-only observation seam; intentionally absent from the package API. */
