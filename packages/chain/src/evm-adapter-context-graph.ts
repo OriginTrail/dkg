@@ -22,6 +22,7 @@ import {
   buildCursorContextGraphRegistryScanPlan,
   buildPublicContextGraphRegistryScanPlan,
 } from './context-graph-registry-scanner.js';
+import { EvmEventLogPageSession } from './evm-event-log-page-session.js';
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
@@ -160,17 +161,19 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         'ContextGraphNameRegistry',
       ),
       resolveHead: () => this.resolveLogScanHead(scanLabel),
-      queryPage: (filter, lo, hi, scanProviders, connected, preferred) =>
-        this.queryEventLogsPage(
+      createPageSession: (scanProviders) => new EvmEventLogPageSession(
+        scanProviders,
+        (filter, lo, hi, providers, connected, preferred) => this.queryEventLogsPage(
           registry,
           filter,
           lo,
           hi,
-          scanProviders,
+          providers,
           connected,
           'listContextGraphsFromChain NameClaimed',
           preferred,
         ),
+      ),
     });
   }
   // =====================================================================

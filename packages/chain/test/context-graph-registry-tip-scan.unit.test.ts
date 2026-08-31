@@ -164,6 +164,38 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
     expect(await restarted.hasContextGraphRegistryScanWatermark()).toBe(false);
   });
 
+  it('probes the current tip without acknowledging an unavailable stale tip gap', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    await store.save({ ...LEGACY_KEY, cursorKind: 'historical' }, 2_000);
+    await store.save({ ...LEGACY_KEY, cursorKind: 'tip' }, 10_001);
+    const cursorStores = registryCursorStores(store);
+    const head = 1_000_000;
+    const currentTipStart = 998_001;
+    const currentEventBlock = 999_123;
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) => {
+        if (lo < currentTipStart) throw new Error('stale tip gap unavailable');
+        return lo <= currentEventBlock && currentEventBlock <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: currentEventBlock }]
+          : [];
+      }),
+    });
+    const { adapter } = makeAdapter(registry, head, { ...cursorStores });
+
+    const recovered = await collectRegistryScan(adapter, { mode: 'tip' });
+
+    expect(recovered.map((cg) => cg.blockNumber)).toEqual([currentEventBlock]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi]))
+      .toEqual([
+        [9_951, 11_950],
+        [currentTipStart, head],
+      ]);
+    expect(store.values.get(`${LEGACY_KEY.chainId}|${LEGACY_KEY.deploymentId}|tip|${REGISTRY}`))
+      .toBe(10_001);
+    expect(store.values.get(`${LEGACY_KEY.chainId}|${LEGACY_KEY.deploymentId}|historical|${REGISTRY}`))
+      .toBe(2_000);
+  });
+
   it('retains exact v1 read/write keys for a legacy store with unrelated kind metadata', async () => {
     const historical = new KindedJsonLegacyRegistryScanCursorStore();
     historical.seed(LEGACY_KEY, 2_000);

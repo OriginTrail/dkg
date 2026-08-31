@@ -58,6 +58,7 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
+import type { EvmEventLogScanProvider as ScanProvider } from './evm-event-log-page-session.js';
 
 export {
   CG_REGISTRY_MAX_SCAN_PAGES,
@@ -307,8 +308,6 @@ const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
  * front of the line for subsequent pages).
  */
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
-
-type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
 
 /**
  * B8 — decode the `CostCovered` event from a publish receipt's logs via the

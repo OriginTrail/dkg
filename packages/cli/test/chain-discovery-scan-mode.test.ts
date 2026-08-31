@@ -6,7 +6,6 @@ import {
   createChainDiscoveryScanRunner,
   deriveChainFullScanEvery,
   resolveManagedChainDiscoveryScanAttempt,
-  transitionManagedChainDiscoveryScanState,
   type ManagedChainDiscoveryScanState,
 } from '../src/daemon/chain-discovery-scan-runner.js';
 import {
@@ -139,12 +138,9 @@ describe('chainDiscoveryScanOptions', () => {
         fullScanEvery,
       });
       actualModes.push(attempt.options.mode);
-      state = transitionManagedChainDiscoveryScanState({
-        state: attempt.state,
-        watermarkSeeded,
-        outcome: outcomes[index]!,
-        fullScanEvery,
-      });
+      state = outcomes[index] === 'success'
+        ? attempt.nextOnSuccess
+        : attempt.nextOnFailure;
     }
     expect(actualModes).toEqual(modes);
   });

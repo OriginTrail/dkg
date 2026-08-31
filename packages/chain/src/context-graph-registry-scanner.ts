@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { Contract, ethers, type JsonRpcProvider } from 'ethers';
+import { Contract } from 'ethers';
 import {
   ContextGraphChainScanPartialError,
   type ContextGraphChainScanOptions,
@@ -16,6 +16,10 @@ import type {
   ContextGraphRegistryHistoricalScanCursor,
   ContextGraphRegistryTipScanCursor,
 } from './context-graph-registry-scan-cursor.js';
+import type {
+  EvmEventLogPageReader,
+  EvmEventLogScanProvider,
+} from './evm-event-log-page-session.js';
 
 type StatelessScanStart =
   | { kind: 'explicit'; fromBlock: number }
@@ -27,11 +31,10 @@ export type ContextGraphRegistryScanPlan =
   | { kind: 'historicalSeed'; start: 'deployment' | 'cursor'; pageBudget?: number }
   | { kind: 'tip' };
 
-type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
 type ScanRange = {
   start: number;
   head: number;
-  scanProviders: ReadonlyArray<ScanProvider>;
+  scanProviders: ReadonlyArray<EvmEventLogScanProvider>;
   degradedFromGenesis: boolean;
 };
 
@@ -64,24 +67,16 @@ type RegistryScannerInput = {
   resolveDeployment(): Promise<{
     fromBlock: number;
     head: number;
-    scanProviders: ReadonlyArray<ScanProvider>;
+    scanProviders: ReadonlyArray<EvmEventLogScanProvider>;
     degradedFromGenesis?: boolean;
   }>;
   resolveHead(): Promise<{
     head: number;
-    scanProviders: ReadonlyArray<ScanProvider>;
+    scanProviders: ReadonlyArray<EvmEventLogScanProvider>;
   }>;
-  queryPage(
-    filter: unknown,
-    lo: number,
-    hi: number,
-    scanProviders: ReadonlyArray<ScanProvider>,
-    connected: Map<JsonRpcProvider, Contract>,
-    preferred?: JsonRpcProvider,
-  ): Promise<{
-    logs: ReadonlyArray<ethers.EventLog | ethers.Log>;
-    provider: JsonRpcProvider;
-  }>;
+  createPageSession(
+    scanProviders: ReadonlyArray<EvmEventLogScanProvider>,
+  ): EvmEventLogPageReader;
 };
 
 function normalizePageBudget(value: number | undefined): number | undefined {
@@ -202,38 +197,46 @@ export class ContextGraphRegistryScanner {
     }
 
     const results: ContextGraphOnChain[] = [];
-    const connected = new Map<JsonRpcProvider, Contract>();
-    let preferred: JsonRpcProvider | undefined;
+    const pageSession = this.input.createPageSession(scanProviders);
+    const queryPage = async (lo: number, hi: number): Promise<ContextGraphOnChain[]> => {
+      const pageResults: ContextGraphOnChain[] = [];
+      for (const log of await pageSession.query(eventFilter, lo, hi)) {
+        const parsed = this.input.registry.interface.parseLog({
+          topics: [...log.topics],
+          data: log.data,
+        });
+        if (!parsed || parsed.name !== 'NameClaimed') continue;
+        pageResults.push({
+          contextGraphId: String(parsed.args.nameHash),
+          creator: String(parsed.args.creator),
+          accessPolicy: Number(parsed.args.accessPolicy),
+          blockNumber: log.blockNumber,
+          metadataRevealed: false,
+        });
+      }
+      return pageResults;
+    };
+    const currentTipStart = Math.max(0, head - this.input.pageSize + 1);
     let scannedAnyPage = false;
     for (let lo = start; lo <= head; lo += this.input.pageSize) {
       const hi = Math.min(lo + this.input.pageSize - 1, head);
       let pageResults: ContextGraphOnChain[];
       try {
-        const page = await this.input.queryPage(
-          eventFilter,
-          lo,
-          hi,
-          scanProviders,
-          connected,
-          preferred,
-        );
-        preferred = page.provider;
-        pageResults = [];
-        for (const log of page.logs) {
-          const parsed = this.input.registry.interface.parseLog({
-            topics: [...log.topics],
-            data: log.data,
-          });
-          if (!parsed || parsed.name !== 'NameClaimed') continue;
-          pageResults.push({
-            contextGraphId: String(parsed.args.nameHash),
-            creator: String(parsed.args.creator),
-            accessPolicy: Number(parsed.args.accessPolicy),
-            blockNumber: log.blockNumber,
-            metadataRevealed: false,
-          });
-        }
+        pageResults = await queryPage(lo, hi);
       } catch (err) {
+        // A persisted tip cursor is gap-safe progress, not permission for an
+        // unavailable old page to suppress recent discovery forever. Probe the
+        // bounded current-tip window independently, but deliberately do not
+        // acknowledge it: the failed gap remains the next catch-up attempt.
+        if (prepared.kind === 'tip' && lo < currentTipStart) {
+          const currentPageResults = await queryPage(currentTipStart, head);
+          results.push(...currentPageResults);
+          yield {
+            contextGraphs: currentPageResults,
+            ack: async () => {},
+          };
+          return;
+        }
         if (prepared.kind !== 'stateless' && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
           throw new ContextGraphChainScanPartialError(
