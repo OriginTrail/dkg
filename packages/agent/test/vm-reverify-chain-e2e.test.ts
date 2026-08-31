@@ -732,6 +732,14 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
     // Down for the rest of the window: the mining, and everything after it.
     await host.stop();
     liveAgents.delete(host);
+    // Let the persistent store's worker thread actually release the data
+    // directory before the restart re-opens it. `stop()` resolves when the
+    // agent has torn down, but the Oxigraph worker and its file handles are
+    // reclaimed asynchronously on Windows, and re-opening the same directory
+    // underneath that can abort the whole vitest fork — which surfaces as a
+    // worker exit with no test output at all, not as an error this file could
+    // catch and report.
+    await new Promise((r) => setTimeout(r, 5000));
 
     // Bury the event deeper than a head seed can reach. A lane that seeded at
     // `head - MAX_RANGE` on restart instead of restoring its cursor would scan
