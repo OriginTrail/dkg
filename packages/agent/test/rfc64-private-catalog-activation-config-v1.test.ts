@@ -23,6 +23,7 @@ import {
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
+  resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationInputV1,
@@ -178,16 +179,24 @@ describe('RFC-64 private catalog activation', () => {
     const bootstrap = snapshotRfc64CatalogBootstrapConfigV1(
       privateActivation().bootstrap,
     )!;
+    const activation = resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: {
+        killSwitch: false,
+        contextGraphModes: { [PRIVATE_CG]: 'shadow' },
+      },
+    }, chainIdentity);
     const resolverAgent = {
       config: {
         rfc64CatalogBootstrap: bootstrap,
         rfc64CatalogRollout: {
-          selectedContextGraphs: [PRIVATE_CG],
-          rollout: {
-            killSwitch: false,
-            contextGraphModes: { [PRIVATE_CG]: 'shadow' },
-          },
+          selectedContextGraphs: activation.selectedContextGraphs,
+          rollout: activation.rollout,
         },
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [PRIVATE_CG],
+          activation,
+        }),
       },
     } as unknown as DKGAgent;
 
