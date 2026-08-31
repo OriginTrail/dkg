@@ -155,7 +155,8 @@ export function* readTrackedBlobs({
   if (listing.status !== 0) throw commandFailure('git ls-files --stage', listing);
   const entries = parseIndexEntries(listing.stdout).filter((entry) =>
     entry.stage === '0'
-    && (entry.mode === '100644' || entry.mode === '100755'));
+    && (entry.mode === '100644' || entry.mode === '100755')
+    && !isExplicitBinaryPath(entry.filePath));
   if (entries.length === 0) return;
 
   const input = Buffer.from(`${entries.map((entry) => entry.objectId).join('\n')}\n`, 'ascii');
@@ -184,7 +185,7 @@ export function findTrackedFilesWithNul({
 } = {}) {
   const offenders = [];
   for (const { filePath, contents } of readBlobs({ repoRoot })) {
-    if (!isExplicitBinaryPath(filePath) && contents.includes(0)) offenders.push(filePath);
+    if (contents.includes(0)) offenders.push(filePath);
   }
   return offenders;
 }
