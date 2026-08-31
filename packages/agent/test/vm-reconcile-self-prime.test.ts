@@ -20,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
+import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -226,16 +227,18 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       const selected = `rfc64-catalog-vm-${killSwitch}`;
       const config = (internals as any).config;
       config.syncContextGraphs = [];
-      config.rfc64CatalogRollout = {
-        enabled: true,
-        selectedContextGraphs: [selected],
-        selectedPublicContextGraphs: [selected],
-        selectedPrivateContextGraphs: [],
-        rollout: {
-          killSwitch,
-          contextGraphModes: { [selected]: 'catalog' },
+      config.rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
+        configuredContextGraphs: [],
+        activation: {
+          enabled: true,
+          selectedContextGraphs: [selected],
+          selectedPublicContextGraphs: [selected],
+          rollout: {
+            killSwitch,
+            contextGraphModes: { [selected]: 'catalog' },
+          },
         },
-      };
+      });
       config.rfc64CatalogBootstrap = {
         acceptedPolicies: [{
           policyEnvelope: { payload: { accessPolicy: 0, contextGraphId: selected } },
