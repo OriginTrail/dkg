@@ -88,6 +88,8 @@ import type {
 } from '../rfc64-shared-projection-stream-capability.js';
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
+  getManagedOxigraphRuntimeConstructionAuthorityV1,
+  isManagedOxigraphRuntimeConstructionAuthorityV1,
 } from '../managed-oxigraph-runtime-store.js';
 import {
   createManagedOxigraphSharedProjectionRunnerV1,
@@ -106,9 +108,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
 const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
 const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
-const MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY = Object.freeze({
-  kind: 'dkg-managed-oxigraph-sparql-construction-v1',
-} as const);
 /**
  * A non-OK response from the configured SPARQL endpoint.
  *
@@ -303,7 +302,7 @@ export class SparqlHttpStore implements TripleStore {
 
   constructor(
     options: SparqlHttpStoreOptions,
-    constructionAuthority?: typeof MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY,
+    constructionAuthority?: object,
   ) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
@@ -312,7 +311,9 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
-    this.managedOxigraph = constructionAuthority === MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY;
+    this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
+      constructionAuthority,
+    );
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
@@ -1256,7 +1257,7 @@ export function createManagedOxigraphSparqlStoreV1(
   });
   return new SparqlHttpStore(
     { ...options, managedByDkg: config.options.managedByDkg === true },
-    MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY,
+    getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
 }
 
@@ -1488,15 +1489,10 @@ export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
 // Adapter registration
 // ---------------------------------------------------------------------------
 
-registerTripleStoreAdapter('sparql-http', async (opts, context) => {
+registerTripleStoreAdapter('sparql-http', async (opts, constructionAuthority) => {
   const options = opts as SparqlHttpStoreOptions | undefined;
   if (!options?.queryEndpoint) {
     throw new Error('sparql-http adapter requires options.queryEndpoint (and optionally options.updateEndpoint)');
   }
-  return new SparqlHttpStore(
-    options,
-    context?.managedOxigraphRuntime
-      ? MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY
-      : undefined,
-  );
+  return new SparqlHttpStore(options, constructionAuthority);
 });
