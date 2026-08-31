@@ -4465,9 +4465,7 @@ export class DKGPublisher implements Publisher {
    */
   async updateKnowledgeAssetFromSharedMemory(
     kaId: bigint,
-    options: Omit<PublishOptions, 'quads'> & Readonly<{
-      stagedOperation?: StagedKnowledgeAssetSharedWorkingMemoryV1;
-    }>,
+    options: Omit<PublishOptions, 'quads'>,
   ): Promise<PublishResult> {
     const descriptor = resolveGraphScopedPublishDescriptor({
       ...options,
@@ -4476,52 +4474,91 @@ export class DKGPublisher implements Publisher {
     if (!descriptor) {
       throw new Error('Graph-scoped SWM update requires a complete V2 content envelope');
     }
-    const stagedOperation = options.stagedOperation;
-    let quads: Quad[];
-    if (stagedOperation !== undefined) {
-      if (
-        stagedOperation.contextGraphId !== options.contextGraphId
-        || stagedOperation.kaUal !== descriptor.scope.ual
-        || stagedOperation.assertionVersion !== descriptor.scope.assertionVersion
-        || stagedOperation.subGraphName !== options.subGraphName
-      ) {
-        throw new Error('Staged SWM operation identity differs from the graph-scoped update');
-      }
-      const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
-        store: this.store,
-        graphManager: this.graphManager,
-        contextGraphId: stagedOperation.contextGraphId,
-        shareOperationId: stagedOperation.shareOperationId,
-        kaUal: stagedOperation.kaUal,
-        assertionVersion: stagedOperation.assertionVersion,
-        ...(stagedOperation.subGraphName === undefined
-          ? {}
-          : { subGraphName: stagedOperation.subGraphName }),
-        ...(this.publicSnapshotStore === undefined
-          ? {}
-          : { publicSnapshotStore: this.publicSnapshotStore }),
-      });
-      quads = snapshot.quads;
-    } else {
-      const swmBucket = this.graphManager.sharedMemoryUri(
-        options.contextGraphId,
-        options.subGraphName,
-      );
-      const scope: SharedMemoryGraphScope = {
-        kind: 'named-lifecycle',
-        identity: {
-          agentAddress: descriptor.scope.agentAddress,
-          kaNumber: BigInt(descriptor.scope.kaNumber),
-        },
-      };
-      quads = await loadSharedMemoryQuadsForScope(
-        this.store,
-        swmBucket,
-        'all',
-        scope,
-        { quadFilter: (quad) => !isSwmMerkleExcludedQuad(quad) },
-      );
+    const swmBucket = this.graphManager.sharedMemoryUri(
+      options.contextGraphId,
+      options.subGraphName,
+    );
+    const scope: SharedMemoryGraphScope = {
+      kind: 'named-lifecycle',
+      identity: {
+        agentAddress: descriptor.scope.agentAddress,
+        kaNumber: BigInt(descriptor.scope.kaNumber),
+      },
+    };
+    const quads = await loadSharedMemoryQuadsForScope(
+      this.store,
+      swmBucket,
+      'all',
+      scope,
+      { quadFilter: (quad) => !isSwmMerkleExcludedQuad(quad) },
+    );
+    return this.updateKnowledgeAssetFromResolvedSharedWorkingMemory(
+      kaId,
+      options,
+      descriptor,
+      quads,
+    );
+  }
+
+  /**
+   * Immutable graph-scoped update entrypoint. Unlike the compatibility live
+   * SWM method, this always consumes the exact operation snapshot named by a
+   * required staging reference.
+   */
+  async updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(
+    kaId: bigint,
+    options: Omit<PublishOptions, 'quads'> & Readonly<{
+      stagedOperation: StagedKnowledgeAssetSharedWorkingMemoryV1;
+    }>,
+  ): Promise<PublishResult> {
+    const { stagedOperation, ...publishOptions } = options;
+    const descriptor = resolveGraphScopedPublishDescriptor({
+      ...publishOptions,
+      quads: [],
+    });
+    if (!descriptor) {
+      throw new Error('Graph-scoped staged SWM update requires a complete V2 content envelope');
     }
+    if (
+      stagedOperation.contextGraphId !== publishOptions.contextGraphId
+      || stagedOperation.kaUal !== descriptor.scope.ual
+      || stagedOperation.assertionVersion !== descriptor.scope.assertionVersion
+      || stagedOperation.subGraphName !== publishOptions.subGraphName
+    ) {
+      throw new Error('Staged SWM operation identity differs from the graph-scoped update');
+    }
+    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId: stagedOperation.contextGraphId,
+      shareOperationId: stagedOperation.shareOperationId,
+      kaUal: stagedOperation.kaUal,
+      assertionVersion: stagedOperation.assertionVersion,
+      ...(stagedOperation.subGraphName === undefined
+        ? {}
+        : { subGraphName: stagedOperation.subGraphName }),
+      ...(this.publicSnapshotStore === undefined
+        ? {}
+        : { publicSnapshotStore: this.publicSnapshotStore }),
+    });
+    const quads = snapshot.quads.filter((quad) => !isSwmMerkleExcludedQuad(quad));
+    if (quads.length !== stagedOperation.tripleCount) {
+      throw new Error('Staged SWM operation triple count differs from its filtered snapshot');
+    }
+    return this.updateKnowledgeAssetFromResolvedSharedWorkingMemory(
+      kaId,
+      publishOptions,
+      descriptor,
+      quads,
+    );
+  }
+
+  private async updateKnowledgeAssetFromResolvedSharedWorkingMemory(
+    kaId: bigint,
+    options: Omit<PublishOptions, 'quads'>,
+    descriptor: GraphScopedPublishDescriptor,
+    quads: readonly Quad[],
+  ): Promise<PublishResult> {
     const hasTrustedCatalogTriples =
       trustedCatalogTripleKeySet(options.trustedNonManifestCatalogTriples).size > 0;
     if (hasTrustedCatalogTriples) {
@@ -4542,9 +4579,8 @@ export class DKGPublisher implements Publisher {
         `No public or private quads available for graph-scoped KA ${descriptor.scope.ual}`,
       );
     }
-    const { stagedOperation: _consumedStagedOperation, ...publishOptions } = options;
     return this.update(kaId, {
-      ...publishOptions,
+      ...options,
       quads: quads.map((quad) => ({ ...quad, graph: '' })),
       [INTERNAL_ORIGIN_TOKEN]: true,
       ...(hasTrustedCatalogTriples

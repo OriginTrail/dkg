@@ -1,4 +1,7 @@
-import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
+import {
+  createGraphKnowledgeAssetScope,
+  isSwmMerkleExcludedQuad,
+} from '@origintrail-official/dkg-core';
 import {
   GraphManager,
   canonicalSharedMemoryScopeWriteGraph,
@@ -67,6 +70,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
     scope.ual,
   );
   return withKeyedLocks(input.writeLocks, [lockKey], async () => {
+    const publicQuads = input.quads.filter((quad) => !isSwmMerkleExcludedQuad(quad));
     const graphManager = input.graphManager;
     const swmBucket = graphManager.sharedMemoryUri(input.contextGraphId, input.subGraphName);
     const sharedMemoryScope: SharedMemoryGraphScope = {
@@ -85,7 +89,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
     const replaced = await tryReplaceGraphAtomically(
       input.store,
       swmGraph,
-      input.quads.map((quad) => ({ ...quad, graph: swmGraph })),
+      publicQuads.map((quad) => ({ ...quad, graph: swmGraph })),
     );
     await invalidateSwmMaterializationWitness(input.store, swmGraph, {
       source: 'publisher.stageKnowledgeAssetSharedWorkingMemoryV1.witnessInvalidate',
@@ -106,7 +110,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       shareOperationId: input.shareOperationId,
       kaUal: scope.ual,
       assertionVersion: scope.assertionVersion,
-      quads: input.quads,
+      quads: publicQuads,
       ...(input.privateMerkleRoot === undefined
         ? {}
         : { privateMerkleRoot: input.privateMerkleRoot }),
@@ -141,7 +145,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       assertionVersion: scope.assertionVersion,
       ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
       swmGraph,
-      tripleCount: input.quads.length,
+      tripleCount: publicQuads.length,
     });
   });
 }

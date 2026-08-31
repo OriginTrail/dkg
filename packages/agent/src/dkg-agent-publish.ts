@@ -2262,7 +2262,7 @@ export class PublishMethods extends DKGAgentBase {
         // private payload out to CG members (member distribution). Public → undefined.
         encryptInlineChunked: updateEncryptInlineChunked,
       };
-      const result = await publisher.updateKnowledgeAssetFromSharedMemory(
+      const result = await publisher.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(
         kaId,
         publisherUpdateOptions,
       );
