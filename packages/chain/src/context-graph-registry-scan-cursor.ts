@@ -32,6 +32,11 @@ abstract class ContextGraphRegistryScanCursorBase {
     if (!this.input.store) return undefined;
     const persisted = await this.input.store.load(this.cursorKey(cacheKey));
     const normalized = this.normalize(persisted);
+    if (persisted !== undefined && normalized === undefined) {
+      throw new Error(
+        `invalid persisted registry scan cursor: expected a positive safe integer, got ${String(persisted)}`,
+      );
+    }
     if (normalized != null) this.watermarks.set(cacheKey, normalized);
     return normalized;
   }

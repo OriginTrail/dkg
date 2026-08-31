@@ -39,11 +39,17 @@ class RuntimePositiveIntegerCursorStore {
     private readonly namespace: string,
   ) {}
 
-  load(scope: string, key: string): number | undefined {
+  load(scope: string, key: string, rejectInvalid = false): number | undefined {
     const row = this.db.prepare(
       `SELECT value FROM runtime_cursors WHERE namespace = ? AND scope = ? AND key = ?`,
-    ).get(this.namespace, scope, key) as { value: number } | undefined;
-    return parsePositiveSafeInteger(row?.value);
+    ).get(this.namespace, scope, key) as { value: number | string } | undefined;
+    const parsed = parsePositiveSafeInteger(row?.value);
+    if (row !== undefined && parsed === undefined && rejectInvalid) {
+      throw new Error(
+        `Invalid ${this.namespace} value for ${scope}/${key}: expected a positive safe integer`,
+      );
+    }
+    return parsed;
   }
 
   save(scope: string, key: string, value: number): void {
@@ -93,8 +99,8 @@ export class SqliteChainEventCursorStore {
  *
  * The value is the next unbuffered block after a successfully scanned
  * contiguous prefix. It is keyed by chain/deployment/registry address/cursor role;
- * corrupt values are ignored by returning `undefined`. Historical loads retain
- * fallbacks for role-less runtime rows and the original settings representation.
+ * Historical corrupt values retain best-effort fallback behavior. A present
+ * corrupt tip value throws so strict recovery cannot confuse it with a missing row.
  */
 export class SqliteContextGraphRegistryScanCursorStore {
   private readonly cursors: RuntimePositiveIntegerCursorStore;
@@ -106,8 +112,13 @@ export class SqliteContextGraphRegistryScanCursorStore {
   }
 
   async load(key: RegistryScanCursorKey): Promise<number | undefined> {
-    const current = this.cursors.load(this.scope(key), this.registryKey(key));
-    if (current !== undefined || this.cursorKind(key) === 'tip') return current;
+    const cursorKind = this.cursorKind(key);
+    const current = this.cursors.load(
+      this.scope(key),
+      this.registryKey(key),
+      cursorKind === 'tip',
+    );
+    if (current !== undefined || cursorKind === 'tip') return current;
     return this.cursors.load(this.scope(key), this.legacyRegistryKey(key))
       ?? this.legacyCursors.load(this.legacyKey(key));
   }

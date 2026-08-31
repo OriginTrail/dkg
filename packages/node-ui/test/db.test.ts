@@ -2212,7 +2212,7 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     expect(await reopened.loadLane('legacyLane')).toBe(2468);
   });
 
-  it('persists registry scan cursors by deployment key and ignores corrupt values', async () => {
+  it('persists registry scan cursors and rejects corrupt strict tip rows', async () => {
     const store = new SqliteContextGraphRegistryScanCursorStore(db);
     const key = {
       chainId: 'evm:1',
@@ -2250,6 +2250,28 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     await store.save(key, Number.MAX_SAFE_INTEGER + 1);
     expect(await store.load(key)).toBe(5000);
     expect(await store.load({ ...key, registryAddress: '0x4444444444444444444444444444444444444444' })).toBeUndefined();
+
+    const corruptTipAddress = '0x8888888888888888888888888888888888888888';
+    db.db.pragma('ignore_check_constraints = ON');
+    try {
+      db.db.prepare(`
+        INSERT INTO runtime_cursors (namespace, scope, key, value, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        'contextGraphRegistryScan.cursor',
+        `${key.chainId}:${key.deploymentId}`,
+        `tip:${corruptTipAddress}`,
+        0,
+        Date.now(),
+      );
+    } finally {
+      db.db.pragma('ignore_check_constraints = OFF');
+    }
+    await expect(store.load({
+      ...key,
+      registryAddress: corruptTipAddress,
+      cursorKind: 'tip',
+    })).rejects.toThrow(/expected a positive safe integer/);
 
     db.db.prepare(
       `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,

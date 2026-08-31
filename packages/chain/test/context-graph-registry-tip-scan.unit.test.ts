@@ -405,6 +405,27 @@ describe('EVMChainAdapter ContextGraphNameRegistry tip recovery', () => {
     }
   });
 
+  it('fails closed when a store returns a present invalid tip cursor', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = {
+      load: vi.fn(async () => 0),
+      save: vi.fn(async () => undefined),
+    };
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 20_000, {
+      ...registryCursorStores(store),
+    });
+
+    try {
+      await expect(collectRegistryScan(adapter, { mode: 'tip' }))
+        .rejects.toThrow('tip cursor load failed');
+      expect(registry.queryFilter.calls).toEqual([]);
+      expect(store.save).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('revisits a fetched tip page when local application never acknowledges it', async () => {
     const store = new MemoryRegistryScanCursorStore();
     const cursorStores = registryCursorStores(store);
