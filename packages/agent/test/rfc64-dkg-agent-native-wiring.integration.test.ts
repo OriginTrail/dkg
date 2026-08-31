@@ -41,6 +41,7 @@ import {
 import {
   GraphManager,
   OxigraphStore,
+  quadsToNQuads,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
   type Quad,
@@ -73,6 +74,7 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
   resolveRfc64PublicCatalogControlsV1,
+  snapshotRfc64CatalogAutoPublishConfigV1,
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
@@ -82,6 +84,7 @@ import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  Rfc64CatalogAutoPublishConfigV1,
   Rfc64PublicCatalogAutoPublishConfigV1,
   Rfc64PublicCatalogBootstrapConfigV1,
 } from '../src/dkg-agent-types.js';
@@ -136,6 +139,10 @@ const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
     graph: '',
   }),
 ]);
+const FINALIZED_VM_POST_READ_DIGEST = ethers.keccak256(ethers.concat([
+  ethers.toUtf8Bytes('OT-RFC-64:finalized-vm-post-read:v1\0'),
+  ethers.toUtf8Bytes(quadsToNQuads(PROJECTION_QUADS)),
+])).toLowerCase() as Digest32V1;
 const NATIVE_DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: '20430',
@@ -286,16 +293,13 @@ async function startNativeAgentWithOptions(
         chainId: networkIdentityChainId,
       },
     }),
-    ...(activation === undefined && catalogActivation === undefined ? {
-      rfc64CatalogDeploymentProfile: deployment,
-      rfc64PublicCatalogAutoPublish: autoPublish,
-      rfc64PublicCatalogBootstrap: bootstrap,
-    } : catalogActivation !== undefined ? {
-      rfc64CatalogActivation: catalogActivation,
-      rfc64PublicCatalogAutoPublish: autoPublish,
-    } : {
-      rfc64PublicCatalogActivation: activation,
-    }),
+    ...(activation === undefined && catalogActivation === undefined
+      ? { rfc64CatalogDeploymentProfile: deployment }
+      : {}),
+    ...(autoPublish === undefined ? {} : { rfc64PublicCatalogAutoPublish: autoPublish }),
+    ...(bootstrap === undefined ? {} : { rfc64PublicCatalogBootstrap: bootstrap }),
+    ...(catalogActivation === undefined ? {} : { rfc64CatalogActivation: catalogActivation }),
+    ...(activation === undefined ? {} : { rfc64PublicCatalogActivation: activation }),
     ...(finalizedRuntime === undefined ? {} : {
       chainAdapter: finalizedRuntime.chainAdapter,
       chainConfig: {
@@ -314,6 +318,75 @@ async function startNativeAgentWithOptions(
   await beforeStart?.(agent);
   await agent.start();
   return agent;
+}
+
+interface SeedSignedSwmWorkspaceParamsV1 {
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly assertionCoordinate: string;
+  readonly shareOperationId: string;
+  readonly kaNumber: bigint;
+  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  readonly publicQuads?: readonly Quad[];
+}
+
+async function seedSignedSwmWorkspaceV1(
+  agent: DKGAgent,
+  params: SeedSignedSwmWorkspaceParamsV1,
+): Promise<Readonly<{
+  canonicalSeal: CanonicalGraphScopedAuthorSealV1;
+  seal: AssertionSeal;
+  assertionUri: string;
+}>> {
+  const publicQuads = params.publicQuads ?? PROJECTION_QUADS;
+  const canonicalSeal = await authorSeal(params.kaNumber, publicQuads);
+  const seal = assertionSealFromCanonical(canonicalSeal);
+  const assertionUri = contextGraphAssertionUri(
+    params.contextGraphId,
+    AUTHOR,
+    params.assertionCoordinate,
+  );
+  await agent.store.insert(buildAssertionSealQuads({
+    assertionUri,
+    metaGraph: contextGraphMetaUri(params.contextGraphId),
+    merkleRoot: seal.merkleRoot,
+    authorAddress: seal.authorAddress,
+    authorAttestationR: seal.authorAttestationR,
+    authorAttestationVS: seal.authorAttestationVS,
+    authorSchemeVersion: seal.authorSchemeVersion,
+    chainId: seal.chainId,
+    kav10Address: seal.kav10Address,
+    reservedKaId: seal.reservedKaId!,
+    finalizedAtIso: seal.finalizedAtIso,
+    contentScopeVersion: seal.contentScopeVersion!,
+    kaUal: seal.kaUal!,
+    assertionVersion: seal.assertionVersion!,
+    publicTripleCount: seal.publicTripleCount!,
+    privateTripleCount: seal.privateTripleCount!,
+  }));
+  const graphManager = new GraphManager(agent.store);
+  await storeKnowledgeAssetOperationPublicQuads({
+    store: agent.store,
+    graphManager,
+    contextGraphId: params.contextGraphId,
+    shareOperationId: params.shareOperationId,
+    kaUal: canonicalSeal.kaUal,
+    assertionVersion: canonicalSeal.assertionVersion,
+    quads: publicQuads,
+    privateTripleCount: Number(canonicalSeal.privateTripleCount),
+    publisherPeerId: agent.peerId,
+    accessPolicy: params.accessPolicy,
+    agentAddress: AUTHOR,
+    timestamp: new Date(canonicalSeal.assertionFinalizedAt),
+  });
+  await storeKnowledgeAssetWorkspaceHead({
+    store: agent.store,
+    graphManager,
+    contextGraphId: params.contextGraphId,
+    kaUal: canonicalSeal.kaUal,
+    assertionVersion: canonicalSeal.assertionVersion,
+    shareOperationId: params.shareOperationId,
+  });
+  return Object.freeze({ canonicalSeal, seal, assertionUri });
 }
 
 async function seedPreexistingFinalizedTwinV1(
@@ -511,6 +584,80 @@ function privateCatalogRoster(
   };
 }
 
+function privateCatalogAuthorityFixtureV1(): Readonly<{
+  policy: ContextGraphPolicyV1;
+  policyDigest: Digest32V1;
+  policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  rosterEnvelope: UnsignedMemberRosterEnvelopeV1;
+}> {
+  const policy = privateCatalogPolicy();
+  const policyEnvelope = {
+    issuer: AUTHOR,
+    objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+    payload: policy,
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as UnsignedContextGraphPolicyEnvelopeV1;
+  const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
+  const rosterEnvelope = {
+    issuer: AUTHOR,
+    objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+    payload: privateCatalogRoster(policy, policyDigest),
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as UnsignedMemberRosterEnvelopeV1;
+  return Object.freeze({ policy, policyDigest, policyEnvelope, rosterEnvelope });
+}
+
+function selectedPrivateCatalogActivationV1(
+  providerPeerId: string,
+  authority: ReturnType<typeof privateCatalogAuthorityFixtureV1>,
+): Rfc64CatalogActivationInputV1 {
+  return Object.freeze({
+    enabled: true,
+    deploymentProfile: NATIVE_DEPLOYMENT,
+    accessPolicyAuthority: {
+      localAgentAddress: AUTHOR,
+      peerAgentBindings: [{ peerId: providerPeerId, agentAddress: AUTHOR }],
+    },
+    autoPublish: {
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    },
+    bootstrap: {
+      acceptedPolicies: [{
+        policyEnvelope: authority.policyEnvelope,
+        rosterEnvelope: authority.rosterEnvelope,
+        targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+        completeSwmProviders: [providerPeerId],
+      }],
+    },
+  });
+}
+
+function selectedPublicCatalogActivationV1(
+  providerPeerId: string,
+): Rfc64CatalogActivationInputV1 {
+  const policy = buildOpenOwnerContextGraphPolicyV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    ownerAddress: AUTHOR,
+  });
+  return Object.freeze({
+    enabled: true,
+    deploymentProfile: NATIVE_DEPLOYMENT,
+    autoPublish: {
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    },
+    bootstrap: {
+      acceptedPolicies: [{
+        policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+        targets: [],
+        completeSwmProviders: [providerPeerId],
+      }],
+    },
+  });
+}
+
 ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
   it('preserves the EVM default chain identity for a no-admin chain config', async () => {
     const operational = ethers.Wallet.createRandom();
@@ -572,6 +719,33 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       peers: ['duplicate', 'duplicate'],
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     })).toThrow(/duplicated/u);
+    expect(() => snapshotRfc64PublicCatalogAutoPublishConfigV1({
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '2' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1' as TimestampMsV1,
+    })).toThrow(
+      /rfc64PublicCatalogAutoPublish delegation expiry must be after its effective time/u,
+    );
+  });
+
+  it('snapshots selected-CG authoring without accepting public peer hints', () => {
+    const callerOwned: Rfc64CatalogAutoPublishConfigV1 = {
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+    expect(snapshotRfc64CatalogAutoPublishConfigV1(callerOwned)).toEqual({
+      catalogIssuerDelegationEffectiveAt: '0',
+      catalogIssuerDelegationExpiresAt: '1893456000000',
+    });
+    expect(() => snapshotRfc64CatalogAutoPublishConfigV1({
+      ...callerOwned,
+      peers: ['12D3KooPublicOnly'],
+    } as never)).toThrow(/unknown or missing fields/u);
+    expect(() => snapshotRfc64CatalogAutoPublishConfigV1({
+      catalogIssuerDelegationEffectiveAt: '2' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1' as TimestampMsV1,
+    })).toThrow(
+      /rfc64Catalog\.autoPublish delegation expiry must be after its effective time/u,
+    );
   });
 
   it('keeps direct legacy agent auto-publish configuration source-compatible', async () => {
@@ -600,6 +774,539 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     expect(agent.readRfc64PublicCatalogBootstrapStatusV1()).toMatchObject({ pass: 1 });
   });
+
+  it('keeps legacy public authoring public-only beside an un-authored private selection', async () => {
+    const publicContextGraphId = (
+      '0x1111111111111111111111111111111111111111/native-wiring-public'
+    ) as ContextGraphIdV1;
+    const privatePolicy = privateCatalogPolicy();
+    const privateEnvelope = {
+      issuer: AUTHOR,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: privatePolicy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const privatePolicyDigest = computeContextGraphPolicyObjectDigestV1(privateEnvelope);
+    const privateRosterEnvelope = {
+      issuer: AUTHOR,
+      objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+      payload: privateCatalogRoster(privatePolicy, privatePolicyDigest),
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedMemberRosterEnvelopeV1;
+    const publicPolicy = {
+      ...finalizedPublicCatalogPolicy(),
+      contextGraphId: publicContextGraphId,
+    };
+    const publicEnvelope = {
+      issuer: AUTHOR,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: publicPolicy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const privateProviderPeerId = '12D3KooPrivateSelectedButDormant';
+    const publicAnnouncementPeerId = '12D3KooLegacyPublicDestination';
+    const author = await startNativeAgentWithOptions({
+      name: 'mixed-legacy-public-unified-private',
+      autoPublish: {
+        peers: [publicAnnouncementPeerId],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+      catalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          peerAgentBindings: [{ peerId: privateProviderPeerId, agentAddress: AUTHOR }],
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope: privateEnvelope,
+            rosterEnvelope: privateRosterEnvelope,
+            targets: [{ authorAddress: AUTHOR, providers: [privateProviderPeerId] }],
+            completeSwmProviders: [privateProviderPeerId],
+          }, {
+            policyEnvelope: publicEnvelope,
+            targets: [],
+          }],
+        },
+      },
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1')
+      .mockImplementation(async ({ announcement, peers }) => ({
+        announcement,
+        announcedPeers: peers,
+        failedPeers: [],
+      }));
+
+    expect((author as any).config.rfc64CatalogAuthoringPolicy).toMatchObject({
+      byContextGraph: {
+        [publicContextGraphId]: {
+          kind: 'selected-public',
+          announcementPeers: [publicAnnouncementPeerId],
+        },
+      },
+    });
+    expect(Object.keys(
+      (author as any).config.rfc64CatalogAuthoringPolicy.byContextGraph,
+    )).toEqual([publicContextGraphId]);
+    const seal = assertionSealFromCanonical(await authorSeal(25n, PROJECTION_QUADS));
+    await expect(author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: publicContextGraphId,
+      assertionCoordinate: 'legacy-public-still-active' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal,
+    })).resolves.toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    expect(announce).toHaveBeenCalledWith(expect.objectContaining({
+      peers: [publicAnnouncementPeerId],
+    }));
+  }, 60_000);
+
+  it.each([
+    { controlKind: 'selected-private' as const, driftedAccessPolicy: 0 as const },
+    { controlKind: 'selected-public' as const, driftedAccessPolicy: 1 as const },
+  ])('refuses $controlKind authoring after opposite policy-kind drift', async ({
+    controlKind,
+    driftedAccessPolicy,
+  }) => {
+    const providerPeerId = `12D3KooPolicyKindDrift${controlKind}`;
+    const authority = privateCatalogAuthorityFixtureV1();
+    const author = await startNativeAgentWithOptions({
+      name: `policy-kind-drift-${controlKind}`,
+      catalogActivation: controlKind === 'selected-private'
+        ? selectedPrivateCatalogActivationV1(providerPeerId, authority)
+        : selectedPublicCatalogActivationV1(providerPeerId),
+    });
+    const service = (author as any).rfc64PublicCatalogServiceV1;
+    const accepted = service.acceptedPolicySnapshot(NETWORK_ID, CONTEXT_GRAPH_ID);
+    expect(accepted).not.toBeNull();
+    vi.spyOn(service, 'acceptedPolicySnapshot').mockReturnValue(Object.freeze({
+      ...accepted,
+      policy: Object.freeze({ ...accepted.policy, accessPolicy: driftedAccessPolicy }),
+    }));
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: `policy-kind-drift-${controlKind}`,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: `policy-kind-drift-operation-${controlKind}`,
+    })).resolves.toMatchObject({
+      status: 'failed',
+      action: 'upsert',
+      error: expect.stringMatching(/policy changed after activation/u),
+    });
+    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+    });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(announce).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('projects an ordinary selected-public SWM promotion through its exact complete providers', async () => {
+    const provider = await startNativeAgentWithOptions({
+      name: 'selected-public-complete-provider',
+      networkIdentityChainId: NETWORK_ID,
+    });
+    provider.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const providerPeerId = provider.peerId;
+    const author = await startNativeAgentWithOptions({
+      name: 'selected-public-author-lifecycle',
+      catalogActivation: selectedPublicCatalogActivationV1(providerPeerId),
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    await connectBothWays(author, provider);
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+
+    expect((author as any).config.rfc64CatalogAuthoringPolicy)
+      .toMatchObject({
+        byContextGraph: {
+          [CONTEXT_GRAPH_ID]: {
+            kind: 'selected-public',
+            announcementPeers: [providerPeerId],
+          },
+        },
+      });
+    const assertionCoordinate = 'ordinary-public-swm';
+    const shareOperationId = 'ordinary-public-swm-operation';
+    await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      assertionCoordinate,
+      kaNumber: 22n,
+      accessPolicy: 'public',
+    });
+
+    await author.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+    });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { totalRows: '1' } },
+      rows: [{ assertionCoordinate, shareOperationId }],
+    });
+    const authorAppliedHead = author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    });
+    expect(authorAppliedHead).toMatchObject({
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce.mock.calls[0]?.[0]).toMatchObject({
+      peers: [providerPeerId],
+    });
+
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: authorAppliedHead?.currentCatalogHeadDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+  }, 60_000);
+
+  it('projects an ordinary selected-private SWM promotion through its exact complete providers', async () => {
+    const authority = privateCatalogAuthorityFixtureV1();
+    const providerPeerAddresses = new Map<string, EvmAddressV1>();
+    const provider = await startNativeAgentWithOptions({
+      name: 'selected-private-complete-provider',
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId) =>
+          providerPeerAddresses.get(peerId) ?? null,
+      },
+    });
+    provider.acceptRfc64CatalogAccessSnapshotV1({
+      policy: authority.policy,
+      policyDigest: authority.policyDigest,
+      roster: authority.rosterEnvelope.payload,
+    });
+    const providerPeerId = provider.peerId;
+    const author = await startNativeAgentWithOptions({
+      name: 'selected-private-author-lifecycle',
+      catalogActivation: selectedPrivateCatalogActivationV1(providerPeerId, authority),
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    providerPeerAddresses.set(author.peerId, AUTHOR);
+    await connectBothWays(author, provider);
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+
+    expect((author as any).config.rfc64CatalogAuthoringPolicy)
+      .toMatchObject({
+        byContextGraph: {
+          [CONTEXT_GRAPH_ID]: {
+            kind: 'selected-private',
+            announcementPeers: [providerPeerId],
+          },
+        },
+      });
+    const assertionCoordinate = 'ordinary-private-swm';
+    const shareOperationId = 'ordinary-private-swm-operation';
+    const { seal, assertionUri } = await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      assertionCoordinate,
+      kaNumber: 23n,
+      accessPolicy: 'ownerOnly',
+    });
+
+    await expect(author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: assertionCoordinate as never,
+      publicQuads: PROJECTION_QUADS,
+      seal,
+    })).resolves.toBeNull();
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(announce).not.toHaveBeenCalled();
+
+    await author.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+    });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { totalRows: '1' } },
+      rows: [{ assertionCoordinate, shareOperationId }],
+    });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+    expect(announce).toHaveBeenCalledWith(expect.objectContaining({
+      peers: [providerPeerId],
+    }));
+
+    const mismatchedCoordinate = 'public-share-under-private-policy';
+    const mismatchedOperationId = 'public-share-under-private-policy-operation';
+    await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: mismatchedOperationId,
+      assertionCoordinate: mismatchedCoordinate,
+      kaNumber: 24n,
+      accessPolicy: 'public',
+    });
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: mismatchedCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: mismatchedOperationId,
+    })).resolves.toMatchObject({ status: 'dormant', action: 'upsert' });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toHaveLength(1);
+
+    const announcementCountBeforeVm = announce.mock.calls.length;
+    await author.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      seal,
+      assertionUri,
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { totalRows: '0' } },
+      rows: [],
+    });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest,
+      catalogVersion: '2',
+      inventoryRowCount: '0',
+    });
+    expect(announce).toHaveBeenCalledTimes(announcementCountBeforeVm + 1);
+    expect(announce.mock.calls.at(-1)?.[0]).toMatchObject({
+      peers: [providerPeerId],
+    });
+  }, 60_000);
+
+  it('repairs durable selected-private inventory through its complete provider on restart', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-startup-repair-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const authority = privateCatalogAuthorityFixtureV1();
+    const providerPeerAddresses = new Map<string, EvmAddressV1>();
+    const provider = await startNativeAgentWithOptions({
+      name: 'selected-private-startup-provider',
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId) =>
+          providerPeerAddresses.get(peerId) ?? null,
+      },
+    });
+    provider.acceptRfc64CatalogAccessSnapshotV1({
+      policy: authority.policy,
+      policyDigest: authority.policyDigest,
+      roster: authority.rosterEnvelope.payload,
+    });
+    const providerPeerId = provider.peerId;
+    const catalogActivation = selectedPrivateCatalogActivationV1(
+      providerPeerId,
+      authority,
+    );
+    const author = await startNativeAgentWithOptions({
+      name: 'selected-private-startup-author',
+      existingDataDir: dataDir,
+      persistentStorePath,
+      catalogActivation,
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    providerPeerAddresses.set(author.peerId, AUTHOR);
+    const assertionCoordinate = 'private-startup-repair';
+    const shareOperationId = 'private-startup-repair-operation';
+    await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      assertionCoordinate,
+      kaNumber: 26n,
+      accessPolicy: 'ownerOnly',
+    });
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    })).resolves.toMatchObject({ status: 'applied', action: 'upsert' });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+
+    let markStartupProjectionEntered!: () => void;
+    let releaseStartupProjection!: () => void;
+    const startupProjectionEntered = new Promise<void>((resolve) => {
+      markStartupProjectionEntered = resolve;
+    });
+    const startupProjectionGate = new Promise<void>((resolve) => {
+      releaseStartupProjection = resolve;
+    });
+    let announce: ReturnType<typeof vi.spyOn<DKGAgent, 'announceRfc64PublicCatalogHeadV1'>>;
+    const restarted = await startNativeAgentWithOptions({
+      name: 'selected-private-startup-author-restarted',
+      existingDataDir: dataDir,
+      persistentStorePath,
+      catalogActivation,
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+        vi.spyOn(agent, 'listLocalAgents').mockReturnValue([
+          { agentAddress: AUTHOR } as never,
+        ]);
+        const originalResolve = (agent as any)
+          .resolveRfc64SwmInventoryCatalogAssetV1.bind(agent);
+        vi.spyOn(agent as any, 'resolveRfc64SwmInventoryCatalogAssetV1')
+          .mockImplementationOnce(async (...args: unknown[]) => {
+            markStartupProjectionEntered();
+            await startupProjectionGate;
+            return originalResolve(...args);
+          });
+        announce = vi.spyOn(agent, 'announceRfc64PublicCatalogHeadV1');
+      },
+    });
+    providerPeerAddresses.set(restarted.peerId, AUTHOR);
+    await startupProjectionEntered;
+    await connectBothWays(restarted, provider);
+    releaseStartupProjection();
+    await restarted.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    expect(restarted.readRfc64SwmCatalogProjectionSupervisorStatusV1())
+      .toMatchObject({
+        repairs: [{
+          contextGraphId: CONTEXT_GRAPH_ID,
+          authorAddress: AUTHOR,
+          outcome: 'reconciled',
+          inventoryRowCount: '1',
+        }],
+      });
+    expect(announce!).toHaveBeenCalledWith(expect.objectContaining({
+      peers: [providerPeerId],
+    }));
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: restarted.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+  }, 60_000);
 
   it('excludes restricted shares, restarts the public SWM-only inventory, then removes VM-confirmed rows', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-swm-shadow-restart-'));
@@ -1413,7 +2120,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
     expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
     expect((agent as any).config.rfc64PublicCatalogBootstrap).toBeUndefined();
-    expect((agent as any).config.rfc64PublicCatalogAutoPublishPolicy).toBeUndefined();
+    expect((agent as any).config.rfc64CatalogAuthoringPolicy).toBeUndefined();
   });
 
   it('snapshots a bounded public-root bootstrap manifest', () => {
@@ -4370,6 +5077,23 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }
     await bootstrapIdle;
     expect(retirementClearCalls).toBe(1);
+    const appliedFinalizedHead = authorizedCold.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    });
+    expect(appliedFinalizedHead).not.toBeNull();
+    expect(authorizedCold.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      successor.headObjectDigest,
+    )?.finalizedSwmRetirementLifecycleReceipts).toMatchObject([{
+      kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: finalizedSeal.kaUal,
+      assertionVersion: finalizedSeal.assertionVersion,
+      vmGraphIri: preexistingTwin.vmGraph,
+      vmPostReadDigest: FINALIZED_VM_POST_READ_DIGEST,
+      vmMaterializationStatus: 'existing',
+      swmReconciliationOutcome: 'retired',
+    }]);
     expect(await authorizedCold.store.countQuads(preexistingTwin.vmGraph))
       .toBe(PROJECTION_QUADS.length);
     expect(await authorizedCold.store.countQuads(preexistingTwin.swmGraph)).toBe(0);
@@ -4456,6 +5180,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       errorCode: 'catalog-native-receiver-activation',
       causeCode: 'finalized-vm-composition-incomplete',
     });
+    await authorizedCold.closeRfc64PublicCatalogServiceV1();
+    expect(authorizedCold.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      successor.headObjectDigest,
+    )).toBeNull();
   }, 90_000);
 
   it('leaves the applied head null for finalized-chain policy in the dormant SWM-only lane', async () => {

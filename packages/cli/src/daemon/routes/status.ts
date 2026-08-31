@@ -1004,6 +1004,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
         selectedPublicContextGraphs: rfc64CatalogActivation.selectedPublicContextGraphs,
         selectedPrivateContextGraphs: rfc64CatalogActivation.selectedPrivateContextGraphs,
+        autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
         rollout: rfc64CatalogRollout,
         privateAuthorityConfigured:
           rfc64CatalogActivation.accessPolicyAuthority !== undefined,

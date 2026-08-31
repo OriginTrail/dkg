@@ -79,13 +79,21 @@ import {
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
   Rfc64PublicCatalogNativeReceiverV1,
-  type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
-import { createRfc64CatalogAppliedHeadCoordinatorV1 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import {
+  createRfc64CatalogAppliedHeadCoordinatorV1,
+} from './rfc64/catalog-applied-head-coordinator-v1.js';
+import type { Rfc64CatalogAppliedHeadEvidenceV1 } from
+  './rfc64/catalog-applied-head-evidence-v1.js';
+import {
+  snapshotRfc64CatalogSynchronizationEvidenceV1,
+  type Rfc64CatalogSynchronizationEvidenceV1,
+} from './rfc64/catalog-synchronization-evidence-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
+  type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
@@ -755,11 +763,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   readRfc64PublicCatalogSynchronizationEvidenceV1(
     this: DKGAgent,
     catalogHeadDigest: Digest32V1,
-  ): Rfc64PublicCatalogNativeSynchronizationEvidenceV1 | null {
+  ): Rfc64CatalogSynchronizationEvidenceV1 | null {
     const evidence = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
       catalogHeadDigest,
     );
-    return evidence === undefined ? null : Object.freeze({ ...evidence });
+    return evidence ?? null;
   }
 
   /**
@@ -909,7 +917,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ),
           logInfo: (ctx, message) => this.log.info(ctx, message),
         });
-        const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
+        const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1<
+          Rfc64CatalogAppliedHeadEvidenceV1
+        >({
           headTransport: clients.headTransport,
           contentTransport: clients.contentTransport,
           controlObjects: persistence.controlObjects,
@@ -921,17 +931,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         readNativeResourceStats = () => nativeReceiver.resourceStats();
+        const synchronizeBoundedPublicRootCatalog:
+          Rfc64BoundedPublicRootCatalogNativeReceiverClientV1[
+            'synchronizeBoundedPublicRootCatalog'
+          ] = async (
+            remotePeerId,
+            announcement,
+            trustedCatalogScope,
+            deployment,
+            signal,
+          ) => {
+            const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(
+              remotePeerId,
+              announcement,
+              trustedCatalogScope,
+              deployment,
+              signal,
+            );
+            const observed = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
+            this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
+              evidence.catalogHeadDigest,
+              observed,
+            );
+            return evidence;
+          };
+        const nativeReceiverClient: Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 =
+          Object.freeze({
+            synchronizeBoundedPublicRootCatalog,
+          });
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
-          nativeReceiver: Object.freeze({
-            synchronizeBoundedPublicRootCatalog: async (...args) => {
-              const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(...args);
-              this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
-                evidence.catalogHeadDigest,
-                evidence,
-              );
-              return evidence;
-            },
-          }),
+          nativeReceiver: nativeReceiverClient,
           inventory: persistence.inventory,
           resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
           resolveDeployment,

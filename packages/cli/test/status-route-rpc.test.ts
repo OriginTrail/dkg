@@ -157,11 +157,16 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           localAgentAddress: '0x3333333333333333333333333333333333333333',
           peerAgentBindings: [],
         },
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
       } as never,
     );
 
     expect(response.status).toBe(200);
     expect(response.body.rfc64PublicCatalog.enabled).toBe(false);
+    expect(response.body.rfc64Catalog.autoPublishEnabled).toBe(true);
     expect(response.body.rfc64Catalog.resourceTelemetry).toEqual({
       providerAttempts: 2,
       providerSwitches: 1,

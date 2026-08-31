@@ -290,6 +290,75 @@ describe('RFC-64 private catalog activation', () => {
     expect(Object.isFrozen(resolved.bootstrap?.acceptedPolicies[0]?.rosterEnvelope)).toBe(true);
   });
 
+  it('snapshots policy-neutral selected-catalog authoring independently from public controls', () => {
+    const catalog = {
+      ...privateActivation(),
+      autoPublish: {
+        catalogIssuerDelegationExpiresAt: '1893456000000',
+      },
+    } as const;
+    const resolved = resolveRfc64CatalogActivationConfigV1(catalog, chainIdentity);
+
+    expect(resolved.autoPublish).toEqual({
+      catalogIssuerDelegationEffectiveAt: '0',
+      catalogIssuerDelegationExpiresAt: '1893456000000',
+    });
+    expect(Object.isFrozen(resolved.autoPublish)).toBe(true);
+
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const publicBootstrap = {
+      acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+      retryIntervalMs: 1_000,
+    } as const;
+    const mixed = resolveRfc64CatalogActivationsV1({
+      catalog: resolved,
+      publicCatalog: {
+        autoPublish: {
+          peers: ['12D3KooPublicHint'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: publicBootstrap,
+      },
+    }, chainIdentity);
+    expect(mixed).toMatchObject({
+      catalog: { autoPublish: resolved.autoPublish },
+      publicCatalog: { autoPublish: { peers: ['12D3KooPublicHint'] } },
+      selectedCatalogAuthoringControls: [{
+        kind: 'selected-private',
+        contextGraphId: PRIVATE_CG,
+        announcementPeers: [PROVIDER_PEER],
+      }],
+    });
+    const roundTripped = resolveRfc64CatalogActivationsV1({
+      catalog: mixed.catalog,
+      publicCatalog: mixed.publicCatalog,
+    }, chainIdentity);
+    expect(roundTripped.selectedCatalogAuthoringControls).toEqual(
+      mixed.selectedCatalogAuthoringControls,
+    );
+    expect(roundTripped.catalog.selectedCatalogAuthoringControls).toEqual(
+      mixed.selectedCatalogAuthoringControls,
+    );
+  });
+
+  it('rejects selected-CG authoring before startup when provider authority is missing', () => {
+    expect(() => resolveRfc64CatalogActivationsV1({
+      catalog: {
+        autoPublish: {
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope: policyEnvelope(policy(PUBLIC_CG, 0)),
+            targets: [],
+          }],
+        },
+      },
+    }, chainIdentity)).toThrow(
+      new RegExp(`autoPublish requires completeSwmProviders for ${PUBLIC_CG}`, 'u'),
+    );
+  });
+
   it('resolves restart-stable per-CG rollout modes without changing omitted compatibility', () => {
     const catalog = resolveRfc64CatalogActivationConfigV1({
       ...privateActivation(),

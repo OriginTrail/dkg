@@ -445,6 +445,7 @@ import {
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogActivationsV1,
+  resolveRfc64CatalogAuthoringPolicyV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -1110,8 +1111,6 @@ export class DKGAgent extends DKGAgentBase {
             activationPeerAgentBindings!.get(remotePeerId) ?? null
           ),
         }));
-    const rfc64PublicCatalogAutoPublishPolicy =
-      rfc64PublicCatalogControls.autoPublishPolicy;
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
       catalogActivation.bootstrap,
@@ -1122,6 +1121,11 @@ export class DKGAgent extends DKGAgentBase {
         ? rfc64PublicCatalogBootstrap
         : undefined,
     );
+    const rfc64CatalogAuthoringPolicy = resolveRfc64CatalogAuthoringPolicyV1({
+      selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
+      legacyPublicFallback: rfc64PublicCatalogControls.autoPublishPolicy,
+      acceptedPolicies: rfc64CatalogBootstrap?.acceptedPolicies ?? [],
+    });
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -1201,8 +1205,8 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
       rfc64CatalogBootstrap,
+      rfc64CatalogAuthoringPolicy,
       rfc64CatalogExecutionPlan,
-      rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       syncReconcilerTiming: resolveSyncReconcilerTiming(config),
