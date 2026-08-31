@@ -46,6 +46,7 @@ import {
   createRolloutStoreFixture,
   type RolloutStoreFixture,
 } from './rollout-store-fixture.js';
+import { rolloutStoreBindingToEnv } from './rollout-store-config.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
@@ -279,12 +280,7 @@ async function execute(): Promise<void> {
       statsBeforeForged.notFound,
       'statsBeforeForged.notFound',
     );
-    const statsAfterForged = await readReceiverStatsWhen(
-      receiver,
-      'after-forged',
-      (stats) => requiredSafeInteger(stats.notFound, 'statsAfterForged.notFound')
-        === notFoundBeforeForged + 1,
-    );
+    const statsAfterForged = await readReceiverStats(receiver, 'after-forged');
     exact(
       requiredSafeInteger(statsAfterForged.notFound, 'statsAfterForged.notFound'),
       notFoundBeforeForged + 1,
@@ -654,25 +650,6 @@ async function readReceiverStats(
   );
 }
 
-async function readReceiverStatsWhen(
-  receiver: Gate1AgentChild,
-  label: string,
-  predicate: (stats: Record<string, unknown>) => boolean,
-): Promise<Record<string, unknown>> {
-  const deadline = Date.now() + 5_000;
-  let stats = await readReceiverStats(receiver, label);
-  while (!predicate(stats) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    await receiver.request(
-      'awaitReceiverIdle',
-      `${label}-settle-${Date.now()}`,
-      'receiver-idle',
-    );
-    stats = await readReceiverStats(receiver, label);
-  }
-  return stats;
-}
-
 async function readSemanticGraph(
   receiver: Gate1AgentChild,
   swmGraph: string,
@@ -812,7 +789,7 @@ function spawnAgent(
         ...process.env,
         DKG_RFC64_GATE1_ADAPTER_DATA_DIR: dataDir,
         DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[role],
-        ...storeFixture.envForRole(role, dataDir),
+        ...rolloutStoreBindingToEnv(storeFixture.bindingForRole(role, dataDir)),
         NODE_ENV: 'production',
       },
     },

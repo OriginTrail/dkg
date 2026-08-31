@@ -20,6 +20,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "benchmark:delete-no-count": "pnpm run build && node scripts/delete-by-pattern-no-count-benchmark.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"

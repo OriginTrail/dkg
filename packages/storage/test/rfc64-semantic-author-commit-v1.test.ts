@@ -31,6 +31,7 @@ import {
   type Quad,
   type Rfc64SemanticAuthorCommitInputV1,
 } from '../src/index.js';
+import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
 const CONTEXT_GRAPH = (
@@ -148,7 +149,9 @@ const STALE_CG_SEAL = record('AppliedContextGraphSealV1', {
 
 describe('RFC-64 typed semantic author commit v1', () => {
   it('compiles complete canonical semantic subjects and no obsolete mutation knobs', () => {
-    const compiled = compileRfc64SemanticAuthorCommitV1(commitInput());
+    const compiled = normalizeRfc64AuthorCommitCasV1(
+      compileRfc64SemanticAuthorCommitV1(commitInput()),
+    );
     const replacement = (role: string) => compiled.subjectReplacements.find(
       (candidate) => candidate.role === role,
     )!;
@@ -450,6 +453,23 @@ describe('RFC-64 typed semantic author commit v1', () => {
     })), 'rfc64-semantic-author-commit-schema');
   });
 
+  it('accepts a canonically encoded Unicode assertion coordinate', () => {
+    const coordinate = Object.freeze({
+      ...SEAL_COORDINATE,
+      assertionCoordinate: 'name λ',
+    }) as CanonicalGraphScopedAuthorSealCoordinateV1;
+    const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1(coordinate);
+    const compiled = compileRfc64SemanticAuthorCommitV1(commitInput({
+      authorSealGraph: placement.metaGraph,
+      authorSealSubject: placement.subject,
+      authorSealQuads: projectCanonicalGraphScopedAuthorSealRowsV1(AUTHOR_SEAL, coordinate),
+    }));
+    expect(compiled).toMatchObject({
+      authorSealGraph: placement.metaGraph,
+      authorSealSubject: placement.subject,
+    });
+  });
+
   it('compiles the complete 15-row private-content author seal', () => {
     const privateSeal = Object.freeze({
       ...AUTHOR_SEAL,
@@ -462,8 +482,7 @@ describe('RFC-64 typed semantic author commit v1', () => {
         SEAL_COORDINATE,
       ),
     }));
-    expect(compiled.subjectReplacements.find(({ role }) => role === 'authorSeal')?.quads)
-      .toHaveLength(15);
+    expect(compiled.authorSealQuads).toHaveLength(15);
   });
 
   it('persists exactly one complete semantic winner across competing worker commits and reopen', async () => {

@@ -242,6 +242,30 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).toMatch(/^CONSTRUCT /);
   });
 
+  it.each([
+    [
+      'CONSTRUCT',
+      'BASE <http://ex.org/>\nPREFIX schema: <http://schema.org/>\nCONSTRUCT { <s> schema:name ?name } WHERE { <s> schema:name ?name }',
+    ],
+    [
+      'DESCRIBE',
+      'BASE <http://ex.org/>\nPREFIX schema: <http://schema.org/>\nDESCRIBE <s>',
+    ],
+  ])('uses an N-Quads Accept header for a BASE/PREFIX-prefixed %s query', async (
+    _form,
+    sparql,
+  ) => {
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://schema.org/name> "Alice" .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    const result = await s.query(sparql);
+    expect(result.type).toBe('quads');
+    const headers = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(headers.Accept).toBe('text/x-nquads, application/n-quads');
+  });
+
   it('sends a server-side query deadline on SELECT and CONSTRUCT, wider than the client deadline', async () => {
     // Without a server-side bound, a client abort leaves the query executing
     // on Blazegraph indefinitely (observed on mainnet: 10-32+ min past a 30s
@@ -709,7 +733,10 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   });
 
   it('ASK query returns boolean result', async () => {
-    setFetch(async () => new Response(JSON.stringify({ boolean: true }), {
+    setFetch(async () => new Response(JSON.stringify({
+      head: { link: ['https://example.test/results'] },
+      boolean: true,
+    }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
@@ -717,6 +744,19 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const r = await s.query('ASK { GRAPH <http://g1> { ?s ?p ?o } }');
     expect(r.type).toBe('boolean');
     if (r.type === 'boolean') expect(r.value).toBe(true);
+  });
+
+  it.each([
+    'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+    'BASE <urn:base:> ASK { ?s <p> ?o }',
+    '# leading comment\nASK { ?s ?p ?o }',
+  ])('classifies prologue-prefixed ASK as boolean: %s', async (query) => {
+    setFetch(async () => new Response(JSON.stringify({ head: {}, boolean: false }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const result = await new BlazegraphStore(baseUrl).query(query);
+    expect(result).toEqual({ type: 'boolean', value: false });
   });
 
   it('query throws when SPARQL endpoint returns error', async () => {
@@ -894,6 +934,20 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const s = new BlazegraphStore(baseUrl);
     const removed = await s.deleteByPattern({ graph: 'http://g', subject: 'http://s' });
     expect(removed).toBe(3);
+  });
+
+  it('deleteByPatternWithoutCount sends one UPDATE and no COUNT queries', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+
+    await s.deleteByPatternWithoutCount({
+      graph: 'http://g',
+      subject: 'http://s',
+    });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(String(fetchCalls[0]?.[1]?.body)).toContain('DELETE');
+    expect(String(fetchCalls[0]?.[1]?.body)).not.toContain('SELECT');
   });
 
   it('deleteByPattern count branch keyed on direct-POST SELECT body', async () => {

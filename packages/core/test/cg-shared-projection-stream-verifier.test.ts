@@ -137,7 +137,10 @@ describe('core cg-shared-v1 incremental verifier', () => {
     expect(() => verifier.push({
       subject: 'urn:a',
       predicate: 'urn:p',
-      object: `"${'0'.repeat(2048)}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      // Deliberately unterminated as well as oversized. If literal parsing runs
+      // before the lexical resource fence this reports projection-literal,
+      // so the assertion proves the raw bound wins before canonicalization.
+      object: `"${'0'.repeat(2048)}`,
     })).toThrow(expect.objectContaining({ code: 'projection-resource-refused' }));
   });
 

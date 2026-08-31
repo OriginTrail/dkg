@@ -28,10 +28,25 @@ export type StoreOperation = typeof STORE_OPERATIONS[number];
 export type StoreOperationOutcome = 'not_started' | 'indeterminate';
 
 const STORE_OPERATION_SET: ReadonlySet<string> = new Set(STORE_OPERATIONS);
+const READ_ONLY_STORE_OPERATION_SET: ReadonlySet<StoreOperation> = new Set([
+  'query',
+  'construct',
+  'hasGraph',
+  'listGraphs',
+  'listGraphsByPrefix',
+  'countQuads',
+]);
 
 /** Runtime validator for public operation metadata crossing package boundaries. */
 export function isStoreOperation(value: unknown): value is StoreOperation {
   return typeof value === 'string' && STORE_OPERATION_SET.has(value);
+}
+
+/** Canonical storage-owned classification of operations that cannot mutate state. */
+export function isReadOnlyStoreOperation(
+  operation: StoreOperation,
+): boolean {
+  return READ_ONLY_STORE_OPERATION_SET.has(operation);
 }
 
 export interface StoreOperationOutcomeTagged {

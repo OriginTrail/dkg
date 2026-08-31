@@ -12,9 +12,30 @@
 'use strict';
 
 const fs = require('node:fs');
-const blazegraphNamespaceContract = require(
-  '@origintrail-official/dkg-storage/blazegraph-namespace-contract',
-);
+const path = require('node:path');
+
+/**
+ * Load the one storage-owned implementation without making source-tree shell
+ * callers depend on an installed workspace. In a checkout the canonical file
+ * is next to this package under packages/storage. At pack time the runtime
+ * asset copier materializes a byte-for-byte package-local copy so the
+ * standalone published facade remains buildless as well.
+ */
+function loadBlazegraphNamespaceContract() {
+  const candidates = [
+    path.resolve(__dirname, '../storage/blazegraph-namespace-contract.cjs'),
+    path.resolve(__dirname, 'blazegraph-namespace-contract.cjs'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return require(candidate);
+  }
+
+  // Retain package-subpath compatibility for non-standard layouts that install
+  // the storage dependency but omit the generated package-local asset.
+  return require('@origintrail-official/dkg-storage/blazegraph-namespace-contract');
+}
+
+const blazegraphNamespaceContract = loadBlazegraphNamespaceContract();
 const {
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   assertBlazegraphNamespace,

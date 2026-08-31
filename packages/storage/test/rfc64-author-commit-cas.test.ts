@@ -12,7 +12,9 @@ import {
   type Rfc64AuthorCommitCasLegacyInputV1,
 } from '../src/index.js';
 import {
+  buildRfc64AuthorCommitCasUpdateFromNormalizedV1,
   buildRfc64AuthorCommitCasUpdateV1,
+  decodeNormalizedRfc64AuthorCommitCasV1,
   executeRfc64AuthorCommitCasV1,
   mapRfc64AuthorCommitCasV1,
   normalizeRfc64AuthorCommitCasV1,
@@ -40,6 +42,15 @@ import {
   quad,
   seedOldState,
 } from './rfc64-author-commit-cas-harness.js';
+
+function normalizeGeneratedIds(value: string): string {
+  return value
+    .replaceAll(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/giu,
+      '<generated-id>',
+    )
+    .replaceAll(/\?subject[PO][0-9a-f]{32}/giu, '?subject<generated-id>');
+}
 
 describe('RFC-64 certified author commit CAS v1', () => {
   afterEach(() => {
@@ -194,7 +205,13 @@ describe('RFC-64 certified author commit CAS v1', () => {
       },
       mapObject: async (value, context) => {
         objectRoles.push(`${context.role}:${context.kind}`);
-        return value === null ? null : `<urn:test:mapped:${context.role}:${context.kind}>`;
+        const predecessorIndex = {
+          currentHead: 7,
+          subgraphMutationGeneration: 8,
+          contextGraphMutationGeneration: 9,
+          appliedSet: 10,
+        }[context.role];
+        return value === null ? null : `"mapped:${context.role}:0:${predecessorIndex}"`;
       },
     });
 
@@ -235,12 +252,12 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(subject('contextGraphMutationGeneration').quads[0]?.object)
       .toBe('"mapped:contextGraphMutationGeneration:0:5"');
     expect(subject('appliedSet').quads[0]?.object).toBe('"mapped:appliedSet:0:6"');
-    expect(guard('currentHead').expectedObject).toBe('<urn:test:mapped:currentHead:expected>');
+    expect(guard('currentHead').expectedObject).toBe('"mapped:currentHead:0:7"');
     expect(guard('subgraphMutationGeneration').expectedObject)
-      .toBe('<urn:test:mapped:subgraphMutationGeneration:expected>');
+      .toBe('"mapped:subgraphMutationGeneration:0:8"');
     expect(guard('contextGraphMutationGeneration').expectedObject)
-      .toBe('<urn:test:mapped:contextGraphMutationGeneration:expected>');
-    expect(guard('appliedSet').expectedObject).toBe('<urn:test:mapped:appliedSet:expected>');
+      .toBe('"mapped:contextGraphMutationGeneration:0:9"');
+    expect(guard('appliedSet').expectedObject).toBe('"mapped:appliedSet:0:10"');
     const currentHeadGuard = guard('currentHead');
     expect(currentHeadGuard.guardKind).toBe('exact-subject');
     if (currentHeadGuard.guardKind !== 'exact-subject') throw new Error('expected exact guard');
@@ -254,6 +271,48 @@ describe('RFC-64 certified author commit CAS v1', () => {
       STATE_GRAPH,
     ]);
     expect(manifest.referencedGraphs).toEqual(manifest.touchedGraphs);
+  });
+
+  it('rejects a deserialized semantic plan that drops its mandatory guards', () => {
+    const source = authorCommitInput();
+    const legitimate = normalizeRfc64AuthorCommitCasV1(source);
+    expect(decodeNormalizedRfc64AuthorCommitCasV1(structuredClone(legitimate)))
+      .toEqual(legitimate);
+    const forged = {
+      ...structuredClone(legitimate),
+      guards: [],
+    };
+
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(forged))
+      .toThrow(/invalid guard topology/u);
+    const sourceUpdate = buildRfc64AuthorCommitCasUpdateV1(source);
+    const deserializedUpdate = buildRfc64AuthorCommitCasUpdateFromNormalizedV1(
+      structuredClone(legitimate),
+    );
+    expect(normalizeGeneratedIds(deserializedUpdate.update)).toBe(
+      normalizeGeneratedIds(sourceUpdate.update),
+    );
+    expect(deserializedUpdate.semanticQuads).toEqual(sourceUpdate.semanticQuads);
+    expect(deserializedUpdate.touchedGraphs).toEqual(sourceUpdate.touchedGraphs);
+
+    const swapped = structuredClone(legitimate);
+    [swapped.subjectReplacements[1], swapped.subjectReplacements[2]] = [
+      swapped.subjectReplacements[2]!,
+      swapped.subjectReplacements[1]!,
+    ];
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(swapped))
+      .toThrow(/semantic currentHead requires one exact guarded replacement/u);
+
+    const legacy = structuredClone(normalizeRfc64AuthorCommitCasV1(
+      legacyAuthorCommitInput(),
+    ));
+    const invalidation = legacy.subjectReplacements.find(
+      ({ role }) => role === 'sealInvalidation',
+    );
+    if (!invalidation) throw new Error('expected legacy invalidation');
+    invalidation.roleIndex = 1;
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(legacy))
+      .toThrow(/invalid replacement topology/u);
   });
 
   it('maps the exported legacy contract through the operation-only canonical plan', async () => {

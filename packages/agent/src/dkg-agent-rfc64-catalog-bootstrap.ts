@@ -189,6 +189,8 @@ interface BootstrapOwnerDependenciesV1 {
 export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1 {
   readonly #dependencies: BootstrapOwnerDependenciesV1;
   #state: BootstrapStateV1 | undefined;
+  #catalogPhaseReady = false;
+  #configuredRecoveryProviders = new Set<string>();
 
   constructor(dependencies: BootstrapOwnerDependenciesV1) {
     this.#dependencies = dependencies;
@@ -203,6 +205,12 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
       ({ completeSwmProviders = [] }) => completeSwmProviders.length > 0,
     );
     if (partition.track2Policies.length === 0 && !hasLegacyRecoveryProviders) return;
+    this.#catalogPhaseReady = false;
+    this.#configuredRecoveryProviders = new Set(
+      partition.legacyRecoveryConfig.acceptedPolicies.flatMap(
+        ({ completeSwmProviders = [] }) => completeSwmProviders,
+      ),
+    );
     let state!: BootstrapStateV1;
     const runner = new Rfc64CoalescingSupervisorV1({
       retryIntervalMs: partition.retryIntervalMs,
@@ -248,8 +256,15 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
   async close(): Promise<void> {
     const state = this.#state;
     if (state === undefined) return;
+    this.#catalogPhaseReady = false;
     await state.runner.close();
     this.#state = undefined;
+  }
+
+  /** Gate graph-complete SWM recovery until the first catalog phase settles. */
+  isRecoveryReady(providerPeerId: string): boolean {
+    return !this.#configuredRecoveryProviders.has(providerPeerId)
+      || this.#catalogPhaseReady;
   }
 
   async #runPass(
@@ -265,6 +280,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
           ({ completeSwmProviders: providers = [] }) => providers,
         ),
       )];
+      const connectedCompleteSwmProviders = new Set<string>();
       await mapWithConcurrency(
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
@@ -274,20 +290,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
             await this.#dependencies.connectToPeerId(providerPeerId, {
               timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
             });
-            if (signal.aborted) return;
-            this.#dependencies.queueRecoveryPlan(
-              resolveRfc64PeerSwmRecoveryPlanV1(
-                state.legacyRecoveryConfig,
-                providerPeerId,
-              ),
-              (_peerId, error) => {
-                this.#dependencies.warn(
-                  ctx,
-                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${rfc64SupervisorErrorMessageV1(error)}`,
-                );
-              },
-              0,
-            );
+            if (!signal.aborted) connectedCompleteSwmProviders.add(providerPeerId);
           } catch (error) {
             this.#dependencies.warn(
               ctx,
@@ -300,6 +303,23 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
         if (signal.aborted) return;
         await this.#synchronizeTarget(target, signal);
       });
+      if (signal.aborted) return;
+      this.#catalogPhaseReady = true;
+      for (const providerPeerId of connectedCompleteSwmProviders) {
+        this.#dependencies.queueRecoveryPlan(
+          resolveRfc64PeerSwmRecoveryPlanV1(
+            state.legacyRecoveryConfig,
+            providerPeerId,
+          ),
+          (_peerId, error) => {
+            this.#dependencies.warn(
+              ctx,
+              `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${rfc64SupervisorErrorMessageV1(error)}`,
+            );
+          },
+          0,
+        );
+      }
     } finally {
       state.lastPassCompletedAtMs = Date.now();
     }
@@ -460,6 +480,14 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /** Stop future retries and abort/drain the current pass before service close. */
   async closeRfc64PublicCatalogBootstrapV1(this: DKGAgent): Promise<void> {
     await bootstrapOwnerV1(this).close();
+  }
+
+  /** Canonical readiness gate for configured graph-complete recovery providers. */
+  isRfc64CatalogBootstrapSwmRecoveryReadyV1(
+    this: DKGAgent,
+    providerPeerId: string,
+  ): boolean {
+    return bootstrapOwnerV1(this).isRecoveryReady(providerPeerId);
   }
 
 }

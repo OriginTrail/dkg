@@ -66,6 +66,59 @@ function withFixture(fn) {
   }
 }
 
+function packAndInstallFixture({
+  root,
+  fixtureName,
+  sourcePackageDir,
+  installedPackageName,
+  consumerDir = path.join(root, `${fixtureName}-consumer`),
+  npmArguments = [],
+}) {
+  const packDir = path.join(root, `${fixtureName}-pack`);
+  const extractedDir = path.join(root, `${fixtureName}-extracted`);
+  const installedPackageDir = path.join(
+    consumerDir,
+    'node_modules',
+    ...installedPackageName.split('/'),
+  );
+  fs.mkdirSync(packDir, { recursive: true });
+  fs.mkdirSync(extractedDir, { recursive: true });
+  fs.mkdirSync(path.dirname(installedPackageDir), { recursive: true });
+  const packed = spawnSync('npm', [
+    'pack',
+    sourcePackageDir,
+    '--pack-destination',
+    packDir,
+    '--json',
+    ...npmArguments,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+  assert.equal(packed.status, 0, `npm pack failed for ${installedPackageName}: ${packed.stderr}`);
+  const report = JSON.parse(packed.stdout);
+  const filename = (Array.isArray(report) ? report[0] : report)?.filename;
+  assert.equal(
+    typeof filename,
+    'string',
+    `npm pack did not report a tarball filename for ${installedPackageName}`,
+  );
+  const extracted = spawnSync('tar', [
+    '-xzf',
+    path.join(packDir, filename),
+    '-C',
+    extractedDir,
+  ], { encoding: 'utf8' });
+  assert.equal(
+    extracted.status,
+    0,
+    `tar extraction failed for ${installedPackageName}: ${extracted.stderr}`,
+  );
+  fs.renameSync(path.join(extractedDir, 'package'), installedPackageDir);
+  return Object.freeze({ consumerDir, installedPackageDir });
+}
+
 test('discovers public OriginTrail packages only', () => withFixture((root) => {
   assert.deepEqual(
     discoverPublishablePackages(root).map((pkg) => pkg.name),
@@ -236,6 +289,12 @@ function writeCliPackFixture(root) {
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'blazegraph-image.json'), VALID_BLAZEGRAPH_METADATA);
+  const storageDir = path.join(root, 'packages', 'storage');
+  fs.mkdirSync(storageDir, { recursive: true });
+  fs.copyFileSync(
+    BLAZEGRAPH_NAMESPACE_CONTRACT,
+    path.join(storageDir, 'blazegraph-namespace-contract.cjs'),
+  );
 }
 
 test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', () => withFixture((root) => {
@@ -247,6 +306,7 @@ test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', ()
     [
       'blazegraph-image-metadata.cjs',
       'blazegraph-image.json',
+      'blazegraph-namespace-contract.cjs',
       'blazegraph-runtime-contract.d.cts',
       'build-info.json',
       'network/mainnet-base.json',
@@ -263,6 +323,7 @@ test('passes when the cli tarball includes every required runtime asset', () => 
     { path: 'project.json' },
     { path: 'blazegraph-image.json' },
     { path: 'blazegraph-image-metadata.cjs' },
+    { path: 'blazegraph-namespace-contract.cjs' },
     { path: 'blazegraph-runtime-contract.d.cts' },
     { path: 'build-info.json' },
     { path: 'network\\testnet.json' },
@@ -273,6 +334,12 @@ test('passes when the cli tarball includes every required runtime asset', () => 
 }));
 
 test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops stale overlays)', () => withFixture((root) => {
+  const storageDir = path.join(root, 'packages', 'storage');
+  fs.mkdirSync(storageDir, { recursive: true });
+  fs.copyFileSync(
+    BLAZEGRAPH_NAMESPACE_CONTRACT,
+    path.join(storageDir, 'blazegraph-namespace-contract.cjs'),
+  );
   fs.mkdirSync(path.join(root, 'network'), { recursive: true });
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{"a":1}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{"b":2}\n');
@@ -292,6 +359,11 @@ test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops 
   assert.ok(
     fs.existsSync(path.join(root, 'packages', 'cli', 'blazegraph-image.json')),
     'blazegraph-image.json copied',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(root, 'packages', 'cli', 'blazegraph-namespace-contract.cjs'), 'utf8'),
+    fs.readFileSync(BLAZEGRAPH_NAMESPACE_CONTRACT, 'utf8'),
+    'the package-local runtime contract is copied byte-for-byte from storage',
   );
   assert.equal(fs.existsSync(path.join(cliNetwork, 'devnet.json')), false, 'stale overlay removed (mirror, not append)');
 }));
@@ -340,6 +412,7 @@ test('the manifest distinguishes copied assets from complete pack requirements',
   assert.deepEqual(copiedRuntimeAssets, [
     'project.json',
     'blazegraph-image.json',
+    'blazegraph-namespace-contract.cjs',
     'network/mainnet-base.json',
     'network/testnet.json',
   ]);
@@ -347,6 +420,7 @@ test('the manifest distinguishes copied assets from complete pack requirements',
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
+    'blazegraph-namespace-contract.cjs',
     'blazegraph-runtime-contract.d.cts',
     'network/mainnet-base.json',
     'network/testnet.json',
@@ -390,6 +464,7 @@ test('packages/cli ships the runtime assets in its published files list', () => 
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
+    'blazegraph-namespace-contract.cjs',
     'blazegraph-runtime-contract.d.cts',
     'build-info.json',
   ]) {
@@ -400,41 +475,22 @@ test('packages/cli ships the runtime assets in its published files list', () => 
 test('the packed CLI resolves the typed Blazegraph runtime subpath for a consumer', {
   skip: NPM_AVAILABLE && TAR_AVAILABLE ? false : 'npm and tar are required',
 }, () => withFixture((root) => {
-  const packDir = path.join(root, 'pack');
-  const extractedDir = path.join(root, 'extracted');
   const consumerDir = path.join(root, 'consumer');
-  const installedPackageDir = path.join(
+  packAndInstallFixture({
+    root,
+    fixtureName: 'storage-types',
+    sourcePackageDir: path.join(REPO_ROOT, 'packages', 'storage'),
+    installedPackageName: '@origintrail-official/dkg-storage',
     consumerDir,
-    'node_modules',
-    '@origintrail-official',
-    'dkg',
-  );
-  fs.mkdirSync(packDir, { recursive: true });
-  fs.mkdirSync(extractedDir, { recursive: true });
-  fs.mkdirSync(path.dirname(installedPackageDir), { recursive: true });
-  const packed = spawnSync('npm', [
-    'pack',
-    path.join(REPO_ROOT, 'packages', 'cli'),
-    '--pack-destination',
-    packDir,
-    '--json',
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-    shell: process.platform === 'win32',
+    npmArguments: ['--ignore-scripts'],
   });
-  assert.equal(packed.status, 0, `npm pack failed: ${packed.stderr}`);
-  const report = JSON.parse(packed.stdout);
-  const filename = (Array.isArray(report) ? report[0] : report)?.filename;
-  assert.equal(typeof filename, 'string', 'npm pack did not report a tarball filename');
-  const extracted = spawnSync('tar', [
-    '-xzf',
-    path.join(packDir, filename),
-    '-C',
-    extractedDir,
-  ], { encoding: 'utf8' });
-  assert.equal(extracted.status, 0, `tar extraction failed: ${extracted.stderr}`);
-  fs.renameSync(path.join(extractedDir, 'package'), installedPackageDir);
+  packAndInstallFixture({
+    root,
+    fixtureName: 'cli',
+    sourcePackageDir: path.join(REPO_ROOT, 'packages', 'cli'),
+    installedPackageName: '@origintrail-official/dkg',
+    consumerDir,
+  });
 
   const consumerPath = path.join(consumerDir, 'consumer.mts');
   fs.writeFileSync(consumerPath, [
@@ -473,49 +529,24 @@ test('the packed CLI resolves the typed Blazegraph runtime subpath for a consume
 test('the packed storage package preserves representative legacy dist imports', {
   skip: NPM_AVAILABLE && TAR_AVAILABLE ? false : 'npm and tar are required',
 }, () => withFixture((root) => {
-  const packDir = path.join(root, 'storage-pack');
-  const extractedDir = path.join(root, 'storage-extracted');
-  const consumerDir = path.join(root, 'storage-consumer');
-  const installedPackageDir = path.join(
-    consumerDir,
-    'node_modules',
-    '@origintrail-official',
-    'dkg-storage',
-  );
-  fs.mkdirSync(packDir, { recursive: true });
-  fs.mkdirSync(extractedDir, { recursive: true });
-  fs.mkdirSync(path.dirname(installedPackageDir), { recursive: true });
-  const packed = spawnSync('npm', [
-    'pack',
-    path.join(REPO_ROOT, 'packages', 'storage'),
-    '--pack-destination',
-    packDir,
-    '--json',
-    '--ignore-scripts',
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-    shell: process.platform === 'win32',
+  const { consumerDir } = packAndInstallFixture({
+    root,
+    fixtureName: 'storage',
+    sourcePackageDir: path.join(REPO_ROOT, 'packages', 'storage'),
+    installedPackageName: '@origintrail-official/dkg-storage',
+    npmArguments: ['--ignore-scripts'],
   });
-  assert.equal(packed.status, 0, `npm pack failed: ${packed.stderr}`);
-  const report = JSON.parse(packed.stdout);
-  const filename = (Array.isArray(report) ? report[0] : report)?.filename;
-  assert.equal(typeof filename, 'string', 'npm pack did not report a tarball filename');
-  const extracted = spawnSync('tar', [
-    '-xzf',
-    path.join(packDir, filename),
-    '-C',
-    extractedDir,
-  ], { encoding: 'utf8' });
-  assert.equal(extracted.status, 0, `tar extraction failed: ${extracted.stderr}`);
-  fs.renameSync(path.join(extractedDir, 'package'), installedPackageDir);
 
   const consumerPath = path.join(consumerDir, 'consumer.mjs');
   fs.writeFileSync(consumerPath, [
+    "import { accessSync } from 'node:fs';",
+    "import { fileURLToPath } from 'node:url';",
     "const resolved = import.meta.resolve('@origintrail-official/dkg-storage/dist/triple-store.js');",
     "if (!resolved.endsWith('/dist/triple-store.js')) throw new Error(`unexpected resolution: ${resolved}`);",
+    'accessSync(fileURLToPath(resolved));',
     "const manifest = import.meta.resolve('@origintrail-official/dkg-storage/package.json');",
     "if (!manifest.endsWith('/package.json')) throw new Error(`unexpected manifest: ${manifest}`);",
+    'accessSync(fileURLToPath(manifest));',
     '',
   ].join('\n'));
   const consumed = spawnSync(process.execPath, [consumerPath], {
@@ -555,6 +586,11 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
   fs.mkdirSync(cliDir, { recursive: true });
   fs.copyFileSync(BLAZEGRAPH_METADATA_PARSER, path.join(cliDir, 'blazegraph-image-metadata.cjs'));
   fs.copyFileSync(BLAZEGRAPH_RUNTIME_TYPES, path.join(cliDir, 'blazegraph-runtime-contract.d.cts'));
+  fs.mkdirSync(path.join(root, 'packages', 'storage'), { recursive: true });
+  fs.copyFileSync(
+    BLAZEGRAPH_NAMESPACE_CONTRACT,
+    path.join(root, 'packages', 'storage', 'blazegraph-namespace-contract.cjs'),
+  );
   const storageDir = path.join(
     root,
     'node_modules',
@@ -578,6 +614,7 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
       'project.json',
       'blazegraph-image.json',
       'blazegraph-image-metadata.cjs',
+      'blazegraph-namespace-contract.cjs',
       'blazegraph-runtime-contract.d.cts',
       'build-info.json',
     ],
@@ -599,6 +636,7 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
+    'blazegraph-namespace-contract.cjs',
     'blazegraph-runtime-contract.d.cts',
     'build-info.json',
     'network/testnet.json',

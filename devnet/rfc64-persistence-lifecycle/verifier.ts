@@ -488,7 +488,6 @@ function verifySnapshot(
     `${OBJECT_ROOT}/signatures`,
     `${OBJECT_ROOT}/signatures/${prefix}`,
     `${OBJECT_ROOT}/signatures/${prefix}/${objectHex}`,
-    'rfc64-sync/rollout-authority-v1',
   ];
   if (
     !Array.isArray(snapshot.namespaceDirectoryModes)

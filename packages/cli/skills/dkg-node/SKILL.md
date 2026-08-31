@@ -757,7 +757,7 @@ and does not promote, finalize, or publish.
 
 - `GET /api/status` (PUBLIC) — node status, peer ID, version, connections
 - `GET /api/info` — lightweight health check
-- `GET /api/agents` — list known agents
+- `GET /api/agents` — list known agents. Filters: `?framework=`, `?skill_type=`, `?connectionStatus=self|connected|disconnected`, `?local=true` (only this node's own agents — the cheap way to learn your own agent address). Pagination: `?limit=N`, then follow `nextCursor` via `?cursor=` repeating the same filters.
 - `GET /api/connections` — transport details
 - `GET /api/wallets/balances` — TRAC and ETH balances
 - `GET /api/chain/rpc-health` (PUBLIC) — RPC health

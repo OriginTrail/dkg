@@ -102,6 +102,7 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
           'test/import-artifact-routes.test.ts',
@@ -125,6 +126,7 @@ export default defineConfig({
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
+          'test/blazegraph-image-metadata.test.ts',
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',

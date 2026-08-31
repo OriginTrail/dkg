@@ -280,7 +280,15 @@ describe('GH#2270 chain-proof cadence', () => {
 
       const current = await publisher.getStatus(jobId);
       const successor = mutate(current as unknown as Record<string, unknown>);
-      const { jobRef, jobQuads } = serializeJobRecord(successor as never, DEFAULT_CONTROL_GRAPH_URI);
+      // Changing only failedFromState to `included` deliberately recreates the
+      // pre-versioning compatibility row (it has no inclusion evidence). Keep
+      // that historical fixture unversioned; current V1 must reject it.
+      const payloadSchema = _component === 'failedFromState' ? 'legacy-v0' : 'current-v1';
+      const { jobRef, jobQuads } = serializeJobRecord(
+        successor as never,
+        DEFAULT_CONTROL_GRAPH_URI,
+        { payloadSchema },
+      );
       await (h.store as unknown as {
         replaceSubject(graph: string, subject: string, quads: unknown): Promise<void>;
       }).replaceSubject(DEFAULT_CONTROL_GRAPH_URI, jobRef, jobQuads);

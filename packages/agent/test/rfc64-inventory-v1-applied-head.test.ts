@@ -10,6 +10,7 @@ import {
   INVENTORY_V1_DIRECTORY_MODE,
   INVENTORY_V1_FILE_MODE,
   INVENTORY_V1_LEGACY_USER_VERSION,
+  INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
   INVENTORY_V1_RELATIVE_PATH,
   INVENTORY_V1_USER_VERSION,
   openInventoryV1,
@@ -107,7 +108,9 @@ describe('RFC-64 SQL-1 durable applied-head CAS', () => {
     chmodSync(dirname(path), INVENTORY_V1_DIRECTORY_MODE);
     chmodSync(path, INVENTORY_V1_FILE_MODE);
 
-    const migrated = await openInventoryV1(directory);
+    const migrated = await openInventoryV1(directory, {
+      quarantineCapability: INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
+    });
     foundations.push(migrated);
     const database = new DatabaseSync(path, { readOnly: true });
     try {

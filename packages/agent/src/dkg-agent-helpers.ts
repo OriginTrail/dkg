@@ -33,6 +33,7 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { CIPHERTEXT_CHUNK_SIZE_BYTES } from './dkg-agent-constants.js';
 import { InvalidContentError, type PublishAsyncQuadEnvelope } from './dkg-agent-types.js';
+export { normalizeAgentDid } from '@origintrail-official/dkg-core';
 
 // ── Publish-payload normalisation ─────────────────────────────────────
 
@@ -71,24 +72,6 @@ export function assertQuadArray(value: unknown, fieldName: string): Quad[] {
 }
 
 // ── DID + delegation-scope normalisation ──────────────────────────────
-
-/**
- * Normalise an `did:dkg:agent:<id>` DID for case-insensitive equality
- * comparison. The agent ID can be either an Ethereum address (which IS
- * case-insensitive on the wire — checksum is purely advisory per
- * EIP-55) or a libp2p peer ID (which is NOT case-insensitive — base58
- * has uppercase characters that carry information). The previous
- * approach lower-cased the entire DID, which works in practice because
- * peer IDs round-trip the same way on both sides of a comparison, but
- * is semantically wrong: a non-EVM owner DID could in principle be
- * stored with one case and read back with another. Make the
- * normalisation explicit and only touch the EVM-address suffix.
- */
-export function normalizeAgentDid(did: string): string {
-  const m = did.match(/^did:dkg:agent:(0x[0-9a-fA-F]{40})$/);
-  if (m) return `did:dkg:agent:${m[1].toLowerCase()}`;
-  return did;
-}
 
 /**
  * Scope string for join-request delegations. Authorises the named node

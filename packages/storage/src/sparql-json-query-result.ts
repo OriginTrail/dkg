@@ -1,4 +1,5 @@
 import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { isSafeIri } from '@origintrail-official/dkg-core';
 import {
   isOrdinaryDataRecord,
   readOwnEnumerableDataProperty,
@@ -20,6 +21,10 @@ type AdapterSparqlJsonTerm =
   | { type: 'uri'; value: string }
   | { type: 'bnode'; value: string }
   | SparqlJsonLiteralTerm;
+
+const SPARQL_JSON_BLANK_NODE_LABEL =
+  /^[\p{L}\p{Nl}_0-9][\p{L}\p{Nl}\p{M}\p{Nd}_.\-\u00B7\u203F-\u2040]*$/u;
+const SPARQL_JSON_LANGUAGE_TAG = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/u;
 
 export interface AdapterSparqlJsonSelectResponse {
   head: { vars: string[] };
@@ -63,12 +68,17 @@ export function decodeSparqlJsonQueryResult(
       malformed,
     );
     if (hasHead) {
-      snapshotExactOrdinaryDataRecord(
+      const hasLink = isOrdinaryDataRecord(record.head)
+        && Object.prototype.hasOwnProperty.call(record.head, 'link');
+      const head = snapshotExactOrdinaryDataRecord(
         record.head,
-        [],
+        hasLink ? ['link'] : [],
         'SPARQL JSON ASK response.head',
         malformed,
       );
+      if (hasLink) {
+        denseStringArray(head.link, 'SPARQL JSON ASK response.head.link');
+      }
     }
     if (typeof record.boolean !== 'boolean') {
       malformed('SPARQL JSON ASK response.boolean must be a boolean');
@@ -179,8 +189,19 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string): Adapt
   if (typeof type !== 'string' || typeof value !== 'string') {
     malformed(`${label} type and value must be strings`);
   }
-  if (type === 'uri' || type === 'bnode') {
+  if (type === 'uri') {
     snapshotExactOrdinaryDataRecord(term, ['type', 'value'], label, malformed);
+    if (!isSafeIri(value)) malformed(`${label} URI value must be an absolute safe IRI`);
+    return { type, value };
+  }
+  if (type === 'bnode') {
+    snapshotExactOrdinaryDataRecord(term, ['type', 'value'], label, malformed);
+    if (
+      !SPARQL_JSON_BLANK_NODE_LABEL.test(value)
+      || value.endsWith('.')
+    ) {
+      malformed(`${label} blank-node value must be an RDF blank-node label`);
+    }
     return { type, value };
   }
   if (type !== 'literal' && type !== 'typed-literal') {
@@ -189,6 +210,12 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string): Adapt
   const hasLanguage = Object.prototype.hasOwnProperty.call(term, 'xml:lang');
   const hasDatatype = Object.prototype.hasOwnProperty.call(term, 'datatype');
   if (hasLanguage && hasDatatype) malformed(`${label} cannot contain both language and datatype`);
+  if (type === 'typed-literal' && !hasDatatype) {
+    malformed(`${label} typed-literal must contain datatype`);
+  }
+  if (type === 'typed-literal' && hasLanguage) {
+    malformed(`${label} typed-literal cannot contain language`);
+  }
   const expected = hasLanguage
     ? ['type', 'value', 'xml:lang']
     : hasDatatype
@@ -197,15 +224,15 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string): Adapt
   snapshotExactOrdinaryDataRecord(term, expected, label, malformed);
   if (hasLanguage) {
     const language = ownDataValue(term, 'xml:lang', label);
-    if (typeof language !== 'string' || language.length === 0) {
-      malformed(`${label} language must be a non-empty string`);
+    if (typeof language !== 'string' || !SPARQL_JSON_LANGUAGE_TAG.test(language)) {
+      malformed(`${label} language must be a valid language tag`);
     }
     return { type, value, 'xml:lang': language };
   }
   if (hasDatatype) {
     const datatype = ownDataValue(term, 'datatype', label);
-    if (typeof datatype !== 'string' || datatype.length === 0) {
-      malformed(`${label} datatype must be a non-empty string`);
+    if (typeof datatype !== 'string' || !isSafeIri(datatype)) {
+      malformed(`${label} datatype must be an absolute safe IRI`);
     }
     return { type, value, datatype };
   }

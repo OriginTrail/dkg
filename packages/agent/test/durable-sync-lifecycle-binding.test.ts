@@ -89,6 +89,7 @@ import {
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
+import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -700,7 +701,17 @@ describe('durable sync lifecycle chain binding', () => {
       needsReconcile: false,
     };
     const agentLike: any = {
-      config: {},
+      config: {
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+            enabled: true,
+            selectedContextGraphs: [],
+            selectedPublicContextGraphs: [],
+            rollout: { killSwitch: false, contextGraphModes: {} },
+          },
+        }),
+      },
       store: changelogCapableStore,
       runChangelogLane,
       runLegacyDurableSync,
@@ -740,14 +751,18 @@ describe('durable sync lifecycle chain binding', () => {
     }));
     const agentLike: any = {
       config: {
-        rfc64CatalogRollout: {
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
           enabled: true,
           selectedContextGraphs: ['legacy-cg', 'catalog-cg'],
+          selectedPublicContextGraphs: [],
           rollout: {
             killSwitch: false,
             contextGraphModes: { 'legacy-cg': 'legacy', 'catalog-cg': 'catalog' },
           },
-        },
+          },
+        }),
       },
       store: {},
       runLegacyDurableSync,
