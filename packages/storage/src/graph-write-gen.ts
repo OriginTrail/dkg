@@ -250,7 +250,10 @@ export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | nul
  * `null` when the backing adapter does not track write generations — callers
  * MUST fail open (always scan) on `null`. A legacy getWriteGen-only adapter is
  * deliberately not promoted: it cannot observe an in-flight write and must
- * not masquerade as a native stable revision source.
+ * not masquerade as a native stable revision source. A getWriteRevision-only
+ * implementation remains runtime-compatible, but this boundary normalizes
+ * its missing coverage metadata to process-local so consumers always receive
+ * the explicit discriminator promised by {@link GraphWriteRevisionSource}.
  */
 export function asGraphWriteRevisionSource(store: unknown): GraphWriteRevisionSource | null {
   type RevisionReader = {
