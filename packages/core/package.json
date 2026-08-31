@@ -30,6 +30,11 @@
       "import": "./dist/query-result.js",
       "default": "./dist/query-result.js"
     },
+    "./closed-data-snapshot": {
+      "types": "./dist/sync-wire-objects.d.ts",
+      "import": "./dist/sync-wire-objects.js",
+      "default": "./dist/sync-wire-objects.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },
