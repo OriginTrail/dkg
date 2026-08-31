@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
-import { findTripleStoreCapability } from './triple-store.js';
+import {
+  deleteByPatternWithoutCount,
+  findTripleStoreCapability,
+} from './triple-store.js';
 import type {
   Quad,
   QueryOptions,
@@ -313,6 +316,32 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
         }
       }
       return removed;
+    });
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.enabled) {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      return;
+    }
+    if (pattern.graph) {
+      this.assertNotReserved(pattern.graph, 'deleteByPatternWithoutCount');
+    } else {
+      this.assertNoReservedTerm(pattern);
+    }
+    await this.runExclusive(async () => {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      if (pattern.graph) {
+        // No count is available to distinguish a no-op. Emitting a
+        // conservative post-mutation marker matches delete(quads) semantics
+        // and keeps every committed change discoverable.
+        await this.markPostMutation([pattern.graph], options);
+      } else {
+        this.flagReconcile('deleteByPatternWithoutCount(no-graph)');
+      }
     });
   }
 
@@ -743,7 +772,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
 
   /** Replace the single `#era` marker in the reserved graph (delete-any + insert). */
   private async writeEra(era: string): Promise<void> {
-    await this.inner.deleteByPattern({
+    await deleteByPatternWithoutCount(this.inner, {
       subject: META_SUBJECT, predicate: P_ERA, graph: CHANGELOG_GRAPH,
     });
     await this.inner.insert([{

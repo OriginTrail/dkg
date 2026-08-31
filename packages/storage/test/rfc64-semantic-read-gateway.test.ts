@@ -194,6 +194,29 @@ describe('SyncSemanticStoreV1', () => {
     expect(requests[0].signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('rejects a URI-typed backend value that is shaped like a serialized literal', async () => {
+    const current = FIXTURES[0];
+    const bindings = projectRfc64SemanticRecordStoreRowsV1(current.record)
+      .map(toSparqlJsonBinding)
+      .map((binding) => binding.o.value === NETWORK
+        ? { ...binding, o: { type: 'uri', value: `"${NETWORK}"` } }
+        : binding);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+      head: { vars: ['p', 'o'] },
+      results: { bindings },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    }));
+
+    const error = await rejected(new SyncSemanticStoreV1(
+      new BlazegraphStore('http://rfc64-uri-kind-confusion.test/sparql'),
+    ).read(requestOf(current), { timeoutMs: 1_000 }));
+    expectGatewayResultError(error);
+    expect((error as Error & { cause: unknown }).cause)
+      .toBeInstanceOf(Rfc64SemanticReadCapabilityResultErrorV1);
+  });
+
   it('distinguishes valid Blazegraph absence from malformed successful responses', async () => {
     const current = FIXTURES[0];
     const payloads: unknown[] = [

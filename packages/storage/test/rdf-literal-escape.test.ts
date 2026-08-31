@@ -62,7 +62,12 @@ describe('RDF binding literal escaping', () => {
     [{ head: { vars: ['p'] }, results: { bindings: [{ p: null }] } }],
     [{ head: { vars: ['p'] }, results: { bindings: [{ q: { type: 'uri', value: 'urn:q' } }] } }],
     [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'uri', value: 'urn:p', extra: true } }] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'uri', value: '"literal"' } }] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'bnode', value: 'bad.' } }] } }],
     [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'literal', value: 'x', datatype: 'urn:d', 'xml:lang': 'en' } }] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'typed-literal', value: 'x' } }] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'literal', value: 'x', datatype: 'relative' } }] } }],
+    [{ head: { vars: ['p'] }, results: { bindings: [{ p: { type: 'literal', value: 'x', 'xml:lang': 'not valid' } }] } }],
   ])('rejects malformed SPARQL JSON rows and terms at one typed boundary', (payload) => {
     expect(() => formatSparqlJsonBindings(payload)).toThrow(SparqlJsonResultsShapeError);
   });

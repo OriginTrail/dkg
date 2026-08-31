@@ -95,29 +95,26 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
   });
 
   it('snapshots catalog-lane data properties before encoding', () => {
-    let contextReads = 0;
-    let subgraphReads = 0;
+    let ordinaryReads = 0;
     const lane = new Proxy({
       contextGraphId: 'safe',
       subGraphName: null,
     }, {
-      getOwnPropertyDescriptor(target, key) {
-        const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
-        if (key === 'contextGraphId') {
-          contextReads += 1;
-          return { ...descriptor!, value: contextReads === 1 ? 'safe' : '' };
-        }
-        if (key === 'subGraphName') {
-          subgraphReads += 1;
-          return { ...descriptor!, value: subgraphReads === 1 ? null : '' };
-        }
-        return descriptor;
+      get(target, key, receiver) {
+        ordinaryReads += 1;
+        if (key === 'contextGraphId') return 'changed';
+        if (key === 'subGraphName') return 'changed';
+        return Reflect.get(target, key, receiver);
       },
     }) as CatalogLaneV1;
 
     expect(buildCatalogAssertionScopeV1(lane)).toBe('v1/root/safe');
-    expect(contextReads).toBe(1);
-    expect(subgraphReads).toBe(1);
+    expect(buildCatalogAssertionSubjectV1(
+      lane,
+      AUTHOR as EvmAddressV1,
+      validatedCoordinate('coordinate'),
+    )).toBe(`did:dkg:context-graph:v1/root/safe/assertion/${AUTHOR}/coordinate`);
+    expect(ordinaryReads).toBe(0);
   });
 
   it('does not let JavaScript callers relax the catalog identifier ceiling', () => {
