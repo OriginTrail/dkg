@@ -577,6 +577,10 @@ describe('ChainEventPoller — pollNow', () => {
         filters.push(f);
         await new Promise((r) => setTimeout(r, 20)); // hold the scan open
         active -= 1;
+        // Zero events, but a real yield loop: the interleave counter above is
+        // the subject here, and `require-yield` is right that a generator
+        // without one is suspicious.
+        for (const evt of [] as ChainEvent[]) yield evt;
       },
     } as unknown as ChainAdapter;
     const poller = new ChainEventPoller({
