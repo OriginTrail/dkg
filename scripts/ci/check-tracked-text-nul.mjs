@@ -51,24 +51,29 @@ function runGit(spawnProcess, args, repoRoot, input, maxBuffer = 64 * 1024 * 102
   return result;
 }
 
+function parseBatchHeader(header, entry, command) {
+  const [objectId, objectType, rawSize] = Buffer.from(header).toString('ascii').split(' ');
+  const size = Number(rawSize);
+  if (
+    objectId !== entry.objectId
+    || objectType !== 'blob'
+    || !Number.isSafeInteger(size)
+    || size < 0
+  ) {
+    throw new Error(`git cat-file ${command} returned invalid metadata for ${entry.objectId}`);
+  }
+  return size;
+}
+
 function attachBlobSizes(batchOutput, entries) {
   const lines = batchOutput.toString('ascii').trimEnd().split('\n');
   if (lines.length !== entries.length) {
     throw new Error('git cat-file --batch-check returned an unexpected number of entries');
   }
-  return entries.map((entry, index) => {
-    const [objectId, objectType, rawSize] = lines[index].split(' ');
-    const size = Number(rawSize);
-    if (
-      objectId !== entry.objectId
-      || objectType !== 'blob'
-      || !Number.isSafeInteger(size)
-      || size < 0
-    ) {
-      throw new Error(`git cat-file --batch-check returned invalid metadata for ${entry.objectId}`);
-    }
-    return { ...entry, size };
-  });
+  return entries.map((entry, index) => ({
+    ...entry,
+    size: parseBatchHeader(lines[index], entry, '--batch-check'),
+  }));
 }
 
 function blobBatches(entries) {
@@ -100,39 +105,29 @@ function parseIndexEntries(buffer) {
   });
 }
 
-function blobsContainingNul(batchOutput, entries) {
-  const offenders = [];
+function decodeBlobBatch(batchOutput, entries) {
+  const records = [];
   let offset = 0;
   for (const entry of entries) {
     const headerEnd = batchOutput.indexOf(0x0a, offset);
     if (headerEnd < 0) throw new Error('git cat-file --batch returned a truncated header');
-    const [objectId, objectType, rawSize] = batchOutput
-      .subarray(offset, headerEnd)
-      .toString('ascii')
-      .split(' ');
-    const size = Number(rawSize);
-    if (
-      objectId !== entry.objectId
-      || objectType !== 'blob'
-      || !Number.isSafeInteger(size)
-      || size < 0
-    ) {
-      throw new Error(`git cat-file --batch returned invalid metadata for ${entry.objectId}`);
-    }
+    const size = parseBatchHeader(
+      batchOutput.subarray(offset, headerEnd),
+      entry,
+      '--batch',
+    );
     const contentStart = headerEnd + 1;
     const contentEnd = contentStart + size;
     if (contentEnd >= batchOutput.length || batchOutput[contentEnd] !== 0x0a) {
       throw new Error(`git cat-file --batch returned a truncated blob for ${entry.objectId}`);
     }
-    if (batchOutput.subarray(contentStart, contentEnd).includes(0)) {
-      offenders.push(entry.filePath);
-    }
+    records.push({ filePath: entry.filePath, contents: batchOutput.subarray(contentStart, contentEnd) });
     offset = contentEnd + 1;
   }
   if (offset !== batchOutput.length) {
     throw new Error('git cat-file --batch returned unexpected trailing output');
   }
-  return offenders;
+  return records;
 }
 
 function isExplicitBinaryPath(filePath) {
@@ -147,27 +142,26 @@ function isExplicitBinaryPath(filePath) {
     || TRACKED_BINARY_PATHS.suffixes.some((suffix) => diagnosticPath.endsWith(suffix));
 }
 
-/** Return non-binary tracked paths containing at least one literal NUL byte. */
-export function findTrackedFilesWithNul({
+/**
+ * Yield regular staged files from Git's object database in bounded batches.
+ * Candidate-controlled worktree paths are never opened; symlinks and gitlinks
+ * are excluded by their index modes before any blob contents are requested.
+ */
+export function* readTrackedBlobs({
   repoRoot = REPO_ROOT,
   spawnProcess = spawnSync,
 } = {}) {
-  // Read regular blobs from Git's object database, never candidate-controlled filesystem paths.
-  // Mode 120000 symlinks and 160000 gitlinks are deliberately skipped; neither is a text-file
-  // payload, and following either through the worktree would escape the trusted scan boundary.
   const listing = runGit(spawnProcess, ['ls-files', '--stage', '-z'], repoRoot);
   if (listing.status !== 0) throw commandFailure('git ls-files --stage', listing);
   const entries = parseIndexEntries(listing.stdout).filter((entry) =>
     entry.stage === '0'
-    && (entry.mode === '100644' || entry.mode === '100755')
-    && !isExplicitBinaryPath(entry.filePath));
-  if (entries.length === 0) return [];
+    && (entry.mode === '100644' || entry.mode === '100755'));
+  if (entries.length === 0) return;
 
   const input = Buffer.from(`${entries.map((entry) => entry.objectId).join('\n')}\n`, 'ascii');
   const metadata = runGit(spawnProcess, ['cat-file', '--batch-check'], repoRoot, input);
   if (metadata.status !== 0) throw commandFailure('git cat-file --batch-check', metadata);
 
-  const offenders = [];
   for (const batch of blobBatches(attachBlobSizes(metadata.stdout, entries))) {
     const batchInput = Buffer.from(`${batch.map((entry) => entry.objectId).join('\n')}\n`, 'ascii');
     const expectedOutputBytes = batch.reduce((sum, entry) => sum + entry.size + 128, 0);
@@ -179,7 +173,18 @@ export function findTrackedFilesWithNul({
       Math.max(1024, expectedOutputBytes),
     );
     if (blobs.status !== 0) throw commandFailure('git cat-file --batch', blobs);
-    offenders.push(...blobsContainingNul(blobs.stdout, batch));
+    yield* decodeBlobBatch(blobs.stdout, batch);
+  }
+}
+
+/** Return non-binary tracked paths containing at least one literal NUL byte. */
+export function findTrackedFilesWithNul({
+  repoRoot = REPO_ROOT,
+  readTrackedBlobs: readBlobs = readTrackedBlobs,
+} = {}) {
+  const offenders = [];
+  for (const { filePath, contents } of readBlobs({ repoRoot })) {
+    if (!isExplicitBinaryPath(filePath) && contents.includes(0)) offenders.push(filePath);
   }
   return offenders;
 }

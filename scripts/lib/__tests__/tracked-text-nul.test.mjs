@@ -7,95 +7,28 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   findTrackedFilesWithNul,
+  readTrackedBlobs,
   runTrackedTextNulCheck,
   TRACKED_BINARY_PATHS,
 } from '../../ci/check-tracked-text-nul.mjs';
 
 const CHECKER_PATH = fileURLToPath(new URL('../../ci/check-tracked-text-nul.mjs', import.meta.url));
 
-function result(status, stdout = Buffer.alloc(0), stderr = Buffer.alloc(0)) {
-  return { status, stdout, stderr, error: undefined, signal: null };
-}
-
-function indexEntry(mode, objectId, filePath) {
-  return Buffer.concat([
-    Buffer.from(`${mode} ${objectId} 0\t`),
-    filePath,
-    Buffer.from([0]),
-  ]);
-}
-
-function batchBlob(objectId, contents) {
-  return Buffer.concat([
-    Buffer.from(`${objectId} blob ${contents.length}\n`),
-    contents,
-    Buffer.from('\n'),
-  ]);
-}
-
-function batchCheck(objectId, contents) {
-  return Buffer.from(`${objectId} blob ${contents.length}\n`);
-}
-
-test('enumerates every tracked path once and classifies file buffers', () => {
-  const calls = [];
-  const cleanObject = 'a'.repeat(40);
-  const brokenObject = 'b'.repeat(40);
-  const cleanContents = Buffer.from('const clean = true;');
-  const brokenContents = Buffer.from([0x23, 0x20, 0x00, 0x62]);
+test('classifies semantic tracked blob records without depending on Git wire details', () => {
+  const invalidBinaryLookingPath = Buffer.concat([Buffer.from([0xff]), Buffer.from('.png')]);
   const offenders = findTrackedFilesWithNul({
-    repoRoot: '/repo',
-    spawnProcess(command, args, options) {
-      calls.push([command, args]);
-      if (args[0] === 'ls-files') {
-        return result(0, Buffer.concat([
-          indexEntry('100644', cleanObject, Buffer.from('clean.ts')),
-          indexEntry('100644', brokenObject, Buffer.from('broken.md')),
-          indexEntry('120000', 'd'.repeat(40), Buffer.from('payload-link')),
-          indexEntry('160000', 'e'.repeat(40), Buffer.from('nested-repository')),
-        ]));
-      }
-      if (args[1] === '--batch-check') {
-        assert.equal(options.input.toString('ascii'), `${cleanObject}\n${brokenObject}\n`);
-        return result(0, Buffer.concat([
-          batchCheck(cleanObject, cleanContents),
-          batchCheck(brokenObject, brokenContents),
-        ]));
-      }
-      assert.deepEqual(args, ['cat-file', '--batch']);
-      assert.equal(options.input.toString('ascii'), `${cleanObject}\n${brokenObject}\n`);
-      return result(0, Buffer.concat([
-        batchBlob(cleanObject, cleanContents),
-        batchBlob(brokenObject, brokenContents),
-      ]));
-    },
+    readTrackedBlobs: () => [
+      { filePath: Buffer.from('clean.ts'), contents: Buffer.from('const clean = true;') },
+      { filePath: Buffer.from('broken.md'), contents: Buffer.from([0x23, 0x00, 0x62]) },
+      { filePath: Buffer.from('intentional.png'), contents: Buffer.from([0x89, 0x00, 0x47]) },
+      { filePath: invalidBinaryLookingPath, contents: Buffer.from([0x89, 0x00, 0x47]) },
+    ],
   });
 
-  assert.deepEqual(offenders, [Buffer.from('broken.md')]);
-  assert.equal(calls.length, 3);
-  assert.deepEqual(calls[0][1], ['ls-files', '--stage', '-z']);
+  assert.deepEqual(offenders, [Buffer.from('broken.md'), invalidBinaryLookingPath]);
 });
 
-test('preserves and inspects invalid UTF-8 pathname bytes even with a binary-looking suffix', () => {
-  const invalidPath = Buffer.concat([Buffer.from([0xff]), Buffer.from('.png')]);
-  const objectId = 'c'.repeat(40);
-  const offenders = findTrackedFilesWithNul({
-    repoRoot: '/repo',
-    spawnProcess(_command, args) {
-      if (args[0] === 'ls-files') {
-        return result(0, indexEntry('100644', objectId, invalidPath));
-      }
-      if (args[1] === '--batch-check') {
-        return result(0, batchCheck(objectId, Buffer.from([0x61, 0x00, 0x62])));
-      }
-      return result(0, batchBlob(objectId, Buffer.from([0x61, 0x00, 0x62])));
-    },
-  });
-
-  assert.deepEqual(offenders, [invalidPath]);
-});
-
-test('real Git checkout checks unknown formats and exempts only explicit binaries', (t) => {
+test('Git adapter reads staged regular blobs and never follows symlinks', (t) => {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-text-nul-'));
   t.after(() => fs.rmSync(repoRoot, { recursive: true, force: true }));
   const git = (...args) => {
@@ -108,7 +41,19 @@ test('real Git checkout checks unknown formats and exempts only explicit binarie
   fs.writeFileSync(path.join(repoRoot, 'docs', 'readme.md'), Buffer.from([0x23, 0x00, 0x20]));
   fs.writeFileSync(path.join(repoRoot, 'future-source.cts'), Buffer.from([0x61, 0x00, 0x62]));
   fs.writeFileSync(path.join(repoRoot, 'image.png'), Buffer.from([0x89, 0x50, 0x00, 0x47]));
+  fs.writeFileSync(path.join(repoRoot, 'untracked-target.bin'), Buffer.from([0x61, 0x00, 0x62]));
+  fs.symlinkSync('untracked-target.bin', path.join(repoRoot, 'payload'));
   git('add', '--all');
+  git('reset', '--quiet', 'untracked-target.bin');
+
+  // The adapter reads the staged object, not this clean worktree replacement.
+  fs.writeFileSync(path.join(repoRoot, 'broken.mjs'), 'export const clean = true;\n');
+  const records = [...readTrackedBlobs({ repoRoot })];
+  const recordPaths = records.map(({ filePath }) => filePath.toString('utf8'));
+  assert.equal(records.find(({ filePath }) => filePath.equals(Buffer.from('broken.mjs')))
+    ?.contents.includes(0), true);
+  assert.equal(recordPaths.includes('payload'), false);
+  assert.equal(recordPaths.includes('untracked-target.bin'), false);
 
   const errors = [];
   assert.equal(runTrackedTextNulCheck({
@@ -121,33 +66,10 @@ test('real Git checkout checks unknown formats and exempts only explicit binarie
   assert.match(errors.join('\n'), /future-source\.cts/);
   assert.doesNotMatch(errors.join('\n'), /image\.png/);
 
-  fs.writeFileSync(path.join(repoRoot, 'broken.mjs'), 'export const clean = true;\n');
   fs.writeFileSync(path.join(repoRoot, 'docs', 'readme.md'), '# clean\n');
   fs.writeFileSync(path.join(repoRoot, 'future-source.cts'), 'export const clean = true;\n');
   git('add', 'broken.mjs', 'docs/readme.md', 'future-source.cts');
   assert.equal(runTrackedTextNulCheck({ repoRoot, log() {}, logError() {} }), 0);
-});
-
-test('real Git scan skips symlinks instead of opening their NUL-containing targets', (t) => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-text-nul-symlink-'));
-  t.after(() => fs.rmSync(repoRoot, { recursive: true, force: true }));
-  const git = (...args) => {
-    const invocation = spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8' });
-    assert.equal(invocation.status, 0, invocation.stderr);
-  };
-  git('init', '--quiet');
-  fs.writeFileSync(
-    path.join(repoRoot, 'untracked-target.bin'),
-    Buffer.from([0x61, 0x00, 0x62]),
-  );
-  fs.symlinkSync('untracked-target.bin', path.join(repoRoot, 'payload'));
-  fs.writeFileSync(path.join(repoRoot, 'regular.txt'), Buffer.from([0x61, 0x00, 0x62]));
-  git('add', 'payload', 'regular.txt');
-
-  const offenders = findTrackedFilesWithNul({ repoRoot }).map((filePath) =>
-    filePath.toString('utf8'));
-
-  assert.deepEqual(offenders, ['regular.txt']);
 });
 
 test('the binary exception inventory is narrow and explicit', () => {
