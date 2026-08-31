@@ -30,9 +30,21 @@
  * machine-readable repo-root `blazegraph-image.json` runtime asset.
  */
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import * as net from 'node:net';
+import blazegraphRuntimeContract from
+  '@origintrail-official/dkg/blazegraph-runtime-contract';
+import {
+  BlazegraphNamespaceManager,
+  blazegraphNamespaceApiUrlFromBaseUrl,
+  normalizeBlazegraphNamespace,
+} from '@origintrail-official/dkg-storage';
 import { runtimeAssetPaths } from '../runtime-assets.js';
+
+const {
+  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: NAMESPACE_XML_TEMPLATE,
+  readBlazegraphImageMetadata,
+} = blazegraphRuntimeContract;
+type BlazegraphImageMetadata = ReturnType<typeof readBlazegraphImageMetadata>;
 
 /**
  * Pinned multi-architecture image index — matches the deployed mainnet fleet.
@@ -42,22 +54,6 @@ import { runtimeAssetPaths } from '../runtime-assets.js';
  * Keep the OCI-index digest immutable: CI reads the same metadata file and
  * requires both linux/amd64 and linux/arm64 manifests.
  */
-interface BlazegraphImageMetadata {
-  image: string;
-  containerPort: number;
-  dataPath: string;
-}
-
-interface BlazegraphRuntimeContract {
-  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: string;
-  readBlazegraphImageMetadata(path: string): BlazegraphImageMetadata;
-}
-
-const require = createRequire(import.meta.url);
-const { BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: NAMESPACE_XML_TEMPLATE, readBlazegraphImageMetadata } = require(
-  '../../blazegraph-image-metadata.cjs',
-) as BlazegraphRuntimeContract;
-
 /**
  * Shared XML template for a Blazegraph namespace tuned for DKG V10
  * (quads enabled, no truth maintenance, no text index, no statement
@@ -234,13 +230,7 @@ function sanitiseContainerName(namespace: string): string {
 }
 
 export function normaliseBlazegraphNamespace(namespace: string): string {
-  const slug = namespace
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase();
-  return slug || 'dkg-node';
+  return normalizeBlazegraphNamespace(namespace);
 }
 
 function sparqlUrlForNamespace(baseUrl: string, namespace: string): string {
@@ -458,62 +448,23 @@ async function waitForBlazegraphReady(opts: {
   );
 }
 
-async function namespaceExists(opts: {
-  url: string;
-  namespace: string;
-  fetch: typeof globalThis.fetch;
-}): Promise<boolean> {
-  // Blazegraph exposes per-namespace metadata at
-  // `/bigdata/namespace/<ns>/sparql/properties`. A 200 means present.
-  try {
-    const r = await opts.fetch(
-      `${opts.url}/bigdata/namespace/${encodeURIComponent(opts.namespace)}/sparql/properties`,
-      { method: 'GET' },
-    );
-    return r.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function createNamespace(opts: {
-  url: string;
-  namespace: string;
-  fetch: typeof globalThis.fetch;
-  log: (msg: string) => void;
-}): Promise<void> {
-  const body = BLAZEGRAPH_NAMESPACE_XML_TEMPLATE.replace(
-    '{namespace}',
-    opts.namespace,
-  );
-  const r = await opts.fetch(`${opts.url}/bigdata/namespace`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/xml' },
-    body,
-  });
-  if (!r.ok) {
-    let detail = '';
-    try { detail = (await r.text()).slice(0, 200); } catch { /* ignore */ }
-    throw new Error(
-      `Failed to create Blazegraph namespace "${opts.namespace}" — HTTP ${r.status}${detail ? `: ${detail}` : ''}`,
-    );
-  }
-  opts.log(`  Created Blazegraph namespace "${opts.namespace}".`);
-}
-
 async function reconcileNamespace(opts: {
   url: string;
   namespace: string;
   fetch: typeof globalThis.fetch;
   log: (msg: string) => void;
 }): Promise<boolean> {
-  const created = !(await namespaceExists(opts));
-  if (created) {
-    await createNamespace(opts);
+  const manager = new BlazegraphNamespaceManager({
+    namespaceApiUrl: blazegraphNamespaceApiUrlFromBaseUrl(opts.url),
+    fetchImpl: opts.fetch,
+  });
+  const result = await manager.ensure(opts.namespace);
+  if (result.created) {
+    opts.log(`  Created Blazegraph namespace "${opts.namespace}".`);
   } else {
     opts.log(`  Namespace "${opts.namespace}" already exists.`);
   }
-  return created;
+  return result.created;
 }
 
 async function finaliseReusedContainer(opts: {

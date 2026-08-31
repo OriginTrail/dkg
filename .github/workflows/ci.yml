@@ -501,7 +501,7 @@ jobs:
   tornado-blazegraph:
     name: "Tornado: storage Blazegraph integration (live server)"
     needs: [changes, build]
-    if: needs.changes.outputs.tornado_blazegraph == 'true'
+    if: needs.changes.outputs.tornado_blazegraph == 'true' || needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -540,10 +540,11 @@ jobs:
           echo "::error::Blazegraph did not become ready within 120s"
           exit 1
 
-      - name: "Storage Blazegraph integration tests (no mocks)"
+      - name: "Storage and RFC-64 rollout Blazegraph integration tests (no mocks)"
         env:
-          # Stock image ships the default `kb` namespace; that's all the
-          # adapter needs (it isolates per-test via unique GRAPH IRIs).
+          # Stock image ships the default `kb` namespace. Storage tests isolate
+          # through unique GRAPH IRIs; the rollout certificate derives the
+          # namespace API and creates separate temporary author/receiver stores.
           BLAZEGRAPH_TEST_URL: http://127.0.0.1:9999/bigdata/namespace/kb/sparql
         # term-canon-blazegraph-oracle: cross-backend V10 leaf agreement (OT-RFC-57)
         # — proves an oxigraph node and a Blazegraph node compute the SAME merkle
@@ -555,7 +556,9 @@ jobs:
         # concurrent inserts intermittently fail with `IllegalStateException:
         # STREAM` and leave later requests timing out. Keep the unit lanes
         # parallel; serialize only these live-server files.
-        run: pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
+        run: |
+          pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
+          DKG_RFC64_GATE1_STORE_BACKEND=blazegraph node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
 
   # ------------------------------------------------------------------
   # Tornado publisher lane — sharded across 4 parallel runners.
@@ -672,9 +675,12 @@ jobs:
           node ../../scripts/ci/run-vitest-junit.mjs \
             --lane agent --shard ${{ matrix.shard }} \
             -- "${SHARD_FILES[@]}"
-      - name: RFC-64 rollout transition certificate
+      - name: "RFC-64 rollout transition certificate (Oxigraph)"
         if: matrix.shard == 10
-        run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-transition.test.ts
+        run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
+      - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
+        if: matrix.shard == 10
+        run: pnpm test:gate1:rfc64-public-open-harness
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit

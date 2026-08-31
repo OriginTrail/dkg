@@ -1,4 +1,17 @@
 export {
+  BlazegraphNamespaceManager,
+  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
+  assertBlazegraphNamespace,
+  blazegraphNamespaceApiUrlFromBaseUrl,
+  blazegraphNamespaceApiUrlFromSparqlEndpoint,
+  normalizeBlazegraphNamespace,
+  normalizeBlazegraphNamespaceApiUrl,
+  renderBlazegraphNamespaceXml,
+  type BlazegraphNamespaceDisposeOptions,
+  type BlazegraphNamespaceEnsureResult,
+  type BlazegraphNamespaceManagerOptions,
+} from './blazegraph-namespace-manager.js';
+export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,

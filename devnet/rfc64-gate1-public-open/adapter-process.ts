@@ -19,7 +19,7 @@ import {
   type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
-  OxigraphStore,
+  createTripleStore,
   quadsToNQuads,
   type Quad,
 } from '@origintrail-official/dkg-storage';
@@ -42,6 +42,10 @@ import {
   Gate1RolloutAdapterFixture,
   parseGate1RolloutAdapterConfig,
 } from './rollout-adapter-fixture.js';
+import {
+  rolloutStoreBackendForBinding,
+  rolloutStoreBindingFromEnv,
+} from './rollout-store-config.js';
 
 const roleInput = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
@@ -54,6 +58,9 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 
 const dataDir = resolve(dataDirInput);
 const role: 'author' | 'receiver' = roleInput;
+const storeBinding = rolloutStoreBindingFromEnv(process.env, dataDir);
+const storeBackend = rolloutStoreBackendForBinding(storeBinding);
+const storeSentinelGraph = storeBinding.sentinelGraph;
 const pinnedMasterKeyHex = masterKeyHex;
 const rolloutConfig = parseGate1RolloutAdapterConfig(process.env);
 const rolloutMode = rolloutConfig?.mode ?? null;
@@ -113,7 +120,12 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
-  const store = new OxigraphStore(join(dataDir, 'store.nq'));
+  const store = await createTripleStore(storeBinding.tripleStore);
+  const storeSentinelVerified = await store.hasGraph(storeSentinelGraph);
+  if (!storeSentinelVerified) {
+    await store.close();
+    throw new Error(`selected store does not contain fixture sentinel ${storeSentinelGraph}`);
+  }
   rolloutFixture = rolloutConfig === null
     ? undefined
     : await Gate1RolloutAdapterFixture.create(rolloutConfig, role, store);
@@ -149,6 +161,8 @@ async function boot(): Promise<void> {
     protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
     rolloutKillSwitch,
     rolloutMode,
+    storeBackend,
+    storeSentinelVerified,
     startupRepair: null,
   });
 }
@@ -379,8 +393,9 @@ interface HarnessVerifiedControlObjectV1 {
 /**
  * Harness-only adversarial setup. Both signatures are cryptographically valid,
  * but the head claims the catalog author while naming an attacker-scoped
- * direct-author delegation. The product receiver must reject that exact scope
- * mismatch before activation or applied-head mutation.
+ * direct-author delegation. The product's scope-closed provider/receiver path
+ * must reject that exact mismatch before activation or applied-head mutation,
+ * without exposing whether the requested digest exists.
  */
 async function prepareForgedAuthorizationGenesis(
   currentAgent: DKGAgent,

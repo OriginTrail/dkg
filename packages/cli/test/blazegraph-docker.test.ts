@@ -36,6 +36,8 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import blazegraphRuntimeContract from
+  '@origintrail-official/dkg/blazegraph-runtime-contract';
 import { runtimeAssetPaths } from '../src/runtime-assets.js';
 import {
   provisionBlazegraphDocker,
@@ -719,6 +721,19 @@ describe('provisionBlazegraphDocker', () => {
     );
     expect(normaliseBlazegraphNamespace('dkg.node_01')).toBe('dkg.node_01');
     expect(normaliseBlazegraphNamespace('   ')).toBe('dkg-node');
+    expect(normaliseBlazegraphNamespace('.')).toBe('dkg-node');
+    expect(normaliseBlazegraphNamespace('..')).toBe('dkg-node');
+    const longNamespace = normaliseBlazegraphNamespace('a'.repeat(129));
+    expect(longNamespace).toHaveLength(128);
+    expect(longNamespace).toMatch(/^a{115}-[0-9a-f]{12}$/u);
+    expect(() => blazegraphRuntimeContract.assertBlazegraphNamespace(longNamespace)).not.toThrow();
+    const commonPrefix = 'a'.repeat(160);
+    const first = normaliseBlazegraphNamespace(`${commonPrefix}-first-tail`);
+    const second = normaliseBlazegraphNamespace(`${commonPrefix}-second-tail`);
+    expect(first).toHaveLength(128);
+    expect(second).toHaveLength(128);
+    expect(first).not.toBe(second);
+    expect(normaliseBlazegraphNamespace(`${commonPrefix}-first-tail`)).toBe(first);
   });
 });
 
