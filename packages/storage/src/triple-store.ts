@@ -19,7 +19,7 @@ import {
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
-  Rfc64SemanticReadOperationV2,
+  Rfc64SemanticReadOperationV1,
   Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
 import type {
@@ -130,7 +130,7 @@ export interface TripleStore {
   /** Explicit opt-in for adapters covered by the RFC-64 semantic-read suite. */
   readonly rfc64SemanticReadCertifiedV1?: boolean;
   rfc64SemanticReadV1?(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<Readonly<{
     rows: readonly Rfc64SemanticStoreRowV1[];

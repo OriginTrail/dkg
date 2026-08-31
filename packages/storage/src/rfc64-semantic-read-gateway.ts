@@ -1,5 +1,5 @@
 import {
-  compileRfc64SemanticReadRequestV2,
+  compileRfc64SemanticReadOperationV1,
   decodeRfc64SemanticRecordStoreRowsV1,
   Rfc64SemanticRecordErrorV1,
   Rfc64SemanticReadManifestErrorV1,
@@ -87,8 +87,15 @@ export class SyncSemanticStoreV1 {
   ): Promise<Rfc64SemanticReadResultV1> {
     let operation;
     try {
-      operation = compileRfc64SemanticReadRequestV2(input);
+      const request = snapshotExactOrdinaryDataRecord(
+        input,
+        ['coordinate'],
+        'RFC-64 semantic read request',
+        (message) => fail('rfc64-semantic-read-request', message),
+      );
+      operation = compileRfc64SemanticReadOperationV1(request.coordinate);
     } catch (cause) {
+      if (cause instanceof Rfc64SemanticReadGatewayErrorV1) throw cause;
       if (cause instanceof Rfc64SemanticReadManifestErrorV1) {
         fail('rfc64-semantic-read-request', cause.message, cause);
       }

@@ -7,7 +7,7 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
 import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
 import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
-import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
+import type { Rfc64SemanticReadOperationV1 } from '@origintrail-official/dkg-core';
 import {
   normalizeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -261,7 +261,7 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ) {
     return executeRfc64SemanticReadCapabilityV1(this, operation, options);
