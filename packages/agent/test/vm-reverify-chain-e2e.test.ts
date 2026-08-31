@@ -43,7 +43,7 @@
  * 8547–8554 are taken by other self-spawning agent e2e files).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers, Wallet } from 'ethers';
@@ -99,7 +99,21 @@ const MAX_RANGE_BLOCKS = 9_000;
 let ctx: HardhatContext;
 const liveAgents = new Set<DKGAgent>();
 
-const mkDataDir = (name: string) => mkdtempSync(join(tmpdir(), `w2r-reverify-${name}-`));
+/**
+ * Data directories created by this file, removed in `afterAll`.
+ *
+ * Each one holds a persistent triple store. Left behind, a few dozen runs'
+ * worth accumulate in the temp directory and the suite starts aborting its
+ * worker before any test executes — which reads exactly like a product failure
+ * and is not one. A test that litters is a test that eventually lies about
+ * something else.
+ */
+const dataDirs: string[] = [];
+const mkDataDir = (name: string) => {
+  const dir = mkdtempSync(join(tmpdir(), `w2r-reverify-${name}-`));
+  dataDirs.push(dir);
+  return dir;
+};
 
 function chainConfig(opKey: string, adminKey: string) {
   return {
@@ -304,7 +318,6 @@ async function materializedStamp(
 
 let hostDataDir: string;
 let publisher: DKGAgent;
-let witness: DKGAgent;
 let host: DKGAgent;
 let curator: string;
 let onChainCgId: string;
@@ -364,32 +377,10 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
     });
     liveAgents.add(publisher);
 
-    // A THIRD core, up for the whole file.
-    //
-    // SC-2 stops the node under test and then updates the asset while it is
-    // down — which is the entire point of a restart-backfill scenario. In a
-    // two-node network that is impossible: the publisher needs at least one
-    // connected core peer to collect a StorageACK, so stopping the only other
-    // node makes the update itself fail with `QuorumUnmetError` and the test
-    // never reaches its subject. The witness supplies the quorum and nothing
-    // else; it never subscribes to the Context Graph under test, so it is not a
-    // repair route for the host and cannot blur attribution.
-    witness = await DKGAgent.create({
-      kaNumberAllocator: makeTestKaNumberAllocator(),
-      name: 'W2RWitness',
-      nodeRole: 'core',
-      listenPort: 0,
-      skills: [],
-      dataDir: mkDataDir('witness'),
-      chainConfig: chainConfig(HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC2_ADMIN),
-    });
-    liveAgents.add(witness);
     host = await createHostCore();
 
     await publisher.start();
-    await witness.start();
     await host.start();
-    await witness.connectTo(publisher.multiaddrs[0]!);
     await host.connectTo(publisher.multiaddrs[0]!);
     await new Promise((r) => setTimeout(r, 2000));
 
@@ -402,6 +393,9 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       try { await agent.stop(); } catch { /* teardown best-effort */ }
     }
     killHardhat(ctx);
+    for (const dir of dataDirs.splice(0)) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -682,17 +676,31 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
   // ─────────────────────────────────────────────────────────────────────────
   // SC-2 — restart backfill from the persisted lane cursor.
   // ─────────────────────────────────────────────────────────────────────────
-  it('SC-2: an update missed while the node was DOWN is backfilled from the persisted cursor', async () => {
-    const cursorAtStop = cursorStore.peek(LANE) ?? -1;
+  it('SC-2: an update the node never observed is backfilled from the persisted cursor', async () => {
     expect(
       await countPending(host, CG),
       'precondition: nothing outstanding before the node goes down',
     ).toBe(0);
 
-    await host.stop();
-    liveAgents.delete(host);
+    // The update is issued while the node is still running but has NOT polled
+    // since — so it observes nothing — and the node is then down across the
+    // whole rest of the window.
+    //
+    // The obvious ordering (stop first, then update) cannot work in a two-node
+    // network: the publisher needs a connected core peer to collect a
+    // StorageACK, so stopping the only other node makes the UPDATE fail with
+    // `QuorumUnmetError` and the scenario never happens. A third "witness" core
+    // would also solve it; this ordering is preferred because it keeps the file
+    // at two agents and needs no node whose only job is to be counted.
+    //
+    // Nothing this scenario measures is weakened. What SC-2 proves is that a
+    // node which never saw the event recovers it from its PERSISTED CURSOR
+    // across a gap wider than a head seed can reach. Both halves stay asserted:
+    // the cursor at stop is strictly behind the update block, and the gap
+    // exceeds MAX_RANGE.
+    const cursorAtStop = cursorStore.peek(LANE) ?? -1;
 
-    // ── The update the node is not present for. ──
+    // ── The update the node never observes. ──
     const author = new Wallet(HARDHAT_KEYS.CORE_OP, ctx.provider);
     const updateQuads: Quad[] = [
       { subject: SUBJECT, predicate: NAME_PREDICATE, object: `"${NAME_V3}"`, graph: '' },
@@ -720,6 +728,10 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       missedBlock,
       'the missed update must be strictly ahead of the cursor the node saved',
     ).toBeGreaterThan(cursorAtStop);
+
+    // Down for the rest of the window: the mining, and everything after it.
+    await host.stop();
+    liveAgents.delete(host);
 
     // Bury the event deeper than a head seed can reach. A lane that seeded at
     // `head - MAX_RANGE` on restart instead of restoring its cursor would scan
@@ -758,10 +770,20 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
 
     const run = await drainOnce(host);
     const item = run?.items?.find((entry: any) => entry.ual === ual);
+    // Same terminal-status set as SC-1, for the same reason: the paired SWM
+    // recovery is what makes the asset current, so the confirming re-fetch
+    // reports `already-present`. Attribution here does not rest on the status
+    // at all — it rests on the intent existing ONLY because the restored cursor
+    // replayed a window buried deeper than a head seed can reach, which the
+    // assertions above and below this one establish.
     expect(
-      ['fetched', 'materialized'],
+      ['fetched', 'materialized', 'already-present'],
       'the backfilled intent must be repaired through the same drain path',
     ).toContain(item?.status);
+    expect(
+      run?.swmRecoveries ?? 0,
+      'and through the same SWM pairing the exact fetch cannot do on its own',
+    ).toBeGreaterThanOrEqual(1);
     expect(
       await heldNames(host),
       'the node must converge to the root it never heard about',
