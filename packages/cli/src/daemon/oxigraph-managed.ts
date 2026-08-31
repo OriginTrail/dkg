@@ -25,9 +25,9 @@
 import { join } from 'node:path';
 import { DEFAULT_SPARQL_HTTP_TIMEOUT_MS } from '@origintrail-official/dkg-storage';
 import {
-  ensureOxigraphBinary,
   OXIGRAPH_VERSION,
   resolveOxigraphBinary,
+  type OxigraphBinaryIo,
 } from './oxigraph-binary.js';
 import {
   startOxigraphServer,
@@ -348,7 +348,7 @@ export interface StartManagedOxigraphOptions {
   log?: (msg: string) => void;
   platform?: NodeJS.Platform;
   arch?: string;
-  binaryIo?: Parameters<typeof ensureOxigraphBinary>[0]['io'];
+  binaryIo?: Partial<OxigraphBinaryIo>;
   serverIo?: Partial<OxigraphServerIo>;
   readyTimeoutMs?: number;
 }

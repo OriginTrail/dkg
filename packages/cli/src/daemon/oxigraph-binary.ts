@@ -38,7 +38,7 @@
  * Every external boundary (fetch, fs, platform/arch, xattr) is injectable
  * so the unit tests run without network or real downloads.
  */
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   access,
@@ -55,6 +55,8 @@ import { join } from 'node:path';
 
 /** Pinned Oxigraph release. Bump deliberately (re-pin checksums below). */
 export const OXIGRAPH_VERSION = '0.5.8';
+export const OXIGRAPH_VERSION_PROBE_TIMEOUT_MS = 5_000;
+const OXIGRAPH_VERSION_OUTPUT_MAX_BYTES = 4_096;
 
 interface OxigraphAsset {
   /** GitHub release asset filename. */
@@ -147,36 +149,55 @@ export interface OxigraphBinaryIo {
   stat: typeof stat;
   access: typeof access;
   /** Read and parse the selected executable's own `--version` output. */
-  probeVersion: (path: string) => Promise<string>;
+  probeVersion: (path: string, timeoutMs?: number) => Promise<string>;
   /** Clear the macOS quarantine xattr; best-effort, never throws. */
   clearQuarantine: (path: string) => Promise<void>;
 }
 
-function defaultProbeVersion(path: string): Promise<string> {
+function parseOxigraphVersionOutput(output: string): string | null {
+  return output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)/u)?.[1] ?? null;
+}
+
+function defaultProbeVersion(
+  path: string,
+  timeoutMs = OXIGRAPH_VERSION_PROBE_TIMEOUT_MS,
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(path, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    const collect = (chunk: Buffer | string) => {
-      const buffer = Buffer.from(chunk);
-      bytes += buffer.length;
-      if (bytes > 4_096) {
-        child.kill();
-        reject(new Error(`Oxigraph --version output from ${path} exceeded 4096 bytes`));
+    execFile(path, ['--version'], {
+      encoding: 'utf8',
+      killSignal: 'SIGTERM',
+      maxBuffer: OXIGRAPH_VERSION_OUTPUT_MAX_BYTES,
+      timeout: timeoutMs,
+    }, (error, stdout, stderr) => {
+      const output = `${stdout}\n${stderr}`.trim();
+      if (error) {
+        if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          reject(new Error(
+            `Oxigraph --version output from ${path} exceeded `
+            + `${OXIGRAPH_VERSION_OUTPUT_MAX_BYTES} bytes`,
+          ));
+        } else if (error.killed) {
+          reject(new Error(`Oxigraph --version probe for ${path} timed out after ${timeoutMs}ms`));
+        } else {
+          reject(new Error(
+            `Unable to determine Oxigraph version from ${path}`
+            + `${output ? `: ${output}` : ` (exit ${error.code ?? 'unknown'})`}`,
+          ));
+        }
         return;
       }
-      chunks.push(buffer);
-    };
-    child.stdout.on('data', collect);
-    child.stderr.on('data', collect);
-    child.once('error', reject);
-    child.once('close', (code) => {
-      const output = Buffer.concat(chunks).toString('utf8').trim();
-      const version = output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)/u)?.[1];
-      if (code !== 0 || !version) {
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > OXIGRAPH_VERSION_OUTPUT_MAX_BYTES) {
+        reject(new Error(
+          `Oxigraph --version output from ${path} exceeded `
+          + `${OXIGRAPH_VERSION_OUTPUT_MAX_BYTES} bytes`,
+        ));
+        return;
+      }
+      const version = parseOxigraphVersionOutput(output);
+      if (!version) {
         reject(new Error(
           `Unable to determine Oxigraph version from ${path}`
-          + `${output ? `: ${output}` : ` (exit ${code ?? 'unknown'})`}`,
+          + `${output ? `: ${output}` : ' (empty output)'}`,
         ));
         return;
       }
@@ -220,7 +241,7 @@ export interface ResolvedOxigraphBinary {
   version: string;
 }
 
-export interface EnsureOxigraphBinaryOptions {
+export interface ResolveOxigraphBinaryOptions {
   /** Directory to cache the binary under (e.g. `<DKG_HOME>/oxigraph`). */
   cacheDir: string;
   platform?: NodeJS.Platform;
@@ -228,6 +249,8 @@ export interface EnsureOxigraphBinaryOptions {
   log?: (msg: string) => void;
   /** Download timeout in ms. Default 120_000 (binaries are ~20 MB). */
   timeoutMs?: number;
+  /** System executable `--version` deadline. Default 5_000. */
+  versionProbeTimeoutMs?: number;
   io?: Partial<OxigraphBinaryIo>;
   /**
    * Override the resolved asset (url + integrity hash + cache filename).
@@ -303,7 +326,7 @@ async function resolveSystemOxigraphOnPath(
  * verified, marked executable, and installed atomically.
  */
 export async function resolveOxigraphBinary(
-  opts: EnsureOxigraphBinaryOptions,
+  opts: ResolveOxigraphBinaryOptions,
 ): Promise<ResolvedOxigraphBinary> {
   const io = { ...defaultIo(), ...opts.io };
   const log = opts.log ?? (() => {});
@@ -316,7 +339,7 @@ export async function resolveOxigraphBinary(
   if (!opts.asset && platform === 'linux' && (await isMuslLinux(io))) {
     const sys = await resolveSystemOxigraphOnPath(io, platform);
     if (sys) {
-      const version = await io.probeVersion(sys);
+      const version = await io.probeVersion(sys, opts.versionProbeTimeoutMs);
       log(`musl libc detected; using system Oxigraph ${version} binary on PATH: ${sys}`);
       return { path: sys, source: 'system', version };
     }
@@ -335,7 +358,7 @@ export async function resolveOxigraphBinary(
     // error's own remediation and look for a system `oxigraph` on PATH.
     const sys = await resolveSystemOxigraphOnPath(io, platform);
     if (sys) {
-      const version = await io.probeVersion(sys);
+      const version = await io.probeVersion(sys, opts.versionProbeTimeoutMs);
       log(`No pinned Oxigraph binary for this platform; using system Oxigraph ${version} on PATH: ${sys}`);
       return { path: sys, source: 'system', version };
     }
@@ -391,11 +414,4 @@ export async function resolveOxigraphBinary(
   await io.rename(tmp, target);
   log(`Oxigraph ${OXIGRAPH_VERSION} binary verified and installed at ${target}`);
   return { path: target, source: 'bundled', version: OXIGRAPH_VERSION };
-}
-
-/** Backward-compatible path-only facade for callers that do not plan runtime capabilities. */
-export async function ensureOxigraphBinary(
-  opts: EnsureOxigraphBinaryOptions,
-): Promise<string> {
-  return (await resolveOxigraphBinary(opts)).path;
 }

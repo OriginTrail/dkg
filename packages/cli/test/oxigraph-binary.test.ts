@@ -3,7 +3,7 @@
  *
  * The retired version faked BOTH the download (a fetch stub returning byte
  * fixtures) and the filesystem (an in-memory files map with chmod/rename
- * recorders). This version runs `ensureOxigraphBinary` against:
+ * recorders). This version runs `resolveOxigraphBinary` against:
  *   - a REAL local `node:http` server that serves the asset bytes (its
  *     request counter is real observation — a cache hit means the real
  *     server saw zero requests), returns tampered bytes for the checksum
@@ -27,7 +27,6 @@ import { mkdtemp, readFile, rm, stat, writeFile, chmod, access } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ensureOxigraphBinary,
   resolveOxigraphBinary,
   resolveOxigraphAsset,
   OXIGRAPH_ASSETS,
@@ -105,16 +104,20 @@ async function freshCache(): Promise<string> {
   return await mkdtemp(join(tmpdir(), 'oxi-bin-cache-'));
 }
 
-describe('ensureOxigraphBinary (real server + real filesystem)', () => {
+describe('resolveOxigraphBinary (real server + real filesystem)', () => {
   it('downloads, sha256-verifies, chmods 0o755, and lands the file atomically', async () => {
     const cacheDir = await freshCache();
     const before = hits;
     try {
-      const path = await ensureOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
-      expect(path).toBe(join(cacheDir, 'oxi-real-bin'));
+      const binary = await resolveOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
+      expect(binary).toEqual({
+        path: join(cacheDir, 'oxi-real-bin'),
+        source: 'bundled',
+        version: OXIGRAPH_VERSION,
+      });
       expect(hits - before).toBe(1); // the real server saw exactly one download
-      expect(new Uint8Array(await readFile(path))).toEqual(bytes);
-      const mode = (await stat(path)).mode & 0o777;
+      expect(new Uint8Array(await readFile(binary.path))).toEqual(bytes);
+      const mode = (await stat(binary.path)).mode & 0o777;
       expect(mode & 0o111, 'binary must be executable').toBeTruthy();
     } finally {
       await rm(cacheDir, { recursive: true, force: true });
@@ -126,8 +129,12 @@ describe('ensureOxigraphBinary (real server + real filesystem)', () => {
     try {
       await writeFile(join(cacheDir, 'oxi-real-bin'), bytes);
       const before = hits;
-      const path = await ensureOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
-      expect(path).toBe(join(cacheDir, 'oxi-real-bin'));
+      const binary = await resolveOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
+      expect(binary).toEqual({
+        path: join(cacheDir, 'oxi-real-bin'),
+        source: 'bundled',
+        version: OXIGRAPH_VERSION,
+      });
       expect(hits - before).toBe(0);
     } finally {
       await rm(cacheDir, { recursive: true, force: true });
@@ -139,7 +146,7 @@ describe('ensureOxigraphBinary (real server + real filesystem)', () => {
     try {
       await writeFile(join(cacheDir, 'oxi-real-bin'), new Uint8Array([9, 9, 9]));
       const before = hits;
-      await ensureOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
+      await resolveOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
       expect(hits - before).toBe(1);
       expect(new Uint8Array(await readFile(join(cacheDir, 'oxi-real-bin')))).toEqual(bytes);
     } finally {
@@ -151,7 +158,7 @@ describe('ensureOxigraphBinary (real server + real filesystem)', () => {
     const cacheDir = await freshCache();
     try {
       await expect(
-        ensureOxigraphBinary({ cacheDir, asset: assetFor('/tampered', 'oxi-real-bin'), log: () => {} }),
+        resolveOxigraphBinary({ cacheDir, asset: assetFor('/tampered', 'oxi-real-bin'), log: () => {} }),
       ).rejects.toThrow(/checksum mismatch/i);
       // The final path must not exist — the tampered download was discarded.
       await expect(access(join(cacheDir, 'oxi-real-bin'))).rejects.toThrow();
@@ -164,7 +171,7 @@ describe('ensureOxigraphBinary (real server + real filesystem)', () => {
     const cacheDir = await freshCache();
     try {
       await expect(
-        ensureOxigraphBinary({ cacheDir, asset: assetFor('/missing', 'oxi-real-bin'), log: () => {} }),
+        resolveOxigraphBinary({ cacheDir, asset: assetFor('/missing', 'oxi-real-bin'), log: () => {} }),
       ).rejects.toThrow(/HTTP 404/);
     } finally {
       await rm(cacheDir, { recursive: true, force: true });
@@ -209,7 +216,7 @@ describe('PATH fallback (real directories, real executables)', () => {
     process.env.PATH = `${pathDirA}:${pathDirB}`;
     try {
       const before = hits;
-      const path = await ensureOxigraphBinary({
+      const binary = await resolveOxigraphBinary({
         cacheDir,
         platform: 'linux',
         arch: 'x64',
@@ -218,7 +225,11 @@ describe('PATH fallback (real directories, real executables)', () => {
       });
       // The decoy in pathDirA is not executable (real X_OK check fails);
       // the real executable in pathDirB wins. No download happened.
-      expect(path).toBe(join(pathDirB, 'oxigraph'));
+      expect(binary).toEqual({
+        path: join(pathDirB, 'oxigraph'),
+        source: 'system',
+        version: '0.6.0',
+      });
       expect(hits - before).toBe(0);
     } finally {
       process.env.PATH = prevPath;
@@ -253,7 +264,7 @@ describe('PATH fallback (real directories, real executables)', () => {
     process.env.PATH = emptyDir;
     try {
       await expect(
-        ensureOxigraphBinary({
+        resolveOxigraphBinary({
           cacheDir,
           platform: 'linux',
           arch: 'x64',
@@ -265,6 +276,92 @@ describe('PATH fallback (real directories, real executables)', () => {
       process.env.PATH = prevPath;
       await rm(emptyDir, { recursive: true, force: true });
       await rm(cacheDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('system binary version probing', () => {
+  async function withSystemBinary<T>(
+    script: string,
+    run: (cacheDir: string) => Promise<T>,
+  ): Promise<T> {
+    const pathDir = await mkdtemp(join(tmpdir(), 'oxi-probe-path-'));
+    const cacheDir = await freshCache();
+    const previousPath = process.env.PATH;
+    try {
+      await writeFile(join(pathDir, 'oxigraph'), script);
+      await chmod(join(pathDir, 'oxigraph'), 0o755);
+      process.env.PATH = pathDir;
+      return await run(cacheDir);
+    } finally {
+      process.env.PATH = previousPath;
+      await rm(pathDir, { recursive: true, force: true });
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+  }
+
+  it('accepts parseable version output from stderr', async () => {
+    await expect(withSystemBinary(
+      '#!/bin/sh\necho "Oxigraph v0.6.1" >&2\n',
+      (cacheDir) => resolveOxigraphBinary({
+        cacheDir,
+        platform: 'freebsd' as NodeJS.Platform,
+        log: () => {},
+      }),
+    )).resolves.toMatchObject({ source: 'system', version: '0.6.1' });
+  });
+
+  it('rejects a non-zero version probe even when its output contains a version', async () => {
+    await expect(withSystemBinary(
+      '#!/bin/sh\necho "Oxigraph 0.6.1"\nexit 7\n',
+      (cacheDir) => resolveOxigraphBinary({
+        cacheDir,
+        platform: 'freebsd' as NodeJS.Platform,
+        log: () => {},
+      }),
+    )).rejects.toThrow(/Unable to determine Oxigraph version/u);
+  });
+
+  it('rejects unparsable and over-limit version output', async () => {
+    await expect(withSystemBinary(
+      '#!/bin/sh\necho "Oxigraph development build"\n',
+      (cacheDir) => resolveOxigraphBinary({
+        cacheDir,
+        platform: 'freebsd' as NodeJS.Platform,
+        log: () => {},
+      }),
+    )).rejects.toThrow(/Unable to determine Oxigraph version/u);
+
+    await expect(withSystemBinary(
+      '#!/bin/sh\ni=0; while [ "$i" -lt 5000 ]; do printf x; i=$((i + 1)); done\n',
+      (cacheDir) => resolveOxigraphBinary({
+        cacheDir,
+        platform: 'freebsd' as NodeJS.Platform,
+        log: () => {},
+      }),
+    )).rejects.toThrow(/exceeded 4096 bytes/u);
+  });
+
+  it.skipIf(process.platform === 'win32')('times out and reaps a version probe that never exits', async () => {
+    const probeStateDir = await mkdtemp(join(tmpdir(), 'oxi-probe-state-'));
+    const pidPath = join(probeStateDir, 'pid');
+    const startedAt = Date.now();
+    try {
+      await expect(withSystemBinary(
+        `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));\nsetInterval(() => {}, 1_000);\n`,
+        (cacheDir) => resolveOxigraphBinary({
+          cacheDir,
+          platform: 'freebsd' as NodeJS.Platform,
+          log: () => {},
+          versionProbeTimeoutMs: 1_000,
+        }),
+      )).rejects.toThrow(/timed out after 1000ms/u);
+
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      const childPid = Number(await readFile(pidPath, 'utf8'));
+      expect(() => process.kill(childPid, 0)).toThrow();
+    } finally {
+      await rm(probeStateDir, { recursive: true, force: true });
     }
   });
 });
