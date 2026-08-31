@@ -80,6 +80,55 @@ export class LocalAgentApiError extends Error {
 // --- Status ---
 export const fetchStatus = () => get<any>('/api/status');
 
+// --- DKG-native semantic runtime ---
+export interface SemanticToolResolution {
+  toolIri: string;
+  operation: string | null;
+  semanticVersion: string | null;
+  witInterface: string | null;
+  requested: true;
+  offered: boolean;
+  policyAllowed: boolean;
+  locallyInstalled: boolean;
+  locallyEnabled: boolean;
+  adapterVersion: string | null;
+  adapterHash: string | null;
+  effective: boolean;
+  unavailableReason: string | null;
+}
+
+export interface SemanticProgramResolution {
+  contextGraphId: string;
+  programIri: string;
+  executingNode: string;
+  selectedPolicy: { iri: string; version: string; hash: string };
+  requiredTools: SemanticToolResolution[];
+  previousExecutions: string[];
+  executable: boolean;
+}
+
+export interface SemanticInvocationResult {
+  invocationId: string;
+  executionIri: string;
+  executionUal: string;
+  persisted: true;
+}
+
+export const resolveSemanticProgram = (contextGraphId: string, programIri: string) => {
+  const query = new URLSearchParams({ contextGraphId, programIri });
+  return get<SemanticProgramResolution>(`/api/semantic-runtime/resolve?${query}`);
+};
+
+export const invokeSemanticProgram = (
+  contextGraphId: string,
+  programIri: string,
+  invocationId: string,
+) => post<SemanticInvocationResult>('/api/semantic-runtime/invoke', {
+  contextGraphId,
+  programIri,
+  invocationId,
+});
+
 // --- LLM Settings ---
 export interface LlmSettingsResponse {
   configured: boolean;

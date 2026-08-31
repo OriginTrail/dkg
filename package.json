@@ -10,6 +10,8 @@
     "build": "node scripts/build.mjs",
     "build:packages": "turbo build",
     "build:runtime:packages": "node scripts/build-runtime-packages.mjs",
+    "build:semantic-runtime": "node scripts/build-semantic-runtime.mjs && pnpm --filter @origintrail-official/dkg-semantic-runtime run build",
+    "check:semantic-runtime": "cargo +1.98.0 test --manifest-path rust/Cargo.toml --workspace --locked && cargo +1.98.0 clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings && node scripts/build-semantic-runtime.mjs --check && pnpm --filter @origintrail-official/dkg-semantic-runtime test",
     "build:runtime": "pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui",
     "test": "turbo test && pnpm run test:scripts",
     "test:scripts": "node --test scripts/lib/__tests__/*.test.mjs",

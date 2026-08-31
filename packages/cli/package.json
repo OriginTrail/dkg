@@ -47,6 +47,7 @@
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
+    "@origintrail-official/dkg-semantic-runtime": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "better-sqlite3": "12.11.1",
     "commander": "^13",

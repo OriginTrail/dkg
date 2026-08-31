@@ -636,6 +636,9 @@ importers:
       '@origintrail-official/dkg-publisher':
         specifier: workspace:*
         version: link:../publisher
+      '@origintrail-official/dkg-semantic-runtime':
+        specifier: workspace:*
+        version: link:../semantic-runtime
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
@@ -1234,6 +1237,25 @@ importers:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/semantic-runtime:
+    dependencies:
+      better-sqlite3:
+        specifier: 12.11.1
+        version: 12.11.1
+      cborg:
+        specifier: 6.1.1
+        version: 6.1.1
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7
+        version: 7.6.13
+      '@types/node':
+        specifier: ^22
+        version: 22.19.11
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
@@ -3618,6 +3640,10 @@ packages:
 
   cborg@5.1.1:
     resolution: {integrity: sha512-BDbSRIp6XrQXkTc7g+DN0RB9RrDPTUfals2ecWUlt3juPLjbAvy/V72mJcXY0Ehu0Dq/3WpNCOCT68HUTbW+lw==}
+    hasBin: true
+
+  cborg@6.1.1:
+    resolution: {integrity: sha512-Ci8+V1OMFtqea8EXicsATqV+3kEqCGXCicM+5MEzpKTxqy58WMzhJUjtUqAjfWpKPZ0wpG8F+u5mC8Xy/0Zevg==}
     hasBin: true
 
   ccount@2.0.1:
@@ -9625,6 +9651,8 @@ snapshots:
       tinycolor2: 1.6.0
 
   cborg@5.1.1: {}
+
+  cborg@6.1.1: {}
 
   ccount@2.0.1: {}
 
