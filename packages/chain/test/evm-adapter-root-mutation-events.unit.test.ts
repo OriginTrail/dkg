@@ -505,5 +505,10 @@ describe('EVMChainAdapter.supportsEventTypes', () => {
     await expect(
       adapter.supportsEventTypes(['ContextGraphCreated', 'KnowledgeAssetUpdated', 'NoSuchEventAnywhere']),
     ).resolves.toEqual(['NoSuchEventAnywhere']);
+    // Served name whose ABI FRAGMENT is spelled differently (review r3):
+    // `listenForEvents` serves the public name `KCCreated` by scanning the
+    // greenfield `KnowledgeAssetCreated` fragment, so the probe must accept
+    // the alias — a literal-fragment probe reports a served event missing.
+    await expect(adapter.supportsEventTypes(['KCCreated'])).resolves.toEqual([]);
   });
 });

@@ -296,6 +296,8 @@ export class ChainEventPoller {
    * the catch handler we attach) BEFORE the chain goes away.
    */
   private inFlightPoll: Promise<void> | null = null;
+  /** Serializes manual `pollNow()` callers; see the method's comment. */
+  private manualPollChain: Promise<void> = Promise.resolve();
 
   /** Max blocks to scan per poll — stays within typical RPC range limits. */
   private static readonly MAX_RANGE = 9_000;
@@ -311,6 +313,18 @@ export class ChainEventPoller {
     this.onProfileEvent = config.onProfileEvent;
     this.onKARegisteredToContextGraph = config.onKARegisteredToContextGraph;
     this.onKnowledgeAssetCreated = config.onKnowledgeAssetCreated;
+    // Removed-callback tripwire (review r3): `onCollectionUpdated` was deleted
+    // rather than aliased — it never functioned (no adapter branch served its
+    // event and no production caller passed it), so an alias would perpetuate
+    // a dead name. A TypeScript consumer gets a compile error; a JavaScript
+    // consumer would be silently ignored, so make that failure loud instead.
+    if ('onCollectionUpdated' in (config as unknown as Record<string, unknown>)) {
+      this.log.warn(
+        createOperationContext('system'),
+        `ChainEventPoller: 'onCollectionUpdated' was removed and never functioned; ` +
+        `use 'onKnowledgeAssetRootMutated' (kaRootMutations lane) instead`,
+      );
+    }
     this.laneRunner = new ChainEventLaneRunner({
       chain: this.chain,
       lanes: this.laneSpecs(),
@@ -382,13 +396,27 @@ export class ChainEventPoller {
    * poll as a whole.)
    */
   async pollNow(): Promise<void> {
+    // Check-and-register is made atomic by chaining on a reservation taken
+    // SYNCHRONOUSLY, before any await (review r3): two concurrent callers
+    // otherwise both observe no in-flight poll, both clear the schedules, and
+    // two scans mutate the same lane state — dispatching every event twice and
+    // racing cursor/failure bookkeeping. Each caller still gets its OWN scan
+    // (the second runs after the first settles), and each caller sees only its
+    // own scan's rejection — the swallowing `.catch` on the stored chain keeps
+    // one caller's failure from poisoning the queue.
+    const run = this.manualPollChain.then(() => this.runManualPoll());
+    this.manualPollChain = run.catch(() => {});
+    return run;
+  }
+
+  private async runManualPoll(): Promise<void> {
     await this.waitForCurrentPoll();
     this.laneRunner.clearActiveLaneSchedules();
     const pending = this.laneRunner.poll();
     // Registered as the in-flight poll so a concurrent interval tick skips
-    // rather than stacking a second scan on the same lanes. The swallowing
-    // `.catch` is on the DERIVED promise only; `pending` itself still rejects
-    // into the caller below.
+    // rather than stacking a second scan on the same lanes — and so `stop()`
+    // awaits the ACTUAL active scan. The swallowing `.catch` is on the DERIVED
+    // promise only; `pending` itself still rejects into the caller below.
     this.inFlightPoll = pending.catch(() => {}).finally(() => { this.inFlightPoll = null; });
     await pending;
   }

@@ -21,9 +21,9 @@
  *  - The `pollNow` rows measure BOTH polarities — a plain `poll()` inside the
  *    cadence window must scan nothing, or the seam proves nothing.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { Logger, TypedEventBus } from '@origintrail-official/dkg-core';
 import {
   KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
   type ChainAdapter,
@@ -387,8 +387,11 @@ describe('ChainEventPoller — kaRootMutations idle cost and periodic re-scan', 
     now += CADENCE_MS;
     await poll(poller);
     expect(chain.filters).toHaveLength(2);
-    expect(chain.filters[1].fromBlock).toBe(50_000 - MAX_RANGE);
+    // Inclusive window of EXACTLY one RPC page (review r3): `toBlock - MAX_RANGE`
+    // spans MAX_RANGE + 1 blocks, which a strict range cap would reject.
+    expect(chain.filters[1].fromBlock).toBe(50_000 - MAX_RANGE + 1);
     expect(chain.filters[1].toBlock).toBe(50_000);
+    expect((chain.filters[1].toBlock as number) - (chain.filters[1].fromBlock as number) + 1).toBe(MAX_RANGE);
 
     // Cursor unchanged: the next forward scan still starts at head + 1, so the
     // re-scan cost nothing in forward progress.
@@ -431,7 +434,7 @@ describe('ChainEventPoller — kaRootMutations idle cost and periodic re-scan', 
 
     const tickFilters = chain.filters.slice(before);
     expect(tickFilters).toHaveLength(2);
-    expect(tickFilters[0].fromBlock).toBe(50_000 - MAX_RANGE); // replay window first…
+    expect(tickFilters[0].fromBlock).toBe(50_000 - MAX_RANGE + 1); // replay window first…
     expect(tickFilters[0].toBlock).toBe(50_000);
     expect(tickFilters[1].fromBlock).toBe(50_001);             // …then the forward window
     expect(tickFilters[1].toBlock).toBe(50_010);
@@ -553,6 +556,82 @@ describe('ChainEventPoller — pollNow', () => {
     expect(chain.filters).toHaveLength(2);
     expect(chain.filters[1].fromBlock).toBe(50_001);
     expect(chain.filters[1].toBlock).toBe(50_010);
+  });
+
+  it('concurrent pollNow callers are serialized: scans never interleave and each caller settles (review r3)', async () => {
+    // Two concurrent manual callers both passing the empty-state check would
+    // run two listenForEvents scans over the same cursor, dispatching every
+    // mutation twice and racing cursor/failure state.
+    let now = 0;
+    let active = 0;
+    let maxActive = 0;
+    let head = 50_000;
+    const setHead = (next: number): void => { head = next; };
+    const filters: EventFilter[] = [];
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => head,
+      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        filters.push(f);
+        await new Promise((r) => setTimeout(r, 20)); // hold the scan open
+        active -= 1;
+      },
+    } as unknown as ChainAdapter;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+
+    await Promise.all([poller.pollNow(), poller.pollNow(), poller.pollNow()]);
+
+    // Never two scans in flight — the race the review named…
+    expect(maxActive).toBe(1);
+    // …and no duplicate dispatch either: the first serialized caller consumed
+    // the window; the later two correctly found the lane caught up (noWork)
+    // and issued ZERO further log scans over the same cursor.
+    expect(filters.length).toBe(1);
+
+    // Same property with fresh work: two concurrent callers over an advanced
+    // head produce exactly ONE scan of the new window, not two.
+    setHead(50_010);
+    await Promise.all([poller.pollNow(), poller.pollNow()]);
+    expect(maxActive).toBe(1);
+    expect(filters.length).toBe(2);
+    expect(filters[1].fromBlock).toBe(50_001);
+    expect(filters[1].toBlock).toBe(50_010);
+  });
+
+  it("passing the removed 'onCollectionUpdated' key warns loudly and enables no lane (review r3)", async () => {
+    // A JavaScript consumer of the old key would otherwise fail silently. The
+    // observable behaviour is unchanged from before the rename — the old lane
+    // scanned a name the adapter never yielded, so the callback never fired —
+    // but silence about a removed key helps nobody, so construction says so.
+    const warned: string[] = [];
+    const spy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(
+      (_ctx: unknown, message: string) => { warned.push(message); },
+    );
+    try {
+      const chain = makeChain(100);
+      const poller = new ChainEventPoller({
+        chain: chain.adapter,
+        publishHandler: makeHandler(),
+        intervalMs: CADENCE_MS,
+        onCollectionUpdated: async () => { /* legacy consumer */ },
+      } as never);
+
+      expect(warned.some((m) => m.includes("'onCollectionUpdated' was removed"))).toBe(true);
+      expect(warned.some((m) => m.includes('onKnowledgeAssetRootMutated'))).toBe(true);
+
+      await poller.pollNow();
+      expect(chain.filters).toHaveLength(0); // the legacy key enables no lane
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('does not persist a cursor for a scan that failed', async () => {

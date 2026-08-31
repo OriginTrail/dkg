@@ -470,7 +470,11 @@ export class ChainEventLaneRunner {
     // Nothing has been scanned yet — there is no history to look back over,
     // and `[1, 0]` would be an inverted window.
     if (toBlock < 1) return undefined;
-    return { fromBlock: Math.max(1, toBlock - windowBlocks), toBlock };
+    // Inclusive window of EXACTLY `windowBlocks` blocks (review r3): the naive
+    // `toBlock - windowBlocks` spans windowBlocks + 1 blocks inclusive, which a
+    // provider enforcing a strict range cap would reject — turning the re-scan
+    // into a permanent no-op on exactly the providers it exists to survive.
+    return { fromBlock: Math.max(1, toBlock - windowBlocks + 1), toBlock };
   }
 
   private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {

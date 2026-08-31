@@ -54,6 +54,18 @@ export type KnowledgeAssetRootMutationEventType =
  * failure direction for a capability gate, and the parity/unit suites pin the
  * roster below.
  */
+/**
+ * Served names whose ABI FRAGMENT is spelled differently on the owning
+ * contract. `listenForEvents` serves the public name `KCCreated` by scanning
+ * the greenfield `KnowledgeAssetCreated` fragment (falling back to the legacy
+ * spelling), so the capability probe must accept EITHER declaration — probing
+ * for a literal `KCCreated` fragment would report a served event missing
+ * (review r3).
+ */
+const EVENT_ABI_ALIASES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  KCCreated: ['KnowledgeAssetCreated', 'KCCreated'],
+});
+
 const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> = Object.freeze({
   KnowledgeBatchCreated: 'knowledgeAssetsStorage', // V8 archive binding
   ContextGraphExpanded: 'contextGraphStorage',
@@ -155,7 +167,8 @@ export class EventsMethods extends EVMChainAdapterBase {
       if (!owner) return true; // no scan branch serves this name
       const contract = this.contracts[owner];
       if (!contract) return true; // owning contract not bound on this deployment
-      return !this.contractHasEvent(contract, name);
+      const abiNames = EVENT_ABI_ALIASES[name] ?? [name];
+      return !abiNames.some((abiName) => this.contractHasEvent(contract, abiName));
     });
   }
 
