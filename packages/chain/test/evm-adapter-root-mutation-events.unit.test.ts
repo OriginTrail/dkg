@@ -378,12 +378,18 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     const iface = new Interface(KA_ABI as never);
     const good = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
     const malformed: FakeLog = { ...good, topics: [good.topics[0], 'not-a-hex-word'] };
+    // The VALID log comes FIRST (review r17): an implementation that
+    // validated incrementally would yield it before throwing on the
+    // malformed tail — a callback would then act on an untrustworthy
+    // partial response. The iterator's FIRST result must already reject.
     const { adapter } = makeAdapter({
-      logsByEvent: { KnowledgeAssetMerkleRootAdded: [malformed, good] },
+      logsByEvent: { KnowledgeAssetMerkleRootAdded: [good, malformed] },
     });
 
-    await expect(drain(adapter, ['KnowledgeAssetMerkleRootAdded']))
-      .rejects.toThrow(/malformed root-mutation log/);
+    const iterator = adapter
+      .listenForEvents({ eventTypes: ['KnowledgeAssetMerkleRootAdded'], fromBlock: 1, toBlock: 9_000 })
+      [Symbol.asyncIterator]();
+    await expect(iterator.next()).rejects.toThrow(/malformed root-mutation log/);
   });
 
   it('a short-but-parsable hex topic never mints a WRONG kaId (reviews r2+r14)', async () => {
@@ -396,12 +402,16 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     const iface = new Interface(KA_ABI as never);
     const good = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
     const shortTopic: FakeLog = { ...good, topics: [good.topics[0], '0x01'] };
+    // Valid log first (review r17): the whole response must be validated
+    // before ANY consumption, so the first iterator result rejects.
     const { adapter } = makeAdapter({
-      logsByEvent: { KnowledgeAssetMerkleRootAdded: [shortTopic, good] },
+      logsByEvent: { KnowledgeAssetMerkleRootAdded: [good, shortTopic] },
     });
 
-    await expect(drain(adapter, ['KnowledgeAssetMerkleRootAdded']))
-      .rejects.toThrow(/malformed root-mutation log/);
+    const iterator = adapter
+      .listenForEvents({ eventTypes: ['KnowledgeAssetMerkleRootAdded'], fromBlock: 1, toBlock: 9_000 })
+      [Symbol.asyncIterator]();
+    await expect(iterator.next()).rejects.toThrow(/malformed root-mutation log/);
   });
 
   it('never decodes the dynamic root array of KnowledgeAssetMerkleRootsUpdated', async () => {
@@ -547,11 +557,14 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     const outsideWindow: FakeLog = { ...good, blockNumber: 10_000 }; // drain requests 1..9_000
 
     for (const [label, bad] of [['foreign contract', foreignContract], ['outside window', outsideWindow]] as const) {
+      // Valid log FIRST (review r17): rejection must precede any yield.
       const { adapter } = makeAdapter({
-        logsByEvent: { KnowledgeAssetMerkleRootAdded: [bad, good] },
+        logsByEvent: { KnowledgeAssetMerkleRootAdded: [good, bad] },
       });
-      await expect(drain(adapter, ['KnowledgeAssetMerkleRootAdded']), label)
-        .rejects.toThrow(/outside the requested filter/);
+      const iterator = adapter
+        .listenForEvents({ eventTypes: ['KnowledgeAssetMerkleRootAdded'], fromBlock: 1, toBlock: 9_000 })
+        [Symbol.asyncIterator]();
+      await expect(iterator.next(), label).rejects.toThrow(/outside the requested filter/);
     }
   });
 
