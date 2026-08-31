@@ -33,6 +33,8 @@ export interface Rfc64SharedProjectionTestFixtureOptions {
   readonly triples?: readonly Rfc64ProjectionTestTriple[];
   readonly projectionBytes?: Uint8Array;
   readonly publicTripleCount?: string;
+  readonly contextGraphId?: string;
+  readonly assertionCoordinate?: string;
 }
 
 /** One shared seal-bound fixture for gateway and certified-adapter suites. */
@@ -46,9 +48,10 @@ export function createRfc64SharedProjectionTestFixture(
   const projectionBytes = options.projectionBytes?.slice()
     ?? encodeCanonicalCgSharedPublicRootProjectionV1(triples);
   const publicTripleCount = options.publicTripleCount ?? String(triples.length);
+  const contextGraphId = options.contextGraphId ?? 'a/b';
   const scope = validScope({
     networkId: 'otp:20430',
-    contextGraphId: 'a/b',
+    contextGraphId,
     governanceChainId: '20430',
     governanceContractAddress: '0x5555555555555555555555555555555555555555',
     ownershipTransitionDigest: null,
@@ -82,7 +85,7 @@ export function createRfc64SharedProjectionTestFixture(
   const projectionDigest = computeKaProjectionDigestV1(projectionBytes);
   const row = validRow({
     kaId: RFC64_PROJECTION_TEST_KA_ID,
-    assertionCoordinate: 'name λ',
+    assertionCoordinate: options.assertionCoordinate ?? 'name λ',
     assertionVersion: '2',
     projectionId: 'cg-shared-v1',
     projectionDigest,
@@ -106,9 +109,10 @@ export function createRfc64SharedProjectionTestFixture(
       profile,
     ),
   });
+  const operation = compileRfc64SharedProjectionStreamOperationV1(request);
   return Object.freeze({
-    graph: RFC64_PROJECTION_TEST_GRAPH,
-    operation: compileRfc64SharedProjectionStreamOperationV1(request),
+    graph: operation.graphIri,
+    operation,
     profile,
     projectionBytes,
     projectionDigest,

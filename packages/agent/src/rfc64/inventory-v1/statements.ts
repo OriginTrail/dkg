@@ -239,6 +239,12 @@ FROM rfc64_applied_catalog_heads_v1
 WHERE catalog_scope_digest = :scope
   AND author_address = :author;`,
 
+  listAppliedHeads: `
+SELECT catalog_scope_digest, author_address, current_catalog_head_digest,
+       applied_inventory_digest, catalog_version_u64be, inventory_row_count_u64be
+FROM rfc64_applied_catalog_heads_v1
+ORDER BY catalog_scope_digest, author_address;`,
+
   insertAppliedHead: `
 INSERT INTO rfc64_applied_catalog_heads_v1 (
   catalog_scope_digest,
@@ -262,6 +268,12 @@ SET current_catalog_head_digest = :nextHead,
     applied_inventory_digest = :inventoryDigest,
     catalog_version_u64be = :catalogVersion,
     inventory_row_count_u64be = :inventoryRowCount
+WHERE catalog_scope_digest = :scope
+  AND author_address = :author
+  AND current_catalog_head_digest = :expectedHead;`,
+
+  deleteAppliedHeadCas: `
+DELETE FROM rfc64_applied_catalog_heads_v1
 WHERE catalog_scope_digest = :scope
   AND author_address = :author
   AND current_catalog_head_digest = :expectedHead;`,
@@ -355,8 +367,10 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   countBucketRows: 'rfc64.candidate-bucket.rows.count.v1',
   deleteHeader: 'rfc64.candidate-bucket.delete.v1',
   getAppliedHead: 'rfc64.applied-head.get.v1',
+  listAppliedHeads: 'rfc64.applied-head.list.v1',
   insertAppliedHead: 'rfc64.applied-head.insert.v1',
   updateAppliedHeadCas: 'rfc64.applied-head.cas-update.v1',
+  deleteAppliedHeadCas: 'rfc64.applied-head.cas-delete.v1',
   getSwmAuthorHead: 'rfc64.swm-author-inventory.head.get.v1',
   getSwmAuthorRows: 'rfc64.swm-author-inventory.rows.get.v1',
   insertSwmAuthorHead: 'rfc64.swm-author-inventory.head.insert.v1',
@@ -381,6 +395,7 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'diffRemovedNext',
   'countBucketRows',
   'getAppliedHead',
+  'listAppliedHeads',
   'getSwmAuthorHead',
   'getSwmAuthorRows',
 ] as const satisfies readonly InventoryV1StatementKey[]);
@@ -390,6 +405,7 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'deleteHeader',
   'insertAppliedHead',
   'updateAppliedHeadCas',
+  'deleteAppliedHeadCas',
   'insertSwmAuthorHead',
   'updateSwmAuthorHeadCas',
   'upsertSwmAuthorRow',

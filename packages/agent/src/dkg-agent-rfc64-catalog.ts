@@ -102,6 +102,9 @@ import {
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
+import {
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -287,6 +290,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
+      this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
+      return;
+    }
+    if (
+      !this.config.rfc64CatalogExecutionPlan.standaloneTrack2Enabled
+      && this.config.rfc64CatalogExecutionPlan.track2ContextGraphs.length === 0
+    ) {
+      this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
+      return;
+    }
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return;
     const verifyIssuerSignature = verifyControlEnvelopeIssuerSignatureV1;
@@ -296,6 +310,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
+      resolveContextGraphAuthority: (contextGraphId) =>
+        resolveRfc64CatalogExecutionPlanAuthorityV1(
+          this.config.rfc64CatalogExecutionPlan,
+          contextGraphId,
+        ),
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -483,6 +502,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     params: PublishOpenAuthorCatalogExactSetSuccessorParamsV1,
   ): Promise<PublishOpenAuthorCatalogExactSetSuccessorResultV1> {
+    this.assertRfc64CatalogAuthoringAuthorityV1();
     const service = this.requireRfc64PublicCatalogServiceV1();
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
@@ -493,6 +513,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       params.previousHead,
     );
     const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
+    this.assertRfc64CatalogAuthoringAuthorityV1(scope.contextGraphId);
     if (scope.subGraphName !== null) {
       throw new Error('RFC-64 public/open compatibility successor requires the root lane');
     }
@@ -505,6 +526,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     params: PublishAuthorCatalogExactSetSuccessorParamsV1,
   ): Promise<PublishAuthorCatalogExactSetSuccessorResultV1> {
+    this.assertRfc64CatalogAuthoringAuthorityV1();
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
       throw new Error('RFC-64 persistence is not available');
@@ -513,18 +535,38 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return this.publishAuthorCatalogExactSetSuccessorFromHistoryV1(params, history);
   }
 
+  /** Reject a disabled successor before any durable mutation. */
+  private assertRfc64CatalogAuthoringAuthorityV1(
+    this: DKGAgent,
+    contextGraphId?: string,
+  ): void {
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
+      throw new Error('RFC-64 catalog authoring is disabled by the Track-2 kill switch');
+    }
+    if (
+      contextGraphId !== undefined
+      && !resolveRfc64CatalogExecutionPlanAuthorityV1(
+        this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      ).authoringAllowed
+    ) {
+      throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
+    }
+  }
+
   private async publishAuthorCatalogExactSetSuccessorFromHistoryV1(
     this: DKGAgent,
     params: PublishAuthorCatalogExactSetSuccessorParamsV1,
     history: BoundedAuthorCatalogHistoryV1,
   ): Promise<PublishAuthorCatalogExactSetSuccessorResultV1> {
-    const service = this.requireRfc64PublicCatalogServiceV1();
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(params.peers);
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
       throw new Error('RFC-64 persistence is not available');
     }
     const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
+    this.assertRfc64CatalogAuthoringAuthorityV1(scope.contextGraphId);
+    const service = this.requireRfc64PublicCatalogServiceV1();
     const heldPolicy = service.acceptedPolicySnapshotForCatalogScope(scope);
     const policyDigest = heldPolicy.policyDigest;
     const authorAddress = params.author.address.toLowerCase() as EvmAddressV1;

@@ -68,6 +68,7 @@ import {
   type CandidateSessionV1,
   type CandidateSessionGcBatchResultV1,
   type CompareAndSwapAppliedCatalogHeadInputV1,
+  type DeleteAppliedCatalogHeadInputV1,
   type CompareAndSwapSwmAuthorInventoryInputV1,
   type Rfc64InventoryV1CandidateApi,
   type SwmAuthorInventoryCasResultV1,
@@ -477,6 +478,21 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   ): AppliedCatalogHeadSnapshotV1 | null {
     this.requireOpen();
     return this.#candidate.readAppliedCatalogHeadV1(catalogScopeDigest, authorAddress);
+  }
+
+  listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[] {
+    this.requireOpen();
+    return this.#candidate.listAppliedCatalogHeadsV1();
+  }
+
+  deleteAppliedCatalogHeadV1(input: DeleteAppliedCatalogHeadInputV1): void {
+    this.requireOpen();
+    this.#candidate.deleteAppliedCatalogHeadV1(input);
+  }
+
+  deleteAppliedCatalogHeadsV1(inputs: readonly DeleteAppliedCatalogHeadInputV1[]): void {
+    this.requireOpen();
+    this.#candidate.deleteAppliedCatalogHeadsV1(inputs);
   }
 
   compareAndSwapAppliedCatalogHeadV1(

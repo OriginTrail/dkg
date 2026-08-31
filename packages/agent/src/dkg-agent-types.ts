@@ -1926,6 +1926,9 @@ export type ResolvedDKGAgentConfig =
     syncReconcilerTiming: SyncReconcilerTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
+    /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
+    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
+      .Rfc64CatalogExecutionPlanV1;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

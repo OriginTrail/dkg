@@ -683,6 +683,13 @@ import {
   type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
+import {
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
+  rfc64ExecutionPlanAllowsLegacySyncV1,
+} from
+  './rfc64/public-catalog-activation-config-v1.js';
+import { reconcileRfc64CatalogAuthorityPlanV1 } from
+  './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -705,7 +712,10 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
     selectedRecoveryContextGraphIds: [...new Set([
       ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
         config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
-      ),
+      ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
+        config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      )),
       ...edgeSelectedContextGraphIds,
     ])],
   });
@@ -2029,6 +2039,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // network consumer. No dataDir intentionally leaves the feature dormant.
     await this.prepareRfc64PersistenceV1();
     try {
+      if (
+        this.config.dataDir !== undefined
+        && this.rfc64PersistenceV1 !== undefined
+      ) {
+        await reconcileRfc64CatalogAuthorityPlanV1(
+          this.rfc64PersistenceV1,
+          this.store,
+          this.config.rfc64CatalogExecutionPlan,
+        );
+      }
       await this.prepareFinalizationRecoveryStore();
       // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
       // so the local store is clean before this node serves or syncs anything.
@@ -4872,9 +4892,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return 'not-started';
     }
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
-    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+    const acceptedPolicies = (this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?? [];
+      ?? []).filter(({ policyEnvelope }) => rfc64ExecutionPlanAllowsLegacySyncV1(
+        this.config.rfc64CatalogExecutionPlan,
+        policyEnvelope.payload.contextGraphId,
+      ));
     // Private RFC-64 selections stay out of `syncContextGraphs`: that list is
     // also the automatic durable/VM scope, and private VM recovery belongs to
     // catalog activation. They still need an explicit SWM-only planning scope
@@ -4883,7 +4906,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(this.config.syncContextGraphs ?? []),
       ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      ),
+      ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
+        this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      )),
     ])];
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
@@ -5150,6 +5176,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
+      if (!rfc64ExecutionPlanAllowsLegacySyncV1(
+        this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      )) {
+        this.log.debug(
+          ctx,
+          `Skipping legacy SWM planning for catalog-authoritative CG "${contextGraphId.slice(0, 28)}"`,
+        );
+        continue;
+      }
       const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
         contextGraphId,
       );
@@ -5769,6 +5805,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return createIncompleteDurableSyncResult();
     }
+    const requestedContextGraphCount = contextGraphIds.length;
+    contextGraphIds = contextGraphIds.filter((contextGraphId) => (
+      rfc64ExecutionPlanAllowsLegacySyncV1(
+        this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      )
+    ));
+    if (contextGraphIds.length !== requestedContextGraphCount) {
+      this.log.debug(
+        ctx,
+        `Skipped ${requestedContextGraphCount - contextGraphIds.length} catalog-authoritative CG(s) from legacy durable sync`,
+      );
+    }
+    if (contextGraphIds.length === 0) return createIncompleteDurableSyncResult();
     // OT-RFC-59 — peel off the public CGs this peer serves via the O(delta) changelog
     // lane; the rest fall through to the legacy full-scan lane below. STRICTLY ADDITIVE:
     // gated on this node's `store.changelog` flag, and ANY failure returns every CG to
@@ -9989,13 +10039,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // operator diagnostics identify the same IDs across restarts.
       const byId = (a: ContextGraphSubscriptionRecord, b: ContextGraphSubscriptionRecord): number =>
         a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-      const hostedRows = rows.filter((r) => r.coreHosted).sort(byId);
-      const userRows = [...rows.filter((r) => !r.coreHosted)].sort(
+      const partitionedRows = rows.map((row) => Object.freeze({
+        row,
+        authority: resolveRfc64CatalogExecutionPlanAuthorityV1(
+          this.config.rfc64CatalogExecutionPlan,
+          row.id,
+        ),
+      }));
+      const legacyRows = partitionedRows
+        .filter(({ authority }) => authority.legacySyncAllowed)
+        .map(({ row }) => row);
+      const catalogRows = partitionedRows
+        .filter(({ authority }) => !authority.legacySyncAllowed)
+        .map(({ row }) => row)
+        .sort(byId);
+      const hostedRows = legacyRows.filter((r) => r.coreHosted).sort(byId);
+      const userRows = [...legacyRows.filter((r) => !r.coreHosted)].sort(
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
       const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
       const toActivate = [...hostedRows, ...cappedUserRows];
-      const dormantRows = cap > 0 ? userRows.slice(cap) : [];
+      const dormantRows = [
+        ...catalogRows,
+        ...(cap > 0 ? userRows.slice(cap) : []),
+      ].sort(byId);
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
         const approvedAgentAddress = row.subscribed
@@ -10088,15 +10155,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ctx,
           `Rehydrated ${toActivate.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
             (skipped > 0
-              ? ` (${skipped} non-hosted left dormant — over the ${cap} activation cap; ` +
-                `${hostedRows.length} hosted always restored)`
+              ? ` (${skipped} left dormant by the activation cap or RFC-64 catalog authority; ` +
+                `${hostedRows.length} legacy-authoritative hosted restored)`
               : ''),
         );
       }
       if (skipped > 0) {
         this.log.warn(
           ctx,
-          `${skipped} context-graph subscription(s) left dormant to avoid store contention (#997). ` +
+          `${skipped} context-graph subscription(s) left dormant by the activation cap or ` +
+            `exclusive RFC-64 catalog authority. ` +
             `Prune stale ones via 'DELETE /api/context-graph/subscriptions', or raise ` +
             `maxRehydratedContextGraphSubscriptions. Inspect ` +
             `'GET /api/context-graph/subscriptions' for dormant ids.`,

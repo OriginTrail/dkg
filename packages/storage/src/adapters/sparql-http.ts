@@ -87,9 +87,10 @@ import {
   snapshotManagedOxigraphRuntimeOptionsV1,
 } from '../managed-oxigraph-runtime-store.js';
 import {
-  createManagedOxigraphSharedProjectionRunnerV1,
-  type ManagedOxigraphConstructRequestV1,
-} from '../managed-oxigraph-shared-projection-runner.js';
+  createRfc64HttpSharedProjectionRunnerV1,
+  managedOxigraphDiagnosticByteCeilingV1,
+  type Rfc64HttpProjectionRequestV1,
+} from '../rfc64-http-shared-projection-runner.js';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
   executeRfc64SemanticReadCapabilityV1,
@@ -339,19 +340,23 @@ export class SparqlHttpStore implements TripleStore {
       this.headers['Authorization'] = options.auth;
     }
     if (this.managedOxigraph) {
-      this.rfc64SharedProjectionStreamV1 = createManagedOxigraphSharedProjectionRunnerV1({
+      this.rfc64SharedProjectionStreamV1 = createRfc64HttpSharedProjectionRunnerV1({
         runConstruct: (request, consume) => this.runStreamingConstruct(request, consume),
         responseError: (status, excerpt) => new SparqlHttpResponseError(
           'rfc64-shared-projection',
           status,
           excerpt,
         ),
+      }, {
+        accept: 'application/n-quads, text/n-quads',
+        diagnosticByteCeiling: managedOxigraphDiagnosticByteCeilingV1,
+        managedOxigraph: true,
       });
     }
   }
 
   private runStreamingConstruct<T>(
-    request: ManagedOxigraphConstructRequestV1,
+    request: Rfc64HttpProjectionRequestV1,
     consume: (
       response: Response,
       lifecycleSignal: AbortSignal | undefined,

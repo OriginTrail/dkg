@@ -11,7 +11,7 @@ This activation is intentionally selective. The operator supplies a bounded
 manifest of independently verified, finalized public-CG policy envelopes. The
 CG IDs in that manifest are the single source for:
 
-- durable graph subscriptions;
+- per-CG legacy, shadow, or catalog authority selection;
 - explicit signed-catalog targets; and
 - optional graph-complete-provider native SWM recovery.
 
@@ -36,6 +36,12 @@ Add the following shape to `~/.dkg/config.json`:
 ```json
 {
   "rfc64PublicCatalog": {
+    "rollout": {
+      "killSwitch": false,
+      "contextGraphModes": {
+        "0x.../selected-public-cg": "shadow"
+      }
+    },
     "autoPublish": {
       "peers": ["12D3Koo...receiver"],
       "catalogIssuerDelegationExpiresAt": "1893456000000"
@@ -90,7 +96,25 @@ Add the following shape to `~/.dkg/config.json`:
 ```
 
 `enabled: true` remains accepted for compatibility, but is redundant when a
-valid manifest is present. `enabled: false` is the explicit kill switch.
+valid manifest is present. `enabled: false` disables the complete activation
+block. The operational emergency stop is the dedicated
+`rollout.killSwitch`; it stops Track-2 protocols and workers without deleting
+verified data or changing any graph's persisted authority mode.
+
+Each selected graph may be assigned exactly one restart-stable mode:
+
+- `legacy`: only the existing durable/SWM correctness path runs; Track 2 is dormant;
+- `shadow`: the existing path stays authoritative while Track 2 fetches and durably
+  stages signed heads for comparison, without activating catalog content; or
+- `catalog`: Track 2 is authoritative for SWM and every overlapping legacy
+  durable/SWM recovery path is excluded.
+
+Omitted modes retain the earlier selected-catalog behavior and resolve to
+`catalog`. New rollouts should set every mode explicitly and begin with
+`shadow`. A `catalog` graph does not silently fall back when the kill switch is
+active; changing authority requires an explicit config edit to `legacy` or
+`shadow` followed by restart. Finalized public VM reconciliation remains
+chain-inventoried in every mode and is not disabled by the catalog kill switch.
 
 The example shows structure only. Do not invent or copy placeholder control
 values. The complete `policyEnvelope` must be the output of an independent
@@ -158,6 +182,12 @@ The bounded operator shape is:
 ```json
 {
   "rfc64Catalog": {
+    "rollout": {
+      "killSwitch": false,
+      "contextGraphModes": {
+        "0x.../selected-private-cg": "shadow"
+      }
+    },
     "bootstrap": {
       "acceptedPolicies": [
         {
@@ -219,13 +249,21 @@ Restart the daemon and inspect `GET /api/status`:
 
 The public compatibility block lists public targets only. Private provider
 identities stay out of status. The `rfc64Catalog.privateRecovery` array gives
-local aggregate counts, whether VM is required, and safe completion reasons.
+local aggregate counts, the effective mode, whether VM is required, and safe
+completion reasons. Both RFC-64 status blocks expose the effective per-CG mode
+map and the kill-switch state resolved at startup.
 
 ```json
 {
   "rfc64PublicCatalog": {
     "enabled": true,
     "selectedContextGraphs": ["0x.../selected-public-cg"],
+    "rollout": {
+      "killSwitch": false,
+      "contextGraphModes": {
+        "0x.../selected-public-cg": "shadow"
+      }
+    },
     "autoPublishEnabled": true,
     "service": {},
     "bootstrap": {
@@ -233,9 +271,11 @@ local aggregate counts, whether VM is required, and safe completion reasons.
       "pass": 1,
       "targets": [
         {
-          "outcome": "applied",
+          "mode": "shadow",
+          "outcome": "shadow-staged",
           "providerPeerId": "12D3Koo...provider-primary",
-          "appliedHeadDigest": "0x...",
+          "appliedHeadDigest": null,
+          "stagedHeadDigest": "0x...",
           "catalogVersion": "50",
           "inventoryRowCount": "50",
           "lastError": null

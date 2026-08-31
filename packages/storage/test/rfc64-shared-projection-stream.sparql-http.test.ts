@@ -1,16 +1,14 @@
-import {
-  type Rfc64SharedProjectionStreamOperationV1,
-} from '@origintrail-official/dkg-core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
-  createTripleStore,
   createManagedOxigraphSparqlStoreV1,
+  createTripleStore,
+  isRfc64SharedProjectionStreamCapabilityV1,
   SparqlHttpStore,
   SyncSharedProjectionStoreV1,
 } from '../src/index.js';
-import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import { runRfc64HttpProjectionCapabilityConformance } from './helpers/rfc64-http-projection-capability-conformance.js';
 import {
   createRfc64SharedProjectionTestFixture,
   RFC64_PROJECTION_TEST_GRAPH,
@@ -19,6 +17,11 @@ import {
   startOxigraphSparqlEndpoint,
   type OxigraphSparqlEndpoint,
 } from './helpers/oxigraph-sparql-endpoint.js';
+import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import {
+  collectProjectionBytes as collectBytes,
+  projectionByteStream as byteStream,
+} from './helpers/rfc64-projection-stream-test-io.js';
 
 const ORIGINAL_FETCH = globalThis.fetch;
 const GRAPH = RFC64_PROJECTION_TEST_GRAPH;
@@ -391,37 +394,26 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
   });
 });
 
+runRfc64HttpProjectionCapabilityConformance({
+  adapterName: 'managed Oxigraph',
+  createStore: (scheduler, timeout) => {
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
+      scheduler,
+      timeout,
+    });
+    if (!isRfc64SharedProjectionStreamCapabilityV1(store)) {
+      throw new Error('managed Oxigraph test store lacks projection capability');
+    }
+    return store;
+  },
+});
+
 function operation(
-  overrides: Partial<Rfc64SharedProjectionStreamOperationV1> = {},
-): Rfc64SharedProjectionStreamOperationV1 {
+  overrides: Partial<typeof OPERATION> = {},
+): typeof OPERATION {
   return Object.freeze({
     ...OPERATION,
     ...overrides,
-  }) as Rfc64SharedProjectionStreamOperationV1;
-}
-
-function byteStream(chunks: readonly string[]): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
-      controller.close();
-    },
   });
-}
-
-async function collectBytes(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for await (const chunk of source) {
-    chunks.push(chunk);
-    length += chunk.byteLength;
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
 }

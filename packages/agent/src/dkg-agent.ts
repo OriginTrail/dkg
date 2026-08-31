@@ -427,6 +427,8 @@ import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-p
 import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import {
+  rfc64ExecutionPlanAllowsLegacySyncV1,
+  resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogActivationsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogControlsV1,
@@ -841,10 +843,21 @@ export class DKGAgent extends DKGAgentBase {
           ),
         selectedPublicAdmissionSnapshot: (peerId) =>
           this.selectedSwmBootstrapAdmission.snapshot(peerId),
-        configuredRecoveryPlan: (peerId) => resolveRfc64PeerSwmRecoveryPlanV1(
-          this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-          peerId,
-        ),
+        configuredRecoveryPlan: (peerId) => {
+          const plan = resolveRfc64PeerSwmRecoveryPlanV1(
+            this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+            peerId,
+          );
+          return Object.freeze({
+            ...plan,
+            targets: Object.freeze(plan.targets.filter(({ contextGraphId }) => (
+              rfc64ExecutionPlanAllowsLegacySyncV1(
+                this.config.rfc64CatalogExecutionPlan,
+                contextGraphId,
+              )
+            ))),
+          });
+        },
         isCatalogReady: (peerId) =>
           this.isRfc64CatalogBootstrapSwmRecoveryReadyV1(peerId),
         isPeerAccepted: (peerId) =>
@@ -944,14 +957,13 @@ export class DKGAgent extends DKGAgentBase {
       legacyAutoPublish: normalizedConfig.rfc64PublicCatalogAutoPublish,
       legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
+    const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
+      configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
+      activation: catalogActivation,
+    });
     const config: StorageAckNormalizedDKGAgentConfig = {
       ...normalizedConfig,
-      syncContextGraphs: [
-        ...new Set([
-          ...(normalizedConfig.syncContextGraphs ?? []),
-          ...catalogActivation.selectedPublicContextGraphs,
-        ]),
-      ],
+      syncContextGraphs: [...rfc64CatalogExecutionPlan.legacyContextGraphs],
     };
     // RFC-64 bootstrap owns durable catalog and control-object state. Reject
     // an impossible ephemeral configuration before constructing a store or
@@ -1088,6 +1100,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
       rfc64CatalogBootstrap,
+      rfc64CatalogExecutionPlan,
       rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,

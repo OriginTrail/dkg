@@ -47,6 +47,10 @@ import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import type { StoreOperation, StoreOperationOutcome } from '../store-operation-outcome.js';
+import {
+  createRfc64HttpSharedProjectionRunnerV1,
+  type Rfc64HttpProjectionRequestV1,
+} from '../rfc64-http-shared-projection-runner.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -226,6 +230,7 @@ export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
+  readonly rfc64SharedProjectionStreamV1;
   private readonly url: string;
   private readonly operationTimeoutMs: number;
   private readonly scheduler: StorePriorityScheduler;
@@ -234,6 +239,44 @@ export class BlazegraphStore implements TripleStore {
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
+    this.rfc64SharedProjectionStreamV1 = createRfc64HttpSharedProjectionRunnerV1({
+      runConstruct: (request, consume) => this.runStreamingConstruct(request, consume),
+      responseError: (status, excerpt) => new Error(
+        `Blazegraph construct failed (${status}): ${excerpt}`,
+      ),
+    }, {
+      accept: 'text/x-nquads, application/n-quads',
+      diagnosticByteCeiling: (projectionByteCeiling) => Math.min(
+        projectionByteCeiling,
+        64 * 1024,
+      ),
+      managedOxigraph: false,
+    });
+  }
+
+  private runStreamingConstruct<T>(
+    request: Rfc64HttpProjectionRequestV1,
+    consume: (
+      response: Response,
+      lifecycleSignal: AbortSignal | undefined,
+    ) => Promise<T>,
+  ): Promise<T> {
+    return this.runStoreWork(
+      'construct',
+      {
+        priority: request.priority,
+        signal: request.signal,
+        source: request.source,
+      },
+      async (deadline) => {
+        const response = await this.postReadRequest(
+          request.sparql,
+          request.accept,
+          deadline,
+        );
+        return deadline.waitFor(consume(response, deadline.signal));
+      },
+    );
   }
 
   rfc64ExactBindingsReadV1(
@@ -567,7 +610,7 @@ export class BlazegraphStore implements TripleStore {
         trimmed,
         'application/sparql-results+json',
         deadline,
-        options,
+        options?.maxResponseBytes,
         'query',
       );
 
@@ -598,10 +641,26 @@ export class BlazegraphStore implements TripleStore {
     sparql: string,
     accept: string,
     deadline: StoreOperationDeadline,
-    options: TripleStoreQueryOptions | undefined,
+    errorResponseByteCeiling: number | undefined,
     failureLabel: 'query' | 'construct',
   ): Promise<Response> {
-    const res = await deadline.waitFor(fetch(this.url, {
+    const res = await this.postReadRequest(sparql, accept, deadline);
+    if (!res.ok) {
+      const text = await deadline.waitFor((errorResponseByteCeiling === undefined
+        ? res.text()
+        : readResponseTextBounded(res, errorResponseByteCeiling)
+      ).catch(() => ''));
+      throw new Error(`Blazegraph ${failureLabel} failed (${res.status}): ${text.slice(0, 300)}`);
+    }
+    return res;
+  }
+
+  private async postReadRequest(
+    sparql: string,
+    accept: string,
+    deadline: StoreOperationDeadline,
+  ): Promise<Response> {
+    return deadline.waitFor(fetch(this.url, {
       method: 'POST',
       headers: {
         'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
@@ -611,14 +670,6 @@ export class BlazegraphStore implements TripleStore {
       body: sparql,
       signal: deadline.signal,
     }));
-    if (!res.ok) {
-      const text = await deadline.waitFor((options?.maxResponseBytes === undefined
-        ? res.text()
-        : readResponseTextBounded(res, options.maxResponseBytes)
-      ).catch(() => ''));
-      throw new Error(`Blazegraph ${failureLabel} failed (${res.status}): ${text.slice(0, 300)}`);
-    }
-    return res;
   }
 
   private async queryConstruct(
@@ -630,7 +681,7 @@ export class BlazegraphStore implements TripleStore {
       sparql,
       'text/x-nquads, application/n-quads',
       deadline,
-      options,
+      options?.maxResponseBytes,
       'construct',
     );
     const text = await deadline.waitFor(options?.maxResponseBytes === undefined

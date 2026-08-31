@@ -89,6 +89,7 @@ import {
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
+import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -700,7 +701,17 @@ describe('durable sync lifecycle chain binding', () => {
       needsReconcile: false,
     };
     const agentLike: any = {
-      config: {},
+      config: {
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+            enabled: true,
+            selectedContextGraphs: [],
+            selectedPublicContextGraphs: [],
+            rollout: { killSwitch: false, contextGraphModes: {} },
+          },
+        }),
+      },
       store: changelogCapableStore,
       runChangelogLane,
       runLegacyDurableSync,
@@ -731,6 +742,52 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
       signal: controller.signal,
     });
+  });
+
+  it('filters catalog-authoritative CGs before direct durable requester admission', async () => {
+    const runLegacyDurableSync = vi.fn(async () => ({
+      ...createDurableSyncAccumulator(),
+      complete: true,
+    }));
+    const agentLike: any = {
+      config: {
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+          enabled: true,
+          selectedContextGraphs: ['legacy-cg', 'catalog-cg'],
+          selectedPublicContextGraphs: [],
+          rollout: {
+            killSwitch: false,
+            contextGraphModes: { 'legacy-cg': 'legacy', 'catalog-cg': 'catalog' },
+          },
+          },
+        }),
+      },
+      store: {},
+      runLegacyDurableSync,
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-mixed-rollout',
+      ['legacy-cg', 'catalog-cg', 'unselected-cg'],
+    );
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync.mock.calls[0]?.[2]).toEqual([
+      'legacy-cg',
+      'unselected-cg',
+    ]);
+
+    runLegacyDurableSync.mockClear();
+    const catalogOnly = await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-catalog-only',
+      ['catalog-cg'],
+    );
+    expect(runLegacyDurableSync).not.toHaveBeenCalled();
+    expect(catalogOnly.complete).toBe(false);
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {

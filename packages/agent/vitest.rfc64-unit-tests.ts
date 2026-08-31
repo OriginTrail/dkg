@@ -48,6 +48,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-access-policy-v1.test.ts",
   "test/rfc64-catalog-bootstrap-outcome-v1.test.ts",
   "test/rfc64-private-catalog-activation-config-v1.test.ts",
+  "test/rfc64-rollout-authority.integration.test.ts",
   "test/rfc64-private-catalog-gate-artifact.test.ts",
   "test/rfc64-policy-cell-v1.test.ts",
 ] as const;

@@ -791,6 +791,39 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveNetworkConfigName(loaded)).toBe('mainnet-base');
   });
 
+  it('round-trips RFC-64 per-CG authority and kill-switch state', async () => {
+    const contextGraphId = 'restart-stable-rollout-cg';
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      rfc64PublicCatalog: {
+        rollout: {
+          killSwitch: true,
+          contextGraphModes: { [contextGraphId]: 'shadow' },
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy(contextGraphId)],
+          retryIntervalMs: 30_000,
+        },
+      },
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.rfc64PublicCatalog?.rollout).toEqual({
+      killSwitch: true,
+      contextGraphModes: { [contextGraphId]: 'shadow' },
+    });
+    expect(resolveRfc64PublicCatalogActivation(loaded, {
+      networkId: 'otp:20430',
+      evmChainId: '20430',
+    }).rollout).toEqual({
+      killSwitch: true,
+      contextGraphModes: { [contextGraphId]: 'shadow' },
+    });
+  });
+
   it('infers legacy network selection from a known chainId', () => {
     expect(resolveNetworkConfigName({ chain: { chainId: 'base:84532' } })).toBe('testnet');
     expect(resolveNetworkConfigName({ chain: { chainId: ' BASE:8453 ' } })).toBe('mainnet-base');
