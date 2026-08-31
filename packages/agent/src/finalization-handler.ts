@@ -1451,13 +1451,12 @@ export class FinalizationHandler {
       return 'no-swm';
     }
 
-    if (!input.inspectOnly) {
-      await this.advanceExactGraphScopedVersion({
-        contextGraphId: input.contextGraphId,
-        scope: resolution.scope,
-        materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
-      });
-    }
+    await this.advanceExactGraphScopedVersion({
+      contextGraphId: input.contextGraphId,
+      scope: resolution.scope,
+      materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
+      inspectOnly: input.inspectOnly,
+    });
     this.log.info(
       ctx,
       `Chain-reconcile: exact confirmed VM state survives without a workspace head for ${input.ual}`,
@@ -1737,13 +1736,12 @@ export class FinalizationHandler {
         subGraphName,
       });
       if (metadataState === 'matching') {
-        if (!input.inspectOnly) {
-          await this.advanceExactGraphScopedVersion({
-            contextGraphId,
-            scope,
-            materializedVersion,
-          });
-        }
+        await this.advanceExactGraphScopedVersion({
+          contextGraphId,
+          scope,
+          materializedVersion,
+          inspectOnly: input.inspectOnly,
+        });
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
@@ -1761,13 +1759,12 @@ export class FinalizationHandler {
           subGraphName,
         });
         if (failClosedMetadataState === 'matching') {
-          if (!input.inspectOnly) {
-            await this.advanceExactGraphScopedVersion({
-              contextGraphId,
-              scope,
-              materializedVersion,
-            });
-          }
+          await this.advanceExactGraphScopedVersion({
+            contextGraphId,
+            scope,
+            materializedVersion,
+            inspectOnly: input.inspectOnly,
+          });
           this.log.info(
             ctx,
             `Chain-reconcile: ${ual} retains fail-closed access without assertion evidence`,
@@ -2575,11 +2572,27 @@ export class FinalizationHandler {
   }
 
   /** Advance only the O(1) ordering stamp after exact VM and metadata verification. */
+  /**
+   * Advance the graph-scoped materialization stamp — unless the caller is only
+   * INSPECTING (#2435, ADR-W2R-8).
+   *
+   * The check lives HERE, at the writer, rather than being repeated at each
+   * already-current call site. Three copies of a guard are three chances to
+   * forget one, and a regression that re-stamped through only one door would
+   * have survived a mutant that forced the other two. One writer, one decision,
+   * one site to mutate.
+   *
+   * `inspectOnly` is optional and defaults to advancing, so the PROMOTION path
+   * — which must always record the version it just materialized — is untouched
+   * by construction rather than by remembering not to pass the flag.
+   */
   private async advanceExactGraphScopedVersion(input: {
     contextGraphId: string;
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     materializedVersion: MaterializedVersion;
+    inspectOnly?: boolean;
   }): Promise<void> {
+    if (input.inspectOnly) return;
     const metaGraph = contextGraphMetaUri(input.contextGraphId);
     await withMaterializationLock(metaGraph, input.scope.ual, async () => {
       const current = await readMaterializedVersion(
