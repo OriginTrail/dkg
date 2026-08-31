@@ -36,12 +36,9 @@ import {
   type EvmAddressV1,
 } from './sync-wire-scalars.js';
 import {
-  MAX_SCALAR_BYTES,
-  VmUpdateConvergenceError,
   adapt,
   boundedString,
   fail,
-  type VmUpdateErrorCodeV1,
 } from './vm-update-errors.js';
 import {
   canonicalBlockNumber,
@@ -50,7 +47,6 @@ import {
   compareEventPosition,
   sameEventIdentity,
   type FinalizedEventPositionV1,
-  type LooseEventPositionInputV1,
 } from './finalized-event-position-v1.js';
 
 // The error plumbing and the exact-event-position model were EXTRACTED to
