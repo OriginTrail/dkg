@@ -4,6 +4,10 @@ export interface WorkerErrorEnvelopeV1 {
   readonly code?: string;
 }
 
+export type WorkerResponseV1 =
+  | { readonly id: number; readonly result: unknown }
+  | { readonly id: number; readonly error: WorkerErrorEnvelopeV1 };
+
 /** Generic transport only: feature boundaries own typed reconstruction. */
 export function serializeWorkerErrorV1(error: unknown): WorkerErrorEnvelopeV1 {
   if (!(error instanceof Error)) {
