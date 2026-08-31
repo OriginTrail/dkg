@@ -715,7 +715,7 @@ export class OxigraphWorkerStore implements TripleStore {
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
     return this.runTrackedWrite(
       { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
-      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', input),
+      () => this.call<Rfc64AuthorCommitCasResultV1>('rfc64AuthorCommitCasV1', manifest),
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {

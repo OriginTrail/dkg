@@ -430,8 +430,8 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
         'ChangelogStore',
       );
     }
-    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(input, options);
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(manifest, options);
     for (const graph of manifest.referencedGraphs) {
       this.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
     }
@@ -439,7 +439,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
       operation: 'rfc64AuthorCommitCasV1',
       touchedGraphs: manifest.touchedGraphs,
       options,
-      execute: () => this.inner.rfc64AuthorCommitCasV1!(input, options),
+      execute: () => this.inner.rfc64AuthorCommitCasV1!(manifest, options),
       committed: result => result === 'committed',
     });
   }
