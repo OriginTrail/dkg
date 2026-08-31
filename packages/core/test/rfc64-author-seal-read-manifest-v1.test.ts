@@ -17,8 +17,13 @@ const COORDINATE = Object.freeze({
 
 describe('RFC-64 author-seal read manifest v1', () => {
   it('derives one exact bounded query from the authenticated coordinate', () => {
-    const operation = compileRfc64AuthorSealReadOperationV1({ coordinate: COORDINATE });
+    const mutableCoordinate = { ...COORDINATE };
+    const operation = compileRfc64AuthorSealReadOperationV1({
+      coordinate: mutableCoordinate as CanonicalGraphScopedAuthorSealCoordinateV1,
+    });
     const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1(COORDINATE);
+    expect(operation.coordinate).not.toBe(mutableCoordinate);
+    mutableCoordinate.assertionCoordinate = 'caller-mutated';
     expect(operation).toEqual({
       queryId: RFC64_AUTHOR_SEAL_READ_QUERY_ID_V1,
       coordinate: COORDINATE,
@@ -36,6 +41,7 @@ describe('RFC-64 author-seal read manifest v1', () => {
     });
     expect(Object.isFrozen(operation)).toBe(true);
     expect(Object.isFrozen(operation.coordinate)).toBe(true);
+    expect(operation.coordinate.assertionCoordinate).toBe('research');
   });
 
   it('rejects raw query controls and accessor-backed coordinates without invoking them', () => {

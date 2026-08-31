@@ -273,6 +273,25 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     });
   });
 
+  it('preserves managed cancellation evidence below the projection byte ceiling', async () => {
+    globalThis.fetch = (async () => new Response(
+      'The SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query',
+    });
+
+    await expect(store.rfc64SharedProjectionStreamV1!(OPERATION, {
+      byteCeiling: 24,
+    })).rejects.toMatchObject({
+      code: 'STORE_OPERATION_TIMEOUT',
+      backend: 'oxigraph-server',
+      operation: 'construct',
+      retryable: true,
+    });
+  });
+
   it('preserves typed HTTP refusal evidence without parsing an unbounded error body', async () => {
     let pulls = 0;
     let cancelled = false;
@@ -280,7 +299,7 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       pull(controller) {
         pulls += 1;
         controller.enqueue(new Uint8Array(1024).fill(0x78));
-        if (pulls >= 8) controller.close();
+        if (pulls >= 80) controller.close();
       },
       cancel() {
         cancelled = true;
@@ -300,7 +319,7 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       responseExcerpt: '',
     });
     expect(cancelled).toBe(true);
-    expect(pulls).toBeLessThan(8);
+    expect(pulls).toBeLessThan(80);
   });
 });
 

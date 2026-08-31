@@ -20,7 +20,7 @@ import {
 } from './triple-store.js';
 import {
   normalizeRfc64AuthorCommitCasV1,
-  type Rfc64AuthorCommitCasSemanticInputV1,
+  type NormalizedRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitStateTransitionV1,
 } from './rfc64-author-commit-cas.js';
 
@@ -77,7 +77,7 @@ export class Rfc64SemanticAuthorCommitErrorV1 extends Error {
  */
 export function compileRfc64SemanticAuthorCommitV1(
   input: unknown,
-): Rfc64AuthorCommitCasSemanticInputV1 {
+): NormalizedRfc64AuthorCommitCasV1 {
   const candidate = snapshotExactRecord(input, [
     'authorSealGraph',
     'authorSealQuads',
@@ -214,8 +214,7 @@ export function compileRfc64SemanticAuthorCommitV1(
       RFC64_SEMANTIC_PREDICATES_V1.GENERATION,
     ),
   });
-  normalizeRfc64AuthorCommitCasV1(compiled);
-  return compiled;
+  return normalizeRfc64AuthorCommitCasV1(compiled);
 }
 
 function assertPayloadTargets(
