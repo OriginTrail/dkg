@@ -224,6 +224,23 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it.each([
+    ['invalid JSON', '{'],
+    ['a null top-level value', 'null'],
+  ])('classifies HTTP 200 with %s as a malformed semantic result', async (_label, body) => {
+    const current = FIXTURES[0];
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    }));
+    const error = await rejected(new SyncSemanticStoreV1(
+      new BlazegraphStore('http://rfc64-malformed-json.test/sparql'),
+    ).read(requestOf(current), { timeoutMs: 1_000 }));
+    expectGatewayResultError(error);
+    expect((error as Error & { cause: unknown }).cause)
+      .toBeInstanceOf(Rfc64SemanticReadCapabilityResultErrorV1);
+  });
+
   it('returns an explicit absent result without invoking the strict record decoder', async () => {
     const query = vi.fn(async (): Promise<QueryResult> => ({
       type: 'bindings',
