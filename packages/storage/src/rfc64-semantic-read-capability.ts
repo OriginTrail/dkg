@@ -8,10 +8,7 @@ import {
 import type { QueryOptions, QueryResult, TripleStore } from './triple-store.js';
 import { SparqlJsonResultsShapeError } from './adapters/sparql-json-results.js';
 
-export type Rfc64SemanticReadProjectionModeV1 = 'manifest' | 'response';
-
 export interface Rfc64SemanticReadCapabilityResultV1 {
-  readonly variables: readonly string[];
   readonly rows: readonly Rfc64SemanticStoreRowV1[];
 }
 
@@ -35,7 +32,6 @@ export async function executeRfc64SemanticReadCapabilityV1(
   store: Pick<TripleStore, 'query'>,
   operation: Rfc64SemanticReadOperationV2,
   options: Pick<QueryOptions, 'signal'> = {},
-  projectionMode: Rfc64SemanticReadProjectionModeV1,
 ): Promise<Rfc64SemanticReadCapabilityResultV1> {
   let result: QueryResult;
   try {
@@ -54,7 +50,7 @@ export async function executeRfc64SemanticReadCapabilityV1(
     }
     throw cause;
   }
-  return normalizeRfc64SemanticReadResultV1(result, operation, projectionMode);
+  return normalizeRfc64SemanticReadResultV1(result, operation);
 }
 
 export function isRfc64SemanticReadCapabilityV1(
@@ -69,13 +65,12 @@ export function isRfc64SemanticReadCapabilityV1(
 function normalizeRfc64SemanticReadResultV1(
   result: QueryResult,
   operation: Rfc64SemanticReadOperationV2,
-  projectionMode: Rfc64SemanticReadProjectionModeV1,
 ): Rfc64SemanticReadCapabilityResultV1 {
   if (ownDataValue(result, 'type') !== 'bindings') {
     invalid('semantic read did not return bindings');
   }
   const reportedVariables = ownOptionalDataValue(result, 'variables');
-  const variables = reportedVariables === undefined && projectionMode === 'manifest'
+  const variables = reportedVariables === undefined
     ? [...operation.resultVariables]
     : snapshotProjection(reportedVariables);
   if (!sameProjection(variables, operation.resultVariables)) {
@@ -120,7 +115,6 @@ function normalizeRfc64SemanticReadResultV1(
     }
   }
   return Object.freeze({
-    variables: Object.freeze([...variables]),
     rows: Object.freeze(rows),
   });
 }

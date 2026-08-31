@@ -240,7 +240,7 @@ export class BlazegraphStore implements TripleStore {
     operation: Rfc64SemanticReadOperationV2,
     options?: Pick<QueryOptions, 'signal'>,
   ) {
-    return executeRfc64SemanticReadCapabilityV1(this, operation, options, 'response');
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   private runStoreWork<T>(

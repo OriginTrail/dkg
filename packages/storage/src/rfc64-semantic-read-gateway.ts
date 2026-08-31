@@ -1,10 +1,10 @@
 import {
   compileRfc64SemanticReadRequestV2,
   decodeRfc64SemanticRecordStoreRowsV1,
+  Rfc64SemanticRecordErrorV1,
   Rfc64SemanticReadManifestErrorV1,
   type DecodedRfc64SemanticRecordV1,
   type Rfc64SemanticRecordCoordinateV1,
-  type Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
 import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
@@ -109,11 +109,20 @@ export class SyncSemanticStoreV1 {
         }
         throw cause;
       }
-      const { rows } = snapshotCapabilityResult(capabilityResult, operation.resultVariables);
+      const { rows } = capabilityResult;
       if (rows.length === 0) {
         return Object.freeze({ kind: 'absent' });
       }
-      const decoded = decodeRfc64SemanticRecordStoreRowsV1(rows, operation.coordinate);
+      let decoded: DecodedRfc64SemanticRecordV1;
+      try {
+        decoded = decodeRfc64SemanticRecordStoreRowsV1(rows, operation.coordinate);
+      } catch (cause) {
+        deadline.check();
+        if (cause instanceof Rfc64SemanticRecordErrorV1) {
+          fail('rfc64-semantic-read-result', cause.message, cause);
+        }
+        throw cause;
+      }
       deadline.check();
       return Object.freeze({
         kind: 'record',
@@ -123,44 +132,6 @@ export class SyncSemanticStoreV1 {
       deadline.dispose();
     }
   }
-}
-
-function snapshotCapabilityResult(
-  input: unknown,
-  expectedVariables: readonly string[],
-): Readonly<{ readonly rows: readonly Rfc64SemanticStoreRowV1[] }> {
-  const result = snapshotExactRecord(
-    input,
-    ['rows', 'variables'],
-    'RFC-64 semantic read capability result',
-    'rfc64-semantic-read-result',
-  );
-  if (!Array.isArray(result.variables) || Object.getPrototypeOf(result.variables) !== Array.prototype) {
-    fail('rfc64-semantic-read-result', 'semantic read result projection must be an ordinary Array');
-  }
-  const variableKeys = Reflect.ownKeys(result.variables);
-  if (
-    variableKeys.some((key) => typeof key !== 'string')
-    || variableKeys.length !== result.variables.length + 1
-    || !variableKeys.includes('length')
-    || result.variables.length !== expectedVariables.length
-  ) {
-    fail('rfc64-semantic-read-result', 'semantic read returned the wrong result projection');
-  }
-  for (let index = 0; index < expectedVariables.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(result.variables, String(index));
-    if (
-      !descriptor?.enumerable
-      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
-      || descriptor.value !== expectedVariables[index]
-    ) {
-      fail('rfc64-semantic-read-result', 'semantic read returned the wrong result projection');
-    }
-  }
-  if (!Array.isArray(result.rows) || Object.getPrototypeOf(result.rows) !== Array.prototype) {
-    fail('rfc64-semantic-read-result', 'semantic read rows must be an ordinary Array');
-  }
-  return Object.freeze({ rows: result.rows as readonly Rfc64SemanticStoreRowV1[] });
 }
 
 function snapshotOptions(input: unknown): Rfc64SemanticReadOptionsV1 {

@@ -23,6 +23,27 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
       .rejects.toBe(reason);
   });
 
+  it('observes a late work rejection after pre-abort', async () => {
+    const controller = new AbortController();
+    const reason = new Error('already cancelled');
+    controller.abort(reason);
+    let rejectWork!: (cause: unknown) => void;
+    const work = new Promise<never>((_resolve, reject) => {
+      rejectWork = reject;
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (cause: unknown) => unhandled.push(cause);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(raceStoreWorkAgainstAbort(work, controller.signal)).rejects.toBe(reason);
+      rejectWork(new Error('late store failure'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('forwards the first abort reason and unlinks both source signals', () => {
     const caller = new AbortController();
     const generation = new AbortController();
