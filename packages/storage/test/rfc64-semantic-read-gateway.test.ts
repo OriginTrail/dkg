@@ -221,6 +221,23 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it.each([
+    ['invalid JSON', '{'],
+    ['a null top-level value', 'null'],
+  ])('classifies HTTP 200 with %s as a malformed semantic result', async (_label, body) => {
+    const current = FIXTURES[0];
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    }));
+    const error = await rejected(new SyncSemanticStoreV1(
+      new BlazegraphStore('http://rfc64-malformed-json.test/sparql'),
+    ).read(requestOf(current), { timeoutMs: 1_000 }));
+    expectGatewayResultError(error);
+    expect((error as Error & { cause: unknown }).cause)
+      .toBeInstanceOf(Rfc64SemanticReadCapabilityResultErrorV1);
+  });
+
   it('returns an explicit absent result without invoking the strict record decoder', async () => {
     const query = vi.fn(async (): Promise<QueryResult> => ({
       type: 'bindings',
@@ -451,6 +468,39 @@ describe('SyncSemanticStoreV1', () => {
     }
   });
 
+  it('times out a pending worker respawn with typed metadata and never dispatches', async () => {
+    const store = new OxigraphWorkerStore();
+    let releaseRespawn!: () => void;
+    const heldRespawn = new Promise<void>((resolve) => {
+      releaseRespawn = resolve;
+    });
+    const internals = store as unknown as {
+      respawnPromise: Promise<void> | null;
+      callWithTimeout: <T>(
+        timeoutMs: number,
+        signal: AbortSignal | undefined,
+        method: string,
+        ...args: unknown[]
+      ) => Promise<T>;
+      postToWorker: (...args: unknown[]) => Promise<unknown>;
+    };
+    internals.respawnPromise = heldRespawn;
+    const postToWorker = vi.spyOn(internals, 'postToWorker');
+    try {
+      await expect(internals.callWithTimeout(10, undefined, 'query', 'SELECT {}'))
+        .rejects.toMatchObject({
+          code: 'OXIGRAPH_WORKER_OP_TIMEOUT',
+          method: 'query',
+          timeoutMs: 10,
+        });
+      expect(postToWorker).not.toHaveBeenCalled();
+    } finally {
+      internals.respawnPromise = null;
+      releaseRespawn();
+      await store.close();
+    }
+  });
+
   it('reports the configured worker timeout after a respawn consumes part of the deadline', async () => {
     const store = new OxigraphWorkerStore();
     let releaseRespawn!: () => void;
@@ -531,6 +581,10 @@ describe('SyncSemanticStoreV1', () => {
       {
         type: 'bindings',
         bindings: [{ p: 'urn:test:p', o: '"value"@en' }],
+      },
+      {
+        type: 'bindings',
+        bindings: [{ p: 'urn:test:p', o: '"value"^^<not an iri>' }],
       },
       {
         type: 'bindings',

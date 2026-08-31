@@ -1,6 +1,9 @@
 import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
 
-import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
+import {
+  composeAbortSignals,
+  raceStoreWorkAgainstAbort,
+} from './abortable-store-work-lifecycle.js';
 
 export interface Rfc64ClosedBindingsReadOptionsV1 {
   readonly timeoutMs: number;
@@ -58,7 +61,7 @@ export async function runRfc64ClosedBindingsReadV1<TRow, TDecoded>(
     assertBeforeDeadline(signalScope.signal, deadlineAt, run.deadlineLabel);
     let rows: readonly TRow[];
     try {
-      rows = await waitForAbort(
+      rows = await raceStoreWorkAgainstAbort(
         run.dispatch(signalScope.signal),
         signalScope.signal,
       );
@@ -77,24 +80,6 @@ export async function runRfc64ClosedBindingsReadV1<TRow, TDecoded>(
     return decoded;
   } finally {
     signalScope.dispose();
-  }
-}
-
-async function waitForAbort<T>(
-  operation: Promise<T>,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (!signal) return operation;
-  let onAbort: (() => void) | undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-  });
-  try {
-    return await Promise.race([operation, aborted]);
-  } finally {
-    if (onAbort) signal.removeEventListener('abort', onAbort);
   }
 }
 

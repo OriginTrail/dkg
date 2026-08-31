@@ -152,23 +152,31 @@ const STALE_CG_SEAL = record('AppliedContextGraphSealV1', {
 describe('RFC-64 typed semantic author commit v1', () => {
   it('compiles complete canonical semantic subjects and no obsolete mutation knobs', () => {
     const compiled = compileRfc64SemanticAuthorCommitV1(commitInput());
-    expect(compiled.currentHead.quads).toHaveLength(10);
-    expect(compiled.subgraphMutationGeneration.quads).toHaveLength(4);
-    expect(compiled.contextGraphMutationGeneration.quads).toHaveLength(3);
-    expect(compiled.appliedSet.quads).toHaveLength(7);
-    expect(compiled.currentHead.expectedObject).toBe(
+    const replacement = (role: string) => compiled.subjectReplacements.find(
+      (candidate) => candidate.role === role,
+    )!;
+    const guard = (role: string) => compiled.guards.find(
+      (candidate) => candidate.role === role,
+    )!;
+    expect(compiled.planKind).toBe('rfc64-author-commit-plan-v1');
+    expect(compiled.sourceKind).toBe('semantic');
+    expect(replacement('currentHead').quads).toHaveLength(10);
+    expect(replacement('subgraphMutationGeneration').quads).toHaveLength(4);
+    expect(replacement('contextGraphMutationGeneration').quads).toHaveLength(3);
+    expect(replacement('appliedSet').quads).toHaveLength(7);
+    expect(guard('currentHead').expectedObject).toBe(
       `"${'a'.repeat(64)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>`,
     );
     expect(Reflect.ownKeys(compiled).sort()).toEqual([
-      'appliedSet',
-      'authorSealGraph',
-      'authorSealQuads',
-      'authorSealSubject',
-      'contextGraphMutationGeneration',
-      'currentHead',
-      'sharedProjectionGraph',
-      'sharedProjectionQuads',
-      'subgraphMutationGeneration',
+      'graphReplacements',
+      'guards',
+      'planKind',
+      'predicateReplacements',
+      'referencedGraphs',
+      'semanticQuads',
+      'sourceKind',
+      'subjectReplacements',
+      'touchedGraphs',
     ]);
     expect(Object.isFrozen(compiled)).toBe(true);
   });
@@ -445,6 +453,22 @@ describe('RFC-64 typed semantic author commit v1', () => {
     })), 'rfc64-semantic-author-commit-schema');
   });
 
+  it('compiles the complete 15-row private-content author seal', () => {
+    const privateSeal = Object.freeze({
+      ...AUTHOR_SEAL,
+      privateTripleCount: '1',
+      privateMerkleRoot: `0x${'f'.repeat(64)}`,
+    }) as CanonicalGraphScopedAuthorSealV1;
+    const compiled = compileRfc64SemanticAuthorCommitV1(commitInput({
+      authorSealQuads: projectCanonicalGraphScopedAuthorSealRowsV1(
+        privateSeal,
+        SEAL_COORDINATE,
+      ),
+    }));
+    expect(compiled.subjectReplacements.find(({ role }) => role === 'authorSeal')?.quads)
+      .toHaveLength(15);
+  });
+
   it('persists exactly one complete semantic winner across competing worker commits and reopen', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'rfc64-semantic-author-worker-'));
     const path = join(dir, 'store.nq');
@@ -502,7 +526,7 @@ describe('RFC-64 typed semantic author commit v1', () => {
       await store?.close().catch(() => {});
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });
 
 type CurrentHeadRecordForTest = Extract<

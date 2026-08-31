@@ -44,6 +44,28 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     }
   });
 
+  it('owns deadline cleanup and consumes work that settles after timeout', async () => {
+    let rejectWork!: (cause: unknown) => void;
+    const work = new Promise<never>((_resolve, reject) => {
+      rejectWork = reject;
+    });
+    const timeout = new Error('bounded wait expired');
+    const unhandled: unknown[] = [];
+    const onUnhandled = (cause: unknown) => unhandled.push(cause);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(raceStoreWorkAgainstAbort(work, undefined, {
+        timeoutMs: 5,
+        timeoutError: () => timeout,
+      })).rejects.toBe(timeout);
+      rejectWork(new Error('late store failure'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('forwards the first abort reason and unlinks both source signals', () => {
     const caller = new AbortController();
     const generation = new AbortController();
