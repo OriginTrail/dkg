@@ -1865,6 +1865,11 @@ export class DKGAgentBase {
     if (!this.config.dataDir) return;
     if (!(await (this as unknown as DKGAgent).vmUpdateConvergenceEnabled())) return;
     const databasePath = join(this.config.dataDir, VM_REVERIFY_INTENTS_DATABASE_FILENAME);
+    // SCOPE: this catch covers the intent-store open and NOTHING else. It sits
+    // inside this method, so it cannot soften the startup block that calls it —
+    // `prepareFinalizationRecoveryStore()` and every sibling there keep their
+    // boot-fatal contract, which is right for core durability. Widening it to
+    // the caller would trade one real bug for a worse one.
     try {
       this.vmReverifyIntents = await openSqliteVmReverifyIntentStore(this.config.dataDir);
       this.vmReverifyIntentStoreFailure = undefined;

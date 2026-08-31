@@ -224,18 +224,36 @@ async function heldNames(agent: DKGAgent): Promise<string[]> {
   )].sort();
 }
 
-/** Quads this node holds in the VERIFIABLE-memory graph of one exact version. */
-async function vmVersionQuadCount(
-  agent: DKGAgent,
-  ual: string,
-  assertionVersion: string,
-): Promise<number> {
+/**
+ * Names served from the Knowledge Asset's own VERIFIABLE-memory graph.
+ *
+ * That graph is keyed by (agentAddress, kaNumber) and NOT by assertion version
+ * — `contextGraphLayerUri` takes no version — so an update REPLACES its content
+ * in place rather than creating a second graph. An earlier revision of this file
+ * asked whether "the version-2 VM graph" existed yet; both versions resolve to
+ * the SAME URI, so that question could not be answered and the assertion was
+ * measuring a distinction the data model does not have. It also never ran until
+ * the oracles above it started passing, which is how it survived every red.
+ *
+ * The honest observable is CONTENT: what does verifiable memory say the name is.
+ * That is also strictly stronger than a quad count, which one triple satisfies
+ * whichever version it holds.
+ */
+async function vmNames(agent: DKGAgent, kaUal: string): Promise<string[]> {
   const graph = knowledgeAssetLayerGraphUri(
     CG,
     MemoryLayer.VerifiableMemory,
-    createGraphKnowledgeAssetScope(ual, assertionVersion),
+    // The version argument builds the scope; it does not reach the URI.
+    createGraphKnowledgeAssetScope(kaUal, '1'),
   );
-  return (agent as any).store.countQuads(graph);
+  const result: any = await (agent as any).store.query(
+    `SELECT ?o WHERE { GRAPH <${graph}> { <${SUBJECT}> <${NAME_PREDICATE}> ?o } }`,
+    { source: 'test.w2r.vmNames' },
+  );
+  const bindings: any[] = result?.bindings ?? [];
+  return [...new Set(
+    bindings.map((b) => literalText(String(b.o?.value ?? b.o))),
+  )].sort();
 }
 
 /**
@@ -450,9 +468,9 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       },
     );
     expect(updateResult.status, 'the on-chain update must confirm').toBe('confirmed');
-    updateBlock = Number(
-      (await ctx.provider.getTransactionReceipt(updateResult.onChainResult.txHash))!.blockNumber,
-    );
+    const updateReceipt =
+      (await ctx.provider.getTransactionReceipt(updateResult.onChainResult.txHash))!;
+    updateBlock = Number(updateReceipt.blockNumber);
 
     // The publisher moved; the host has not, and nothing will tell it.
     await new Promise((r) => setTimeout(r, 3000));
@@ -479,9 +497,25 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       + 'means some OTHER lane delivered the update',
     ).toEqual([NAME_V1]);
     expect(
-      await vmVersionQuadCount(host, ual, '2'),
-      'state-at-event: the version-2 VM graph must not exist yet',
-    ).toBe(0);
+      await vmNames(host, ual),
+      'state-at-event: verifiable memory must still say the OLD name',
+    ).toEqual([NAME_V1]);
+
+    // The position the lane DECODED and PERSISTED must be the position of the
+    // transaction that actually emitted the event. Everything downstream orders
+    // on this triple — "is this newer than what I recorded", and the
+    // `versionBlock >= observedBlock` resolve rule — so a decode that drifted
+    // from the receipt by one field would silently corrupt both, and no content
+    // assertion here would notice.
+    const pendingRows = await (host as unknown as {
+      vmReverifyIntents?: { listDue(now: number, limit: number): Promise<any[]> };
+    }).vmReverifyIntents!.listDue(Date.now(), 10);
+    const recorded = pendingRows.find((row) => row.ual === ual);
+    expect(recorded?.observed, 'the recorded position must match the emitting receipt')
+      .toMatchObject({
+        blockNumber: Number(updateReceipt.blockNumber),
+        transactionIndex: Number(updateReceipt.index),
+      });
 
     // ── Drain: the repair, through the shipped exact-asset fetch. ──
     const run = await drainOnce(host);
@@ -506,9 +540,9 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       'the host must now serve the NEW root',
     ).toContain(NAME_V2);
     expect(
-      await vmVersionQuadCount(host, ual, '2'),
-      'the version-2 content must be in VERIFIABLE memory, not merely staged',
-    ).toBeGreaterThan(0);
+      await vmNames(host, ual),
+      'the new content must be in VERIFIABLE memory, not merely staged',
+    ).toContain(NAME_V2);
     expect(
       await countPending(host, CG),
       'a resolved intent must be deleted, not left to retry forever',
