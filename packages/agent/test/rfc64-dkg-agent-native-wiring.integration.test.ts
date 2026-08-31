@@ -292,6 +292,7 @@ async function startNativeAgentWithOptions(
       rfc64PublicCatalogBootstrap: bootstrap,
     } : catalogActivation !== undefined ? {
       rfc64CatalogActivation: catalogActivation,
+      rfc64PublicCatalogAutoPublish: autoPublish,
     } : {
       rfc64PublicCatalogActivation: activation,
     }),
@@ -1258,6 +1259,109 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
 
     expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
+  });
+
+  it('keeps accepted private policy out of the legacy all-public projection lane', async () => {
+    const privatePolicy = privateCatalogPolicy();
+    const privatePolicyEnvelope = {
+      issuer: AUTHOR,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: privatePolicy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const privateRosterEnvelope = {
+      issuer: AUTHOR,
+      objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+      payload: privateCatalogRoster(
+        privatePolicy,
+        computeContextGraphPolicyObjectDigestV1(privatePolicyEnvelope),
+      ),
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedMemberRosterEnvelopeV1;
+    const privateProviderPeerId = '12D3KooPrivateProjectionBoundary';
+    const autoPublish = {
+      peers: [],
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+    let privateReconcile!: ReturnType<typeof vi.spyOn>;
+    const privateAgent = await startNativeAgentWithOptions({
+      name: 'private-policy-public-projection-exclusion',
+      autoPublish,
+      catalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          peerAgentBindings: [{
+            peerId: privateProviderPeerId,
+            agentAddress: AUTHOR,
+          }],
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope: privatePolicyEnvelope,
+            rosterEnvelope: privateRosterEnvelope,
+            targets: [],
+            completeSwmProviders: [privateProviderPeerId],
+          }],
+        },
+      },
+      beforeStart: (agent) => {
+        privateReconcile = vi.spyOn(
+          agent,
+          'reconcileRfc64PublicCatalogFromSwmInventoryV1',
+        ).mockResolvedValue(null);
+      },
+    });
+
+    expect((privateAgent as any).config.rfc64PublicCatalogAutoPublishPolicy)
+      .toMatchObject({ mode: 'all-accepted-public' });
+    expect(privateAgent.resolveRfc64AcceptedPublicRootLaneV1(
+      CONTEXT_GRAPH_ID,
+      null,
+    )).toBeNull();
+    expect(privateAgent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(false);
+    await privateAgent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(privateReconcile).not.toHaveBeenCalled();
+
+    const publicPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    let publicReconcile!: ReturnType<typeof vi.spyOn>;
+    const publicAgent = await startNativeAgentWithOptions({
+      name: 'public-policy-public-projection-admission',
+      autoPublish,
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(publicPolicy),
+          targets: [],
+        }],
+      },
+      beforeStart: (agent) => {
+        publicReconcile = vi.spyOn(
+          agent,
+          'reconcileRfc64PublicCatalogFromSwmInventoryV1',
+        ).mockResolvedValue(null);
+      },
+    });
+
+    expect(publicAgent.resolveRfc64AcceptedPublicRootLaneV1(
+      CONTEXT_GRAPH_ID,
+      null,
+    )).not.toBeNull();
+    expect(publicAgent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(true);
+    await publicAgent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(publicReconcile).toHaveBeenCalledTimes(1);
   });
 
   it('projects a manifest-selected activation to catalog authority by default', async () => {
