@@ -11,6 +11,12 @@ import {
   createRolloutStoreFixture,
   type RolloutStoreFixture,
 } from './rollout-store-fixture.js';
+import {
+  createBlazegraphRolloutStoreBinding,
+  createOxigraphRolloutStoreBinding,
+  rolloutStoreBindingFromEnv,
+  rolloutStoreBindingToEnv,
+} from './rollout-store-config.js';
 
 const BLAZEGRAPH_URL = 'http://127.0.0.1:9999/bigdata/namespace/kb/sparql';
 
@@ -19,6 +25,32 @@ test('loads the canonical Blazegraph namespace contract from storage', () => {
     'rfc64-runtime-contract-probe',
   );
   assert.match(namespaceXml, /rfc64-runtime-contract-probe/u);
+});
+
+test('round-trips complete Oxigraph and Blazegraph store bindings through the process environment', () => {
+  const oxigraph = createOxigraphRolloutStoreBinding({
+    dataDir: '/tmp/round-trip-oxigraph',
+    sentinelGraph: 'urn:dkg:rfc64:rollout-store-sentinel:round-trip:oxigraph',
+  });
+  assert.deepEqual(
+    rolloutStoreBindingFromEnv(
+      rolloutStoreBindingToEnv(oxigraph),
+      '/tmp/round-trip-oxigraph',
+    ),
+    oxigraph,
+  );
+
+  const blazegraph = createBlazegraphRolloutStoreBinding({
+    endpoint: 'http://127.0.0.1:9999/bigdata/namespace/round-trip/sparql',
+    sentinelGraph: 'urn:dkg:rfc64:rollout-store-sentinel:round-trip:blazegraph',
+  });
+  assert.deepEqual(
+    rolloutStoreBindingFromEnv(
+      rolloutStoreBindingToEnv(blazegraph),
+      '/tmp/ignored-for-blazegraph',
+    ),
+    blazegraph,
+  );
 });
 
 test('bounds a Blazegraph namespace request that never returns', async () => {
@@ -103,19 +135,26 @@ test('isolates fresh Blazegraph data directories and reuses restart endpoints', 
       receiver: ['/tmp/receiver-a', '/tmp/receiver-b'],
     },
   });
-  const first = fixture.envForRole('receiver', '/tmp/receiver-a');
-  const restarted = fixture.envForRole('receiver', '/tmp/receiver-a');
-  const fresh = fixture.envForRole('receiver', '/tmp/receiver-b');
+  const first = fixture.bindingForRole('receiver', '/tmp/receiver-a');
+  const restarted = fixture.bindingForRole('receiver', '/tmp/receiver-a');
+  const fresh = fixture.bindingForRole('receiver', '/tmp/receiver-b');
+  if (
+    first.backend !== 'blazegraph'
+    || restarted.backend !== 'blazegraph'
+    || fresh.backend !== 'blazegraph'
+  ) {
+    throw new Error('Blazegraph fixture returned a non-Blazegraph binding');
+  }
   assert.equal(
-    first.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
-    restarted.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+    first.endpoint,
+    restarted.endpoint,
   );
   assert.notEqual(
-    first.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
-    fresh.DKG_RFC64_GATE1_BLAZEGRAPH_URL,
+    first.endpoint,
+    fresh.endpoint,
   );
   assert.throws(
-    () => fixture.envForRole('receiver', '/tmp/receiver-c'),
+    () => fixture.bindingForRole('receiver', '/tmp/receiver-c'),
     /no registered receiver store/u,
   );
   await fixture.dispose();
@@ -129,7 +168,10 @@ test('removes every temporary root when remote fixture cleanup fails', async () 
   const roots = [...createdRoots];
   const failingFixture = {
     backend: 'blazegraph',
-    envForRole: () => ({}),
+    bindingForRole: () => createBlazegraphRolloutStoreBinding({
+      endpoint: BLAZEGRAPH_URL,
+      sentinelGraph: 'urn:dkg:rfc64:rollout-store-sentinel:cleanup',
+    }),
     assertGraphExact: async () => undefined,
     dispose: async () => { throw new Error('remote cleanup failed'); },
   } satisfies RolloutStoreFixture;

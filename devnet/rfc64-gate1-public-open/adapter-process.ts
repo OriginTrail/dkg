@@ -13,7 +13,6 @@ import {
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import {
   computeControlSignatureVariantDigestHex,
-  assertSafeIri,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -44,10 +43,7 @@ import {
   parseGate1RolloutAdapterConfig,
 } from './rollout-adapter-fixture.js';
 import {
-  buildGate1RolloutStoreConfig,
-  ROLLOUT_BLAZEGRAPH_URL_ENV,
-  ROLLOUT_STORE_BACKEND_ENV,
-  ROLLOUT_STORE_SENTINEL_GRAPH_ENV,
+  rolloutStoreBindingFromEnv,
 } from './rollout-store-config.js';
 
 const roleInput = process.argv[2];
@@ -61,17 +57,9 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 
 const dataDir = resolve(dataDirInput);
 const role: 'author' | 'receiver' = roleInput;
-const storeConfig = buildGate1RolloutStoreConfig({
-  backendInput: process.env[ROLLOUT_STORE_BACKEND_ENV],
-  blazegraphUrl: process.env[ROLLOUT_BLAZEGRAPH_URL_ENV],
-  dataDir,
-});
-const storeBackend = storeConfig.backend;
-const storeSentinelGraphInput = process.env[ROLLOUT_STORE_SENTINEL_GRAPH_ENV];
-if (storeSentinelGraphInput === undefined || storeSentinelGraphInput.length === 0) {
-  throw new Error(`${ROLLOUT_STORE_SENTINEL_GRAPH_ENV} is required`);
-}
-const storeSentinelGraph = assertSafeIri(storeSentinelGraphInput);
+const storeBinding = rolloutStoreBindingFromEnv(process.env, dataDir);
+const storeBackend = storeBinding.backend;
+const storeSentinelGraph = storeBinding.sentinelGraph;
 const pinnedMasterKeyHex = masterKeyHex;
 const rolloutConfig = parseGate1RolloutAdapterConfig(process.env);
 const rolloutMode = rolloutConfig?.mode ?? null;
@@ -131,7 +119,7 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
-  const store = await createTripleStore(storeConfig.tripleStore);
+  const store = await createTripleStore(storeBinding.tripleStore);
   const storeSentinelVerified = await store.hasGraph(storeSentinelGraph);
   if (!storeSentinelVerified) {
     await store.close();

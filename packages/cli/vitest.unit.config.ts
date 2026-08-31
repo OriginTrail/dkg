@@ -125,6 +125,7 @@ export default defineConfig({
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
+          'test/blazegraph-image-metadata.test.ts',
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',

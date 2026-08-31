@@ -46,6 +46,7 @@ import {
   createRolloutStoreFixture,
   type RolloutStoreFixture,
 } from './rollout-store-fixture.js';
+import { rolloutStoreBindingToEnv } from './rollout-store-config.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
@@ -812,7 +813,7 @@ function spawnAgent(
         ...process.env,
         DKG_RFC64_GATE1_ADAPTER_DATA_DIR: dataDir,
         DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[role],
-        ...storeFixture.envForRole(role, dataDir),
+        ...rolloutStoreBindingToEnv(storeFixture.bindingForRole(role, dataDir)),
         NODE_ENV: 'production',
       },
     },

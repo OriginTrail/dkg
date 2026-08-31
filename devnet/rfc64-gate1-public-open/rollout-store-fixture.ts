@@ -13,11 +13,10 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   parseRolloutStoreBackend,
-  buildGate1RolloutStoreConfig,
-  ROLLOUT_BLAZEGRAPH_URL_ENV,
-  ROLLOUT_STORE_BACKEND_ENV,
-  ROLLOUT_STORE_SENTINEL_GRAPH_ENV,
+  createBlazegraphRolloutStoreBinding,
+  createOxigraphRolloutStoreBinding,
   type RolloutStoreBackend,
+  type RolloutStoreBinding,
 } from './rollout-store-config.js';
 
 export { parseRolloutStoreBackend, type RolloutStoreBackend } from './rollout-store-config.js';
@@ -30,7 +29,7 @@ type RolloutNamespaceHandle = Readonly<{
 
 export interface RolloutStoreFixture {
   readonly backend: RolloutStoreBackend;
-  envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>>;
+  bindingForRole(role: RolloutStoreRole, dataDir: string): RolloutStoreBinding;
   assertGraphExact(
     role: RolloutStoreRole,
     dataDir: string,
@@ -94,41 +93,35 @@ class OxigraphRolloutStoreFixture implements RolloutStoreFixture {
   readonly backend = 'oxigraph' as const;
 
   private constructor(
-    private readonly sentinelByStore: ReadonlyMap<string, string>,
+    private readonly bindingByStore: ReadonlyMap<string, RolloutStoreBinding>,
   ) {}
 
   static async create(
     storeDataDirs: Readonly<Record<RolloutStoreRole, readonly string[]>>,
   ): Promise<OxigraphRolloutStoreFixture> {
-    const sentinelByStore = new Map<string, string>();
+    const bindingByStore = new Map<string, RolloutStoreBinding>();
     const nonce = fixtureNonce();
     for (const role of ['author', 'receiver'] as const) {
       for (const [index, dataDir] of storeDataDirs[role].entries()) {
         await mkdir(dataDir, { recursive: true, mode: 0o700 });
         const graph = sentinelGraph(nonce, role, index);
-        await seedStoreSentinel(
-          buildGate1RolloutStoreConfig({
-            backendInput: 'oxigraph',
-            blazegraphUrl: undefined,
-            dataDir,
-          }).tripleStore,
-          graph,
-        );
-        sentinelByStore.set(roleDataDirKey(role, dataDir), graph);
+        const binding = createOxigraphRolloutStoreBinding({
+          dataDir,
+          sentinelGraph: graph,
+        });
+        await seedStoreSentinel(binding.tripleStore, binding.sentinelGraph);
+        bindingByStore.set(roleDataDirKey(role, dataDir), binding);
       }
     }
-    return new OxigraphRolloutStoreFixture(sentinelByStore);
+    return new OxigraphRolloutStoreFixture(bindingByStore);
   }
 
-  envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>> {
-    const sentinelGraph = this.sentinelByStore.get(roleDataDirKey(role, dataDir));
-    if (sentinelGraph === undefined) {
+  bindingForRole(role: RolloutStoreRole, dataDir: string): RolloutStoreBinding {
+    const binding = this.bindingByStore.get(roleDataDirKey(role, dataDir));
+    if (binding === undefined) {
       throw new Error(`Oxigraph rollout fixture has no registered ${role} store for ${dataDir}`);
     }
-    return Object.freeze({
-      [ROLLOUT_STORE_BACKEND_ENV]: this.backend,
-      [ROLLOUT_STORE_SENTINEL_GRAPH_ENV]: sentinelGraph,
-    });
+    return binding;
   }
 
   async assertGraphExact(
@@ -161,8 +154,7 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
   readonly backend = 'blazegraph' as const;
 
   private constructor(
-    private readonly endpointByStore: ReadonlyMap<string, string>,
-    private readonly sentinelByStore: ReadonlyMap<string, string>,
+    private readonly bindingByStore: ReadonlyMap<string, RolloutStoreBinding>,
     private readonly namespaceManager: BlazegraphNamespaceManager,
     private readonly namespaceHandles: readonly RolloutNamespaceHandle[],
     private readonly requestTimeoutMs: number,
@@ -201,22 +193,23 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       plan.map((entry) => entry.namespace),
       input.signal,
     );
-    const endpointByStore = new Map<string, string>();
-    const sentinelByStore = new Map<string, string>();
+    const bindingByStore = new Map<string, RolloutStoreBinding>();
     for (const [index, entry] of plan.entries()) {
       const endpoint = handles[index]?.sparqlUrl;
       if (endpoint === undefined) throw new Error(`missing namespace handle for ${entry.key}`);
-      endpointByStore.set(entry.key, endpoint);
-      const graph = sentinelGraph(nonce, entry.role, entry.roleIndex);
-      sentinelByStore.set(entry.key, graph);
+      bindingByStore.set(entry.key, createBlazegraphRolloutStoreBinding({
+        endpoint,
+        sentinelGraph: sentinelGraph(nonce, entry.role, entry.roleIndex),
+      }));
     }
     try {
-      await Promise.all([...endpointByStore.entries()].map(async ([key, endpoint]) => {
-        const graph = sentinelByStore.get(key);
-        if (graph === undefined) throw new Error(`missing store sentinel for ${key}`);
+      await Promise.all([...bindingByStore.entries()].map(async ([key, binding]) => {
+        if (binding.backend !== 'blazegraph') {
+          throw new Error(`non-Blazegraph binding registered for ${key}`);
+        }
         await seedBlazegraphStoreSentinel(
-          endpoint,
-          graph,
+          binding.endpoint,
+          binding.sentinelGraph,
           input.fetchImpl,
           input.requestTimeoutMs,
           input.signal,
@@ -234,25 +227,19 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       throw cause;
     }
     return new BlazegraphRolloutStoreFixture(
-      endpointByStore,
-      sentinelByStore,
+      bindingByStore,
       namespaceManager,
       handles,
       input.requestTimeoutMs,
     );
   }
 
-  envForRole(role: RolloutStoreRole, dataDir: string): Readonly<Record<string, string>> {
-    const endpoint = this.endpointByStore.get(roleDataDirKey(role, dataDir));
-    const sentinelGraph = this.sentinelByStore.get(roleDataDirKey(role, dataDir));
-    if (endpoint === undefined || sentinelGraph === undefined) {
+  bindingForRole(role: RolloutStoreRole, dataDir: string): RolloutStoreBinding {
+    const binding = this.bindingByStore.get(roleDataDirKey(role, dataDir));
+    if (binding === undefined) {
       throw new Error(`Blazegraph rollout fixture has no registered ${role} store for ${dataDir}`);
     }
-    return Object.freeze({
-      [ROLLOUT_STORE_BACKEND_ENV]: this.backend,
-      [ROLLOUT_BLAZEGRAPH_URL_ENV]: endpoint,
-      [ROLLOUT_STORE_SENTINEL_GRAPH_ENV]: sentinelGraph,
-    });
+    return binding;
   }
 
   async assertGraphExact(
@@ -265,13 +252,13 @@ class BlazegraphRolloutStoreFixture implements RolloutStoreFixture {
       join(dataDir, 'store.nq'),
       `Blazegraph ${role} unexpectedly created an Oxigraph fallback store`,
     );
-    const endpoint = this.endpointByStore.get(roleDataDirKey(role, dataDir));
-    if (endpoint === undefined) {
+    const binding = this.bindingByStore.get(roleDataDirKey(role, dataDir));
+    if (binding?.backend !== 'blazegraph') {
       throw new Error(`Blazegraph ${role} endpoint is not registered`);
     }
     const observer = await createTripleStore({
       backend: 'blazegraph',
-      options: { url: endpoint, timeout: this.requestTimeoutMs },
+      options: { url: binding.endpoint, timeout: this.requestTimeoutMs },
     });
     try {
       const actual = await readExactGraphPaged(observer, graphUri, {

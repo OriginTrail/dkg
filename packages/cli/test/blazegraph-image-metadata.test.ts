@@ -1,5 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -140,6 +146,30 @@ describe('Blazegraph image metadata contract', () => {
 });
 
 describe('Blazegraph namespace XML rendering', () => {
+  it('runs from a clean source checkout without an installed workspace', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dkg-blazegraph-buildless-cli-'));
+    const cleanCliDir = join(root, 'packages', 'cli');
+    const cleanStorageDir = join(root, 'packages', 'storage');
+    mkdirSync(cleanCliDir, { recursive: true });
+    mkdirSync(cleanStorageDir, { recursive: true });
+    copyFileSync(parserPath, join(cleanCliDir, 'blazegraph-image-metadata.cjs'));
+    copyFileSync(
+      resolve(dirname(parserPath), '../storage/blazegraph-namespace-contract.cjs'),
+      join(cleanStorageDir, 'blazegraph-namespace-contract.cjs'),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [join(cleanCliDir, 'blazegraph-image-metadata.cjs'), '--namespace-xml', 'clean-checkout'],
+      { encoding: 'utf8' },
+    );
+    rmSync(root, { recursive: true, force: true });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      '<entry key="com.bigdata.rdf.sail.namespace">clean-checkout</entry>',
+    );
+  });
+
   it('renders the canonical template with the namespace substituted', () => {
     expect(contract.renderBlazegraphNamespaceXml('mynode')).toBe(
       contract.BLAZEGRAPH_NAMESPACE_XML_TEMPLATE.replace('{namespace}', 'mynode'),
