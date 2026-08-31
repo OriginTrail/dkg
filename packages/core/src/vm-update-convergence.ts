@@ -35,6 +35,40 @@ import {
   type Digest32V1,
   type EvmAddressV1,
 } from './sync-wire-scalars.js';
+import {
+  adapt,
+  boundedString,
+  fail,
+} from './vm-update-errors.js';
+import {
+  canonicalBlockNumber,
+  canonicalDigest32,
+  canonicalEventPositionV1,
+  compareEventPosition,
+  sameEventIdentity,
+  type FinalizedEventPositionV1,
+} from './finalized-event-position-v1.js';
+
+// The error plumbing and the exact-event-position model were EXTRACTED to
+// their own modules (PR #2436 review r16 — this file crossed the 1,000-line
+// threshold). The public surface is unchanged: every moved public name is
+// re-exported here, so the core index's star export serves the same API.
+export {
+  VM_UPDATE_ERROR_CODES,
+  VmUpdateConvergenceError,
+} from './vm-update-errors.js';
+export type { VmUpdateErrorCodeV1 } from './vm-update-errors.js';
+export {
+  canonicalBlockNumber,
+  canonicalDigest32,
+  canonicalEventPositionV1,
+  compareEventPosition,
+  sameEventIdentity,
+} from './finalized-event-position-v1.js';
+export type {
+  FinalizedEventPositionV1,
+  LooseEventPositionInputV1,
+} from './finalized-event-position-v1.js';
 
 /**
  * `sync-wire-scalars.ts` is the single source of truth for canonical EVM
@@ -50,31 +84,10 @@ import {
 const ZERO_EVM_ADDRESS = `0x${'00'.repeat(20)}`;
 const UTF8 = new TextEncoder();
 
-/** Run a shipped canonical-scalar assertion, re-raised as a W2 error code. */
-function adapt<T>(label: string, assertion: () => T, code: VmUpdateErrorCodeV1 = 'noncanonical-scalar'): T {
-  try {
-    return assertion();
-  } catch (cause) {
-    fail(code, `${label} is not canonical: ${(cause as Error)?.message ?? String(cause)}`, cause);
-  }
-}
 
 /** `(1 << 96) - 1` — the rootless KA-number field width. Re-exported from the owner. */
 export const MAX_ROOTLESS_KA_NUMBER = MAX_ROOTLESS_KA_NUMBER_V1;
 const MAX_UINT256 = MAX_KA_ID_V1;
-/**
- * Bound on an IDENTITY scalar — chain id, deployment id, UAL, origin.
- *
- * Deliberately NOT applied to raw event data. `log.data` for a legal
- * `KnowledgeAssetMerkleRootsUpdated` is `64 + n * 96` bytes: 21 MerkleRoot
- * entries is 2,080 bytes, i.e. 4,162 hex characters, which this cap would
- * reject. That event is a BLOCKING mutation, so rejecting it would stop W2
- * before it can persist the unsupported-mutation latch that is supposed to fail
- * closed — a legal on-chain event turned into a wedge. Raw log bytes are bounded
- * by {@link MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE} instead, per page, as the
- * plan specifies.
- */
-const MAX_SCALAR_BYTES = 4_096;
 
 /**
  * Aggregate bound on the raw topic+data hex a single page may carry.
@@ -135,48 +148,7 @@ export const VM_UPDATE_COVERAGE_STATES = Object.freeze([
 ] as const);
 export type VmUpdateCoverageStateV1 = (typeof VM_UPDATE_COVERAGE_STATES)[number];
 
-export const VM_UPDATE_ERROR_CODES = Object.freeze([
-  'scope-drift',
-  'noncanonical-scalar',
-  'foreign-chain',
-  'noncanonical-ual',
-  'ka-number-overflow',
-  'ual-round-trip-failed',
-  'ambiguous-w2-identity',
-  'page-malformed',
-  'page-oversized',
-  'assurance-insufficient',
-  'origin-not-distinct',
-  'commitment-mismatch',
-  'cursor-regression',
-  'resume-identity-conflict',
-  'coverage-invalid',
-] as const);
-export type VmUpdateErrorCodeV1 = (typeof VM_UPDATE_ERROR_CODES)[number];
 
-/**
- * A bounded, redactable failure.
- *
- * `detail` is capped and carries only values this module itself canonicalized —
- * never raw RPC payloads, endpoint URLs, or peer identifiers. W2's structured
- * logs emit `code` and `detail`; anything unbounded belongs in neither.
- */
-export class VmUpdateConvergenceError extends Error {
-  readonly code: VmUpdateErrorCodeV1;
-  readonly detail: string;
-
-  constructor(code: VmUpdateErrorCodeV1, detail: string, options?: { cause?: unknown }) {
-    const bounded = detail.length > 200 ? `${detail.slice(0, 197)}...` : detail;
-    super(`vm-update: ${code}: ${bounded}`, options);
-    this.name = 'VmUpdateConvergenceError';
-    this.code = code;
-    this.detail = bounded;
-  }
-}
-
-function fail(code: VmUpdateErrorCodeV1, detail: string, cause?: unknown): never {
-  throw new VmUpdateConvergenceError(code, detail, cause === undefined ? undefined : { cause });
-}
 
 /**
  * Snapshot an array as dense, own, enumerable DATA properties — or fail.
@@ -226,13 +198,6 @@ function denseDataArray(
 
 // ── canonical scalars ─────────────────────────────────────────────────────
 
-function boundedString(value: unknown, label: string): string {
-  if (typeof value !== 'string') fail('noncanonical-scalar', `${label} must be a string`);
-  if (value.length > MAX_SCALAR_BYTES || UTF8.encode(value).byteLength > MAX_SCALAR_BYTES) {
-    fail('noncanonical-scalar', `${label} exceeds ${MAX_SCALAR_BYTES} bytes`);
-  }
-  return value;
-}
 
 /** Canonical lowercase 20-byte address; the zero address is REJECTED. */
 export function canonicalEvmAddress(value: unknown, label = 'address'): EvmAddressV1 {
@@ -270,13 +235,6 @@ export function canonicalNullableAuthorAddress(
   return canonicalEvmAddress(text, label);
 }
 
-export function canonicalDigest32(value: unknown, label = 'digest'): Digest32V1 {
-  const text = boundedString(value, label);
-  return adapt(label, () => {
-    assertCanonicalDigest(text, label);
-    return text;
-  });
-}
 
 /**
  * A canonical UAL chain id.
@@ -306,13 +264,6 @@ export function canonicalUnsignedDecimal(value: unknown, label = 'value'): bigin
   return adapt(label, () => parseCanonicalDecimalU256(text, label));
 }
 
-/** A non-negative safe integer; block numbers and log indices are numbers on this wire. */
-export function canonicalBlockNumber(value: unknown, label = 'blockNumber'): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    fail('noncanonical-scalar', `${label} must be a non-negative safe integer`);
-  }
-  return value;
-}
 
 // ── scope identity ────────────────────────────────────────────────────────
 
@@ -425,13 +376,6 @@ export function canonicalVmUpdateScope(input: VmUpdateScopeV1): Readonly<VmUpdat
 
 // ── exact event identity ──────────────────────────────────────────────────
 
-export interface FinalizedEventPositionV1 {
-  blockNumber: number;
-  blockHash: string;
-  transactionHash: string;
-  transactionIndex: number;
-  logIndex: number;
-}
 
 export interface FinalizedKnowledgeAssetUpdateV1 extends FinalizedEventPositionV1 {
   kind: 'lifecycle-update' | 'root-added';
@@ -461,39 +405,7 @@ export type KnowledgeAssetRootMutationKindV1 =
   | FinalizedKnowledgeAssetUpdateV1['kind']
   | FinalizedUnsupportedKnowledgeAssetRootMutationV1['kind'];
 
-/**
- * The UNVALIDATED spelling of a position, as read off an untrusted boundary:
- * same keys, every value still unproven. The validator's parameter says so
- * honestly (PR #2436 review r8) — declaring `FinalizedEventPositionV1` here
- * forced callers decoding loose payloads into `as never` casts that made the
- * type boundary claim the input was already canonical.
- */
-export type LooseEventPositionInputV1 = { readonly [K in keyof FinalizedEventPositionV1]: unknown };
 
-/**
- * Public alias of the position validator (PR #2436 review r5): consumers that
- * decode a LOOSE event payload into `FinalizedEventPositionV1` must use THIS
- * boundary rather than restating `Number.isInteger`-style checks that drift
- * from core's canonical rules (safe integers, lowercase 32-byte digests).
- * Accepts the loose input shape and returns the proven one — the direction a
- * trust boundary is supposed to point.
- */
-export function canonicalEventPositionV1(
-  input: LooseEventPositionInputV1,
-  label = 'position',
-): FinalizedEventPositionV1 {
-  return canonicalPosition(input, label);
-}
-
-function canonicalPosition(input: LooseEventPositionInputV1, label: string): FinalizedEventPositionV1 {
-  return {
-    blockNumber: canonicalBlockNumber(input.blockNumber, `${label}.blockNumber`),
-    blockHash: canonicalDigest32(input.blockHash, `${label}.blockHash`),
-    transactionHash: canonicalDigest32(input.transactionHash, `${label}.transactionHash`),
-    transactionIndex: canonicalBlockNumber(input.transactionIndex, `${label}.transactionIndex`),
-    logIndex: canonicalBlockNumber(input.logIndex, `${label}.logIndex`),
-  };
-}
 
 export function canonicalFinalizedUpdate(
   input: FinalizedKnowledgeAssetUpdateV1,
@@ -512,31 +424,10 @@ export function canonicalFinalizedUpdate(
     kaId: canonicalUnsignedDecimal(input.kaId, 'update.kaId').toString(),
     author: canonicalNullableAuthorAddress(input.author, 'update.author'),
     merkleRoot: canonicalDigest32(input.merkleRoot, 'update.merkleRoot'),
-    ...canonicalPosition(input, 'update'),
+    ...canonicalEventPositionV1(input, 'update'),
   });
 }
 
-/**
- * Lexicographic order over `(blockNumber, transactionIndex, logIndex)`.
- *
- * `transactionHash` is an identity/equality check, NOT an ordering dimension:
- * ordering by it would make the reducer's resume point depend on hash bytes,
- * which carry no chain order.
- */
-export function compareEventPosition(a: FinalizedEventPositionV1, b: FinalizedEventPositionV1): number {
-  if (a.blockNumber !== b.blockNumber) return a.blockNumber < b.blockNumber ? -1 : 1;
-  if (a.transactionIndex !== b.transactionIndex) return a.transactionIndex < b.transactionIndex ? -1 : 1;
-  if (a.logIndex !== b.logIndex) return a.logIndex < b.logIndex ? -1 : 1;
-  return 0;
-}
-
-export function sameEventIdentity(a: FinalizedEventPositionV1, b: FinalizedEventPositionV1): boolean {
-  return (
-    compareEventPosition(a, b) === 0 &&
-    a.blockHash === b.blockHash &&
-    a.transactionHash === b.transactionHash
-  );
-}
 
 // ── ordered raw-log commitment ────────────────────────────────────────────
 
@@ -579,7 +470,7 @@ export function orderedLogCommitment(logs: readonly RawLogV1[]): Digest32V1 {
 
   for (const entry of dense) {
     const log = entry as RawLogV1;
-    const position = canonicalPosition(log.position, 'log');
+    const position = canonicalEventPositionV1(log.position, 'log');
     if (previous !== undefined) {
       const order = compareEventPosition(previous, position);
       if (order > 0) fail('page-malformed', 'logs are not in ascending chain order');
@@ -781,7 +672,7 @@ export function canonicalCoverageCursor(
   const resumeAfter =
     input.resumeAfter === undefined
       ? undefined
-      : Object.freeze(canonicalPosition(input.resumeAfter, 'cursor.resumeAfter'));
+      : Object.freeze(canonicalEventPositionV1(input.resumeAfter, 'cursor.resumeAfter'));
   const scanned =
     input.scannedThroughUnattested === undefined
       ? undefined

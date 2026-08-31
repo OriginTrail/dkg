@@ -46,6 +46,7 @@ import {
   KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
   type KnowledgeAssetRootMutationEventType,
 } from '../src/evm-adapter-events.js';
+import { RpcFailoverClient, type RpcEndpoint } from '../src/rpc-failover-client.js';
 import type { ChainEvent } from '../src/chain-adapter.js';
 
 const ABI_DIR = join(import.meta.dirname, '..', 'abi');
@@ -72,6 +73,7 @@ function minimalConfig(): EVMAdapterConfig {
 }
 
 interface FakeLog {
+  address?: string;
   topics: string[];
   data: string;
   blockNumber: number;
@@ -105,6 +107,9 @@ function encodeLog(
   if (!fragment) throw new Error(`event ${eventName} not in ABI`);
   const { data, topics } = iface.encodeEventLog(fragment, values);
   return {
+    // The bound storage contract's address — the r16 escape guard rejects a
+    // response log from any other contract as endpoint corruption.
+    address: '0x' + '22'.repeat(20),
     topics: [...topics],
     data,
     blockNumber: 4_242,
@@ -363,10 +368,13 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(events[0].data['blockHash']).toBe(BLOCK_HASH);
   });
 
-  it('skips a log whose indexed id is not a 32-byte word instead of aborting the scan', async () => {
-    // A malformed topic must not throw: a throw out of `listenForEvents` holds
-    // the lane cursor and stalls every LATER event behind one bad log, and the
-    // stall is deterministic — it never clears.
+  it('a malformed indexed id from the ONLY endpoint fails the scan — no partial consumption (review r14)', async () => {
+    // r14 overturned the r2 skip rule: a wrong-sized topic on a log matching
+    // our filter cannot originate on-chain, so it is endpoint corruption. With
+    // every endpoint exhausted the scan FAILS (the lane holds its cursor and
+    // retries later) rather than reporting a successful scan that silently
+    // dropped a mutation the endpoint mangled. Nothing from the corrupt
+    // response is consumed — not even its well-formed logs.
     const iface = new Interface(KA_ABI as never);
     const good = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
     const malformed: FakeLog = { ...good, topics: [good.topics[0], 'not-a-hex-word'] };
@@ -374,19 +382,17 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
       logsByEvent: { KnowledgeAssetMerkleRootAdded: [malformed, good] },
     });
 
-    const events = await drain(adapter, ['KnowledgeAssetMerkleRootAdded']);
-
-    expect(events).toHaveLength(1);
-    expect(events[0].data['kaId']).toBe(KA_ID.toString());
+    await expect(drain(adapter, ['KnowledgeAssetMerkleRootAdded']))
+      .rejects.toThrow(/malformed root-mutation log/);
   });
 
-  it('skips a short-but-parsable hex topic instead of minting a WRONG kaId (review r2)', async () => {
+  it('a short-but-parsable hex topic never mints a WRONG kaId (reviews r2+r14)', async () => {
     // The sharper malformed case: `0x01` is not a 32-byte EVM topic, but
     // `ethers.getBigInt` parses it happily — so without an exact-width guard
     // the scan would yield kaId "1" and a consumer would durably record a
-    // re-verification intent for an asset that was never mutated. The
-    // non-hex case above cannot catch that: it proves unparsable input is
-    // skipped, not that parsable-but-wrong-sized input is.
+    // re-verification intent for an asset that was never mutated. Under the
+    // r14 contract the corrupt response fails the scan outright; the property
+    // this row pins is that NO reading of it ever becomes kaId "1".
     const iface = new Interface(KA_ABI as never);
     const good = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
     const shortTopic: FakeLog = { ...good, topics: [good.topics[0], '0x01'] };
@@ -394,11 +400,8 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
       logsByEvent: { KnowledgeAssetMerkleRootAdded: [shortTopic, good] },
     });
 
-    const events = await drain(adapter, ['KnowledgeAssetMerkleRootAdded']);
-
-    expect(events).toHaveLength(1);
-    expect(events[0].data['kaId']).toBe(KA_ID.toString());
-    expect(events.some((e) => e.data['kaId'] === '1')).toBe(false);
+    await expect(drain(adapter, ['KnowledgeAssetMerkleRootAdded']))
+      .rejects.toThrow(/malformed root-mutation log/);
   });
 
   it('never decodes the dynamic root array of KnowledgeAssetMerkleRootsUpdated', async () => {
@@ -455,6 +458,101 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     // from genesis or clamp to a lagging endpoint's tip.
     expect(req?.fromBlock).toBe(1);
     expect(req?.toBlock).toBe(9_000);
+  });
+
+  it('a corrupt endpoint FAILS OVER instead of yielding a successful empty scan (review r14)', async () => {
+    // A wrong-sized indexed-id topic on a log matching our filter cannot
+    // originate on-chain — it is endpoint corruption. Silently skipping it
+    // let a faulty RPC hide a real mutation behind a "successful" response:
+    // the failover never fired and the lane cursor advanced past the block.
+    const iface = new Interface(KA_ABI as never);
+    const valid = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
+    const corrupt: FakeLog = { ...valid, topics: [valid.topics[0]!, '0x01', ...valid.topics.slice(2)] };
+
+    const { adapter } = makeAdapter({});
+    const attempts: string[] = [];
+    const priv = adapter as unknown as {
+      readProvider: (label: string, fn: unknown, opts?: unknown) => Promise<unknown>;
+    };
+    priv.readProvider = async (_label, fn) => {
+      // Emulate the production read-failover contract: run the callback per
+      // endpoint; a throw moves to the next endpoint.
+      const run = fn as (p: { getLogs: (req: unknown) => Promise<FakeLog[]> }) => Promise<FakeLog[]>;
+      try {
+        attempts.push('corrupt-endpoint');
+        return await run({ getLogs: async () => [corrupt] });
+      } catch {
+        attempts.push('healthy-endpoint');
+        return run({ getLogs: async () => [valid] });
+      }
+    };
+
+    const events = await drain(adapter, ['KnowledgeAssetMerkleRootAdded']);
+
+    // The corrupt response was rejected INSIDE the per-provider callback, the
+    // failover tried the healthy endpoint, and the real mutation arrived.
+    expect(attempts).toEqual(['corrupt-endpoint', 'healthy-endpoint']);
+    expect(events).toHaveLength(1);
+    expect(events[0].data['kaId']).toBe(KA_ID.toString());
+  });
+
+  it('endpoint corruption rides the REAL failover: BAD_DATA advances to the healthy endpoint (review r15)', async () => {
+    // The row above emulates the failover contract; this one runs the REAL
+    // RpcFailoverClient so the production retry CLASSIFIER decides the
+    // advance. A plain Error is non-retryable there — the corrupt endpoint
+    // would hold the lane in failure/backoff and the healthy endpoint would
+    // never be queried. The corruption error carries `code: 'BAD_DATA'`,
+    // which the raw-provider read path classifies as retryable.
+    const iface = new Interface(KA_ABI as never);
+    const valid = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
+    const corrupt: FakeLog = { ...valid, topics: [valid.topics[0]!, '0x01', ...valid.topics.slice(2)] };
+
+    const { adapter } = makeAdapter({});
+    const calls: string[] = [];
+    const endpoint = (name: string, logs: FakeLog[]): RpcEndpoint => ({
+      rpcUrl: `http://fake-${name}.invalid`,
+      provider: {
+        getLogs: async () => { calls.push(name); return logs; },
+      } as unknown as RpcEndpoint['provider'],
+    });
+    const failover = new RpcFailoverClient(
+      () => [endpoint('corrupt', [corrupt]), endpoint('healthy', [valid])],
+      (async () => { throw new Error('no signing in this test'); }) as never,
+      () => 'evm:31337',
+      { stickiness: { enabled: false } },
+    );
+    const priv = adapter as unknown as { rpcFailover: RpcFailoverClient; readProvider?: unknown };
+    priv.rpcFailover = failover;
+    // Drop the harness stub so the PROTOTYPE readProvider — the production
+    // transport entry — runs against the real failover client above.
+    delete priv.readProvider;
+
+    const events = await drain(adapter, ['KnowledgeAssetMerkleRootAdded']);
+
+    expect(calls).toEqual(['corrupt', 'healthy']);
+    expect(events).toHaveLength(1);
+    expect(events[0].data['kaId']).toBe(KA_ID.toString());
+  });
+
+  it('a response log that ESCAPES the requested filter is endpoint corruption (review r16)', async () => {
+    // eth_getLogs filters by address and block range. A log from another
+    // contract, or outside the requested window, proves the endpoint violated
+    // the request — accepting it would fabricate a root-mutation position and
+    // poison downstream ordering/de-duplication; silently dropping it would
+    // hide the corruption from the failover. Both reject through the same
+    // retryable corruption path.
+    const iface = new Interface(KA_ABI as never);
+    const good = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
+    const foreignContract: FakeLog = { ...good, address: '0x' + '99'.repeat(20) };
+    const outsideWindow: FakeLog = { ...good, blockNumber: 10_000 }; // drain requests 1..9_000
+
+    for (const [label, bad] of [['foreign contract', foreignContract], ['outside window', outsideWindow]] as const) {
+      const { adapter } = makeAdapter({
+        logsByEvent: { KnowledgeAssetMerkleRootAdded: [bad, good] },
+      });
+      await expect(drain(adapter, ['KnowledgeAssetMerkleRootAdded']), label)
+        .rejects.toThrow(/outside the requested filter/);
+    }
   });
 
   it('each yielded event carries the position of ITS OWN log (review r10)', async () => {

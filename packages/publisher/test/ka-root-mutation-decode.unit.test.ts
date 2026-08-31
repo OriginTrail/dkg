@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ChainEvent } from '@origintrail-official/dkg-chain';
 import { decodeKnowledgeAssetRootMutationEvent } from '../src/ka-root-mutation-decode.js';
+import { rootMutation } from './chain-event-poller-harness.js';
 
 const BLOCK_HASH = '0x' + 'cd'.repeat(32);
 const TX_HASH = '0x' + 'ef'.repeat(32);
@@ -42,5 +43,38 @@ describe('decodeKnowledgeAssetRootMutationEvent', () => {
       expect(decoded.mutation.kaId).toBe('42');
       expect(decoded.mutation.position.blockNumber).toBe(7);
     }
+  });
+});
+
+describe('decodeKnowledgeAssetRootMutationEvent — core-boundary canonicalization (review r5)', () => {
+  // The decoder is the ONE boundary from the loose ChainEvent bag to the typed
+  // union, and every judgement is core's — these rows pin the two drifts the
+  // review caught in the ad-hoc predecessors.
+  it('rejects a leading-zero kaId that the old digit-only regex used to accept', () => {
+    const r = decodeKnowledgeAssetRootMutationEvent(
+      rootMutation('KnowledgeAssetMerkleRootAdded', 50, { kaId: '00042' }),
+    );
+    expect(r).toEqual({ ok: false, reason: 'noncanonical-ka-id' });
+  });
+
+  it('accepts the full canonical u256 range', () => {
+    const max = (2n ** 256n - 1n).toString();
+    const r = decodeKnowledgeAssetRootMutationEvent(
+      rootMutation('KnowledgeAssetMerkleRootAdded', 50, { kaId: max }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.mutation.kaId).toBe(max);
+  });
+
+  it('rejects an unsafe-integer transaction index that Number.isInteger used to accept', () => {
+    const r = decodeKnowledgeAssetRootMutationEvent(
+      rootMutation('KnowledgeAssetMerkleRootAdded', 50, { txIndex: 2 ** 53 }),
+    );
+    expect(r).toEqual({ ok: false, reason: 'noncanonical-position' });
+  });
+
+  it('classifies an unserved event name without warning-noise', () => {
+    const r = decodeKnowledgeAssetRootMutationEvent({ type: 'SomethingElse', blockNumber: 1, data: {} });
+    expect(r).toEqual({ ok: false, reason: 'unknown-event-type' });
   });
 });
