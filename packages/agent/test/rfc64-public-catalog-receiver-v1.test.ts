@@ -485,6 +485,42 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ scheduled: 3, applied: 0, inFlight: 0, queued: 0 });
   });
 
+  it('cancels and fences an in-flight reconciliation when its CG becomes inactive', async () => {
+    const entered = deferred<void>();
+    const onHeadApplied = vi.fn();
+    let observedSignal: AbortSignal | undefined;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (_peerId, _announcement, signal) => {
+        observedSignal = signal;
+        entered.resolve();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return 'applied';
+      },
+    ), { onHeadApplied });
+    const current = announcement();
+    const completion = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+
+    await entered.promise;
+    receiver.cancelContextGraph(current.contextGraphId);
+
+    expect(observedSignal?.aborted).toBe(true);
+    await expect(completion).resolves.toEqual({
+      outcome: 'closed',
+      appliedProviderPeerId: null,
+      providerAttempts: 0,
+      error: null,
+    });
+    await receiver.whenIdle();
+    expect(onHeadApplied).not.toHaveBeenCalled();
+    expect(receiver.stats()).toMatchObject({ applied: 0, inFlight: 0, queued: 0 });
+    await receiver.close();
+  });
+
   it('round-robins transient failures with a bounded per-provider budget', async () => {
     const peers: string[] = [];
     const firstAttempt = deferred<void>();

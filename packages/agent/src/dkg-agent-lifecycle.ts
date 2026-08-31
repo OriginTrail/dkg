@@ -2025,7 +2025,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
           this.store,
-          this.config.rfc64CatalogRollout,
+          this.config.rfc64CatalogExecutionPlan,
         );
       }
       await this.prepareFinalizationRecoveryStore();
@@ -2439,7 +2439,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // OT-RFC-64 Gate 1: wire the public author-catalog transport onto the
     // production router. Announce/fetch protocols are admission-gated like
     // every other node protocol. Dormant when no dataDir opened persistence.
-    this.rfc64CatalogRuntimeV1?.start(ctx);
+    this.rfc64CatalogRuntimeV1.start(ctx);
 
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
@@ -9211,30 +9211,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
-    if (
-      (previous?.subscribed === true) !== (canonicalNext.subscribed === true)
-      && this.config.rfc64CatalogRollout.selectedContextGraphs.includes(contextGraphId)
-    ) {
-      // The canonical registry owns receiver selection. Every subscription
-      // entry point, including restart rehydration, crosses this one boundary;
-      // sync-scope bookkeeping cannot independently activate RFC-64.
-      this.requestRfc64PublicCatalogBootstrapPassV1();
-      if (
-        canonicalNext.subscribed
-        && this.rfc64PublicCatalogServiceV1 !== undefined
-      ) {
-        // The projection supervisor may have observed this edge while the CG
-        // was still dormant and therefore seeded no restart work. Re-enter
-        // its idempotent start boundary on the same canonical transition so a
-        // newly active subscription also repairs durable local-author SWM
-        // inventory. Rehydration happens before the service is ready and is
-        // picked up by the ordinary supervisor start later in startup. No
-        // parallel selection state is introduced here.
-        this.startRfc64SwmCatalogProjectionSupervisorV1(
-          createOperationContext('system'),
-        );
-      }
-    }
+    this.handleRfc64CatalogReceiverSelectionTransitionV1(
+      contextGraphId,
+      previous?.subscribed === true,
+      canonicalNext.subscribed === true,
+    );
     // VM cleanup policy belongs to the lifecycle consumer, not to the binding
     // registry. Invalidating a reverse candidate must also invalidate any work
     // captured against it; otherwise only an inactive subscription needs the
@@ -9470,20 +9451,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
     this.invalidateListContextGraphsCache();
     this.forceClearVmReconcileStateForContextGraph(contextGraphId);
-    const wasSelected = this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
+    const wasSubscribed = this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
     const deleted = this.subscribedContextGraphs.delete(contextGraphId);
-    if (
-      deleted
-      && wasSelected
-      && this.config.rfc64CatalogRollout.selectedContextGraphs.includes(contextGraphId)
-    ) {
-      this.requestRfc64PublicCatalogBootstrapPassV1();
-    }
+    if (deleted) this.handleRfc64CatalogReceiverSelectionTransitionV1(
+      contextGraphId,
+      wasSubscribed,
+      false,
+    );
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
     // new subscription later reuses the same local id.
     this.contextGraphBindingState.delete(contextGraphId);
     return deleted;
+  }
+
+  /** RFC-64-owned reaction to one canonical subscription state transition. */
+  handleRfc64CatalogReceiverSelectionTransitionV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    previousSubscribed: boolean,
+    nextSubscribed: boolean,
+  ): void {
+    if (
+      previousSubscribed === nextSubscribed
+      || !this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).eligible
+    ) return;
+    if (!nextSubscribed) {
+      this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
+    }
+    this.invalidateRfc64PublicCatalogBootstrapPassV1(contextGraphId);
+    if (nextSubscribed && this.rfc64PublicCatalogServiceV1 !== undefined) {
+      // Re-entering the idempotent start boundary also dirties an existing
+      // failed repair for this newly active CG, including retryIntervalMs=0.
+      this.startRfc64SwmCatalogProjectionSupervisorV1(
+        createOperationContext('system'),
+      );
+    }
   }
 
   persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): Promise<void> {

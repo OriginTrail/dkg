@@ -112,9 +112,8 @@ import {
 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
 import {
-  rfc64CatalogKillSwitchActiveV1,
-  resolveRfc64CatalogAuthorityDecisionV1,
-  resolveRfc64CatalogConfiguredAuthorityDecisionV1,
+  projectRfc64CatalogReceiverAuthorityV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogAuthorityPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
@@ -311,15 +310,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Rfc64CatalogAuthorityPolicyV1 {
-    const eligible = this.config.rfc64CatalogRollout.selectedContextGraphs
-      .includes(contextGraphId);
-    const active = eligible && (
+    const configured = resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
+      contextGraphId,
+    );
+    const active = configured.eligible && (
       (this.config.nodeRole ?? 'edge') === 'core'
       || this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
     );
-    return resolveRfc64CatalogAuthorityDecisionV1(
-      this.config.rfc64CatalogRollout,
-      contextGraphId,
+    return projectRfc64CatalogReceiverAuthorityV1(
+      configured,
       { active },
     );
   }
@@ -329,8 +329,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Rfc64CatalogAuthorityPolicyV1 {
-    return resolveRfc64CatalogConfiguredAuthorityDecisionV1(
-      this.config.rfc64CatalogRollout,
+    return resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
       contextGraphId,
     );
   }
@@ -340,7 +340,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
   ): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
     const eligibleContextGraphs = Object.freeze([
-      ...this.config.rfc64CatalogRollout.selectedContextGraphs,
+      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
     ].sort());
     const subscriptionDriven = (this.config.nodeRole ?? 'edge') === 'edge';
     return Object.freeze({
@@ -635,15 +635,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId?: string,
   ): void {
-    if (rfc64CatalogKillSwitchActiveV1(this.config.rfc64CatalogRollout)) {
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
       throw new Error('RFC-64 catalog authoring is disabled by the Track-2 kill switch');
     }
     if (
       contextGraphId !== undefined
-      && !resolveRfc64CatalogConfiguredAuthorityDecisionV1(
-        this.config.rfc64CatalogRollout,
-        contextGraphId,
-      ).authoringAllowed
+      && !this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).authoringAllowed
     ) {
       throw new Error('RFC-64 catalog authoring is disabled for legacy-mode CG');
     }

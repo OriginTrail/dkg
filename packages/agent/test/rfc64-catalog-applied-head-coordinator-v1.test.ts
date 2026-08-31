@@ -476,8 +476,8 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     const expectedPostReadByUal = new Map(primary.materializationReceipts.map(
       ({ ual, postReadDigest }) => [ual, postReadDigest],
     ));
+    expect(postHeadEvidence.committedHead).toEqual(committedHeadToken(combinedPlan));
     for (const receipt of recorded) {
-      expect(receipt.committedHead).toEqual(committedHeadToken(combinedPlan));
       expect(receipt.vmPostReadDigest).toBe(expectedPostReadByUal.get(receipt.kaUal));
       expect(receipt.swmReconciliationOutcome).toBe('retired');
     }

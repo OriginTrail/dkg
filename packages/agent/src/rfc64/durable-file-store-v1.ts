@@ -52,12 +52,16 @@ type Rfc64DurableFilePublishBoundaryV1 =
   | 'existing-fsynced'
   | 'existing-parent-fsynced';
 
+type Rfc64DurableFileDeleteBoundaryV1 =
+  | 'deleted'
+  | 'delete-parent-fsynced';
+
 export type Rfc64DurableFileBoundaryV1<TKind extends string = string> =
   | 'directory.created'
   | 'directory.mode-secured'
   | 'directory.self-fsynced'
   | 'directory.parent-fsynced'
-  | `${TKind}.${Rfc64DurableFilePublishBoundaryV1}`;
+  | `${TKind}.${Rfc64DurableFilePublishBoundaryV1 | Rfc64DurableFileDeleteBoundaryV1}`;
 
 /** Package-internal observation seam for durability and directory coordination. */
 export interface Rfc64DurableFileInstrumentationV1<TKind extends string = string> {
@@ -76,6 +80,7 @@ export interface Rfc64DirectoryPreparationObservationV1 {
 
 export interface Rfc64DurableFileStoreV1<TKind extends string> {
   putExactBytes(input: PutRfc64ExactBytesInputV1<TKind>): Promise<void>;
+  deleteExactBytes(input: DeleteRfc64ExactBytesInputV1<TKind>): Promise<boolean>;
   readOptionalBoundedBytes(
     input: ReadRfc64OptionalBoundedBytesInputV1,
   ): Promise<Uint8Array | null>;
@@ -153,6 +158,8 @@ export function createRfc64DurableFileStoreWithInstrumentationV1<TKind extends s
       }),
     readOptionalBoundedBytes: (input: ReadRfc64OptionalBoundedBytesInputV1) =>
       readRfc64OptionalBoundedBytesV1({ ...input, containmentRoot }),
+    deleteExactBytes: (input: DeleteRfc64ExactBytesInputV1<TKind>) =>
+      deleteRfc64ExactBytesV1({ ...input, containmentRoot, lifecycle }),
   });
 }
 
@@ -245,6 +252,51 @@ export interface PutRfc64ExactBytesInputV1<TKind extends string> {
   readonly maxBytes: number;
   readonly label: string;
   readonly kind: TKind;
+}
+
+export interface DeleteRfc64ExactBytesInputV1<TKind extends string> {
+  readonly relativePath: string;
+  readonly expectedBytes: Uint8Array;
+  readonly maxBytes: number;
+  readonly label: string;
+  readonly kind: TKind;
+}
+
+interface InternalDeleteRfc64ExactBytesInputV1<TKind extends string>
+  extends DeleteRfc64ExactBytesInputV1<TKind> {
+  readonly containmentRoot: string;
+  readonly lifecycle: Rfc64DurableFileInstrumentationV1<TKind>;
+}
+
+async function deleteRfc64ExactBytesV1<TKind extends string>(
+  input: InternalDeleteRfc64ExactBytesInputV1<TKind>,
+): Promise<boolean> {
+  const targetPath = resolveContainedFileTarget(input.containmentRoot, input.relativePath);
+  assertByteBounds(input.expectedBytes, input.maxBytes, input.label);
+  const stored = await readRfc64OptionalBoundedBytesV1({
+    containmentRoot: input.containmentRoot,
+    relativePath: input.relativePath,
+    maxBytes: input.maxBytes,
+    label: input.label,
+  });
+  if (stored === null) return false;
+  if (!bytesEqual(stored, input.expectedBytes)) {
+    fail('corrupt', `${input.label} changed before delete`);
+  }
+  try {
+    await unlink(targetPath);
+    await input.lifecycle.boundary(`${input.kind}.deleted`);
+  } catch (cause) {
+    if (isNodeError(cause, 'ENOENT')) return false;
+    fail('io', `failed to delete ${input.label}`, cause);
+  }
+  try {
+    await fsyncDirectory(dirname(targetPath));
+    await input.lifecycle.boundary(`${input.kind}.delete-parent-fsynced`);
+  } catch (cause) {
+    fail('durability', `failed to durably delete ${input.label}`, cause);
+  }
+  return true;
 }
 
 interface InternalPutRfc64ExactBytesInputV1<TKind extends string>

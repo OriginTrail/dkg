@@ -140,6 +140,8 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
 interface ReceiverTaskV1 {
   readonly key: string;
   readonly scopeKey: string;
+  readonly contextGraphId: string;
+  readonly cancellation: AbortController;
   /** Canonical provider registry; Map insertion order is the round-robin order. */
   readonly providers: Map<string, ReceiverProviderV1>;
   /** Monotonic accepted mutation revision used to close the settlement race. */
@@ -171,6 +173,8 @@ interface ReceiverTaskV1 {
   reconciliationAttemptStarted?: boolean;
   reconciliationAttemptToken?: number | null;
   reconciliationAttemptEnded?: boolean;
+  running?: boolean;
+  settled?: boolean;
 }
 
 interface ReceiverProviderV1 {
@@ -382,7 +386,10 @@ export class Rfc64PublicCatalogReceiverV1 {
     for (const { announcement, remotePeerId } of inputs) {
       this.#scheduled += 1;
       const key = headKey(announcement);
-      const existing = this.#pendingByKey.get(key);
+      const candidate = this.#pendingByKey.get(key);
+      const existing = candidate?.cancellation.signal.aborted === true
+        ? undefined
+        : candidate;
       if (existing !== undefined) {
         this.#dedupedInFlight += 1;
         const providerKey = providerContextKey(remotePeerId, announcement);
@@ -413,6 +420,8 @@ export class Rfc64PublicCatalogReceiverV1 {
       const task: ReceiverTaskV1 = {
         key,
         scopeKey: catalogScopeKey(announcement),
+        contextGraphId: announcement.contextGraphId,
+        cancellation: new AbortController(),
         revision: 1n,
         providers: new Map([[providerKey, {
           key: providerKey,
@@ -480,6 +489,8 @@ export class Rfc64PublicCatalogReceiverV1 {
         ++this.#isolatedCompletionSequence
       }`,
       scopeKey: catalogScopeKey(first.announcement),
+      contextGraphId: first.announcement.contextGraphId,
+      cancellation: new AbortController(),
       revision: 1n,
       providers,
       completionWaiters: [completion],
@@ -495,6 +506,30 @@ export class Rfc64PublicCatalogReceiverV1 {
     return new Promise<void>((resolve) => this.#idleWaiters.push(resolve));
   }
 
+  /** Fence queued, deferred, and active work for one no-longer-selected CG. */
+  cancelContextGraph(contextGraphId: string): void {
+    const tasks = new Set(
+      [...this.#pendingByKey.values()].filter(
+        (task) => task.contextGraphId === contextGraphId,
+      ),
+    );
+    for (const task of tasks) {
+      task.cancellation.abort(new Error(
+        `RFC-64 receiver selection inactive for ${contextGraphId}`,
+      ));
+      if (task.running === true) continue;
+      const queueIndex = this.#queue.indexOf(task);
+      if (queueIndex >= 0) this.#queue.splice(queueIndex, 1);
+      this.#deferred.delete(task);
+      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: task.providerAttempts ?? 0,
+      }));
+      if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
+    }
+    if (this.#isIdle()) this.#resolveIdle();
+  }
+
   /**
    * Stop accepting hints, abort in-flight fetch retries, and await every
    * in-flight chain so no durable stage write races the control store close.
@@ -505,6 +540,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       return;
     }
     this.#closed = true;
+    for (const task of new Set(this.#pendingByKey.values())) {
+      task.cancellation.abort(new Error('RFC-64 public catalog receiver closing'));
+    }
     for (const timer of this.#deferralTimers) clearTimeout(timer);
     this.#deferralTimers.clear();
     for (const task of this.#deferred) {
@@ -512,7 +550,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
       }));
-      this.#pendingByKey.delete(task.key);
+      if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
     }
     this.#deferred.clear();
     const abandoned = this.#queue.splice(0);
@@ -521,7 +559,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
       }));
-      this.#pendingByKey.delete(task.key);
+      if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
     }
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
     await Promise.allSettled([...this.#active]);
@@ -558,12 +596,25 @@ export class Rfc64PublicCatalogReceiverV1 {
       if (taskIndex < 0) return;
       const [task] = this.#queue.splice(taskIndex, 1);
       if (task === undefined) return;
+      if (task.cancellation.signal.aborted) {
+        this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+          outcome: 'closed',
+          providerAttempts: task.providerAttempts ?? 0,
+        }));
+        if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
+        continue;
+      }
       this.#activeScopeKeys.add(task.scopeKey);
+      task.running = true;
       const run = this.#runTask(task).then((outcome) => {
         // A deferral releases the concurrency slot AND the semantic scope lock
         // before waiting, and keeps the pending key so a duplicate announcement
         // still dedupes onto this task instead of creating a second writer.
-        if (outcome.kind === 'defer-admission' && !this.#closed) {
+        if (
+          outcome.kind === 'defer-admission'
+          && !this.#closed
+          && !task.cancellation.signal.aborted
+        ) {
           this.#scheduleAdmissionRetry(task);
           return;
         }
@@ -637,8 +688,9 @@ export class Rfc64PublicCatalogReceiverV1 {
             }));
             break;
         }
-        this.#pendingByKey.delete(task.key);
+        if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
       }).finally(() => {
+        task.running = false;
         this.#active.delete(run);
         this.#activeScopeKeys.delete(task.scopeKey);
         if (!this.#closed) this.#pump();
@@ -662,7 +714,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (task.admissionDeferrals > this.#maxAdmissionDeferrals) {
       this.#failed += 1;
       this.#deferred.delete(task);
-      this.#pendingByKey.delete(task.key);
+      if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
       const firstProvider = task.providers.values().next().value;
       this.#safeNotify(() => this.#onError?.(
         firstProvider!.announcement,
@@ -683,12 +735,16 @@ export class Rfc64PublicCatalogReceiverV1 {
     const timer = setTimeout(() => {
       this.#deferralTimers.delete(timer);
       this.#deferred.delete(task);
-      if (this.#closed || this.#closing.signal.aborted) {
+      if (
+        this.#closed
+        || this.#closing.signal.aborted
+        || task.cancellation.signal.aborted
+      ) {
         this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
           outcome: 'closed',
           providerAttempts: task.providerAttempts ?? 0,
         }));
-        this.#pendingByKey.delete(task.key);
+        if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
         if (this.#isIdle()) this.#resolveIdle();
         return;
       }
@@ -715,7 +771,9 @@ export class Rfc64PublicCatalogReceiverV1 {
     );
     let providerCursor = task.providerCursor ?? 0;
     while (true) {
-      if (this.#closing.signal.aborted) return { kind: 'aborted' };
+      if (this.#closing.signal.aborted || task.cancellation.signal.aborted) {
+        return { kind: 'aborted' };
+      }
       const providers = [...task.providers.values()];
       const selection = nextEligibleProvider(
         providers,
@@ -768,8 +826,9 @@ export class Rfc64PublicCatalogReceiverV1 {
         const result = await this.#reconciler.reconcileHead(
           provider.peerId,
           provider.announcement,
-          this.#closing.signal,
+          task.cancellation.signal,
         );
+        if (task.cancellation.signal.aborted) return { kind: 'aborted' };
         recordProviderAttempt();
         if (result === 'not-found') {
           terminalFailuresByProvider.delete(provider.key);
@@ -785,6 +844,9 @@ export class Rfc64PublicCatalogReceiverV1 {
           peerId: provider.peerId,
         };
       } catch (error) {
+        if (this.#closing.signal.aborted || task.cancellation.signal.aborted) {
+          return { kind: 'aborted' };
+        }
         if (this.#isDeferrableError(error)) {
           // Not this head's fault and not this provider's fault: roll back ONLY
           // this attempt and let the task wait for the lane outside the slot.
@@ -799,18 +861,19 @@ export class Rfc64PublicCatalogReceiverV1 {
           providerPeerId: provider.peerId,
           error,
         }));
-        if (this.#closing.signal.aborted) return { kind: 'aborted' };
-        await this.#backoff(providerAttempt - 1);
+        if (this.#closing.signal.aborted || task.cancellation.signal.aborted) {
+          return { kind: 'aborted' };
+        }
+        await this.#backoff(providerAttempt - 1, task.cancellation.signal);
       }
     }
   }
 
-  #backoff(attempt: number): Promise<void> {
+  #backoff(attempt: number, signal: AbortSignal): Promise<void> {
     const delay = this.#retryBackoffMs * 2 ** attempt;
     if (delay <= 0) return Promise.resolve();
     this.#providerBackoffMs += delay;
     return new Promise<void>((resolve) => {
-      const signal = this.#closing.signal;
       const timer = setTimeout(() => {
         signal.removeEventListener('abort', onAbort);
         resolve();
@@ -857,6 +920,8 @@ export class Rfc64PublicCatalogReceiverV1 {
     task: ReceiverTaskV1,
     result: Rfc64PublicCatalogReceiverCompletionV1,
   ): void {
+    if (task.settled === true) return;
+    task.settled = true;
     this.#finishReconciliationAttempt(task);
     const waiters = task.completionWaiters?.splice(0) ?? [];
     for (const resolve of waiters) this.#safeNotify(() => resolve(result));

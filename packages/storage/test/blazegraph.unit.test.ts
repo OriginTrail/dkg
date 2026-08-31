@@ -449,12 +449,12 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(outcome).not.toBe(lateTransportFailure);
   });
 
-  it('reports TimeoutError when JSON decoding rejects after the deadline clock but before its timer runs', async () => {
+  it('reports TimeoutError when response text reading rejects after the deadline clock but before its timer runs', async () => {
     const lateDecodeFailure = new Error('late JSON failure');
     setFetch(async () => ({
       ok: true,
       status: 200,
-      json: async () => {
+      text: async () => {
         blockEventLoopFor(25);
         throw lateDecodeFailure;
       },
@@ -484,15 +484,15 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     await expect(query).rejects.toBe(reason);
   });
 
-  it('keeps the SELECT deadline active through response JSON decoding', async () => {
+  it('keeps the SELECT deadline active through response text reading', async () => {
     setFetch(async (_url, init) => {
-      const body = new Promise<unknown>((_resolve, reject) => {
+      const body = new Promise<string>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
       });
       return {
         ok: true,
         status: 200,
-        json: () => body,
+        text: () => body,
       } as Response;
     });
     const s = new BlazegraphStore(baseUrl, { timeout: 20 });

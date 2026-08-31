@@ -1,5 +1,7 @@
 import { buildCatalogAssertionScopeV1, type CatalogLaneV1 } from './author-catalog-codec.js';
+import { contextGraphLayerUri } from './constants.js';
 import type { CanonicalDeterministicKnowledgeAssetUalPartsV1 } from './ka-content-scope.js';
+import { MemoryLayer } from './memory-model.js';
 
 /**
  * Canonical physical graph for one RFC-64 shared projection.
@@ -12,6 +14,10 @@ export function deriveRfc64SharedProjectionGraphIriV1(
   lane: CatalogLaneV1,
   ual: CanonicalDeterministicKnowledgeAssetUalPartsV1,
 ): string {
-  return `did:dkg:context-graph:${buildCatalogAssertionScopeV1(lane)}`
-    + `/_shared_memory/${ual.agentAddress}/${ual.kaNumber}`;
+  return contextGraphLayerUri(
+    buildCatalogAssertionScopeV1(lane),
+    MemoryLayer.SharedWorkingMemory,
+    ual.agentAddress,
+    ual.kaNumber,
+  );
 }

@@ -34,6 +34,7 @@ import {
 
 export {
   rfc64CatalogConfiguredRolloutModeForContextGraphV1,
+  projectRfc64CatalogReceiverAuthorityV1,
   resolveRfc64CatalogConfiguredAuthorityDecisionV1,
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
@@ -41,6 +42,7 @@ export {
   rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64CatalogExecutionPlanV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogExecutionPlanV1,
   type ResolvedRfc64CatalogRolloutConfigV1,
   type Rfc64CatalogRolloutConfigV1,

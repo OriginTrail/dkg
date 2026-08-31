@@ -12,7 +12,9 @@
 'use strict';
 
 const fs = require('node:fs');
-const blazegraphNamespaceContract = require('./blazegraph-namespace-contract.cjs');
+const blazegraphNamespaceContract = require(
+  '@origintrail-official/dkg-storage/blazegraph-namespace-contract',
+);
 const {
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   assertBlazegraphNamespace,

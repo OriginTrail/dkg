@@ -27,17 +27,12 @@ import type {
   QueryOptions,
   UpdateOptions,
   QueryResult,
-  SelectResult,
   ConstructResult,
-  AskResult,
   StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import {
-  parseSparqlJsonSelectResponse,
-  type AdapterSparqlJsonSelectResponse,
-} from './sparql-json-results.js';
+import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -69,7 +64,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { AbortableStoreWorkLifecycle, composeAbortSignals } from '../abortable-store-work-lifecycle.js';
+import {
+  AbortableStoreWorkLifecycle,
+  composeAbortSignals,
+  raceStoreWorkAgainstAbort,
+} from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
   isStoreOperationTimeoutError,
@@ -82,42 +81,29 @@ import type {
 } from '../rfc64-shared-projection-stream-capability.js';
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
+  getManagedOxigraphRuntimeConstructionAuthorityV1,
+  isManagedOxigraphRuntimeConstructionAuthorityV1,
 } from '../managed-oxigraph-runtime-store.js';
 import {
-  createManagedOxigraphSharedProjectionRunnerV1,
-  type ManagedOxigraphConstructRequestV1,
-} from '../managed-oxigraph-shared-projection-runner.js';
+  createRfc64HttpSharedProjectionRunnerV1,
+  managedOxigraphDiagnosticByteCeilingV1,
+  type Rfc64HttpProjectionRequestV1,
+} from '../rfc64-http-shared-projection-runner.js';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import type { Rfc64SemanticReadOperationV2 } from '@origintrail-official/dkg-core';
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
-}
-
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
 const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
 const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
-const MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY = Object.freeze({
-  kind: 'dkg-managed-oxigraph-sparql-construction-v1',
-} as const);
 /**
  * A non-OK response from the configured SPARQL endpoint.
  *
@@ -284,6 +270,7 @@ export class SparqlHttpStore implements TripleStore {
   readonly rfc64SharedProjectionStreamV1?:
     Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1'];
   readonly rfc64ExactBindingsReadCertifiedV1: true | false;
+  readonly rfc64SemanticReadCertifiedV1: true | false;
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
@@ -312,7 +299,7 @@ export class SparqlHttpStore implements TripleStore {
 
   constructor(
     options: SparqlHttpStoreOptions,
-    constructionAuthority?: typeof MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY,
+    constructionAuthority?: object,
   ) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
@@ -321,8 +308,11 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
-    this.managedOxigraph = constructionAuthority === MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY;
+    this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
+      constructionAuthority,
+    );
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
+    this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
     this.consistencyProfile = this.managedOxigraph
@@ -347,19 +337,23 @@ export class SparqlHttpStore implements TripleStore {
       this.headers['Authorization'] = options.auth;
     }
     if (this.managedOxigraph) {
-      this.rfc64SharedProjectionStreamV1 = createManagedOxigraphSharedProjectionRunnerV1({
+      this.rfc64SharedProjectionStreamV1 = createRfc64HttpSharedProjectionRunnerV1({
         runConstruct: (request, consume) => this.runStreamingConstruct(request, consume),
         responseError: (status, excerpt) => new SparqlHttpResponseError(
           'rfc64-shared-projection',
           status,
           excerpt,
         ),
+      }, {
+        accept: 'application/n-quads, text/n-quads',
+        diagnosticByteCeiling: managedOxigraphDiagnosticByteCeilingV1,
+        managedOxigraph: true,
       });
     }
   }
 
   private runStreamingConstruct<T>(
-    request: ManagedOxigraphConstructRequestV1,
+    request: Rfc64HttpProjectionRequestV1,
     consume: (
       response: Response,
       lifecycleSignal: AbortSignal | undefined,
@@ -398,6 +392,16 @@ export class SparqlHttpStore implements TripleStore {
       throw new Error('RFC-64 exact reads require a DKG-managed Oxigraph endpoint');
     }
     return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV2,
+    options?: Pick<QueryOptions, 'signal'>,
+  ) {
+    if (!this.rfc64SemanticReadCertifiedV1) {
+      throw new Error('RFC-64 semantic reads require a DKG-managed Oxigraph endpoint');
+    }
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
   private runStoreWork<T>(
@@ -1025,21 +1029,7 @@ export class SparqlHttpStore implements TripleStore {
               managedOxigraph: this.managedOxigraph,
               operation: canonicalOperation,
             });
-            const json = JSON.parse(text) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
-
-            if (isAsk || 'boolean' in json) {
-              return {
-                type: 'boolean',
-                value: (json as W3CAskResponse).boolean,
-              } satisfies AskResult;
-            }
-
-            const parsed = parseSparqlJsonSelectResponse(json as AdapterSparqlJsonSelectResponse);
-            return {
-              type: 'bindings',
-              bindings: parsed.bindings,
-              variables: parsed.variables,
-            } satisfies SelectResult;
+            return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
           },
         );
       } finally {
@@ -1124,7 +1114,7 @@ export class SparqlHttpStore implements TripleStore {
 
     const refreshOptions = options?.source ? { source: options.source } : undefined;
     const inFlight = this.listGraphsInFlight ?? this.refreshListGraphsCache(refreshOptions);
-    const graphs = await raceAgainstAbort(inFlight, options?.signal);
+    const graphs = await raceStoreWorkAgainstAbort(inFlight, options?.signal);
     return [...graphs];
   }
 
@@ -1254,7 +1244,7 @@ export function createManagedOxigraphSparqlStoreV1(
   });
   return new SparqlHttpStore(
     { ...options, managedByDkg: config.options.managedByDkg === true },
-    MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY,
+    getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
 }
 
@@ -1333,14 +1323,6 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
   } catch {
     return endpoint.split(/[?#]/, 1)[0];
   }
-}
-
-// ---------------------------------------------------------------------------
-// W3C SPARQL 1.1 JSON result types
-// ---------------------------------------------------------------------------
-
-interface W3CAskResponse {
-  boolean: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1494,15 +1476,10 @@ export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
 // Adapter registration
 // ---------------------------------------------------------------------------
 
-registerTripleStoreAdapter('sparql-http', async (opts, context) => {
+registerTripleStoreAdapter('sparql-http', async (opts, constructionAuthority) => {
   const options = opts as SparqlHttpStoreOptions | undefined;
   if (!options?.queryEndpoint) {
     throw new Error('sparql-http adapter requires options.queryEndpoint (and optionally options.updateEndpoint)');
   }
-  return new SparqlHttpStore(
-    options,
-    context?.managedOxigraphRuntime
-      ? MANAGED_OXIGRAPH_CONSTRUCTION_AUTHORITY
-      : undefined,
-  );
+  return new SparqlHttpStore(options, constructionAuthority);
 });

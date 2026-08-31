@@ -1,7 +1,11 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   OxigraphStore,
+  OxigraphWorkerStore,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   SparqlHttpStore,
   type Rfc64AuthorCommitCasInputV1,
@@ -145,6 +149,34 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(await objectFor(store, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBeUndefined();
   });
 
+  it('preserves exported legacy commits through worker transport and reopen', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rfc64-legacy-author-worker-'));
+    const path = join(dir, 'store.nq');
+    const kaStateSubject = 'urn:test:rfc64:ka-state';
+    let store: OxigraphWorkerStore | null = new OxigraphWorkerStore(path);
+    try {
+      await seedOldState(store);
+      await store.insert([
+        quad(kaStateSubject, P_VALUE, '"old-ka-state"', STATE_GRAPH),
+        quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', SEAL_GRAPH),
+      ]);
+
+      await expect(store.rfc64AuthorCommitCasV1!(legacyAuthorCommitInput()))
+        .resolves.toBe('committed');
+      await store.close();
+      store = new OxigraphWorkerStore(path);
+
+      expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
+      expect(await objectFor(store, STATE_GRAPH, kaStateSubject, P_VALUE))
+        .toBe('"new-ka-state"');
+      expect(await objectFor(store, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE))
+        .toBeUndefined();
+    } finally {
+      await store?.close().catch(() => {});
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('maps every closed-manifest role through the canonical async plan', async () => {
     const input = authorCommitInput();
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
@@ -185,24 +217,34 @@ describe('RFC-64 certified author commit CAS v1', () => {
       'contextGraphMutationGeneration:expected',
       'appliedSet:expected',
     ]);
-    expect(mapped.sharedProjectionQuads.map(({ object }) => object)).toEqual([
+    const subject = (role: string) => mapped.subjectReplacements.find(
+      (replacement) => replacement.role === role,
+    )!;
+    const guard = (role: string) => mapped.guards.find(
+      (candidate) => candidate.role === role,
+    )!;
+    expect(mapped.sourceKind).toBe('semantic');
+    expect(mapped.graphReplacements[0]!.quads.map(({ object }) => object)).toEqual([
       '"mapped:sharedProjection:0:0"',
       '"mapped:sharedProjection:0:1"',
     ]);
-    expect(mapped.authorSealQuads[0]?.object).toBe('"mapped:authorSeal:0:2"');
-    expect(mapped.currentHead.quads[0]?.object).toBe('"mapped:currentHead:0:3"');
-    expect(mapped.subgraphMutationGeneration.quads[0]?.object)
+    expect(subject('authorSeal').quads[0]?.object).toBe('"mapped:authorSeal:0:2"');
+    expect(subject('currentHead').quads[0]?.object).toBe('"mapped:currentHead:0:3"');
+    expect(subject('subgraphMutationGeneration').quads[0]?.object)
       .toBe('"mapped:subgraphMutationGeneration:0:4"');
-    expect(mapped.contextGraphMutationGeneration.quads[0]?.object)
+    expect(subject('contextGraphMutationGeneration').quads[0]?.object)
       .toBe('"mapped:contextGraphMutationGeneration:0:5"');
-    expect(mapped.appliedSet.quads[0]?.object).toBe('"mapped:appliedSet:0:6"');
-    expect(mapped.currentHead.expectedObject).toBe('<urn:test:mapped:currentHead:expected>');
-    expect(mapped.subgraphMutationGeneration.expectedObject)
+    expect(subject('appliedSet').quads[0]?.object).toBe('"mapped:appliedSet:0:6"');
+    expect(guard('currentHead').expectedObject).toBe('<urn:test:mapped:currentHead:expected>');
+    expect(guard('subgraphMutationGeneration').expectedObject)
       .toBe('<urn:test:mapped:subgraphMutationGeneration:expected>');
-    expect(mapped.contextGraphMutationGeneration.expectedObject)
+    expect(guard('contextGraphMutationGeneration').expectedObject)
       .toBe('<urn:test:mapped:contextGraphMutationGeneration:expected>');
-    expect(mapped.appliedSet.expectedObject).toBe('<urn:test:mapped:appliedSet:expected>');
-    expect(mapped.currentHead.expectedQuads?.[0]?.object)
+    expect(guard('appliedSet').expectedObject).toBe('<urn:test:mapped:appliedSet:expected>');
+    const currentHeadGuard = guard('currentHead');
+    expect(currentHeadGuard.guardKind).toBe('exact-subject');
+    if (currentHeadGuard.guardKind !== 'exact-subject') throw new Error('expected exact guard');
+    expect(currentHeadGuard.expectedQuads?.[0]?.object)
       .toBe('"mapped:currentHead:0:7"');
     expect(manifest.semanticQuads).toHaveLength(7);
     expect(manifest.touchedGraphs).toEqual([
@@ -217,7 +259,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
   it('maps the exported legacy contract through the operation-only canonical plan', async () => {
     const manifest = normalizeRfc64AuthorCommitCasV1(legacyAuthorCommitInput());
     expect(manifest).not.toHaveProperty('mode');
-    expect(manifest).not.toHaveProperty('currentHead');
+    expect(manifest.sourceKind).toBe('legacy');
     expect(manifest.predicateReplacements).toHaveLength(1);
 
     const mapped = await mapRfc64AuthorCommitCasV1(manifest, {
@@ -230,16 +272,19 @@ describe('RFC-64 certified author commit CAS v1', () => {
         : `<urn:test:mapped:${context.role}:${context.kind}>`,
     });
 
-    expect(mapped).not.toHaveProperty('currentHead');
-    if ('currentHead' in mapped) throw new Error('expected mapped legacy input');
-    expect(mapped.expectedCurrentHeadObject)
+    expect(mapped.sourceKind).toBe('legacy');
+    const currentHead = mapped.predicateReplacements[0]!;
+    expect(currentHead.expectedObject)
       .toBe('<urn:test:mapped:currentHead:expected>');
-    expect(mapped.nextCurrentHeadObject).toBe('<urn:test:mapped:currentHead:next>');
-    expect(mapped.kaStateDigest).toMatchObject({
+    expect(currentHead.nextObject).toBe('<urn:test:mapped:currentHead:next>');
+    expect(mapped.guards.find(({ role }) => role === 'kaStateDigest')).toMatchObject({
       expectedObject: '<urn:test:mapped:kaStateDigest:expected>',
-      quads: [{ object: '"mapped:kaStateDigest:0"' }],
     });
-    expect(mapped.sealInvalidations).toEqual([{
+    expect(mapped.subjectReplacements.find(({ role }) => role === 'kaStateDigest'))
+      .toMatchObject({ quads: [{ object: '"mapped:kaStateDigest:0"' }] });
+    expect(mapped.subjectReplacements.filter(({ role }) => role === 'sealInvalidation')).toEqual([{
+      role: 'sealInvalidation',
+      roleIndex: 0,
       graphUri: SEAL_GRAPH,
       subject: INVALIDATED_SEAL,
       quads: [],

@@ -7,6 +7,7 @@ import {
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
   decodeOpaqueKaBundleV1,
@@ -36,11 +37,11 @@ import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-p
 import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
 import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from './rfc64/public-catalog-successor-producer-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
-import { resolveRfc64CatalogConfiguredAuthorityDecisionV1 } from
-  './rfc64/public-catalog-activation-config-v1.js';
 import {
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
+import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
+  './rfc64/swm-author-inventory-producer-v1.js';
 
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -109,6 +110,29 @@ interface Rfc64CatalogMutationStateV1 {
 }
 
 export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
+  /** Package-internal positive proof used by crash-safe confirmed-row retirement. */
+  async rfc64CatalogContainsConfirmedSwmRowV1(
+    this: DKGAgent,
+    params: Readonly<{
+      readonly scope: AuthorCatalogScopeV1;
+      readonly expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
+    }>,
+  ): Promise<boolean> {
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+    const state = await this.readRfc64CatalogMutationStateV1(
+      persistence,
+      computeAuthorCatalogScopeDigestV1(params.scope),
+      params.scope.authorAddress,
+    );
+    return state?.assets.some((asset) => (
+      asset.seal.kaUal === params.expectedRow.kaUal
+      && asset.seal.assertionVersion === params.expectedRow.assertionVersion
+      && computeCanonicalGraphScopedAuthorSealDigestV1(asset.seal)
+        === params.expectedRow.sealDigest
+    )) ?? false;
+  }
+
   /**
    * Own genesis creation, predecessor reconstruction, exact-set successor,
    * applied-head CAS, and best-effort availability announcement as one
@@ -308,11 +332,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): void {
-    const rollout = this.config.rfc64CatalogRollout;
-    const authority = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
-      rollout,
-      contextGraphId,
-    );
+    const authority = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId);
     if (authority.killSwitchActive) {
       throw new Error('RFC-64 catalog authoring is disabled by the Track-2 kill switch');
     }

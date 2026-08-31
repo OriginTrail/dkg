@@ -1,10 +1,33 @@
 import type {
+  ContextGraphReconcileStatus,
   ContextGraphReconcileResult,
   ReplicationEvent,
+  VmReconcileSource,
 } from '@origintrail-official/dkg-agent';
 
 export type Gate1RolloutMode = 'legacy' | 'shadow' | 'catalog';
 export type Gate1VmChainScenario = 'valid' | 'inactive';
+
+const VM_RECONCILE_SOURCES = Object.freeze({
+  live: true,
+  manual: true,
+  periodic: true,
+} satisfies Record<VmReconcileSource, true>);
+const VM_RECONCILE_STATUSES = Object.freeze({
+  current: true,
+  pending: true,
+  progress: true,
+  'watermark-ahead': true,
+} satisfies Record<ContextGraphReconcileStatus, true>);
+const REPLICATION_EVENT_ACTIONS = Object.freeze({
+  already: true,
+  'core-fill': true,
+  'cursor-advance': true,
+  defer: true,
+  fetch: true,
+  promote: true,
+  sweep: true,
+} satisfies Record<ReplicationEvent['action'], true>);
 
 export const GATE1_VM_CHAIN_READ_KEYS = Object.freeze([
   'accessPolicy',
@@ -231,17 +254,17 @@ function parseContextGraphReconcileResult(value: unknown): ContextGraphReconcile
   const result = plainRecord(value, 'vmReconcile.result');
   const source = requiredString(result.source, 'vmReconcile.result.source');
   const status = requiredString(result.status, 'vmReconcile.result.status');
-  if (!['live', 'manual', 'periodic'].includes(source)) {
+  if (!hasOwnVariant(VM_RECONCILE_SOURCES, source)) {
     throw new TypeError('vmReconcile.result.source is invalid');
   }
-  if (!['current', 'progress', 'pending', 'watermark-ahead'].includes(status)) {
+  if (!hasOwnVariant(VM_RECONCILE_STATUSES, status)) {
     throw new TypeError('vmReconcile.result.status is invalid');
   }
   return Object.freeze({
     contextGraphId: requiredString(result.contextGraphId, 'vmReconcile.result.contextGraphId'),
     onChainId: requiredString(result.onChainId, 'vmReconcile.result.onChainId'),
-    source: source as ContextGraphReconcileResult['source'],
-    status: status as ContextGraphReconcileResult['status'],
+    source,
+    status,
     attempted: requiredBoolean(result.attempted, 'vmReconcile.result.attempted'),
     headOrdinal: requiredNonNegativeInteger(result.headOrdinal, 'vmReconcile.result.headOrdinal'),
     watermarkBefore: requiredNonNegativeInteger(
@@ -266,8 +289,7 @@ function parseContextGraphReconcileResult(value: unknown): ContextGraphReconcile
 function parseReplicationEvent(value: unknown): Gate1ReplicationEvent {
   const event = plainRecord(value, 'vmReconcile replication event');
   const action = requiredString(event.action, 'vmReconcile replication event action');
-  if (!['sweep', 'fetch', 'promote', 'already', 'defer', 'cursor-advance', 'core-fill']
-    .includes(action)) {
+  if (!hasOwnVariant(REPLICATION_EVENT_ACTIONS, action)) {
     throw new TypeError('vmReconcile replication event action is invalid');
   }
   return Object.freeze({
@@ -275,9 +297,16 @@ function parseReplicationEvent(value: unknown): Gate1ReplicationEvent {
       event.contextGraphId,
       'vmReconcile replication event contextGraphId',
     ),
-    action: action as Gate1ReplicationEvent['action'],
+    action,
     ...optionalNonNegativeIntegerField(event, 'ordinal'),
   });
+}
+
+function hasOwnVariant<K extends string>(
+  registry: Readonly<Record<K, true>>,
+  value: string,
+): value is K {
+  return Object.hasOwn(registry, value);
 }
 
 function optionalNonNegativeIntegerField<K extends string>(

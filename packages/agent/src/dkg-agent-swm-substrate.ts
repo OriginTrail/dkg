@@ -385,7 +385,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { resolveRfc64CatalogConfiguredAuthorityDecisionV1 } from
+import { resolveRfc64CatalogExecutionPlanAuthorityV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -407,8 +407,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
     });
     const persist = syncMode === 'on-demand' ? false : options?.persist;
-    const authority = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
-      this.config.rfc64CatalogRollout,
+    const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
       contextGraphId,
     );
     if (!authority.legacySyncAllowed) {
@@ -932,8 +932,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   public trackSyncContextGraph(this: DKGAgent, contextGraphId: string): boolean {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     if (systemContextGraphs.has(contextGraphId)) return false;
-    if (!resolveRfc64CatalogConfiguredAuthorityDecisionV1(
-      this.config.rfc64CatalogRollout,
+    if (!resolveRfc64CatalogExecutionPlanAuthorityV1(
+      this.config.rfc64CatalogExecutionPlan,
       contextGraphId,
     ).legacySyncAllowed) return false;
 

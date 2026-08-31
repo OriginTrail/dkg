@@ -56,8 +56,10 @@ import {
 } from './open-catalog-policy-v1.js';
 import {
   Rfc64CatalogAccessPolicyRegistryV1,
+  rfc64CatalogAuthorityDirectionV1,
   type AcceptRfc64CatalogAccessSnapshotInputV1,
   type AcceptedRfc64CatalogAccessSnapshotV1,
+  type Rfc64CatalogAuthorityOperationV1,
   type Rfc64CatalogAccessPolicyRegistryOptionsV1,
 } from './catalog-access-policy-v1.js';
 import {
@@ -332,6 +334,7 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#resolveContextGraphAuthority = options.resolveContextGraphAuthority
       ?? ((contextGraphId) => Object.freeze({
         contextGraphId,
+        selected: false,
         eligible: false,
         active: true,
         mode: 'catalog',
@@ -347,10 +350,10 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
       authorizeCatalogOperation: async (input) => {
-        const authority = input.operation === 'announce-outbound'
-          || input.operation === 'fetch-inbound'
-          ? this.#resolveContextGraphServingAuthority(input.contextGraphId)
-          : this.#resolveContextGraphAuthority(input.contextGraphId);
+        const authority = this.#authorityForOperation(
+          input.contextGraphId,
+          input.operation,
+        );
         return !authority.track2Enabled
           ? null
           : this.#policies.authorize(input);
@@ -381,9 +384,10 @@ export class Rfc64PublicCatalogServiceV1 {
         readKaBundleByDigest: options.native.readKaBundleByDigest,
         resolveScopedReadCapability: options.native.resolveScopedReadCapability,
         authorizeCatalogOperation: async (input) => {
-          const authority = input.operation.endsWith('-inbound')
-            ? this.#resolveContextGraphServingAuthority(input.contextGraphId)
-            : this.#resolveContextGraphAuthority(input.contextGraphId);
+          const authority = this.#authorityForOperation(
+            input.contextGraphId,
+            input.operation,
+          );
           return !authority.track2Enabled
             ? null
             : this.#policies.authorize(input);
@@ -533,6 +537,11 @@ export class Rfc64PublicCatalogServiceV1 {
   /** Fence receiver scheduling and drain applied-head callbacks; keep authoring live. */
   async closeReceiverAdmissionAndDrain(): Promise<void> {
     await this.#receiver.close();
+  }
+
+  /** Abort receiver work for a graph while retaining verified served data. */
+  deactivateReceiverContextGraph(contextGraphId: string): void {
+    this.#receiver.cancelContextGraph(contextGraphId);
   }
 
   /** Stop serving, drain in-flight receiver work, then release. Idempotent. */
@@ -688,7 +697,10 @@ export class Rfc64PublicCatalogServiceV1 {
       encodeRfc64PublicCatalogHeadAnnouncementV1(input.announcement),
     );
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
-    const heldPolicy = this.#assertAcceptedCatalogAnnouncement(announcement, 'serving');
+    const heldPolicy = this.#assertAcceptedCatalogAnnouncement(
+      announcement,
+      'announce-outbound',
+    );
     assertSupportedCatalogFanout(
       heldPolicy,
       peers,
@@ -912,6 +924,15 @@ export class Rfc64PublicCatalogServiceV1 {
       : { timeoutMs: this.#transportTimeoutMs, signal };
   }
 
+  #authorityForOperation(
+    contextGraphId: ContextGraphIdV1,
+    operation: Rfc64CatalogAuthorityOperationV1,
+  ): Rfc64CatalogAuthorityPolicyV1 {
+    return rfc64CatalogAuthorityDirectionV1(operation) === 'serving'
+      ? this.#resolveContextGraphServingAuthority(contextGraphId)
+      : this.#resolveContextGraphAuthority(contextGraphId);
+  }
+
   async #announceCatalogHeadSnapshot(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     peers: readonly string[],
@@ -944,11 +965,12 @@ export class Rfc64PublicCatalogServiceV1 {
 
   #assertAcceptedCatalogAnnouncement(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-    direction: 'receiver' | 'serving' = 'receiver',
+    operation: Rfc64CatalogAuthorityOperationV1 = 'announce-inbound',
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
-    const authority = direction === 'serving'
-      ? this.#resolveContextGraphServingAuthority(announcement.contextGraphId)
-      : this.#resolveContextGraphAuthority(announcement.contextGraphId);
+    const authority = this.#authorityForOperation(
+      announcement.contextGraphId,
+      operation,
+    );
     if (!authority.track2Enabled) {
       throw new Error('RFC-64 catalog reconciliation is disabled for legacy-mode CG');
     }
@@ -973,9 +995,7 @@ export class Rfc64PublicCatalogServiceV1 {
   async #authorizeCurrentHeadDiscovery(
     input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
   ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
-    const authority = input.operation === 'current-head-discovery-inbound'
-      ? this.#resolveContextGraphServingAuthority(input.contextGraphId)
-      : this.#resolveContextGraphAuthority(input.contextGraphId);
+    const authority = this.#authorityForOperation(input.contextGraphId, input.operation);
     if (!authority.track2Enabled) return null;
     let trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
     try {

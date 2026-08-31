@@ -25,10 +25,13 @@ import type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
   './public-catalog-native-committed-head-token-v1.js';
 import type {
   Rfc64CatalogAppliedHeadEvidenceV1,
-  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+  Rfc64FinalizedSwmRetirementLifecycleReceiptV2,
 } from
   './finalized-swm-retirement-lifecycle-receipt-v1.js';
-export type { Rfc64FinalizedSwmRetirementLifecycleReceiptV1 } from
+export type {
+  Rfc64FinalizedSwmRetirementLifecycleReceiptV1,
+  Rfc64FinalizedSwmRetirementLifecycleReceiptV2,
+} from
   './finalized-swm-retirement-lifecycle-receipt-v1.js';
 import type {
   Rfc64FinalizedVmAgentPrecommitHandlerV1,
@@ -143,8 +146,7 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
             retire: (retirement) => options.retire(retirement, ctx),
           });
           return Object.freeze({
-            kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-            committedHead: Object.freeze({ ...committedHead }),
+            kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v2',
             contextGraphId: plan.catalogScope.contextGraphId,
             ...(plan.catalogScope.subGraphName === null
               ? {}
@@ -155,7 +157,7 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
             vmPostReadDigest: materialization.postReadDigest,
             vmMaterializationStatus: materialization.status,
             swmReconciliationOutcome,
-          }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV1;
+          }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV2;
         },
       );
       const retired = receipts.filter(
@@ -169,6 +171,7 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
       }
       return Object.freeze({
         kind: 'rfc64-catalog-applied-head-evidence-v1',
+        committedHead: Object.freeze({ ...committedHead }),
         finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts),
       } satisfies Rfc64CatalogAppliedHeadEvidenceV1);
     },

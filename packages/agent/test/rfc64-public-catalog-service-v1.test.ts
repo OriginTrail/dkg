@@ -333,6 +333,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       accessPolicyAuthority: accessPolicyAuthority(),
       resolveContextGraphAuthority: (contextGraphId) => Object.freeze({
         contextGraphId,
+        selected: true,
         eligible: true,
         active: true,
         mode: 'legacy',
@@ -360,6 +361,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const inactiveReceiver = (contextGraphId: ContextGraphPolicyV1['contextGraphId']) =>
       Object.freeze({
         contextGraphId,
+        selected: true,
         eligible: true,
         active: false,
         mode: 'catalog' as const,
@@ -372,6 +374,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const configuredServing = (contextGraphId: ContextGraphPolicyV1['contextGraphId']) =>
       Object.freeze({
         contextGraphId,
+        selected: true,
         eligible: true,
         active: true,
         mode: 'catalog' as const,
@@ -499,6 +502,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
         contextGraphId === legacyCg
           ? {
             contextGraphId,
+            selected: true,
             eligible: true,
             active: true,
             mode: 'legacy' as const,
@@ -510,6 +514,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
           }
           : {
             contextGraphId,
+            selected: true,
             eligible: true,
             active: true,
             mode: 'catalog' as const,
@@ -1938,6 +1943,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       onHeadStaged,
       resolveContextGraphAuthority: (contextGraphId) => Object.freeze({
         contextGraphId,
+        selected: true,
         eligible: true,
         active: true,
         mode: 'shadow',

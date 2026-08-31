@@ -43,6 +43,19 @@ export class Rfc64CoalescingSupervisorV1 {
     return true;
   }
 
+  /** Abort a stale active pass and guarantee one fresh pass afterward. */
+  invalidateAndRequest(reason: string): boolean {
+    if (this.#closed) return false;
+    this.#requested = true;
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    this.#abortController?.abort(new Error(reason));
+    this.#launch();
+    return true;
+  }
+
   async whenIdle(): Promise<void> {
     while (this.#run !== null) {
       const current = this.#run;
