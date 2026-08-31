@@ -608,8 +608,10 @@ export class OxigraphWorkerStore implements TripleStore {
         this.respawnPromise,
         signal,
         {
-          timeoutMs: remainingMs,
-          timeoutError: () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+          timeout: {
+            timeoutMs: remainingMs,
+            timeoutError: () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+          },
         },
       );
     }

@@ -7,7 +7,7 @@ import {
   type Rfc64SharedProjectionStreamOperationV1,
   type Rfc64SharedProjectionStreamTemplateInputV1,
 } from '@origintrail-official/dkg-core';
-import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/strict-data-boundary';
+import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/closed-data-snapshot';
 
 import { openLazyAbortableStream } from './abortable-stream-work-lifecycle.js';
 import {
