@@ -10,6 +10,7 @@ import {
   RFC64_DIGEST_LIST_DATATYPE_IRI_V1,
   RFC64_SEMANTIC_NULL_IRI_V1,
   RFC64_SUBGRAPH_KEY_DOMAIN_V1,
+  TypedRdfStoreRowErrorV1,
   assertCanonicalChainId,
   assertCanonicalDecimalU64,
   assertCanonicalDecimalU256,
@@ -20,7 +21,7 @@ import {
   assertKaTransferDescriptorV1,
   canonicalizeKaTransferDescriptorV1,
   computeRfc64SubGraphKeyV1,
-  compileRfc64SemanticReadOperationV1,
+  compileRfc64SemanticReadOperationV2,
   decodeRfc64SemanticRecordStoreRowsV1,
   deriveRfc64ContextGraphSemanticAddressesV1,
   deriveRfc64CurrentAuthorCatalogRefAddressV1,
@@ -30,8 +31,12 @@ import {
   parseCanonicalKaTransferDescriptorV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
+  renderTypedRdfStoreRowV1,
   snapshotRfc64SemanticRecordCoordinateV1,
   snapshotRfc64SemanticRecordV1,
+  snapshotTypedRdfStoreRowV1,
+  typedRdfLiteralV1,
+  typedRdfNamedNodeV1,
 } from '../src/index.js';
 
 const VALID_MIN = {
@@ -85,7 +90,7 @@ describe('RFC-64 transfer descriptor + wire scalars public package barrel', () =
     expect(MAX_RFC64_PENDING_TARGET_DIGESTS_V1).toBe(64);
     expect(RFC64_SEMANTIC_READ_QUERY_IDS_V1).toHaveLength(6);
     for (const [name, fn] of [
-      ['compileRfc64SemanticReadOperationV1', compileRfc64SemanticReadOperationV1],
+      ['compileRfc64SemanticReadOperationV2', compileRfc64SemanticReadOperationV2],
       ['decodeRfc64SemanticRecordStoreRowsV1', decodeRfc64SemanticRecordStoreRowsV1],
       ['projectRfc64SemanticRecordStoreRowsV1', projectRfc64SemanticRecordStoreRowsV1],
       ['renderRfc64SemanticStoreRowV1', renderRfc64SemanticStoreRowV1],
@@ -93,6 +98,45 @@ describe('RFC-64 transfer descriptor + wire scalars public package barrel', () =
       ['snapshotRfc64SemanticRecordV1', snapshotRfc64SemanticRecordV1],
     ] as const) {
       expect(typeof fn, name).toBe('function');
+    }
+  });
+
+  it('re-exports the typed RDF store-row API with its generic error contract', () => {
+    for (const [name, fn] of [
+      ['renderTypedRdfStoreRowV1', renderTypedRdfStoreRowV1],
+      ['snapshotTypedRdfStoreRowV1', snapshotTypedRdfStoreRowV1],
+      ['typedRdfLiteralV1', typedRdfLiteralV1],
+      ['typedRdfNamedNodeV1', typedRdfNamedNodeV1],
+    ] as const) {
+      expect(typeof fn, name).toBe('function');
+    }
+
+    const valid = {
+      subjectIri: 'urn:test:subject',
+      predicateIri: 'urn:test:predicate',
+      graphIri: 'urn:test:graph',
+      object: typedRdfNamedNodeV1('urn:test:object'),
+    };
+    expect(snapshotTypedRdfStoreRowV1(valid)).toEqual(valid);
+    expect(renderTypedRdfStoreRowV1(valid)).toEqual({
+      subject: 'urn:test:subject',
+      predicate: 'urn:test:predicate',
+      object: '<urn:test:object>',
+      graph: 'urn:test:graph',
+    });
+
+    for (const [input, code] of [
+      [{ ...valid, subjectIri: 42 }, 'row-schema'],
+      [{ ...valid, subjectIri: 'urn:has space' }, 'row-term'],
+    ] as const) {
+      let failure: unknown;
+      try {
+        snapshotTypedRdfStoreRowV1(input);
+      } catch (cause) {
+        failure = cause;
+      }
+      expect(failure).toBeInstanceOf(TypedRdfStoreRowErrorV1);
+      expect((failure as TypedRdfStoreRowErrorV1).code).toBe(code);
     }
   });
 
