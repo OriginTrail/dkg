@@ -1446,9 +1446,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const seal = assertionSealFromCanonical(canonicalSeal);
     const assertionCoordinate = 'swm-only-shadow';
     const shareOperationId = 'swm-only-shadow-operation';
+    // The deployed seal writer uses the EIP-55 display spelling in RDF IRIs,
+    // while the RFC-64 inventory scope and rows use the lowercase wire form.
+    // Catalog projection must resolve that honest cross-boundary pair.
     const assertionUri = contextGraphAssertionUri(
       CONTEXT_GRAPH_ID,
-      AUTHOR,
+      AUTHOR_WALLET.address,
       assertionCoordinate,
     );
     await author.store.insert(buildAssertionSealQuads({

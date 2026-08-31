@@ -10,18 +10,14 @@
 import {
   assertAssertionCoordinateV1,
   assertContextGraphIdV1,
-  assertSafeIri,
   assertSubGraphNameV1,
   assertSwmAuthorInventoryShareOperationIdV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaProjectionDigestV1,
   computeSwmAuthorInventoryScopeDigestV1,
-  contextGraphAssertionUri,
-  contextGraphMetaUri,
   createOperationContext,
   encodeCanonicalCgSharedPublicRootProjectionV1,
-  parseGraphScopedAssertionSealCandidate,
   type AssertionCoordinateV1,
   type AssertionSeal,
   type AuthorCatalogScopeV1,
@@ -60,6 +56,8 @@ import {
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
+import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
+  './durable-author-seal-resolver-v1.js';
 import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
@@ -433,21 +431,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       const shareOperationId = params.shareOperationId;
       assertSwmAuthorInventoryShareOperationIdV1(shareOperationId);
-      const assertionUri = contextGraphAssertionUri(
-        params.contextGraphId,
-        params.lifecycleAgentAddress,
-        params.assertionCoordinate,
-        params.subGraphName ?? undefined,
-      );
-      const metaGraph = contextGraphMetaUri(params.contextGraphId);
-      const sealResult = await this.store.query(
-        `CONSTRUCT { <${assertSafeIri(assertionUri)}> ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(assertionUri)}> ?p ?o } }`,
-        { source: 'agent.rfc64.swmInventory.seal' },
-      );
-      const candidate = parseGraphScopedAssertionSealCandidate(
-        sealResult.type === 'quads' ? sealResult.quads : [],
-        assertionUri,
-      );
+      const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({
+        store: this.store,
+        contextGraphId: params.contextGraphId,
+        agentAddress: params.lifecycleAgentAddress,
+        assertionCoordinate: params.assertionCoordinate,
+        subGraphName: params.subGraphName ?? undefined,
+        source: 'agent.rfc64.swmInventory.seal',
+      });
       if (candidate === undefined) {
         throw new Error('durable SWM assertion has no strict graph-scoped author seal');
       }

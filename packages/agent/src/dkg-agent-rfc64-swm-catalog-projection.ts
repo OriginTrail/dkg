@@ -5,13 +5,9 @@
 import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
-  assertSafeIri,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeSwmAuthorInventoryScopeDigestV1,
-  contextGraphAssertionUri,
-  contextGraphMetaUri,
   encodeCanonicalCgSharedPublicRootProjectionV1,
-  parseGraphScopedAssertionSealCandidate,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
   type CatalogSealDeploymentProfileV1,
@@ -47,6 +43,8 @@ import {
 } from './rfc64/abort-v1.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from
   './rfc64/swm-inventory-shadow-runtime-v1.js';
+import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
+  './durable-author-seal-resolver-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from
@@ -486,20 +484,14 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
     throwIfAbortedV1(signal);
-    const assertionUri = contextGraphAssertionUri(
+    const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({
+      store: this.store,
       contextGraphId,
-      authorAddress,
-      row.assertionCoordinate,
-    );
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const sealResult = await this.store.query(
-      `CONSTRUCT { <${assertSafeIri(assertionUri)}> ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(assertionUri)}> ?p ?o } }`,
-      { source: 'agent.rfc64.swmInventory.catalogReconcile.seal', signal },
-    );
-    const candidate = parseGraphScopedAssertionSealCandidate(
-      sealResult.type === 'quads' ? sealResult.quads : [],
-      assertionUri,
-    );
+      agentAddress: authorAddress,
+      assertionCoordinate: row.assertionCoordinate,
+      source: 'agent.rfc64.swmInventory.catalogReconcile.seal',
+      signal,
+    });
     if (candidate === undefined) {
       throw new Error(`durable SWM inventory asset ${row.kaUal} has no strict author seal`);
     }
