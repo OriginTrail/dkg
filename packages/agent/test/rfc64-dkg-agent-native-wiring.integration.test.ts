@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -4764,12 +4764,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(announce).toHaveBeenCalledTimes(1);
 
     // Restart after publication. The exact catalog upsert must replay as
-    // existing, then the SWM row can be removed. Denying the marker directory
-    // deletion permission simulates the crash window before durable deletion
-    // without altering the recoverable marker bytes.
+    // existing, then the SWM row and its colocated repair queue entry can be
+    // removed from the same inventory persistence owner.
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
-    let markerDeletionFailures = 0;
     author = await startNativeAgentWithOptions({
       name: 'finalized-private-auto-publish-author-post-publication-restart',
       existingDataDir: authorDataDir,
@@ -4779,21 +4777,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
         );
-        const originalRemove = agent.removeRfc64SwmAuthorInventoryConfirmedRowV1.bind(agent);
-        vi.spyOn(agent, 'removeRfc64SwmAuthorInventoryConfirmedRowV1')
-          .mockImplementationOnce(async (...args) => {
-            const removed = await originalRemove(...args);
-            const repairDirectory = join(
-              authorDataDir,
-              'rfc64-sync',
-              'finalized-private-placement-repairs-v1',
-            );
-            const markerNames = await readdir(repairDirectory);
-            expect(markerNames).toHaveLength(1);
-            await chmod(repairDirectory, 0o500);
-            markerDeletionFailures += 1;
-            return removed;
-          });
       },
     });
     peerAddresses.set(author.peerId, AUTHOR);
@@ -4807,16 +4790,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
     expect((author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.list())
-      .toHaveLength(1);
-    expect(markerDeletionFailures).toBe(1);
-    await chmod(join(
-      authorDataDir,
-      'rfc64-sync',
-      'finalized-private-placement-repairs-v1',
-    ), 0o700);
+      .toHaveLength(0);
 
     // A final restart positively proves the row is already represented by the
-    // unchanged catalog head and consumes only the remaining durable marker.
+    // unchanged catalog head and does not replay a consumed queue entry.
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
     author = await startNativeAgentWithOptions({

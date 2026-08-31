@@ -346,6 +346,17 @@ DELETE FROM rfc64_swm_author_inventory_rows_v1
 WHERE inventory_scope_digest = :scope
   AND author_address = :author
   AND ka_ual = :kaUal;`,
+  listFinalizedPrivatePlacementRepairs: `
+SELECT repair_digest, repair_json
+FROM rfc64_finalized_private_placement_repairs_v1
+ORDER BY repair_digest;`,
+  insertFinalizedPrivatePlacementRepair: `
+INSERT INTO rfc64_finalized_private_placement_repairs_v1 (repair_digest, repair_json)
+VALUES (:repairDigest, :repairJson)
+ON CONFLICT (repair_digest) DO NOTHING;`,
+  deleteFinalizedPrivatePlacementRepair: `
+DELETE FROM rfc64_finalized_private_placement_repairs_v1
+WHERE repair_digest = :repairDigest AND repair_json = :repairJson;`,
 });
 
 export type InventoryV1StatementKey = keyof typeof INVENTORY_V1_STATEMENT_SQL;
@@ -377,6 +388,9 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   updateSwmAuthorHeadCas: 'rfc64.swm-author-inventory.head.cas-update.v1',
   upsertSwmAuthorRow: 'rfc64.swm-author-inventory.row.upsert.v1',
   deleteSwmAuthorRow: 'rfc64.swm-author-inventory.row.delete.v1',
+  listFinalizedPrivatePlacementRepairs: 'rfc64.finalized-private-placement-repair.list.v1',
+  insertFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.insert.v1',
+  deleteFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.delete.v1',
 } as const satisfies Readonly<Record<InventoryV1StatementKey, string>>);
 
 export type InventoryV1StatementId =
@@ -398,6 +412,7 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'listAppliedHeads',
   'getSwmAuthorHead',
   'getSwmAuthorRows',
+  'listFinalizedPrivatePlacementRepairs',
 ] as const satisfies readonly InventoryV1StatementKey[]);
 
 export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
@@ -410,4 +425,6 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'updateSwmAuthorHeadCas',
   'upsertSwmAuthorRow',
   'deleteSwmAuthorRow',
+  'insertFinalizedPrivatePlacementRepair',
+  'deleteFinalizedPrivatePlacementRepair',
 ] as const satisfies readonly InventoryV1StatementKey[]);

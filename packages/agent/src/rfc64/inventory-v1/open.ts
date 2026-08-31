@@ -47,10 +47,13 @@ import {
   INVENTORY_V1_LEGACY_USER_VERSION,
   INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
   INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
-  INVENTORY_V1_USER_OBJECTS,
+  INVENTORY_V1_MIGRATE_V3_TO_REPAIR_QUEUE_SQL,
   INVENTORY_V1_USER_VERSION,
   INVENTORY_V1_V2_USER_OBJECTS,
   INVENTORY_V1_V2_USER_VERSION,
+  INVENTORY_V1_V3_USER_VERSION,
+  INVENTORY_V1_V3_USER_OBJECTS,
+  INVENTORY_V1_REPAIR_QUEUE_USER_OBJECTS,
   normalizeInventoryV1SchemaSql,
 } from './sql.js';
 import {
@@ -518,6 +521,25 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   ): SwmAuthorInventoryCasResultV1 {
     this.requireOpen();
     return this.#candidate.compareAndSwapSwmAuthorInventoryV1(input);
+  }
+
+  listFinalizedPrivatePlacementRepairs() {
+    this.requireOpen();
+    return this.#candidate.listFinalizedPrivatePlacementRepairs();
+  }
+
+  putFinalizedPrivatePlacementRepair(repair: Parameters<
+    Rfc64InventoryV1CandidateApi['putFinalizedPrivatePlacementRepair']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.putFinalizedPrivatePlacementRepair(repair);
+  }
+
+  deleteFinalizedPrivatePlacementRepair(repair: Parameters<
+    Rfc64InventoryV1CandidateApi['deleteFinalizedPrivatePlacementRepair']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.deleteFinalizedPrivatePlacementRepair(repair);
   }
 
   private requireOpen(): DatabaseSyncV1 {
@@ -1163,7 +1185,7 @@ function isFreshIdentity(identity: DatabaseIdentityV1): boolean {
 
 function schemaMatches(
   objects: DatabaseIdentityV1['userObjects'],
-  expectedObjects: Readonly<Record<string, string>> = INVENTORY_V1_USER_OBJECTS,
+  expectedObjects: Readonly<Record<string, string>> = INVENTORY_V1_REPAIR_QUEUE_USER_OBJECTS,
 ): boolean {
   if (objects.length !== Object.keys(expectedObjects).length) return false;
   return objects.every((object) => {
@@ -1196,12 +1218,21 @@ const INVENTORY_SCHEMA_MIGRATIONS_V1: readonly InventorySchemaMigrationV1[] = Ob
   }),
   Object.freeze({
     fromVersion: INVENTORY_V1_V2_USER_VERSION,
-    toVersion: INVENTORY_V1_USER_VERSION,
+    toVersion: INVENTORY_V1_V3_USER_VERSION,
     fromLabel: 'v2',
     toLabel: 'v3',
     fromObjects: INVENTORY_V1_V2_USER_OBJECTS,
-    toObjects: INVENTORY_V1_USER_OBJECTS,
+    toObjects: INVENTORY_V1_V3_USER_OBJECTS,
     sql: INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
+  }),
+  Object.freeze({
+    fromVersion: INVENTORY_V1_V3_USER_VERSION,
+    toVersion: INVENTORY_V1_USER_VERSION,
+    fromLabel: 'v3',
+    toLabel: 'v4',
+    fromObjects: INVENTORY_V1_V3_USER_OBJECTS,
+    toObjects: INVENTORY_V1_REPAIR_QUEUE_USER_OBJECTS,
+    sql: INVENTORY_V1_MIGRATE_V3_TO_REPAIR_QUEUE_SQL,
   }),
 ]);
 
