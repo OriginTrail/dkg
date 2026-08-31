@@ -118,7 +118,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -443,7 +443,7 @@ export function createListContextGraphsCacheInvalidatingStore(
   // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
   // dirty the projection by graph rather than by inserted quads (covers deletes).
   markProjectionDirty?: (quads?: readonly Quad[], targetGraph?: string) => void,
-): TripleStore {
+): TripleStore & Partial<SortedGraphSetSource> {
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
     changed: (result: T) => boolean,
@@ -456,7 +456,13 @@ export function createListContextGraphsCacheInvalidatingStore(
     }
     return result;
   };
-  const wrapper: TripleStore & { readonly innerStore: TripleStore } = {
+  const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
+    === 'function'
+    ? innerStore as TripleStore & SortedGraphSetSource
+    : null;
+  const wrapper: TripleStore
+    & Partial<SortedGraphSetSource>
+    & { readonly innerStore: TripleStore } = {
     innerStore,
     get queryCancellation() {
       return innerStore.queryCancellation;
@@ -559,6 +565,12 @@ export function createListContextGraphsCacheInvalidatingStore(
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },
+    // This wrapper changes mutation-side cache state but not graph visibility,
+    // so forwarding the direct inner capability preserves the same public
+    // boundary while keeping the responder's identity-stable catalog path live.
+    listGraphsSorted: sortedSource
+      ? (options) => sortedSource.listGraphsSorted(options)
+      : undefined,
     listGraphsByPrefix(prefix, options) {
       return innerStore.listGraphsByPrefix
         ? innerStore.listGraphsByPrefix(prefix, options)

@@ -22,6 +22,7 @@ import {
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
+import { GraphSetCatalogState } from './graph-set-catalog-state.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -237,12 +238,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   private readonly onMutation?: (event: GraphSetMutationEvent) => void;
   private readonly onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
 
-  private graphs: Set<string> | null = null;
-  private sortedGraphs: SortedGraphCatalog | null = null;
+  private readonly catalog = new GraphSetCatalogState();
   private nextRevalidateAt = 0;
   private revalidateFailureCount = 0;
   private mutationGeneration = 0;
-  private readonly refreshCoordinator = new RefreshCoordinator<Set<string>>();
+  private readonly refreshCoordinator = new RefreshCoordinator<ReadonlySet<string>>();
   /**
    * Pending full rebuild requested by a mutation whose exact graph effects can't
    * be applied incrementally. The stored source preserves the observer contract
@@ -395,8 +395,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       return (await this.ensureGraphSet(options)).has(graphUri);
     }
     const hasGraph = await this.inner.hasGraph(graphUri, options);
-    const indexed = this.graphs?.has(graphUri);
-    if (this.graphs && indexed !== hasGraph) {
+    const indexed = this.catalog.has(graphUri);
+    if (this.catalog.initialized && indexed !== hasGraph) {
       this.bumpMutation();
       if (hasGraph) this.addGraphs([graphUri], 'revalidate');
       else this.removeGraphs([graphUri], 'revalidate');
@@ -591,23 +591,29 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     await this.inner.close();
   }
 
-  private async ensureGraphSet(options?: QueryOptions): Promise<Set<string>> {
+  private async ensureGraphSet(options?: QueryOptions): Promise<ReadonlySet<string>> {
     throwIfAborted(options?.signal);
     if (
-      this.graphs &&
+      this.catalog.initialized &&
       !this.pendingFullRefresh &&
       this.revalidateMs > 0 &&
       this.now() < this.nextRevalidateAt
     ) {
-      return this.graphs;
+      return this.catalog.current!;
     }
     return raceAgainstAbort(
-      this.refreshIndex(this.pendingFullRefresh ?? (this.graphs ? 'revalidate' : 'seed'), options),
+      this.refreshIndex(
+        this.pendingFullRefresh ?? (this.catalog.initialized ? 'revalidate' : 'seed'),
+        options,
+      ),
       options?.signal,
     );
   }
 
-  private async refreshIndex(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
+  private async refreshIndex(
+    source: GraphSetRefreshSource,
+    options?: QueryOptions,
+  ): Promise<ReadonlySet<string>> {
     const priority = refreshPriority(source, options);
     // The coordinator owns the complete promotion policy: lower-priority cold
     // seeds/revalidations cannot capture later normal or ACK readers, while
@@ -619,13 +625,13 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         if (source !== 'revalidate') throw error;
         // Cancellation, cold seeds, and mutation-dirty rebuilds are strict
         // correctness paths even if another refresh published in parallel.
-        if (options?.signal?.aborted || !this.graphs || this.pendingFullRefresh) {
+        if (options?.signal?.aborted || !this.catalog.initialized || this.pendingFullRefresh) {
           throw error;
         }
         // A newer promoted refresh already published a usable graph set. Do
         // not let this older failed scan overwrite its healthy schedule with
         // failure backoff.
-        if (!this.refreshCoordinator.shouldApplyFailureBackoff(flight)) return this.graphs;
+        if (!this.refreshCoordinator.shouldApplyFailureBackoff(flight)) return this.catalog.current!;
         // Periodic discovery of out-of-contract writers is advisory once the
         // write-through index is warm. Preserve that last known set and back
         // off after a store failure instead of making every graph reader repeat
@@ -633,7 +639,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         // correctness paths: if either condition applies by the time the scan
         // fails, keep the original strict rejection behavior.
         this.noteRevalidationFailure();
-        return this.graphs;
+        return this.catalog.current!;
       }
     });
   }
@@ -641,8 +647,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   private async refreshIndexLoop(
     source: GraphSetRefreshSource,
     options: QueryOptions | undefined,
-    flight: RefreshFlight<Set<string>>,
-  ): Promise<Set<string>> {
+    flight: RefreshFlight<ReadonlySet<string>>,
+  ): Promise<ReadonlySet<string>> {
     for (;;) {
       const dirtyRebuildSource = this.pendingFullRefresh;
       const isDirtyRebuild = dirtyRebuildSource != null;
@@ -671,7 +677,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // shared cache by scan start order so an older, slower background response
       // cannot overwrite a later ACK/normal snapshot that already published.
       if (!this.refreshCoordinator.tryPublish(scan)) {
-        return this.graphs ?? next;
+        return this.catalog.current ?? next;
       }
       // This scan reflects every mutation up to `generation` (synchronous from
       // here — no await — so a concurrent write can't slip between the check and
@@ -687,7 +693,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         });
       }
       this.replaceGraphSet(next, sourceForScan);
-      return this.graphs!;
+      return this.catalog.current!;
     }
   }
 
@@ -717,7 +723,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
             present: await this.inner.hasGraph(graph, options),
           })),
         );
-        if (!this.graphs) return;
+        if (!this.catalog.initialized) return;
         if (generation !== this.mutationGeneration) {
           continue;
         }
@@ -743,17 +749,12 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   private clearIndex(): void {
-    this.graphs = null;
-    this.sortedGraphs = null;
+    this.catalog.clear();
     this.resetRevalidationSchedule();
   }
 
   private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
-    const previous = this.graphs ?? new Set<string>();
-    const added = [...next].filter((graph) => !previous.has(graph)).sort();
-    const removed = [...previous].filter((graph) => !next.has(graph)).sort();
-    this.graphs = next;
-    if (added.length > 0 || removed.length > 0) this.sortedGraphs = null;
+    const { added, removed } = this.catalog.replace(next);
     this.revalidateFailureCount = 0;
     this.nextRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
@@ -785,28 +786,23 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
-    if (!this.graphs) return;
+    if (!this.catalog.initialized) return;
     for (const graph of graphs) {
-      if (!graph || isAtomicGraphReplaceStagingGraph(graph) || this.graphs.has(graph)) continue;
-      this.graphs.add(graph);
-      this.sortedGraphs = null;
+      if (!graph || isAtomicGraphReplaceStagingGraph(graph) || !this.catalog.add(graph)) continue;
       this.emit({ type: 'graph-added', graph, source });
     }
   }
 
   private removeGraphs(graphs: string[], source: GraphSetMutationSource): void {
-    if (!this.graphs) return;
+    if (!this.catalog.initialized) return;
     for (const graph of graphs) {
-      if (!graph || !this.graphs.delete(graph)) continue;
-      this.sortedGraphs = null;
+      if (!graph || !this.catalog.remove(graph)) continue;
       this.emit({ type: 'graph-removed', graph, source });
     }
   }
 
   private ensureSortedGraphs(): SortedGraphCatalog {
-    if (!this.graphs) return createSortedUniqueStringCatalog([]);
-    this.sortedGraphs ??= createSortedUniqueStringCatalog(this.graphs);
-    return this.sortedGraphs;
+    return this.catalog.sorted();
   }
 
   private async maintainTouchedGraphs(
@@ -814,7 +810,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     source: TouchedGraphMutationSource,
     options?: QueryOptions,
   ): Promise<void> {
-    if (!this.graphs) return;
+    if (!this.catalog.initialized) return;
     const uniqueGraphs = [...new Set(graphs.filter(Boolean))];
     await this.maintainStableGraphPresence(uniqueGraphs, source, options);
   }

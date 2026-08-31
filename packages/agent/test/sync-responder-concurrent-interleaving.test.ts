@@ -15,6 +15,7 @@ import {
   createResponderGraphListMemo,
   createResponderSubGraphRegistrationMemo,
 } from '../src/sync/responder/graph-plan.js';
+import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
@@ -1665,10 +1666,11 @@ describe('sync responder pagination interleaving', () => {
     const base = new OxigraphStore();
     await base.insert([q(visible, 1), q(reserved, 2)]);
     const indexed = new GraphSetIndexStore(base, { revalidateMs: 100_000 });
-    const store = new ChangelogStore(indexed, { reservedGraphs: [reserved] });
-    const listGraphs = vi.spyOn(store, 'listGraphs').mockRejectedValue(
+    const visibleStore = new ChangelogStore(indexed, { reservedGraphs: [reserved] });
+    const listGraphs = vi.spyOn(visibleStore, 'listGraphs').mockRejectedValue(
       new Error('unsorted graph enumeration must not be selected'),
     );
+    const store = createListContextGraphsCacheInvalidatingStore(visibleStore, () => undefined);
     const memo = createResponderGraphListMemo(store);
 
     const initial = await memo.get({ refresh: true });
