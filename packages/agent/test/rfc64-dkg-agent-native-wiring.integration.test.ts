@@ -4746,9 +4746,17 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     peerAddresses.set(author.peerId, AUTHOR);
     await startupRepairEntered;
     await connectBothWays(author, provider);
+    await author.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
     announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
     releaseStartupRepair();
     await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
     const publishedHead = author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,

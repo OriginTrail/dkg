@@ -8,6 +8,8 @@ import {
   computeFinalizedVmPostReadDigestV1,
   computeFinalizedVmPostReadDigestFromHarnessReadbackV1,
 } from './lifecycle-receipts.ts';
+import { wireSynchronizationEvidence } from
+  '../rfc64-gate2-multi-asset-completeness/synchronization-evidence-wire.ts';
 
 const HEAD = `0x${'11'.repeat(32)}` as Digest32V1;
 const INVENTORY = `0x${'22'.repeat(32)}` as Digest32V1;
@@ -79,6 +81,38 @@ describe('private cold retirement lifecycle certification', () => {
     assert.equal(decoded.byUal.get(UAL)?.vmGraphIri, VM_GRAPH);
     assert.equal(Object.isFrozen(decoded.receipts), true);
     assert.equal(Object.isFrozen(decoded.receipts[0]), true);
+  });
+
+  it('preserves lifecycle receipts through populated and empty adapter readbacks', () => {
+    const populated = wireSynchronizationEvidence({
+      ...synchronization(),
+      inventoryRowCount: 1,
+      activatedTripleCount: 2,
+      appliedHeadStatus: 'applied',
+      kaUal: UAL,
+      authorship: {
+        directoryPathObjectDigests: [],
+        directoryPathSignatureVariantDigests: [],
+      },
+      catalogRowDigest: `0x${'33'.repeat(32)}`,
+      contentDigest: `0x${'44'.repeat(32)}`,
+      bundleDigest: `0x${'55'.repeat(32)}`,
+      swmGraph: 'urn:dkg:swm:1',
+    });
+    const populatedDecoded = assertPrivateColdRetirementLifecycleV1(
+      populated,
+      expected(),
+    );
+    assert.deepEqual(populatedDecoded.receipts, [receipt()]);
+
+    const empty = wireSynchronizationEvidence({
+      ...synchronization(),
+      inventoryRowCount: 0,
+      activatedTripleCount: 0,
+      appliedHeadStatus: 'applied',
+    });
+    const emptyDecoded = assertPrivateColdRetirementLifecycleV1(empty, expected());
+    assert.deepEqual(emptyDecoded.receipts, [receipt()]);
   });
 
   it('rejects malformed, duplicate, out-of-order, and non-root evidence', () => {

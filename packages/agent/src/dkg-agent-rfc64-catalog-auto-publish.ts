@@ -298,9 +298,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       return;
     }
-    if (finalizedPrivateInventoryScope === null) {
-      shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion);
-    }
+    // Fence every confirmed version, including confirmation-gated finalized
+    // private repairs, until the asset-tail repair and queued observers drain.
+    // Newer assertion versions use distinct fence entries and remain eligible.
+    shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion);
     let finalizedPrivateAttempt: Promise<void> | null = null;
     try {
       await shadowRuntime.runExclusive(

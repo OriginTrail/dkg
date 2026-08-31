@@ -24,6 +24,15 @@ import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  AssertionCoordinateV1,
+  CanonicalDeterministicUalV1,
+  ContextGraphIdV1,
+  Digest32V1,
+  EvmAddressV1,
+  PositiveDecimalU64V1,
+  SwmAuthorInventoryScopeV1,
+} from '@origintrail-official/dkg-core';
 
 import {
   INVENTORY_V1_APPLICATION_ID,
@@ -34,6 +43,8 @@ import {
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
   INVENTORY_V1_V2_USER_VERSION,
+  INVENTORY_V1_V3_USER_OBJECTS,
+  INVENTORY_V1_V3_USER_VERSION,
   INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
   InventoryV1OpenError,
   normalizeInventoryV1SchemaSql,
@@ -681,6 +692,100 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
       expect.unreachable('closed foundation unexpectedly rebuilt');
     } catch (error) {
       expectOpenErrorCode(error, 'database-closed');
+    }
+  });
+
+  it('migrates an exact V3 database without losing data and opens an empty repair queue', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const session = Buffer.alloc(32, 1);
+    const catalogScope = Buffer.alloc(32, 2);
+    const author = Buffer.alloc(20, 3);
+    const targetHead = Buffer.alloc(32, 4);
+    const inventoryScope = Buffer.alloc(32, 5);
+    const one = u64be(1n);
+    const sixteen = u64be(16n);
+    const chunkSize = u64be(262_144n);
+    const kaUal = `did:dkg:otp:20430/0x${'03'.repeat(20)}/1`;
+    const v3 = new DatabaseSync(path);
+    v3.exec([
+      `PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID}`,
+      'PRAGMA journal_mode = WAL',
+      ...Object.values(INVENTORY_V1_V3_USER_OBJECTS),
+      `PRAGMA user_version = ${INVENTORY_V1_V3_USER_VERSION}`,
+    ].join(';\n'));
+    v3.prepare('INSERT INTO rfc64_candidate_bucket_loads_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(
+        session, catalogScope, author, targetHead, null, one, one, Buffer.alloc(8),
+        Buffer.alloc(32, 6), one, sixteen,
+      );
+    v3.prepare('INSERT INTO rfc64_candidate_bucket_rows_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(
+        session, catalogScope, author, targetHead, Buffer.alloc(8), Buffer.alloc(32, 7),
+        Buffer.alloc(32, 8), 'migration-coordinate', one, 'cg-shared-v1',
+        Buffer.alloc(32, 9), Buffer.alloc(32, 10), 'dkg-ka-bundle-v1', sixteen,
+        chunkSize, one, Buffer.alloc(32, 11), Buffer.alloc(32, 12), Buffer.alloc(32, 13),
+      );
+    v3.prepare('INSERT INTO rfc64_applied_catalog_heads_v1 VALUES (?,?,?,?,?,?)')
+      .run(catalogScope, author, targetHead, Buffer.alloc(32, 14), one, one);
+    v3.prepare('INSERT INTO rfc64_swm_author_inventory_heads_v1 VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(
+        inventoryScope, author, Buffer.alloc(32, 15), one, one, Buffer.alloc(32, 16),
+        Buffer.from('signed-head'), null, 'upsert', kaUal,
+      );
+    v3.prepare('INSERT INTO rfc64_swm_author_inventory_rows_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(
+        inventoryScope, author, kaUal, 'migration-coordinate', one,
+        'migration-share', Buffer.alloc(32, 17), one, one, Buffer.alloc(32, 18), one, null,
+      );
+    v3.close();
+    chmodSync(path, 0o600);
+
+    const repair = Object.freeze({
+      version: 1 as const,
+      contextGraphId: 'migration-context' as ContextGraphIdV1,
+      authorAddress: `0x${'11'.repeat(20)}` as EvmAddressV1,
+      inventoryScope: Object.freeze({
+        networkId: 'testnet' as const,
+        contextGraphId: 'migration-context' as ContextGraphIdV1,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        authorAddress: `0x${'11'.repeat(20)}` as EvmAddressV1,
+        subGraphName: null,
+        era: '1' as const,
+      }) satisfies SwmAuthorInventoryScopeV1,
+      assertionCoordinate: 'migration-repair' as AssertionCoordinateV1,
+      assertionVersion: '1' as PositiveDecimalU64V1,
+      kaUal: `did:dkg:otp:20430/0x${'11'.repeat(20)}/1` as CanonicalDeterministicUalV1,
+      sealDigest: `0x${'22'.repeat(32)}` as Digest32V1,
+    });
+    const foundation = await openInventoryV1(dataDirectory);
+    expect(foundation.listFinalizedPrivatePlacementRepairs()).toEqual([]);
+    foundation.putFinalizedPrivatePlacementRepair(repair);
+    expect(foundation.listFinalizedPrivatePlacementRepairs()).toEqual([repair]);
+    foundation.deleteFinalizedPrivatePlacementRepair(repair);
+    expect(foundation.listFinalizedPrivatePlacementRepairs()).toEqual([]);
+    foundation.close();
+
+    const migrated = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(pragmaInteger(migrated, 'user_version')).toBe(INVENTORY_V1_USER_VERSION);
+      for (const table of [
+        'rfc64_candidate_bucket_loads_v1',
+        'rfc64_candidate_bucket_rows_v1',
+        'rfc64_applied_catalog_heads_v1',
+        'rfc64_swm_author_inventory_heads_v1',
+        'rfc64_swm_author_inventory_rows_v1',
+      ]) {
+        expect(migrated.prepare(`SELECT count(*) AS count FROM ${table}`).get()?.count).toBe(1);
+      }
+      expect(migrated.prepare(
+        'SELECT count(*) AS count FROM rfc64_finalized_private_placement_repairs_v1',
+      ).get()?.count).toBe(0);
+    } finally {
+      migrated.close();
     }
   });
 
