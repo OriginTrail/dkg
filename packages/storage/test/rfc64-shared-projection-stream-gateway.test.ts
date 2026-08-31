@@ -1,21 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  assertAuthorCatalogRowV1,
-  assertAuthorCatalogScopeV1,
-  assertCanonicalGraphScopedAuthorSealV1,
-  canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
-  computeCanonicalGraphScopedAuthorSealDigestV1,
-  computeKaProjectionDigestV1,
-  compileRfc64SharedProjectionStreamOperationV1,
   CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1,
   CG_SHARED_PRIVATE_HASH_PREDICATE_V1,
   tripleContentV10,
-  verifyCatalogSealBindingV1,
-  type AuthorCatalogRowV1,
-  type AuthorCatalogScopeV1,
-  type CanonicalGraphScopedAuthorSealV1,
-  type CatalogSealDeploymentProfileV1,
   type Rfc64SharedProjectionStreamOperationV1,
 } from '@origintrail-official/dkg-core';
 
@@ -26,85 +14,26 @@ import {
   isRfc64SharedProjectionStreamCapabilityV1,
   type Rfc64SharedProjectionStreamCapabilityV1,
 } from '../src/index.js';
-import type { Quad, TripleStore } from '../src/triple-store.js';
+import type { TripleStore } from '../src/triple-store.js';
+import {
+  createRfc64SharedProjectionTestFixture,
+  type Rfc64ProjectionTestTriple,
+} from './helpers/rfc64-shared-projection-fixture.js';
 
-const AUTHOR = '0x3333333333333333333333333333333333333333';
-const KAV10 = '0x4444444444444444444444444444444444444444';
-const KA_ID =
-  '23158417847463239084714197001737581570653996933112267175388663934063917137927';
-const GRAPH = `did:dkg:context-graph:v1/root/a%2Fb/_shared_memory/${AUTHOR}/7`;
-const QUADS: readonly Quad[] = Object.freeze([
-  Object.freeze({ subject: 'urn:a', predicate: 'urn:p', object: '"alpha"', graph: GRAPH }),
-  Object.freeze({ subject: 'urn:b', predicate: 'urn:p', object: '"beta"', graph: GRAPH }),
+const TRIPLES: readonly Rfc64ProjectionTestTriple[] = Object.freeze([
+  Object.freeze({ subject: 'urn:a', predicate: 'urn:p', object: '"alpha"' }),
+  Object.freeze({ subject: 'urn:b', predicate: 'urn:p', object: '"beta"' }),
 ]);
-const PROJECTION_BYTES = joinLines(QUADS);
-const PROJECTION_DIGEST = computeKaProjectionDigestV1(PROJECTION_BYTES);
-const SCOPE = validScope({
-  networkId: 'otp:20430',
-  contextGraphId: 'a/b',
-  governanceChainId: '20430',
-  governanceContractAddress: '0x5555555555555555555555555555555555555555',
-  ownershipTransitionDigest: null,
-  subGraphName: null,
-  authorAddress: AUTHOR,
-  era: '0',
-  bucketCount: '1',
-});
-const PROFILE = {
-  networkId: 'otp:20430',
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: KAV10,
-} as CatalogSealDeploymentProfileV1;
-const SEAL = validSeal({
-  assertionMerkleRoot: `0x${'aa'.repeat(32)}`,
-  authorAddress: AUTHOR,
-  authorAttestationR: `0x${'11'.repeat(32)}`,
-  authorAttestationVS: `0x${'22'.repeat(32)}`,
-  authorSchemeVersion: '1',
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: KAV10,
-  reservedKaId: KA_ID,
-  assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
-  contentScopeVersion: '2',
-  kaUal: `did:dkg:otp:20430/${AUTHOR}/7`,
-  assertionVersion: '2',
-  publicTripleCount: '2',
-  privateTripleCount: '0',
-  privateMerkleRoot: null,
-});
-const ROW = validRow({
-  kaId: KA_ID,
-  assertionCoordinate: 'name λ',
-  assertionVersion: '2',
-  projectionId: 'cg-shared-v1',
-  projectionDigest: PROJECTION_DIGEST,
-  sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(SEAL),
-  transfer: {
-    codec: 'dkg-ka-bundle-v1',
-    projectionId: 'cg-shared-v1',
-    projectionDigest: PROJECTION_DIGEST,
-    byteLength: '4096',
-    chunkSize: '262144',
-    chunkCount: '1',
-    blobDigest: `0x${'11'.repeat(32)}`,
-    chunkTreeRoot: `0x${'22'.repeat(32)}`,
-  },
-});
-const SEAL_BINDING = verifyCatalogSealBindingV1(
-  SCOPE,
-  ROW,
-  canonicalizeCanonicalGraphScopedAuthorSealBytesV1(SEAL),
-  PROFILE,
-);
-const REQUEST = Object.freeze({
-  sealBinding: SEAL_BINDING,
-});
+const FIXTURE = createRfc64SharedProjectionTestFixture({ triples: TRIPLES });
+const PROJECTION_BYTES = FIXTURE.projectionBytes;
+const PROJECTION_DIGEST = FIXTURE.projectionDigest;
+const REQUEST = FIXTURE.request;
 
 describe('SyncSharedProjectionStoreV1', () => {
   it('exports the gateway and capability contract from the package root', () => {
     const capability: Rfc64SharedProjectionStreamCapabilityV1 = {
       rfc64SharedProjectionStreamCertifiedV1: true,
-      rfc64SharedProjectionStreamV1: async () => streamQuads(QUADS),
+      rfc64SharedProjectionStreamV1: async () => streamLines(TRIPLES),
     };
     expect(isRfc64SharedProjectionStreamCapabilityV1(capability)).toBe(true);
     expect(MAX_RFC64_SHARED_PROJECTION_STREAM_TIMEOUT_MS_V1).toBe(600_000);
@@ -118,7 +47,7 @@ describe('SyncSharedProjectionStoreV1', () => {
     const gateway = new SyncSharedProjectionStoreV1(fakeStore(async (operation, options) => {
       captured = operation;
       capturedByteCeiling = options.byteCeiling;
-      return streamQuads(QUADS);
+      return streamLines(TRIPLES);
     }));
     const result = await gateway.open(REQUEST, {
       operatorByteCeiling: 2048,
@@ -133,28 +62,28 @@ describe('SyncSharedProjectionStoreV1', () => {
       effectiveByteCeiling: 2048,
     });
     expect(captured).toMatchObject({
-      graphIri: GRAPH,
+      graphIri: FIXTURE.graph,
       signedByteCeiling: 4096,
-      resultKind: 'quad-stream',
+      resultKind: 'canonical-line-byte-stream',
     });
     expect(capturedByteCeiling).toBe(2048);
   });
 
-  it('centrally normalizes graphless CONSTRUCT output and preserves exact-graph output', async () => {
-    const graphless = QUADS.map((quad) => ({ ...quad, graph: '' }));
-    for (const quads of [graphless, QUADS]) {
-      const result = await new SyncSharedProjectionStoreV1(
-        fakeStore(async () => streamQuads(quads)),
-      ).open(REQUEST, {
-        operatorByteCeiling: 4096,
-        timeoutMs: 1000,
-      });
-      expect(await collect(result.bytes)).toEqual(PROJECTION_BYTES);
-    }
+  it('rejects a capability line that is not one canonical LF-terminated record', async () => {
+    const malformed = new TextEncoder().encode(
+      '<urn:a> <urn:p> "alpha" .\r\n',
+    );
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(async () => streamCanonicalLines([malformed])),
+    ).open(REQUEST, { operatorByteCeiling: 4096, timeoutMs: 1000 });
+
+    await expect(collect(result.bytes)).rejects.toMatchObject({
+      code: 'rfc64-shared-projection-stream-result',
+    });
   });
 
   it('discovers the callable capability through a documented decorator', async () => {
-    const inner = fakeStore(async () => streamQuads(QUADS));
+    const inner = fakeStore(async () => streamLines(TRIPLES));
     const outer = { innerStore: inner } as unknown as TripleStore;
     const result = await new SyncSharedProjectionStoreV1(outer).open(REQUEST, {
       operatorByteCeiling: 4096,
@@ -164,7 +93,7 @@ describe('SyncSharedProjectionStoreV1', () => {
   });
 
   it('does not acquire an adapter stream until its bytes are consumed', async () => {
-    const open = vi.fn(async () => streamQuads(QUADS));
+    const open = vi.fn(async () => streamLines(TRIPLES));
     const result = await new SyncSharedProjectionStoreV1(fakeStore(open)).open(REQUEST, {
       operatorByteCeiling: 4096,
       timeoutMs: 1000,
@@ -175,7 +104,7 @@ describe('SyncSharedProjectionStoreV1', () => {
   });
 
   it('anchors the absolute deadline at open even before lazy consumption', async () => {
-    const open = vi.fn(async () => streamQuads(QUADS));
+    const open = vi.fn(async () => streamLines(TRIPLES));
     const result = await new SyncSharedProjectionStoreV1(fakeStore(open)).open(REQUEST, {
       operatorByteCeiling: 4096,
       timeoutMs: 5,
@@ -186,21 +115,36 @@ describe('SyncSharedProjectionStoreV1', () => {
     expect(open).not.toHaveBeenCalled();
   });
 
-  it('fails closed on another graph, non-canonical order, or digest mismatch', async () => {
+  it('rejects semantically valid but noncanonical capability bytes', async () => {
+    const integer = Object.freeze({
+      subject: 'urn:a',
+      predicate: 'urn:p',
+      object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    });
+    const request = createRfc64SharedProjectionTestFixture({ triples: [integer] }).request;
+    const noncanonical = new TextEncoder().encode(
+      '<urn:a> <urn:p> "00000000000000000001"^^<http://www.w3.org/2001/XMLSchema#integer> .\n',
+    );
+    const result = await new SyncSharedProjectionStoreV1(
+      fakeStore(async () => streamCanonicalLines([noncanonical])),
+    ).open(request, { operatorByteCeiling: 4096, timeoutMs: 1000 });
+
+    await expect(collect(result.bytes)).rejects.toMatchObject({
+      code: 'rfc64-shared-projection-stream-result',
+    });
+  });
+
+  it('fails closed on non-canonical order or digest mismatch', async () => {
+    await expectStreamFailure([TRIPLES[1], TRIPLES[0]], /canonical byte order/);
     await expectStreamFailure([
-      { ...QUADS[0], graph: 'urn:other' },
-      QUADS[1],
-    ], /outside the authenticated projection graph/);
-    await expectStreamFailure([QUADS[1], QUADS[0]], /canonical byte order/);
-    await expectStreamFailure([
-      QUADS[0],
-      { ...QUADS[1], object: '"changed"' },
+      TRIPLES[0],
+      { ...TRIPLES[1], object: '"changed"' },
     ], /digest differs/);
   });
 
   it('enforces the local byte ceiling while consuming instead of buffering', async () => {
     const gateway = new SyncSharedProjectionStoreV1(
-      fakeStore(async () => streamQuads(QUADS)),
+      fakeStore(async () => streamLines(TRIPLES)),
     );
     const result = await gateway.open(REQUEST, {
       operatorByteCeiling: 1,
@@ -211,39 +155,20 @@ describe('SyncSharedProjectionStoreV1', () => {
     });
   });
 
-  it('measures canonical output bytes rather than a longer backend lexical form', async () => {
-    const canonical = Object.freeze({
-      subject: 'urn:a',
-      predicate: 'urn:p',
-      object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
-      graph: GRAPH,
-    });
-    const backend = Object.freeze({
-      ...canonical,
-      object: '"00000000000000000001"^^<http://www.w3.org/2001/XMLSchema#integer>',
-    });
-    const canonicalBytes = joinLines([canonical]);
-    const result = await new SyncSharedProjectionStoreV1(
-      fakeStore(async () => streamQuads([backend])),
-    ).open(requestFor([canonical], '1'), {
-      operatorByteCeiling: canonicalBytes.byteLength,
-      timeoutMs: 1000,
-    });
-
-    expect(await collect(result.bytes)).toEqual(canonicalBytes);
-  });
-
   it('rejects sealed-count underflow and overflow before digest can mask them', async () => {
     await expectStreamFailureForRequest(
-      [QUADS[0]],
-      requestFor([QUADS[0]], '2'),
+      [TRIPLES[0]],
+      requestFor([TRIPLES[0]], '2'),
       /triple count differs from the author seal/,
     );
-    const overflowRequest = requestFor(QUADS, '1');
-    expect(compileRfc64SharedProjectionStreamOperationV1(overflowRequest).publicTripleCount)
+    const overflowRequest = requestFor(TRIPLES, '1');
+    expect(createRfc64SharedProjectionTestFixture({
+      triples: TRIPLES,
+      publicTripleCount: '1',
+    }).operation.publicTripleCount)
       .toBe('1');
     await expectStreamFailureForRequest(
-      QUADS,
+      TRIPLES,
       overflowRequest,
       /exceeded the author-sealed public triple count/,
     );
@@ -259,7 +184,6 @@ describe('SyncSharedProjectionStoreV1', () => {
       object: predicate === CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1
         ? '"true"'
         : `"${'aa'.repeat(32)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>`,
-      graph: GRAPH,
     });
     await expectStreamFailureForRequest(
       [misplaced],
@@ -271,7 +195,7 @@ describe('SyncSharedProjectionStoreV1', () => {
   it('keeps one deadline authoritative through lazy stream consumption', async () => {
     const gateway = new SyncSharedProjectionStoreV1(fakeStore(async () => (async function* () {
       await new Promise((resolve) => setTimeout(resolve, 20));
-      yield* QUADS;
+      yield* linesFor(TRIPLES);
     })()));
     const result = await gateway.open(REQUEST, {
       operatorByteCeiling: 4096,
@@ -300,7 +224,7 @@ describe('SyncSharedProjectionStoreV1', () => {
 
   it('enforces the deadline when adapter acquisition ignores cancellation', async () => {
     const gateway = new SyncSharedProjectionStoreV1(fakeStore(
-      () => new Promise<AsyncIterable<Quad>>(() => undefined),
+      () => new Promise<AsyncIterable<Uint8Array>>(() => undefined),
     ));
     const result = await gateway.open(REQUEST, {
       operatorByteCeiling: 4096,
@@ -311,9 +235,9 @@ describe('SyncSharedProjectionStoreV1', () => {
   });
 
   it('closes an adapter stream that arrives after its acquisition deadline', async () => {
-    const pending = Promise.withResolvers<AsyncIterable<Quad>>();
+    const pending = Promise.withResolvers<AsyncIterable<Uint8Array>>();
     let closed = false;
-    const lateSource: AsyncIterable<Quad> = {
+    const lateSource: AsyncIterable<Uint8Array> = {
       [Symbol.asyncIterator]() {
         return {
           async next() {
@@ -342,7 +266,7 @@ describe('SyncSharedProjectionStoreV1', () => {
     const controller = new AbortController();
     const cancellation = new DOMException('cancelled after acquisition', 'AbortError');
     let returned = false;
-    const source: AsyncIterable<Quad> = {
+    const source: AsyncIterable<Uint8Array> = {
       [Symbol.asyncIterator]() {
         return {
           async next() {
@@ -377,10 +301,10 @@ describe('SyncSharedProjectionStoreV1', () => {
 
   it('enforces the deadline on a non-cooperative iterator read and closes it', async () => {
     let returned = false;
-    const source: AsyncIterable<Quad> = {
+    const source: AsyncIterable<Uint8Array> = {
       [Symbol.asyncIterator]() {
         return {
-          next: () => new Promise<IteratorResult<Quad>>(() => undefined),
+          next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
           async return() {
             returned = true;
             return { done: true, value: undefined };
@@ -402,7 +326,7 @@ describe('SyncSharedProjectionStoreV1', () => {
   it('preserves a timeout when synchronous iterator cleanup throws', async () => {
     const result = await new SyncSharedProjectionStoreV1(
       fakeStore(async () => sourceWithThrowingReturn(
-        () => new Promise<IteratorResult<Quad>>(() => undefined),
+        () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
       )),
     ).open(REQUEST, {
       operatorByteCeiling: 4096,
@@ -445,7 +369,7 @@ describe('SyncSharedProjectionStoreV1', () => {
     const result = await new SyncSharedProjectionStoreV1(
       fakeStore(async () => sourceWithThrowingReturn(() => {
         started.resolve();
-        return new Promise<IteratorResult<Quad>>(() => undefined);
+        return new Promise<IteratorResult<Uint8Array>>(() => undefined);
       })),
     ).open(REQUEST, {
       operatorByteCeiling: 4096,
@@ -460,11 +384,11 @@ describe('SyncSharedProjectionStoreV1', () => {
   });
 
   it('preserves validation failures when synchronous iterator cleanup throws', async () => {
+    const malformed = new TextEncoder().encode('<urn:a> <urn:p> "alpha" .\r\n');
     const result = await new SyncSharedProjectionStoreV1(
-      fakeStore(async () => sourceWithThrowingReturn(async () => ({
-        done: false,
-        value: { ...QUADS[0], graph: 'urn:other' },
-      }))),
+      fakeStore(async () => sourceWithThrowingReturn(
+        async () => ({ done: false, value: malformed }),
+      )),
     ).open(REQUEST, {
       operatorByteCeiling: 4096,
       timeoutMs: 1000,
@@ -472,7 +396,6 @@ describe('SyncSharedProjectionStoreV1', () => {
 
     await expect(collect(result.bytes)).rejects.toMatchObject({
       code: 'rfc64-shared-projection-stream-result',
-      message: expect.stringMatching(/outside the authenticated projection graph/u),
     });
   });
 
@@ -480,7 +403,7 @@ describe('SyncSharedProjectionStoreV1', () => {
     let sourceClosed = false;
     const source = async function* () {
       try {
-        yield* QUADS;
+        yield* linesFor(TRIPLES);
       } finally {
         sourceClosed = true;
       }
@@ -503,7 +426,7 @@ describe('SyncSharedProjectionStoreV1', () => {
       fakeStore(async () => sourceWithThrowingReturn(async () => {
         if (delivered) return { done: true, value: undefined };
         delivered = true;
-        return { done: false, value: QUADS[0] };
+        return { done: false, value: linesFor(TRIPLES)[0] };
       })),
     ).open(REQUEST, {
       operatorByteCeiling: 4096,
@@ -519,22 +442,25 @@ describe('SyncSharedProjectionStoreV1', () => {
     expect(() => new SyncSharedProjectionStoreV1({} as TripleStore))
       .toThrow(/no certified RFC-64 shared-projection stream capability/);
     expect(() => new SyncSharedProjectionStoreV1({
-      rfc64SharedProjectionStreamV1: async () => streamQuads(QUADS),
+      rfc64SharedProjectionStreamV1: async () => streamLines(TRIPLES),
     } as TripleStore)).toThrow(/no certified RFC-64 shared-projection stream capability/);
   });
 });
 
-async function expectStreamFailure(quads: readonly Quad[], message: RegExp): Promise<void> {
-  return expectStreamFailureForRequest(quads, REQUEST, message);
+async function expectStreamFailure(
+  triples: readonly Rfc64ProjectionTestTriple[],
+  message: RegExp,
+): Promise<void> {
+  return expectStreamFailureForRequest(triples, REQUEST, message);
 }
 
 async function expectStreamFailureForRequest(
-  quads: readonly Quad[],
+  triples: readonly Rfc64ProjectionTestTriple[],
   request: typeof REQUEST,
   message: RegExp,
 ): Promise<void> {
   const gateway = new SyncSharedProjectionStoreV1(
-    fakeStore(async () => streamQuads(quads)),
+    fakeStore(async () => streamLines(triples)),
   );
   const result = await gateway.open(request, {
     operatorByteCeiling: 4096,
@@ -551,33 +477,18 @@ async function expectStreamFailureForRequest(
   throw new Error(`expected stream failure ${message}`);
 }
 
-function requestFor(quads: readonly Quad[], publicTripleCount: string): typeof REQUEST {
-  const projectionDigest = computeKaProjectionDigestV1(joinLines(quads));
-  const seal = validSeal({ ...SEAL, publicTripleCount });
-  const row = validRow({
-    ...ROW,
-    projectionDigest,
-    sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
-    transfer: {
-      ...ROW.transfer,
-      projectionDigest,
-    },
-  });
-  return Object.freeze({
-    sealBinding: verifyCatalogSealBindingV1(
-      SCOPE,
-      row,
-      canonicalizeCanonicalGraphScopedAuthorSealBytesV1(seal),
-      PROFILE,
-    ),
-  });
+function requestFor(
+  triples: readonly Rfc64ProjectionTestTriple[],
+  publicTripleCount: string,
+): typeof REQUEST {
+  return createRfc64SharedProjectionTestFixture({ triples, publicTripleCount }).request;
 }
 
 function fakeStore(
   open: (
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: { readonly byteCeiling: number; readonly signal?: AbortSignal },
-  ) => Promise<AsyncIterable<Quad>>,
+  ) => Promise<AsyncIterable<Uint8Array>>,
 ): TripleStore {
   const store = {
     rfc64SharedProjectionStreamCertifiedV1: true as const,
@@ -587,13 +498,21 @@ function fakeStore(
   return store as TripleStore;
 }
 
-async function* streamQuads(quads: readonly Quad[]): AsyncGenerator<Quad> {
-  for (const quad of quads) yield { ...quad };
+async function* streamLines(
+  triples: readonly Rfc64ProjectionTestTriple[],
+): AsyncGenerator<Uint8Array> {
+  yield* linesFor(triples);
+}
+
+async function* streamCanonicalLines(
+  lines: readonly Uint8Array[],
+): AsyncGenerator<Uint8Array> {
+  for (const line of lines) yield line;
 }
 
 function sourceWithThrowingReturn(
-  next: () => Promise<IteratorResult<Quad>>,
-): AsyncIterable<Quad> {
+  next: () => Promise<IteratorResult<Uint8Array>>,
+): AsyncIterable<Uint8Array> {
   return {
     [Symbol.asyncIterator]() {
       return {
@@ -606,21 +525,16 @@ function sourceWithThrowingReturn(
   };
 }
 
-function joinLines(quads: readonly Quad[]): Uint8Array {
-  const lines = quads.map((quad) => {
-    const content = tripleContentV10(quad.subject, quad.predicate, quad.object);
+function linesFor(
+  triples: readonly Rfc64ProjectionTestTriple[],
+): Uint8Array[] {
+  return triples.map((triple) => {
+    const content = tripleContentV10(triple.subject, triple.predicate, triple.object);
     const line = new Uint8Array(content.byteLength + 1);
     line.set(content);
     line[line.byteLength - 1] = 0x0a;
     return line;
   });
-  const bytes = new Uint8Array(lines.reduce((sum, line) => sum + line.byteLength, 0));
-  let offset = 0;
-  for (const line of lines) {
-    bytes.set(line, offset);
-    offset += line.byteLength;
-  }
-  return bytes;
 }
 
 async function collect(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
@@ -637,19 +551,4 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
     offset += chunk.byteLength;
   }
   return bytes;
-}
-
-function validScope(value: unknown): AuthorCatalogScopeV1 {
-  assertAuthorCatalogScopeV1(value);
-  return value;
-}
-
-function validRow(value: unknown): AuthorCatalogRowV1 {
-  assertAuthorCatalogRowV1(value);
-  return value;
-}
-
-function validSeal(value: unknown): CanonicalGraphScopedAuthorSealV1 {
-  assertCanonicalGraphScopedAuthorSealV1(value);
-  return value;
 }

@@ -11,6 +11,7 @@ import {
   SparqlHttpStore,
   StoreSchedulerBusyError,
   StorePriorityScheduler,
+  createManagedOxigraphRuntimeStoreConfigV1,
   createTripleStore,
   registerTripleStoreAdapter,
   type GraphSetIndexStoreOptions,
@@ -20,6 +21,7 @@ import {
   type StoreWorkPriority,
   type TripleStore,
 } from '../src/index.js';
+
 import {
   ControlledProbeStore,
   CountingStore,
@@ -1412,15 +1414,14 @@ describe('GraphSetIndexStore', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
     const endpoint = `http://127.0.0.1:${port}/sparql`;
-    const store = await createTripleStore({
+    const store = await createTripleStore(createManagedOxigraphRuntimeStoreConfigV1({
       backend: 'sparql-http',
       options: {
         queryEndpoint: endpoint,
         updateEndpoint: endpoint,
         managedByDkg: true,
-        managedOxigraph: true,
       },
-    });
+    }));
     try {
       const graph = 'did:dkg:context-graph:managed-atomic';
       await expect(store.replaceGraph!(graph, [q(graph)])).resolves.toBeUndefined();

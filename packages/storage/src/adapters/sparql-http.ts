@@ -77,12 +77,24 @@ import {
 } from '../store-operation-timeout.js';
 import { readSparqlResponseText } from './sparql-response-policy.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
+import type {
+  Rfc64SharedProjectionStreamCapabilityV1,
+} from '../rfc64-shared-projection-stream-capability.js';
+import {
+  createManagedOxigraphRuntimeStoreConfigV1,
+  getManagedOxigraphRuntimeConstructionAuthorityV1,
+  isManagedOxigraphRuntimeConstructionAuthorityV1,
+  snapshotManagedOxigraphRuntimeOptionsV1,
+} from '../managed-oxigraph-runtime-store.js';
+import {
+  createManagedOxigraphSharedProjectionRunnerV1,
+  type ManagedOxigraphConstructRequestV1,
+} from '../managed-oxigraph-shared-projection-runner.js';
 import {
   executeRfc64ExactBindingsReadCapabilityV1,
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
@@ -210,10 +222,8 @@ export interface SparqlHttpStoreOptions {
    */
   managedByDkg?: boolean;
   /**
-   * Runtime-only marker issued by the daemon supervisor for the Oxigraph
-   * process it launched. This is deliberately independent of
-   * `managedByDkg`, which only describes namespace/cache ownership and may be
-   * present in persisted operator configuration.
+   * @deprecated Ignored. Retained only so old persisted configuration fails
+   * closed instead of failing boot; it never grants managed guarantees.
    */
   managedOxigraph?: boolean;
   /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
@@ -253,6 +263,13 @@ export interface SparqlHttpStoreOptions {
 
 export class SparqlHttpStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  /**
+   * RFC-64 stream capability installed only for a storage-created managed
+   * Oxigraph runtime configuration, never for an arbitrary SPARQL URL.
+   */
+  readonly rfc64SharedProjectionStreamV1?:
+    Rfc64SharedProjectionStreamCapabilityV1['rfc64SharedProjectionStreamV1'];
+  readonly rfc64SharedProjectionStreamCertifiedV1: true | false;
   readonly rfc64ExactBindingsReadCertifiedV1: true | false;
   readonly rfc64SemanticReadCertifiedV1: true | false;
 
@@ -281,7 +298,10 @@ export class SparqlHttpStore implements TripleStore {
   // reconcile negative memo via `asGraphWriteGenSource` / `getWriteRevision`.
   private readonly writeGen = new GraphWriteGenTracker();
 
-  constructor(options: SparqlHttpStoreOptions) {
+  constructor(
+    options: SparqlHttpStoreOptions,
+    constructionAuthority?: object,
+  ) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
     }
@@ -289,7 +309,10 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
-    this.managedOxigraph = options.managedOxigraph === true;
+    this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
+      constructionAuthority,
+    );
+    this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
@@ -315,6 +338,48 @@ export class SparqlHttpStore implements TripleStore {
     if (options.auth) {
       this.headers['Authorization'] = options.auth;
     }
+    if (this.managedOxigraph) {
+      this.rfc64SharedProjectionStreamV1 = createManagedOxigraphSharedProjectionRunnerV1({
+        runConstruct: (request, consume) => this.runStreamingConstruct(request, consume),
+        responseError: (status, excerpt) => new SparqlHttpResponseError(
+          'rfc64-shared-projection',
+          status,
+          excerpt,
+        ),
+      });
+    }
+  }
+
+  private runStreamingConstruct<T>(
+    request: ManagedOxigraphConstructRequestV1,
+    consume: (
+      response: Response,
+      lifecycleSignal: AbortSignal | undefined,
+    ) => Promise<T>,
+  ): Promise<T> {
+    return this.runStoreWork(
+      'construct',
+      {
+        priority: request.priority,
+        signal: request.signal,
+        source: request.source,
+      },
+      async (lifecycleSignal) => {
+        const effectiveOptions: SparqlHttpQueryOptions = {
+          priority: request.priority,
+          signal: lifecycleSignal,
+          source: request.source,
+        };
+        return this.postQuery(
+          request.sparql,
+          request.accept,
+          'construct',
+          'construct',
+          effectiveOptions,
+          (response) => consume(response, lifecycleSignal),
+        );
+      },
+    );
   }
 
   rfc64ExactBindingsReadV1(
@@ -1179,6 +1244,23 @@ export class SparqlHttpStore implements TripleStore {
   }
 }
 
+/**
+ * Construct a SPARQL adapter for a DKG-supervised local Oxigraph process.
+ * Generic constructor options cannot grant managed-server capabilities.
+ */
+export function createManagedOxigraphSparqlStoreV1(
+  options: SparqlHttpStoreOptions,
+): SparqlHttpStore {
+  const config = createManagedOxigraphRuntimeStoreConfigV1({
+    backend: 'sparql-http',
+    options: snapshotManagedOxigraphRuntimeOptionsV1(options, true),
+  });
+  return new SparqlHttpStore(
+    config.options as unknown as SparqlHttpStoreOptions,
+    getManagedOxigraphRuntimeConstructionAuthorityV1(config),
+  );
+}
+
 function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {
   if (value === undefined) return 'best-effort';
   if (value === 'best-effort' || value === 'atomic-update' || value === 'atomic-readback') {
@@ -1407,10 +1489,10 @@ export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
 // Adapter registration
 // ---------------------------------------------------------------------------
 
-registerTripleStoreAdapter('sparql-http', async (opts) => {
+registerTripleStoreAdapter('sparql-http', async (opts, constructionAuthority) => {
   const options = opts as SparqlHttpStoreOptions | undefined;
   if (!options?.queryEndpoint) {
     throw new Error('sparql-http adapter requires options.queryEndpoint (and optionally options.updateEndpoint)');
   }
-  return new SparqlHttpStore(options);
+  return new SparqlHttpStore(options, constructionAuthority);
 });

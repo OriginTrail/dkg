@@ -68,6 +68,48 @@ describe('core cg-shared-v1 incremental verifier', () => {
     expect(() => verifier.finalize()).not.toThrow();
   });
 
+  it('accepts canonical LF lines without changing their bytes and isolates ownership', () => {
+    const verifier = createVerifier();
+    const [first, second] = splitLines(BYTES);
+    const bufferInput = Buffer.from(first);
+    const accepted = verifier.pushCanonicalLine(bufferInput);
+
+    expect(accepted).toEqual(first);
+    expect(accepted).not.toBe(bufferInput);
+    expect(Buffer.isBuffer(accepted)).toBe(false);
+    first.fill(0x7f);
+    bufferInput.fill(0x5f);
+    accepted.fill(0x6f);
+    expect(() => verifier.pushCanonicalLine(second)).not.toThrow();
+    expect(() => verifier.finalize()).not.toThrow();
+  });
+
+  it('rejects canonical-line inputs without exactly one terminal LF', () => {
+    const verifier = createVerifier();
+    expect(() => verifier.pushCanonicalLine(new TextEncoder().encode(
+      '<urn:a> <urn:p> "alpha" .',
+    ))).toThrow(CgSharedProjectionError);
+    expect(() => verifier.pushCanonicalLine(new TextEncoder().encode(
+      '<urn:a> <urn:p> "alpha" .\r\n',
+    ))).toThrow(CgSharedProjectionError);
+  });
+
+  it('rejects LF-terminated RDF that is not a canonical V10 fixed point', () => {
+    const canonical = [{
+      subject: 'urn:a',
+      predicate: 'urn:p',
+      object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    }];
+    const verifier = createVerifier({ triples: canonical });
+    const noncanonical = new TextEncoder().encode(
+      '<urn:a> <urn:p> "00000000000000000001"^^<http://www.w3.org/2001/XMLSchema#integer> .\n',
+    );
+
+    expect(() => verifier.pushCanonicalLine(noncanonical)).toThrow(
+      expect.objectContaining({ code: 'projection-literal' }),
+    );
+  });
+
   it('uses the same typed projection errors for ordered-stream failures', () => {
     const verifier = createVerifier();
     verifier.push(TRIPLES[1]);
@@ -146,6 +188,17 @@ function join(chunks: readonly Uint8Array[]): Uint8Array {
     offset += chunk.byteLength;
   }
   return result;
+}
+
+function splitLines(bytes: Uint8Array): Uint8Array[] {
+  const lines: Uint8Array[] = [];
+  let start = 0;
+  for (let index = 0; index < bytes.byteLength; index += 1) {
+    if (bytes[index] !== 0x0a) continue;
+    lines.push(bytes.slice(start, index + 1));
+    start = index + 1;
+  }
+  return lines;
 }
 
 function expectProjectionCountCode(

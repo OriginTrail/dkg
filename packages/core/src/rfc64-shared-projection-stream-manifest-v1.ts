@@ -47,7 +47,7 @@ export interface Rfc64SharedProjectionStreamOperationV1 {
   readonly publicTripleCount: CountV1;
   readonly signedByteCeiling: number;
   readonly protocolByteCeiling: typeof RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1;
-  readonly resultKind: 'quad-stream';
+  readonly resultKind: 'canonical-line-byte-stream';
   readonly concurrencyClass: typeof RFC64_SHARED_PROJECTION_STREAM_CONCURRENCY_CLASS_V1;
   readonly sparql: string;
 }
@@ -108,7 +108,7 @@ export function compileRfc64SharedProjectionStreamOperationV1(
     publicTripleCount: sealBinding.seal.publicTripleCount,
     signedByteCeiling,
     protocolByteCeiling: RFC64_SHARED_PROJECTION_STREAM_PROTOCOL_BYTES_V1,
-    resultKind: 'quad-stream' as const,
+    resultKind: 'canonical-line-byte-stream' as const,
     concurrencyClass: RFC64_SHARED_PROJECTION_STREAM_CONCURRENCY_CLASS_V1,
     sparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {

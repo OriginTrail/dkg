@@ -165,6 +165,7 @@ export {
   executeRfc64SemanticReadCapabilityV1,
   isRfc64ExactBindingsReadCapabilityV1,
   isRfc64SemanticReadCapabilityV1,
+  isRfc64SemanticReadCapabilitySourceV1,
   RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
   type Rfc64ExactBindingsReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
@@ -182,6 +183,15 @@ export {
   type Rfc64AuthorSealReadResultV1,
 } from './rfc64-author-seal-read-gateway.js';
 export {
+  createManagedOxigraphRuntimeStoreConfigV1,
+  type ManagedOxigraphRuntimeStoreConfigV1,
+} from './managed-oxigraph-runtime-store.js';
+export {
+  isRfc64SharedProjectionStreamCapabilityV1,
+  type Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  type Rfc64SharedProjectionStreamCapabilityV1,
+} from './rfc64-shared-projection-stream-capability.js';
+export {
   MAX_RFC64_SHARED_PROJECTION_STREAM_TIMEOUT_MS_V1,
   Rfc64SharedProjectionStreamGatewayErrorV1,
   SyncSharedProjectionStoreV1,
@@ -189,11 +199,6 @@ export {
   type Rfc64SharedProjectionStreamOptionsV1,
   type Rfc64SharedProjectionStreamResultV1,
 } from './rfc64-shared-projection-stream-gateway.js';
-export {
-  isRfc64SharedProjectionStreamCapabilityV1,
-  type Rfc64SharedProjectionStreamCapabilityOptionsV1,
-  type Rfc64SharedProjectionStreamCapabilityV1,
-} from './rfc64-shared-projection-stream-capability.js';
 export {
   resolveGraphScopedOrLegacyMetadata,
   type GraphScopedOrLegacyMetadata,
@@ -207,6 +212,7 @@ export {
   type BlazegraphStoreOptions,
 } from './adapters/blazegraph.js';
 export {
+  createManagedOxigraphSparqlStoreV1,
   SparqlHttpStore,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
   type SparqlHttpConsistencyProfile,

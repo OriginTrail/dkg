@@ -3,7 +3,6 @@ import type {
 } from '@origintrail-official/dkg-core';
 
 import type {
-  Quad,
   Rfc64SharedProjectionStreamCapabilityOptionsV1,
   TripleStore,
 } from './triple-store.js';
@@ -13,11 +12,10 @@ export type { Rfc64SharedProjectionStreamCapabilityOptionsV1 } from './triple-st
 /**
  * Callable adapter contract for one exact, non-materialized KA projection.
  *
- * SPARQL CONSTRUCT normally returns graphless triples even when its WHERE
- * clause reads one named graph. Capabilities may therefore yield graphless
- * quads or quads tagged with `operation.graphIri`. The public gateway owns the
- * one canonical normalization rule: it attaches the authenticated graph to
- * graphless results and rejects every foreign named graph.
+ * The capability owns exact-graph response validation and canonicalizes each
+ * accepted triple exactly once. It yields owned, LF-terminated canonical line
+ * bytes; the public gateway independently validates those same bytes against
+ * the authenticated seal before exposing them.
  */
 export interface Rfc64SharedProjectionStreamCapabilityV1
   extends Pick<TripleStore,
@@ -26,7 +24,7 @@ export interface Rfc64SharedProjectionStreamCapabilityV1
   rfc64SharedProjectionStreamV1(
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
-  ): Promise<AsyncIterable<Quad>>;
+  ): Promise<AsyncIterable<Uint8Array>>;
 }
 
 export function isRfc64SharedProjectionStreamCapabilityV1(

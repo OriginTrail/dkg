@@ -348,6 +348,7 @@ import {
   formatIdentityTagMismatch,
 } from './store-health-check.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
+import { buildAgentRuntimeStoreConfig } from './agent-runtime-store-config.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
 import {
@@ -1502,7 +1503,13 @@ async function runDaemonInnerWithStartupOwnership(
   const runtimeStoreConfig: DkgConfig = managed
     ? {
         ...config,
-        store: runtimeStore,
+        store: runtimeStore
+          ? {
+              backend: runtimeStore.backend,
+              options: runtimeStore.options,
+              graphSetIndex: runtimeStore.graphSetIndex,
+            }
+          : undefined,
         largeLiteralStorage: runtimeLargeLiteralStorage,
         sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
       }
@@ -1811,6 +1818,16 @@ async function runDaemonInnerWithStartupOwnership(
   const kaNumberStore = new SqliteKaNumberStore(dashDb);
   const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
 
+  // Mint managed authority only after the complete agent config has been
+  // assembled. Passing the start-up result through an ordinary object literal
+  // would intentionally strip its non-enumerable runtime authority.
+  const agentStoreConfig = buildAgentRuntimeStoreConfig({
+    runtimeStore,
+    managedStore: managed?.storeConfig,
+    changelogEnabled: Boolean(config.store?.changelog),
+    changelogEraGuard,
+  });
+
   const agent = await DKGAgent.create({
     kaNumberAllocator,
     name: config.name,
@@ -1862,21 +1879,10 @@ async function runDaemonInnerWithStartupOwnership(
     // `swmHostMode` config is inert and only in-agent defaults apply, so an
     // operator could not toggle the strip via config (the rung-1 inert-flag bug).
     swmHostMode: config.swmHostMode,
-    storeConfig: runtimeStore ? {
-      backend: runtimeStore.backend,
-      options: runtimeStore.options,
-      graphSetIndex: runtimeStore.graphSetIndex,
-      // OT-RFC-59: operator opt-in to the append-only change log (default OFF).
-      // Sourced from config.store (operator intent), NOT runtimeStore — the
-      // managed-oxigraph path rebuilds runtimeStore and would drop it. Enabling
-      // this wraps the store in ChangelogStore, which is what makes
-      // asChangelogReader(store) non-null and registers the responder delta lane.
-      // Wire the DURABLE era guard (§6 P0) so restore/rollback rotates the era —
-      // enabling the changelog fleet-wide without it is unsafe (silent skips).
-      changelog: config.store?.changelog
-        ? { enabled: true, eraGuard: changelogEraGuard }
-        : undefined,
-    } : undefined,
+    // OT-RFC-59 changelog intent and its durable era guard are already folded
+    // into this final store config. Managed Oxigraph retains its opaque runtime
+    // authority through the agent's actual createTripleStore boundary.
+    storeConfig: agentStoreConfig,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
     publicSnapshotStore,

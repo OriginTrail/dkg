@@ -3,6 +3,7 @@ import {
   BlazegraphStore,
   OxigraphStore,
   SparqlHttpStore,
+  createManagedOxigraphRuntimeStoreConfigV1,
   createTripleStore,
   tryReplaceGraphAtomically,
   tryReplaceSubjectAtomically,
@@ -10,6 +11,7 @@ import {
   UnsupportedTripleStoreCapabilityError,
   type TripleStore,
 } from '../src/index.js';
+
 import {
   HEAD_GRAPH,
   PROJECTION_GRAPH,
@@ -158,15 +160,14 @@ describe('RFC-64 author commit remote adapters', () => {
       }
       return new Response(null, { status: 200 });
     });
-    const store = await createTripleStore({
+    const store = await createTripleStore(createManagedOxigraphRuntimeStoreConfigV1({
       backend: 'sparql-http',
       options: {
-        queryEndpoint: 'http://managed-rfc64.test/query',
-        updateEndpoint: 'http://managed-rfc64.test/update',
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
         managedByDkg: true,
-        managedOxigraph: true,
       },
-    });
+    }));
     try {
       await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput()))
         .resolves.toBe('committed');

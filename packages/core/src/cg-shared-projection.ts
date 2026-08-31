@@ -93,6 +93,13 @@ export interface CgSharedProjectionStreamVerifierOptionsV1 {
 export interface CgSharedProjectionStreamVerifierV1 {
   /** Validate one semantic triple and return one fresh canonical LF-terminated line. */
   push(triple: CgSharedPublicRootProjectionTripleV1): Uint8Array;
+  /**
+   * Validate one already canonical LF-terminated line and return a fresh owned
+   * copy of those exact bytes. This is the storage-stream fast path: it keeps
+   * canonical bytes as the single representation while retaining the same
+   * semantic, ordering, count, digest, and byte-ceiling checks as `push()`.
+   */
+  pushCanonicalLine(line: Uint8Array): Uint8Array;
   /** Prove final count and digest after the complete ordered stream. */
   finalize(): void;
 }
@@ -111,6 +118,41 @@ export function createCgSharedProjectionStreamVerifierV1(
   );
   let lineNumber = 0;
 
+  const commitOwnedLine = (
+    line: Uint8Array,
+    parsed: Readonly<CgSharedPublicRootProjectionTripleV1>,
+  ): Uint8Array => {
+    accumulator.pushCanonicalLine(line, parsed);
+    return line;
+  };
+
+  const acceptCanonicalLine = (rawLine: Uint8Array): Uint8Array => {
+    if (!(rawLine instanceof Uint8Array)) {
+      fail('projection-input', 'projection stream line must be a Uint8Array');
+    }
+    // Buffer.slice() aliases its source. Always mint a plain, independently
+    // owned Uint8Array so neither caller-side nor consumer-side mutation can
+    // corrupt the accumulator's retained ordering state.
+    const line = Uint8Array.from(rawLine);
+    if (line.byteLength === 0 || line[line.byteLength - 1] !== 0x0a) {
+      fail('projection-line-ending', 'projection stream line must end with one LF');
+    }
+    for (let index = 0; index < line.byteLength - 1; index += 1) {
+      if (line[index] === 0x0a || line[index] === 0x0d) {
+        fail(
+          'projection-line-ending',
+          'projection stream line contains an embedded raw line ending',
+        );
+      }
+    }
+    lineNumber += 1;
+    const parsed = parseCanonicalProjectionLine(
+      line.subarray(0, line.byteLength - 1),
+      lineNumber,
+    );
+    return commitOwnedLine(line, parsed);
+  };
+
   return Object.freeze({
     push(rawTriple: CgSharedPublicRootProjectionTripleV1): Uint8Array {
       const triple = snapshotProjectionTriple(rawTriple);
@@ -122,13 +164,15 @@ export function createCgSharedProjectionStreamVerifierV1(
       } catch (cause) {
         fail('projection-line', 'projection triple cannot be canonicalized', cause);
       }
-      lineNumber += 1;
-      const parsed = parseCanonicalProjectionLine(content, lineNumber, false);
       const line = new Uint8Array(content.byteLength + 1);
       line.set(content);
       line[line.byteLength - 1] = 0x0a;
-      accumulator.pushCanonicalLine(line, parsed);
-      return line;
+      lineNumber += 1;
+      const parsed = parseCanonicalProjectionLine(content, lineNumber, false);
+      return commitOwnedLine(line, parsed);
+    },
+    pushCanonicalLine(rawLine: Uint8Array): Uint8Array {
+      return acceptCanonicalLine(rawLine);
     },
     finalize(): void {
       accumulator.finalize();

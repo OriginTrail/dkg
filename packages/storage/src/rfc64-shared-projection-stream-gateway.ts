@@ -7,16 +7,15 @@ import {
   type Rfc64SharedProjectionStreamOperationV1,
   type Rfc64SharedProjectionStreamTemplateInputV1,
 } from '@origintrail-official/dkg-core';
-import { snapshotExactDataRecord } from '@origintrail-official/dkg-core/closed-data-snapshot';
 
 import { openLazyAbortableStream } from './abortable-stream-work-lifecycle.js';
+import { snapshotExactOrdinaryDataRecord } from './closed-data-snapshot.js';
 import {
   isRfc64SharedProjectionStreamCapabilityV1,
   type Rfc64SharedProjectionStreamCapabilityV1,
 } from './rfc64-shared-projection-stream-capability.js';
 import {
   findTripleStoreCapability,
-  type Quad,
   type TripleStore,
 } from './triple-store.js';
 
@@ -110,7 +109,7 @@ export class SyncSharedProjectionStoreV1 {
     callerSignal: AbortSignal | undefined,
     deadlineAt: number,
   ): AsyncGenerator<Uint8Array, void, undefined> {
-    const source = openLazyAbortableStream<Quad>({
+    const source = openLazyAbortableStream<Uint8Array>({
       deadlineAt,
       signal: callerSignal,
       timeoutMessage: 'RFC-64 shared-projection stream deadline exceeded',
@@ -127,7 +126,6 @@ export class SyncSharedProjectionStoreV1 {
     });
     yield* this.validateStream(
       source,
-      operation.graphIri,
       operation.commitmentSubject,
       operation.publicTripleCount,
       operation.projectionDigest,
@@ -136,8 +134,7 @@ export class SyncSharedProjectionStoreV1 {
   }
 
   private async *validateStream(
-    source: AsyncIterable<Quad>,
-    graphIri: string,
+    source: AsyncIterable<Uint8Array>,
     commitmentSubject: string,
     expectedTripleCount: Rfc64SharedProjectionStreamOperationV1['publicTripleCount'],
     expectedDigest: Digest32V1,
@@ -150,19 +147,9 @@ export class SyncSharedProjectionStoreV1 {
       byteCeiling,
     });
     for await (const value of source) {
-      const quad = snapshotQuad(value);
-      if (quad.graph !== '' && quad.graph !== graphIri) {
-        fail(
-          'rfc64-shared-projection-stream-result',
-          'adapter returned a quad outside the authenticated projection graph',
-        );
-      }
-      const normalized = quad.graph === graphIri
-        ? quad
-        : Object.freeze({ ...quad, graph: graphIri });
       let line: Uint8Array;
       try {
-        line = verifier.push(normalized);
+        line = verifier.pushCanonicalLine(value);
       } catch (cause) {
         fail(
           'rfc64-shared-projection-stream-result',
@@ -190,10 +177,11 @@ function snapshotOptions(input: unknown): Rfc64SharedProjectionStreamOptionsV1 {
     : ['operatorByteCeiling', 'timeoutMs'];
   let options: Readonly<Record<string, unknown>>;
   try {
-    options = snapshotExactDataRecord(
+    options = snapshotExactOrdinaryDataRecord(
       input,
       expectedKeys,
       'RFC-64 shared-projection stream options',
+      (message) => { throw new Error(message); },
     );
   } catch (cause) {
     fail(
@@ -232,40 +220,6 @@ function snapshotOptions(input: unknown): Rfc64SharedProjectionStreamOptionsV1 {
     timeoutMs: options.timeoutMs,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   }) as Rfc64SharedProjectionStreamOptionsV1;
-}
-
-function snapshotQuad(input: unknown): Readonly<Quad> {
-  let quad: Readonly<Record<string, unknown>>;
-  try {
-    quad = snapshotExactDataRecord(
-      input,
-      ['graph', 'object', 'predicate', 'subject'],
-      'RFC-64 shared-projection stream quad',
-    );
-  } catch (cause) {
-    fail(
-      'rfc64-shared-projection-stream-result',
-      'adapter returned a malformed projection quad',
-      cause,
-    );
-  }
-  if (
-    typeof quad.subject !== 'string'
-    || typeof quad.predicate !== 'string'
-    || typeof quad.object !== 'string'
-    || typeof quad.graph !== 'string'
-  ) {
-    fail(
-      'rfc64-shared-projection-stream-result',
-      'projection quad terms must be strings',
-    );
-  }
-  return Object.freeze({
-    subject: quad.subject,
-    predicate: quad.predicate,
-    object: quad.object,
-    graph: quad.graph,
-  });
 }
 
 function hasOwnKey(input: unknown, key: string): boolean {

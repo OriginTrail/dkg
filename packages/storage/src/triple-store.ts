@@ -31,6 +31,9 @@ import type {
   Rfc64ExactBindingsReadOperationV1,
   Rfc64SemanticReadCapabilityResultV1,
 } from './rfc64-exact-bindings-read-capability.js';
+import {
+  getManagedOxigraphRuntimeConstructionAuthorityV1,
+} from './managed-oxigraph-runtime-store.js';
 
 export interface Quad {
   subject: string;
@@ -172,7 +175,7 @@ export interface TripleStore {
   rfc64SharedProjectionStreamV1?(
     operation: Rfc64SharedProjectionStreamOperationV1,
     options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
-  ): Promise<AsyncIterable<Quad>>;
+  ): Promise<AsyncIterable<Uint8Array>>;
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
@@ -572,6 +575,7 @@ export interface TripleStoreConfig {
 
 type AdapterFactory = (
   options?: Record<string, unknown>,
+  constructionAuthority?: object,
 ) => Promise<TripleStore>;
 
 const adapterRegistry = new Map<string, AdapterFactory>();
@@ -593,7 +597,8 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
-  const store = await factory(resolveAdapterOptions(config));
+  const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
+  const store = await factory(resolveAdapterOptions(config), constructionAuthority);
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
@@ -624,12 +629,12 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   }
   // The outer GraphSetIndexStore replaces the adapter-local graph-list cache,
   // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
-  // process carries the separate runtime-only `managedOxigraph` capability;
-  // never derive that consistency proof from persisted namespace ownership.
-  return {
+  // process carries separate storage-issued runtime provenance; never derive
+  // that consistency proof from persisted namespace ownership.
+  return Object.freeze({
     ...config.options,
     managedByDkg: false,
-  };
+  });
 }
 
 function wrapGraphSetIndex(
