@@ -304,6 +304,7 @@ async function materializedStamp(
 
 let hostDataDir: string;
 let publisher: DKGAgent;
+let witness: DKGAgent;
 let host: DKGAgent;
 let curator: string;
 let onChainCgId: string;
@@ -362,10 +363,33 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       chainConfig: chainConfig(HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.CORE_ADMIN),
     });
     liveAgents.add(publisher);
+
+    // A THIRD core, up for the whole file.
+    //
+    // SC-2 stops the node under test and then updates the asset while it is
+    // down — which is the entire point of a restart-backfill scenario. In a
+    // two-node network that is impossible: the publisher needs at least one
+    // connected core peer to collect a StorageACK, so stopping the only other
+    // node makes the update itself fail with `QuorumUnmetError` and the test
+    // never reaches its subject. The witness supplies the quorum and nothing
+    // else; it never subscribes to the Context Graph under test, so it is not a
+    // repair route for the host and cannot blur attribution.
+    witness = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'W2RWitness',
+      nodeRole: 'core',
+      listenPort: 0,
+      skills: [],
+      dataDir: mkDataDir('witness'),
+      chainConfig: chainConfig(HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC2_ADMIN),
+    });
+    liveAgents.add(witness);
     host = await createHostCore();
 
     await publisher.start();
+    await witness.start();
     await host.start();
+    await witness.connectTo(publisher.multiaddrs[0]!);
     await host.connectTo(publisher.multiaddrs[0]!);
     await new Promise((r) => setTimeout(r, 2000));
 
@@ -534,11 +558,30 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
     // ── Drain: the repair, through the shipped exact-asset fetch. ──
     const run = await drainOnce(host);
     const item = run?.items?.find((entry: any) => entry.ual === ual);
+
+    // PRIMARY ORACLE: the DRAIN repaired X — not some other lane that happened
+    // to deliver. Attribution rests on three facts together, because no single
+    // status can carry it:
+    //
+    //  - the state-at-event block above already proved the asset was NOT
+    //    current immediately before this call (VM still said the old name);
+    //  - the drain performed its own whole-CG SWM recovery (ADR-W2R-10);
+    //  - the asset resolved on this call.
+    //
+    // `already-present` is an EXPECTED terminal status here, not a weakening.
+    // The paired recovery is what makes the asset current, so the confirming
+    // re-fetch inspects an asset that is already correct and says so. Demanding
+    // `fetched|materialized` would reject the very repair shape ADR-W2R-10
+    // creates — and would have kept this file red while the feature worked.
     expect(
-      ['fetched', 'materialized'],
-      'PRIMARY ORACLE: the drain must report that IT repaired X — a query-only '
-      + 'assertion would go green for any other lane that happened to deliver',
+      ['fetched', 'materialized', 'already-present'],
+      'the drain must have resolved X on this call',
     ).toContain(item?.status);
+    expect(
+      run?.swmRecoveries ?? 0,
+      'and it must have done the repairing itself: a host-only core needs the '
+      + 'the SWM recovery the drain performs, since the exact fetch carries none',
+    ).toBeGreaterThanOrEqual(1);
     expect(
       run?.peerAttempts ?? 0,
       'the repair must have actually contacted a peer that holds the new version',
