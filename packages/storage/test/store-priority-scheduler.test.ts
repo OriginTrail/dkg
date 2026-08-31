@@ -301,6 +301,13 @@ describe('StorePriorityScheduler', () => {
     for (const priority of STORE_WORK_PRIORITIES) {
       expect(isStoreSchedulerBusyError({ ...structural, priority })).toBe(true);
     }
+    expect(isStoreSchedulerBusyError({ ...structural, retryable: false })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, outcome: 'indeterminate' })).toBe(false);
+    expect(isStoreSchedulerBusyError({
+      ...structural,
+      storeOperationOutcomeTag: 'dkg.store-operation-outcome.v2',
+    })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, storeOperation: 'unknown' })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, reason: undefined })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, priority: 'urgent' })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, operation: undefined })).toBe(false);
