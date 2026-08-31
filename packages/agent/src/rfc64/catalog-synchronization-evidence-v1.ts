@@ -41,18 +41,19 @@ export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   }
   const receipts = extension?.finalizedSwmRetirementLifecycleReceipts ?? [];
   const { postAppliedHeadExtension: _postAppliedHeadExtension, ...baseEvidence } = evidence;
+  if (
+    extension !== undefined
+    && (
+      extension.committedHead.catalogHeadDigest !== evidence.catalogHeadDigest
+      || extension.committedHead.inventoryDigest !== evidence.inventoryDigest
+    )
+  ) {
+    throw new TypeError(
+      'RFC-64 applied-head evidence differs from its synchronization evidence head',
+    );
+  }
   const seenUals = new Set<string>();
   for (const receipt of receipts) {
-    if (
-      receipt.catalogHeadDigest !== evidence.catalogHeadDigest
-      || receipt.inventoryDigest !== evidence.inventoryDigest
-      || receipt.committedHead.catalogHeadDigest !== evidence.catalogHeadDigest
-      || receipt.committedHead.inventoryDigest !== evidence.inventoryDigest
-    ) {
-      throw new TypeError(
-        'RFC-64 lifecycle receipt differs from its synchronization evidence head',
-      );
-    }
     if (seenUals.has(receipt.kaUal)) {
       throw new TypeError(`RFC-64 synchronization evidence duplicates receipt ${receipt.kaUal}`);
     }
@@ -61,9 +62,6 @@ export function snapshotRfc64CatalogSynchronizationEvidenceV1(
   return Object.freeze({
     ...baseEvidence,
     finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts.map((receipt) =>
-      Object.freeze({
-        ...receipt,
-        committedHead: Object.freeze({ ...receipt.committedHead }),
-      }))),
+      Object.freeze({ ...receipt }))),
   });
 }

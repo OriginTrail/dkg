@@ -14,8 +14,6 @@ import type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
  */
 export interface Rfc64FinalizedSwmRetirementLifecycleReceiptV1 {
   readonly kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1';
-  readonly catalogHeadDigest: Digest32V1;
-  readonly inventoryDigest: Digest32V1;
   readonly contextGraphId: string;
   readonly subGraphName?: string;
   readonly kaUal: string;
@@ -23,13 +21,13 @@ export interface Rfc64FinalizedSwmRetirementLifecycleReceiptV1 {
   readonly vmGraphIri: string;
   readonly vmPostReadDigest: Digest32V1;
   readonly vmMaterializationStatus: 'materialized' | 'existing';
-  readonly committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>;
   readonly swmReconciliationOutcome: FinalizedSwmTwinReconciliationOutcome;
 }
 
 /** Agent-layer result carried through the receiver's neutral post-head extension. */
 export interface Rfc64CatalogAppliedHeadEvidenceV1 {
   readonly kind: 'rfc64-catalog-applied-head-evidence-v1';
+  readonly committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>;
   readonly finalizedSwmRetirementLifecycleReceipts:
     readonly Readonly<Rfc64FinalizedSwmRetirementLifecycleReceiptV1>[];
 }

@@ -4738,19 +4738,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       successor.headObjectDigest,
     )?.finalizedSwmRetirementLifecycleReceipts).toMatchObject([{
       kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-      catalogHeadDigest: successor.headObjectDigest,
-      inventoryDigest: appliedFinalizedHead!.appliedInventoryDigest,
       contextGraphId: CONTEXT_GRAPH_ID,
       kaUal: finalizedSeal.kaUal,
       assertionVersion: finalizedSeal.assertionVersion,
       vmGraphIri: preexistingTwin.vmGraph,
       vmPostReadDigest: FINALIZED_VM_POST_READ_DIGEST,
       vmMaterializationStatus: 'existing',
-      committedHead: {
-        kind: 'rfc64-public-catalog-native-committed-head-token-v1',
-        catalogHeadDigest: successor.headObjectDigest,
-        inventoryDigest: appliedFinalizedHead!.appliedInventoryDigest,
-      },
       swmReconciliationOutcome: 'retired',
     }]);
     expect(await authorizedCold.store.countQuads(preexistingTwin.vmGraph))

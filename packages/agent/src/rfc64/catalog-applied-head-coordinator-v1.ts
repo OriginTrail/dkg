@@ -145,8 +145,6 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
           });
           return Object.freeze({
             kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v1',
-            catalogHeadDigest: plan.catalogHeadDigest,
-            inventoryDigest: plan.inventoryDigest,
             contextGraphId: plan.catalogScope.contextGraphId,
             ...(plan.catalogScope.subGraphName === null
               ? {}
@@ -156,7 +154,6 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
             vmGraphIri: materialization.vmGraphIri,
             vmPostReadDigest: materialization.postReadDigest,
             vmMaterializationStatus: materialization.status,
-            committedHead: Object.freeze({ ...committedHead }),
             swmReconciliationOutcome,
           }) satisfies Rfc64FinalizedSwmRetirementLifecycleReceiptV1;
         },
@@ -172,6 +169,7 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
       }
       return Object.freeze({
         kind: 'rfc64-catalog-applied-head-evidence-v1',
+        committedHead: Object.freeze({ ...committedHead }),
         finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts),
       } satisfies Rfc64CatalogAppliedHeadEvidenceV1);
     },
