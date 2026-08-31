@@ -306,6 +306,8 @@ export function resolveRfc64LegacySyncContextGraphsV1(input: Readonly<{
 /** Resolve legacy and Track-2 owner scopes once, before either lane starts. */
 export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   configuredContextGraphs: readonly string[];
+  /** Legacy public bootstrap remains active beside additive catalog selection. */
+  standaloneTrack2ContextGraphs?: readonly string[];
   activation: Readonly<{
     enabled?: boolean;
     selectedContextGraphs: readonly string[];
@@ -323,6 +325,26 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     );
     selectedAuthority[contextGraphId] = authority;
     if (authority.track2Enabled) track2ContextGraphs.push(contextGraphId);
+  }
+  for (const contextGraphId of input.standaloneTrack2ContextGraphs ?? []) {
+    // The direct public-catalog controls predate selected-CG activation.  They
+    // retain catalog discovery while allowing legacy sync, even when another
+    // graph is under an additive rollout.
+    if (
+      input.activation.rollout.killSwitch
+      || selectedAuthority[contextGraphId] !== undefined
+    ) continue;
+    selectedAuthority[contextGraphId] = Object.freeze({
+      contextGraphId,
+      selected: false,
+      mode: 'catalog',
+      killSwitchActive: false,
+      legacySyncAllowed: true,
+      track2Enabled: true,
+      authoringAllowed: true,
+      reconciliationLane: 'catalog-apply',
+    });
+    track2ContextGraphs.push(contextGraphId);
   }
   return Object.freeze({
     killSwitchActive: input.activation.rollout.killSwitch,

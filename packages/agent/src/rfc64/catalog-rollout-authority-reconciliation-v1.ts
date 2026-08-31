@@ -2,8 +2,10 @@
 
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
-import type { Rfc64CatalogExecutionPlanV1 } from
-  './catalog-rollout-authority-v1.js';
+import {
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
+  type Rfc64CatalogExecutionPlanV1,
+} from './catalog-rollout-authority-v1.js';
 import type { Rfc64PersistenceV1 } from './persistence-v1.js';
 import {
   commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1,
@@ -34,6 +36,21 @@ export async function reconcileRfc64CatalogAuthorityPlanV1(
       controlObjects: persistence.controlObjects,
       appliedHead,
     });
+    const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
+      executionPlan,
+      contextGraphId,
+    );
+    // A shadow author stages discovery metadata alongside legacy authority.
+    // Only a receiver-applied row can own catalog semantic material, so never
+    // infer relinquishment from the generic applied-head table alone.
+    if (
+      authority.reconciliationLane === 'shadow-stage'
+      && persistence.inventory.isStagedCatalogHeadV1(
+        appliedHead.catalogScopeDigest,
+        appliedHead.authorAddress,
+        appliedHead.currentCatalogHeadDigest,
+      )
+    ) continue;
     // Preserve the pre-activation standalone catalog API when no selected-CG
     // rollout block is enabled.
     if (executionPlan.standaloneTrack2Enabled) nextCatalogSet.add(contextGraphId);
