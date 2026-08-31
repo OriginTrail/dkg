@@ -367,15 +367,28 @@ export class ChainEventLaneRunner {
       ? Math.min(fromBlock + this.maxRange - 1, head)
       : fromBlock + this.maxRange - 1;
 
-    if (fromBlock > upperBound) {
-      if (rescan) {
-        try {
-          await this.dispatchWindow(lane, rescan.fromBlock, rescan.toBlock, ctx);
-        } catch (err) {
-          this.onLaneScanFailed(lane, now, err, ctx);
-          return { lane, blockNumber: state.lastBlock, advanced: false };
-        }
+    // The re-scan is best-effort redundancy over blocks the cursor already
+    // passed, and its failure handling is deliberately DIFFERENT from a
+    // forward scan's (PR #2436 review r2): routing it through
+    // `onLaneScanFailed` would rewind the FORWARD cursor because a REPLAY
+    // failed — the one cursor movement the replay was documented never to
+    // cause — and gating the forward scan on it would let a provider that
+    // rejects wide history ranges starve fresh events every rescan tick.
+    // A failed re-scan is logged and simply waits for its next scheduled
+    // tick; the forward scan below proceeds regardless.
+    if (rescan) {
+      try {
+        await this.dispatchWindow(lane, rescan.fromBlock, rescan.toBlock, ctx);
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Periodic re-scan failed (forward scan unaffected): lane=${lane.spec.name} ` +
+          `[${rescan.fromBlock}, ${rescan.toBlock}] ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
+    }
+
+    if (fromBlock > upperBound) {
       this.applyLaneSchedule(lane, { kind: 'noWork', now });
       return { lane, blockNumber: state.lastBlock, advanced: false };
     }
@@ -384,11 +397,6 @@ export class ChainEventLaneRunner {
     let advanced = false;
 
     try {
-      // The re-scan runs first and does NOT touch `lastBlock`: it is a second
-      // look at blocks the cursor has already passed, not a cursor movement.
-      if (rescan) {
-        await this.dispatchWindow(lane, rescan.fromBlock, rescan.toBlock, ctx);
-      }
       await this.dispatchWindow(lane, fromBlock, upperBound, ctx);
 
       state.lastBlock = upperBound;

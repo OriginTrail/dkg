@@ -400,6 +400,87 @@ describe('ChainEventPoller — kaRootMutations idle cost and periodic re-scan', 
     expect(chain.filters[2].toBlock).toBe(50_010);
   });
 
+  it('a due re-scan and forward work on the SAME tick both run: replay first, then the cursor advances (review r2)', async () => {
+    // On a chain that advances every cadence, tick 25 hits the forward branch,
+    // not the caught-up one — a regression that skipped the re-scan whenever
+    // forward work exists would be invisible to the idle-tick rows above.
+    let now = 0;
+    const chain = makeChain(50_000, [
+      rootMutation('KnowledgeAssetUpdated', 45_000),
+      rootMutation('KnowledgeAssetUpdated', 50_005),
+    ]);
+    const seen: number[] = [];
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    for (let tick = 1; tick <= 24; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    const before = chain.filters.length;
+
+    // Tick 25: head has advanced, so the tick carries BOTH a due re-scan and
+    // fresh forward work.
+    chain.setHead(50_010);
+    await poll(poller);
+
+    const tickFilters = chain.filters.slice(before);
+    expect(tickFilters).toHaveLength(2);
+    expect(tickFilters[0].fromBlock).toBe(50_000 - MAX_RANGE); // replay window first…
+    expect(tickFilters[0].toBlock).toBe(50_000);
+    expect(tickFilters[1].fromBlock).toBe(50_001);             // …then the forward window
+    expect(tickFilters[1].toBlock).toBe(50_010);
+    expect(seen.slice(-2)).toEqual([45_000, 50_005]);          // old replayed, new delivered
+
+    // The forward cursor advanced normally despite the replay.
+    chain.setHead(50_020);
+    now += CADENCE_MS;
+    await poll(poller);
+    expect(chain.filters[chain.filters.length - 1].fromBlock).toBe(50_011);
+  });
+
+  it('a failing re-scan is logged and skipped: no rewind, no backoff, and the forward scan still runs (review r2)', async () => {
+    // Routing a REPLAY failure through the forward failure path would rewind
+    // the forward cursor — the one movement the replay is documented never to
+    // cause — and gate fresh events behind a provider that rejects wide
+    // history ranges.
+    let now = 0;
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 50_005)]);
+    const seen: number[] = [];
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    for (let tick = 1; tick <= 24; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+
+    // Tick 25: the re-scan (first listenForEvents of the tick) throws.
+    chain.setHead(50_010);
+    chain.failNextScan(new Error('provider rejects wide history ranges'));
+    await poll(poller);
+
+    // The forward scan still ran and delivered the fresh event…
+    expect(seen).toContain(50_005);
+    // …the cursor advanced (no rewind: next forward window starts above head)…
+    chain.setHead(50_020);
+    now += CADENCE_MS;
+    await poll(poller);
+    expect(chain.filters[chain.filters.length - 1].fromBlock).toBe(50_011);
+    // …and no failure backoff was applied: that last tick was due at the
+    // ordinary cadence, one CADENCE_MS after the failing one, and it scanned.
+  });
+
   it('re-dispatches an event the forward scan already passed', async () => {
     // The whole point: an event inside the trailing window reaches the callback
     // a second time, so a forward scan served by a lagging endpoint is

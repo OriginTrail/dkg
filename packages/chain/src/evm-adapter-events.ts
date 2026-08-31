@@ -12,6 +12,7 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { EventFilter, ChainEvent } from './chain-adapter.js';
+import type { ContractCache } from './evm-adapter-types.js';
 
 /**
  * Every `DKGKnowledgeAssets` event that mutates a Knowledge Asset's committed
@@ -37,6 +38,37 @@ export const KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES = [
 
 export type KnowledgeAssetRootMutationEventType =
   (typeof KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES)[number];
+
+/**
+ * Every event name `listenForEvents` can serve, mapped to the BOUND CONTRACT
+ * that owns it (the property on `this.contracts` whose ABI declares the
+ * fragment and whose address the scan filters on).
+ *
+ * This is the single source of event OWNERSHIP: `supportsEventTypes` consults
+ * it so a capability answer about, say, `ContextGraphCreated` is given by the
+ * context-graph storage binding rather than by whichever contract one feature
+ * happened to care about (PR #2436 review r2 — the earlier implementation
+ * answered every name from `knowledgeAssetStorage`, reporting events this
+ * adapter genuinely serves as missing). A branch added to `listenForEvents`
+ * without a row here will be reported unsupported — which is the correct
+ * failure direction for a capability gate, and the parity/unit suites pin the
+ * roster below.
+ */
+const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> = Object.freeze({
+  KnowledgeBatchCreated: 'knowledgeAssetsStorage', // V8 archive binding
+  ContextGraphExpanded: 'contextGraphStorage',
+  KnowledgeAssetRegisteredToContextGraph: 'contextGraphStorage',
+  KCCreated: 'knowledgeAssetStorage',
+  KnowledgeAssetCreated: 'knowledgeAssetStorage',
+  NameClaimed: 'contextGraphNameRegistry',
+  ContextGraphNameClaimed: 'contextGraphNameRegistry',
+  ContextGraphCreated: 'contextGraphStorage',
+  RelayCapabilityUpdated: 'profileStorage',
+  KnowledgeAssetUpdated: 'knowledgeAssetStorage',
+  KnowledgeAssetMerkleRootAdded: 'knowledgeAssetStorage',
+  KnowledgeAssetMerkleRootsUpdated: 'knowledgeAssetStorage',
+  KnowledgeAssetMerkleRootRemoved: 'knowledgeAssetStorage',
+});
 
 export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -91,11 +123,23 @@ export class EventsMethods extends EVMChainAdapterBase {
   }
 
   /**
-   * Which of `names` this adapter's CURRENTLY BOUND contracts cannot produce.
+   * Which of `names` this adapter's `listenForEvents` cannot serve, judged per
+   * name against the CLIENT ABI of the bound contract that OWNS that event
+   * (`EVENT_OWNING_CONTRACT`).
    *
    * Returns the MISSING names (empty array = all supported), so a caller gates
    * on `.length === 0` and can name the specific absent event in its
    * diagnostics instead of reporting an opaque "unsupported".
+   *
+   * What this answers — and deliberately does not: it is a **client-side
+   * declaration probe** ("this adapter, with these bound contracts and this
+   * shipped ABI, can build a filter for the name and has a scan branch that
+   * serves it"), not a deployed-bytecode capability proof. A deployment older
+   * than the shipped ABI can declare-but-never-emit an event; that shape is
+   * indistinguishable from a chain where nobody happens to call the emitter,
+   * and consumers of a scan lane must tolerate silence regardless. The failure
+   * direction is what matters for a gate: an unbound owning contract, a legacy
+   * ABI, or a name this adapter has no branch for all report MISSING.
    *
    * Async, and awaits `init()`: contract bindings are resolved lazily from the
    * Hub on first use. A synchronous variant called at wiring time — before any
@@ -106,33 +150,40 @@ export class EventsMethods extends EVMChainAdapterBase {
    */
   async supportsEventTypes(names: readonly string[]): Promise<string[]> {
     await this.init();
-    const kaStorage = this.contracts.knowledgeAssetStorage;
-    if (!kaStorage) return [...names];
-    return names.filter((name) => !this.contractHasEvent(kaStorage, name));
+    return names.filter((name) => {
+      const owner = EVENT_OWNING_CONTRACT[name];
+      if (!owner) return true; // no scan branch serves this name
+      const contract = this.contracts[owner];
+      if (!contract) return true; // owning contract not bound on this deployment
+      return !this.contractHasEvent(contract, name);
+    });
   }
 
   /**
    * The four `DKGKnowledgeAssets` root-mutation events, one name per call.
    *
-   * Mirrors the `KnowledgeAssetRegisteredToContextGraph` template above —
-   * notably it goes through `queryFilterWithFailover`, whose `wideLogScan`
-   * policy and `skipPreferred` carve-out are load-bearing: a scan pinned to a
-   * lagging sticky endpoint would return fewer logs while the runner still
-   * persisted `lastBlock = head`, and the events in `(backendTip, head]` would
-   * be skipped forever with no trace.
+   * Fetches RAW provider logs (`eth_getLogs` through `readProvider`) rather
+   * than `contract.queryFilter`, and this is load-bearing (PR #2436 review
+   * r2): ethers' `queryFilter` wraps every matched log in an `EventLog`,
+   * whose construction EAGERLY decodes the non-indexed payload — so a
+   * `KnowledgeAssetMerkleRootsUpdated` response carrying a huge dynamic
+   * `MerkleRoot[]` would be fully decoded by the library before this helper
+   * ever read `topics[1]`, defeating the bounded-decode contract. Raw logs
+   * decode NOTHING until this code chooses to. The same failover properties
+   * the query-filter helper documents are preserved explicitly: policy
+   * `wideLogScan` (multi-RPC wide-log timeout) and `skipPreferred` (tip
+   * alignment with the head read that advances the lane cursor).
    *
    * `kaId` is read from `topics[1]` — the indexed `uint256 id` all four events
-   * share — NOT from `parseLog`. The id is the only field a consumer needs to
-   * identify the mutated asset, and reading it from the topic keeps it
-   * available even when the non-indexed payload fails to decode (a fabricated
-   * or truncated log from an untrusted RPC, or an ABI whose non-indexed
-   * arguments drifted). `parseLog` is then best-effort, for `merkleRoot` /
-   * `author` only.
+   * share — and the topic must be an exact 32-byte word: `getBigInt` alone
+   * would happily parse a short-but-valid hex topic like `0x01` from a
+   * malformed RPC into a WRONG asset id (review r2), so wrong-sized topics are
+   * skipped, not reinterpreted.
    *
-   * `KnowledgeAssetMerkleRootsUpdated` is never parsed: it carries a dynamic
-   * `MerkleRoot[]`, i.e. unbounded decode work driven by an untrusted payload,
-   * and no consumer wants the array — the repair path re-reads the committed
-   * set from chain regardless.
+   * `parseLog` is then best-effort enrichment (`merkleRoot` / `author`) for
+   * the three single-root events only. `KnowledgeAssetMerkleRootsUpdated` is
+   * never parsed: no consumer wants the array — the repair path re-reads the
+   * committed set from chain regardless.
    */
   private async *yieldKnowledgeAssetRootMutationLogs(
     eventName: KnowledgeAssetRootMutationEventType,
@@ -141,27 +192,31 @@ export class EventsMethods extends EVMChainAdapterBase {
     const kaStorage = this.contracts.knowledgeAssetStorage;
     if (!kaStorage || !this.contractHasEvent(kaStorage, eventName)) return;
 
-    const logs = await this.queryFilterWithFailover(
-      kaStorage,
-      `kas.queryFilter(${eventName})`,
-      kaStorage.filters[eventName](),
-      filter.fromBlock ?? 0,
-      filter.toBlock,
+    const address = await kaStorage.getAddress();
+    const topicHash = kaStorage.interface.getEvent(eventName)?.topicHash;
+    if (!topicHash) return;
+
+    const logs = await this.readProvider(
+      `kas.getLogs(${eventName})`,
+      (provider) => provider.getLogs({
+        address,
+        topics: [topicHash],
+        fromBlock: filter.fromBlock ?? 0,
+        toBlock: filter.toBlock ?? 'latest',
+      }),
+      { policy: 'wideLogScan', skipPreferred: true },
     );
 
     for (const log of logs) {
       const kaIdTopic = log.topics[1];
-      if (kaIdTopic == null) continue;
-      let kaId: string;
-      try {
-        kaId = ethers.getBigInt(kaIdTopic).toString();
-      } catch {
-        // A log whose indexed id is not a 32-byte word is not one of ours.
-        // Skipping costs a consumer nothing; THROWING would abort the scan,
-        // hold the lane cursor, and stall every later event behind one
-        // malformed log — a deterministic stall, not a retryable one.
-        continue;
-      }
+      // The indexed id of a real EVM log is exactly one 32-byte word. A
+      // wrong-sized topic from a malformed RPC must be SKIPPED, not
+      // reinterpreted: `getBigInt` alone would parse `0x01` into asset id 1.
+      // Skipping costs a consumer nothing; THROWING would abort the scan,
+      // hold the lane cursor, and stall every later event behind one
+      // malformed log — a deterministic stall, not a retryable one.
+      if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) continue;
+      const kaId = ethers.getBigInt(kaIdTopic).toString();
 
       const data: Record<string, unknown> = {
         kaId,

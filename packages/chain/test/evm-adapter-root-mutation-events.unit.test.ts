@@ -23,11 +23,13 @@
  *    legacy `DKGKnowledgeAssets` degrades to "yields nothing" instead of
  *    throwing out of the caller's whole scan. Dropping the guard reds
  *    `a legacy ABI ... does not throw`.
- *  - The scan goes through `queryFilterWithFailover`, whose `wideLogScan`
- *    policy and `skipPreferred` carve-out keep the scan's tip coverage
- *    aligned with the head that advances the lane cursor. Calling
- *    `contract.queryFilter` directly reds `every scan is issued through the
- *    wide-log failover path`.
+ *  - The scan fetches RAW logs (`eth_getLogs` via `readProvider`) with the
+ *    `wideLogScan` policy and `skipPreferred` carve-out, keeping tip coverage
+ *    aligned with the head that advances the lane cursor. A `queryFilter`
+ *    route would ALSO eagerly decode every matched log's payload inside
+ *    ethers (review r2) — the raw route decodes nothing until this code
+ *    chooses to. Rerouting reds `every scan is issued through the wide-log
+ *    failover path`.
  *  - `KnowledgeAssetMerkleRootsUpdated` is never ABI-decoded (unbounded
  *    dynamic-array decode on an untrusted payload). Adding a `parseLog` call
  *    for it reds `never decodes the dynamic root array`.
@@ -169,13 +171,20 @@ function makeAdapter(options: {
       fn: unknown,
       opts?: { policy?: string; skipPreferred?: boolean },
     ) => Promise<unknown>;
+    readProvider: (
+      label: string,
+      fn: unknown,
+      opts?: { policy?: string; skipPreferred?: boolean },
+    ) => Promise<unknown>;
   };
   priv.init = async () => { /* offline */ };
   priv.contracts = options.bindStorage === false ? {} : { knowledgeAssetStorage: contract };
-  priv.readContractWith = async (_c, label, _fn, opts) => {
-    // `queryFilterWithFailover(contract, label, eventFilter, fromBlock, toBlock)`
-    // closes over from/to inside `fn`; the label carries the event name, which
-    // is what the assertions key on.
+  const recordScan = (
+    label: string,
+    opts: { policy?: string; skipPreferred?: boolean } | undefined,
+  ): FakeLog[] => {
+    // The label carries the event name (`kas.getLogs(<event>)`), which is what
+    // the assertions key on; from/to close over inside the never-invoked `fn`.
     scans.push({
       label,
       policy: opts?.policy,
@@ -187,6 +196,12 @@ function makeAdapter(options: {
     const eventName = match?.[1] ?? '';
     return options.logsByEvent?.[eventName] ?? [];
   };
+  // The root-mutation scan fetches RAW logs (`eth_getLogs` via `readProvider`)
+  // so ethers never eagerly decodes an untrusted payload (review r2): a
+  // `queryFilter` route would wrap each log in an `EventLog`, whose
+  // construction decodes the non-indexed tail before topics[1] is ever read.
+  priv.readProvider = async (label, _fn, opts) => recordScan(label, opts);
+  priv.readContractWith = async (_c, label, _fn, opts) => recordScan(label, opts);
 
   return { adapter, scans, parseLogCalls, iface };
 }
@@ -331,6 +346,27 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(events[0].data['kaId']).toBe(KA_ID.toString());
   });
 
+  it('skips a short-but-parsable hex topic instead of minting a WRONG kaId (review r2)', async () => {
+    // The sharper malformed case: `0x01` is not a 32-byte EVM topic, but
+    // `ethers.getBigInt` parses it happily — so without an exact-width guard
+    // the scan would yield kaId "1" and a consumer would durably record a
+    // re-verification intent for an asset that was never mutated. The
+    // non-hex case above cannot catch that: it proves unparsable input is
+    // skipped, not that parsable-but-wrong-sized input is.
+    const iface = new Interface(KA_ABI as never);
+    const good = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
+    const shortTopic: FakeLog = { ...good, topics: [good.topics[0], '0x01'] };
+    const { adapter } = makeAdapter({
+      logsByEvent: { KnowledgeAssetMerkleRootAdded: [shortTopic, good] },
+    });
+
+    const events = await drain(adapter, ['KnowledgeAssetMerkleRootAdded']);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].data['kaId']).toBe(KA_ID.toString());
+    expect(events.some((e) => e.data['kaId'] === '1')).toBe(false);
+  });
+
   it('never decodes the dynamic root array of KnowledgeAssetMerkleRootsUpdated', async () => {
     const iface = new Interface(KA_ABI as never);
     const log = sampleLog(iface, 'KnowledgeAssetMerkleRootsUpdated');
@@ -353,7 +389,7 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     await drain(adapter, [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
 
     expect(scans.map((s) => s.label)).toEqual(
-      KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES.map((n) => `kas.queryFilter(${n})`),
+      KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES.map((n) => `kas.getLogs(${n})`),
     );
     for (const scan of scans) {
       // `wideLogScan` owns the multi-RPC log timeout; `skipPreferred` keeps the
@@ -416,7 +452,7 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     // KCCreated scanned its own create/mint/transfer surfaces on the same
     // binding, then the root-mutation branch scanned its one name.
     expect(scans.some((s) => s.label.includes('KnowledgeAssetCreated'))).toBe(true);
-    expect(scans.some((s) => s.label === 'kas.queryFilter(KnowledgeAssetMerkleRootAdded)')).toBe(true);
+    expect(scans.some((s) => s.label === 'kas.getLogs(KnowledgeAssetMerkleRootAdded)')).toBe(true);
   });
 });
 
@@ -444,5 +480,30 @@ describe('EVMChainAdapter.supportsEventTypes', () => {
     await expect(
       adapter.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]),
     ).resolves.toEqual([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+  });
+
+  it('answers each name from the contract that OWNS it, not from one hard-coded binding (review r2)', async () => {
+    // The first implementation asked `knowledgeAssetStorage` about every name,
+    // so `ContextGraphCreated` — an event this adapter genuinely serves from
+    // `contextGraphStorage` — was reported missing. The registry keys the
+    // answer per event.
+    const cgAbi = [{
+      type: 'event', name: 'ContextGraphCreated', anonymous: false,
+      inputs: [{ indexed: true, internalType: 'uint256', name: 'contextGraphId', type: 'uint256' }],
+    }];
+    const cgContract = new ethers.Contract('0x' + '33'.repeat(20), cgAbi as never);
+    const { adapter } = makeAdapter({});
+    (adapter as unknown as { contracts: Record<string, unknown> }).contracts['contextGraphStorage'] = cgContract;
+
+    // Owned by contextGraphStorage and declared there → supported.
+    await expect(adapter.supportsEventTypes(['ContextGraphCreated'])).resolves.toEqual([]);
+    // Served by this adapter but its owning contract lacks the fragment → missing.
+    await expect(adapter.supportsEventTypes(['ContextGraphExpanded'])).resolves.toEqual(['ContextGraphExpanded']);
+    // No scan branch serves this name at all → missing, whatever any ABI says.
+    await expect(adapter.supportsEventTypes(['NoSuchEventAnywhere'])).resolves.toEqual(['NoSuchEventAnywhere']);
+    // Mixed probe: each name judged independently.
+    await expect(
+      adapter.supportsEventTypes(['ContextGraphCreated', 'KnowledgeAssetUpdated', 'NoSuchEventAnywhere']),
+    ).resolves.toEqual(['NoSuchEventAnywhere']);
   });
 });

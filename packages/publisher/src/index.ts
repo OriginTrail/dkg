@@ -430,7 +430,11 @@ export {
   type ChainEventLanePollResult,
   type ChainEventPollerConfig,
   type CursorPersistence,
+  type KnowledgeAssetLifecycleUpdateEventV1,
+  type KnowledgeAssetRootAddedEventV1,
   type KnowledgeAssetRootMutationEventV1,
+  type KnowledgeAssetRootRemovedEventV1,
+  type KnowledgeAssetRootsReplacedEventV1,
   type OnContextGraphCreated,
   type OnKnowledgeAssetRootMutated,
 } from './chain-event-poller.js';
