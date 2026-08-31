@@ -255,3 +255,58 @@ describe('installRoutineLogRetentionSchema locking', () => {
     }
   });
 });
+
+describe('RoutineLogRetention pruning locks', () => {
+  it('prevents concurrent pruners from acting on the same overflow count', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-routine-retention-prune-lock-'));
+    const path = join(dir, 'retention.db');
+    const firstConnection = new Database(path);
+    const secondConnection = new Database(path);
+    try {
+      createLogsTable(firstConnection);
+      installRoutineLogRetentionSchema(firstConnection);
+      const insert = firstConnection.prepare(`
+        INSERT INTO logs (ts, level, module, message)
+        VALUES (?, 'info', 'test', ?)
+      `);
+      for (let index = 1; index <= 5; index += 1) insert.run(index, `row-${index}`);
+      secondConnection.pragma('busy_timeout = 0');
+
+      const competingPruner = new RoutineLogRetention(secondConnection, 3, 2);
+      let competingPrunerBlocked = false;
+      const observedFirst = new Proxy(firstConnection, {
+        get(target, property) {
+          if (property === 'prepare') {
+            return (sql: string) => {
+              if (!competingPrunerBlocked && sql === ROUTINE_LOG_PRUNE_SQL) {
+                expect(() => competingPruner.pruneOverflowBatch()).toThrow(/locked/);
+                competingPrunerBlocked = true;
+              }
+              return target.prepare(sql);
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const firstPruner = new RoutineLogRetention(observedFirst, 3, 2);
+      expect(firstPruner.pruneOverflowBatch()).toEqual({
+        deleted: 2,
+        hadOverflow: true,
+        hasMore: false,
+      });
+      expect(competingPrunerBlocked).toBe(true);
+      expect(competingPruner.pruneOverflowBatch()).toEqual({
+        deleted: 0,
+        hadOverflow: false,
+        hasMore: false,
+      });
+      expect(retentionState(firstConnection).routine_count).toBe(3);
+    } finally {
+      secondConnection.close();
+      firstConnection.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

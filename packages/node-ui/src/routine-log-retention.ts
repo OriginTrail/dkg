@@ -235,7 +235,7 @@ export class RoutineLogRetention {
   private writesSinceGuard = 0;
 
   constructor(
-    private readonly db: Pick<Database.Database, 'prepare'>,
+    private readonly db: Pick<Database.Database, 'prepare' | 'transaction'>,
     private readonly rowCap: number,
     private readonly batchRows: number,
   ) {}
@@ -267,6 +267,13 @@ export class RoutineLogRetention {
   }
 
   pruneOverflowBatch(): RoutineLogPruneBatch {
+    // Hold a write reservation from the counter read through deletion. Without
+    // it, two connections can both observe the same overflow and the second
+    // pruner can delete routine rows below the configured cap.
+    return this.db.transaction(() => this.pruneOverflowBatchLocked()).immediate();
+  }
+
+  private pruneOverflowBatchLocked(): RoutineLogPruneBatch {
     const overflowRows = this.routineCount() - this.rowCap;
     if (overflowRows <= 0) {
       return { deleted: 0, hadOverflow: false, hasMore: false };
