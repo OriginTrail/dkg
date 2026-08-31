@@ -73,13 +73,19 @@ interface ReconcileRfc64SwmInventoryCatalogExactSetParamsV1
    */
   readonly commitAppliedHeadIfInventoryCurrent: (
     commit: () => AppliedCatalogHeadSnapshotV1,
-  ) => Promise<AppliedCatalogHeadSnapshotV1>;
+  ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
 }
 
 interface Rfc64CatalogExactSetMutationOptionsV1 {
   readonly commitAppliedHead?: (
     commit: () => AppliedCatalogHeadSnapshotV1,
-  ) => Promise<AppliedCatalogHeadSnapshotV1>;
+  ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
+}
+
+interface Rfc64SourceAwareAppliedHeadCommitResultV1 {
+  readonly appliedHead: AppliedCatalogHeadSnapshotV1;
+  /** False means the signed branch was committed but the source needs a follow-up pass. */
+  readonly sourceCurrent: boolean;
 }
 
 export interface ReconcileRfc64PublicRootCatalogExactSetResultV1 {
@@ -87,6 +93,11 @@ export interface ReconcileRfc64PublicRootCatalogExactSetResultV1 {
   readonly appliedHead: AppliedCatalogHeadSnapshotV1 | null;
   readonly successorsApplied: number;
   readonly targetAssetCount: number;
+}
+
+interface ReconcileRfc64SwmInventoryCatalogExactSetResultV1
+  extends ReconcileRfc64PublicRootCatalogExactSetResultV1 {
+  readonly sourceCurrent: boolean;
 }
 
 interface Rfc64CatalogMutationStateV1 {
@@ -175,7 +186,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   async reconcileRfc64SwmInventoryCatalogExactSetV1(
     this: DKGAgent,
     params: ReconcileRfc64SwmInventoryCatalogExactSetParamsV1,
-  ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
+  ): Promise<ReconcileRfc64SwmInventoryCatalogExactSetResultV1> {
     return this.reconcileRfc64PublicRootCatalogExactSetCoreV1(params, {
       commitAppliedHead: params.commitAppliedHeadIfInventoryCurrent,
     });
@@ -185,7 +196,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
     options: Readonly<Rfc64CatalogExactSetMutationOptionsV1> = {},
-  ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
+  ): Promise<ReconcileRfc64SwmInventoryCatalogExactSetResultV1> {
     throwIfAbortedV1(params.signal);
     this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
@@ -229,6 +240,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           appliedHead: null,
           successorsApplied: 0,
           targetAssetCount: 0,
+          sourceCurrent: true,
         });
       }
       state ??= await this.createRfc64CatalogGenesisStateV1(params);
@@ -240,6 +252,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           appliedHead: state.current,
           successorsApplied: 0,
           targetAssetCount: targetAssets.length,
+          sourceCurrent: true,
         });
       }
 
@@ -271,12 +284,22 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           assets: nextAssets,
           expectedCurrentCatalogHeadDigest: committed.applied.currentCatalogHeadDigest,
         });
+        if (!committed.sourceCurrent) {
+          return Object.freeze({
+            status: 'advanced' as const,
+            appliedHead: state.current,
+            successorsApplied,
+            targetAssetCount: targetAssets.length,
+            sourceCurrent: false,
+          });
+        }
       }
       return Object.freeze({
         status: 'advanced' as const,
         appliedHead: state.current,
         successorsApplied,
         targetAssetCount: targetAssets.length,
+        sourceCurrent: true,
       });
     }, params.signal);
   }
@@ -391,7 +414,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     signal?: AbortSignal,
     commitAppliedHead?: (
       commit: () => AppliedCatalogHeadSnapshotV1,
-    ) => Promise<AppliedCatalogHeadSnapshotV1>,
+    ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>,
   ) {
     throwIfAbortedV1(signal);
     const successor = await this.publishAuthorCatalogExactSetSuccessorV1({
@@ -419,8 +442,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         expectedCurrentCatalogHeadDigest: state.expectedCurrentCatalogHeadDigest,
       }).snapshot
     );
-    const applied = commitAppliedHead === undefined
-      ? commit()
+    const committed = commitAppliedHead === undefined
+      ? Object.freeze({ appliedHead: commit(), sourceCurrent: true })
       : await commitAppliedHead(commit);
     if (!signal?.aborted) {
       await this.announceRfc64PublicCatalogHeadV1({
@@ -429,7 +452,11 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         signal,
       });
     }
-    return Object.freeze({ applied, successor });
+    return Object.freeze({
+      applied: committed.appliedHead,
+      successor,
+      sourceCurrent: committed.sourceCurrent,
+    });
   }
 
 }

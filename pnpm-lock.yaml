@@ -357,9 +357,6 @@ importers:
       '@multiformats/multiaddr':
         specifier: ^13.0.3
         version: 13.0.3
-      '@origintrail-official/dkg':
-        specifier: workspace:*
-        version: link:../../packages/cli
       '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../../packages/agent

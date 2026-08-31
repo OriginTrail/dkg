@@ -5,7 +5,6 @@
   "type": "module",
   "dependencies": {
     "@multiformats/multiaddr": "^13.0.3",
-    "@origintrail-official/dkg": "workspace:*",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",

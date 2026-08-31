@@ -35,7 +35,6 @@ export interface Rfc64SharedProjectionTestFixtureOptions {
   readonly publicTripleCount?: string;
   readonly contextGraphId?: string;
   readonly assertionCoordinate?: string;
-  readonly kaNumber?: string;
 }
 
 /** One shared seal-bound fixture for gateway and certified-adapter suites. */
@@ -50,7 +49,6 @@ export function createRfc64SharedProjectionTestFixture(
     ?? encodeCanonicalCgSharedPublicRootProjectionV1(triples);
   const publicTripleCount = options.publicTripleCount ?? String(triples.length);
   const contextGraphId = options.contextGraphId ?? 'a/b';
-  const kaNumber = options.kaNumber ?? '7';
   const scope = validScope({
     networkId: 'otp:20430',
     contextGraphId,
@@ -78,7 +76,7 @@ export function createRfc64SharedProjectionTestFixture(
     reservedKaId: RFC64_PROJECTION_TEST_KA_ID,
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
-    kaUal: `did:dkg:otp:20430/${RFC64_PROJECTION_TEST_AUTHOR}/${kaNumber}`,
+    kaUal: `did:dkg:otp:20430/${RFC64_PROJECTION_TEST_AUTHOR}/7`,
     assertionVersion: '2',
     publicTripleCount,
     privateTripleCount: '0',

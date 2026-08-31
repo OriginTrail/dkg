@@ -49,6 +49,7 @@ describe('canonical storage N-Quads text parser', () => {
       String.raw`urn:bad\uD800`,
       String.raw`urn:bad\uDC00`,
       String.raw`urn:bad\U0000D83D\uDE00`,
+      String.raw`urn:bad\n`,
     ]) {
       expect(parseNQuadLine(`<${subject}> <urn:p> "value" .`)).toBeUndefined();
     }

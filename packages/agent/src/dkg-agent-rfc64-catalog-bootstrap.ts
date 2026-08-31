@@ -22,6 +22,8 @@ import type {
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
+import { Rfc64CoalescingSupervisorV1 } from
+  './rfc64/coalescing-supervisor-v1.js';
 import { resolveRfc64PeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
@@ -152,18 +154,11 @@ interface BootstrapStateV1 {
   readonly legacyRecoveryConfig: Rfc64CatalogBootstrapPartitionV1['legacyRecoveryConfig'];
   readonly targets: MutableTargetStatusV1[];
   readonly ctx: OperationContext;
-  closed: boolean;
-  running: boolean;
+  readonly runner: Rfc64CoalescingSupervisorV1;
   pass: number;
   lastPassStartedAtMs: number | null;
   lastPassCompletedAtMs: number | null;
-  timer: ReturnType<typeof setTimeout> | null;
-  abortController: AbortController | null;
-  run: Promise<void> | null;
-  rerunRequested: boolean;
 }
-
-const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
 
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /**
@@ -190,7 +185,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /** Accept pinned policies and start the first bounded provider pass. */
   startRfc64PublicCatalogBootstrapV1(this: DKGAgent, ctx: OperationContext): void {
     const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
-    if (config === undefined || STATES.has(this)) return;
+    if (
+      config === undefined
+      || this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>() !== undefined
+    ) return;
     const service = this.rfc64PublicCatalogServiceV1;
     const partition = partitionRfc64CatalogBootstrapV1(
       config,
@@ -214,7 +212,19 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       partition.track2Policies.length === 0
       && !hasLegacyRecoveryProviders
     ) return;
-    const state: BootstrapStateV1 = {
+    let state!: BootstrapStateV1;
+    const runner = new Rfc64CoalescingSupervisorV1({
+      retryIntervalMs: partition.retryIntervalMs,
+      runPass: (signal) => this.runRfc64PublicCatalogBootstrapPassV1(state, signal),
+      onError: (error) => {
+        this.log.warn(
+          ctx,
+          `RFC-64 public catalog bootstrap pass failed: ${errorMessageV1(error)}`,
+        );
+      },
+      closingMessage: 'RFC-64 public catalog bootstrap closing',
+    });
+    state = {
       retryIntervalMs: partition.retryIntervalMs,
       legacyRecoveryConfig: partition.legacyRecoveryConfig,
       targets: partition.track2Targets.map((target) => ({
@@ -234,28 +244,23 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         updatedAtMs: null,
       })),
       ctx,
-      closed: false,
-      running: false,
+      runner,
       pass: 0,
       lastPassStartedAtMs: null,
       lastPassCompletedAtMs: null,
-      timer: null,
-      abortController: null,
-      run: null,
-      rerunRequested: false,
     };
-    STATES.set(this, state);
-    this.launchRfc64PublicCatalogBootstrapPassV1(state);
+    this.rfc64CatalogRuntimeV1?.writeBootstrapState(state);
+    runner.request();
   }
 
   /** Immutable bounded observability for release harnesses and daemon adapters. */
   readRfc64PublicCatalogBootstrapStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64PublicCatalogBootstrapStatusV1> | null {
-    const state = STATES.get(this);
+    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
     if (state === undefined) return null;
     return Object.freeze({
-      running: state.running,
+      running: state.runner.running,
       pass: state.pass,
       retryIntervalMs: state.retryIntervalMs ?? 0,
       lastPassStartedAtMs: state.lastPassStartedAtMs,
@@ -266,85 +271,32 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
 
   /** Wait through the current pass and any subscription-triggered follow-up. */
   async whenRfc64PublicCatalogBootstrapIdleV1(this: DKGAgent): Promise<void> {
-    const state = STATES.get(this);
-    if (state !== undefined) {
-      while (state.run !== null) {
-        const current = state.run;
-        await current;
-        if (state.run === current) break;
-      }
-    }
+    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
+    await state?.runner.whenIdle();
   }
 
   /** Stop future retries and abort/drain the current pass before service close. */
   async closeRfc64PublicCatalogBootstrapV1(this: DKGAgent): Promise<void> {
-    const state = STATES.get(this);
+    const state = this.rfc64CatalogRuntimeV1?.readBootstrapState<BootstrapStateV1>();
     if (state === undefined) return;
-    state.closed = true;
-    if (state.timer !== null) {
-      clearTimeout(state.timer);
-      state.timer = null;
-    }
-    state.abortController?.abort(new Error('RFC-64 public catalog bootstrap closing'));
-    await state.run?.catch(() => undefined);
-    STATES.delete(this);
+    await state.runner.close();
+    this.rfc64CatalogRuntimeV1?.clearBootstrapState();
   }
 
   /** Re-evaluate targets immediately after an edge subscription changes. */
   requestRfc64PublicCatalogBootstrapPassV1(this: DKGAgent): void {
-    const state = STATES.get(this);
-    if (state === undefined || state.closed) return;
-    if (state.timer !== null) {
-      clearTimeout(state.timer);
-      state.timer = null;
-    }
-    if (state.run !== null) {
-      state.rerunRequested = true;
-      return;
-    }
-    this.launchRfc64PublicCatalogBootstrapPassV1(state);
-  }
-
-  private launchRfc64PublicCatalogBootstrapPassV1(
-    this: DKGAgent,
-    state: BootstrapStateV1,
-  ): void {
-    if (state.closed || state.run !== null) return;
-    const run = this.runRfc64PublicCatalogBootstrapPassV1(state)
-      .catch((error) => {
-        this.log.warn(
-          state.ctx,
-          `RFC-64 public catalog bootstrap pass failed: ${errorMessageV1(error)}`,
-        );
-      })
-      .finally(() => {
-        if (state.run === run) state.run = null;
-        if (!state.closed && state.rerunRequested) {
-          state.rerunRequested = false;
-          this.launchRfc64PublicCatalogBootstrapPassV1(state);
-          return;
-        }
-        const retryIntervalMs = state.retryIntervalMs ?? 0;
-        if (!state.closed && retryIntervalMs > 0) {
-          state.timer = setTimeout(() => {
-            state.timer = null;
-            this.launchRfc64PublicCatalogBootstrapPassV1(state);
-          }, retryIntervalMs);
-          state.timer.unref?.();
-        }
-      });
-    state.run = run;
+    this.rfc64CatalogRuntimeV1
+      ?.readBootstrapState<BootstrapStateV1>()
+      ?.runner.request();
   }
 
   private async runRfc64PublicCatalogBootstrapPassV1(
     this: DKGAgent,
     state: BootstrapStateV1,
+    signal: AbortSignal,
   ): Promise<void> {
-    state.running = true;
     state.pass += 1;
     state.lastPassStartedAtMs = Date.now();
-    const abortController = new AbortController();
-    state.abortController = abortController;
     try {
       const activeLegacyPolicies = state.legacyRecoveryConfig.acceptedPolicies.filter(
         ({ policyEnvelope }) => this.resolveRfc64CatalogReceiverAuthorityV1(
@@ -362,7 +314,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
         async (providerPeerId) => {
-          if (state.closed || abortController.signal.aborted) return;
+          if (signal.aborted) return;
           try {
             await this.connectToPeerId(providerPeerId, {
               timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
@@ -395,16 +347,14 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         state.targets,
         MAX_CONCURRENT_TARGETS_V1,
         async (target) => {
-          if (state.closed) return;
+          if (signal.aborted) return;
           await this.synchronizeRfc64PublicCatalogBootstrapTargetV1(
             target,
-            abortController.signal,
+            signal,
           );
         },
       );
     } finally {
-      if (state.abortController === abortController) state.abortController = null;
-      state.running = false;
       state.lastPassCompletedAtMs = Date.now();
     }
   }

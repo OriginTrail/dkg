@@ -89,6 +89,16 @@ export interface Rfc64CatalogReceiverActivityV1 {
 export type Rfc64CatalogReconciliationLaneV1 =
   Rfc64CatalogAuthorityPolicyV1['reconciliationLane'];
 
+/** Canonical lane ownership resolved once during agent construction. */
+export interface Rfc64CatalogExecutionPlanV1 {
+  readonly killSwitchActive: boolean;
+  readonly legacyContextGraphs: readonly string[];
+  readonly track2ContextGraphs: readonly string[];
+  readonly selectedAuthority: Readonly<Record<string, Rfc64CatalogAuthorityPolicyV1>>;
+  /** Compatibility catalog controls remain available without selected-CG activation. */
+  readonly standaloneTrack2Enabled: boolean;
+}
+
 const RFC64_CATALOG_ROLLOUT_FIELDS_V1 = new Set([
   'contextGraphModes',
   'killSwitch',
@@ -313,6 +323,45 @@ export function resolveRfc64LegacySyncContextGraphsV1(input: Readonly<{
     input.activation,
     contextGraphId,
   )));
+}
+
+/** Resolve legacy and Track-2 owner scopes once, before either lane starts. */
+export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
+  configuredContextGraphs: readonly string[];
+  activation: Readonly<{
+    enabled?: boolean;
+    selectedContextGraphs: readonly string[];
+    selectedPublicContextGraphs: readonly string[];
+    rollout: ResolvedRfc64CatalogRolloutConfigV1;
+  }>;
+}>): Rfc64CatalogExecutionPlanV1 {
+  const selectedAuthority: Record<string, Rfc64CatalogAuthorityPolicyV1> =
+    Object.create(null);
+  const track2ContextGraphs: string[] = [];
+  for (const contextGraphId of input.activation.selectedContextGraphs) {
+    const authority = resolveRfc64CatalogAuthorityDecisionV1(
+      input.activation,
+      contextGraphId,
+    );
+    selectedAuthority[contextGraphId] = authority;
+    if (authority.track2Enabled) track2ContextGraphs.push(contextGraphId);
+  }
+  return Object.freeze({
+    killSwitchActive: input.activation.rollout.killSwitch,
+    legacyContextGraphs: resolveRfc64LegacySyncContextGraphsV1(input),
+    track2ContextGraphs: Object.freeze(track2ContextGraphs),
+    selectedAuthority: Object.freeze(selectedAuthority),
+    standaloneTrack2Enabled: input.activation.enabled === false
+      && !input.activation.rollout.killSwitch,
+  });
+}
+
+/** Read the pre-resolved legacy capability; unselected CGs stay legacy-owned. */
+export function rfc64ExecutionPlanAllowsLegacySyncV1(
+  plan: Rfc64CatalogExecutionPlanV1,
+  contextGraphId: string,
+): boolean {
+  return plan.selectedAuthority[contextGraphId]?.legacySyncAllowed ?? true;
 }
 
 function assertRolloutInputV1(

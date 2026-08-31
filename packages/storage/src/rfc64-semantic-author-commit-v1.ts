@@ -295,7 +295,7 @@ function assertPayloadTargets(
   }
   const expectedProjectionGraph = deriveRfc64SharedProjectionGraphIriV1(
     scope,
-    ual.ual,
+    ual,
   );
   if (sharedProjectionGraph !== expectedProjectionGraph) {
     fail(
