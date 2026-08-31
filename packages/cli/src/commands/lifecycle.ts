@@ -99,21 +99,23 @@ import {
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
 import { resolveShutdownPolicy } from '../daemon/shutdown-policy.js';
 import {
-  completeDaemonShutdown,
+  daemonShutdownCoordinator,
+  reportDaemonShutdownResult,
+  type DaemonShutdownCoordinator,
 } from '../daemon/shutdown-wait.js';
 
 interface StopCommandDependencies {
   connectApi(): Promise<{ shutdown(): Promise<unknown> }>;
-  readPid(): Promise<number | null>;
-  completeShutdown(pid: number | null): Promise<boolean>;
+  coordinator: DaemonShutdownCoordinator;
   log(message: string): void;
+  error(message: string): void;
 }
 
 const defaultStopCommandDependencies: StopCommandDependencies = {
   connectApi: () => ApiClient.connect(),
-  readPid,
-  completeShutdown: completeDaemonShutdown,
+  coordinator: daemonShutdownCoordinator,
   log: (message) => console.log(message),
+  error: (message) => console.error(message),
 };
 
 /** Executable boundary for the user-facing `dkg stop` lifecycle. */
@@ -121,10 +123,11 @@ export async function executeStopCommand(
   dependencies: StopCommandDependencies = defaultStopCommandDependencies,
 ): Promise<boolean> {
   const client = await dependencies.connectApi();
-  const pid = await dependencies.readPid();
-  await client.shutdown();
-  dependencies.log('Daemon stopping...');
-  return dependencies.completeShutdown(pid);
+  const result = await dependencies.coordinator.stopViaApi(async () => {
+    await client.shutdown();
+    dependencies.log('Daemon stopping...');
+  });
+  return reportDaemonShutdownResult(result, dependencies);
 }
 
 export function registerLifecycleCommands(program: Command): void {

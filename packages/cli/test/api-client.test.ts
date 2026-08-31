@@ -867,8 +867,30 @@ describe('ApiClient', () => {
 
   describe('shutdown', () => {
     it('does not throw even if connection closes', async () => {
-      globalThis.fetch = (async () => { throw new Error('connection reset'); }) as any;
+      globalThis.fetch = (async () => {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNRESET' } });
+      }) as any;
       await expect(client.shutdown()).resolves.toBeUndefined();
+    });
+
+    it('propagates a definite HTTP rejection', async () => {
+      const { fetch } = createTrackingFetch({
+        ok: false,
+        status: 401,
+        body: { error: 'Unauthorized' },
+      });
+      globalThis.fetch = fetch;
+      await expect(client.shutdown()).rejects.toMatchObject({
+        message: 'Unauthorized',
+        httpStatus: 401,
+      });
+    });
+
+    it('propagates a definite pre-request connection failure', async () => {
+      globalThis.fetch = (async () => {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+      }) as any;
+      await expect(client.shutdown()).rejects.toMatchObject({ message: 'fetch failed' });
     });
   });
 

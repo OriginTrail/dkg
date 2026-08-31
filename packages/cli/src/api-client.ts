@@ -34,6 +34,27 @@ import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
+const SHUTDOWN_RESPONSE_DISCONNECT_CODES = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'UND_ERR_SOCKET',
+]);
+
+function shutdownResponseMayHaveBeenInterrupted(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  if ('httpStatus' in error && typeof error.httpStatus === 'number') return false;
+  let candidate: unknown = error;
+  for (let depth = 0; depth < 4 && candidate && typeof candidate === 'object'; depth += 1) {
+    const code = 'code' in candidate ? candidate.code : undefined;
+    if (typeof code === 'string' && SHUTDOWN_RESPONSE_DISCONNECT_CODES.has(code)) return true;
+    candidate = 'cause' in candidate ? candidate.cause : undefined;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  return message.includes('connection reset')
+    || message.includes('socket closed')
+    || message.includes('socket hang up');
+}
+
 export interface PublisherJobResponse {
   job: PersistedLiftJob;
   retryState: LiftJobRetryProjection;
@@ -2212,8 +2233,11 @@ export class ApiClient {
   async shutdown(): Promise<void> {
     try {
       await this.post('/api/shutdown', {});
-    } catch {
-      // Connection may close before response
+    } catch (error) {
+      // The daemon may exit after accepting the request but before its response
+      // reaches this process. Definite HTTP and pre-request failures must remain
+      // visible so callers do not enter the full shutdown wait on a rejected stop.
+      if (!shutdownResponseMayHaveBeenInterrupted(error)) throw error;
     }
   }
 

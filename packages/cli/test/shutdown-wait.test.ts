@@ -3,10 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  persistDaemonShutdownPolicy,
-  readPersistedDaemonShutdownPolicy,
-  removePersistedDaemonShutdownPolicy,
-  resolveDaemonShutdownWaitTimeoutMs,
+  daemonRuntimeState,
   waitForDaemonExit,
 } from '../src/daemon/shutdown-wait.js';
 import { _autoUpdateIo } from '../src/daemon/manifest.js';
@@ -35,43 +32,43 @@ describe('daemon lifecycle shutdown wait', () => {
     temporaryHomes.push(dkgHome);
     process.env.DKG_HOME = dkgHome;
     process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '60000';
-    await persistDaemonShutdownPolicy(resolveShutdownPolicy(
+    await daemonRuntimeState.claim(process.pid, resolveShutdownPolicy(
       process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS,
     ));
 
     process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
-    await expect(resolveDaemonShutdownWaitTimeoutMs(process.pid)).resolves.toBe(61_000);
-    await expect(resolveDaemonShutdownWaitTimeoutMs(process.pid + 1)).resolves.toBe(301_000);
+    await expect(daemonRuntimeState.resolveWaitTimeoutMs(process.pid)).resolves.toBe(61_000);
+    await expect(daemonRuntimeState.resolveWaitTimeoutMs(process.pid + 1)).resolves.toBe(301_000);
   });
 
   it('falls back to the maximum valid bounded policy when captured state is absent', async () => {
     const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-policy-missing-'));
     temporaryHomes.push(dkgHome);
     process.env.DKG_HOME = dkgHome;
-    await expect(resolveDaemonShutdownWaitTimeoutMs(process.pid)).resolves.toBe(301_000);
+    await expect(daemonRuntimeState.resolveWaitTimeoutMs(process.pid)).resolves.toBe(301_000);
   });
 
   it('lets only the owning PID consume and remove persisted policy', async () => {
     const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-policy-owner-'));
     temporaryHomes.push(dkgHome);
     process.env.DKG_HOME = dkgHome;
-    await persistDaemonShutdownPolicy(resolveShutdownPolicy('60000'));
+    await daemonRuntimeState.claim(process.pid, resolveShutdownPolicy('60000'));
 
-    await expect(readPersistedDaemonShutdownPolicy(process.pid + 1)).resolves.toBeNull();
-    await removePersistedDaemonShutdownPolicy(process.pid + 1);
-    await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toEqual({
+    await expect(daemonRuntimeState.readPolicy(process.pid + 1)).resolves.toBeNull();
+    await daemonRuntimeState.release(process.pid + 1);
+    await expect(daemonRuntimeState.readPolicy(process.pid)).resolves.toEqual({
       hardTimeoutMs: 60_000,
     });
 
-    await removePersistedDaemonShutdownPolicy(process.pid);
-    await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toBeNull();
+    await daemonRuntimeState.release(process.pid);
+    await expect(daemonRuntimeState.readPolicy(process.pid)).resolves.toBeNull();
   });
 
   it('keeps the previous complete policy visible when an atomic replacement is interrupted', async () => {
     const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-policy-atomic-'));
     temporaryHomes.push(dkgHome);
     process.env.DKG_HOME = dkgHome;
-    await persistDaemonShutdownPolicy(resolveShutdownPolicy('60000'));
+    await daemonRuntimeState.claim(process.pid, resolveShutdownPolicy('60000'));
 
     const writes: string[] = [];
     const renames: Array<[string, string]> = [];
@@ -85,11 +82,11 @@ describe('daemon lifecycle shutdown wait', () => {
     _autoUpdateIo.unlink = (async () => {}) as typeof _autoUpdateIo.unlink;
 
     await expect(
-      persistDaemonShutdownPolicy(resolveShutdownPolicy('5000')),
+      daemonRuntimeState.claim(process.pid, resolveShutdownPolicy('5000')),
     ).rejects.toThrow('interrupted before replace');
     expect(writes[0]).toMatch(/shutdown-policy\.json\.tmp\./u);
     expect(renames[0]?.[1]).toMatch(/shutdown-policy\.json$/u);
-    await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toEqual({
+    await expect(daemonRuntimeState.readPolicy(process.pid)).resolves.toEqual({
       hardTimeoutMs: 60_000,
     });
   });

@@ -108,8 +108,6 @@ import {
   resolveAutoUpdateConfig,
   resolveChainConfig,
   dkgDir,
-  writePid,
-  removePid,
   writeApiPort,
   removeApiPort,
   logPath,
@@ -286,8 +284,7 @@ import {
 } from './shutdown.js';
 import { resolveShutdownPolicy, type ShutdownPolicy } from './shutdown-policy.js';
 import {
-  persistDaemonShutdownPolicy,
-  removePersistedDaemonShutdownPolicy,
+  daemonRuntimeState,
 } from './shutdown-wait.js';
 import {
   resolveNameToPeerId,
@@ -986,21 +983,14 @@ export async function validateStartupGenesis(
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
   const shutdownPolicy = resolveShutdownPolicy(process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
-  await persistDaemonShutdownPolicy(shutdownPolicy).catch((error) => {
-    console.warn(
-      `[shutdown-policy] could not persist the worker shutdown deadline: `
-      + `${error instanceof Error ? error.message : String(error)}. `
-      + `Lifecycle commands will use the maximum bounded wait.`,
-    );
-  });
   try {
     const config = await loadConfig();
     configureKaPublishLifecycleDebugLogging(config);
     const startedAt = Date.now();
 
-    // Write PID early so the CLI detects the process is alive while
-    // initialization (sync, on-chain identity, profile publish) proceeds.
-    await writePid(process.pid);
+    // Claim PID + shutdown policy together so lifecycle commands never have
+    // to coordinate independent ownership files.
+    await daemonRuntimeState.claim(process.pid, shutdownPolicy);
     await runDaemonInner(foreground, config, startedAt, shutdownPolicy);
   } catch (err) {
     await removeOwnedDaemonRuntimeState().catch(() => {});
@@ -1009,10 +999,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
 }
 
 async function removeOwnedDaemonRuntimeState(): Promise<void> {
-  await Promise.all([
-    removePid(),
-    removePersistedDaemonShutdownPolicy(process.pid),
-  ]);
+  await daemonRuntimeState.release(process.pid);
 }
 
 function configureKaPublishLifecycleDebugLogging(config: Pick<DkgConfig, 'logging'>): void {

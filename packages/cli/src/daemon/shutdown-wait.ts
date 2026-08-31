@@ -1,6 +1,13 @@
 import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { dkgDir, ensureDkgDir, isProcessRunning } from '../config.js';
+import {
+  dkgDir,
+  ensureDkgDir,
+  isProcessRunning,
+  readPid,
+  removePid,
+  writePid,
+} from '../config.js';
 import { writeFileAtomic } from './fs-utils.js';
 import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
 import {
@@ -20,17 +27,6 @@ interface ShutdownPolicyState {
 
 function daemonShutdownPolicyStatePath(): string {
   return join(dkgDir(), DAEMON_SHUTDOWN_POLICY_STATE_FILE);
-}
-
-/** Capture the worker's startup-validated policy for later CLI processes. */
-export async function persistDaemonShutdownPolicy(policy: ShutdownPolicy): Promise<void> {
-  const validated = resolveShutdownPolicy(String(policy.hardTimeoutMs));
-  await ensureDkgDir();
-  await writeFileAtomic(daemonShutdownPolicyStatePath(), JSON.stringify({
-    version: 1,
-    pid: process.pid,
-    ...validated,
-  }));
 }
 
 function decodeShutdownPolicyState(serialized: string): ShutdownPolicyState | null {
@@ -58,16 +54,7 @@ async function readShutdownPolicyState(): Promise<ShutdownPolicyState | null> {
   }
 }
 
-/** Read only state written from a validated worker policy. */
-export async function readPersistedDaemonShutdownPolicy(
-  expectedPid: number,
-): Promise<ShutdownPolicy | null> {
-  const state = await readShutdownPolicyState();
-  return state?.pid === expectedPid ? { hardTimeoutMs: state.hardTimeoutMs } : null;
-}
-
-/** Remove only the policy owned by the worker being retired. */
-export async function removePersistedDaemonShutdownPolicy(expectedPid: number): Promise<void> {
+async function removeShutdownPolicyState(expectedPid: number): Promise<void> {
   const state = await readShutdownPolicyState();
   if (state?.pid !== expectedPid) return;
   try {
@@ -80,15 +67,45 @@ export async function removePersistedDaemonShutdownPolicy(expectedPid: number): 
   }
 }
 
-/**
- * The worker may use its entire graceful-shutdown budget and then the bounded
- * forced-cleanup hook before exiting. Lifecycle commands must allow both.
- */
-export async function resolveDaemonShutdownWaitTimeoutMs(expectedPid: number): Promise<number> {
-  const persisted = await readPersistedDaemonShutdownPolicy(expectedPid);
-  return (persisted?.hardTimeoutMs ?? MAX_SHUTDOWN_HARD_TIMEOUT_MS)
-    + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS;
-}
+/** Canonical owner-scoped boundary for the daemon PID and shutdown policy. */
+export const daemonRuntimeState = {
+  async claim(pid: number, policy: ShutdownPolicy): Promise<void> {
+    const validated = resolveShutdownPolicy(String(policy.hardTimeoutMs));
+    await ensureDkgDir();
+    await writeFileAtomic(daemonShutdownPolicyStatePath(), JSON.stringify({
+      version: 1,
+      pid,
+      ...validated,
+    }));
+    try {
+      await writePid(pid);
+    } catch (error) {
+      await removeShutdownPolicyState(pid).catch(() => {});
+      throw error;
+    }
+  },
+
+  readPid,
+
+  async readPolicy(expectedPid: number): Promise<ShutdownPolicy | null> {
+    const state = await readShutdownPolicyState();
+    return state?.pid === expectedPid ? { hardTimeoutMs: state.hardTimeoutMs } : null;
+  },
+
+  async resolveWaitTimeoutMs(expectedPid: number): Promise<number> {
+    const persisted = await this.readPolicy(expectedPid);
+    return (persisted?.hardTimeoutMs ?? MAX_SHUTDOWN_HARD_TIMEOUT_MS)
+      + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS;
+  },
+
+  async release(expectedPid: number): Promise<void> {
+    const recordedPid = await readPid();
+    await Promise.all([
+      recordedPid === expectedPid ? removePid() : Promise.resolve(),
+      removeShutdownPolicyState(expectedPid),
+    ]);
+  },
+};
 
 interface WaitForDaemonExitOptions {
   timeoutMs?: number;
@@ -103,7 +120,7 @@ export async function waitForDaemonExit(
   pid: number,
   options: WaitForDaemonExitOptions = {},
 ): Promise<boolean> {
-  const timeoutMs = options.timeoutMs ?? await resolveDaemonShutdownWaitTimeoutMs(pid);
+  const timeoutMs = options.timeoutMs ?? await daemonRuntimeState.resolveWaitTimeoutMs(pid);
   const pollIntervalMs = options.pollIntervalMs ?? DAEMON_EXIT_POLL_INTERVAL_MS;
   const now = options.now ?? Date.now;
   const sleep = options.sleep
@@ -119,43 +136,97 @@ export async function waitForDaemonExit(
   return true;
 }
 
-export interface CompleteDaemonShutdownDependencies {
-  resolveWaitTimeoutMs(pid: number): Promise<number>;
+export type DaemonShutdownResult =
+  | { status: 'not-running'; pid: number | null }
+  | { status: 'stopped'; pid: number | null; timeoutMs?: number; cleanupError?: unknown }
+  | { status: 'timed-out'; pid: number; timeoutMs: number };
+
+export interface DaemonShutdownCoordinator {
+  stopViaApi(requestShutdown: () => Promise<void>): Promise<DaemonShutdownResult>;
+  stopViaSignal(): Promise<DaemonShutdownResult>;
+}
+
+interface DaemonShutdownCoordinatorIo {
+  runtimeState: Pick<typeof daemonRuntimeState, 'readPid' | 'resolveWaitTimeoutMs' | 'release'>;
+  isRunning(pid: number): boolean;
+  kill(pid: number, signal: NodeJS.Signals): void;
   waitForExit(pid: number, timeoutMs: number): Promise<boolean>;
-  removePersistedPolicy(pid: number): Promise<void>;
+}
+
+const defaultDaemonShutdownCoordinatorIo: DaemonShutdownCoordinatorIo = {
+  runtimeState: daemonRuntimeState,
+  isRunning: isProcessRunning,
+  kill: (pid, signal) => process.kill(pid, signal),
+  waitForExit: (pid, timeoutMs) => waitForDaemonExit(pid, { timeoutMs }),
+};
+
+/** Build the single lifecycle coordinator; low-level process I/O is injected here once. */
+export function createDaemonShutdownCoordinator(
+  io: DaemonShutdownCoordinatorIo = defaultDaemonShutdownCoordinatorIo,
+): DaemonShutdownCoordinator {
+  const complete = async (pid: number | null): Promise<DaemonShutdownResult> => {
+    if (pid === null) return { status: 'stopped', pid };
+    const timeoutMs = await io.runtimeState.resolveWaitTimeoutMs(pid);
+    if (!await io.waitForExit(pid, timeoutMs)) {
+      return { status: 'timed-out', pid, timeoutMs };
+    }
+    try {
+      await io.runtimeState.release(pid);
+      return { status: 'stopped', pid, timeoutMs };
+    } catch (cleanupError) {
+      return { status: 'stopped', pid, timeoutMs, cleanupError };
+    }
+  };
+
+  return {
+    async stopViaApi(requestShutdown) {
+      const pid = await io.runtimeState.readPid();
+      await requestShutdown();
+      return complete(pid);
+    },
+
+    async stopViaSignal() {
+      const pid = await io.runtimeState.readPid();
+      if (pid === null || !io.isRunning(pid)) return { status: 'not-running', pid };
+      try {
+        io.kill(pid, 'SIGTERM');
+      } catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error
+          ? (error as NodeJS.ErrnoException).code
+          : undefined;
+        if (code !== 'ESRCH') throw error;
+      }
+      return complete(pid);
+    },
+  };
+}
+
+export const daemonShutdownCoordinator = createDaemonShutdownCoordinator();
+
+interface DaemonShutdownReporter {
   log(message: string): void;
   error(message: string): void;
 }
 
-const defaultCompleteDaemonShutdownDependencies: CompleteDaemonShutdownDependencies = {
-  resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
-  waitForExit: (pid, timeoutMs) => waitForDaemonExit(pid, { timeoutMs }),
-  removePersistedPolicy: removePersistedDaemonShutdownPolicy,
-  log: (message) => console.log(message),
-  error: (message) => console.error(message),
-};
-
-/** Canonical post-trigger wait and reporting path for every daemon stop command. */
-export async function completeDaemonShutdown(
-  pid: number | null,
-  dependencies: CompleteDaemonShutdownDependencies = defaultCompleteDaemonShutdownDependencies,
-): Promise<boolean> {
-  if (pid === null) {
-    dependencies.log('Stopped.');
-    return true;
+/** Keep presentation at the command boundary while the coordinator owns lifecycle I/O. */
+export function reportDaemonShutdownResult(
+  result: DaemonShutdownResult,
+  reporter: DaemonShutdownReporter = console,
+): boolean {
+  if (result.status === 'not-running') return true;
+  if (result.status === 'timed-out') {
+    reporter.error(
+      `Daemon is still running after the configured shutdown deadline (${result.timeoutMs}ms).`,
+    );
+    return false;
   }
-  const timeoutMs = await dependencies.resolveWaitTimeoutMs(pid);
-  if (await dependencies.waitForExit(pid, timeoutMs)) {
-    await dependencies.removePersistedPolicy(pid).catch((error) => {
-      dependencies.error(
-        `Shutdown policy cleanup error: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-    dependencies.log('Stopped.');
-    return true;
+  if (result.cleanupError !== undefined) {
+    reporter.error(
+      `Daemon runtime-state cleanup error: ${result.cleanupError instanceof Error
+        ? result.cleanupError.message
+        : String(result.cleanupError)}`,
+    );
   }
-  dependencies.error(
-    `Daemon is still running after the configured shutdown deadline (${timeoutMs}ms).`,
-  );
-  return false;
+  reporter.log('Stopped.');
+  return true;
 }

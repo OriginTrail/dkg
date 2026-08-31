@@ -14,12 +14,11 @@ import {
   requestFaucetFunding,
   resolveDkgConfigHome,
   toErrorMessage,
-  hasErrorCode,
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
+  readApiPort, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   activeSlot, swapSlot,
@@ -52,7 +51,9 @@ import {
 import { migrateToBlueGreen, noteEdgeLegacyReleases } from './migration.js';
 import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
 import {
-  completeDaemonShutdown,
+  daemonShutdownCoordinator,
+  reportDaemonShutdownResult,
+  type DaemonShutdownCoordinator,
 } from './daemon/shutdown-wait.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
@@ -366,32 +367,23 @@ function sleep(ms: number): Promise<void> {
 }
 
 interface StopDaemonDependencies {
-  readPid(): Promise<number | null>;
-  isRunning(pid: number): boolean;
-  kill(pid: number, signal: NodeJS.Signals): void;
-  completeShutdown(pid: number): Promise<boolean>;
+  coordinator: DaemonShutdownCoordinator;
   log(message: string): void;
+  error(message: string): void;
 }
 
 const defaultStopDaemonDependencies: StopDaemonDependencies = {
-  readPid,
-  isRunning: isProcessRunning,
-  kill: (pid, signal) => process.kill(pid, signal),
-  completeShutdown: (pid) => completeDaemonShutdown(pid),
+  coordinator: daemonShutdownCoordinator,
   log: (message) => console.log(message),
+  error: (message) => console.error(message),
 };
 
 /** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
 async function stopDaemonIfRunning(
   dependencies: StopDaemonDependencies = defaultStopDaemonDependencies,
 ): Promise<boolean> {
-  const pid = await dependencies.readPid();
-  if (!pid || !dependencies.isRunning(pid)) return true;
-  dependencies.log('Stopping daemon...');
-  try { dependencies.kill(pid, 'SIGTERM'); } catch (err) {
-    if (!hasErrorCode(err, 'ESRCH')) throw err;
-  }
-  return dependencies.completeShutdown(pid);
+  const result = await dependencies.coordinator.stopViaSignal();
+  return reportDaemonShutdownResult(result, dependencies);
 }
 
 export {

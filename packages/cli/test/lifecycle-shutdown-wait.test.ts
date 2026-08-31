@@ -5,11 +5,8 @@ import { describe, expect, it } from 'vitest';
 import { stopDaemonIfRunning } from '../src/cli-helpers.js';
 import { executeStopCommand } from '../src/commands/lifecycle.js';
 import {
-  completeDaemonShutdown,
-  persistDaemonShutdownPolicy,
-  readPersistedDaemonShutdownPolicy,
-  removePersistedDaemonShutdownPolicy,
-  resolveDaemonShutdownWaitTimeoutMs,
+  createDaemonShutdownCoordinator,
+  daemonRuntimeState,
   waitForDaemonExit,
 } from '../src/daemon/shutdown-wait.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
@@ -41,26 +38,26 @@ describe('lifecycle command shutdown waits', () => {
     try {
       process.env.DKG_HOME = dkgHome;
       process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '60000';
-      await persistDaemonShutdownPolicy(resolveShutdownPolicy(
+      await daemonRuntimeState.claim(process.pid, resolveShutdownPolicy(
         process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS,
       ));
       process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS = '5000';
+      const coordinator = createDaemonShutdownCoordinator({
+        runtimeState: daemonRuntimeState,
+        isRunning: () => true,
+        kill: () => {},
+        waitForExit: simulation.wait,
+      });
 
       await expect(executeStopCommand({
         connectApi: async () => ({
           shutdown: async () => { shutdownRequests += 1; },
         }),
-        readPid: async () => process.pid,
-        completeShutdown: (pid) => completeDaemonShutdown(pid, {
-          resolveWaitTimeoutMs: resolveDaemonShutdownWaitTimeoutMs,
-          waitForExit: simulation.wait,
-          removePersistedPolicy: removePersistedDaemonShutdownPolicy,
-          log: (message) => logs.push(message),
-          error: (message) => logs.push(message),
-        }),
+        coordinator,
         log: (message) => logs.push(message),
+        error: (message) => logs.push(message),
       })).resolves.toBe(true);
-      await expect(readPersistedDaemonShutdownPolicy(process.pid)).resolves.toBeNull();
+      await expect(daemonRuntimeState.readPolicy(process.pid)).resolves.toBeNull();
     } finally {
       if (savedDkgHome === undefined) delete process.env.DKG_HOME;
       else process.env.DKG_HOME = savedDkgHome;
@@ -77,18 +74,20 @@ describe('lifecycle command shutdown waits', () => {
   it('lets the update/rollback stop helper complete after the same 30s drain', async () => {
     const simulation = simulatedExitWait(30_000);
     const signals: NodeJS.Signals[] = [];
-    await expect(stopDaemonIfRunning({
-      readPid: async () => 42,
+    const coordinator = createDaemonShutdownCoordinator({
+      runtimeState: {
+        readPid: async () => 42,
+        resolveWaitTimeoutMs: async () => 61_000,
+        release: async () => {},
+      },
       isRunning: () => true,
       kill: (_pid, signal) => { signals.push(signal); },
-      completeShutdown: (pid) => completeDaemonShutdown(pid, {
-        resolveWaitTimeoutMs: async () => 61_000,
-        waitForExit: simulation.wait,
-        removePersistedPolicy: async () => {},
-        log: () => {},
-        error: () => {},
-      }),
+      waitForExit: simulation.wait,
+    });
+    await expect(stopDaemonIfRunning({
+      coordinator,
       log: () => {},
+      error: () => {},
     })).resolves.toBe(true);
 
     expect(signals).toEqual(['SIGTERM']);
@@ -98,23 +97,48 @@ describe('lifecycle command shutdown waits', () => {
   it('reports the configured deadline when the shared stop helper never observes exit', async () => {
     const simulation = simulatedExitWait(null);
     const errors: string[] = [];
-    await expect(stopDaemonIfRunning({
-      readPid: async () => 42,
+    const coordinator = createDaemonShutdownCoordinator({
+      runtimeState: {
+        readPid: async () => 42,
+        resolveWaitTimeoutMs: async () => 1_250,
+        release: async () => {},
+      },
       isRunning: () => true,
       kill: () => {},
-      completeShutdown: (pid) => completeDaemonShutdown(pid, {
-        resolveWaitTimeoutMs: async () => 1_250,
-        waitForExit: simulation.wait,
-        removePersistedPolicy: async () => {},
-        log: () => {},
-        error: (message) => errors.push(message),
-      }),
+      waitForExit: simulation.wait,
+    });
+    await expect(stopDaemonIfRunning({
+      coordinator,
       log: () => {},
+      error: (message) => errors.push(message),
     })).resolves.toBe(false);
 
     expect(simulation.elapsed()).toBe(1_250);
     expect(errors).toEqual([
       'Daemon is still running after the configured shutdown deadline (1250ms).',
     ]);
+  });
+
+  it('fails dkg stop promptly on an auth rejection without entering completion wait', async () => {
+    let waitCalls = 0;
+    const coordinator = createDaemonShutdownCoordinator({
+      runtimeState: {
+        readPid: async () => 42,
+        resolveWaitTimeoutMs: async () => 61_000,
+        release: async () => {},
+      },
+      isRunning: () => true,
+      kill: () => {},
+      waitForExit: async () => { waitCalls += 1; return true; },
+    });
+    const unauthorized = Object.assign(new Error('Unauthorized'), { httpStatus: 401 });
+
+    await expect(executeStopCommand({
+      connectApi: async () => ({ shutdown: async () => { throw unauthorized; } }),
+      coordinator,
+      log: () => {},
+      error: () => {},
+    })).rejects.toBe(unauthorized);
+    expect(waitCalls).toBe(0);
   });
 });
