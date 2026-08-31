@@ -2,31 +2,12 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
+  canonicalAgentDidSubject,
   isPublicLikeAddress,
+  toAgentDid,
 } from '@origintrail-official/dkg-core';
-
-/**
- * Canonicalise the DID subject for an agent.
- *
- * A-12 review: the same wallet can be supplied with different casings
- * (e.g. `ethers.Wallet.address` returns checksum case, while config
- * files and JSON bodies often carry lowercase). Without normalisation
- * a profile publish would mint `did:dkg:agent:0xAb...` while an
- * endorsement from the same wallet would mint `did:dkg:agent:0xab...`,
- * splitting the entity into two RDF subjects that never converge.
- *
- * Rule: if the raw subject matches the EVM-address shape `0x<40hex>`,
- * fold it to lowercase. Any other shape (peer id, non-hex) is passed
- * through unchanged — callers upstream may have minted a legacy
- * peer-id subject and we must not silently rewrite it to look like an
- * address.
- */
-export function canonicalAgentDidSubject(raw: string): string {
-  if (/^0x[0-9a-fA-F]{40}$/.test(raw)) {
-    return raw.toLowerCase();
-  }
-  return raw;
-}
+/** Compatibility re-export; canonicalization is implemented and documented in dkg-core. */
+export { canonicalAgentDidSubject } from '@origintrail-official/dkg-core';
 
 /**
  * Filter a node's live libp2p multiaddrs down to the set worth
@@ -172,8 +153,7 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   // A-12: normalise the DID subject so profile + endorsement subjects
   // converge for the same wallet regardless of the source casing. See
   // `canonicalAgentDidSubject` for rationale.
-  const didSubject = canonicalAgentDidSubject(config.agentAddress ?? config.peerId);
-  const entity = `did:dkg:agent:${didSubject}`;
+  const entity = toAgentDid(config.agentAddress ?? config.peerId);
   const quads: Quad[] = [];
   const role = config.nodeRole ?? 'edge';
 

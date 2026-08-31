@@ -18,6 +18,9 @@ const PEER_ID_CID = peerIdFromString(PEER_ID).toCID().toString();
 const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const DIRECT_MULTIADDR = `/ip4/127.0.0.1/tcp/9090/p2p/${PEER_ID}`;
 const DIRECT_MULTIADDR_CID = `/ip4/127.0.0.1/tcp/9090/p2p/${PEER_ID_CID}`;
+const RELAY_MULTIADDR =
+  '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const CIRCUIT_MULTIADDR = `${RELAY_MULTIADDR}/p2p-circuit/p2p/${PEER_ID}`;
 
 function makeAgent(overrides: Record<string, unknown> = {}): any {
   const agent: any = {
@@ -29,7 +32,10 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
       },
     },
     peerResolver: {
-      resolve: vi.fn(async () => [DIRECT_MULTIADDR]),
+      connect: vi.fn(async () => ({
+        status: 'connected' as const,
+        resolvedAddresses: [DIRECT_MULTIADDR],
+      })),
     },
     networkAdmissionCoordinator: {
       enabled: true,
@@ -81,7 +87,7 @@ describe('explicit connect network admission', () => {
       expect.anything(),
       expect.objectContaining({
         kind: 'direct',
-        multiaddress: DIRECT_MULTIADDR,
+        address: DIRECT_MULTIADDR,
         targetPeerId: PEER_ID,
       }),
       expect.any(Function),
@@ -136,11 +142,10 @@ describe('explicit connect network admission', () => {
       AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_REJECTED' });
 
-    expect(agent.peerResolver.resolve).toHaveBeenCalledWith(
+    expect(agent.peerResolver.connect).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(agent.node.libp2p.dial).toHaveBeenCalledOnce();
     expect(agent.networkAdmissionCoordinator.ensureExplicitConnectAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
@@ -174,11 +179,97 @@ describe('explicit connect network admission', () => {
         timeoutMs: expect.any(Number),
       }),
     );
-    expect(agent.peerResolver.resolve).not.toHaveBeenCalled();
+    expect(agent.peerResolver.connect).not.toHaveBeenCalled();
     expect(agent.node.libp2p.dial).not.toHaveBeenCalled();
     expect(agent.log.info).not.toHaveBeenCalledWith(
       expect.objectContaining({ operationName: 'connect' }),
       expect.stringContaining('Already connected'),
     );
+  });
+
+  it('delegates cold-peer connection policy to the canonical resolver boundary', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async () => ({
+          status: 'connected' as const,
+          resolvedAddresses: [DIRECT_MULTIADDR, CIRCUIT_MULTIADDR],
+        })),
+      },
+      networkAdmissionCoordinator: admittedCoordinator(PEER_ID),
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).resolves.toBeUndefined();
+
+    expect(agent.peerResolver.connect).toHaveBeenCalledWith(
+      PEER_ID,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(agent.node.libp2p.dial).not.toHaveBeenCalled();
+  });
+
+  it('classifies a candidate-local AbortError as DIAL_FAILED while the caller budget is active', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async () => {
+          throw new DOMException('candidate timed out', 'AbortError');
+        }),
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({ code: 'DIAL_FAILED' });
+  });
+
+  it('classifies an operational transport failure after an empty lookup as DIAL_FAILED', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async () => {
+          throw new Error('libp2p is not started');
+        }),
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({
+      code: 'DIAL_FAILED',
+      message: expect.stringContaining('libp2p is not started'),
+    });
+  });
+
+  it('preserves PEER_NOT_FOUND when resolution and peer-store fallback both miss', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async () => ({
+          status: 'unresolved' as const,
+          resolvedAddresses: [],
+        })),
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({ code: 'PEER_NOT_FOUND' });
+  });
+
+  it('classifies an abort from the caller-owned deadline as CONNECT_TIMEOUT', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        connect: vi.fn(async (_peerId: string, options: { signal?: AbortSignal }) => {
+          await new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () => {
+              reject(new DOMException('caller timed out', 'AbortError'));
+            }, { once: true });
+          });
+        }),
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 10 }),
+    ).rejects.toMatchObject({ code: 'CONNECT_TIMEOUT' });
   });
 });

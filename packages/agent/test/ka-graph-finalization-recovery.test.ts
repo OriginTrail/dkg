@@ -144,9 +144,10 @@ describe('graph-scoped assertion finalization recovery', () => {
       { subject: 'urn:after:seal', predicate: 'urn:predicate:value', object: '"sealed"' },
     ]);
     const lifecycle = assertionLifecycleUri(contextGraphId, author, afterSeal);
-    const realDeleteByPattern = agent.store.deleteByPattern.bind(agent.store);
+    const realDeleteByPatternWithoutCount = agent.store.deleteByPatternWithoutCount?.bind(agent.store);
+    if (!realDeleteByPatternWithoutCount) throw new Error('no-count delete capability unavailable');
     let stoppedAfterSeal = false;
-    agent.store.deleteByPattern = async (pattern, options) => {
+    agent.store.deleteByPatternWithoutCount = async (pattern, options) => {
       if (
         !stoppedAfterSeal &&
         pattern.subject === lifecycle &&
@@ -155,13 +156,13 @@ describe('graph-scoped assertion finalization recovery', () => {
         stoppedAfterSeal = true;
         throw new Error('injected after-seal failure');
       }
-      return realDeleteByPattern(pattern, options);
+      return realDeleteByPatternWithoutCount(pattern, options);
     };
     await expect(agent.assertion.finalize(contextGraphId, afterSeal)).rejects.toThrow(
       'injected after-seal failure',
     );
     expect(await hasSeal(agent, contextGraphId, afterSeal)).toBe(true);
-    agent.store.deleteByPattern = realDeleteByPattern;
+    agent.store.deleteByPatternWithoutCount = realDeleteByPatternWithoutCount;
     const afterSealRecovered = await agent.assertion.finalize(contextGraphId, afterSeal) as never as {
       kaUal: string; assertionVersion: string; publicTripleCount: number;
     };

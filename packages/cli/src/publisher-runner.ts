@@ -37,8 +37,8 @@ import {
   type AsyncLiftChainProofResolution,
   type AsyncLiftPublisherRecoveryResult,
   type VmPublisherControl,
-  type LiftJob,
   type LiftJobHex,
+  type PersistedLiftJob,
   type PublishOptions,
   type V10ACKProviderParams,
   type SnapshotPageIndexStore,
@@ -950,7 +950,7 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
  * block hash or tx index, which cannot make durable evidence.
  */
 async function resolveCanonicalUpdateRecoveryEvidence(
-  job: LiftJob,
+  job: PersistedLiftJob,
   lookup: AsyncLiftUpdateChainProofLookup,
   adapters: PublisherChainAdapters,
   verdictRecovery: AsyncLiftPublisherRecoveryResult | undefined,
