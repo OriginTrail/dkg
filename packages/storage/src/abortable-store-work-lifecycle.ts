@@ -9,6 +9,12 @@ export interface AbortSignalScope {
   dispose(): void;
 }
 
+export interface StoreWorkRaceOptions<T> {
+  readonly onLateResult?: (value: T) => void | Promise<void>;
+  readonly timeoutMs?: number;
+  readonly timeoutError?: () => Error;
+}
+
 const NOOP_DISPOSE = () => {};
 
 export function composeAbortSignals(
@@ -54,50 +60,51 @@ export function composeAbortSignals(
 export function raceStoreWorkAgainstAbort<T>(
   work: Promise<T>,
   signal: AbortSignal | undefined,
-  onLateResult?: (value: T) => void | Promise<void>,
+  options: StoreWorkRaceOptions<T> = {},
 ): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) {
-    void work.then(onLateResult).catch(() => undefined);
-    return Promise.reject(normalizeAbortReason(signal.reason));
-  }
+  const timeoutMs = options.timeoutMs ?? 0;
+  if (!signal && timeoutMs <= 0) return work;
   return new Promise<T>((resolve, reject) => {
-    let aborted = false;
     let settled = false;
-    let abortListenerAttached = false;
-    const removeAbortListener = () => {
-      if (!abortListenerAttached) return;
-      abortListenerAttached = false;
-      signal.removeEventListener('abort', onAbort);
-    };
-    const onAbort = () => {
-      if (settled) return;
-      aborted = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (action: () => void): boolean => {
+      if (settled) return false;
       settled = true;
-      removeAbortListener();
-      reject(normalizeAbortReason(signal.reason));
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      action();
+      return true;
     };
-    abortListenerAttached = true;
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (!aborted && signal.aborted) onAbort();
+    const consumeLateResult = (value: T) => {
+      if (!options.onLateResult) return;
+      void Promise.resolve()
+        .then(() => options.onLateResult?.(value))
+        .catch(() => undefined);
+    };
+    const onAbort = () => finish(() => reject(normalizeAbortReason(signal?.reason)));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // Attach both handlers before observing pre-abort so every started promise
+    // remains consumed even when cancellation wins the race immediately.
     work.then(
       (value) => {
-        removeAbortListener();
-        if (aborted) {
-          void Promise.resolve(onLateResult?.(value)).catch(() => undefined);
-        } else if (!settled) {
-          settled = true;
-          resolve(value);
-        }
+        if (!finish(() => resolve(value))) consumeLateResult(value);
       },
-      (cause) => {
-        removeAbortListener();
-        if (!settled) {
-          settled = true;
-          reject(cause);
-        }
-      },
+      (cause) => finish(() => reject(cause)),
     );
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    if (timeoutMs > 0) {
+      if (!options.timeoutError) {
+        throw new Error('store-work timeout requires timeoutError');
+      }
+      timer = setTimeout(
+        () => finish(() => reject(options.timeoutError!())),
+        timeoutMs,
+      );
+      if (typeof timer.unref === 'function') timer.unref();
+    }
   });
 }
 

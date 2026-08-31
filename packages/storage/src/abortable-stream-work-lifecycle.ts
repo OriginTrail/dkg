@@ -39,8 +39,10 @@ export function openLazyAbortableStream<T>(
         source = await raceStoreWorkAgainstAbort(
           pendingSource,
           signalScope.signal,
-          async (lateSource) => {
-            if (isAsyncIterable(lateSource)) await closeAsyncIterable(lateSource);
+          {
+            onLateResult: async (lateSource) => {
+              if (isAsyncIterable(lateSource)) await closeAsyncIterable(lateSource);
+            },
           },
         );
       } catch (cause) {

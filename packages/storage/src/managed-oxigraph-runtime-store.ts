@@ -54,11 +54,27 @@ export function createManagedOxigraphRuntimeStoreConfigV1(
 export function isManagedOxigraphRuntimeStoreConfigV1(
   candidate: unknown,
 ): candidate is ManagedOxigraphRuntimeStoreConfigV1 {
-  if (candidate === null || typeof candidate !== 'object') return false;
+  return getManagedOxigraphRuntimeConstructionAuthorityV1(candidate) !== undefined;
+}
+
+/** @internal Pass the one opaque authority through the adapter construction boundary. */
+export function getManagedOxigraphRuntimeConstructionAuthorityV1(
+  candidate: unknown,
+): object | undefined {
+  if (candidate === null || typeof candidate !== 'object') return undefined;
   const descriptor = Object.getOwnPropertyDescriptor(candidate, MANAGED_RUNTIME_CONTEXT);
   return descriptor !== undefined
     && Object.prototype.hasOwnProperty.call(descriptor, 'value')
-    && descriptor.value === MANAGED_RUNTIME_AUTHORITY;
+    && descriptor.value === MANAGED_RUNTIME_AUTHORITY
+    ? MANAGED_RUNTIME_AUTHORITY
+    : undefined;
+}
+
+/** @internal Recognize only the authority minted by the runtime config factory. */
+export function isManagedOxigraphRuntimeConstructionAuthorityV1(
+  candidate: unknown,
+): boolean {
+  return candidate === MANAGED_RUNTIME_AUTHORITY;
 }
 
 function assertLoopbackEndpoint(input: unknown, label: string): void {
