@@ -445,6 +445,22 @@ export interface FinalizedUnsupportedKnowledgeAssetRootMutationV1 extends Finali
   kaId: string;
 }
 
+/**
+ * The kinds of on-chain Knowledge-Asset root mutation, as one NAMED union.
+ *
+ * Derived from the two record shapes above rather than restated as a literal
+ * union, so a kind added to either shape reaches every consumer instead of
+ * silently splitting into two vocabularies. The chain adapter's
+ * `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES` enumerates the on-chain EVENT
+ * NAMES that produce these kinds; this type is the off-chain CLASSIFICATION
+ * they map to. Packages that only classify (the publisher's poller lane, the
+ * agent's re-verification intents) import this instead of re-declaring
+ * `'lifecycle-update' | 'root-added' | 'roots-replaced' | 'root-removed'`.
+ */
+export type KnowledgeAssetRootMutationKindV1 =
+  | FinalizedKnowledgeAssetUpdateV1['kind']
+  | FinalizedUnsupportedKnowledgeAssetRootMutationV1['kind'];
+
 function canonicalPosition(input: FinalizedEventPositionV1, label: string): FinalizedEventPositionV1 {
   return {
     blockNumber: canonicalBlockNumber(input.blockNumber, `${label}.blockNumber`),

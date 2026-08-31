@@ -1,5 +1,11 @@
 import type { ChainAdapter, ChainEvent } from '@origintrail-official/dkg-chain';
-import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  Logger,
+  createOperationContext,
+  type FinalizedEventPositionV1,
+  type KnowledgeAssetRootMutationKindV1,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 import {
@@ -38,6 +44,58 @@ export type OnCollectionUpdated = (info: {
   batchId: bigint;
   blockNumber: number;
 }) => Promise<void>;
+
+/**
+ * One on-chain mutation of a Knowledge Asset's committed Merkle-root set.
+ *
+ * Emitted by the `kaRootMutations` lane for each of the four
+ * `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES`. The payload is deliberately
+ * canonical-string shaped (not `bigint`/`Uint8Array`) so it matches core's
+ * `FinalizedEventPositionV1` vocabulary and survives a durable round-trip
+ * without a lossy re-encode.
+ *
+ * `position` — not a bare `blockNumber` — because two root mutations of the
+ * SAME asset can land in one block; a consumer deciding whether an event is
+ * newer than one it already recorded needs `(block, txIndex, logIndex)`, which
+ * is exactly what core's `compareEventPosition` orders on.
+ */
+export interface KnowledgeAssetRootMutationEventV1 {
+  /** Off-chain classification of the emitting event. */
+  kind: KnowledgeAssetRootMutationKindV1;
+  /** On-chain KA id, canonical unsigned decimal (never hex, never `bigint`). */
+  kaId: string;
+  /**
+   * The single root the event carries, 0x-prefixed 32-byte hex.
+   *
+   * Absent for `roots-replaced`: that event carries a dynamic `MerkleRoot[]`
+   * whose decode is unbounded work on an untrusted payload, and no consumer
+   * needs it — the repair path re-reads the committed set from chain anyway.
+   */
+  merkleRoot?: string;
+  /**
+   * EIP-712-attested author, `lifecycle-update` only; `null` for the
+   * unattributed publish path. Absent (not `null`) on the other three kinds,
+   * which carry no author field at all — the distinction keeps "the chain said
+   * nobody" separable from "the event has no such field".
+   */
+  author?: string | null;
+  /** Chain position, for ordering and de-duplication. */
+  position: FinalizedEventPositionV1;
+}
+
+/**
+ * Callback for `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES`.
+ *
+ * Contract, unlike every other poller callback: **a rejection is not
+ * swallowed.** It propagates to the lane runner, which holds the lane cursor
+ * and re-scans the same window on the next due poll. So a handler that cannot
+ * durably record the event MUST reject — returning normally is a promise that
+ * the event has been taken responsibility for, and the cursor advances past it
+ * forever.
+ */
+export type OnKnowledgeAssetRootMutated = (
+  event: KnowledgeAssetRootMutationEventV1,
+) => Promise<void>;
 
 /** Callback for AllowListUpdated events (spec §5.1). */
 export type OnAllowListUpdated = (info: {

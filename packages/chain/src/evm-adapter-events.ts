@@ -13,6 +13,31 @@ import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { EventFilter, ChainEvent } from './chain-adapter.js';
 
+/**
+ * Every `DKGKnowledgeAssets` event that mutates a Knowledge Asset's committed
+ * Merkle-root set, as ONE join constant.
+ *
+ * A KA's root changes through four distinct emitters (`updateKnowledgeAsset`,
+ * `pushMerkleRoot`, `setMerkleRoots`, `popMerkleRoot`); subscribing to a subset
+ * silently loses the rest, and the loss is invisible because a poller lane that
+ * asks for a name the adapter never yields simply scans and finds nothing. The
+ * lane declares its `eventTypes()` as exactly this constant and a test asserts
+ * that equality, so adding a fifth emitter is a one-line change here rather
+ * than a hunt through the publisher.
+ *
+ * NOTE: this is the on-chain EVENT-NAME vocabulary. The off-chain
+ * classification these map to is core's `KnowledgeAssetRootMutationKindV1`.
+ */
+export const KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES = [
+  'KnowledgeAssetUpdated',
+  'KnowledgeAssetMerkleRootAdded',
+  'KnowledgeAssetMerkleRootsUpdated',
+  'KnowledgeAssetMerkleRootRemoved',
+] as const;
+
+export type KnowledgeAssetRootMutationEventType =
+  (typeof KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES)[number];
+
 export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
   // Events

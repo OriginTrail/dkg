@@ -147,6 +147,14 @@ export {
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   type PublisherWalletBalance,
 } from './evm-adapter.js';
+// The join constant for the four KA root-mutation event names. Public API
+// because the publisher's poller lane declares its subscription as exactly
+// this list — a lane that restated the names could drift from the adapter
+// branches that produce them without any test noticing.
+export {
+  KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
+  type KnowledgeAssetRootMutationEventType,
+} from './evm-adapter-events.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
   ChainRpcTransportError,
