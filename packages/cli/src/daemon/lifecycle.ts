@@ -157,6 +157,7 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
+import { startConfiguredSemanticRuntime } from '../semantic-runtime.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
   exitAfterFatalLogDrain,
@@ -2202,6 +2203,37 @@ async function runDaemonInnerWithStartupOwnership(
 
   await agent.start();
 
+  // Phase 0 is exact-opt-in and starts only after the DKG agent/services and
+  // durable home exist. It runs before configured graph activation so future
+  // semantic trigger intake cannot race Worker integrity/restore readiness.
+  // A requested runtime fails closed; ordinary daemon startup never touches
+  // the Worker path while semanticRuntime.enabled is absent/false.
+  let semanticRuntimeHost: Awaited<ReturnType<typeof startConfiguredSemanticRuntime>> = null;
+  try {
+    semanticRuntimeHost = await startConfiguredSemanticRuntime(config.semanticRuntime, {
+      log,
+      dataDirectory: dkgDir(),
+    });
+  } catch (err) {
+    await agent.stop().catch((stopErr: any) =>
+      log(`Semantic runtime startup rollback could not stop agent: ${stopErr?.message ?? String(stopErr)}`),
+    );
+    await managedOxigraph
+      ?.stop()
+      .catch((stopErr: any) =>
+        log(`Semantic runtime startup rollback could not stop managed Oxigraph: ${stopErr?.message ?? String(stopErr)}`),
+      );
+    try {
+      dashDb.close();
+    } catch (closeErr: any) {
+      log(`Semantic runtime startup rollback could not close dashboard DB: ${closeErr?.message ?? String(closeErr)}`);
+    }
+    throw new Error(
+      `Semantic runtime startup failed: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
+
   // Classify configured graphs before migrating legacy readiness. Explicit
   // local-bootstrap targets receive current provenance here; configured
   // remote targets are subscribed fail-closed so migration cannot mistake a
@@ -3635,6 +3667,7 @@ async function runDaemonInnerWithStartupOwnership(
         routePlugins,
         admission: admissionStats,
         localLlm,
+        semanticRuntimeHost,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3743,6 +3776,20 @@ async function runDaemonInnerWithStartupOwnership(
         metricsCollector?.stop();
         natStatusWatcherStop?.();
         resetNatStatus();
+
+        // Stop semantic trigger intake/Worker ownership before the DKG agent
+        // and its backing stores. Phase 0 has no external effects; later
+        // phases extend host.stop() with drain/checkpoint/reconciliation while
+        // preserving this position in the shutdown order.
+        if (semanticRuntimeHost) {
+          const runtimeToStop = semanticRuntimeHost;
+          semanticRuntimeHost = null;
+          await runtimeToStop
+            .stop()
+            .catch((err: any) =>
+              log(`Semantic runtime stop error: ${err?.message ?? String(err)}`),
+            );
+        }
 
         // ── Producer-quiescent teardown ────────────────────────────────────
         // Both the ORDER and the WIRING live in `./teardown.ts` — the order in

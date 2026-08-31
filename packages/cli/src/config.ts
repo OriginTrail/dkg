@@ -41,6 +41,7 @@ import {
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
+import type { SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -646,6 +647,12 @@ export interface DkgConfig {
   localBootstrapContextGraphs?: string[];
   /** Local daemon logging controls. */
   logging?: LoggingConfig;
+  /**
+   * Default-off Rust/Wasm semantic runtime. The daemon opt-in starts the
+   * integrity/watchdog/recovery partition only; graph activation and protected
+   * adapters still require explicit trusted host wiring.
+   */
+  semanticRuntime?: SemanticRuntimeConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;

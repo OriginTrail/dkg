@@ -1,0 +1,18 @@
+[package]
+name = "dkg-runtime-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dkg-runtime-types.workspace = true
+dkg-runtime-kernel.workspace = true
+dkg-runtime-codec.workspace = true
+dkg-ir.workspace = true
+dkg-strategy-compiler.workspace = true
+dkg-authority-model.workspace = true
+dkg-effect-model.workspace = true
+
+[lints]
+workspace = true

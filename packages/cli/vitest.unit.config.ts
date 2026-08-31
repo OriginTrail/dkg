@@ -32,6 +32,7 @@ export default defineConfig({
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/config.test.ts',
+          'test/semantic-runtime.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',

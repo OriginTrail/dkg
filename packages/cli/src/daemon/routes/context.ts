@@ -34,6 +34,7 @@ import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
 import type { DaemonLocalLlmService } from '../local-llm-service.js';
+import type { ConfiguredSemanticRuntimeService } from '../../semantic-runtime.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -151,6 +152,8 @@ export interface RequestContext {
   admission: AdmissionStatsView;
   /** Daemon-owned, read-only local LLM session used by the Node UI. */
   localLlm?: DaemonLocalLlmService;
+  /** Opt-in WASM semantic runtime owned by the daemon lifecycle. */
+  semanticRuntimeHost?: ConfiguredSemanticRuntimeService | null;
   // Derived per-request. The correlated authentication decision is carried unchanged; identity
   // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;

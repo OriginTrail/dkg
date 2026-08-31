@@ -53,6 +53,7 @@
     "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
+    "@origintrail-official/dkg-semantic-runtime": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1",
