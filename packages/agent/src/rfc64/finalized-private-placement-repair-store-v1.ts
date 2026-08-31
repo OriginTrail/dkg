@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from 'node:crypto';
-import { readdir, unlink } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -10,6 +10,7 @@ import {
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
+  assertSwmAuthorInventoryScopeV1,
   parseCanonicalDecimalU64,
   type AssertionCoordinateV1,
   type CanonicalDeterministicUalV1,
@@ -17,13 +18,15 @@ import {
   type Digest32V1,
   type EvmAddressV1,
   type PositiveDecimalU64V1,
+  type SwmAuthorInventoryScopeV1,
 } from '@origintrail-official/dkg-core';
 
 import {
   assertRfc64ExistingDirectoryV1,
   createRfc64DurableFileStoreV1,
 } from './durable-file-store-v1.js';
-import { fsyncRfc64DirectoryV1 } from './secure-filesystem-policy-v1.js';
+import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
+  './swm-author-inventory-producer-v1.js';
 
 const DIRECTORY_V1 = 'finalized-private-placement-repairs-v1';
 const MAX_MARKER_BYTES_V1 = 8 * 1024;
@@ -31,10 +34,13 @@ const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const MARKER_FILENAME_V1 = /^[0-9a-f]{64}\.json$/u;
 
-export interface Rfc64FinalizedPrivatePlacementRepairV1 {
+export interface Rfc64FinalizedPrivatePlacementRepairV1
+  extends Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 {
   readonly version: 1;
   readonly contextGraphId: ContextGraphIdV1;
   readonly authorAddress: EvmAddressV1;
+  /** Exact confirmation-time scope; a policy transition must not redirect recovery. */
+  readonly inventoryScope: SwmAuthorInventoryScopeV1;
   readonly assertionCoordinate: AssertionCoordinateV1;
   readonly assertionVersion: PositiveDecimalU64V1;
   readonly kaUal: CanonicalDeterministicUalV1;
@@ -114,20 +120,16 @@ export async function openRfc64FinalizedPrivatePlacementRepairStoreV1(
       if (!bytesEqualV1(encodeRepairV1(current), encodeRepairV1(repair))) {
         throw new Error('RFC-64 finalized-private placement repair deletion conflicts');
       }
-      const stored = await durableFiles.readOptionalBoundedBytes({
+      const deleted = await durableFiles.deleteExactBytes({
         relativePath: `${DIRECTORY_V1}/${filename}`,
+        expectedBytes: encodeRepairV1(repair),
         maxBytes: MAX_MARKER_BYTES_V1,
         label: 'RFC-64 finalized-private placement repair marker',
+        kind: 'placement-repair',
       });
-      if (stored === null || !bytesEqualV1(stored, encodeRepairV1(repair))) {
+      if (!deleted) {
         throw new Error('RFC-64 finalized-private placement repair marker changed before delete');
       }
-      try {
-        await unlink(join(directoryPath, filename));
-      } catch (cause) {
-        if (!isNodeErrorV1(cause, 'ENOENT')) throw cause;
-      }
-      await fsyncRfc64DirectoryV1(directoryPath);
       repairs.delete(filename);
     },
   });
@@ -145,6 +147,13 @@ function snapshotRepairV1(
   if (input.version !== 1) throw new TypeError('RFC-64 placement repair version is invalid');
   assertContextGraphIdV1(input.contextGraphId, 'placement repair contextGraphId');
   assertCanonicalEvmAddress(input.authorAddress, 'placement repair authorAddress');
+  assertSwmAuthorInventoryScopeV1(input.inventoryScope);
+  if (input.inventoryScope.authorAddress !== input.authorAddress) {
+    throw new TypeError('RFC-64 placement repair inventory scope author differs');
+  }
+  if (input.inventoryScope.contextGraphId !== input.contextGraphId) {
+    throw new TypeError('RFC-64 placement repair inventory scope graph differs');
+  }
   assertAssertionCoordinateV1(input.assertionCoordinate, 'placement repair assertionCoordinate');
   parseCanonicalDecimalU64(input.assertionVersion, 'placement repair assertionVersion');
   if (BigInt(input.assertionVersion) < 1n) {
@@ -156,6 +165,7 @@ function snapshotRepairV1(
     version: 1,
     contextGraphId: input.contextGraphId,
     authorAddress: input.authorAddress,
+    inventoryScope: Object.freeze({ ...input.inventoryScope }),
     assertionCoordinate: input.assertionCoordinate,
     assertionVersion: input.assertionVersion,
     kaUal: canonicalUal.ual,
@@ -187,6 +197,7 @@ function parseRepairV1(bytes: Uint8Array): Readonly<Rfc64FinalizedPrivatePlaceme
     'assertionVersion',
     'authorAddress',
     'contextGraphId',
+    'inventoryScope',
     'kaUal',
     'sealDigest',
     'version',

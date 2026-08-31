@@ -150,4 +150,58 @@ describe('RFC-64 durable file store v1', () => {
     })).rejects.toMatchObject({ code: 'corrupt' });
   });
 
+  it('owns exact deletion, containment, mismatch, absence, and parent durability', async () => {
+    const containmentRoot = await temporaryDataDirectory();
+    applyRfc64OwnerOnlyPermissionsSyncV1(
+      containmentRoot,
+      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+      { entryKind: 'directory' },
+    );
+    const boundaries: string[] = [];
+    const durableFiles = createRfc64DurableFileStoreForTestV1<'marker'>(
+      containmentRoot,
+      Object.freeze({ boundary: (boundary) => { boundaries.push(boundary); } }),
+    );
+    const expectedBytes = new TextEncoder().encode('expected');
+    await durableFiles.putExactBytes({
+      relativePath: join('markers', 'one'),
+      bytes: expectedBytes,
+      maxBytes: 32,
+      label: 'deletion fixture',
+      kind: 'marker',
+    });
+    await expect(durableFiles.deleteExactBytes({
+      relativePath: join('..', 'escaped'),
+      expectedBytes,
+      maxBytes: 32,
+      label: 'escaped deletion fixture',
+      kind: 'marker',
+    })).rejects.toMatchObject({ code: 'unsafe-path' });
+    await expect(durableFiles.deleteExactBytes({
+      relativePath: join('markers', 'one'),
+      expectedBytes: new TextEncoder().encode('different'),
+      maxBytes: 32,
+      label: 'deletion fixture',
+      kind: 'marker',
+    })).rejects.toMatchObject({ code: 'corrupt' });
+    await expect(durableFiles.deleteExactBytes({
+      relativePath: join('markers', 'one'),
+      expectedBytes,
+      maxBytes: 32,
+      label: 'deletion fixture',
+      kind: 'marker',
+    })).resolves.toBe(true);
+    expect(boundaries).toEqual(expect.arrayContaining([
+      'marker.deleted',
+      'marker.delete-parent-fsynced',
+    ]));
+    await expect(durableFiles.deleteExactBytes({
+      relativePath: join('markers', 'one'),
+      expectedBytes,
+      maxBytes: 32,
+      label: 'deletion fixture',
+      kind: 'marker',
+    })).resolves.toBe(false);
+  });
+
 });

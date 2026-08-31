@@ -203,7 +203,9 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
     });
-    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({} as never);
+    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({
+      projectionLifecycle: 'immediate-exact-set',
+    } as never);
     let active = 0;
     let maxActive = 0;
     let call = 0;
@@ -248,5 +250,119 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(reconcile).toHaveBeenCalledTimes(6);
     expect(maxActive).toBe(4);
+  }, 30_000);
+
+  it('settles a finalized-private repair without waiting for an unrelated projection', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'repair-scoped-completion',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    const privateContextGraphId =
+      '0x1111111111111111111111111111111111111111/private-repair' as ContextGraphIdV1;
+    const ordinaryContextGraphId =
+      '0x1111111111111111111111111111111111111111/blocked-repair' as ContextGraphIdV1;
+    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1')
+      .mockImplementation((contextGraphId: string) => ({
+        projectionLifecycle: contextGraphId === privateContextGraphId
+          ? 'confirmation-gated-append'
+          : 'immediate-exact-set',
+      } as never));
+    let markOrdinaryEntered!: () => void;
+    let releaseOrdinary!: () => void;
+    const ordinaryEntered = new Promise<void>((resolve) => { markOrdinaryEntered = resolve; });
+    const ordinaryGate = new Promise<void>((resolve) => { releaseOrdinary = resolve; });
+    vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+      .mockImplementation(async () => {
+        markOrdinaryEntered();
+        await ordinaryGate;
+        return null;
+      });
+    const repair = Object.freeze({
+      version: 1 as const,
+      contextGraphId: privateContextGraphId,
+      authorAddress: AUTHOR,
+      inventoryScope: Object.freeze({
+        networkId: NETWORK_ID,
+        contextGraphId: privateContextGraphId,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        authorAddress: AUTHOR,
+        subGraphName: null,
+        era: '1' as const,
+      }),
+      assertionCoordinate: 'private-repair' as never,
+      assertionVersion: '1' as const,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/1` as never,
+      sealDigest: `0x${'aa'.repeat(32)}` as Digest32V1,
+    });
+    await (agent as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.put(repair);
+    const repairAttempt = vi.spyOn(agent, 'repairRfc64FinalizedPrivateCatalogPlacementV1')
+      .mockResolvedValue('repaired');
+
+    expect(agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: ordinaryContextGraphId,
+      authorAddress: AUTHOR,
+    })).toBe(true);
+    await ordinaryEntered;
+    const request = agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair });
+    expect(request.accepted).toBe(true);
+    await request.whenAttempted;
+    expect(repairAttempt).toHaveBeenCalledWith(repair);
+    releaseOrdinary();
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  }, 30_000);
+
+  it('retains confirmation-time repair work when the accepted policy era changes', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'repair-policy-transition',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    const privateContextGraphId =
+      '0x1111111111111111111111111111111111111111/policy-transition' as ContextGraphIdV1;
+    const repair = Object.freeze({
+      version: 1 as const,
+      contextGraphId: privateContextGraphId,
+      authorAddress: AUTHOR,
+      inventoryScope: Object.freeze({
+        networkId: NETWORK_ID,
+        contextGraphId: privateContextGraphId,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        authorAddress: AUTHOR,
+        subGraphName: null,
+        era: '1' as const,
+      }),
+      assertionCoordinate: 'policy-transition' as never,
+      assertionVersion: '1' as const,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/2` as never,
+      sealDigest: `0x${'bb'.repeat(32)}` as Digest32V1,
+    });
+    const repairStore = (agent as any).rfc64PersistenceV1
+      .finalizedPrivatePlacementRepairs;
+    await repairStore.put(repair);
+    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({
+      projectionLifecycle: 'confirmation-gated-append',
+      scopeBase: Object.freeze({
+        networkId: NETWORK_ID,
+        contextGraphId: privateContextGraphId,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        era: '2',
+      }),
+    } as never);
+
+    await expect(agent.repairRfc64FinalizedPrivateCatalogPlacementV1(repair))
+      .rejects.toThrow('conflicts with a policy transition');
+    expect(repairStore.list()).toEqual([repair]);
   }, 30_000);
 });

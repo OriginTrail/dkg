@@ -15,10 +15,12 @@ import {
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
   type CatalogSealDeploymentProfileV1,
+  type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
+  type PositiveDecimalU64V1,
   type SwmAuthorInventoryRowV1,
   type SwmAuthorInventoryScopeV1,
   type TimestampMsV1,
@@ -78,9 +80,11 @@ interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
 type ResolvedRfc64CatalogAuthoringLaneV1 =
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'public';
+    readonly projectionLifecycle: 'immediate-exact-set';
   }>
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'private';
+    readonly projectionLifecycle: 'immediate-exact-set' | 'confirmation-gated-append';
   }>;
 
 type Rfc64CatalogAuthoringLaneDecisionV1 =
@@ -98,13 +102,6 @@ export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(
   return lane.kind === 'public'
     ? accessPolicy === 'public'
     : accessPolicy === 'ownerOnly' || accessPolicy === 'allowList';
-}
-
-/** Finalized private lanes publish placements only after chain confirmation. */
-export function rfc64CatalogLaneUsesFinalizedChainRecoveryV1(
-  lane: ResolvedRfc64CatalogAuthoringLaneV1,
-): boolean {
-  return lane.kind === 'private' && lane.policySourceKind === 'finalized-chain';
 }
 
 export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
@@ -131,20 +128,30 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     params: Readonly<{
       readonly contextGraphId: ContextGraphIdV1;
       readonly authorAddress: EvmAddressV1;
+      readonly inventoryScope: SwmAuthorInventoryScopeV1;
       readonly assertionCoordinate: string;
-      readonly assertionVersion: string;
-      readonly kaUal: string;
+      readonly assertionVersion: PositiveDecimalU64V1;
+      readonly kaUal: CanonicalDeterministicUalV1;
       readonly sealDigest: Digest32V1;
     }>,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
-    if (lane === null || !rfc64CatalogLaneUsesFinalizedChainRecoveryV1(lane)) {
+    if (lane === null || lane.projectionLifecycle !== 'confirmation-gated-append') {
       throw new Error('RFC-64 finalized-private placement repair lane is inactive');
     }
-    const inventoryScope = Object.freeze({
+    const currentInventoryScope = Object.freeze({
       ...lane.scopeBase,
       authorAddress: params.authorAddress,
     }) as SwmAuthorInventoryScopeV1;
+    if (
+      computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
+      !== computeSwmAuthorInventoryScopeDigestV1(params.inventoryScope)
+    ) {
+      throw new Error(
+        'RFC-64 finalized-private placement repair conflicts with a policy transition',
+      );
+    }
+    const inventoryScope = params.inventoryScope;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
     const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(inventoryScope);
@@ -158,18 +165,25 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       && candidate.kaUal === params.kaUal
       && candidate.sealDigest === params.sealDigest
     ));
-    if (row === undefined) return null;
+    const scope = Object.freeze({
+      ...inventoryScope,
+      bucketCount: '1',
+    }) as AuthorCatalogScopeV1;
+    if (row === undefined) {
+      if (await this.rfc64CatalogContainsConfirmedSwmRowV1({
+        scope,
+        expectedRow: params,
+      })) return null;
+      throw new Error(
+        'RFC-64 finalized-private source row is missing without catalog publication proof',
+      );
+    }
     const asset = await this.resolveRfc64SwmInventoryCatalogAssetV1(
       params.contextGraphId,
       params.authorAddress,
       lane,
       row,
     );
-    const scope = Object.freeze({
-      ...lane.scopeBase,
-      authorAddress: params.authorAddress,
-      bucketCount: '1',
-    }) as AuthorCatalogScopeV1;
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertConfirmedRfc64PublicRootCatalogAssetV1({
       scope,
@@ -452,10 +466,14 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ? Object.freeze({
         ...commonLane,
         kind: 'public',
+        projectionLifecycle: 'immediate-exact-set',
       })
       : Object.freeze({
         ...commonLane,
         kind: 'private',
+        projectionLifecycle: acceptedPolicy.policy.source.kind === 'finalized-chain'
+          ? 'confirmation-gated-append'
+          : 'immediate-exact-set',
       });
     return Object.freeze({
       status: 'active',

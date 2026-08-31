@@ -131,7 +131,7 @@ describe('RFC-64 catalog synchronization evidence', () => {
     const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
     const otherHead = digest('66');
     const current = snapshotRfc64CatalogSynchronizationEvidenceV1({
-      ...evidence([receipt()]),
+      ...evidence([receipt()], otherHead),
       catalogHeadDigest: otherHead,
       appliedHeadStatus: 'existing' as const,
     });
