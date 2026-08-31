@@ -77,12 +77,14 @@ describe('resolveRfc64PublicCatalogActivation', () => {
   it('is fail-closed when omitted or explicitly disabled', () => {
     expect(resolveRfc64PublicCatalogActivation({}, chainIdentity)).toEqual({
       enabled: false,
+      rollout: { killSwitch: false, contextGraphModes: {} },
       selectedContextGraphs: [],
     });
     expect(resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: { enabled: false },
     }, chainIdentity)).toEqual({
       enabled: false,
+      rollout: { killSwitch: false, contextGraphModes: {} },
       selectedContextGraphs: [],
     });
     expect(resolveRfc64PublicCatalogActivation({
@@ -103,6 +105,7 @@ describe('resolveRfc64PublicCatalogActivation', () => {
       },
     }, chainIdentity)).toEqual({
       enabled: false,
+      rollout: { killSwitch: false, contextGraphModes: {} },
       selectedContextGraphs: [],
     });
   });

@@ -928,6 +928,7 @@ function makeQueuedAgentHarness(options: {
     _resolveEncryptInlinePayload: recorder(async () => options.encryptInlinePayload),
     _resolveEncryptInlineChunked: recorder(async () => options.encryptInlineChunked),
     _stampPointer: recorder(async () => undefined),
+    resolveRfc64CatalogAuthoringLaneV1: () => null,
   };
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;

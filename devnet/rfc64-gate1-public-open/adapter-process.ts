@@ -148,6 +148,20 @@ async function boot(): Promise<void> {
   });
   agent = created;
   await created.start();
+  // The rollout certificate models an Edge that explicitly selected this CG.
+  // RFC-64 receiver authority is subscription-owned; an accepted manifest by
+  // itself must not make an Edge receive every configured public graph.
+  if (
+    role === 'receiver'
+    && rolloutConfig !== null
+    && rolloutConfig.vmChainScenario !== 'inactive'
+  ) {
+    created.subscribeToContextGraph(rolloutConfig.contextGraphId, {
+      trackSyncScope: false,
+      persist: false,
+      syncMode: 'always-on',
+    });
+  }
   const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
   if (tcp === undefined) throw new Error('real DKGAgent exposed no TCP multiaddr');
   emit({

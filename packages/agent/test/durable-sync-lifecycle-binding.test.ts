@@ -90,6 +90,7 @@ import {
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -702,6 +703,7 @@ describe('durable sync lifecycle chain binding', () => {
     };
     const agentLike: any = {
       config: {
+        nodeRole: 'core',
         rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
           configuredContextGraphs: [],
           activation: {
@@ -712,6 +714,9 @@ describe('durable sync lifecycle chain binding', () => {
           },
         }),
       },
+      subscribedContextGraphs: new Map(),
+      resolveRfc64CatalogReceiverAuthorityV1:
+        Rfc64CatalogMethods.prototype.resolveRfc64CatalogReceiverAuthorityV1,
       store: changelogCapableStore,
       runChangelogLane,
       runLegacyDurableSync,
@@ -751,6 +756,7 @@ describe('durable sync lifecycle chain binding', () => {
     }));
     const agentLike: any = {
       config: {
+        nodeRole: 'core',
         rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
           configuredContextGraphs: [],
           activation: {
@@ -764,6 +770,9 @@ describe('durable sync lifecycle chain binding', () => {
           },
         }),
       },
+      subscribedContextGraphs: new Map(),
+      resolveRfc64CatalogReceiverAuthorityV1:
+        Rfc64CatalogMethods.prototype.resolveRfc64CatalogReceiverAuthorityV1,
       store: {},
       runLegacyDurableSync,
       log: { info: () => {}, warn: () => {}, debug: () => {} },

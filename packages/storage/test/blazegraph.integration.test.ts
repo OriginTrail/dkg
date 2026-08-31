@@ -31,9 +31,9 @@ import type {
 import type { Rfc64SemanticAuthorCommitInputV1 } from
   '../src/rfc64-semantic-author-commit-v1.js';
 import {
-  MemoryLayer,
-  contextGraphLayerUri,
+  assertCanonicalDeterministicUalV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  deriveRfc64SharedProjectionGraphIriV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
@@ -489,11 +489,9 @@ function semanticAuthorCommitFixture(): Readonly<{
   ) as ContextGraphIdV1;
   const author = '0x89abcdef0123456789abcdef0123456789abcdef' as EvmAddressV1;
   const digest = (value: string) => `0x${value.repeat(64)}` as Digest32V1;
-  const projectionGraph = contextGraphLayerUri(
-    contextGraphId,
-    MemoryLayer.SharedWorkingMemory,
-    author,
-    '7',
+  const projectionGraph = deriveRfc64SharedProjectionGraphIriV1(
+    { contextGraphId, subGraphName: null },
+    assertCanonicalDeterministicUalV1(`did:dkg:${networkId}/${author}/7`),
   );
   const coordinate = Object.freeze({
     contextGraphId,
