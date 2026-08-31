@@ -301,7 +301,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   ): boolean {
     const state = STATES.get(this);
     if (state === undefined) return true;
-    const configuredProvider = state.config.acceptedPolicies.some(
+    const configuredProvider = state.legacyRecoveryConfig.acceptedPolicies.some(
       ({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId),
     );
     if (!configuredProvider) return true;
