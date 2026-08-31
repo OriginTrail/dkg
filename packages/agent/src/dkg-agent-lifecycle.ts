@@ -4245,8 +4245,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       resolveStorageAddress: (_signal) => this.chain.getDKGKnowledgeAssetsAddress
         ? this.chain.getDKGKnowledgeAssetsAddress()
         : this.chain.getKnowledgeAssetsLifecycleAddress(),
-      resolveLocalContextGraphId: (cgId) =>
-        this.resolveLocalCgIdByOnChainId(cgId) ?? undefined,
+      resolveLocalContextGraphId: (cgId, signal) =>
+        this.resolveRandomSamplingLocalContextGraphId(cgId, signal),
       resolveCandidatePeerIds: async (localContextGraphId, signal) => {
         const isCurrent = () => this.started && !signal.aborted;
         const curatorResolution = await this.resolveCuratorPeerIdsForCg(
