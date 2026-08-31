@@ -63,12 +63,17 @@ export function decodeSparqlJsonQueryResult(
       malformed,
     );
     if (hasHead) {
-      snapshotExactOrdinaryDataRecord(
+      const hasLink = isOrdinaryDataRecord(record.head)
+        && Object.prototype.hasOwnProperty.call(record.head, 'link');
+      const head = snapshotExactOrdinaryDataRecord(
         record.head,
-        [],
+        hasLink ? ['link'] : [],
         'SPARQL JSON ASK response.head',
         malformed,
       );
+      if (hasLink) {
+        denseStringArray(head.link, 'SPARQL JSON ASK response.head.link');
+      }
     }
     if (typeof record.boolean !== 'boolean') {
       malformed('SPARQL JSON ASK response.boolean must be a boolean');

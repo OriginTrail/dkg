@@ -474,6 +474,24 @@ describe('RFC-64 semantic record RDF codec v1', () => {
 
   it('enforces the pending-history and typed-response resource bounds', () => {
     const target = records[4];
+    const validPendingHistories = [
+      [],
+      Array.from(
+        { length: MAX_RFC64_PENDING_TARGET_DIGESTS_V1 },
+        (_, index) => `0x${index.toString(16).padStart(64, '0')}` as Digest32V1,
+      ),
+    ] as const;
+    for (const pendingTargetCheckpointDigests of validPendingHistories) {
+      const boundaryRecord = snapshotRfc64SemanticRecordV1({
+        ...target,
+        value: { ...target.value, pendingTargetCheckpointDigests },
+      });
+      const projected = projectRfc64SemanticRecordStoreRowsV1(boundaryRecord);
+      expect(
+        decodeRfc64SemanticRecordStoreRowsV1(projected, coordinateFor(boundaryRecord)).record,
+      ).toEqual(boundaryRecord);
+    }
+
     const tooMany = Array.from(
       { length: MAX_RFC64_PENDING_TARGET_DIGESTS_V1 + 1 },
       (_, index) => `0x${index.toString(16).padStart(64, '0')}` as Digest32V1,

@@ -36,7 +36,7 @@ import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
   JAVA_WRITE_UTF_MAX_BYTES,
-  type Rfc64SemanticReadOperationV2,
+  type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
 import { executeRfc64SemanticReadCapabilityV1 } from '../rfc64-semantic-read-capability.js';
 
@@ -75,7 +75,7 @@ export class OxigraphStore implements TripleStore {
   }
 
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<TripleStoreQueryOptions, 'signal'>,
   ) {
     return executeRfc64SemanticReadCapabilityV1(this, operation, options);

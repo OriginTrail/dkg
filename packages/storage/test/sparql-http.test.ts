@@ -1044,6 +1044,15 @@ describe('SparqlHttpStore (test server)', () => {
     if (result.type === 'boolean') expect(result.value).toBe(true);
   });
 
+  it.each([
+    'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+    'BASE <urn:base:> ASK { ?s <p> ?o }',
+    '# leading comment\nASK { ?s ?p ?o }',
+  ])('classifies prologue-prefixed ASK as boolean: %s', async (query) => {
+    const result = await store.query(query);
+    expect(result).toEqual({ type: 'boolean', value: true });
+  });
+
   it('delete sends DELETE DATA to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.delete([{

@@ -1,7 +1,7 @@
 import {
   TypedRdfStoreRowErrorV1,
   parseRenderedRdfStoreObjectV1,
-  type Rfc64SemanticReadOperationV2,
+  type Rfc64SemanticReadOperationV1,
   type Rfc64SemanticStoreRowV1,
 } from '@origintrail-official/dkg-core';
 
@@ -19,7 +19,7 @@ export interface Rfc64SemanticReadCapabilityResultV1 {
 export interface Rfc64SemanticReadCapabilityV1 {
   readonly rfc64SemanticReadCertifiedV1: true;
   rfc64SemanticReadV1(
-    operation: Rfc64SemanticReadOperationV2,
+    operation: Rfc64SemanticReadOperationV1,
     options?: Pick<QueryOptions, 'signal'>,
   ): Promise<Rfc64SemanticReadCapabilityResultV1>;
 }
@@ -34,7 +34,7 @@ export class Rfc64SemanticReadCapabilityResultErrorV1 extends Error {
 /** Shared implementation used by adapters that explicitly expose the capability. */
 export async function executeRfc64SemanticReadCapabilityV1(
   store: Pick<TripleStore, 'query'>,
-  operation: Rfc64SemanticReadOperationV2,
+  operation: Rfc64SemanticReadOperationV1,
   options: Pick<QueryOptions, 'signal'> = {},
 ): Promise<Rfc64SemanticReadCapabilityResultV1> {
   let result: QueryResult;
@@ -68,7 +68,7 @@ export function isRfc64SemanticReadCapabilityV1(
 
 function normalizeRfc64SemanticReadResultV1(
   result: QueryResult,
-  operation: Rfc64SemanticReadOperationV2,
+  operation: Rfc64SemanticReadOperationV1,
 ): Rfc64SemanticReadCapabilityResultV1 {
   if (ownDataValue(result, 'type') !== 'bindings') {
     invalid('semantic read did not return bindings');
