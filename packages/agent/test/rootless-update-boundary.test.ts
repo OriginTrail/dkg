@@ -135,6 +135,7 @@ function makeAgentLike(
       debug: () => undefined,
     },
     node: { peerId: { toString: () => 'peer-rootless-update' } },
+    writeLocks: new Map<string, Promise<void>>(),
     publisher: { updateKnowledgeAssetFromSharedMemory: onPublisherUpdate },
     getContextGraphOnChainId: async () => null,
     createV10UpdateACKProvider: () => undefined,

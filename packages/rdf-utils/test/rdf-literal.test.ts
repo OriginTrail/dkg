@@ -64,6 +64,12 @@ describe('N-Triples UCHAR decoding', () => {
     expect(decodeNTriplesIriEscapesStrict(String.raw`\uD83D\uDE00`)).toBe('😀');
     expect(decodeNTriplesIriEscapesStrict(String.raw`\U0000D83D\uDE00`)).toBeNull();
   });
+
+  it('rejects recognized ECHAR in strict IRIs and preserves it for legacy datatype IRIs', () => {
+    expect(decodeNTriplesIriEscapesStrict(String.raw`urn:x\n`)).toBeNull();
+    expect(decodeNTriplesIriEscapesPreservingLegacy(String.raw`urn:x\n`))
+      .toBe(String.raw`urn:x\n`);
+  });
 });
 
 describe('RDF literal term codec', () => {

@@ -15,6 +15,7 @@ import {
   type EvmAddressV1,
   type NetworkIdV1,
   type Rfc64SemanticReadQueryIdV1,
+  Rfc64SemanticReadManifestErrorV1,
   type Rfc64SemanticAddressV1,
   type Rfc64SemanticRecordCoordinateV1,
   type SubGraphNameV1,
@@ -202,6 +203,25 @@ describe('RFC-64 semantic read manifest v1', () => {
       backend: 'sparql-http',
       coordinate: CASES[0].coordinate,
     })).toThrow(/backend is not certified/u);
+  });
+
+  it('normalizes every malformed coordinate through the manifest error contract', () => {
+    for (const coordinate of [
+      { ...CASES[0].coordinate, extra: true },
+      { ...CASES[0].coordinate, recordType: 'UnknownRecordV1' },
+      { ...CASES[0].coordinate, networkId: 'invalid network' },
+    ]) {
+      let failure: unknown;
+      try {
+        compileRfc64SemanticReadOperationV2(coordinate);
+      } catch (cause) {
+        failure = cause;
+      }
+      expect(failure).toBeInstanceOf(Rfc64SemanticReadManifestErrorV1);
+      expect((failure as Rfc64SemanticReadManifestErrorV1).code)
+        .toBe('rfc64-semantic-read-schema');
+      expect((failure as Error & { cause?: unknown }).cause).toBeDefined();
+    }
   });
 
   it('rejects accessor-bearing input fields without invoking the accessor', () => {

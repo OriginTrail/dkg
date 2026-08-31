@@ -114,14 +114,11 @@ import {
   createTripleStore,
   loadSharedMemoryQuadsForScope,
   canonicalSharedMemoryScopeWriteGraph,
-  resolveSharedMemoryScopeGraphs,
-  tryReplaceGraphAtomically,
   type SharedMemoryGraphScope,
   type TripleStore,
   type TripleStoreConfig,
   type Quad,
   type LargeLiteralStorageConfig,
-  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -138,8 +135,7 @@ import {
   skolemizeKnowledgeAssetParts,
   assertNoKnowledgeAssetPayloadNamedGraphs,
   assertValidPrecomputedUpdateAttestation,
-  storeKnowledgeAssetOperationPublicQuads,
-  storeKnowledgeAssetWorkspaceHead,
+  stageKnowledgeAssetSharedWorkingMemoryV1,
   isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
@@ -175,7 +171,7 @@ import {
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
   type EncodedWorkspaceGossipPayload,
-  type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
+  type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
 import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -832,105 +828,6 @@ async function withRootlessUpdateLock<T>(
 function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined): boolean {
   if (left === undefined || right === undefined) return left === right;
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
-}
-
-export interface StageKnowledgeAssetSharedWorkingMemoryInputV1 {
-  readonly store: TripleStore;
-  readonly graphManager?: GraphManager;
-  readonly contextGraphId: string;
-  readonly kaUal: string;
-  readonly assertionVersion: string | number | bigint;
-  readonly shareOperationId: string;
-  readonly quads: readonly Quad[];
-  readonly privateMerkleRoot?: Uint8Array;
-  readonly privateTripleCount?: number;
-  readonly publisherPeerId?: string;
-  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-  readonly allowedPeers?: readonly string[];
-  readonly agentAddress?: string;
-  readonly subGraphName?: string;
-  readonly timestamp?: Date;
-  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
-}
-
-/**
- * Canonical product boundary for staging one complete graph-scoped public SWM
- * snapshot. It owns the assertion graph replacement, immutable operation
- * snapshot, and mutable workspace head so callers cannot reproduce only a
- * prefix of the durable staging protocol.
- */
-export async function stageKnowledgeAssetSharedWorkingMemoryV1(
-  input: StageKnowledgeAssetSharedWorkingMemoryInputV1,
-): Promise<Readonly<{ swmGraph: string; tripleCount: number }>> {
-  const scope = createGraphKnowledgeAssetScope(input.kaUal, input.assertionVersion);
-  const graphManager = input.graphManager ?? new GraphManager(input.store);
-  const swmBucket = graphManager.sharedMemoryUri(input.contextGraphId, input.subGraphName);
-  const sharedMemoryScope: SharedMemoryGraphScope = {
-    kind: 'named-lifecycle',
-    identity: {
-      agentAddress: scope.agentAddress,
-      kaNumber: BigInt(scope.kaNumber),
-    },
-  };
-  const swmGraph = canonicalSharedMemoryScopeWriteGraph(swmBucket, sharedMemoryScope);
-  const priorSwmGraphs = await resolveSharedMemoryScopeGraphs(
-    input.store,
-    swmBucket,
-    sharedMemoryScope,
-  );
-  const replaced = await tryReplaceGraphAtomically(
-    input.store,
-    swmGraph,
-    input.quads.map((quad) => ({ ...quad, graph: swmGraph })),
-  );
-  await invalidateSwmMaterializationWitness(input.store, swmGraph, {
-    source: 'agent.stageKnowledgeAssetSharedWorkingMemoryV1.witnessInvalidate',
-  }).catch(() => {});
-  if (!replaced) {
-    throw Object.assign(
-      new Error(`Graph-scoped update requires atomic SWM replacement at ${swmGraph}`),
-      { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED', graphUri: swmGraph },
-    );
-  }
-  for (const graph of priorSwmGraphs) {
-    if (graph !== swmGraph) await input.store.dropGraph(graph);
-  }
-  await storeKnowledgeAssetOperationPublicQuads({
-    store: input.store,
-    graphManager,
-    contextGraphId: input.contextGraphId,
-    shareOperationId: input.shareOperationId,
-    kaUal: scope.ual,
-    assertionVersion: scope.assertionVersion,
-    quads: input.quads,
-    ...(input.privateMerkleRoot === undefined
-      ? {}
-      : { privateMerkleRoot: input.privateMerkleRoot }),
-    ...(input.privateTripleCount === undefined
-      ? {}
-      : { privateTripleCount: input.privateTripleCount }),
-    ...(input.publisherPeerId === undefined
-      ? {}
-      : { publisherPeerId: input.publisherPeerId }),
-    ...(input.accessPolicy === undefined ? {} : { accessPolicy: input.accessPolicy }),
-    ...(input.allowedPeers === undefined ? {} : { allowedPeers: input.allowedPeers }),
-    ...(input.agentAddress === undefined ? {} : { agentAddress: input.agentAddress }),
-    ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
-    ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
-    ...(input.publicSnapshotStore === undefined
-      ? {}
-      : { publicSnapshotStore: input.publicSnapshotStore }),
-  });
-  await storeKnowledgeAssetWorkspaceHead({
-    store: input.store,
-    graphManager,
-    contextGraphId: input.contextGraphId,
-    kaUal: scope.ual,
-    assertionVersion: scope.assertionVersion,
-    shareOperationId: input.shareOperationId,
-    ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
-  });
-  return Object.freeze({ swmGraph, tripleCount: input.quads.length });
 }
 
 /** Normalize the deprecated raw-byte call and validate the typed publish seam. */
@@ -2237,8 +2134,9 @@ export class PublishMethods extends DKGAgentBase {
     // reconciliation can now resolve the staged version, counts, private
     // commitment, publisher, and immutable public payload without guessing.
     const updateOperationId = ctx.operationId;
-    await stageKnowledgeAssetSharedWorkingMemoryV1({
+    const result = await stageKnowledgeAssetSharedWorkingMemoryV1({
       store: this.store,
+      writeLocks: this.writeLocks,
       graphManager,
       contextGraphId,
       shareOperationId: updateOperationId,
@@ -2254,124 +2152,125 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: opts?.subGraphName,
       timestamp: new Date(),
       publicSnapshotStore: this.publicSnapshotStore,
-    });
-    // GH #842: thread the on-chain cgId so the publisher can promote the update
-    // payload into the per-cgId partition the RS prover reads. Without it,
-    // updated KAs stay unprovable (data-corrupted / leaf-count-mismatch).
-    // Best-effort: a store/ontology failure here must NOT abort the on-chain
-    // update — the RS sync is a downstream concern and the unguarded await
-    // would let any local lookup error tank the entire update RPC (Codex
-    // review #3 on PR #845).
-    let updateOnChainId: string | null = null;
-    try {
-      updateOnChainId = await this.getContextGraphOnChainId(contextGraphId);
-    } catch (err) {
-      this.log.warn(
-        ctx,
-        `Failed to resolve on-chain cgId for "${contextGraphId}" prior to update; per-cgId RS promotion will be skipped: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+    }, async () => {
+      // GH #842: thread the on-chain cgId so the publisher can promote the update
+      // payload into the per-cgId partition the RS prover reads. Without it,
+      // updated KAs stay unprovable (data-corrupted / leaf-count-mismatch).
+      // Best-effort: a store/ontology failure here must NOT abort the on-chain
+      // update — the RS sync is a downstream concern and the unguarded await
+      // would let any local lookup error tank the entire update RPC (Codex
+      // review #3 on PR #845).
+      let updateOnChainId: string | null = null;
+      try {
+        updateOnChainId = await this.getContextGraphOnChainId(contextGraphId);
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to resolve on-chain cgId for "${contextGraphId}" prior to update; per-cgId RS promotion will be skipped: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      // V10 UPDATE StorageACK quorum. Wired here so BOTH update entry points
+      // reach it: the public `agent.update(...)` API and the A2 create-vs-
+      // update branch in `publishFromFinalizedAssertion` (which calls
+      // `this.update(...)`). The provider resolves the on-chain digest
+      // fields inside the publisher (via `chain.getUpdateAckDigestFields`)
+      // and collects core-node ACKs over `PROTOCOL_STORAGE_UPDATE_ACK`. The
+      // numeric on-chain cgId (`updateOnChainId`) is the ACK domain; we fall
+      // back to the cleartext `contextGraphId` only when the on-chain id
+      // could not be resolved (the provider re-resolves the digest cgId from
+      // the adapter regardless, so the digest TARGET stays chain-truth).
+      const v10UpdateACKProvider = this.createV10UpdateACKProvider(updateOnChainId ?? contextGraphId);
+
+      // OT-RFC-49 / WS-D — curated-UPDATE discrimination + floor re-projection.
+      // A1: resolve the single-blob curated AEAD hook the SAME way the publish
+      // path does (dkg-agent-publish.ts:1257 _resolveEncryptInlinePayload). The
+      // resolver returns a function for a curated CG (accessPolicy=curated) and
+      // `undefined` for a public CG, so the function's truthiness IS the curated
+      // gate — exactly what the producer keys `useEncryptedInlineUpdate` off of.
+      // No separate accessPolicy read is needed. The 4th arg mirrors publish: the
+      // target on-chain cgId is now binding-only so the AEAD key derives from
+      // the canonical id consumers verify against without reclassifying the
+      // same-CG update as an explicit remap.
+      const updateEncryptInlinePayload = await this._resolveEncryptInlinePayload(
+        contextGraphId,
+        opts?.subGraphName,
+        undefined,
+        undefined,
+        updateOnChainId
+          ? { aeadBindingContextGraphId: updateOnChainId }
+          : undefined,
       );
-    }
-    // V10 UPDATE StorageACK quorum. Wired here so BOTH update entry points
-    // reach it: the public `agent.update(...)` API and the A2 create-vs-
-    // update branch in `publishFromFinalizedAssertion` (which calls
-    // `this.update(...)`). The provider resolves the on-chain digest
-    // fields inside the publisher (via `chain.getUpdateAckDigestFields`)
-    // and collects core-node ACKs over `PROTOCOL_STORAGE_UPDATE_ACK`. The
-    // numeric on-chain cgId (`updateOnChainId`) is the ACK domain; we fall
-    // back to the cleartext `contextGraphId` only when the on-chain id
-    // could not be resolved (the provider re-resolves the digest cgId from
-    // the adapter regardless, so the digest TARGET stays chain-truth).
-    const v10UpdateACKProvider = this.createV10UpdateACKProvider(updateOnChainId ?? contextGraphId);
+      const isCuratedUpdate = typeof updateEncryptInlinePayload === 'function';
 
-    // OT-RFC-49 / WS-D — curated-UPDATE discrimination + floor re-projection.
-    // A1: resolve the single-blob curated AEAD hook the SAME way the publish
-    // path does (dkg-agent-publish.ts:1257 _resolveEncryptInlinePayload). The
-    // resolver returns a function for a curated CG (accessPolicy=curated) and
-    // `undefined` for a public CG, so the function's truthiness IS the curated
-    // gate — exactly what the producer keys `useEncryptedInlineUpdate` off of.
-    // No separate accessPolicy read is needed. The 4th arg mirrors publish: the
-    // target on-chain cgId is now binding-only so the AEAD key derives from
-    // the canonical id consumers verify against without reclassifying the
-    // same-CG update as an explicit remap.
-    const updateEncryptInlinePayload = await this._resolveEncryptInlinePayload(
-      contextGraphId,
-      opts?.subGraphName,
-      undefined,
-      undefined,
-      updateOnChainId
-        ? { aeadBindingContextGraphId: updateOnChainId }
-        : undefined,
-    );
-    const isCuratedUpdate = typeof updateEncryptInlinePayload === 'function';
+      // ALSO resolve the chunked SWM emitter — the MEMBER-DISTRIBUTION path. A
+      // curated update must actively fan the updated private payload out to CG
+      // members (OT-RFC-49: cores hold zero ciphertext, members hold it), exactly
+      // as curated publish does — otherwise members silently fall behind a
+      // committed update. The producer prefers this side-effecting chunked emitter
+      // over the pure single-blob hook. Like publish, it THROWS for a curated CG
+      // with no workspace-gossip signer (cores reject unsigned chunked envelopes):
+      // fail-closed — you cannot update a curated CG you cannot distribute to
+      // members. Public CGs → `undefined` (no-op), unchanged.
+      const updateEncryptInlineChunked = isCuratedUpdate
+        ? await this._resolveEncryptInlineChunked(
+            contextGraphId,
+            opts?.subGraphName,
+            undefined,
+            undefined,
+            updateOnChainId
+              ? { aeadBindingContextGraphId: updateOnChainId }
+              : undefined,
+          )
+        : undefined;
 
-    // ALSO resolve the chunked SWM emitter — the MEMBER-DISTRIBUTION path. A
-    // curated update must actively fan the updated private payload out to CG
-    // members (OT-RFC-49: cores hold zero ciphertext, members hold it), exactly
-    // as curated publish does — otherwise members silently fall behind a
-    // committed update. The producer prefers this side-effecting chunked emitter
-    // over the pure single-blob hook. Like publish, it THROWS for a curated CG
-    // with no workspace-gossip signer (cores reject unsigned chunked envelopes):
-    // fail-closed — you cannot update a curated CG you cannot distribute to
-    // members. Public CGs → `undefined` (no-op), unchanged.
-    const updateEncryptInlineChunked = isCuratedUpdate
-      ? await this._resolveEncryptInlineChunked(
-          contextGraphId,
-          opts?.subGraphName,
-          undefined,
-          undefined,
-          updateOnChainId
-            ? { aeadBindingContextGraphId: updateOnChainId }
-            : undefined,
-        )
-      : undefined;
+      // Curated V2 updates re-commit the deterministic catalog floor only as a
+      // detached trusted capability. The exact staged KA graph stays untouched.
+      // There is intentionally no legacy root-scoped mutation fallback here.
+      const trustedUpdateCatalogTriples = isCuratedUpdate && updateOnChainId != null
+        ? generatedPrivateCatalogTripleKeys(contextGraphId)
+        : undefined;
 
-    // Curated V2 updates re-commit the deterministic catalog floor only as a
-    // detached trusted capability. The exact staged KA graph stays untouched.
-    // There is intentionally no legacy root-scoped mutation fallback here.
-    const trustedUpdateCatalogTriples = isCuratedUpdate && updateOnChainId != null
-      ? generatedPrivateCatalogTripleKeys(contextGraphId)
-      : undefined;
-
-    const publisher = opts?.publisherOverride ?? this.publisher;
-    const publisherUpdateOptions = {
-      contextGraphId,
-      privateQuads: canonicalParts.privateQuads,
-      publisherPeerId: this.node.peerId.toString(),
-      publishContextGraphId: updateOnChainId ?? undefined,
-      operationCtx: ctx,
-      // r10 (3877910013) — one-unit hook forwarding at the update boundary; the spread's
-      // required-keys type carries onPhase (= opts?.onPhase, the same value the local
-      // shorthand held), so no separate onPhase entry may precede it (TS2783).
-      ...pickPublishLifecycleHooks(opts ?? {}),
-      subGraphName: opts?.subGraphName,
-      precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: updateScope.ual,
-      assertionVersion: updateScope.assertionVersion,
-      publicTripleCount: canonicalParts.publicQuads.length,
-      ...(canonicalPrivateMerkleRoot
-        ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
-        : {}),
-      privateTripleCount: canonicalParts.privateQuads.length,
-      accessPolicy: opts?.accessPolicy,
-      allowedPeers: opts?.allowedPeers,
-      trustedNonManifestCatalogTriples:
-        trustedUpdateCatalogTriples,
-      v10UpdateACKProvider,
-      // Curated → wire the single-blob AEAD hook so the producer's
-      // `useEncryptedInlineUpdate` gate fires (catalog commit). Public →
-      // `undefined` (no catalog); unchanged on a healthy chain.
-      encryptInlinePayload: updateEncryptInlinePayload,
-      // Curated → the chunked emitter the producer prefers to fan the updated
-      // private payload out to CG members (member distribution). Public → undefined.
-      encryptInlineChunked: updateEncryptInlineChunked,
-    };
-    const result = await publisher.updateKnowledgeAssetFromSharedMemory(
-      kaId,
-      publisherUpdateOptions,
-    );
+      const publisher = opts?.publisherOverride ?? this.publisher;
+      const publisherUpdateOptions = {
+        contextGraphId,
+        privateQuads: canonicalParts.privateQuads,
+        publisherPeerId: this.node.peerId.toString(),
+        publishContextGraphId: updateOnChainId ?? undefined,
+        operationCtx: ctx,
+        // r10 (3877910013) — one-unit hook forwarding at the update boundary; the spread's
+        // required-keys type carries onPhase (= opts?.onPhase, the same value the local
+        // shorthand held), so no separate onPhase entry may precede it (TS2783).
+        ...pickPublishLifecycleHooks(opts ?? {}),
+        subGraphName: opts?.subGraphName,
+        precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: updateScope.ual,
+        assertionVersion: updateScope.assertionVersion,
+        publicTripleCount: canonicalParts.publicQuads.length,
+        ...(canonicalPrivateMerkleRoot
+          ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
+          : {}),
+        privateTripleCount: canonicalParts.privateQuads.length,
+        accessPolicy: opts?.accessPolicy,
+        allowedPeers: opts?.allowedPeers,
+        trustedNonManifestCatalogTriples:
+          trustedUpdateCatalogTriples,
+        v10UpdateACKProvider,
+        // Curated → wire the single-blob AEAD hook so the producer's
+        // `useEncryptedInlineUpdate` gate fires (catalog commit). Public →
+        // `undefined` (no catalog); unchanged on a healthy chain.
+        encryptInlinePayload: updateEncryptInlinePayload,
+        // Curated → the chunked emitter the producer prefers to fan the updated
+        // private payload out to CG members (member distribution). Public → undefined.
+        encryptInlineChunked: updateEncryptInlineChunked,
+      };
+      return publisher.updateKnowledgeAssetFromSharedMemory(
+        kaId,
+        publisherUpdateOptions,
+      );
+    });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
     onPhase?.('broadcast', 'start');

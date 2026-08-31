@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,6 +10,8 @@ import {
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   computeNetworkId,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
   type AssertionSeal,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
@@ -33,6 +35,8 @@ import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
 import type { Rfc64PublicCatalogActivationInputV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
+import { deriveRfc64PublicSwmGraphV1 } from
+  '../src/rfc64/catalog-semantic-authority-transition-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -182,24 +186,23 @@ describe('RFC-64 rollout authority integration', () => {
       persistentStorePath,
     );
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    const seal = await authorSeal(81n);
     const applied = await author.recordRfc64PublicCatalogAssetV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: 'rollout-restart-guard' as never,
       publicQuads: PROJECTION_QUADS,
-      seal: assertionSealFromCanonical(await authorSeal(81n)),
+      seal: assertionSealFromCanonical(seal),
     });
     expect(applied).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    await seedCatalogSemanticClosure(author, seal, 'rollout-restart-guard');
+    await expectCatalogSemanticClosure(
+      author,
+      seal,
+      'rollout-restart-guard',
+      true,
+    );
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
-    // Upgrade fixture: prior catalog state exists, but the newly introduced
-    // authority sidecar does not. Durable inventory must remain the truth.
-    await rm(join(
-      dataDir,
-      'rfc64-sync',
-      'rollout-authority-v1',
-      'state.json',
-    ));
-
     const producer = vi.spyOn(
       Rfc64PublicCatalogSuccessorProducerV1.prototype,
       'produceAndStageExactSet',
@@ -215,6 +218,12 @@ describe('RFC-64 rollout authority integration', () => {
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toBeNull();
+    await expectCatalogSemanticClosure(
+      restarted,
+      seal,
+      'rollout-restart-guard',
+      false,
+    );
     expect(restarted.rfc64PublicCatalogStatsV1()).toEqual(
       nextMode === 'shadow' ? expect.objectContaining({ started: true }) : null,
     );
@@ -222,6 +231,67 @@ describe('RFC-64 rollout authority integration', () => {
     },
     30_000,
   );
+
+  it('pauses and resumes existing catalog authority without deleting it', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-kill-switch-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const author = await startAgent(
+      'kill-switch-author',
+      {
+        ...activation('catalog'),
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+      dataDir,
+      persistentStorePath,
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    const seal = await authorSeal(84n);
+    const applied = await author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'kill-switch-preservation' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealFromCanonical(seal),
+    });
+    expect(applied).not.toBeNull();
+    await seedCatalogSemanticClosure(author, seal, 'kill-switch-preservation');
+    await expectCatalogSemanticClosure(author, seal, 'kill-switch-preservation', true);
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+
+    const stopped = await startAgent(
+      'kill-switch-active',
+      activation('catalog', true),
+      dataDir,
+      persistentStorePath,
+    );
+    expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
+    expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect(stopped.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ currentCatalogHeadDigest: applied?.currentCatalogHeadDigest });
+    await expectCatalogSemanticClosure(stopped, seal, 'kill-switch-preservation', true);
+    await stopped.stop();
+    agents.splice(agents.indexOf(stopped), 1);
+
+    const resumed = await startAgent(
+      'kill-switch-cleared',
+      activation('catalog'),
+      dataDir,
+      persistentStorePath,
+    );
+    expect(resumed.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+    expect(resumed.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect(resumed.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ currentCatalogHeadDigest: applied?.currentCatalogHeadDigest });
+    await expectCatalogSemanticClosure(resumed, seal, 'kill-switch-preservation', true);
+  }, 30_000);
 
   it('retains durable catalog authority for pre-activation standalone controls', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-standalone-'));
@@ -272,32 +342,6 @@ describe('RFC-64 rollout authority integration', () => {
       catalogVersion: '1',
       inventoryRowCount: '1',
     });
-  }, 30_000);
-
-  it('fails closed on malformed restart authority state', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-malformed-'));
-    tempDirs.push(dataDir);
-    const persistentStorePath = join(dataDir, 'oxigraph');
-    const first = await startAgent(
-      'authority-state-writer',
-      activation('catalog'),
-      dataDir,
-      persistentStorePath,
-    );
-    await first.stop();
-    agents.splice(agents.indexOf(first), 1);
-    await writeFile(
-      join(dataDir, 'rfc64-sync', 'rollout-authority-v1', 'state.json'),
-      '{invalid-json',
-      'utf8',
-    );
-
-    await expect(startAgent(
-      'authority-state-reader',
-      activation('catalog'),
-      dataDir,
-      persistentStorePath,
-    )).rejects.toThrow('RFC-64 catalog authority state is not valid JSON');
   }, 30_000);
 
   it('cold-bootstraps a valid shadow head as staged-only with no applied head', async () => {
@@ -406,6 +450,54 @@ async function connectBothWays(a: DKGAgent, b: DKGAgent): Promise<void> {
   };
   await a.node.libp2p.dial(multiaddr(address(b)));
   await b.node.libp2p.dial(multiaddr(address(a)));
+}
+
+async function expectCatalogSemanticClosure(
+  agent: DKGAgent,
+  seal: CanonicalGraphScopedAuthorSealV1,
+  assertionCoordinate: string,
+  present: boolean,
+): Promise<void> {
+  const swmGraph = deriveRfc64PublicSwmGraphV1(
+    CONTEXT_GRAPH_ID,
+    seal.reservedKaId as never,
+  );
+  const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+    contextGraphId: CONTEXT_GRAPH_ID,
+    subGraphName: null,
+    authorAddress: AUTHOR,
+    assertionCoordinate: assertionCoordinate as never,
+  });
+  const store = (agent as unknown as { store: OxigraphStore }).store;
+  await expect(store.hasGraph(swmGraph)).resolves.toBe(present);
+  const sealRows = await store.query(
+    `SELECT ?p ?o WHERE { GRAPH <${placement.metaGraph}> { `
+      + `<${placement.subject}> ?p ?o } } LIMIT 1`,
+  );
+  expect(sealRows.type).toBe('bindings');
+  if (sealRows.type !== 'bindings') throw new Error('expected seal bindings');
+  expect(sealRows.bindings.length > 0).toBe(present);
+}
+
+async function seedCatalogSemanticClosure(
+  agent: DKGAgent,
+  seal: CanonicalGraphScopedAuthorSealV1,
+  assertionCoordinate: string,
+): Promise<void> {
+  const swmGraph = deriveRfc64PublicSwmGraphV1(
+    CONTEXT_GRAPH_ID,
+    seal.reservedKaId as never,
+  );
+  const store = (agent as unknown as { store: OxigraphStore }).store;
+  await store.insert([
+    ...PROJECTION_QUADS.map((quad) => ({ ...quad, graph: swmGraph })),
+    ...projectCanonicalGraphScopedAuthorSealRowsV1(seal, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      assertionCoordinate: assertionCoordinate as never,
+    }),
+  ]);
 }
 
 function catalogScopeDigest() {

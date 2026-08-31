@@ -2678,6 +2678,86 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(signMessageAs).toHaveBeenCalled();
   }, 60_000);
 
+  it('keeps production custodial and chain signer factories lazy under cancellation', async () => {
+    const author = await startNativeAgent('catalog-signer-cancellation');
+    const custodialKey = vi.spyOn(author, 'getCustodialAgentPrivateKey')
+      .mockReturnValue(AUTHOR_WALLET.privateKey);
+    const walletSign = vi.spyOn(ethers.Wallet.prototype, 'signMessage');
+    const custodialAbort = new AbortController();
+    const custodialReason = new Error('custodial signer canceled before admission');
+    custodialAbort.abort(custodialReason);
+    const custodialSigner = author.createRfc64CatalogAuthorSignerV1(
+      AUTHOR,
+      custodialAbort.signal,
+    );
+    await expect(custodialSigner.signMessage(PROJECTION)).rejects.toBe(custodialReason);
+    expect(walletSign).not.toHaveBeenCalled();
+    walletSign.mockRestore();
+
+    custodialKey.mockReturnValue(undefined);
+    const chain = (author as unknown as {
+      chain: {
+        signMessageAs?: (
+          address: string,
+          message: Uint8Array,
+        ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
+      };
+    }).chain;
+    const chainSign = vi.fn(async () => {
+      const signature = ethers.Signature.from(await AUTHOR_WALLET.signMessage(PROJECTION));
+      return {
+        r: ethers.getBytes(signature.r),
+        vs: ethers.getBytes(signature.yParityAndS),
+      };
+    });
+    chain.signMessageAs = chainSign;
+    const chainAbort = new AbortController();
+    const chainReason = new Error('chain signer canceled before admission');
+    chainAbort.abort(chainReason);
+    const chainSigner = author.createRfc64CatalogAuthorSignerV1(AUTHOR, chainAbort.signal);
+    await expect(chainSigner.signMessage(PROJECTION)).rejects.toBe(chainReason);
+    expect(chainSign).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('promptly cancels an active non-cooperative production chain signer', async () => {
+    const author = await startNativeAgent('catalog-active-signer-cancellation');
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(undefined);
+    let releaseChainSigner!: () => void;
+    const chainSignerGate = new Promise<void>((resolve) => { releaseChainSigner = resolve; });
+    let markChainSignerEntered!: () => void;
+    const chainSignerEntered = new Promise<void>((resolve) => {
+      markChainSignerEntered = resolve;
+    });
+    const chain = (author as unknown as {
+      chain: {
+        signMessageAs?: (
+          address: string,
+          message: Uint8Array,
+        ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
+      };
+    }).chain;
+    const chainSign = vi.fn(async (_address: string, message: Uint8Array) => {
+      markChainSignerEntered();
+      await chainSignerGate;
+      const signature = ethers.Signature.from(await AUTHOR_WALLET.signMessage(message));
+      return {
+        r: ethers.getBytes(signature.r),
+        vs: ethers.getBytes(signature.yParityAndS),
+      };
+    });
+    chain.signMessageAs = chainSign;
+    const abort = new AbortController();
+    const signer = author.createRfc64CatalogAuthorSignerV1(AUTHOR, abort.signal);
+    const signing = signer.signMessage(PROJECTION);
+    await chainSignerEntered;
+    const reason = new Error('active chain signer canceled');
+    abort.abort(reason);
+    await expect(signing).rejects.toBe(reason);
+    expect(chainSign).toHaveBeenCalledOnce();
+    releaseChainSigner();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }, 60_000);
+
   it('does not expose an empty applied head when first-asset successor staging fails', async () => {
     const author = await startNativeAgent(
       'auto-publish-first-asset-retry',
@@ -2928,7 +3008,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   }, 60_000);
 
-  it('rejects an SWM projection whose inventory changes before the applied-head CAS', async () => {
+  it('commits an already-signed SWM successor when its source becomes stale', async () => {
     const author = await startNativeAgent('r1-3-commit-freshness-author');
     author.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -2979,21 +3059,26 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       commitAppliedHeadIfInventoryCurrent: async (commit) => {
-        if (currentInventoryHead !== expectedInventoryHead) {
-          throw new Error('simulated stale SWM inventory head');
-        }
-        return commit();
+        const appliedHead = commit();
+        return Object.freeze({
+          appliedHead,
+          sourceCurrent: currentInventoryHead === expectedInventoryHead,
+        });
       },
     });
     await successorStaged;
     currentInventoryHead = `0x${'a2'.repeat(32)}` as Digest32V1;
     releaseSuccessor();
-    await expect(reconciliation).rejects.toThrow('simulated stale SWM inventory head');
+    await expect(reconciliation).resolves.toMatchObject({
+      status: 'advanced',
+      sourceCurrent: false,
+      appliedHead: { currentCatalogHeadDigest: staleHeadDigest },
+    });
     expect(staleHeadDigest).not.toBeNull();
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toBeNull();
+    })?.currentCatalogHeadDigest).toBe(staleHeadDigest);
   }, 60_000);
 
   it('keeps a canceled successor mutation attached to service shutdown', async () => {

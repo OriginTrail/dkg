@@ -90,13 +90,6 @@ type Rfc64CatalogAuthoringLaneDecisionV1 =
     readonly lane: ResolvedRfc64CatalogAuthoringLaneV1;
   }>;
 
-class Rfc64StaleSwmInventorySnapshotErrorV1 extends Error {
-  constructor() {
-    super('RFC-64 SWM inventory snapshot changed before catalog mutation');
-    this.name = 'Rfc64StaleSwmInventorySnapshotErrorV1';
-  }
-}
-
 export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(
   lane: ResolvedRfc64CatalogAuthoringLaneV1,
   accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined,
@@ -105,7 +98,6 @@ export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(
     ? accessPolicy === 'public'
     : accessPolicy === 'ownerOnly' || accessPolicy === 'allowList';
 }
-
 export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   /** Project the latest authenticated durable author inventory into its signed catalog. */
   async reconcileRfc64PublicCatalogFromSwmInventoryV1(
@@ -257,8 +249,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         lane.networkId,
       );
       throwIfAbortedV1(params.signal);
-      try {
-        const reconciled = await this.reconcileRfc64SwmInventoryCatalogExactSetV1({
+      const reconciled = await this.reconcileRfc64SwmInventoryCatalogExactSetV1({
           scope: prepared.catalogScope,
           author: this.createRfc64CatalogAuthorSignerV1(
             params.authorAddress,
@@ -278,24 +269,29 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
                     inventoryScopeDigest,
                     params.authorAddress,
                   );
-                if (current?.head.objectDigest !== prepared.inventoryHeadObjectDigest) {
-                  throw new Rfc64StaleSwmInventorySnapshotErrorV1();
-                }
-                return Promise.resolve(commit());
+                return Promise.resolve(Object.freeze({
+                  // Never abandon an already-signed branch. Commit it as the
+                  // unique next version, then let the projection loop advance
+                  // from that durable head when its source snapshot is stale.
+                  appliedHead: commit(),
+                  sourceCurrent:
+                    current?.head.objectDigest === prepared.inventoryHeadObjectDigest,
+                }));
               },
               params.signal,
             )
           ),
           signal: params.signal,
-        });
-        return Object.freeze({
-          ...reconciled,
-          inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
-        });
-      } catch (cause) {
-        if (!(cause instanceof Rfc64StaleSwmInventorySnapshotErrorV1)) throw cause;
+      });
+      if (!reconciled.sourceCurrent) {
         throwIfAbortedV1(params.signal);
+        continue;
       }
+      const { sourceCurrent: _sourceCurrent, ...result } = reconciled;
+      return Object.freeze({
+        ...result,
+        inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
+      });
     }
   }
 

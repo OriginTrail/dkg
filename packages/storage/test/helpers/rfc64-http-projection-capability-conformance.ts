@@ -105,6 +105,38 @@ export function runRfc64HttpProjectionCapabilityConformance(
       await vi.waitFor(() => expect(scheduler.snapshot.backgroundInflight).toBe(0));
     });
 
+    it('uses the configured store deadline while a successful body is stalled', async () => {
+      const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
+      const started = Promise.withResolvers<void>();
+      let transportSignal: AbortSignal | null = null;
+      globalThis.fetch = (async (_input, init) => {
+        transportSignal = init?.signal as AbortSignal;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(LINE_A));
+            started.resolve();
+            transportSignal?.addEventListener('abort', () => {
+              controller.error(transportSignal?.reason);
+            }, { once: true });
+          },
+        }), { status: 200 });
+      }) as typeof fetch;
+      const store = options.createStore(scheduler, 20);
+
+      const pending = store.rfc64SharedProjectionStreamV1(FIXTURE.operation, {
+        byteCeiling: 4096,
+      });
+      await started.promise;
+      expect(scheduler.snapshot.backgroundInflight).toBe(1);
+
+      await expect(pending).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'construct',
+      });
+      expect(transportSignal?.aborted).toBe(true);
+      await vi.waitFor(() => expect(scheduler.snapshot.backgroundInflight).toBe(0));
+    });
+
     it('keeps caller cancellation live after the spool releases its scheduler slot', async () => {
       const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
       globalThis.fetch = (async () => new Response(byteStream([LINE_Z, LINE_A]), {

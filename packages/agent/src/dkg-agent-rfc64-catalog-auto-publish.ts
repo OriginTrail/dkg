@@ -62,6 +62,14 @@ export type {
   Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
 
+// Compatibility exports for consumers of the historically public dist/*
+// subpath. The implementation moved to the projection owner, but the named
+// types remain available from their original module path.
+export type {
+  ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
+  ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
+} from './dkg-agent-rfc64-swm-catalog-projection.js';
+
 function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
   contextGraphId: string;
   subGraphName?: string | null;

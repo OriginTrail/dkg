@@ -1,7 +1,6 @@
 import {
   DKGAgent,
   buildOpenOwnerContextGraphPolicyV1,
-  stageKnowledgeAssetSharedWorkingMemoryV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
   type DKGAgentConfig,
   type ReplicationEvent,
@@ -19,6 +18,7 @@ import {
   type Digest32V1,
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
+import { stageKnowledgeAssetSharedWorkingMemoryV1 } from '@origintrail-official/dkg-publisher';
 import { type TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
@@ -32,6 +32,7 @@ import {
   GATE1_PROJECTION_NQUADS,
   GATE1_PROJECTION_QUADS,
 } from './fixture.js';
+
 import {
   GATE1_VM_CHAIN_READ_KEYS,
   isGate1RolloutCommand,
@@ -45,6 +46,8 @@ import {
   type Gate1VmChainReadCounts,
   type Gate1VmChainScenario,
 } from './rollout-process-protocol.js';
+
+const rolloutFixtureSwmWriteLocks = new Map<string, Promise<void>>();
 
 export interface Gate1RolloutAdapterConfig {
   readonly completeSwmProvider: string | undefined;
@@ -377,6 +380,7 @@ export async function seedGate1VmSourceSwm(
   const shareOperationId = 'rfc64-rollout-vm-source-v1';
   return stageKnowledgeAssetSharedWorkingMemoryV1({
     store,
+    writeLocks: rolloutFixtureSwmWriteLocks,
     contextGraphId,
     shareOperationId,
     kaUal: GATE1_KA_UAL,
@@ -387,7 +391,7 @@ export async function seedGate1VmSourceSwm(
     accessPolicy: 'public',
     agentAddress: GATE1_AUTHOR_ADDRESS,
     timestamp: new Date('2026-07-19T12:34:56.789Z'),
-  });
+  }, async (staged) => staged);
 }
 
 function parseRolloutMode(input: string | undefined): Gate1RolloutMode | null {

@@ -274,6 +274,55 @@ describe('CanonicalGraphScopedAuthorSealV1 typed store inverse', () => {
     )).toThrow(/canonical-seal-row-cardinality/u);
   });
 
+  it('validates rendered-row cardinality and descriptors before traversal', () => {
+    const rendered = projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE);
+
+    let indexGetterInvoked = false;
+    const accessorRows = [...rendered];
+    Object.defineProperty(accessorRows, '0', {
+      enumerable: true,
+      get() {
+        indexGetterInvoked = true;
+        return rendered[0];
+      },
+    });
+    expect(() => decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      accessorRows,
+      COORDINATE,
+    )).toThrow(/enumerable data properties/u);
+    expect(indexGetterInvoked).toBe(false);
+
+    let customMapInvoked = false;
+    const adornedRows = [...rendered];
+    Object.defineProperty(adornedRows, 'map', {
+      enumerable: true,
+      get() {
+        customMapInvoked = true;
+        return () => [];
+      },
+    });
+    expect(() => decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      adornedRows,
+      COORDINATE,
+    )).toThrow(/dense and unadorned/u);
+    expect(customMapInvoked).toBe(false);
+
+    let oversizedGetterInvoked = false;
+    const oversized = Array.from({ length: 16 });
+    Object.defineProperty(oversized, '0', {
+      enumerable: true,
+      get() {
+        oversizedGetterInvoked = true;
+        return rendered[0];
+      },
+    });
+    expect(() => decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      oversized,
+      COORDINATE,
+    )).toThrow(/canonical-seal-row-cardinality/u);
+    expect(oversizedGetterInvoked).toBe(false);
+  });
+
   it('rejects missing, duplicate, unknown, legacy, misplaced, and noncanonical rows', () => {
     const valid = toStoreRows(projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE));
     expect(() => decodeCanonicalGraphScopedAuthorSealRowsV1(valid.slice(1), COORDINATE))
