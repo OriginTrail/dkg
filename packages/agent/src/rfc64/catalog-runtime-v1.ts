@@ -5,27 +5,33 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 export interface Rfc64CatalogRuntimeOptionsV1 {
-  readonly openInventoryObservers: () => void;
-  readonly startService: (ctx: OperationContext) => void;
-  readonly startBootstrap: (ctx: OperationContext) => void;
-  readonly startProjection: (ctx: OperationContext) => void;
-  readonly whenBootstrapIdle: () => Promise<void>;
-  readonly whenProjectionIdle: () => Promise<void>;
-  readonly closeInventoryObservers: () => Promise<void>;
-  readonly closeReceiverAdmission: () => Promise<void>;
-  readonly closeBootstrap: () => Promise<void>;
-  readonly closeProjection: () => Promise<void>;
-  /** Closes transport and physically drains the shared mutation coordinator. */
-  readonly closeServiceAndMutations: () => Promise<void>;
+  readonly inventoryObservers: Readonly<{
+    open: () => void;
+    close: () => Promise<void>;
+  }>;
+  readonly service: Readonly<{
+    start: (ctx: OperationContext) => void;
+    /** Closes transport and physically drains the shared mutation coordinator. */
+    close: () => Promise<void>;
+  }>;
+  readonly receiverAdmission: Readonly<{
+    close: () => Promise<void>;
+  }>;
+  readonly bootstrap: Rfc64CatalogWorkloadOwnerV1;
+  readonly projection: Rfc64CatalogWorkloadOwnerV1;
 }
 
-export class Rfc64CatalogRuntimeV1<BootstrapState, ProjectionState> {
+/** Semantic lifecycle surface implemented by each feature-local workload owner. */
+export interface Rfc64CatalogWorkloadOwnerV1 {
+  start(ctx: OperationContext): void;
+  whenIdle(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export class Rfc64CatalogRuntimeV1 {
   readonly #options: Rfc64CatalogRuntimeOptionsV1;
   #started = false;
   #close: Promise<void> | null = null;
-  #bootstrapState: BootstrapState | undefined;
-  #projectionState: ProjectionState | undefined;
-  #projectionAdmissionClosed = false;
 
   constructor(options: Rfc64CatalogRuntimeOptionsV1) {
     this.#options = options;
@@ -36,51 +42,18 @@ export class Rfc64CatalogRuntimeV1<BootstrapState, ProjectionState> {
       throw new Error('RFC-64 catalog runtime cannot start while close is in progress');
     }
     if (this.#started) return;
-    this.#projectionAdmissionClosed = false;
-    this.#options.openInventoryObservers();
-    this.#options.startService(ctx);
-    this.#options.startBootstrap(ctx);
-    this.#options.startProjection(ctx);
+    this.#options.inventoryObservers.open();
+    this.#options.service.start(ctx);
+    this.#options.bootstrap.start(ctx);
+    this.#options.projection.start(ctx);
     this.#started = true;
   }
 
   async whenIdle(): Promise<void> {
     await Promise.all([
-      this.#options.whenBootstrapIdle(),
-      this.#options.whenProjectionIdle(),
+      this.#options.bootstrap.whenIdle(),
+      this.#options.projection.whenIdle(),
     ]);
-  }
-
-  readBootstrapState(): BootstrapState | undefined {
-    return this.#bootstrapState;
-  }
-
-  writeBootstrapState(state: BootstrapState): void {
-    this.#bootstrapState = state;
-  }
-
-  clearBootstrapState(): void {
-    this.#bootstrapState = undefined;
-  }
-
-  readProjectionState(): ProjectionState | undefined {
-    return this.#projectionState;
-  }
-
-  writeProjectionState(state: ProjectionState): void {
-    this.#projectionState = state;
-  }
-
-  clearProjectionState(): void {
-    this.#projectionState = undefined;
-  }
-
-  get projectionAdmissionClosed(): boolean {
-    return this.#projectionAdmissionClosed;
-  }
-
-  closeProjectionAdmission(): void {
-    this.#projectionAdmissionClosed = true;
   }
 
   close(): Promise<void> {
@@ -109,13 +82,13 @@ export class Rfc64CatalogRuntimeV1<BootstrapState, ProjectionState> {
         if (result.status === 'rejected') failures.push(result.reason);
       }
     };
-    await settle([this.#options.closeInventoryObservers]);
-    await settle([this.#options.closeReceiverAdmission]);
+    await settle([this.#options.inventoryObservers.close]);
+    await settle([this.#options.receiverAdmission.close]);
     await settle([
-      this.#options.closeBootstrap,
-      this.#options.closeProjection,
+      () => this.#options.bootstrap.close(),
+      () => this.#options.projection.close(),
     ]);
-    await settle([this.#options.closeServiceAndMutations]);
+    await settle([this.#options.service.close]);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) {
       throw new AggregateError(failures, 'RFC-64 catalog runtime close failed');
