@@ -429,8 +429,8 @@ import { Rfc64SwmCatalogProjectionMethods } from
 import { Rfc64SwmCatalogProjectionSupervisorMethods } from
   './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
-import { Rfc64CatalogSupervisorMethods } from './dkg-agent-rfc64-catalog-supervisor.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
+import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import {
   rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64CatalogExecutionPlanV1,
@@ -835,6 +835,19 @@ export class DKGAgent extends DKGAgentBase {
       writeLocks,
       publicSnapshotStore,
     );
+    this.rfc64CatalogRuntimeV1 = new Rfc64CatalogRuntimeV1({
+      openInventoryObservers: () => this.openRfc64SwmInventoryObserversV1(),
+      startService: (ctx) => this.startRfc64PublicCatalogServiceV1(ctx),
+      startBootstrap: (ctx) => this.startRfc64PublicCatalogBootstrapV1(ctx),
+      startProjection: (ctx) => this.startRfc64SwmCatalogProjectionSupervisorV1(ctx),
+      whenBootstrapIdle: () => this.whenRfc64PublicCatalogBootstrapIdleV1(),
+      whenProjectionIdle: () => this.whenRfc64SwmCatalogProjectionSupervisorIdleV1(),
+      closeInventoryObservers: () => this.closeRfc64SwmInventoryObserversV1(),
+      closeReceiverAdmission: () => this.closeRfc64PublicCatalogReceiverAdmissionV1(),
+      closeBootstrap: () => this.closeRfc64PublicCatalogBootstrapV1(),
+      closeProjection: () => this.closeRfc64SwmCatalogProjectionSupervisorV1(),
+      closeServiceAndMutations: () => this.closeRfc64PublicCatalogServiceV1(),
+    });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
       admission: {
         selectedPublicContextGraphIds: () => this.config.syncContextGraphs ?? [],
@@ -2170,10 +2183,7 @@ export class DKGAgent extends DKGAgentBase {
       // and authoring transports remain live. Receiver close then proves that
       // no later applied-head callback can enqueue work. Only after both
       // producer classes are quiet may the projection owner drain and close.
-      await this.closeRfc64SwmInventoryObserversV1();
-      await this.closeRfc64PublicCatalogReceiverAdmissionV1();
-      await this.closeRfc64CatalogSupervisorsV1();
-      await this.closeRfc64PublicCatalogServiceV1();
+      await this.rfc64CatalogRuntimeV1?.close();
     } catch (err) {
       this.log.warn(
         createOperationContext('connect'),
@@ -3582,8 +3592,13 @@ export class DKGAgent extends DKGAgentBase {
     this._promoteQueueConfig = config;
   }
 
+  /** Compatibility observation surface; lifecycle ownership lives in the runtime. */
+  whenRfc64CatalogSupervisorsIdleV1(): Promise<void> {
+    return this.rfc64CatalogRuntimeV1?.whenIdle() ?? Promise.resolve();
+  }
+
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods, Rfc64CatalogSupervisorMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods, Rfc64CatalogSupervisorMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods]);
