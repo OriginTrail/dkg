@@ -28,6 +28,7 @@ import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import { StoreOperationTimeoutError } from '../src/store-operation-timeout.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasSemanticInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from '../src/rfc64-author-commit-cas.js';
 
@@ -39,13 +40,14 @@ function q(subject: string, graph: string, object = '"x"'): Quad {
   return { subject, predicate: 'http://ex.org/p', object, graph };
 }
 
-function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasInputV1 {
+function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasSemanticInputV1 {
   const stateGraph = 'urn:test:changelog:rfc64:state';
   const transition = (role: string) => ({
     graphUri: stateGraph,
     subject: `urn:test:changelog:rfc64:${role}`,
     predicate: 'urn:test:changelog:rfc64:value',
     expectedObject: null,
+    expectedQuads: null,
     quads: [q(`urn:test:changelog:rfc64:${role}`, stateGraph, `"${role}"`)],
   });
   return {
@@ -61,16 +63,22 @@ function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasInputV1 {
       'urn:test:changelog:rfc64:seals',
       '"seal"',
     )],
-    currentHeadGraph: 'urn:test:changelog:rfc64:heads',
-    currentHeadSubject: 'urn:test:changelog:rfc64:author',
-    currentHeadPredicate: 'urn:test:changelog:rfc64:current-head',
-    expectedCurrentHeadObject: null,
-    nextCurrentHeadObject: 'urn:test:changelog:rfc64:catalog:new',
-    kaStateDigest: transition('ka-state'),
+    currentHead: {
+      graphUri: 'urn:test:changelog:rfc64:heads',
+      subject: 'urn:test:changelog:rfc64:author',
+      predicate: 'urn:test:changelog:rfc64:current-head',
+      expectedObject: null,
+      expectedQuads: null,
+      quads: [{
+        subject: 'urn:test:changelog:rfc64:author',
+        predicate: 'urn:test:changelog:rfc64:current-head',
+        object: 'urn:test:changelog:rfc64:catalog:new',
+        graph: 'urn:test:changelog:rfc64:heads',
+      }],
+    },
     subgraphMutationGeneration: transition('subgraph-generation'),
     contextGraphMutationGeneration: transition('context-graph-generation'),
     appliedSet: transition('applied-set'),
-    sealInvalidations: [],
   };
 }
 
@@ -589,9 +597,8 @@ describe('ChangelogStore — reserved-graph write protection', () => {
         authorSealGraph: CHANGELOG_GRAPH,
         authorSealQuads: [reservedQuad(baseInput.authorSealSubject, '"seal"')],
       }],
-      ['current head', { ...baseInput, currentHeadGraph: CHANGELOG_GRAPH }],
       ...([
-        'kaStateDigest',
+        'currentHead',
         'subgraphMutationGeneration',
         'contextGraphMutationGeneration',
         'appliedSet',
@@ -600,17 +607,11 @@ describe('ChangelogStore — reserved-graph write protection', () => {
         [role]: {
           ...baseInput[role],
           graphUri: CHANGELOG_GRAPH,
-          quads: [reservedQuad(baseInput[role].subject, `"${role}"`)],
+          quads: role === 'currentHead'
+            ? [{ ...baseInput.currentHead.quads[0]!, graph: CHANGELOG_GRAPH }]
+            : [reservedQuad(baseInput[role].subject, `"${role}"`)],
         },
       }] as const),
-      ['seal invalidation', {
-        ...baseInput,
-        sealInvalidations: [{
-          graphUri: CHANGELOG_GRAPH,
-          subject: 'urn:test:changelog:rfc64:stale-seal',
-          quads: [],
-        }],
-      }],
     ];
 
     for (const [role, input] of cases) {

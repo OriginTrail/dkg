@@ -5,7 +5,7 @@ import {
   snapshotDenseDataArray,
   snapshotExactDataRecord,
   type ClosedDataReject,
-} from '@origintrail-official/dkg-core';
+} from '@origintrail-official/dkg-core/closed-data-snapshot';
 
 export {
   readOwnEnumerableDataProperty,
@@ -17,7 +17,7 @@ export function isOrdinaryDataRecord(input: unknown): input is Record<string, un
   return isClosedDataRecord(input, 'ordinary-only');
 }
 
-/** Snapshot an exact ordinary record through the same closed-data boundary. */
+/** Snapshot an exact plain data record through the same closed-data boundary. */
 export function snapshotExactOrdinaryDataRecord(
   input: unknown,
   expectedKeys: readonly string[],

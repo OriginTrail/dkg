@@ -27,6 +27,7 @@ import {
   computeAuthorCatalogKeyDigestV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
+  decodeIriComponentV1,
   isCatalogForbiddenCodePointV1,
   iriComponentV1,
   parseCanonicalAuthorCatalogRowV1,
@@ -75,8 +76,11 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
     );
 
     const unicodeLane = validatedLane({ contextGraphId: 'cg', subGraphName: 'café' });
-    const coordinate = validatedCoordinate('name λ');
-    expect(iriComponentV1('AZaz09-._~ /é')).toBe('AZaz09-._~%20%2F%C3%A9');
+  const coordinate = validatedCoordinate('name λ');
+  expect(iriComponentV1('AZaz09-._~ /é')).toBe('AZaz09-._~%20%2F%C3%A9');
+  expect(decodeIriComponentV1('name%20%CE%BB')).toBe('name λ');
+  expect(() => decodeIriComponentV1('name%20%ce%bb')).toThrow(/not canonical/u);
+  expect(() => decodeIriComponentV1('name%2')).toThrow(/malformed/u);
     try {
       iriComponentV1('');
       throw new Error('expected invalid IRI component to be rejected');

@@ -55,6 +55,7 @@ import {
 import {
   TypedRdfStoreRowErrorV1,
   renderTypedRdfStoreRowV1,
+  snapshotDenseRenderedRdfStoreRowsV1,
   snapshotDenseTypedRdfStoreRowsV1,
   typedRdfLiteralV1,
   type TypedRdfStoreObjectV1,
@@ -746,6 +747,32 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
     placement,
     rows: projectedRows,
   };
+}
+
+/**
+ * Decode the flattened RDF rows returned by storage adapters through the same
+ * strict typed-row boundary as transferred catalog seals. This keeps RDF-term
+ * parsing, canonical projection, coordinate binding, and exact row-set checks
+ * in the protocol codec instead of duplicating them in storage callers.
+ */
+export function decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+  rows: unknown,
+  coordinate: CanonicalGraphScopedAuthorSealCoordinateV1,
+): DecodedCanonicalGraphScopedAuthorSealRowsV1 {
+  let typedRows: readonly CanonicalAuthorSealStoreRowV1[];
+  try {
+    typedRows = snapshotDenseRenderedRdfStoreRowsV1(rows, {
+      allowedLengths: [14, 15],
+    }) as readonly CanonicalAuthorSealStoreRowV1[];
+  } catch (cause) {
+    if (cause instanceof CanonicalGraphScopedAuthorSealError) throw cause;
+    const translated = translateTypedAuthorSealRowFailure(
+      cause,
+      'invalid rendered canonical author-seal row collection',
+    );
+    fail(translated.code, translated.message, cause);
+  }
+  return decodeCanonicalGraphScopedAuthorSealRowsV1(typedRows, coordinate);
 }
 
 function translateTypedAuthorSealRowFailure(

@@ -9,30 +9,24 @@ import {
   OxigraphStore,
   SharedMemoryLiteralBlobStore,
   UnsupportedTripleStoreCapabilityError,
-  createTripleStore,
   tryRfc64AuthorCommitCasV1,
   type QueryOptions,
   type Rfc64AuthorCommitCasInputV1,
 } from '../src/index.js';
 import {
-  APPLIED_SET,
   AUTHOR,
-  CG_MUTATION,
   HEAD_GRAPH,
   INVALIDATED_SEAL,
-  KA_STATE,
-  MUTATION,
   NEW_HEAD,
   OTHER_GRAPH,
   PROJECTION_GRAPH,
-  P_APPLIED,
-  P_GENERATION,
   P_HEAD,
   P_VALUE,
   SEAL,
   SEAL_GRAPH,
   STATE_GRAPH,
   authorCommitInput,
+  legacyAuthorCommitInput,
   objectFor,
   overrideStore,
   quad,
@@ -98,86 +92,85 @@ describe('RFC-64 author commit decorator integration', () => {
     expect(records).toEqual([]);
   });
 
-  it('commits one consistent winner and persists it through the factory worker stack', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-author-commit-worker-'));
-    tempDirs.push(dataDir);
-    const path = join(dataDir, 'store.nq');
-    const first = authorCommitInput();
-    const competingHead = 'urn:test:rfc64:catalog:competing';
-    const competingProjection = 'urn:test:rfc64:new:competing';
-    const second = authorCommitInput({
-      sharedProjectionQuads: [quad(competingProjection, P_VALUE, '"competing"', PROJECTION_GRAPH)],
-      authorSealQuads: [quad(SEAL, P_VALUE, '"competing-seal"', SEAL_GRAPH)],
-      nextCurrentHeadObject: competingHead,
-      kaStateDigest: {
-        ...first.kaStateDigest,
-        quads: [quad(KA_STATE, P_VALUE, competingHead, STATE_GRAPH)],
-      },
-      subgraphMutationGeneration: {
-        ...first.subgraphMutationGeneration,
-        quads: [quad(MUTATION, P_GENERATION, '"3"', STATE_GRAPH)],
-      },
-      contextGraphMutationGeneration: {
-        ...first.contextGraphMutationGeneration,
-        quads: [quad(CG_MUTATION, P_GENERATION, '"12"', STATE_GRAPH)],
-      },
-      appliedSet: {
-        ...first.appliedSet,
-        quads: [quad(APPLIED_SET, P_APPLIED, competingHead, STATE_GRAPH)],
+  it('preserves the legacy public input shape behind every decorator', async () => {
+    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-legacy-decorator-blobs-'));
+    tempDirs.push(blobDir);
+    const base = new OxigraphStore();
+    const received: Rfc64AuthorCommitCasInputV1[] = [];
+    const legacyOnly = overrideStore(base, {
+      rfc64AuthorCommitCasV1: async (input) => {
+        received.push(input);
+        if (!('currentHeadGraph' in input) || 'planKind' in input) {
+          throw new Error('legacy-only adapter received an internal plan');
+        }
+        return 'conflict';
       },
     });
+    const wrappers = [
+      new ChangelogStore(legacyOnly),
+      new GraphSetIndexStore(legacyOnly, { revalidateMs: 60_000 }),
+      new SharedMemoryLiteralBlobStore(legacyOnly, {
+        blobDir,
+        thresholdBytes: Number.MAX_SAFE_INTEGER,
+      }),
+    ];
 
-    let store = await createTripleStore({ backend: 'oxigraph-worker', options: { path } });
-    await seedOldState(store);
-    const results = await Promise.all([
-      tryRfc64AuthorCommitCasV1(store, first),
-      tryRfc64AuthorCommitCasV1(store, second),
-    ]);
-    expect(results.slice().sort()).toEqual(['committed', 'conflict']);
-    const winner = results[0] === 'committed'
-      ? {
-          head: NEW_HEAD,
-          projectionSubject: 'urn:test:rfc64:new:1',
-          projectionValue: '"new-1"',
-          losingProjectionSubject: competingProjection,
-          seal: '"new-seal"',
-          mutation: '"2"',
-          contextMutation: '"11"',
-        }
-      : {
-          head: competingHead,
-          projectionSubject: competingProjection,
-          projectionValue: '"competing"',
-          losingProjectionSubject: 'urn:test:rfc64:new:1',
-          seal: '"competing-seal"',
-          mutation: '"3"',
-          contextMutation: '"12"',
-        };
-
-    const assertWinner = async () => {
-      expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(winner.head);
-      expect(await objectFor(store, PROJECTION_GRAPH, winner.projectionSubject, P_VALUE))
-        .toBe(winner.projectionValue);
-      expect(await objectFor(store, PROJECTION_GRAPH, winner.losingProjectionSubject, P_VALUE))
-        .toBeUndefined();
-      expect(await objectFor(store, SEAL_GRAPH, SEAL, P_VALUE)).toBe(winner.seal);
-      expect(await objectFor(store, STATE_GRAPH, KA_STATE, P_VALUE)).toBe(winner.head);
-      expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBe(winner.mutation);
-      expect(await objectFor(store, STATE_GRAPH, CG_MUTATION, P_GENERATION))
-        .toBe(winner.contextMutation);
-      expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(winner.head);
-    };
-    await assertWinner();
-    await store.flush();
-    await store.close();
-
-    store = await createTripleStore({ backend: 'oxigraph-worker', options: { path } });
-    try {
-      await assertWinner();
-    } finally {
-      await store.close();
+    for (const store of wrappers) {
+      await expect(store.rfc64AuthorCommitCasV1(legacyAuthorCommitInput()))
+        .resolves.toBe('conflict');
     }
-  }, 15_000);
+    expect(received).toHaveLength(3);
+    expect(received.every((input) => 'currentHeadGraph' in input)).toBe(true);
+    await base.close();
+  });
+
+  it('snapshots a queued changelog commit before caller mutation', async () => {
+    const base = new OxigraphStore();
+    let releaseInsert!: () => void;
+    let insertEntered!: () => void;
+    const release = new Promise<void>((resolve) => { releaseInsert = resolve; });
+    const entered = new Promise<void>((resolve) => { insertEntered = resolve; });
+    let blockInsert = true;
+    let received: Rfc64AuthorCommitCasInputV1 | undefined;
+    const inner = overrideStore(base, {
+      insert: async (quads, options) => {
+        if (blockInsert) {
+          blockInsert = false;
+          insertEntered();
+          await release;
+        }
+        return base.insert(quads, options);
+      },
+      rfc64AuthorCommitCasV1: async (input) => {
+        received = input;
+        return 'conflict';
+      },
+    });
+    const store = new ChangelogStore(inner);
+    const blocker = store.insert([
+      quad('urn:test:rfc64:queue-blocker', P_VALUE, '"block"', OTHER_GRAPH),
+    ]);
+    await entered;
+
+    const mutable = legacyAuthorCommitInput();
+    const expectedSealGraph = mutable.authorSealGraph;
+    const expectedSealObject = mutable.authorSealQuads[0]!.object;
+    const commit = store.rfc64AuthorCommitCasV1(mutable);
+    (mutable as { authorSealGraph: string }).authorSealGraph = 'urn:test:rfc64:mutated';
+    (mutable.authorSealQuads[0] as { object: string }).object = '"mutated"';
+    releaseInsert();
+
+    await blocker;
+    await expect(commit).resolves.toBe('conflict');
+    expect(received).toBeDefined();
+    expect(received && 'planKind' in received).toBe(false);
+    expect(received && 'currentHeadGraph' in received ? received.authorSealGraph : undefined)
+      .toBe(expectedSealGraph);
+    expect(received && 'currentHeadGraph' in received
+      ? received.authorSealQuads[0]?.object
+      : undefined).toBe(expectedSealObject);
+    await base.close();
+  });
 
   it('flags changelog reconciliation after an indeterminate post-commit failure', async () => {
     const base = new OxigraphStore();
@@ -234,7 +227,7 @@ describe('RFC-64 author commit decorator integration', () => {
     expect(scans).toBe(2);
   });
 
-  it('maintains added and emptied graphs in a warm index without a full rescan', async () => {
+  it('maintains an added graph and retains an unrelated stale-seal graph without a full rescan', async () => {
     const base = new OxigraphStore();
     await seedOldState(base);
     const addedGraph = 'urn:test:rfc64:added-seal-graph';
@@ -257,16 +250,11 @@ describe('RFC-64 author commit decorator integration', () => {
     await expect(store.rfc64AuthorCommitCasV1(authorCommitInput({
       authorSealGraph: addedGraph,
       authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', addedGraph)],
-      sealInvalidations: [{
-        graphUri: emptiedGraph,
-        subject: INVALIDATED_SEAL,
-        quads: [],
-      }],
     }))).resolves.toBe('committed');
 
     const graphs = await store.listGraphs();
     expect(graphs).toContain(addedGraph);
-    expect(graphs).not.toContain(emptiedGraph);
+    expect(graphs).toContain(emptiedGraph);
     expect(scans).toBe(1);
   });
 

@@ -1,6 +1,7 @@
 import type {
   Quad,
-  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasLegacyInputV1,
+  Rfc64AuthorCommitCasSemanticInputV1,
   TripleStore,
 } from '../src/index.js';
 
@@ -11,7 +12,6 @@ export const STATE_GRAPH = 'urn:test:rfc64:state';
 export const OTHER_GRAPH = 'urn:test:rfc64:unrelated';
 export const AUTHOR = 'urn:test:rfc64:author:alice';
 export const SEAL = 'urn:test:rfc64:seal:alice';
-export const KA_STATE = 'urn:test:rfc64:ka-state';
 export const MUTATION = 'urn:test:rfc64:mutation:subgraph';
 export const CG_MUTATION = 'urn:test:rfc64:mutation:context-graph';
 export const APPLIED_SET = 'urn:test:rfc64:applied-set';
@@ -28,8 +28,8 @@ export function quad(subject: string, predicate: string, object: string, graph: 
 }
 
 export function authorCommitInput(
-  overrides: Partial<Rfc64AuthorCommitCasInputV1> = {},
-): Rfc64AuthorCommitCasInputV1 {
+  overrides: Partial<Rfc64AuthorCommitCasSemanticInputV1> = {},
+): Rfc64AuthorCommitCasSemanticInputV1 {
   return {
     sharedProjectionGraph: PROJECTION_GRAPH,
     sharedProjectionQuads: [
@@ -39,23 +39,20 @@ export function authorCommitInput(
     authorSealGraph: SEAL_GRAPH,
     authorSealSubject: SEAL,
     authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', SEAL_GRAPH)],
-    currentHeadGraph: HEAD_GRAPH,
-    currentHeadSubject: AUTHOR,
-    currentHeadPredicate: P_HEAD,
-    expectedCurrentHeadObject: OLD_HEAD,
-    nextCurrentHeadObject: NEW_HEAD,
-    kaStateDigest: {
-      graphUri: STATE_GRAPH,
-      subject: KA_STATE,
-      predicate: P_VALUE,
+    currentHead: {
+      graphUri: HEAD_GRAPH,
+      subject: AUTHOR,
+      predicate: P_HEAD,
       expectedObject: OLD_HEAD,
-      quads: [quad(KA_STATE, P_VALUE, NEW_HEAD, STATE_GRAPH)],
+      expectedQuads: [quad(AUTHOR, P_HEAD, OLD_HEAD, HEAD_GRAPH)],
+      quads: [quad(AUTHOR, P_HEAD, NEW_HEAD, HEAD_GRAPH)],
     },
     subgraphMutationGeneration: {
       graphUri: STATE_GRAPH,
       subject: MUTATION,
       predicate: P_GENERATION,
       expectedObject: '"1"',
+      expectedQuads: [quad(MUTATION, P_GENERATION, '"1"', STATE_GRAPH)],
       quads: [quad(MUTATION, P_GENERATION, '"2"', STATE_GRAPH)],
     },
     contextGraphMutationGeneration: {
@@ -63,6 +60,7 @@ export function authorCommitInput(
       subject: CG_MUTATION,
       predicate: P_GENERATION,
       expectedObject: '"10"',
+      expectedQuads: [quad(CG_MUTATION, P_GENERATION, '"10"', STATE_GRAPH)],
       quads: [quad(CG_MUTATION, P_GENERATION, '"11"', STATE_GRAPH)],
     },
     appliedSet: {
@@ -70,10 +68,42 @@ export function authorCommitInput(
       subject: APPLIED_SET,
       predicate: P_APPLIED,
       expectedObject: OLD_HEAD,
+      expectedQuads: [quad(APPLIED_SET, P_APPLIED, OLD_HEAD, STATE_GRAPH)],
       quads: [quad(APPLIED_SET, P_APPLIED, NEW_HEAD, STATE_GRAPH)],
     },
-    sealInvalidations: [],
     ...overrides,
+  };
+}
+
+export function legacyAuthorCommitInput(): Rfc64AuthorCommitCasLegacyInputV1 {
+  const current = authorCommitInput();
+  const kaStateSubject = 'urn:test:rfc64:ka-state';
+  return {
+    sharedProjectionGraph: current.sharedProjectionGraph,
+    sharedProjectionQuads: current.sharedProjectionQuads,
+    authorSealGraph: current.authorSealGraph,
+    authorSealSubject: current.authorSealSubject,
+    authorSealQuads: current.authorSealQuads,
+    currentHeadGraph: current.currentHead.graphUri,
+    currentHeadSubject: current.currentHead.subject,
+    currentHeadPredicate: current.currentHead.predicate,
+    expectedCurrentHeadObject: current.currentHead.expectedObject,
+    nextCurrentHeadObject: current.currentHead.quads[0]!.object,
+    kaStateDigest: {
+      graphUri: STATE_GRAPH,
+      subject: kaStateSubject,
+      predicate: P_VALUE,
+      expectedObject: '"old-ka-state"',
+      quads: [quad(kaStateSubject, P_VALUE, '"new-ka-state"', STATE_GRAPH)],
+    },
+    subgraphMutationGeneration: current.subgraphMutationGeneration,
+    contextGraphMutationGeneration: current.contextGraphMutationGeneration,
+    appliedSet: current.appliedSet,
+    sealInvalidations: [{
+      graphUri: SEAL_GRAPH,
+      subject: INVALIDATED_SEAL,
+      quads: [],
+    }],
   };
 }
 
@@ -82,7 +112,6 @@ export async function seedOldState(store: TripleStore): Promise<void> {
     quad('urn:test:rfc64:old', P_VALUE, '"old"', PROJECTION_GRAPH),
     quad(SEAL, P_VALUE, '"old-seal"', SEAL_GRAPH),
     quad(AUTHOR, P_HEAD, OLD_HEAD, HEAD_GRAPH),
-    quad(KA_STATE, P_VALUE, OLD_HEAD, STATE_GRAPH),
     quad(MUTATION, P_GENERATION, '"1"', STATE_GRAPH),
     quad(CG_MUTATION, P_GENERATION, '"10"', STATE_GRAPH),
     quad(APPLIED_SET, P_APPLIED, OLD_HEAD, STATE_GRAPH),

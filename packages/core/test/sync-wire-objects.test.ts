@@ -79,4 +79,20 @@ describe('RFC-64 sync wire object helpers', () => {
       /enumerable data properties/,
     );
   });
+
+  it('keeps closed-data helpers compatible at the root and canonical subpath', async () => {
+    const root = await import('../src/index.js') as Record<string, unknown>;
+    const subpath = await import(
+      '@origintrail-official/dkg-core/closed-data-snapshot'
+    ) as Record<string, unknown>;
+    for (const helper of [
+      'isClosedDataRecord',
+      'readOwnEnumerableDataProperty',
+      'snapshotDenseDataArray',
+      'snapshotExactDataRecord',
+    ]) {
+      expect(root[helper], `${helper} root compatibility export`).toBeTypeOf('function');
+      expect(subpath[helper], `${helper} package subpath export`).toBeTypeOf('function');
+    }
+  }, 15_000);
 });

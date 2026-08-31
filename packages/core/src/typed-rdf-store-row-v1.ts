@@ -92,7 +92,50 @@ export function parseRenderedRdfStoreObjectV1(input: unknown): TypedRdfStoreObje
     );
   }
   if (isSafeIri(input)) return typedRdfNamedNodeV1(input);
+  if (input.startsWith('<') && input.endsWith('>')) {
+    const iri = input.slice(1, -1);
+    if (isSafeIri(iri)) return typedRdfNamedNodeV1(iri);
+  }
   throw new TypedRdfStoreRowErrorV1('row-term', 'rendered RDF object is not an exact RDF term');
+}
+
+/**
+ * Snapshot and decode flattened adapter rows at the typed RDF boundary. The
+ * collection and every row are captured without invoking accessors or
+ * re-reading mutable slots.
+ */
+export function snapshotDenseRenderedRdfStoreRowsV1(
+  input: unknown,
+  options: Readonly<{ readonly allowedLengths: readonly number[] }>,
+): readonly TypedRdfStoreRowV1[] {
+  return snapshotDenseRdfStoreRowsV1(input, {
+    allowedLengths: options.allowedLengths,
+    collectionLabel: 'rendered RDF rows',
+    decodeRow(value, index) {
+      const row = snapshotClosed(
+        value,
+        ['graph', 'object', 'predicate', 'subject'],
+        `rendered RDF row ${index}`,
+      );
+      if (
+        typeof row.graph !== 'string'
+        || typeof row.object !== 'string'
+        || typeof row.predicate !== 'string'
+        || typeof row.subject !== 'string'
+      ) {
+        throw new TypedRdfStoreRowErrorV1(
+          'row-schema',
+          `rendered RDF row ${index} fields must be strings`,
+        );
+      }
+      return Object.freeze({
+        graphIri: row.graph,
+        object: parseRenderedRdfStoreObjectV1(row.object),
+        predicateIri: row.predicate,
+        subjectIri: row.subject,
+      });
+    },
+  });
 }
 
 export function snapshotTypedRdfStoreRowV1(input: unknown): TypedRdfStoreRowV1 {
@@ -147,8 +190,30 @@ export function snapshotDenseTypedRdfStoreRowsV1(
     readonly maxBytes?: number;
   }>,
 ): readonly TypedRdfStoreRowV1[] {
+  return snapshotDenseRdfStoreRowsV1(input, {
+    allowedLengths: options.allowedLengths,
+    collectionLabel: 'typed RDF rows',
+    decodeRow: snapshotTypedRdfStoreRowV1,
+    maxBytes: options.maxBytes,
+    rowByteLength: typedRdfStoreRowByteLengthV1,
+  });
+}
+
+function snapshotDenseRdfStoreRowsV1(
+  input: unknown,
+  options: Readonly<{
+    readonly allowedLengths: readonly number[];
+    readonly collectionLabel: string;
+    readonly decodeRow: (value: unknown, index: number) => TypedRdfStoreRowV1;
+    readonly maxBytes?: number;
+    readonly rowByteLength?: (row: TypedRdfStoreRowV1) => number;
+  }>,
+): readonly TypedRdfStoreRowV1[] {
   if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
-    throw new TypedRdfStoreRowErrorV1('row-schema', 'typed RDF rows must be an ordinary Array');
+    throw new TypedRdfStoreRowErrorV1(
+      'row-schema',
+      `${options.collectionLabel} must be an ordinary Array`,
+    );
   }
   const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
   const length = lengthDescriptor
@@ -159,7 +224,7 @@ export function snapshotDenseTypedRdfStoreRowsV1(
   if (!options.allowedLengths.includes(length)) {
     throw new TypedRdfStoreRowErrorV1(
       'row-cardinality',
-      `typed RDF rows require ${options.allowedLengths.join(' or ')} rows`,
+      `${options.collectionLabel} require ${options.allowedLengths.join(' or ')} rows`,
     );
   }
   const ownKeys = Reflect.ownKeys(input);
@@ -168,7 +233,10 @@ export function snapshotDenseTypedRdfStoreRowsV1(
     || ownKeys.length !== length + 1
     || !ownKeys.includes('length')
   ) {
-    throw new TypedRdfStoreRowErrorV1('row-schema', 'typed RDF rows must be dense and unadorned');
+    throw new TypedRdfStoreRowErrorV1(
+      'row-schema',
+      `${options.collectionLabel} must be dense and unadorned`,
+    );
   }
   let totalBytes = 0;
   const rows: TypedRdfStoreRowV1[] = [];
@@ -177,11 +245,11 @@ export function snapshotDenseTypedRdfStoreRowsV1(
     if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
       throw new TypedRdfStoreRowErrorV1(
         'row-schema',
-        'typed RDF rows must contain enumerable data properties',
+        `${options.collectionLabel} must contain enumerable data properties`,
       );
     }
-    const row = snapshotTypedRdfStoreRowV1(descriptor.value);
-    totalBytes += typedRdfStoreRowByteLengthV1(row);
+    const row = options.decodeRow(descriptor.value, index);
+    totalBytes += options.rowByteLength?.(row) ?? 0;
     if (options.maxBytes !== undefined && totalBytes > options.maxBytes) {
       throw new TypedRdfStoreRowErrorV1('row-too-large', 'typed RDF rows exceed the byte limit');
     }

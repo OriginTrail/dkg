@@ -1,14 +1,20 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   OxigraphStore,
-  RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
+  OxigraphWorkerStore,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   SparqlHttpStore,
   type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasLegacyInputV1,
 } from '../src/index.js';
 import {
+  buildRfc64AuthorCommitCasUpdateFromNormalizedV1,
   buildRfc64AuthorCommitCasUpdateV1,
+  decodeNormalizedRfc64AuthorCommitCasV1,
   executeRfc64AuthorCommitCasV1,
   mapRfc64AuthorCommitCasV1,
   normalizeRfc64AuthorCommitCasV1,
@@ -19,7 +25,6 @@ import {
   CG_MUTATION,
   HEAD_GRAPH,
   INVALIDATED_SEAL,
-  KA_STATE,
   MUTATION,
   NEW_HEAD,
   OLD_HEAD,
@@ -37,6 +42,15 @@ import {
   quad,
   seedOldState,
 } from './rfc64-author-commit-cas-harness.js';
+
+function normalizeGeneratedIds(value: string): string {
+  return value
+    .replaceAll(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/giu,
+      '<generated-id>',
+    )
+    .replaceAll(/\?subject[PO][0-9a-f]{32}/giu, '?subject<generated-id>');
+}
 
 describe('RFC-64 certified author commit CAS v1', () => {
   afterEach(() => {
@@ -119,7 +133,6 @@ describe('RFC-64 certified author commit CAS v1', () => {
     ]);
     expect(await objectFor(store, SEAL_GRAPH, SEAL, P_VALUE)).toBe('"new-seal"');
     expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
-    expect(await objectFor(store, STATE_GRAPH, KA_STATE, P_VALUE)).toBe(NEW_HEAD);
     expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBe('"2"');
     expect(await objectFor(store, STATE_GRAPH, CG_MUTATION, P_GENERATION)).toBe('"11"');
     expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(NEW_HEAD);
@@ -129,15 +142,54 @@ describe('RFC-64 certified author commit CAS v1', () => {
     )).toBe(false);
   });
 
+  it('preserves the exported legacy V1 input and seal-invalidation behavior', async () => {
+    const store = new OxigraphStore();
+    await seedOldState(store);
+    const kaStateSubject = 'urn:test:rfc64:ka-state';
+    await store.insert([
+      quad(kaStateSubject, P_VALUE, '"old-ka-state"', STATE_GRAPH),
+      quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', SEAL_GRAPH),
+    ]);
+
+    await expect(store.rfc64AuthorCommitCasV1!(legacyAuthorCommitInput()))
+      .resolves.toBe('committed');
+
+    expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
+    expect(await objectFor(store, STATE_GRAPH, kaStateSubject, P_VALUE))
+      .toBe('"new-ka-state"');
+    expect(await objectFor(store, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBeUndefined();
+  });
+
+  it('preserves exported legacy commits through worker transport and reopen', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rfc64-legacy-author-worker-'));
+    const path = join(dir, 'store.nq');
+    const kaStateSubject = 'urn:test:rfc64:ka-state';
+    let store: OxigraphWorkerStore | null = new OxigraphWorkerStore(path);
+    try {
+      await seedOldState(store);
+      await store.insert([
+        quad(kaStateSubject, P_VALUE, '"old-ka-state"', STATE_GRAPH),
+        quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', SEAL_GRAPH),
+      ]);
+
+      await expect(store.rfc64AuthorCommitCasV1!(legacyAuthorCommitInput()))
+        .resolves.toBe('committed');
+      await store.close();
+      store = new OxigraphWorkerStore(path);
+
+      expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
+      expect(await objectFor(store, STATE_GRAPH, kaStateSubject, P_VALUE))
+        .toBe('"new-ka-state"');
+      expect(await objectFor(store, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE))
+        .toBeUndefined();
+    } finally {
+      await store?.close().catch(() => {});
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('maps every closed-manifest role through the canonical async plan', async () => {
-    const invalidationGraph = 'urn:test:rfc64:invalidations';
-    const input = authorCommitInput({
-      sealInvalidations: [{
-        graphUri: invalidationGraph,
-        subject: INVALIDATED_SEAL,
-        quads: [quad(INVALIDATED_SEAL, P_VALUE, '"invalidated"', invalidationGraph)],
-      }],
-    });
+    const input = authorCommitInput();
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
     const quadRoles: string[] = [];
     const objectRoles: string[] = [];
@@ -153,7 +205,13 @@ describe('RFC-64 certified author commit CAS v1', () => {
       },
       mapObject: async (value, context) => {
         objectRoles.push(`${context.role}:${context.kind}`);
-        return value === null ? null : `<urn:test:mapped:${context.role}:${context.kind}>`;
+        const predecessorIndex = {
+          currentHead: 7,
+          subgraphMutationGeneration: 8,
+          contextGraphMutationGeneration: 9,
+          appliedSet: 10,
+        }[context.role];
+        return value === null ? null : `"mapped:${context.role}:0:${predecessorIndex}"`;
       },
     });
 
@@ -161,50 +219,135 @@ describe('RFC-64 certified author commit CAS v1', () => {
       'sharedProjection:0',
       'sharedProjection:0',
       'authorSeal:0',
-      'kaStateDigest:0',
+      'currentHead:0',
       'subgraphMutationGeneration:0',
       'contextGraphMutationGeneration:0',
       'appliedSet:0',
-      'sealInvalidation:0',
+      'currentHead:0',
+      'subgraphMutationGeneration:0',
+      'contextGraphMutationGeneration:0',
+      'appliedSet:0',
     ]);
     expect(objectRoles).toEqual([
       'currentHead:expected',
-      'kaStateDigest:expected',
       'subgraphMutationGeneration:expected',
       'contextGraphMutationGeneration:expected',
       'appliedSet:expected',
-      'currentHead:next',
     ]);
-    expect(mapped.sharedProjectionQuads.map(({ object }) => object)).toEqual([
+    const subject = (role: string) => mapped.subjectReplacements.find(
+      (replacement) => replacement.role === role,
+    )!;
+    const guard = (role: string) => mapped.guards.find(
+      (candidate) => candidate.role === role,
+    )!;
+    expect(mapped.sourceKind).toBe('semantic');
+    expect(mapped.graphReplacements[0]!.quads.map(({ object }) => object)).toEqual([
       '"mapped:sharedProjection:0:0"',
       '"mapped:sharedProjection:0:1"',
     ]);
-    expect(mapped.authorSealQuads[0]?.object).toBe('"mapped:authorSeal:0:2"');
-    expect(mapped.kaStateDigest.quads[0]?.object).toBe('"mapped:kaStateDigest:0:3"');
-    expect(mapped.subgraphMutationGeneration.quads[0]?.object)
+    expect(subject('authorSeal').quads[0]?.object).toBe('"mapped:authorSeal:0:2"');
+    expect(subject('currentHead').quads[0]?.object).toBe('"mapped:currentHead:0:3"');
+    expect(subject('subgraphMutationGeneration').quads[0]?.object)
       .toBe('"mapped:subgraphMutationGeneration:0:4"');
-    expect(mapped.contextGraphMutationGeneration.quads[0]?.object)
+    expect(subject('contextGraphMutationGeneration').quads[0]?.object)
       .toBe('"mapped:contextGraphMutationGeneration:0:5"');
-    expect(mapped.appliedSet.quads[0]?.object).toBe('"mapped:appliedSet:0:6"');
-    expect(mapped.sealInvalidations[0]?.quads[0]?.object)
-      .toBe('"mapped:sealInvalidation:0:7"');
-    expect(mapped.expectedCurrentHeadObject).toBe('<urn:test:mapped:currentHead:expected>');
-    expect(mapped.kaStateDigest.expectedObject).toBe('<urn:test:mapped:kaStateDigest:expected>');
-    expect(mapped.subgraphMutationGeneration.expectedObject)
-      .toBe('<urn:test:mapped:subgraphMutationGeneration:expected>');
-    expect(mapped.contextGraphMutationGeneration.expectedObject)
-      .toBe('<urn:test:mapped:contextGraphMutationGeneration:expected>');
-    expect(mapped.appliedSet.expectedObject).toBe('<urn:test:mapped:appliedSet:expected>');
-    expect(mapped.nextCurrentHeadObject).toBe('<urn:test:mapped:currentHead:next>');
-    expect(manifest.semanticQuads).toHaveLength(9);
+    expect(subject('appliedSet').quads[0]?.object).toBe('"mapped:appliedSet:0:6"');
+    expect(guard('currentHead').expectedObject).toBe('"mapped:currentHead:0:7"');
+    expect(guard('subgraphMutationGeneration').expectedObject)
+      .toBe('"mapped:subgraphMutationGeneration:0:8"');
+    expect(guard('contextGraphMutationGeneration').expectedObject)
+      .toBe('"mapped:contextGraphMutationGeneration:0:9"');
+    expect(guard('appliedSet').expectedObject).toBe('"mapped:appliedSet:0:10"');
+    const currentHeadGuard = guard('currentHead');
+    expect(currentHeadGuard.guardKind).toBe('exact-subject');
+    if (currentHeadGuard.guardKind !== 'exact-subject') throw new Error('expected exact guard');
+    expect(currentHeadGuard.expectedQuads?.[0]?.object)
+      .toBe('"mapped:currentHead:0:7"');
+    expect(manifest.semanticQuads).toHaveLength(7);
     expect(manifest.touchedGraphs).toEqual([
       PROJECTION_GRAPH,
       SEAL_GRAPH,
       HEAD_GRAPH,
       STATE_GRAPH,
-      invalidationGraph,
     ]);
     expect(manifest.referencedGraphs).toEqual(manifest.touchedGraphs);
+  });
+
+  it('rejects a deserialized semantic plan that drops its mandatory guards', () => {
+    const source = authorCommitInput();
+    const legitimate = normalizeRfc64AuthorCommitCasV1(source);
+    expect(decodeNormalizedRfc64AuthorCommitCasV1(structuredClone(legitimate)))
+      .toEqual(legitimate);
+    const forged = {
+      ...structuredClone(legitimate),
+      guards: [],
+    };
+
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(forged))
+      .toThrow(/invalid guard topology/u);
+    const sourceUpdate = buildRfc64AuthorCommitCasUpdateV1(source);
+    const deserializedUpdate = buildRfc64AuthorCommitCasUpdateFromNormalizedV1(
+      structuredClone(legitimate),
+    );
+    expect(normalizeGeneratedIds(deserializedUpdate.update)).toBe(
+      normalizeGeneratedIds(sourceUpdate.update),
+    );
+    expect(deserializedUpdate.semanticQuads).toEqual(sourceUpdate.semanticQuads);
+    expect(deserializedUpdate.touchedGraphs).toEqual(sourceUpdate.touchedGraphs);
+
+    const swapped = structuredClone(legitimate);
+    [swapped.subjectReplacements[1], swapped.subjectReplacements[2]] = [
+      swapped.subjectReplacements[2]!,
+      swapped.subjectReplacements[1]!,
+    ];
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(swapped))
+      .toThrow(/semantic currentHead requires one exact guarded replacement/u);
+
+    const legacy = structuredClone(normalizeRfc64AuthorCommitCasV1(
+      legacyAuthorCommitInput(),
+    ));
+    const invalidation = legacy.subjectReplacements.find(
+      ({ role }) => role === 'sealInvalidation',
+    );
+    if (!invalidation) throw new Error('expected legacy invalidation');
+    invalidation.roleIndex = 1;
+    expect(() => decodeNormalizedRfc64AuthorCommitCasV1(legacy))
+      .toThrow(/invalid replacement topology/u);
+  });
+
+  it('maps the exported legacy contract through the operation-only canonical plan', async () => {
+    const manifest = normalizeRfc64AuthorCommitCasV1(legacyAuthorCommitInput());
+    expect(manifest).not.toHaveProperty('mode');
+    expect(manifest.sourceKind).toBe('legacy');
+    expect(manifest.predicateReplacements).toHaveLength(1);
+
+    const mapped = await mapRfc64AuthorCommitCasV1(manifest, {
+      mapQuad: (value, context) => ({
+        ...value,
+        object: `"mapped:${context.role}:${context.roleIndex}"`,
+      }),
+      mapObject: (value, context) => value === null
+        ? null
+        : `<urn:test:mapped:${context.role}:${context.kind}>`,
+    });
+
+    expect(mapped.sourceKind).toBe('legacy');
+    const currentHead = mapped.predicateReplacements[0]!;
+    expect(currentHead.expectedObject)
+      .toBe('<urn:test:mapped:currentHead:expected>');
+    expect(currentHead.nextObject).toBe('<urn:test:mapped:currentHead:next>');
+    expect(mapped.guards.find(({ role }) => role === 'kaStateDigest')).toMatchObject({
+      expectedObject: '<urn:test:mapped:kaStateDigest:expected>',
+    });
+    expect(mapped.subjectReplacements.find(({ role }) => role === 'kaStateDigest'))
+      .toMatchObject({ quads: [{ object: '"mapped:kaStateDigest:0"' }] });
+    expect(mapped.subjectReplacements.filter(({ role }) => role === 'sealInvalidation')).toEqual([{
+      role: 'sealInvalidation',
+      roleIndex: 0,
+      graphUri: SEAL_GRAPH,
+      subject: INVALIDATED_SEAL,
+      quads: [],
+    }]);
   });
 
   it('returns a clean conflict and changes no semantic target when any guard is stale', async () => {
@@ -215,6 +358,7 @@ describe('RFC-64 certified author commit CAS v1', () => {
       subgraphMutationGeneration: {
         ...base.subgraphMutationGeneration,
         expectedObject: '"stale"',
+        expectedQuads: [quad(MUTATION, P_GENERATION, '"stale"', STATE_GRAPH)],
       },
     });
 
@@ -243,7 +387,6 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(await objectFor(store, PROJECTION_GRAPH, 'urn:test:rfc64:old', P_VALUE)).toBe('"old"');
     expect(await objectFor(store, SEAL_GRAPH, SEAL, P_VALUE)).toBe('"old-seal"');
     expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(OLD_HEAD);
-    expect(await objectFor(store, STATE_GRAPH, KA_STATE, P_VALUE)).toBe(OLD_HEAD);
     expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBe('"1"');
     expect(await objectFor(store, STATE_GRAPH, CG_MUTATION, P_GENERATION)).toBe('"10"');
     expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(OLD_HEAD);
@@ -258,7 +401,10 @@ describe('RFC-64 certified author commit CAS v1', () => {
     });
 
     await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput({
-      nextCurrentHeadObject: `"${'x'.repeat(65_536)}"`,
+      currentHead: {
+        ...authorCommitInput().currentHead,
+        quads: [quad(AUTHOR, P_HEAD, `"${'x'.repeat(65_536)}"`, HEAD_GRAPH)],
+      },
     }))).rejects.toThrow(/safe limit of 65535 bytes/i);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -283,12 +429,13 @@ describe('RFC-64 certified author commit CAS v1', () => {
 
     const absent = new OxigraphStore();
     await seedOldState(absent);
-    await absent.delete([quad(KA_STATE, P_VALUE, OLD_HEAD, STATE_GRAPH)]);
+    await absent.delete([quad(AUTHOR, P_HEAD, OLD_HEAD, HEAD_GRAPH)]);
     const base = authorCommitInput();
     const absentInput = authorCommitInput({
-      kaStateDigest: {
-        ...base.kaStateDigest,
+      currentHead: {
+        ...base.currentHead,
         expectedObject: null,
+        expectedQuads: null,
       },
     });
     await expect(absent.rfc64AuthorCommitCasV1!(absentInput)).resolves.toBe('committed');
@@ -313,15 +460,14 @@ describe('RFC-64 certified author commit CAS v1', () => {
     const first = authorCommitInput();
     const secondHead = 'urn:test:rfc64:catalog:competing';
     const second = authorCommitInput({
-      nextCurrentHeadObject: secondHead,
+      currentHead: {
+        ...authorCommitInput().currentHead,
+        quads: [quad(AUTHOR, P_HEAD, secondHead, HEAD_GRAPH)],
+      },
       sharedProjectionQuads: [
         quad('urn:test:rfc64:competing', P_VALUE, '"competing"', PROJECTION_GRAPH),
       ],
       authorSealQuads: [quad(SEAL, P_VALUE, '"competing-seal"', SEAL_GRAPH)],
-      kaStateDigest: {
-        ...authorCommitInput().kaStateDigest,
-        quads: [quad(KA_STATE, P_VALUE, secondHead, STATE_GRAPH)],
-      },
       subgraphMutationGeneration: {
         ...authorCommitInput().subgraphMutationGeneration,
         quads: [quad(MUTATION, P_GENERATION, '"3"', STATE_GRAPH)],
@@ -357,12 +503,11 @@ describe('RFC-64 certified author commit CAS v1', () => {
     }
   });
 
-  it('can atomically invalidate bounded state subjects without retracting the asset', async () => {
+  it('can clear nullable bounded controls but always installs an advanced current head', async () => {
     const store = new OxigraphStore();
     await seedOldState(store);
     const base = authorCommitInput();
     const input = authorCommitInput({
-      kaStateDigest: { ...base.kaStateDigest, quads: [] },
       subgraphMutationGeneration: {
         ...base.subgraphMutationGeneration,
         quads: [],
@@ -386,22 +531,16 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(await store.countQuads(OTHER_GRAPH)).toBe(1);
   });
 
-  it('applies seal invalidations only when every guard commits', async () => {
+  it('retains unrelated stale seals on both commit and conflict', async () => {
     const committed = new OxigraphStore();
     await seedOldState(committed);
     await committed.insert([
       quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', SEAL_GRAPH),
     ]);
-    const invalidation = {
-      graphUri: SEAL_GRAPH,
-      subject: INVALIDATED_SEAL,
-      quads: [],
-    } as const;
-
-    await expect(committed.rfc64AuthorCommitCasV1!(authorCommitInput({
-      sealInvalidations: [invalidation],
-    }))).resolves.toBe('committed');
-    expect(await objectFor(committed, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBeUndefined();
+    await expect(committed.rfc64AuthorCommitCasV1!(authorCommitInput()))
+      .resolves.toBe('committed');
+    expect(await objectFor(committed, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE))
+      .toBe('"stale-seal"');
 
     const conflicted = new OxigraphStore();
     await seedOldState(conflicted);
@@ -413,8 +552,8 @@ describe('RFC-64 certified author commit CAS v1', () => {
       subgraphMutationGeneration: {
         ...base.subgraphMutationGeneration,
         expectedObject: '"stale"',
+        expectedQuads: [quad(MUTATION, P_GENERATION, '"stale"', STATE_GRAPH)],
       },
-      sealInvalidations: [invalidation],
     }))).resolves.toBe('conflict');
     expect(await objectFor(conflicted, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBe('"stale-seal"');
   });
@@ -480,10 +619,25 @@ describe('RFC-64 certified author commit CAS v1', () => {
       authorSealQuads: [],
     }))).toThrow(/non-empty author seal/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
+      currentHead: {
+        ...authorCommitInput().currentHead,
+        quads: [],
+      },
+    }))).toThrow(/non-empty current-head replacement/i);
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
+      currentHead: {
+        ...authorCommitInput().currentHead,
+        quads: [quad(AUTHOR, P_VALUE, '"not-a-head"', HEAD_GRAPH)],
+      },
+    }))).toThrow(/exactly one guarded predicate/i);
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
       authorSealSubject: '_:seal',
     }))).toThrow(/canonical IRI/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
-      nextCurrentHeadObject: '_:next-head',
+      currentHead: {
+        ...authorCommitInput().currentHead,
+        expectedObject: '_:next-head',
+      },
     }))).toThrow(/blank node/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
       subgraphMutationGeneration: {
@@ -491,45 +645,38 @@ describe('RFC-64 certified author commit CAS v1', () => {
         expectedObject: '_:generation',
       },
     }))).toThrow(/blank node/i);
-    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
-      expectedCurrentHeadObject: NEW_HEAD,
-    }))).toThrow(/must advance/i);
-    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
-      expectedCurrentHeadObject: `<${NEW_HEAD}>`,
-    }))).toThrow(/must advance/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1({
       ...authorCommitInput(),
-      kaStateDigest: undefined,
-    } as unknown as Rfc64AuthorCommitCasInputV1)).toThrow(/exact kaStateDigest semantic transition/i);
-    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
-      sealInvalidations: Array.from(
-        { length: RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1 - 3 },
-        (_, index) => ({
-          graphUri: STATE_GRAPH,
-          subject: `urn:test:rfc64:replacement:${index}`,
-          quads: [],
-        }),
-      ),
-    }))).toThrow(/at most .* state replacements/i);
+      currentHead: undefined,
+    } as unknown as Rfc64AuthorCommitCasInputV1)).toThrow(/exact currentHead semantic transition/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
       appliedSet: {
         ...authorCommitInput().appliedSet,
-        graphUri: authorCommitInput().kaStateDigest.graphUri,
-        subject: authorCommitInput().kaStateDigest.subject,
-        predicate: authorCommitInput().kaStateDigest.predicate,
+        graphUri: authorCommitInput().currentHead.graphUri,
+        subject: authorCommitInput().currentHead.subject,
+        predicate: authorCommitInput().currentHead.predicate,
+        expectedQuads: authorCommitInput().currentHead.expectedQuads,
       },
     }))).toThrow(/duplicate guard/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
       subgraphMutationGeneration: {
         ...authorCommitInput().subgraphMutationGeneration,
         graphUri: `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}guard`,
+        expectedQuads: [quad(
+          MUTATION,
+          P_GENERATION,
+          '"1"',
+          `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}guard`,
+        )],
       },
     }))).toThrow(/internal atomic graph/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
       appliedSet: {
         ...authorCommitInput().appliedSet,
-        graphUri: authorCommitInput().kaStateDigest.graphUri,
-        subject: authorCommitInput().kaStateDigest.subject,
+        graphUri: authorCommitInput().currentHead.graphUri,
+        subject: authorCommitInput().currentHead.subject,
+        predicate: P_APPLIED,
+        expectedQuads: [quad(AUTHOR, P_APPLIED, OLD_HEAD, HEAD_GRAPH)],
       },
     }))).toThrow(/duplicate subject replacement/i);
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
@@ -549,3 +696,35 @@ describe('RFC-64 certified author commit CAS v1', () => {
     }))).toThrow(/control payload exceeds/i);
   });
 });
+
+function legacyAuthorCommitInput(): Rfc64AuthorCommitCasLegacyInputV1 {
+  const current = authorCommitInput();
+  const kaStateSubject = 'urn:test:rfc64:ka-state';
+  return {
+    sharedProjectionGraph: current.sharedProjectionGraph,
+    sharedProjectionQuads: current.sharedProjectionQuads,
+    authorSealGraph: current.authorSealGraph,
+    authorSealSubject: current.authorSealSubject,
+    authorSealQuads: current.authorSealQuads,
+    currentHeadGraph: current.currentHead.graphUri,
+    currentHeadSubject: current.currentHead.subject,
+    currentHeadPredicate: current.currentHead.predicate,
+    expectedCurrentHeadObject: current.currentHead.expectedObject,
+    nextCurrentHeadObject: current.currentHead.quads[0]!.object,
+    kaStateDigest: {
+      graphUri: STATE_GRAPH,
+      subject: kaStateSubject,
+      predicate: P_VALUE,
+      expectedObject: '"old-ka-state"',
+      quads: [quad(kaStateSubject, P_VALUE, '"new-ka-state"', STATE_GRAPH)],
+    },
+    subgraphMutationGeneration: current.subgraphMutationGeneration,
+    contextGraphMutationGeneration: current.contextGraphMutationGeneration,
+    appliedSet: current.appliedSet,
+    sealInvalidations: [{
+      graphUri: SEAL_GRAPH,
+      subject: INVALIDATED_SEAL,
+      quads: [],
+    }],
+  };
+}

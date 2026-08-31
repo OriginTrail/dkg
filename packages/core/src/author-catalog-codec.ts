@@ -150,6 +150,27 @@ export function iriComponentV1(value: string): string {
   );
 }
 
+/** Strict inverse of {@link iriComponentV1} for parsed protocol coordinates. */
+export function decodeIriComponentV1(value: unknown): string {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1 * 3
+  ) {
+    fail('catalog-identifier', 'encoded IRI component is malformed or oversized');
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch (cause) {
+    fail('catalog-identifier', 'encoded IRI component is malformed', cause);
+  }
+  if (iriComponentV1(decoded) !== value) {
+    fail('catalog-identifier', 'encoded IRI component is not canonical');
+  }
+  return decoded;
+}
+
 export function assertNetworkIdV1(
   value: unknown,
   label = 'networkId',

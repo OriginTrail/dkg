@@ -16,6 +16,7 @@ function input(): Rfc64AuthorCommitCasInputV1 {
     subject,
     predicate,
     expectedObject: oldValue,
+    expectedQuads: [{ subject, predicate, object: oldValue, graph: stateGraph }],
     quads: [{ subject, predicate, object: nextValue, graph: stateGraph }],
   });
   return {
@@ -24,16 +25,17 @@ function input(): Rfc64AuthorCommitCasInputV1 {
     authorSealGraph: 'urn:seals',
     authorSealSubject: 'urn:seal',
     authorSealQuads: [{ subject: 'urn:seal', predicate: 'urn:p', object: '"seal"', graph: 'urn:seals' }],
-    currentHeadGraph: 'urn:heads',
-    currentHeadSubject: 'urn:author',
-    currentHeadPredicate: 'urn:head',
-    expectedCurrentHeadObject: 'urn:old',
-    nextCurrentHeadObject: 'urn:new',
-    kaStateDigest: transition('urn:ka-state', 'urn:value', 'urn:old', 'urn:new'),
+    currentHead: {
+      graphUri: 'urn:heads',
+      subject: 'urn:author',
+      predicate: 'urn:head',
+      expectedObject: 'urn:old',
+      expectedQuads: [{ subject: 'urn:author', predicate: 'urn:head', object: 'urn:old', graph: 'urn:heads' }],
+      quads: [{ subject: 'urn:author', predicate: 'urn:head', object: 'urn:new', graph: 'urn:heads' }],
+    },
     subgraphMutationGeneration: transition('urn:subgraph-mutation', 'urn:generation', '"1"', '"2"'),
     contextGraphMutationGeneration: transition('urn:cg-mutation', 'urn:generation', '"10"', '"11"'),
     appliedSet: transition('urn:applied-set', 'urn:root', 'urn:old-root', 'urn:new-root'),
-    sealInvalidations: [],
   };
 }
 

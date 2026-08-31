@@ -22,7 +22,10 @@ import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
-import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
+} from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
 
@@ -504,15 +507,17 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         'GraphSetIndexStore',
       );
     }
-    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(input, options);
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
     // Prepare every fallible index-maintenance input before dispatch. Once the
     // inner capability reports `committed`, only best-effort observation and
     // index maintenance may remain; malformed caller input must never create a
     // committed backend mutation that this decorator cannot account for.
-    const touchedGraphs = rfc64AuthorCommitTouchedGraphs(input);
+    const touchedGraphs = [...manifest.touchedGraphs];
     let result: Rfc64AuthorCommitCasResultV1;
     try {
-      result = await this.inner.rfc64AuthorCommitCasV1(input, options);
+      result = await this.inner.rfc64AuthorCommitCasV1(source, options);
     } catch (error) {
       if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
         this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
@@ -810,10 +815,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // Observability hooks must not make already-committed store writes fail.
     }
   }
-}
-
-function rfc64AuthorCommitTouchedGraphs(input: Rfc64AuthorCommitCasInputV1): string[] {
-  return [...normalizeRfc64AuthorCommitCasV1(input).touchedGraphs];
 }
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {

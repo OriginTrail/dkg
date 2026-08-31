@@ -15,6 +15,7 @@ import {
   type Rfc64AuthorCommitCasInputV1,
   type TripleStore,
 } from '../src/index.js';
+import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
 
 const SWM_GRAPH = 'did:dkg:context-graph:test/_shared_memory';
 const NON_SWM_GRAPH = 'did:dkg:context-graph:test';
@@ -293,7 +294,8 @@ describe('SharedMemoryLiteralBlobStore', () => {
     const committedBase = new OxigraphStore();
     const committedInner = overrideStore(committedBase, {
       rfc64AuthorCommitCasV1: async (input) => {
-        await committedBase.insert([...input.sharedProjectionQuads]);
+        const plan = normalizeRfc64AuthorCommitCasV1(input);
+        await committedBase.insert([...plan.graphReplacements[0]!.quads]);
         return 'committed';
       },
     });
@@ -449,6 +451,7 @@ function rfc64Input(subject: string, object: string): Rfc64AuthorCommitCasInputV
     subject: `urn:test:blob-race:${role}`,
     predicate: 'http://schema.org/value',
     expectedObject: null,
+    expectedQuads: null,
     quads: [quad(`urn:test:blob-race:${role}`, `"${role}-next"`, stateGraph)],
   });
   return {
@@ -457,15 +460,20 @@ function rfc64Input(subject: string, object: string): Rfc64AuthorCommitCasInputV
     authorSealGraph: sealGraph,
     authorSealSubject: 'urn:test:blob-race:seal',
     authorSealQuads: [quad('urn:test:blob-race:seal', '"seal"', sealGraph)],
-    currentHeadGraph: headGraph,
-    currentHeadSubject: 'urn:test:blob-race:author',
-    currentHeadPredicate: 'http://schema.org/value',
-    expectedCurrentHeadObject: null,
-    nextCurrentHeadObject: 'urn:test:blob-race:head:new',
-    kaStateDigest: transition('ka-state'),
+    currentHead: {
+      graphUri: headGraph,
+      subject: 'urn:test:blob-race:author',
+      predicate: 'http://schema.org/value',
+      expectedObject: null,
+      expectedQuads: null,
+      quads: [quad(
+        'urn:test:blob-race:author',
+        'urn:test:blob-race:head:new',
+        headGraph,
+      )],
+    },
     subgraphMutationGeneration: transition('subgraph-generation'),
     contextGraphMutationGeneration: transition('context-graph-generation'),
     appliedSet: transition('applied-set'),
-    sealInvalidations: [],
   };
 }
