@@ -246,6 +246,7 @@ interface NativeAgentStartOptionsV1 {
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
   readonly networkIdentityChainId?: NetworkIdV1;
+  readonly syncContextGraphs?: readonly string[];
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
@@ -264,6 +265,7 @@ async function startNativeAgentWithOptions(
     activation,
     persistentStorePath,
     beforeStart,
+    syncContextGraphs,
     networkIdentityChainId = activation === undefined && catalogActivation === undefined
       ? undefined
       : deployment.networkId,
@@ -284,7 +286,7 @@ async function startNativeAgentWithOptions(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    syncContextGraphs: catalogActivation !== undefined && catalogActivation.enabled !== false
+    syncContextGraphs: syncContextGraphs ?? (catalogActivation !== undefined && catalogActivation.enabled !== false
       ? catalogActivation.bootstrap?.acceptedPolicies.map(
         ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
       ) ?? []
@@ -292,7 +294,7 @@ async function startNativeAgentWithOptions(
         ? activation.bootstrap?.acceptedPublicPolicies.map(
           ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
         ) ?? []
-        : [],
+        : []),
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
     ...(networkIdentityChainId === undefined ? {} : {
       networkIdentity: {
@@ -324,6 +326,19 @@ async function startNativeAgentWithOptions(
   agents.push(agent);
   await beforeStart?.(agent);
   await agent.start();
+  const selectedContextGraphs = syncContextGraphs ?? (catalogActivation !== undefined
+    && catalogActivation.enabled !== false
+    ? catalogActivation.bootstrap?.acceptedPolicies.map(
+      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+    ) ?? []
+    : activation !== undefined && activation.enabled !== false
+      ? activation.bootstrap?.acceptedPublicPolicies.map(
+        ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+      ) ?? []
+      : []);
+  for (const contextGraphId of selectedContextGraphs) {
+    agent.subscribeToContextGraph(contextGraphId);
+  }
   return agent;
 }
 
@@ -1972,6 +1987,96 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((agent as any).config.rfc64PublicCatalogBootstrap).toBeDefined();
   });
 
+  it('keeps explicit catalog repair available without activating edge receiver bootstrap', async () => {
+    const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const providerPeerId = '12D3KooWUnsubscribedRepairProvider';
+    let synchronize!: ReturnType<typeof vi.spyOn>;
+    const author = await startNativeAgentWithOptions({
+      name: 'unsubscribed-explicit-catalog-repair',
+      syncContextGraphs: [],
+      activation: {
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' } },
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(selectedPolicy),
+            targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          }],
+        },
+      },
+      beforeStart: (startingAgent) => {
+        synchronize = vi.spyOn(startingAgent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
+          .mockResolvedValue(null);
+      },
+    });
+    await author.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(author.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs).toEqual([]);
+    expect(synchronize).not.toHaveBeenCalled();
+
+    const scope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    }) as const;
+    const asset = Object.freeze({
+      assertionCoordinate: 'unsubscribed-explicit-repair' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(69n),
+    });
+    const common = {
+      scope,
+      author: AUTHOR_WALLET,
+      deployment: NATIVE_DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+
+    await expect(author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+      ...common,
+      asset,
+    })).resolves.toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [asset],
+    })).resolves.toMatchObject({
+      status: 'existing',
+      successorsApplied: 0,
+      targetAssetCount: 1,
+    });
+    expect(author.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs).toEqual([]);
+    expect(synchronize).not.toHaveBeenCalled();
+
+    const legacy = await startNativeAgentWithOptions({
+      name: 'unsubscribed-legacy-repair-denied',
+      syncContextGraphs: [],
+      activation: {
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'legacy' } },
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(selectedPolicy),
+            targets: [],
+          }],
+        },
+      },
+    });
+    await expect(legacy.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...common,
+      assets: [],
+    })).rejects.toThrow(/authoring is disabled for legacy-mode CG/u);
+  }, 60_000);
+
   it('keeps direct disabled activation fail-closed even when stale controls are present', async () => {
     const ignoredPolicy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -2036,6 +2141,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const providerResolver = DKGAgent.prototype.resolveRfc64CompleteSwmProviderPeerIdsV1;
     const resolverAgent = {
       config: { rfc64PublicCatalogBootstrap: snapshot },
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
     } as unknown as DKGAgent;
     expect(providerResolver.call(resolverAgent, CONTEXT_GRAPH_ID))
       .toEqual(['12D3KooCompleteSwm']);
@@ -2085,6 +2191,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       .mockReturnValue(true);
 
     await receiver.start();
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(connect).toHaveBeenCalledWith('12D3KooWCompleteSwmProvider', {
@@ -2161,7 +2268,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       .mockReturnValue(true);
 
     await receiver.start();
-    expect(receiver.trackSyncContextGraph(policy.contextGraphId)).toBe(true);
+    receiver.subscribeToContextGraph(policy.contextGraphId);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
@@ -2225,6 +2332,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
 
     await receiver.start();
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(authorizedPlans).toHaveLength(1);
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
@@ -2290,6 +2398,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
 
     await receiver.start();
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(authorizedPlans).toHaveLength(1);
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
@@ -2357,6 +2466,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
 
     await receiver.start();
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(authorizedPlans).toHaveLength(1);
     const firstScopeOwner = (receiver as any).selectedSwmBootstrapAdmission.beginTransfer(
@@ -2365,7 +2475,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
     (receiver as any).selectedSwmBootstrapAdmission.markTransferTerminal(firstScopeOwner);
 
-    expect(receiver.trackSyncContextGraph(secondContextGraphId)).toBe(true);
+    receiver.subscribeToContextGraph(secondContextGraphId);
     await vi.waitFor(() => {
       expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass).toBeGreaterThanOrEqual(2);
     }, { timeout: 2_500, interval: 25 });

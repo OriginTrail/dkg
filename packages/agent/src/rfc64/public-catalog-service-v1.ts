@@ -332,7 +332,8 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#resolveContextGraphAuthority = options.resolveContextGraphAuthority
       ?? ((contextGraphId) => Object.freeze({
         contextGraphId,
-        selected: false,
+        eligible: false,
+        active: true,
         mode: 'catalog',
         killSwitchActive: false,
         legacySyncAllowed: true,
@@ -687,7 +688,7 @@ export class Rfc64PublicCatalogServiceV1 {
       encodeRfc64PublicCatalogHeadAnnouncementV1(input.announcement),
     );
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
-    const heldPolicy = this.#assertAcceptedCatalogAnnouncement(announcement);
+    const heldPolicy = this.#assertAcceptedCatalogAnnouncement(announcement, 'serving');
     assertSupportedCatalogFanout(
       heldPolicy,
       peers,
@@ -943,8 +944,12 @@ export class Rfc64PublicCatalogServiceV1 {
 
   #assertAcceptedCatalogAnnouncement(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    direction: 'receiver' | 'serving' = 'receiver',
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
-    if (!this.#resolveContextGraphAuthority(announcement.contextGraphId).track2Enabled) {
+    const authority = direction === 'serving'
+      ? this.#resolveContextGraphServingAuthority(announcement.contextGraphId)
+      : this.#resolveContextGraphAuthority(announcement.contextGraphId);
+    if (!authority.track2Enabled) {
       throw new Error('RFC-64 catalog reconciliation is disabled for legacy-mode CG');
     }
     const held = this.#policies.lookup(announcement.networkId, announcement.contextGraphId);

@@ -4863,10 +4863,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
     const acceptedPolicies = (this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?? []).filter(({ policyEnvelope }) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        this.config.rfc64CatalogRollout,
+      ?? []).filter(({ policyEnvelope }) => this.resolveRfc64CatalogReceiverAuthorityV1(
         policyEnvelope.payload.contextGraphId,
-      ));
+      ).legacySyncAllowed);
     // Private RFC-64 selections stay out of `syncContextGraphs`: that list is
     // also the automatic durable/VM scope, and private VM recovery belongs to
     // catalog activation. They still need an explicit SWM-only planning scope
@@ -4875,10 +4874,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(this.config.syncContextGraphs ?? []),
       ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      ).filter((contextGraphId) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        this.config.rfc64CatalogRollout,
+      ).filter((contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(
         contextGraphId,
-      )),
+      ).legacySyncAllowed),
     ])];
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
@@ -5181,10 +5179,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
-      if (!rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        this.config.rfc64CatalogRollout,
+      if (!this.resolveRfc64CatalogReceiverAuthorityV1(
         contextGraphId,
-      )) {
+      ).legacySyncAllowed) {
         this.log.debug(
           ctx,
           `Skipping legacy SWM planning for catalog-authoritative CG "${contextGraphId.slice(0, 28)}"`,
@@ -5774,10 +5771,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const requestedContextGraphCount = contextGraphIds.length;
     contextGraphIds = contextGraphIds.filter((contextGraphId) => (
-      rfc64LegacySyncAuthorityActiveForContextGraphV1(
-        this.config.rfc64CatalogRollout,
-        contextGraphId,
-      )
+      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed
     ));
     if (contextGraphIds.length !== requestedContextGraphCount) {
       this.log.debug(
@@ -9219,6 +9213,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    if (
+      (previous?.subscribed === true) !== (canonicalNext.subscribed === true)
+      && this.config.rfc64CatalogRollout.selectedContextGraphs.includes(contextGraphId)
+    ) {
+      // The canonical registry owns receiver selection. Every subscription
+      // entry point, including restart rehydration, crosses this one boundary;
+      // sync-scope bookkeeping cannot independently activate RFC-64.
+      this.requestRfc64PublicCatalogBootstrapPassV1();
+      if (
+        canonicalNext.subscribed
+        && this.rfc64PublicCatalogServiceV1 !== undefined
+      ) {
+        // The projection supervisor may have observed this edge while the CG
+        // was still dormant and therefore seeded no restart work. Re-enter
+        // its idempotent start boundary on the same canonical transition so a
+        // newly active subscription also repairs durable local-author SWM
+        // inventory. Rehydration happens before the service is ready and is
+        // picked up by the ordinary supervisor start later in startup. No
+        // parallel selection state is introduced here.
+        this.startRfc64SwmCatalogProjectionSupervisorV1(
+          createOperationContext('system'),
+        );
+      }
+    }
     // VM cleanup policy belongs to the lifecycle consumer, not to the binding
     // registry. Invalidating a reverse candidate must also invalidate any work
     // captured against it; otherwise only an inactive subscription needs the
@@ -9454,7 +9472,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
     this.invalidateListContextGraphsCache();
     this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    const wasSelected = this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
     const deleted = this.subscribedContextGraphs.delete(contextGraphId);
+    if (
+      deleted
+      && wasSelected
+      && this.config.rfc64CatalogRollout.selectedContextGraphs.includes(contextGraphId)
+    ) {
+      this.requestRfc64PublicCatalogBootstrapPassV1();
+    }
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
     // new subscription later reuses the same local id.

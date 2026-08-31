@@ -259,8 +259,9 @@ local aggregate counts, the effective mode, whether VM is required, and safe
 completion reasons. Both RFC-64 status blocks expose the configured per-CG mode
 map, the kill-switch state, and `runtimeSelection`. On edges,
 `runtimeSelection.selectedContextGraphs` is the current subscribed intersection
-of the eligible manifest. Bootstrap targets for eligible but unsubscribed CGs
-report `inactive`.
+of the eligible manifest, derived directly from the canonical live subscription
+registry. Sync-scope tracking does not select RFC-64 independently. Bootstrap
+targets for eligible but unsubscribed CGs report `inactive`.
 
 ```json
 {

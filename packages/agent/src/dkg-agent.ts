@@ -432,8 +432,6 @@ import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstra
 import { Rfc64CatalogSupervisorMethods } from './dkg-agent-rfc64-catalog-supervisor.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import {
-  createRfc64CatalogRuntimeSelectionV1,
-  rfc64LegacySyncAuthorityActiveForContextGraphV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64CatalogActivationsV1,
   resolveRfc64CatalogAuthoringPolicyV1,
@@ -852,10 +850,8 @@ export class DKGAgent extends DKGAgentBase {
           return Object.freeze({
             ...plan,
             targets: Object.freeze(plan.targets.filter(({ contextGraphId }) => (
-              rfc64LegacySyncAuthorityActiveForContextGraphV1(
-                this.config.rfc64CatalogRollout,
-                contextGraphId,
-              )
+              this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)
+                .legacySyncAllowed
             ))),
           });
         },
@@ -1105,14 +1101,6 @@ export class DKGAgent extends DKGAgentBase {
         enabled: catalogActivation.enabled,
         selectedContextGraphs: catalogActivation.selectedContextGraphs,
         rollout: catalogActivation.rollout,
-        ...(nodeRole === 'edge'
-          ? {
-            runtimeSelection: createRfc64CatalogRuntimeSelectionV1({
-              eligibleContextGraphs: catalogActivation.selectedContextGraphs,
-              initiallySelectedContextGraphs: normalizedConfig.syncContextGraphs ?? [],
-            }),
-          }
-          : {}),
       }),
       rfc64CatalogAuthoringPolicy,
       rfc64PublicCatalogBootstrap,

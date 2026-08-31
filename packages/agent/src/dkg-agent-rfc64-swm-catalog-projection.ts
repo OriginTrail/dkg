@@ -47,8 +47,6 @@ import { rfc64SwmInventoryShadowRuntimeV1 } from
   './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
-import { resolveRfc64CatalogAuthorityDecisionV1 } from
-  './rfc64/public-catalog-activation-config-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from
   './rfc64/public-catalog-service-v1.js';
 import { prepareRfc64SwmInventoryCatalogTargetV1 } from
@@ -375,9 +373,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     contextGraphId: string,
     subGraphName: string | null | undefined,
   ): Rfc64CatalogAuthoringLaneDecisionV1 {
-    const rollout = this.config.rfc64CatalogRollout;
-    if (!resolveRfc64CatalogAuthorityDecisionV1(
-      rollout,
+    if (!this.resolveRfc64CatalogReceiverAuthorityV1(
       contextGraphId,
     ).authoringAllowed) return Object.freeze({ status: 'inactive' });
     const authoringPolicy = this.config.rfc64CatalogAuthoringPolicy;

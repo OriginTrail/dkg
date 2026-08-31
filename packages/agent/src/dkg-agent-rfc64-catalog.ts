@@ -115,6 +115,7 @@ import {
   rfc64CatalogKillSwitchActiveV1,
   resolveRfc64CatalogAuthorityDecisionV1,
   resolveRfc64CatalogConfiguredAuthorityDecisionV1,
+  type Rfc64CatalogAuthorityPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -301,6 +302,39 @@ export interface Rfc64CatalogRuntimeSelectionStatusV1 {
 }
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
+  /**
+   * Receiver authority is the configured manifest policy projected through the
+   * canonical live subscription registry on edges. Cores deliberately retain
+   * manifest-wide receiver activity.
+   */
+  resolveRfc64CatalogReceiverAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64CatalogAuthorityPolicyV1 {
+    const eligible = this.config.rfc64CatalogRollout.selectedContextGraphs
+      .includes(contextGraphId);
+    const active = eligible && (
+      (this.config.nodeRole ?? 'edge') === 'core'
+      || this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
+    );
+    return resolveRfc64CatalogAuthorityDecisionV1(
+      this.config.rfc64CatalogRollout,
+      contextGraphId,
+      { active },
+    );
+  }
+
+  /** Serving and explicit repair authority is independent of edge receipt. */
+  resolveRfc64CatalogServingAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64CatalogAuthorityPolicyV1 {
+    return resolveRfc64CatalogConfiguredAuthorityDecisionV1(
+      this.config.rfc64CatalogRollout,
+      contextGraphId,
+    );
+  }
+
   /** Safe runtime selection projection for daemon status and release harnesses. */
   readRfc64CatalogRuntimeSelectionV1(
     this: DKGAgent,
@@ -308,11 +342,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const eligibleContextGraphs = Object.freeze([
       ...this.config.rfc64CatalogRollout.selectedContextGraphs,
     ].sort());
-    const runtimeSelection = this.config.rfc64CatalogRollout.runtimeSelection;
+    const subscriptionDriven = (this.config.nodeRole ?? 'edge') === 'edge';
     return Object.freeze({
-      subscriptionDriven: runtimeSelection !== undefined,
+      subscriptionDriven,
       eligibleContextGraphs,
-      selectedContextGraphs: runtimeSelection?.snapshot() ?? eligibleContextGraphs,
+      selectedContextGraphs: subscriptionDriven
+        ? Object.freeze(eligibleContextGraphs.filter((contextGraphId) => (
+          this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
+        )))
+        : eligibleContextGraphs,
     });
   }
 
@@ -350,15 +388,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
       resolveContextGraphAuthority: (contextGraphId) =>
-        resolveRfc64CatalogAuthorityDecisionV1(
-          this.config.rfc64CatalogRollout,
-          contextGraphId,
-        ),
+        this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
       resolveContextGraphServingAuthority: (contextGraphId) =>
-        resolveRfc64CatalogConfiguredAuthorityDecisionV1(
-          this.config.rfc64CatalogRollout,
-          contextGraphId,
-        ),
+        this.resolveRfc64CatalogServingAuthorityV1(contextGraphId),
       runCatalogMutationExclusive: (scope, operation, signal) =>
         this.rfc64CatalogMutationCoordinatorV1.run(scope, operation, signal),
       currentHeadDiscovery: {

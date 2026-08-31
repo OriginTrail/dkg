@@ -333,7 +333,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       accessPolicyAuthority: accessPolicyAuthority(),
       resolveContextGraphAuthority: (contextGraphId) => Object.freeze({
         contextGraphId,
-        selected: true,
+        eligible: true,
+        active: true,
         mode: 'legacy',
         killSwitchActive: false,
         legacySyncAllowed: true,
@@ -348,6 +349,128 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       .rejects.toThrow(/authoring is disabled for legacy-mode CG/u);
     expect(store.stageVerifiedObjects).not.toHaveBeenCalled();
     expect(router.events.some((event) => event.startsWith('send:'))).toBe(false);
+    await service.close();
+  });
+
+  it('keeps serving and authoring live while an edge receiver is inactive', async () => {
+    const router = new RecordingRouter();
+    const store = controlObjects();
+    const readCatalogObjectByDigest = vi.fn(async () => null);
+    const readCurrentAppliedCatalogHeadDigest = vi.fn(async () => null);
+    const inactiveReceiver = (contextGraphId: ContextGraphPolicyV1['contextGraphId']) =>
+      Object.freeze({
+        contextGraphId,
+        eligible: true,
+        active: false,
+        mode: 'catalog' as const,
+        killSwitchActive: false,
+        legacySyncAllowed: false,
+        track2Enabled: false,
+        authoringAllowed: false,
+        reconciliationLane: 'disabled' as const,
+      });
+    const configuredServing = (contextGraphId: ContextGraphPolicyV1['contextGraphId']) =>
+      Object.freeze({
+        contextGraphId,
+        eligible: true,
+        active: true,
+        mode: 'catalog' as const,
+        killSwitchActive: false,
+        legacySyncAllowed: false,
+        track2Enabled: true,
+        authoringAllowed: true,
+        reconciliationLane: 'catalog-apply' as const,
+      });
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: store,
+      native: {
+        ...nativeOptions(() => inertReconciler()),
+        readCatalogObjectByDigest,
+        resolveScopedReadCapability: async (scope) =>
+          mintRfc64CatalogNativeScopedReadCapabilityV1({
+            scope,
+            readCatalogObjectByDigest,
+            readKaBundleByDigest: async () => null,
+          }),
+      },
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest },
+      resolveContextGraphAuthority: inactiveReceiver,
+      resolveContextGraphServingAuthority: configuredServing,
+    });
+    const policy = acceptPolicy(service);
+    service.start();
+
+    const headRequest = {
+      kind: RFC64_PUBLIC_CATALOG_HEAD_FETCH_KIND_V1,
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      catalogEra: '0',
+      catalogVersion: '0',
+      policyDigest: policy.policyDigest,
+      catalogHeadObjectDigest: `0x${'aa'.repeat(32)}` as Digest32V1,
+      signatureVariantDigest: `0x${'bb'.repeat(32)}` as Digest32V1,
+    } as const;
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadFetchRequestV1(headRequest),
+    );
+    expect(store.getVerifiedObject).toHaveBeenCalledTimes(1);
+
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
+      encodeRfc64PublicCatalogObjectFetchRequestV1({
+        kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+        catalogVersion: '0',
+        policyDigest: policy.policyDigest,
+        catalogHeadObjectDigest: headRequest.catalogHeadObjectDigest,
+        targetObjectType: AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+        targetObjectDigest: `0x${'cc'.repeat(32)}` as Digest32V1,
+      }),
+    );
+    expect(readCatalogObjectByDigest).toHaveBeenCalledTimes(1);
+
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
+      encodeRfc64PublicCatalogCurrentHeadQueryV1({
+        kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+        policyDigest: policy.policyDigest,
+      }),
+    );
+    // The responder re-reads the applied head after loading the object so a
+    // concurrent local head change cannot produce a stale discovery answer.
+    expect(readCurrentAppliedCatalogHeadDigest).toHaveBeenCalledTimes(2);
+
+    await expect(service.discoverCurrentCatalogHead({
+      remotePeerId: 'peer-provider',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+      },
+    })).rejects.toThrow(/not access-policy authorized/u);
+    expect(countEvent(
+      router,
+      `send:${RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1}`,
+    )).toBe(0);
+
+    await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service, { peers: [] })))
+      .resolves.toMatchObject({ announcedPeers: [], failedPeers: [] });
+    expect(store.stageVerifiedObjects).toHaveBeenCalledTimes(2);
     await service.close();
   });
 
@@ -376,7 +499,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
         contextGraphId === legacyCg
           ? {
             contextGraphId,
-            selected: true,
+            eligible: true,
+            active: true,
             mode: 'legacy' as const,
             killSwitchActive: false,
             legacySyncAllowed: true as const,
@@ -386,7 +510,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
           }
           : {
             contextGraphId,
-            selected: true,
+            eligible: true,
+            active: true,
             mode: 'catalog' as const,
             killSwitchActive: false,
             legacySyncAllowed: false as const,
@@ -1813,7 +1938,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       onHeadStaged,
       resolveContextGraphAuthority: (contextGraphId) => Object.freeze({
         contextGraphId,
-        selected: true,
+        eligible: true,
+        active: true,
         mode: 'shadow',
         killSwitchActive: false,
         legacySyncAllowed: true,

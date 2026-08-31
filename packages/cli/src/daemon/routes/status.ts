@@ -782,6 +782,11 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       selectedPublicContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
       selectedPrivateContextGraphs: [],
       accessPolicyAuthority: undefined,
+      // The compatibility-only public projection has no private bootstrap
+      // manifest, but keep the fallback structurally aligned with the shared
+      // activation snapshot so downstream status projection stays typed.
+      bootstrap: undefined,
+      autoPublish: rfc64PublicCatalogActivation.autoPublish,
       rollout: rfc64PublicCatalogActivation.rollout,
     };
     const rfc64CatalogRollout = {

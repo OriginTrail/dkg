@@ -26,8 +26,6 @@ import { resolveRfc64PeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
   resolveRfc64CatalogConfiguredAuthorityDecisionV1,
-  rfc64LegacySyncAuthorityActiveForContextGraphV1,
-  resolveRfc64CatalogAuthorityDecisionV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
@@ -177,10 +175,9 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    if (!rfc64LegacySyncAuthorityActiveForContextGraphV1(
-      this.config.rfc64CatalogRollout,
-      contextGraphId,
-    )) return Object.freeze([]);
+    if (!this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) {
+      return Object.freeze([]);
+    }
     const config = this.config.rfc64CatalogBootstrap
       ?? this.config.rfc64PublicCatalogBootstrap;
     if (config === undefined) return Object.freeze([]);
@@ -350,10 +347,9 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     state.abortController = abortController;
     try {
       const activeLegacyPolicies = state.legacyRecoveryConfig.acceptedPolicies.filter(
-        ({ policyEnvelope }) => rfc64LegacySyncAuthorityActiveForContextGraphV1(
-          this.config.rfc64CatalogRollout,
+        ({ policyEnvelope }) => this.resolveRfc64CatalogReceiverAuthorityV1(
           policyEnvelope.payload.contextGraphId,
-        ),
+        ).legacySyncAllowed,
       );
       const activeLegacyRecoveryConfig = Object.freeze({
         ...state.legacyRecoveryConfig,
@@ -418,8 +414,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target: MutableTargetStatusV1,
     signal: AbortSignal,
   ): Promise<void> {
-    const authority = resolveRfc64CatalogAuthorityDecisionV1(
-      this.config.rfc64CatalogRollout,
+    const authority = this.resolveRfc64CatalogReceiverAuthorityV1(
       target.scope.contextGraphId,
     );
     if (!authority.track2Enabled) {

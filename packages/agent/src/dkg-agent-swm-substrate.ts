@@ -385,7 +385,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { resolveRfc64CatalogAuthorityDecisionV1 } from
+import { resolveRfc64CatalogConfiguredAuthorityDecisionV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -407,13 +407,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
     });
     const persist = syncMode === 'on-demand' ? false : options?.persist;
-    const selectionChanged = this.config.rfc64CatalogRollout.runtimeSelection
-      ?.select(contextGraphId) ?? false;
-    const authority = resolveRfc64CatalogAuthorityDecisionV1(
+    const authority = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
       this.config.rfc64CatalogRollout,
       contextGraphId,
     );
-    if (selectionChanged) this.requestRfc64PublicCatalogBootstrapPassV1();
     if (!authority.legacySyncAllowed) {
       // Preserve the user's durable selection and VM intent without installing
       // any legacy publish/update/finalization/SWM gossip authority. RFC-64 is
@@ -535,10 +532,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   ): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
-
-    const selectionChanged = this.config.rfc64CatalogRollout.runtimeSelection
-      ?.deselect(contextGraphId) ?? false;
-    if (selectionChanged) this.requestRfc64PublicCatalogBootstrapPassV1();
 
     // A host-only Core may continue chain reconciliation after member
     // unsubscribe, but peer-rotation evidence collected under the member
@@ -939,10 +932,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   public trackSyncContextGraph(this: DKGAgent, contextGraphId: string): boolean {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     if (systemContextGraphs.has(contextGraphId)) return false;
-    const selectionChanged = this.config.rfc64CatalogRollout.runtimeSelection
-      ?.select(contextGraphId) ?? false;
-    if (selectionChanged) this.requestRfc64PublicCatalogBootstrapPassV1();
-    if (!resolveRfc64CatalogAuthorityDecisionV1(
+    if (!resolveRfc64CatalogConfiguredAuthorityDecisionV1(
       this.config.rfc64CatalogRollout,
       contextGraphId,
     ).legacySyncAllowed) return false;

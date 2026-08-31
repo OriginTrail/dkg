@@ -233,7 +233,14 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     for (const listener of sigtermListeners) process.on('SIGTERM', listener);
     if (originalDkgHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = originalDkgHome;
-    if (tempHome) await rm(tempHome, { recursive: true, force: true });
+    if (tempHome) {
+      await rm(tempHome, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 20,
+      });
+    }
     tempHome = undefined;
   });
 
@@ -373,6 +380,25 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
+  it('keeps an eligible public manifest dormant on an edge without an explicit subscription', async () => {
+    const manifestContextGraph = 'rfc64-edge-eligible-only';
+    const createArg = await captureCreateArg({
+      nodeRole: 'edge',
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy(manifestContextGraph, 'evm:100'),
+          ],
+        },
+      },
+    });
+
+    expect(createArg.syncContextGraphs).toEqual([]);
+    expect(createArg.rfc64PublicCatalogActivation.bootstrap.acceptedPublicPolicies[0]
+      .policyEnvelope.payload.contextGraphId).toBe(manifestContextGraph);
   });
 
   it('keeps a private-only RFC-64 catalog selection out of generic sync wiring', async () => {
