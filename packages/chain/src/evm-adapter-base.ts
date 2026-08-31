@@ -17,7 +17,6 @@ import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import {
   DEFAULT_APPROVAL_POLICY,
   buildEvmDeploymentId,
-  contextGraphRegistryScanCursorStoreForRole,
   normalizeContextGraphRegistryScanCursorStore,
 } from './chain-adapter.js';
 import type {
@@ -1324,23 +1323,19 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
-    const roleAwareCursorStore = normalizeContextGraphRegistryScanCursorStore({
+    const cursorStores = normalizeContextGraphRegistryScanCursorStore({
       legacy: config.contextGraphRegistryScanCursorStore,
       roleAware: config.contextGraphRegistryRoleAwareScanCursorStore,
     });
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryHistoricalScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
-      store: roleAwareCursorStore
-        ? contextGraphRegistryScanCursorStoreForRole(roleAwareCursorStore, 'historical')
-        : undefined,
+      store: cursorStores.historicalStore,
     });
     this.contextGraphRegistryTipScanCursor = new ContextGraphRegistryTipScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
-      store: roleAwareCursorStore
-        ? contextGraphRegistryScanCursorStoreForRole(roleAwareCursorStore, 'tip')
-        : undefined,
+      store: cursorStores.tipStore,
     });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;

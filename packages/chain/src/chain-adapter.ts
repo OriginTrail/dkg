@@ -600,8 +600,13 @@ export interface ContextGraphRegistryRoleAwareScanCursorStore {
   ): Promise<void>;
 }
 
-/** Bind a canonical role-aware backing store to one scanner-owned cursor role. */
-export function contextGraphRegistryScanCursorStoreForRole(
+/** Internal store shape consumed by the two scanner-owned cursor roles. */
+interface ContextGraphRegistryScanCursorStores {
+  historicalStore?: ContextGraphRegistryScanCursorStore;
+  tipStore?: ContextGraphRegistryScanCursorStore;
+}
+
+function contextGraphRegistryScanCursorStoreForRole(
   store: ContextGraphRegistryRoleAwareScanCursorStore,
   cursorKind: ContextGraphRegistryScanCursorRole,
 ): ContextGraphRegistryScanCursorStore {
@@ -615,30 +620,22 @@ export function contextGraphRegistryScanCursorStoreForRole(
 export function normalizeContextGraphRegistryScanCursorStore(input: {
   legacy?: ContextGraphRegistryScanCursorStore;
   roleAware?: ContextGraphRegistryRoleAwareScanCursorStore;
-}): ContextGraphRegistryRoleAwareScanCursorStore | undefined {
+}): ContextGraphRegistryScanCursorStores {
   if (input.legacy && input.roleAware) {
     throw new Error(
       'Configure only one registry scan cursor store: legacy or role-aware, not both',
     );
   }
-  if (input.roleAware) return input.roleAware;
-  if (!input.legacy) return undefined;
-  const legacy = input.legacy;
-  const historicalKey = (
-    key: ContextGraphRegistryRoleAwareScanCursorKey,
-  ): ContextGraphRegistryScanCursorKey => ({
-    chainId: key.chainId,
-    deploymentId: key.deploymentId,
-    registryAddress: key.registryAddress,
-  });
-  return {
-    load: (key) => key.cursorKind === 'historical'
-      ? legacy.load(historicalKey(key))
-      : Promise.resolve(undefined),
-    save: (key, nextBlock) => key.cursorKind === 'historical'
-      ? legacy.save(historicalKey(key), nextBlock)
-      : Promise.resolve(),
-  };
+  if (input.roleAware) {
+    return {
+      historicalStore: contextGraphRegistryScanCursorStoreForRole(
+        input.roleAware,
+        'historical',
+      ),
+      tipStore: contextGraphRegistryScanCursorStoreForRole(input.roleAware, 'tip'),
+    };
+  }
+  return input.legacy ? { historicalStore: input.legacy } : {};
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----

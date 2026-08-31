@@ -30,6 +30,7 @@
     "@opentelemetry/sdk-trace-node": "^2.8.0",
     "@opentelemetry/semantic-conventions": "^1.41.1",
     "@openuidev/react-lang": "^0.2.3",
+    "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-graph-viz": "workspace:*",
     "better-sqlite3": "12.11.1",

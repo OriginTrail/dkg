@@ -1,15 +1,11 @@
 import Database from 'better-sqlite3';
+import type {
+  ContextGraphRegistryRoleAwareScanCursorKey,
+  ContextGraphRegistryRoleAwareScanCursorStore,
+  ContextGraphRegistryScanCursorKey,
+  ContextGraphRegistryScanCursorStore,
+} from '@origintrail-official/dkg-chain';
 import type { DashboardDB } from './db.js';
-
-type LegacyRegistryScanCursorKey = {
-  chainId: string;
-  deploymentId: string;
-  registryAddress: string;
-};
-
-type RegistryScanCursorKey = LegacyRegistryScanCursorKey & {
-  cursorKind: 'historical' | 'tip';
-};
 
 function parsePositiveSafeInteger(value: number | string | undefined): number | undefined {
   if (value == null) return undefined;
@@ -104,7 +100,8 @@ export class SqliteChainEventCursorStore {
  * Historical corrupt values retain best-effort fallback behavior. A present
  * corrupt tip value throws so strict recovery cannot confuse it with a missing row.
  */
-export class SqliteContextGraphRegistryScanCursorStore {
+export class SqliteContextGraphRegistryScanCursorStore
+  implements ContextGraphRegistryRoleAwareScanCursorStore {
   private readonly cursors: RuntimePositiveIntegerCursorStore;
   private readonly legacyCursors: SettingsPositiveIntegerCursorStore;
 
@@ -113,7 +110,7 @@ export class SqliteContextGraphRegistryScanCursorStore {
     this.legacyCursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
   }
 
-  async load(key: RegistryScanCursorKey): Promise<number | undefined> {
+  async load(key: ContextGraphRegistryRoleAwareScanCursorKey): Promise<number | undefined> {
     const current = this.cursors.load(
       this.scope(key),
       this.registryKey(key),
@@ -124,7 +121,7 @@ export class SqliteContextGraphRegistryScanCursorStore {
       ?? this.legacyCursors.load(this.legacyKey(key));
   }
 
-  async save(key: RegistryScanCursorKey, nextBlock: number): Promise<void> {
+  async save(key: ContextGraphRegistryRoleAwareScanCursorKey, nextBlock: number): Promise<void> {
     this.cursors.save(this.scope(key), this.registryKey(key), nextBlock);
   }
 
@@ -132,7 +129,7 @@ export class SqliteContextGraphRegistryScanCursorStore {
     return `${key.chainId}:${key.deploymentId}`;
   }
 
-  private registryKey(key: RegistryScanCursorKey): string {
+  private registryKey(key: ContextGraphRegistryRoleAwareScanCursorKey): string {
     return `${key.cursorKind}:${key.registryAddress.toLowerCase()}`;
   }
 
@@ -151,18 +148,19 @@ export class SqliteContextGraphRegistryScanCursorStore {
 }
 
 /** Compatibility adapter that confines the original role-less API to historical progress. */
-export class SqliteLegacyContextGraphRegistryScanCursorStore {
+export class SqliteLegacyContextGraphRegistryScanCursorStore
+  implements ContextGraphRegistryScanCursorStore {
   private readonly roleAware: SqliteContextGraphRegistryScanCursorStore;
 
   constructor(dashboard: DashboardDB) {
     this.roleAware = new SqliteContextGraphRegistryScanCursorStore(dashboard);
   }
 
-  async load(key: LegacyRegistryScanCursorKey): Promise<number | undefined> {
+  async load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined> {
     return this.roleAware.load({ ...key, cursorKind: 'historical' });
   }
 
-  async save(key: LegacyRegistryScanCursorKey, nextBlock: number): Promise<void> {
+  async save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void> {
     await this.roleAware.save({ ...key, cursorKind: 'historical' }, nextBlock);
   }
 }
