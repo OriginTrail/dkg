@@ -425,6 +425,9 @@ export {
 export { UpdateHandler } from './update-handler.js';
 export {
   ChainEventPoller,
+  type ChainEventLaneHealth,
+  type ChainEventLaneMetrics,
+  type ChainEventLanePollResult,
   type ChainEventPollerConfig,
   type CursorPersistence,
   type KnowledgeAssetRootMutationEventV1,
