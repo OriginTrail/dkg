@@ -655,12 +655,13 @@ describe('ChainEventPoller — pollNow', () => {
 
   it('stop() during a manual poll drains the queue: no scan starts after stop resolves (review r6)', async () => {
     let now = 0;
+    let head = 50_000;
     let scansStarted = 0;
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((r) => { releaseFirst = r; });
     const adapter = {
       chainId: 'mock:0',
-      getBlockNumber: async () => 50_000,
+      getBlockNumber: async () => head,
       listenForEvents: async function* (): AsyncIterable<ChainEvent> {
         scansStarted += 1;
         if (scansStarted === 1) await firstGate; // hold the FIRST scan open across stop()
@@ -676,8 +677,12 @@ describe('ChainEventPoller — pollNow', () => {
     });
 
     const p1 = poller.pollNow();          // starts scanning, blocked on the gate
+    await new Promise((r) => setTimeout(r, 10)); // p1 is INSIDE the gate with its
+                                          // window already computed (..50_000)
     const p2 = poller.pollNow();          // queued behind p1
-    await new Promise((r) => setTimeout(r, 10));
+    head = 50_010;                        // FRESH work for p2: an uncancelled
+                                          // entry must be adapter-visible, not
+                                          // an invisible caught-up noWork
     const stopped = poller.stop();        // stop() begins while p1 is mid-scan
     releaseFirst();
     await stopped;
@@ -755,11 +760,13 @@ describe('ChainEventPoller — pollNow', () => {
     let active = 0;
     let maxActive = 0;
     let scans = 0;
+    let head = 50_000;
+    const setHead = (next: number): void => { head = next; };
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const adapter = {
       chainId: 'mock:0',
-      getBlockNumber: async () => 50_000,
+      getBlockNumber: async () => head,
       listenForEvents: async function* (): AsyncIterable<ChainEvent> {
         active += 1;
         maxActive = Math.max(maxActive, active);
@@ -778,19 +785,30 @@ describe('ChainEventPoller — pollNow', () => {
     });
 
     const p1 = poller.pollNow();          // scanning, blocked on the gate
-    await new Promise((r) => setTimeout(r, 10));
-    const stopped = poller.stop();        // drains p1
+    await new Promise((r) => setTimeout(r, 10)); // p1 inside the gate; its window
+                                          // (..50_000) is already computed
+    const p2 = poller.pollNow();          // queued behind p1 BEFORE stop()
+    setHead(50_010);                      // fresh work, so an uncancelled p2
+                                          // shows up as a real adapter scan
+    const stopped = poller.stop();        // drains p1, discards p2
     const restarted = poller.start();     // must WAIT for the drain, not re-arm over it
     await new Promise((r) => setTimeout(r, 10));
     release();
-    await Promise.allSettled([p1, stopped, restarted]);
+    await Promise.allSettled([p1, p2, stopped, restarted]);
+
+    // stop()'s discard contract survives a concurrent restart: p2 was queued
+    // before stop() and must have been CANCELLED, not revived by start()
+    // resetting the latch while the drain was still walking the queue.
+    expect(scans).toBe(1);
     await poller.waitForCurrentPoll();
 
     // Never two scans in flight -- a start() that jumped the drain would have
     // issued its immediate first poll while p1 was still gated.
     expect(maxActive).toBe(1);
-    // And the restart is REAL: the manual API works again.
+    // And the restart is REAL: the manual API works again and scans the
+    // window p2 never took.
     await expect(poller.pollNow()).resolves.toBeUndefined();
+    expect(scans).toBe(2);
     await poller.stop();
   });
 
