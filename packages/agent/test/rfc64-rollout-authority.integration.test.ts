@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { multiaddr } from '@multiformats/multiaddr';
@@ -57,9 +55,9 @@ const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
   }),
 ]);
 const {
-  agents,
-  tempDirs,
+  createDataDir,
   startAgent,
+  restartAgent,
   cleanup,
 } = createRfc64RolloutAgentHarness();
 
@@ -72,9 +70,9 @@ describe('RFC-64 rollout authority integration', () => {
   it('keeps an eligible edge CG dormant until subscribe and deactivates it on unsubscribe', async () => {
     const providerPeerId = '12D3KooWSubscriptionOwnedCatalogProvider';
     let synchronize!: ReturnType<typeof vi.spyOn>;
-    const edge = await startAgent(
-      'subscription-owned-selection',
-      {
+    const edge = await startAgent({
+      name: 'subscription-owned-selection',
+      activation: {
         ...activation('catalog'),
         bootstrap: {
           acceptedPublicPolicies: [{
@@ -83,14 +81,12 @@ describe('RFC-64 rollout authority integration', () => {
           }],
         },
       },
-      undefined,
-      undefined,
-      (agent) => {
+      beforeStart: (agent) => {
         synchronize = vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
           .mockResolvedValue(null);
       },
-      { syncContextGraphs: [] },
-    );
+      config: { syncContextGraphs: [] },
+    });
     await edge.whenRfc64PublicCatalogBootstrapIdleV1();
     const initialPass = edge.readRfc64PublicCatalogBootstrapStatusV1()?.pass ?? 0;
 
@@ -162,9 +158,9 @@ describe('RFC-64 rollout authority integration', () => {
     const entered = new Promise<void>((resolve) => { markEntered = resolve; });
     let firstSignal: AbortSignal | undefined;
     let synchronize!: ReturnType<typeof vi.spyOn>;
-    const edge = await startAgent(
-      'subscription-transition-during-bootstrap',
-      {
+    const edge = await startAgent({
+      name: 'subscription-transition-during-bootstrap',
+      activation: {
         ...activation('catalog'),
         bootstrap: {
           acceptedPublicPolicies: [{
@@ -173,9 +169,7 @@ describe('RFC-64 rollout authority integration', () => {
           }],
         },
       },
-      undefined,
-      undefined,
-      (agent) => {
+      beforeStart: (agent) => {
         synchronize = vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
           .mockImplementationOnce(async ({ signal }) => {
             firstSignal = signal;
@@ -187,8 +181,8 @@ describe('RFC-64 rollout authority integration', () => {
           })
           .mockResolvedValue(null);
       },
-      { syncContextGraphs: [] },
-    );
+      config: { syncContextGraphs: [] },
+    });
     await edge.whenRfc64PublicCatalogBootstrapIdleV1();
     const initialPass = edge.readRfc64PublicCatalogBootstrapStatusV1()?.pass ?? 0;
 
@@ -212,9 +206,9 @@ describe('RFC-64 rollout authority integration', () => {
   it('retains manifest-wide RFC-64 selection on core nodes', async () => {
     const providerPeerId = '12D3KooWCoreManifestWideCatalogProvider';
     let synchronize!: ReturnType<typeof vi.spyOn>;
-    const core = await startAgent(
-      'core-manifest-selection',
-      {
+    const core = await startAgent({
+      name: 'core-manifest-selection',
+      activation: {
         ...activation('catalog'),
         bootstrap: {
           acceptedPublicPolicies: [{
@@ -223,14 +217,12 @@ describe('RFC-64 rollout authority integration', () => {
           }],
         },
       },
-      undefined,
-      undefined,
-      (agent) => {
+      beforeStart: (agent) => {
         synchronize = vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
           .mockResolvedValue(null);
       },
-      { nodeRole: 'core', syncContextGraphs: [] },
-    );
+      config: { nodeRole: 'core', syncContextGraphs: [] },
+    });
     await core.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(core.readRfc64CatalogRuntimeSelectionV1()).toEqual({
       subscriptionDriven: false,
@@ -258,29 +250,32 @@ describe('RFC-64 rollout authority integration', () => {
   });
 
   it('enforces legacy, shadow, catalog, and kill-switch authority at startup', async () => {
-    const legacy = await startAgent('legacy', activation('legacy'));
+    const legacy = await startAgent({ name: 'legacy', activation: activation('legacy') });
     expect(legacy.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(legacy.rfc64PublicCatalogStatsV1()).toBeNull();
 
-    const shadow = await startAgent('shadow', activation('shadow'));
+    const shadow = await startAgent({ name: 'shadow', activation: activation('shadow') });
     expect(shadow.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(shadow.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
 
-    const catalog = await startAgent('catalog', activation('catalog'));
+    const catalog = await startAgent({ name: 'catalog', activation: activation('catalog') });
     expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect(catalog.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
     catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect((catalog as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
 
-    const stopped = await startAgent('kill-switch', {
-      ...activation('catalog', true),
-      bootstrap: {
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(),
-          targets: [],
-          completeSwmProviders: ['12D3KooWKilledCompleteProvider'],
-        }],
+    const stopped = await startAgent({
+      name: 'kill-switch',
+      activation: {
+        ...activation('catalog', true),
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [],
+            completeSwmProviders: ['12D3KooWKilledCompleteProvider'],
+          }],
+        },
       },
     });
     expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
@@ -289,7 +284,10 @@ describe('RFC-64 rollout authority integration', () => {
   });
 
   it('keeps authorized catalog-mode metadata refresh off member and host SWM gossip', async () => {
-    const catalog = await startAgent('catalog-metadata-refresh-fence', activation('catalog'));
+    const catalog = await startAgent({
+      name: 'catalog-metadata-refresh-fence',
+      activation: activation('catalog'),
+    });
     catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
 
     const internals = catalog as any;
@@ -347,20 +345,17 @@ describe('RFC-64 rollout authority integration', () => {
       syncScoped: true,
       coreHosted: false,
     }]]);
-    const catalog = await startAgent(
-      'catalog-rehydration-fence',
-      activation('catalog'),
-      undefined,
-      undefined,
-      undefined,
-      {
+    const catalog = await startAgent({
+      name: 'catalog-rehydration-fence',
+      activation: activation('catalog'),
+      config: {
         contextGraphSubscriptionStore: {
           loadAll: async () => [...persisted.values()],
           save: async (record) => { persisted.set(record.id, { ...record }); },
           delete: async (contextGraphId) => { persisted.delete(contextGraphId); },
         },
       },
-    );
+    });
     expect(catalog.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(true);
     expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs)
       .toEqual([CONTEXT_GRAPH_ID]);
@@ -378,19 +373,23 @@ describe('RFC-64 rollout authority integration', () => {
     const providerPeerId = '12D3KooWAllLegacyCompleteProvider';
     let connect!: ReturnType<typeof vi.spyOn>;
     let queue!: ReturnType<typeof vi.spyOn>;
-    const legacy = await startAgent('all-legacy-provider', {
-      ...activation('legacy'),
-      bootstrap: {
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(),
-          targets: [],
-          completeSwmProviders: [providerPeerId],
-        }],
+    const legacy = await startAgent({
+      name: 'all-legacy-provider',
+      activation: {
+        ...activation('legacy'),
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [],
+            completeSwmProviders: [providerPeerId],
+          }],
+        },
       },
-    }, undefined, undefined, (agent) => {
-      connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
-        .mockReturnValue(true);
+      beforeStart: (agent) => {
+        connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
+        queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+          .mockReturnValue(true);
+      },
     });
     await legacy.whenRfc64PublicCatalogBootstrapIdleV1();
 
@@ -411,12 +410,11 @@ describe('RFC-64 rollout authority integration', () => {
   it.each(['legacy', 'shadow'] as const)(
     'semantically deactivates durable catalog authority before a %s restart',
     async (nextMode) => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-transition-'));
-    tempDirs.push(dataDir);
+    const dataDir = await createDataDir('rollout-transition');
     const persistentStorePath = join(dataDir, 'oxigraph');
-    const author = await startAgent(
-      'catalog-author',
-      {
+    const author = await startAgent({
+      name: 'catalog-author',
+      activation: {
         ...activation('catalog'),
         autoPublish: {
           peers: [],
@@ -425,7 +423,7 @@ describe('RFC-64 rollout authority integration', () => {
       },
       dataDir,
       persistentStorePath,
-    );
+    });
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     const seal = await authorSeal(81n);
     const applied = await author.recordRfc64PublicCatalogAssetV1({
@@ -442,18 +440,16 @@ describe('RFC-64 rollout authority integration', () => {
       'rollout-restart-guard',
       true,
     );
-    await author.stop();
-    agents.splice(agents.indexOf(author), 1);
     const producer = vi.spyOn(
       Rfc64PublicCatalogSuccessorProducerV1.prototype,
       'produceAndStageExactSet',
     );
-    const restarted = await startAgent(
-      `${nextMode}-after-catalog`,
-      activation(nextMode),
+    const restarted = await restartAgent(author, {
+      name: `${nextMode}-after-catalog`,
+      activation: activation(nextMode),
       dataDir,
       persistentStorePath,
-    );
+    });
     expect(restarted.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
@@ -474,12 +470,11 @@ describe('RFC-64 rollout authority integration', () => {
   );
 
   it('preserves locally authored shadow discovery state and legacy material on restart', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-shadow-author-'));
-    tempDirs.push(dataDir);
+    const dataDir = await createDataDir('rollout-shadow-author');
     const persistentStorePath = join(dataDir, 'oxigraph');
-    const author = await startAgent(
-      'shadow-author-restart',
-      {
+    const author = await startAgent({
+      name: 'shadow-author-restart',
+      activation: {
         ...activation('shadow'),
         autoPublish: {
           peers: [],
@@ -488,7 +483,7 @@ describe('RFC-64 rollout authority integration', () => {
       },
       dataDir,
       persistentStorePath,
-    );
+    });
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     const seal = await authorSeal(810n);
     const applied = await author.recordRfc64PublicCatalogAssetV1({
@@ -501,15 +496,12 @@ describe('RFC-64 rollout authority integration', () => {
     // Shadow catalog publication accompanies existing legacy material; it does
     // not grant catalog semantic authority over that material.
     await seedCatalogSemanticClosure(author, seal, 'shadow-author-restart-guard');
-    await author.stop();
-    agents.splice(agents.indexOf(author), 1);
-
-    const restarted = await startAgent(
-      'shadow-author-restarted',
-      activation('shadow'),
+    const restarted = await restartAgent(author, {
+      name: 'shadow-author-restarted',
+      activation: activation('shadow'),
       dataDir,
       persistentStorePath,
-    );
+    });
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -523,12 +515,11 @@ describe('RFC-64 rollout authority integration', () => {
   }, 30_000);
 
   it('preserves later legacy semantic content while relinquishing stale catalog authority', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-divergent-'));
-    tempDirs.push(dataDir);
+    const dataDir = await createDataDir('rollout-divergent');
     const persistentStorePath = join(dataDir, 'oxigraph');
-    const author = await startAgent(
-      'catalog-divergent-author',
-      {
+    const author = await startAgent({
+      name: 'catalog-divergent-author',
+      activation: {
         ...activation('catalog'),
         autoPublish: {
           peers: [],
@@ -537,7 +528,7 @@ describe('RFC-64 rollout authority integration', () => {
       },
       dataDir,
       persistentStorePath,
-    );
+    });
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     const seal = await authorSeal(85n);
     const applied = await author.recordRfc64PublicCatalogAssetV1({
@@ -555,15 +546,12 @@ describe('RFC-64 rollout authority integration', () => {
       object: '"must survive"',
       graph: swmGraph,
     }]);
-    await author.stop();
-    agents.splice(agents.indexOf(author), 1);
-
-    const restarted = await startAgent(
-      'legacy-after-divergent-catalog',
-      activation('legacy'),
+    const restarted = await restartAgent(author, {
+      name: 'legacy-after-divergent-catalog',
+      activation: activation('legacy'),
       dataDir,
       persistentStorePath,
-    );
+    });
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -584,11 +572,14 @@ describe('RFC-64 rollout authority integration', () => {
   it.each(['later semantic removal', 'inventory deletion'] as const)(
     'rolls back the whole CG after injected %s failure and retries cleanly',
     async (failureStage) => {
-      const author = await startAgent('catalog-atomic-transition', {
-        ...activation('catalog'),
-        autoPublish: {
-          peers: [],
-          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      const author = await startAgent({
+        name: 'catalog-atomic-transition',
+        activation: {
+          ...activation('catalog'),
+          autoPublish: {
+            peers: [],
+            catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+          },
         },
       });
       vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
@@ -673,12 +664,11 @@ describe('RFC-64 rollout authority integration', () => {
   );
 
   it('pauses and resumes existing catalog authority without deleting it', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-kill-switch-'));
-    tempDirs.push(dataDir);
+    const dataDir = await createDataDir('rollout-kill-switch');
     const persistentStorePath = join(dataDir, 'oxigraph');
-    const author = await startAgent(
-      'kill-switch-author',
-      {
+    const author = await startAgent({
+      name: 'kill-switch-author',
+      activation: {
         ...activation('catalog'),
         autoPublish: {
           peers: [],
@@ -687,7 +677,7 @@ describe('RFC-64 rollout authority integration', () => {
       },
       dataDir,
       persistentStorePath,
-    );
+    });
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     const seal = await authorSeal(84n);
     const applied = await author.recordRfc64PublicCatalogAssetV1({
@@ -699,15 +689,12 @@ describe('RFC-64 rollout authority integration', () => {
     expect(applied).not.toBeNull();
     await seedCatalogSemanticClosure(author, seal, 'kill-switch-preservation');
     await expectCatalogSemanticClosure(author, seal, 'kill-switch-preservation', true);
-    await author.stop();
-    agents.splice(agents.indexOf(author), 1);
-
-    const stopped = await startAgent(
-      'kill-switch-active',
-      activation('catalog', true),
+    const stopped = await restartAgent(author, {
+      name: 'kill-switch-active',
+      activation: activation('catalog', true),
       dataDir,
       persistentStorePath,
-    );
+    });
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
     expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect(stopped.readRfc64AppliedCatalogHeadV1({
@@ -715,15 +702,12 @@ describe('RFC-64 rollout authority integration', () => {
       authorAddress: AUTHOR,
     })).toMatchObject({ currentCatalogHeadDigest: applied?.currentCatalogHeadDigest });
     await expectCatalogSemanticClosure(stopped, seal, 'kill-switch-preservation', true);
-    await stopped.stop();
-    agents.splice(agents.indexOf(stopped), 1);
-
-    const resumed = await startAgent(
-      'kill-switch-cleared',
-      activation('catalog'),
+    const resumed = await restartAgent(stopped, {
+      name: 'kill-switch-cleared',
+      activation: activation('catalog'),
       dataDir,
       persistentStorePath,
-    );
+    });
     expect(resumed.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
     expect(resumed.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect(resumed.readRfc64AppliedCatalogHeadV1({
@@ -734,12 +718,11 @@ describe('RFC-64 rollout authority integration', () => {
   }, 30_000);
 
   it('retains durable catalog authority for pre-activation standalone controls', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-rollout-standalone-'));
-    tempDirs.push(dataDir);
+    const dataDir = await createDataDir('rollout-standalone');
     const persistentStorePath = join(dataDir, 'oxigraph');
-    const author = await startAgent(
-      'standalone-author',
-      {
+    const author = await startAgent({
+      name: 'standalone-author',
+      activation: {
         ...activation('catalog'),
         autoPublish: {
           peers: [],
@@ -748,7 +731,7 @@ describe('RFC-64 rollout authority integration', () => {
       },
       dataDir,
       persistentStorePath,
-    );
+    });
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     const applied = await author.recordRfc64PublicCatalogAssetV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -757,22 +740,17 @@ describe('RFC-64 rollout authority integration', () => {
       seal: assertionSealFromCanonical(await authorSeal(83n)),
     });
     expect(applied).not.toBeNull();
-    await author.stop();
-    agents.splice(agents.indexOf(author), 1);
-
-    const restarted = await startAgent(
-      'standalone-compatibility',
-      undefined,
+    const restarted = await restartAgent(author, {
+      name: 'standalone-compatibility',
       dataDir,
       persistentStorePath,
-      undefined,
-      {
+      config: {
         rfc64CatalogDeploymentProfile: DEPLOYMENT,
         rfc64PublicCatalogBootstrap: {
           acceptedPublicPolicies: [{ policyEnvelope: policyEnvelope(), targets: [] }],
         },
       },
-    );
+    });
     expect(restarted.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
@@ -785,11 +763,14 @@ describe('RFC-64 rollout authority integration', () => {
   }, 30_000);
 
   it('cold-bootstraps a valid shadow head as staged-only with no applied head', async () => {
-    const author = await startAgent('shadow-author', {
-      ...activation('catalog'),
-      autoPublish: {
-        peers: [],
-        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    const author = await startAgent({
+      name: 'shadow-author',
+      activation: {
+        ...activation('catalog'),
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
       },
     });
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
@@ -799,13 +780,16 @@ describe('RFC-64 rollout authority integration', () => {
       publicQuads: PROJECTION_QUADS,
       seal: assertionSealFromCanonical(await authorSeal(82n)),
     });
-    const shadow = await startAgent('shadow-receiver', {
-      ...activation('shadow'),
-      bootstrap: {
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(),
-          targets: [{ authorAddress: AUTHOR, providers: [author.peerId] }],
-        }],
+    const shadow = await startAgent({
+      name: 'shadow-receiver',
+      activation: {
+        ...activation('shadow'),
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [{ authorAddress: AUTHOR, providers: [author.peerId] }],
+          }],
+        },
       },
     });
     await connectBothWays(author, shadow);

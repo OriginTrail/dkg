@@ -29,18 +29,49 @@ export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
   | { kind: 'rejected' }
 >;
 
-export interface Rfc64SwmRecoveryTargetFenceV1 {
-  readonly signal: AbortSignal;
-  isCurrent(): boolean;
-  assertCurrent(): void;
-}
-
 export class Rfc64SwmRecoveryTargetRevokedErrorV1 extends Error {
   readonly code = 'RFC64_SWM_RECOVERY_TARGET_REVOKED' as const;
 
   constructor(readonly contextGraphId: string) {
     super(`RFC-64 SWM recovery authority was revoked for "${contextGraphId}"`);
     this.name = 'Rfc64SwmRecoveryTargetRevokedErrorV1';
+  }
+}
+
+/**
+ * One graph-scoped lease over the live RFC-64 recovery authority.
+ *
+ * Requester algorithms stay policy-agnostic: selected-recovery construction
+ * decorates their dependency ports with this lease once, at the lifecycle
+ * boundary. `run()` checks both sides of an awaited operation, while the
+ * signal gives transport an immediate cancellation path.
+ */
+export class Rfc64SwmRecoveryTargetLeaseV1 {
+  constructor(
+    readonly contextGraphId: string,
+    readonly signal: AbortSignal,
+    readonly isCurrent: () => boolean,
+  ) {}
+
+  assertCurrent(): void {
+    if (this.isCurrent()) return;
+    const reason = this.signal.reason;
+    if (reason instanceof Error) throw reason;
+    throw new Rfc64SwmRecoveryTargetRevokedErrorV1(this.contextGraphId);
+  }
+
+  runSync<T>(operation: () => T): T {
+    this.assertCurrent();
+    const result = operation();
+    this.assertCurrent();
+    return result;
+  }
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertCurrent();
+    const result = await operation();
+    this.assertCurrent();
+    return result;
   }
 }
 
@@ -137,11 +168,11 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     );
   }
 
-  /** Capture one target's graph-scoped cancellation and live-authority fence. */
-  captureRfc64SwmRecoveryTargetFenceV1(
+  /** Acquire one target's graph-scoped cancellation and live-authority lease. */
+  acquireRfc64SwmRecoveryTargetLeaseV1(
     this: DKGAgent,
     target: Readonly<Rfc64SwmRecoveryTargetV1>,
-  ): Rfc64SwmRecoveryTargetFenceV1 {
+  ): Rfc64SwmRecoveryTargetLeaseV1 {
     let controller = this.rfc64SwmRecoverySelectionControllers.get(target.contextGraphId);
     if (controller === undefined) {
       controller = new AbortController();
@@ -155,13 +186,11 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
       const authority = this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(target.contextGraphId);
       return authority.active && authority.lane === target.lane;
     };
-    const assertCurrent = () => {
-      if (isCurrent()) return;
-      const reason = controller.signal.reason;
-      if (reason instanceof Error) throw reason;
-      throw new Rfc64SwmRecoveryTargetRevokedErrorV1(target.contextGraphId);
-    };
-    return Object.freeze({ signal: controller.signal, isCurrent, assertCurrent });
+    return Object.freeze(new Rfc64SwmRecoveryTargetLeaseV1(
+      target.contextGraphId,
+      controller.signal,
+      isCurrent,
+    ));
   }
 
   /** Exact operator-pinned graph-complete SWM providers for one accepted policy. */

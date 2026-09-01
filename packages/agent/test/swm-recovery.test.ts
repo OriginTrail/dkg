@@ -31,6 +31,8 @@ import {
   recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from '../src/sync/requester/swm-recovery.js';
+import { Rfc64SwmRecoveryTargetLeaseV1 } from
+  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 
 /**
  * integration. `recoverContextGraphSwm` fetches a CG's
@@ -523,24 +525,33 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(await statusValues(store)).toEqual(['"v2"']); // ONLY v2 — the bug would leave {v1,v2}
   });
 
-  it('does not replace private SWM after its live recovery authority is revoked', async () => {
+  it('does not replace private SWM when authority is revoked during verification', async () => {
     const store = new OxigraphStore();
     stores.push(store);
     await store.insert([{ subject: SUBJ, predicate: STATUS, object: '"v1"', graph: WS }]);
-    let markMetaFetchEntered!: () => void;
-    let releaseMetaFetch!: () => void;
-    const metaFetchEntered = new Promise<void>((resolve) => { markMetaFetchEntered = resolve; });
-    const metaFetchRelease = new Promise<void>((resolve) => { releaseMetaFetch = resolve; });
+    let markVerificationEntered!: () => void;
+    let releaseVerification!: () => void;
+    const verificationEntered = new Promise<void>((resolve) => {
+      markVerificationEntered = resolve;
+    });
+    const verificationRelease = new Promise<void>((resolve) => {
+      releaseVerification = resolve;
+    });
     let current = true;
+    const controller = new AbortController();
+    const lease = new Rfc64SwmRecoveryTargetLeaseV1(CG, controller.signal, () => current);
     const dataFetch = vi.fn();
     const deps = makeDeps(store, [
       { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS },
     ]);
+    const processSharedMemoryBatch = deps.processSharedMemoryBatch;
     const recovery = recoverContextGraphSwm({
       ...deps,
-      assertCurrent: () => {
-        if (!current) throw new Error('recovery authority revoked');
-      },
+      processSharedMemoryBatch: (...args) => lease.run(async () => {
+        markVerificationEntered();
+        await verificationRelease;
+        return processSharedMemoryBatch(...args);
+      }),
       fetchSyncPages: async (
         _c: OperationContext,
         _p: string,
@@ -548,19 +559,16 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         _inc: boolean,
         phase: 'data' | 'meta',
       ): Promise<SyncPageResult> => {
-        if (phase === 'meta') {
-          markMetaFetchEntered();
-          await metaFetchRelease;
-          return page([]);
-        }
+        if (phase === 'meta') return page([]);
         dataFetch();
         return page([{ subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS }]);
       },
     });
 
-    await metaFetchEntered;
+    await verificationEntered;
     current = false;
-    releaseMetaFetch();
+    controller.abort(new Error('recovery authority revoked'));
+    releaseVerification();
 
     await expect(recovery).rejects.toThrow('recovery authority revoked');
     expect(dataFetch).not.toHaveBeenCalled();

@@ -20,7 +20,7 @@ import type {
   SelectedSharedMemorySyncResult,
 } from '../src/sync/shared-memory-freshness.js';
 import type { Rfc64SwmRecoveryTargetV1 } from '../src/rfc64/swm-recovery-plan-v1.js';
-import type { Rfc64SwmRecoveryTargetFenceV1 } from
+import { Rfc64SwmRecoveryTargetLeaseV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
@@ -308,9 +308,9 @@ export interface SelectedProviderSelectionAgent {
     targets: readonly Rfc64SwmRecoveryTargetV1[];
   }>;
   resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => string[];
-  captureRfc64SwmRecoveryTargetFenceV1: (
+  acquireRfc64SwmRecoveryTargetLeaseV1: (
     target: Readonly<Rfc64SwmRecoveryTargetV1>,
-  ) => Rfc64SwmRecoveryTargetFenceV1;
+  ) => Rfc64SwmRecoveryTargetLeaseV1;
   syncFromPeerDetailed: () => Promise<number>;
   refreshMetaSyncedFlags: () => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
@@ -849,7 +849,7 @@ export function createSelectedSwmLifecycleHarness(
         ? [...(options.completeSwmProviders ?? [PEER])]
         : []
     ),
-    captureRfc64SwmRecoveryTargetFenceV1: (target) => {
+    acquireRfc64SwmRecoveryTargetLeaseV1: (target) => {
       let controller = recoverySelectionControllers.get(target.contextGraphId);
       if (controller === undefined) {
         controller = new AbortController();
@@ -859,13 +859,11 @@ export function createSelectedSwmLifecycleHarness(
         !controller.signal.aborted
         && recoverySelectionControllers.get(target.contextGraphId) === controller
       );
-      return {
-        signal: controller.signal,
+      return new Rfc64SwmRecoveryTargetLeaseV1(
+        target.contextGraphId,
+        controller.signal,
         isCurrent,
-        assertCurrent: () => {
-          if (!isCurrent()) throw new Error('test recovery selection revoked');
-        },
-      };
+      );
     },
     syncSharedMemoryFromPeerDetailedExecution:
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,

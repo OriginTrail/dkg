@@ -30,20 +30,24 @@ describe('RFC-64 rollout selected-SWM recovery integration', () => {
     const providerPeerId = '12D3KooWCatalogCompleteProvider';
     let connect!: ReturnType<typeof vi.spyOn>;
     let queue!: ReturnType<typeof vi.spyOn>;
-    const catalog = await startAgent('catalog-complete-provider', {
-      ...activation('catalog'),
-      bootstrap: {
-        retryIntervalMs: 0,
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(),
-          targets: [],
-          completeSwmProviders: [providerPeerId],
-        }],
+    const catalog = await startAgent({
+      name: 'catalog-complete-provider',
+      activation: {
+        ...activation('catalog'),
+        bootstrap: {
+          retryIntervalMs: 0,
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [],
+            completeSwmProviders: [providerPeerId],
+          }],
+        },
       },
-    }, undefined, undefined, (agent) => {
-      connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
-        .mockReturnValue(true);
+      beforeStart: (agent) => {
+        connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
+        queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+          .mockReturnValue(true);
+      },
     });
     await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
 
@@ -128,25 +132,30 @@ describe('RFC-64 rollout selected-SWM recovery integration', () => {
       releaseCatalog = () => resolve(null);
     });
     let queue!: ReturnType<typeof vi.spyOn>;
-    const catalog = await startAgent('catalog-readiness-invalidation', {
-      ...activation('catalog'),
-      bootstrap: {
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(),
-          targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
-          completeSwmProviders: [providerPeerId],
-        }],
+    const catalog = await startAgent({
+      name: 'catalog-readiness-invalidation',
+      activation: {
+        ...activation('catalog'),
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+            completeSwmProviders: [providerPeerId],
+          }],
+        },
       },
-    }, undefined, undefined, (agent) => {
-      vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-      vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
-        .mockImplementation(async () => {
-          markCatalogEntered();
-          return stalledCatalog;
-        });
-      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
-        .mockReturnValue(true);
-    }, { syncContextGraphs: [] });
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
+        vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
+          .mockImplementation(async () => {
+            markCatalogEntered();
+            return stalledCatalog;
+          });
+        queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+          .mockReturnValue(true);
+      },
+      config: { syncContextGraphs: [] },
+    });
 
     await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs).toEqual([]);
@@ -172,27 +181,31 @@ describe('RFC-64 rollout selected-SWM recovery integration', () => {
     );
   });
 
-  it('revokes an in-flight selected recovery before it can mutate the store', async () => {
+  it('aborts an in-flight selected recovery fetch before it can mutate the store', async () => {
     const providerPeerId = '12D3KooWCatalogRevocationProvider';
     let markFetchEntered!: () => void;
-    let releaseFetch!: () => void;
     const fetchEntered = new Promise<void>((resolve) => { markFetchEntered = resolve; });
-    const fetchRelease = new Promise<void>((resolve) => { releaseFetch = resolve; });
-    const catalog = await startAgent('catalog-recovery-revocation', {
-      ...activation('catalog'),
-      bootstrap: {
-        retryIntervalMs: 0,
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(),
-          targets: [],
-          completeSwmProviders: [providerPeerId],
-        }],
+    let fetchSignal: AbortSignal | undefined;
+    const catalog = await startAgent({
+      name: 'catalog-recovery-revocation',
+      activation: {
+        ...activation('catalog'),
+        bootstrap: {
+          retryIntervalMs: 0,
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [],
+            completeSwmProviders: [providerPeerId],
+          }],
+        },
       },
-    }, undefined, undefined, (agent) => {
-      vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-      vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
-        .mockReturnValue(true);
-    }, { durableSyncEnabled: true });
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
+        vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+          .mockReturnValue(true);
+      },
+      config: { durableSyncEnabled: true },
+    });
     await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
 
     const dataQuad: Quad = {
@@ -208,11 +221,26 @@ describe('RFC-64 rollout selected-SWM recovery integration', () => {
       _contextGraphId,
       _includeSharedMemory,
       phase,
+      _graphUri,
+      _deadline,
+      options,
     ) => {
       if (firstFetch) {
         firstFetch = false;
+        fetchSignal = options?.signal;
         markFetchEntered();
-        await fetchRelease;
+        await new Promise<never>((_resolve, reject) => {
+          const signal = fetchSignal;
+          if (signal === undefined) {
+            reject(new Error('selected recovery did not forward its revocation signal'));
+            return;
+          }
+          if (signal.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
       }
       const quads = phase === 'data' ? [dataQuad] : [];
       return {
@@ -259,9 +287,121 @@ describe('RFC-64 rollout selected-SWM recovery integration', () => {
 
     const admission = (catalog as any).selectedSwmBootstrapAdmission;
     expect(admission.snapshot(providerPeerId)).toMatchObject({ phase: 'retry-required' });
+    expect(fetchSignal).toBeDefined();
+    expect(fetchSignal?.aborted).toBe(false);
     catalog.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    expect(fetchSignal?.aborted).toBe(true);
     expect(admission.snapshot(providerPeerId)).toBeNull();
-    releaseFetch();
+
+    await expect(recovery).resolves.toMatchObject({
+      kind: 'selected-shared-memory',
+      scopeComplete: false,
+      targetDiagnostics: {
+        selectedPublic: { completed: 0, total: 1 },
+      },
+    });
+    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(admission.snapshot(providerPeerId)).toBeNull();
+    const store = (catalog as any).store;
+    await expect(store.hasGraph(contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)))
+      .resolves.toBe(false);
+  });
+
+  it('revokes selected recovery after verification but before materialization', async () => {
+    const providerPeerId = '12D3KooWCatalogLateRevocationProvider';
+    const catalog = await startAgent({
+      name: 'catalog-late-recovery-revocation',
+      activation: {
+        ...activation('catalog'),
+        bootstrap: {
+          retryIntervalMs: 0,
+          acceptedPublicPolicies: [{
+            policyEnvelope: policyEnvelope(),
+            targets: [],
+            completeSwmProviders: [providerPeerId],
+          }],
+        },
+      },
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
+        vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+          .mockReturnValue(true);
+      },
+      config: { durableSyncEnabled: true },
+    });
+    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    const dataQuad: Quad = {
+      subject: 'https://example.org/late-revoked',
+      predicate: 'https://schema.org/name',
+      object: '"must-not-materialize"',
+      graph: contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID),
+    };
+    vi.spyOn(catalog, 'fetchSyncPages').mockImplementation(async (
+      _ctx,
+      _peerId,
+      _contextGraphId,
+      _includeSharedMemory,
+      phase,
+    ) => {
+      const quads = phase === 'data' ? [dataQuad] : [];
+      return {
+        quads,
+        bytesReceived: quads.length,
+        resumedFromOffset: 0,
+        nextOffset: quads.length,
+        checkpointKey: `late-revocation:${phase}`,
+        completed: true,
+        timedOut: false,
+      };
+    });
+    let markVerificationEntered!: () => void;
+    let releaseVerification!: () => void;
+    const verificationEntered = new Promise<void>((resolve) => {
+      markVerificationEntered = resolve;
+    });
+    const verificationRelease = new Promise<void>((resolve) => {
+      releaseVerification = resolve;
+    });
+    vi.spyOn(catalog, 'getOrCreateSyncVerifyWorker').mockReturnValue({
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => {
+        markVerificationEntered();
+        await verificationRelease;
+        return {
+          verifiedData: dataQuads,
+          verifiedMeta: metaQuads,
+          totalFetchedDataQuads: dataQuads.length,
+          totalFetchedMetaQuads: metaQuads.length,
+          droppedDataTriples: 0,
+          emptyResponses: 0,
+          entityCreators: [],
+        };
+      },
+    } as any);
+
+    const recovery = catalog.syncSelectedSharedMemoryFromPeerDetailed(
+      providerPeerId,
+      [CONTEXT_GRAPH_ID],
+      {
+        selectedSwmPriority: true,
+        requestedScope: {
+          kind: 'rfc64-recovery-plan',
+          plan: {
+            kind: 'rfc64-authorized-swm-recovery-v1',
+            providerPeerId,
+            targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+          },
+        },
+        stopOnBackoffWorthyFailure: true,
+        priority: 2_000,
+        source: 'on-connect',
+      },
+    );
+    await verificationEntered;
+
+    const admission = (catalog as any).selectedSwmBootstrapAdmission;
+    catalog.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    releaseVerification();
 
     await expect(recovery).resolves.toMatchObject({
       kind: 'selected-shared-memory',

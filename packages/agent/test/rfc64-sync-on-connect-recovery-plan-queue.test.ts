@@ -116,22 +116,22 @@ describe('RFC-64 recovery-plan queue authorization', () => {
         lane: contextGraphId === 'private-cg' ? 'ordinary-private' : 'selected-public',
         active: true,
       }));
-    const publicFence = agent.captureRfc64SwmRecoveryTargetFenceV1({
+    const publicLease = agent.acquireRfc64SwmRecoveryTargetLeaseV1({
       contextGraphId: 'public-cg',
       lane: 'selected-public',
     });
-    const privateFence = agent.captureRfc64SwmRecoveryTargetFenceV1({
+    const privateLease = agent.acquireRfc64SwmRecoveryTargetLeaseV1({
       contextGraphId: 'private-cg',
       lane: 'ordinary-private',
     });
 
     agent.invalidateRfc64SwmRecoverySelectionStateV1('public-cg');
 
-    expect(publicFence.signal.aborted).toBe(true);
-    expect(publicFence.isCurrent()).toBe(false);
-    expect(privateFence.signal.aborted).toBe(false);
-    expect(privateFence.isCurrent()).toBe(true);
-    expect(() => privateFence.assertCurrent()).not.toThrow();
+    expect(publicLease.signal.aborted).toBe(true);
+    expect(publicLease.isCurrent()).toBe(false);
+    expect(privateLease.signal.aborted).toBe(false);
+    expect(privateLease.isCurrent()).toBe(true);
+    expect(() => privateLease.assertCurrent()).not.toThrow();
   });
 
   it('reports a catalog recovery plan that is not authorized', async () => {

@@ -61,20 +61,34 @@ export function rfc64RolloutActivation(
   };
 }
 
-export function createRfc64RolloutAgentHarness() {
-  const agents: DKGAgent[] = [];
-  const tempDirs: string[] = [];
+export interface Rfc64RolloutStartAgentOptions {
+  readonly name: string;
+  readonly activation?: Rfc64PublicCatalogActivationInputV1;
+  readonly dataDir?: string;
+  readonly persistentStorePath?: string;
+  readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
+  readonly config?: Partial<Parameters<typeof DKGAgent.create>[0]>;
+}
 
-  const startAgent = async (
-    name: string,
-    activationInput: Rfc64PublicCatalogActivationInputV1 | undefined,
-    existingDataDir?: string,
-    persistentStorePath?: string,
-    beforeStart?: (agent: DKGAgent) => void | Promise<void>,
-    extraConfig: Partial<Parameters<typeof DKGAgent.create>[0]> = {},
-  ): Promise<DKGAgent> => {
-    const dataDir = existingDataDir ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-${name}-`));
-    if (existingDataDir === undefined) tempDirs.push(dataDir);
+export function createRfc64RolloutAgentHarness() {
+  const agents = new Set<DKGAgent>();
+  const tempDirs = new Set<string>();
+
+  const createDataDir = async (label: string): Promise<string> => {
+    const dataDir = await mkdtemp(join(tmpdir(), `dkg-rfc64-${label}-`));
+    tempDirs.add(dataDir);
+    return dataDir;
+  };
+
+  const startAgent = async (options: Rfc64RolloutStartAgentOptions): Promise<DKGAgent> => {
+    const {
+      name,
+      activation: activationInput,
+      persistentStorePath,
+      beforeStart,
+      config = {},
+    } = options;
+    const dataDir = options.dataDir ?? await createDataDir(name);
     const agent = await DKGAgent.create({
       name,
       dataDir,
@@ -96,12 +110,12 @@ export function createRfc64RolloutAgentHarness() {
         chainId: RFC64_ROLLOUT_NETWORK_ID,
       },
       rfc64PublicCatalogActivation: activationInput,
-      ...extraConfig,
+      ...config,
     });
-    agents.push(agent);
+    agents.add(agent);
     await beforeStart?.(agent);
     await agent.start();
-    for (const contextGraphId of extraConfig.syncContextGraphs
+    for (const contextGraphId of config.syncContextGraphs
       ?? activationInput?.bootstrap?.acceptedPublicPolicies.map(
         ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
       )
@@ -111,14 +125,29 @@ export function createRfc64RolloutAgentHarness() {
     return agent;
   };
 
-  const cleanup = async (): Promise<void> => {
-    for (const agent of agents.splice(0)) {
-      try { await agent.stop(); } catch { /* best effort */ }
-    }
-    await Promise.all(tempDirs.splice(0).map(
-      (path) => rm(path, { recursive: true, force: true }),
-    ));
+  const stopAgent = async (agent: DKGAgent): Promise<void> => {
+    await agent.stop();
+    agents.delete(agent);
   };
 
-  return { agents, tempDirs, startAgent, cleanup };
+  const restartAgent = async (
+    previous: DKGAgent,
+    options: Rfc64RolloutStartAgentOptions,
+  ): Promise<DKGAgent> => {
+    await stopAgent(previous);
+    return startAgent(options);
+  };
+
+  const cleanup = async (): Promise<void> => {
+    for (const agent of agents) {
+      try { await agent.stop(); } catch { /* best effort */ }
+    }
+    agents.clear();
+    await Promise.all([...tempDirs].map(
+      (path) => rm(path, { recursive: true, force: true }),
+    ));
+    tempDirs.clear();
+  };
+
+  return { createDataDir, startAgent, stopAgent, restartAgent, cleanup };
 }
