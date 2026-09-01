@@ -21,11 +21,7 @@ export interface PublisherSigner {
 export interface PublisherAddressResolution {
   address?: string;
   planningPin?: string;
-  /** Diagnostics only; signer policy is carried exclusively by registrationPin. */
   planningPinLabel?: string;
-  registrationPin:
-    | { disposition: 'hard'; address: string }
-    | { disposition: 'advisory' };
 }
 
 interface PublisherPlanningStateLocal {

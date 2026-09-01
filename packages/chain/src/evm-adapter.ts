@@ -45,8 +45,6 @@ export {
   ContextGraphFacadeVersionUnknownError,
   ContextGraphRegistrationSignerUnavailableError,
   ContextGraphRegistrationCoverageSignerUnavailableError,
-  StaleHubBindingError,
-  isHubStaleError,
   type PublisherWalletBalance,
 } from './evm-adapter-errors.js';
 export {
@@ -60,11 +58,6 @@ export {
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
 } from './evm-adapter-allowance.js';
 export type { EVMAdapterConfig } from './evm-adapter-types.js';
-export {
-  parsePcaRegistrationCoverageAccount,
-  type PcaRegistrationCoverageAccount,
-} from './evm-adapter-conviction.js';
-
 /**
  * EVM chain adapter implementing the V9 ChainAdapter interface.
  * Resolves contract addresses dynamically from the Hub.

@@ -154,10 +154,6 @@ export {
   ContextGraphFacadeVersionUnknownError,
   ContextGraphRegistrationSignerUnavailableError,
   ContextGraphRegistrationCoverageSignerUnavailableError,
-  StaleHubBindingError,
-  isHubStaleError,
-  parsePcaRegistrationCoverageAccount,
-  type PcaRegistrationCoverageAccount,
   type PublisherWalletBalance,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';

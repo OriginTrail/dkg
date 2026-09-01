@@ -1520,6 +1520,54 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     });
   });
 
+  it('seals legacy direct registration around the adapter signer, not an advisory author hint', async () => {
+    const advisoryWallet = new ethers.Wallet(TEST_KEY);
+    const directWallet = new ethers.Wallet(TEST_KEY_ALT);
+    const chain = new MockChainAdapter('mock:31337', directWallet.address);
+    const create = vi.spyOn(chain, 'createOnChainContextGraph');
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async () => ({
+        address: advisoryWallet.address,
+        registrationPin: 'advisory',
+        source: 'generic-adapter-inference',
+      }),
+    });
+
+    const legacy = await publisher.prepareLegacyContextGraphRegistration();
+    expect(legacy.signerAddress).toBe(directWallet.address);
+    await legacy.submit({
+      accessPolicy: 1,
+      publishPolicy: 1,
+      participantAgents: [],
+      nameHash: ethers.ZeroHash,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects legacy direct registration when a hard publisher pin differs from the adapter signer', async () => {
+    const pinnedWallet = new ethers.Wallet(TEST_KEY);
+    const directWallet = new ethers.Wallet(TEST_KEY_ALT);
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain: new MockChainAdapter('mock:31337', directWallet.address),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async () => ({
+        address: pinnedWallet.address,
+        registrationPin: 'hard',
+        source: 'configured-publisher',
+      }),
+    });
+
+    await expect(publisher.prepareLegacyContextGraphRegistration())
+      .rejects.toThrow(/does not match the legacy direct chain signer/);
+  });
+
   it('keeps a legacy string resolver result as a hard registration pin', async () => {
     const wallet = new ethers.Wallet(TEST_KEY);
     const chain = new MockChainAdapter('mock:31337', wallet.address);

@@ -1,5 +1,14 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal, PrepareContextGraphRegistrationOptions, PreparedContextGraphRegistration } from '@origintrail-official/dkg-chain';
+import type {
+  ChainAdapter,
+  OnChainPublishResult,
+  AddBatchToContextGraphParams,
+  PreBroadcastSignal,
+  PrepareContextGraphRegistrationOptions,
+  PreparedContextGraphRegistration,
+  CreateOnChainContextGraphParams,
+  CreateOnChainContextGraphResult,
+} from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
@@ -572,6 +581,17 @@ interface PublisherAddressResolutionOptions {
   includeReservingPublisherProbe?: boolean;
   includeGenericSignMessageProbe?: boolean;
 }
+
+interface PublisherRegistrationSelection extends PublisherAddressResolution {
+  registrationPin:
+    | { disposition: 'hard'; address: string }
+    | { disposition: 'advisory' };
+}
+
+type PublisherContextGraphRegistrationOptions = Pick<
+  PrepareContextGraphRegistrationOptions,
+  'registrationPcaAccountId' | 'registrationSignerAddress'
+>;
 
 function normalizePublisherAddress(address: string | undefined): string | undefined {
   if (address === undefined) return undefined;
@@ -1476,7 +1496,7 @@ export class DKGPublisher implements Publisher {
   private async resolvePublisherAddressSelection(
     contextGraphId?: bigint,
     options: PublisherAddressResolutionOptions = {},
-  ): Promise<PublisherAddressResolution> {
+  ): Promise<PublisherRegistrationSelection> {
     if (this.publisherAddress) {
       return {
         address: this.publisherAddress,
@@ -1542,7 +1562,7 @@ export class DKGPublisher implements Publisher {
    * escape this boundary.
    */
   async prepareContextGraphRegistration(
-    options: PrepareContextGraphRegistrationOptions = {},
+    options: PublisherContextGraphRegistrationOptions = {},
   ): Promise<PreparedContextGraphRegistration> {
     const prepare = this.chain.prepareOnChainContextGraphRegistration;
     if (!prepare) {
@@ -1578,6 +1598,49 @@ export class DKGPublisher implements Publisher {
       registrationSignerAddress,
       preferPcaCoveredSigner: registrationSignerAddress === undefined,
     });
+  }
+
+  /**
+   * Seal the compatibility path for adapters that predate prepared context-
+   * graph registration. Hard publisher identities must match the adapter that
+   * will submit; advisory inference leaves that direct adapter signer in
+   * control. The caller receives only the authoritative signer (when the
+   * adapter exposes it) and a one-purpose submit capability.
+   */
+  async prepareLegacyContextGraphRegistration(): Promise<{
+    readonly signerAddress?: string;
+    submit(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  }> {
+    if (typeof this.chain.createOnChainContextGraph !== 'function') {
+      throw new Error('Chain adapter does not support direct context-graph registration.');
+    }
+
+    const [selection, directSignerAddress] = await Promise.all([
+      this.resolvePublisherAddressSelection(),
+      this.inferAdapterPublisherAddress(undefined, {
+        includeReservingPublisherProbe: false,
+      }),
+    ]);
+    const hardRegistrationPin = selection.registrationPin.disposition === 'hard'
+      ? selection.registrationPin.address
+      : undefined;
+    if (
+      hardRegistrationPin
+      && (
+        !directSignerAddress
+        || hardRegistrationPin.toLowerCase() !== directSignerAddress.toLowerCase()
+      )
+    ) {
+      throw new Error(
+        `Configured publisher ${hardRegistrationPin} does not match the legacy direct chain signer ` +
+        `${directSignerAddress ?? '(unavailable)'}.`,
+      );
+    }
+
+    return {
+      ...(directSignerAddress ? { signerAddress: directSignerAddress } : {}),
+      submit: (params) => this.chain.createOnChainContextGraph!(params),
+    };
   }
 
   /** Sign EIP-712 typed data with the publisher's own wallet. Returns KAv10's compact (r, vs). */
