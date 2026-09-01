@@ -13,7 +13,6 @@ import {
 } from './_helpers/sync-on-connect-test-fixture.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
-const PEER_B = '12D3KooWRfc64SecondCompleteProvider';
 
 describe('RFC-64 recovery-plan queue authorization', () => {
   it('queues a widened plan when a newly selected graph had no admission owner', async () => {
