@@ -1594,6 +1594,7 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     const walletB = new ethers.Wallet(TEST_KEY_ALT);
     const chain = new MockChainAdapter('mock:31337', walletA.address);
     const prepare = vi.spyOn(chain, 'prepareOnChainContextGraphRegistration');
+    const { accountId } = await chain.createPublishingConvictionAccount(ethers.parseEther('10000'));
     const publisher = new DKGPublisher({
       store: new OxigraphStore(),
       chain,
@@ -1606,9 +1607,9 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       }),
     });
 
-    await publisher.prepareContextGraphRegistration({ registrationPcaAccountId: 8n });
+    await publisher.prepareContextGraphRegistration({ registrationPcaAccountId: accountId });
     expect(prepare).toHaveBeenCalledWith({
-      registrationPcaAccountId: 8n,
+      registrationPcaAccountId: accountId,
       registrationSignerAddress: walletA.address,
       preferPcaCoveredSigner: false,
     });

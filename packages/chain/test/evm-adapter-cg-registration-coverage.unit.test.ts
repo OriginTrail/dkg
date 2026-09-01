@@ -10,6 +10,7 @@ import {
   ContextGraphRegistrationCoverageSignerUnavailableError,
   PcaCoverageUnsupportedError,
 } from '../src/evm-adapter-errors.js';
+import { ChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 
 const PRIMARY_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const SECONDARY_PK = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
@@ -283,6 +284,36 @@ describe('prepared context-graph PCA registration coverage', () => {
     expect(error.accountId).toBe(8n);
   });
 
+  it.each(['ownerOf', 'agentToAccountId'] as const)(
+    'preserves a retryable %s verification failure instead of fabricating a signer mismatch',
+    async (failingMethod) => {
+      const adapter = makeAdapter();
+      const pca = { kind: 'pca' };
+      const rpcError = new ChainRpcTransportError(
+        'RPC_ENDPOINTS_EXHAUSTED',
+        `${failingMethod} RPC endpoints exhausted`,
+      );
+      adapter.contracts = { ...adapter.contracts, dkgPublishingConvictionNFT: pca };
+      adapter.readContract = async (
+        contract: unknown,
+        _label: string,
+        method: string,
+      ) => {
+        if (contract !== pca) throw new Error(`unexpected contract read ${method}`);
+        if (method === failingMethod) throw rpcError;
+        if (method === 'ownerOf') return UNRELATED_ADDRESS;
+        if (method === 'agentToAccountId') return 0n;
+        throw new Error(`unexpected PCA read ${method}`);
+      };
+
+      const rejected = adapter.prepareOnChainContextGraphRegistration({
+        registrationPcaAccountId: 8n,
+      }).catch((error: unknown) => error);
+
+      expect(await rejected).toBe(rpcError);
+    },
+  );
+
   it('verifies a hard pin without rotating to a different matching pool signer', async () => {
     const adapter = makeAdapter([SECONDARY_PK]);
     const [walletA, walletB] = adapter.signerPool;
@@ -492,6 +523,68 @@ describe('automatic PCA coverage discovery bounds and eligibility', () => {
       .resolves.toEqual({ source: 'owned', accountId: 2n });
   });
 
+  it.each([
+    {
+      label: 'fully swept',
+      account: { committedTRAC: 1_000n, expiresAtTimestamp: 0n, fullySwept: true },
+      ownerMatches: true,
+      snapshot: {},
+      expected: { source: 'none' },
+    },
+    {
+      label: 'expired exactly at the latest block timestamp',
+      account: { committedTRAC: 1_000n, expiresAtTimestamp: 1_000n, fullySwept: false },
+      ownerMatches: true,
+      snapshot: {},
+      expected: { source: 'none' },
+    },
+    {
+      label: 'not yet expired',
+      account: { committedTRAC: 1_000n, expiresAtTimestamp: 1_001n, fullySwept: false },
+      ownerMatches: true,
+      snapshot: {},
+      expected: { source: 'owned', accountId: 1n },
+    },
+    {
+      label: 'owner mismatch',
+      account: { committedTRAC: 1_000n, expiresAtTimestamp: 0n, fullySwept: false },
+      ownerMatches: false,
+      snapshot: {},
+      expected: { source: 'none' },
+    },
+    {
+      label: 'zero commitment even with a zero minimum floor',
+      account: { committedTRAC: 0n, expiresAtTimestamp: 0n, fullySwept: false },
+      ownerMatches: true,
+      snapshot: { minimumCommitment: 0n },
+      expected: { source: 'none' },
+    },
+  ])('treats $label with fail-closed eligibility semantics', async ({
+    account,
+    ownerMatches,
+    snapshot,
+    expected,
+  }) => {
+    const adapter = makeAdapter();
+    const signer = adapter.signerPool[0];
+    adapter.readContract = async (
+      _contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (method === 'balanceOf') return 1n;
+      if (method === 'tokenOfOwnerByIndex') return 1n;
+      if (method === 'ownerOf') return ownerMatches ? signer.address : UNRELATED_ADDRESS;
+      if (method === 'accounts') return account;
+      if (method === 'waivedCgCount') return 0n;
+      if (method === 'agentToAccountId') return 0n;
+      throw new Error(`unexpected read ${method}`);
+    };
+
+    await expect(adapter.discoverCoverageForSigner(signer, coverageSnapshot(snapshot)))
+      .resolves.toEqual(expected);
+  });
+
   it('uses the exact strict-agent mapping only after no owned candidate qualifies', async () => {
     const adapter = makeAdapter();
     const signer = adapter.signerPool[0];
@@ -572,9 +665,14 @@ describe('facade capability and allowance/stale-Hub behavior', () => {
     expect(send.calls[0][3]).toBe(adapter.signerPool[0]);
   });
 
-  it('uses the additive selector on 10.0.5+ and preserves legacy selector for matching authority coverage', async () => {
+  it.each([
+    '10.0.5',
+    '10.0.5+build.1',
+    '10.0.6-rc.1',
+    '11.0.0',
+  ])('uses the additive selector on supported facade version %s', async (version) => {
     const adapter = makeAdapter();
-    configureSubmission(adapter, '10.0.5');
+    configureSubmission(adapter, version);
     const send = recorder(async (..._args: unknown[]) => successfulReceipt());
     adapter.sendContractTransaction = send;
     const prepared = await adapter.prepareOnChainContextGraphRegistration({ registrationPcaAccountId: 5n });
@@ -582,8 +680,15 @@ describe('facade capability and allowance/stale-Hub behavior', () => {
     await prepared.submit(CREATE_PARAMS);
     expect(send.calls[0][1]).toBe('createContextGraphWithPcaCoverage');
     expect(send.calls[0][2]).toHaveLength(8);
+  });
 
-    send.calls.length = 0;
+  it('preserves the legacy selector when publish authority provides the same coverage', async () => {
+    const adapter = makeAdapter();
+    configureSubmission(adapter, '10.0.5');
+    const send = recorder(async (..._args: unknown[]) => successfulReceipt());
+    adapter.sendContractTransaction = send;
+    const prepared = await adapter.prepareOnChainContextGraphRegistration({ registrationPcaAccountId: 5n });
+
     await prepared.submit({ ...CREATE_PARAMS, publishAuthorityAccountId: 5n });
     expect(send.calls[0][1]).toBe('createContextGraph');
     expect(send.calls[0][2]).toHaveLength(7);

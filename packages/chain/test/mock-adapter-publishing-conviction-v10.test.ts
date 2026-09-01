@@ -9,9 +9,53 @@ import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { toShardingTableNode } from '../src/evm-adapter-conviction.js';
 import type { PcaRpcMethod } from '../src/chain-adapter.js';
+import { ContextGraphRegistrationCoverageSignerUnavailableError } from '../src/evm-adapter-errors.js';
 
 const SIGNER = '0x1111111111111111111111111111111111111111';
 const COMMITTED = ethers.parseEther('10000');
+
+describe('MockChainAdapter — explicit context-graph registration coverage parity', () => {
+  const AGENT = '0x2222222222222222222222222222222222222222';
+  const STRANGER = '0x3333333333333333333333333333333333333333';
+
+  it('prepares explicit coverage for the account owner', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+
+    await expect(mock.prepareOnChainContextGraphRegistration({
+      registrationPcaAccountId: accountId,
+    })).resolves.toMatchObject({
+      signerAddress: ethers.getAddress(SIGNER),
+      coverage: { source: 'explicit', accountId },
+    });
+  });
+
+  it('prepares explicit coverage for the exact registered agent', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+    await mock.registerPublishingConvictionAgent(accountId, AGENT);
+    mock.getSignerAddress = async () => ethers.getAddress(AGENT);
+
+    await expect(mock.prepareOnChainContextGraphRegistration({
+      registrationPcaAccountId: accountId,
+    })).resolves.toMatchObject({
+      signerAddress: ethers.getAddress(AGENT),
+      coverage: { source: 'explicit', accountId },
+    });
+  });
+
+  it.each([
+    ['missing account', 999n],
+    ['signer mismatch', 1n],
+  ])('rejects explicit coverage for a %s', async (_label, accountId) => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    if (accountId === 1n) mock.seedConvictionAccount(STRANGER);
+
+    await expect(mock.prepareOnChainContextGraphRegistration({
+      registrationPcaAccountId: accountId,
+    })).rejects.toBeInstanceOf(ContextGraphRegistrationCoverageSignerUnavailableError);
+  });
+});
 
 describe('MockChainAdapter — V10 conviction account create/read', () => {
   it('createPublishingConvictionAccount mints to the signer with an incrementing id', async () => {

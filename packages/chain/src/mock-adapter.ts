@@ -45,6 +45,7 @@ import {
   MerkleRootMismatchError,
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
+import { ContextGraphRegistrationCoverageSignerUnavailableError } from './evm-adapter-errors.js';
 import { ethers } from 'ethers';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -1253,6 +1254,19 @@ export class MockChainAdapter implements ChainAdapter {
       throw new Error(
         `Mock: registration signer ${options.registrationSignerAddress} is unavailable`,
       );
+    }
+
+    if (options.registrationPcaAccountId !== undefined) {
+      const account = this.convictionAccounts.get(options.registrationPcaAccountId);
+      const signerKey = signerAddress.toLowerCase();
+      const ownsAccount = account?.owner.toLowerCase() === signerKey;
+      const isExactAgent = this.agentToConvictionAccount.get(signerKey)
+        === options.registrationPcaAccountId;
+      if (!ownsAccount && !isExactAgent) {
+        throw new ContextGraphRegistrationCoverageSignerUnavailableError(
+          options.registrationPcaAccountId,
+        );
+      }
     }
 
     const coverage = Object.freeze(options.registrationPcaAccountId !== undefined

@@ -679,9 +679,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   ): Promise<Wallet> {
     const pca = this.contracts.dkgPublishingConvictionNFT;
     if (!pca) {
-      throw new ContextGraphRegistrationCoverageSignerUnavailableError(accountId, {
-        cause: new Error('DKGPublishingConvictionNFT is not deployed.'),
-      });
+      throw new Error(
+        'DKGPublishingConvictionNFT is not deployed; explicit PCA registration coverage cannot be verified.',
+      );
     }
 
     let firstReadError: unknown;
@@ -714,9 +714,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       }
     }
 
-    throw new ContextGraphRegistrationCoverageSignerUnavailableError(accountId, {
-      cause: firstReadError,
-    });
+    // A permanent signer mismatch is knowable only when every relationship
+    // read completed. If any owner/agent verification failed, preserve that
+    // original RPC, stale-binding, or decoded contract error so callers retain
+    // its retryability/classification instead of treating an outage as a
+    // terminal signer-configuration problem.
+    if (firstReadError !== undefined) throw firstReadError;
+    throw new ContextGraphRegistrationCoverageSignerUnavailableError(accountId);
   }
 
   private sealContextGraphRegistration(
