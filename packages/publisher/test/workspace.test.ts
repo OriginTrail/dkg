@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
@@ -1595,6 +1595,31 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     if (outcome.applied) throw new Error('unreachable');
     expect(outcome.retryable).toBe(false);
     expect(outcome.reason).toContain('does not match sender');
+  });
+
+  it('declines legacy live materialization when another authoritative rail owns the CG', async () => {
+    const legacyApplyAllowedOracle = vi.fn(async () => false);
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      legacyApplyAllowedOracle,
+    });
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Catalog owned" <${DATA_GRAPH}> .`;
+    const msg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(nquads),
+      publisherPeerId: '12D3KooWCatalogOwned',
+      shareOperationId: 'op-catalog-owned',
+      timestampMs: Date.now(),
+    });
+
+    const outcome = await handler.handle(msg, '12D3KooWCatalogOwned');
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('not authoritative'),
+    });
+    expect(legacyApplyAllowedOracle).toHaveBeenCalledWith(CONTEXT_GRAPH);
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(msg))).resolves.toBe(false);
   });
 
   it('retryable rejection (CAS pre-condition not met) returns { applied: false, retryable: true } — codex R4', async () => {

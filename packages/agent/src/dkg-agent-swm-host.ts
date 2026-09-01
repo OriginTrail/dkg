@@ -96,7 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -281,13 +281,6 @@ function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptio
     source: `agent.swm.rsHeal.${operation}`,
     ...(signal ? { signal } : {}),
   };
-}
-
-function isStoreSchedulerBusyError(err: unknown): boolean {
-  return err instanceof StoreSchedulerBusyError || (
-    typeof err === 'object' && err !== null &&
-    (err as { code?: unknown }).code === 'STORE_SCHEDULER_BUSY'
-  );
 }
 
 export type RsHealPassResult =
@@ -842,6 +835,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): Promise<void> {
     if (!this.swmHostModeStore) return;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
+      // Host reconciliation is a second, independent path into the same
+      // legacy SWM topic. Catalog authority must remove an already-wired host
+      // handler as well as refuse a new one.
+      this.unwireSwmHostModeHandler(contextGraphId);
+      return;
+    }
     if (this.sharedMemoryGossipRegistered.has(contextGraphId)) {
       // Member-mode subscription already active — apply path covers
       // local consumption; no need to also opaquely store.
@@ -1039,6 +1039,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
     source: SubscriptionSource = SUBSCRIPTION_SOURCES.RECONCILER,
     curated = true,
   ): void {
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
+      const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+      const hadRuntimeHostState = this.swmHostModeHandlers.has(hostKey)
+        || this.swmHostModeSubscribed.has(hostKey)
+        || this.swmHostModeCurated.has(hostKey);
+      this.unwireSwmHostModeHandler(contextGraphId);
+      const deletedStaleHandler = this.swmHostModeHandlers.delete(hostKey);
+      const deletedStaleSubscription = this.swmHostModeSubscribed.delete(hostKey);
+      const deletedStaleClassification = this.swmHostModeCurated.delete(hostKey);
+      if (deletedStaleHandler || deletedStaleSubscription || deletedStaleClassification) {
+        // Heal partially restored/stale bookkeeping even when its handler
+        // reference is absent, which makes unwireSwmHostModeHandler a no-op.
+        this.enqueueHostModePersistence(contextGraphId, false);
+      } else if (!hadRuntimeHostState) {
+        // The restart restore path calls this method from a persisted marker
+        // before rebuilding runtime maps. Clear that marker too, otherwise
+        // every catalog-authoritative restart would retry the legacy host path.
+        this.enqueueHostModePersistence(contextGraphId, false);
+      }
+      return;
+    }
     // OT-RFC-38 / LU-6 Phase B — host-mode subscribes on the wire-form
     // topic. For chain-event-driven auto-subscribe, `contextGraphId`
     // IS the wire id (the core has no cleartext to translate from).
@@ -2886,7 +2907,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
-    if (!(this.config.syncContextGraphs ?? []).includes(contextGraphId)) return false;
+    // Catalog mode removes the CG from the legacy durable/SWM scope, but VM
+    // remains chain-inventoried and must not disappear with that authority
+    // hand-off (or with the Track-2 kill switch). The immutable RFC-64
+    // selection therefore remains an independent VM-reconcile intent source.
+    const explicitlySelected = (this.config.syncContextGraphs ?? []).includes(contextGraphId)
+      || this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined;
+    if (!explicitlySelected) return false;
     const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];
@@ -7102,6 +7129,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: false };
     }
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
+      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+    }
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
+      this.unwireSwmHostModeHandler(contextGraphId);
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     }
     // Codex PR #610 R4: refuse host-mode subscribe when the same

@@ -21,8 +21,11 @@ import {
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
-import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
+import type { Rfc64CatalogSynchronizationEvidenceV1 } from
+  './rfc64/catalog-synchronization-evidence-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
+import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
+import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
@@ -118,7 +121,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -443,7 +446,7 @@ export function createListContextGraphsCacheInvalidatingStore(
   // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
   // dirty the projection by graph rather than by inserted quads (covers deletes).
   markProjectionDirty?: (quads?: readonly Quad[], targetGraph?: string) => void,
-): TripleStore {
+): TripleStore & Partial<SortedGraphSetSource> {
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
     changed: (result: T) => boolean,
@@ -456,7 +459,13 @@ export function createListContextGraphsCacheInvalidatingStore(
     }
     return result;
   };
-  const wrapper: TripleStore & { readonly innerStore: TripleStore } = {
+  const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
+    === 'function'
+    ? innerStore as TripleStore & SortedGraphSetSource
+    : null;
+  const wrapper: TripleStore
+    & Partial<SortedGraphSetSource>
+    & { readonly innerStore: TripleStore } = {
     innerStore,
     get queryCancellation() {
       return innerStore.queryCancellation;
@@ -556,9 +565,39 @@ export function createListContextGraphsCacheInvalidatingStore(
             () => markProjectionDirty?.(undefined, graphUri),
           )
       : undefined,
+    // RFC-64 author publication moves a complete public-SWM projection and
+    // its bounded semantic control state through one backend CAS. Preserve the
+    // capability through this cache-invalidation decorator and invalidate only
+    // after a proven commit; a clean guard conflict changes nothing.
+    rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
+      ? async (input, options) => {
+          try {
+            return await invalidateAfterMutation(
+              () => innerStore.rfc64AuthorCommitCasV1!(input, options),
+              result => result === 'committed',
+              () => markProjectionDirty?.(),
+            );
+          } catch (error) {
+            // A rejected CAS may have committed before its response was lost.
+            // Only an outcome-tagged pre-dispatch refusal proves caches remain
+            // valid; every indeterminate failure dirties both cache layers.
+            if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
+              invalidate();
+              markProjectionDirty?.();
+            }
+            throw error;
+          }
+        }
+      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },
+    // This wrapper changes mutation-side cache state but not graph visibility,
+    // so forwarding the direct inner capability preserves the same public
+    // boundary while keeping the responder's identity-stable catalog path live.
+    listGraphsSorted: sortedSource
+      ? (options) => sortedSource.listGraphsSorted(options)
+      : undefined,
     listGraphsByPrefix(prefix, options) {
       return innerStore.listGraphsByPrefix
         ? innerStore.listGraphsByPrefix(prefix, options)
@@ -1167,14 +1206,17 @@ export class DKGAgentBase {
    * while dormant (no dataDir) or after `stop()`.
    */
   protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
+  /** One explicit serializer and physical drain boundary for every catalog mutation. */
+  protected readonly rfc64CatalogMutationCoordinatorV1 =
+    new Rfc64CatalogMutationCoordinatorV1();
+  /** One explicit owner for observer, receiver, supervisor, and mutation lifetimes. */
+  protected rfc64CatalogRuntimeV1!: Rfc64CatalogRuntimeV1;
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
-    new Map<string, Rfc64PublicCatalogNativeSynchronizationEvidenceV1>();
+    new Map<string, Rfc64CatalogSynchronizationEvidenceV1>();
   /** Bounded process-local terminal receiver failures, keyed by announced head. */
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
-  /** Serialize local author-head construction/CAS independently per exact scope. */
-  protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /** Process-local reverse candidates plus the monotonic binding fence. */
   protected readonly contextGraphBindingState = new ContextGraphBindingState();

@@ -425,11 +425,18 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   // =====================================================================
 
   /** True when `contextGraphId` is an active minted CG in ContextGraphStorage. */
-  async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
+  async isContextGraphActiveOnChain(
+    contextGraphId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<boolean> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    return Boolean(await this.readContract(
-      cgs, 'cgStorage.isContextGraphActive', 'isContextGraphActive', contextGraphId,
+    return Boolean(await this.readContractWithOptions(
+      cgs,
+      'cgStorage.isContextGraphActive',
+      'isContextGraphActive',
+      [contextGraphId],
+      { signal: options.signal },
     ));
   }
 
@@ -755,18 +762,30 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    * unknown" — for the encrypted-payload guard, `0` MUST NOT be
    * interpreted as a positive curation signal.
    */
-  async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
+  async getContextGraphAccessPolicy(
+    contextGraphId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<number> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
     try {
-      const raw: bigint = BigInt(await this.readContract(
-        cgs, 'cgStorage.getAccessPolicy', 'getAccessPolicy', contextGraphId,
+      const raw: bigint = BigInt(await this.readContractWithOptions(
+        cgs,
+        'cgStorage.getAccessPolicy',
+        'getAccessPolicy',
+        [contextGraphId],
+        { signal: options.signal },
       ));
       return Number(raw);
     } catch (primaryErr) {
+      if (options.signal?.aborted) throw primaryErr;
       try {
-        const cg = await this.readContract(
-          cgs, 'cgStorage.getContextGraph', 'getContextGraph', contextGraphId,
+        const cg = await this.readContractWithOptions(
+          cgs,
+          'cgStorage.getContextGraph',
+          'getContextGraph',
+          [contextGraphId],
+          { signal: options.signal },
         );
         const raw =
           cg?.accessPolicy
@@ -776,6 +795,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         }
         return Number(BigInt(raw));
       } catch (fallbackErr) {
+        if (options.signal?.aborted) throw fallbackErr;
         throw new Error(
           `ContextGraphStorage access-policy lookup failed via getAccessPolicy and getContextGraph fallback: ` +
           `${primaryErr instanceof Error ? primaryErr.message : String(primaryErr)}; ` +

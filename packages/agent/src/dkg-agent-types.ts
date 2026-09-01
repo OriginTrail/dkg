@@ -63,7 +63,7 @@ import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
-  ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
+  ResolvedRfc64CatalogAuthoringPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
   SyncAdmissionConfig,
@@ -1361,6 +1361,15 @@ export interface Rfc64PublicCatalogAutoPublishConfigV1 {
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
 }
 
+/**
+ * Policy-neutral selected-CG authoring controls. Announcement destinations
+ * are deliberately absent: the accepted CG policy owns those per graph.
+ */
+export interface Rfc64CatalogAutoPublishConfigV1 {
+  readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}
+
 export interface Rfc64PublicCatalogBootstrapScopeV1 {
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: ContextGraphIdV1;
@@ -1926,6 +1935,9 @@ export type ResolvedDKGAgentConfig =
     syncReconcilerTiming: SyncReconcilerTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
-    rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+    /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
+    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
+      .Rfc64CatalogExecutionPlanV1;
+    rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

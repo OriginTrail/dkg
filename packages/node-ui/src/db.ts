@@ -20,13 +20,16 @@ import {
   type DurableManifestPrefixDigest,
   type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
-import { RoutineLogRetention } from './routine-log-retention.js';
+import {
+  RoutineLogRetention,
+  installRoutineLogRetentionSchema,
+} from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-export const SCHEMA_VERSION = 34;
+export const SCHEMA_VERSION = 35;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -348,6 +351,7 @@ export class DashboardDB {
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
+      installRoutineLogRetentionSchema(this.db);
       return;
     }
 
@@ -1277,6 +1281,14 @@ export class DashboardDB {
            AND key NOT LIKE '%|durable|data|checkpoint:v2%'
       `).run();
     }
+    if (version < 35) {
+      // Retention probes used to find the (cap + 1)th newest routine row via
+      // OFFSET, synchronously scanning the million-row cap on every cleanup
+      // tick. Maintain the exact count transactionally and index only routine
+      // row ids, so overflow checks are O(1) and each prune touches at most one
+      // configured batch.
+      installRoutineLogRetentionSchema(this.db);
+    }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -1370,10 +1382,7 @@ export class DashboardDB {
       };
     }
 
-    // If the batch filled, conservatively schedule another tick. An exact-size
-    // final batch costs one extra cheap probe before compaction, which is safer
-    // than running a second million-row count after every deletion.
-    const { deleted, filledBatch: hasMore } = batch;
+    const { deleted, hasMore } = batch;
     const reclaim = hasMore
       ? { compacted: false, reclaimPending: false }
       : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);

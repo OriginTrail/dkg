@@ -158,7 +158,7 @@ export function buildAtomicSubjectReplaceUpdate(
   return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;
 }
 
-function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {
+export function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {
   for (const [index, quad] of quads.entries()) {
     if (quad.graph !== graphUri) {
       throw new Error(
@@ -214,7 +214,7 @@ export function assertSubjectReplacementPayload(
   }
 }
 
-function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
+export function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
   const triples = quads
     .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
     .join('\n');
@@ -228,7 +228,7 @@ function formatResource(term: string, role: string): string {
   return `<${assertSafeIri(unwrapIri(term))}>`;
 }
 
-function formatObject(term: string): string {
+export function formatObject(term: string): string {
   if (term.startsWith('"')) {
     const normalized = normalizeLiteralDatatype(term);
     assertSafeRdfTerm(normalized);
@@ -244,7 +244,7 @@ function normalizeLiteralDatatype(term: string): string {
     : term;
 }
 
-function unwrapIri(term: string): string {
+export function unwrapIri(term: string): string {
   return term.startsWith('<') && term.endsWith('>')
     ? term.slice(1, -1)
     : term;

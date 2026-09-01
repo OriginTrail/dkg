@@ -161,6 +161,163 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     });
   });
 
+  it('prioritizes a verified current head and retires only older ambient work after apply', async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const versions: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      versions.push(head.catalogVersion);
+      if (head.catalogVersion === '1') {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        throw new Error('stale provider');
+      }
+      return 'applied';
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
+    await firstStarted.promise;
+    receiver.schedule(announcement({
+      catalogVersion: '2',
+      catalogHeadObjectDigest: `0x${'a2'.repeat(32)}`,
+    }), 'peer-ambient');
+    receiver.schedule(announcement({
+      catalogVersion: '3',
+      catalogHeadObjectDigest: `0x${'a3'.repeat(32)}`,
+    }), 'peer-ambient');
+    const current = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: announcement({
+        catalogVersion: '100',
+        catalogHeadObjectDigest: `0x${'f1'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-current',
+    }]);
+    releaseFirst.resolve();
+
+    await expect(current).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(versions).toEqual(['1', '100']);
+    expect(receiver.stats()).toMatchObject({
+      applied: 1,
+      failed: 1,
+      supersededQueued: 2,
+      queued: 0,
+      inFlight: 0,
+    });
+  });
+
+  it('preserves older ambient history when a verified current-head jump fails', async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const versions: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      versions.push(head.catalogVersion);
+      if (head.catalogVersion === '1') {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        throw new Error('first head unavailable');
+      }
+      if (head.catalogVersion === '3') throw new Error('jump is not monotonic');
+      return 'applied';
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
+    await firstStarted.promise;
+    receiver.schedule(announcement({
+      catalogVersion: '2',
+      catalogHeadObjectDigest: `0x${'a2'.repeat(32)}`,
+    }), 'peer-ambient');
+    const current = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: announcement({
+        catalogVersion: '3',
+        catalogHeadObjectDigest: `0x${'a3'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-current',
+    }]);
+    releaseFirst.resolve();
+
+    await expect(current).resolves.toMatchObject({ outcome: 'failed' });
+    await receiver.whenIdle();
+    expect(versions).toEqual(['1', '3', '2']);
+    expect(receiver.stats()).toMatchObject({
+      applied: 1,
+      failed: 2,
+      supersededQueued: 0,
+    });
+  });
+
+  it('does not prioritize an unverified awaited provider set', async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const versions: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      versions.push(head.catalogVersion);
+      if (head.catalogVersion === '1') {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      }
+      return 'applied';
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
+    await firstStarted.promise;
+    receiver.schedule(announcement({
+      catalogVersion: '2',
+      catalogHeadObjectDigest: `0x${'a2'.repeat(32)}`,
+    }), 'peer-ambient');
+    const unverified = receiver.scheduleManyAndWait([{
+      announcement: announcement({
+        catalogVersion: '100',
+        catalogHeadObjectDigest: `0x${'f1'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-explicit',
+    }]);
+    releaseFirst.resolve();
+
+    await expect(unverified).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(versions).toEqual(['1', '2', '100']);
+    expect(receiver.stats().supersededQueued).toBe(0);
+  });
+
+  it('never retires an older caller-awaited request as ambient work', async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const versions: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      versions.push(head.catalogVersion);
+      if (head.catalogVersion === '1') {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        throw new Error('stale provider');
+      }
+      return 'applied';
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
+    await firstStarted.promise;
+    const awaitedOlder = receiver.scheduleManyAndWait([{
+      announcement: announcement({
+        catalogVersion: '2',
+        catalogHeadObjectDigest: `0x${'a2'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-explicit',
+    }]);
+    const current = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: announcement({
+        catalogVersion: '100',
+        catalogHeadObjectDigest: `0x${'f1'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-current',
+    }]);
+    releaseFirst.resolve();
+
+    await expect(current).resolves.toMatchObject({ outcome: 'applied' });
+    await expect(awaitedOlder).resolves.toMatchObject({ outcome: 'applied' });
+    expect(versions).toEqual(['1', '100', '2']);
+    expect(receiver.stats().supersededQueued).toBe(0);
+  });
+
   it('isolates an explicit provider set from pre-existing same-head ambient work', async () => {
     const ambientStarted = deferred<void>();
     const releaseAmbient = deferred<void>();
@@ -483,6 +640,148 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
     expect(script.peers).toEqual(['peerA', 'peerB']);
     expect(receiver.stats()).toMatchObject({ scheduled: 3, applied: 0, inFlight: 0, queued: 0 });
+  });
+
+  it('cancels and fences an in-flight reconciliation when its CG becomes inactive', async () => {
+    const entered = deferred<void>();
+    const onHeadApplied = vi.fn();
+    let observedSignal: AbortSignal | undefined;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (_peerId, _announcement, signal) => {
+        observedSignal = signal;
+        entered.resolve();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return 'applied';
+      },
+    ), { onHeadApplied });
+    const current = announcement();
+    const completion = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+
+    await entered.promise;
+    receiver.cancelContextGraph(current.contextGraphId);
+
+    expect(observedSignal?.aborted).toBe(true);
+    await expect(completion).resolves.toEqual({
+      outcome: 'closed',
+      appliedProviderPeerId: null,
+      providerAttempts: 0,
+      error: null,
+    });
+    await receiver.whenIdle();
+    expect(onHeadApplied).not.toHaveBeenCalled();
+    expect(receiver.stats()).toMatchObject({ applied: 0, inFlight: 0, queued: 0 });
+    await receiver.close();
+  });
+
+  it('requeues the same head when resubscribed while its cancelled run settles', async () => {
+    const firstEntered = deferred<void>();
+    const releaseFirst = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const current = announcement();
+    const peers: string[] = [];
+    let attempts = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      attempts += 1;
+      if (attempts === 1) {
+        firstEntered.resolve();
+        return releaseFirst.promise;
+      }
+      return 'applied';
+    }));
+
+    const cancelled = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+    await firstEntered.promise;
+    receiver.cancelContextGraph(current.contextGraphId);
+    const replacement = receiver.scheduleManyAndWait([{
+      announcement: current,
+      remotePeerId: 'peerA',
+    }]);
+    releaseFirst.resolve('applied');
+
+    await expect(cancelled).resolves.toMatchObject({ outcome: 'closed' });
+    await expect(replacement).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(peers).toEqual(['peerA', 'peerA']);
+    expect(receiver.stats()).toMatchObject({ applied: 1, inFlight: 0, queued: 0 });
+    await receiver.close();
+  });
+
+  it('settles queued, deferred, and active cancellation through one lifecycle owner', async () => {
+    const activeEntered = deferred<void>();
+    const attemptedContextGraphs: string[] = [];
+    const active = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/active',
+      catalogHeadObjectDigest: `0x${'a1'.repeat(32)}`,
+    });
+    const queued = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/queued',
+      catalogHeadObjectDigest: `0x${'b2'.repeat(32)}`,
+    });
+    const deferredHead = announcement({
+      contextGraphId: '0x1111111111111111111111111111111111111111/deferred',
+      catalogHeadObjectDigest: `0x${'c3'.repeat(32)}`,
+    });
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (_peerId, head, signal) => {
+        attemptedContextGraphs.push(head.contextGraphId);
+        if (head.contextGraphId === active.contextGraphId) {
+          activeEntered.resolve();
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          return 'applied';
+        }
+        if (head.contextGraphId === deferredHead.contextGraphId) {
+          throw new Error('finalized chain lane busy');
+        }
+        throw new Error('queued task must never start');
+      },
+    ), {
+      maxConcurrent: 1,
+      admissionDeferralMs: 60_000,
+      isDeferrableError: (error) =>
+        error instanceof Error && error.message === 'finalized chain lane busy',
+    });
+
+    const activeCompletion = receiver.scheduleManyAndWait([{
+      announcement: active,
+      remotePeerId: 'peer-active',
+    }]);
+    await activeEntered.promise;
+    const queuedCompletion = receiver.scheduleManyAndWait([{
+      announcement: queued,
+      remotePeerId: 'peer-queued',
+    }]);
+    const deferredCompletion = receiver.scheduleManyAndWait([{
+      announcement: deferredHead,
+      remotePeerId: 'peer-deferred',
+    }]);
+
+    receiver.cancelContextGraph(queued.contextGraphId);
+    await expect(queuedCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    receiver.cancelContextGraph(active.contextGraphId);
+    await expect(activeCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    await vi.waitFor(() => {
+      expect(receiver.stats()).toMatchObject({ deferred: 1, inFlight: 0, queued: 0 });
+    });
+    receiver.cancelContextGraph(deferredHead.contextGraphId);
+    await expect(deferredCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    await receiver.whenIdle();
+
+    expect(attemptedContextGraphs).toEqual([
+      active.contextGraphId,
+      deferredHead.contextGraphId,
+    ]);
+    expect(receiver.stats()).toMatchObject({ deferred: 0, inFlight: 0, queued: 0 });
+    await receiver.close();
   });
 
   it('round-robins transient failures with a bounded per-provider budget', async () => {

@@ -70,6 +70,14 @@ import {
   prepareSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-commit-plan.js';
 import { SwmAuthorInventoryPersistenceV1 } from './swm-author-inventory-persistence.js';
+import {
+  digestRfc64FinalizedPrivatePlacementRepairV1,
+  encodeRfc64FinalizedPrivatePlacementRepairV1,
+  parseRfc64FinalizedPrivatePlacementRepairV1,
+  snapshotRfc64FinalizedPrivatePlacementRepairV1,
+  type Rfc64FinalizedPrivatePlacementRepairV1,
+  type Rfc64FinalizedPrivatePlacementRepairOperationsV1,
+} from '../finalized-private-placement-repair-store-v1.js';
 import type {
   CompareAndSwapSwmAuthorInventoryInputV1,
   SwmAuthorInventoryCasResultV1,
@@ -184,11 +192,23 @@ export interface CompareAndSwapAppliedCatalogHeadInputV1
   extends AppliedCatalogHeadSnapshotV1 {
   /** `null` initializes a scope; otherwise the exact current head must match. */
   readonly expectedCurrentCatalogHeadDigest: Digest32V1 | null;
+  /**
+   * A locally authored shadow head is durable discovery state, not installed
+   * catalog semantic authority.  Keep that provenance separate from the
+   * applied-head snapshot so a shadow restart never deactivates legacy data.
+   */
+  readonly stageOnly?: boolean;
 }
 
 export interface AppliedCatalogHeadCasResultV1 {
   readonly status: 'applied' | 'existing';
   readonly snapshot: AppliedCatalogHeadSnapshotV1;
+}
+
+export interface DeleteAppliedCatalogHeadInputV1 {
+  readonly catalogScopeDigest: Digest32V1;
+  readonly authorAddress: EvmAddressV1;
+  readonly expectedCurrentCatalogHeadDigest: Digest32V1;
 }
 
 /**
@@ -251,7 +271,8 @@ export interface Rfc64SwmAuthorInventoryOperationsV1 {
 }
 
 export interface Rfc64InventoryV1CandidateApi
-  extends Rfc64SwmAuthorInventoryOperationsV1 {
+  extends Rfc64SwmAuthorInventoryOperationsV1,
+    Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
   purgeNextStartupStaleCandidateBatch(): CandidateSessionGcBatchResultV1;
   createCandidateSession(): CandidateSessionV1;
   putVerifiedCandidateBucket(load: VerifiedCandidateBucketLoadV1): CandidateBucketPutResultV1;
@@ -300,6 +321,14 @@ export interface Rfc64InventoryV1CandidateApi
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
   ): AppliedCatalogHeadSnapshotV1 | null;
+  listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[];
+  isStagedCatalogHeadV1(
+    catalogScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+    currentCatalogHeadDigest: Digest32V1,
+  ): boolean;
+  deleteAppliedCatalogHeadV1(input: DeleteAppliedCatalogHeadInputV1): void;
+  deleteAppliedCatalogHeadsV1(inputs: readonly DeleteAppliedCatalogHeadInputV1[]): void;
   compareAndSwapAppliedCatalogHeadV1(
     input: CompareAndSwapAppliedCatalogHeadInputV1,
   ): AppliedCatalogHeadCasResultV1;
@@ -322,6 +351,10 @@ export type Rfc64InventoryV1OperationsV1 = Pick<
   | 'discardCandidateSessionBatch'
   | 'deleteCandidateBucket'
   | 'readAppliedCatalogHeadV1'
+  | 'listAppliedCatalogHeadsV1'
+  | 'isStagedCatalogHeadV1'
+  | 'deleteAppliedCatalogHeadV1'
+  | 'deleteAppliedCatalogHeadsV1'
   | 'compareAndSwapAppliedCatalogHeadV1'
 >;
 
@@ -362,6 +395,10 @@ export function createRfc64InventoryOperationsViewV1(
     ),
     deleteCandidateBucket: fence(inventory.deleteCandidateBucket.bind(inventory)),
     readAppliedCatalogHeadV1: fence(inventory.readAppliedCatalogHeadV1.bind(inventory)),
+    listAppliedCatalogHeadsV1: fence(inventory.listAppliedCatalogHeadsV1.bind(inventory)),
+    isStagedCatalogHeadV1: fence(inventory.isStagedCatalogHeadV1.bind(inventory)),
+    deleteAppliedCatalogHeadV1: fence(inventory.deleteAppliedCatalogHeadV1.bind(inventory)),
+    deleteAppliedCatalogHeadsV1: fence(inventory.deleteAppliedCatalogHeadsV1.bind(inventory)),
     compareAndSwapAppliedCatalogHeadV1: fence(
       inventory.compareAndSwapAppliedCatalogHeadV1.bind(inventory),
     ),
@@ -414,6 +451,7 @@ interface EncodedAppliedCatalogHeadV1 {
   readonly inventoryDigest: Uint8Array;
   readonly catalogVersion: Uint8Array;
   readonly inventoryRowCount: Uint8Array;
+  readonly stageOnly: boolean;
   readonly publicSnapshot: AppliedCatalogHeadSnapshotV1;
 }
 
@@ -630,6 +668,89 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     this.assertOpen();
     const key = encodeAppliedHeadKey(catalogScopeDigest, authorAddress);
     return this.readTransaction(() => this.readAppliedHead(key));
+  }
+
+  listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[] {
+    this.assertOpen();
+    return this.readTransaction(() => {
+      const query = this.prepare(INVENTORY_V1_STATEMENT_SQL.listAppliedHeads);
+      const rows = this.statement(() => query.all() as SqlRowV1[]);
+      return Object.freeze(rows.map((row) => this.decodeAppliedHeadRow(row)));
+    });
+  }
+
+  isStagedCatalogHeadV1(
+    catalogScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+    currentCatalogHeadDigest: Digest32V1,
+  ): boolean {
+    this.assertOpen();
+    const key = encodeAppliedHeadKey(catalogScopeDigest, authorAddress);
+    const expected = encodeAppliedDigest(currentCatalogHeadDigest, 'current catalog head');
+    return this.readTransaction(() => {
+      const query = this.prepare(INVENTORY_V1_STATEMENT_SQL.getStagedHead);
+      const row = this.statement(() => query.get({
+        scope: key.scope,
+        author: key.author,
+      }) as SqlRowV1 | undefined);
+      return row !== undefined
+        && sqlBlobsEqualV1(
+          assertSqlBlobWidthV1(row.current_catalog_head_digest, 32, 'staged catalog head'),
+          expected,
+        );
+    });
+  }
+
+  deleteAppliedCatalogHeadV1(input: DeleteAppliedCatalogHeadInputV1): void {
+    this.deleteAppliedCatalogHeadsV1([input]);
+  }
+
+  deleteAppliedCatalogHeadsV1(inputs: readonly DeleteAppliedCatalogHeadInputV1[]): void {
+    this.assertOpen();
+    const captured = Object.freeze(inputs.map((input) => Object.freeze({
+      input,
+      key: encodeAppliedHeadKey(input.catalogScopeDigest, input.authorAddress),
+      expected: encodeAppliedDigest(input.expectedCurrentCatalogHeadDigest, 'expected current head'),
+    })));
+    this.writeTransaction('delete applied catalog heads', () => {
+      for (const current of captured) this.deleteAppliedHeadInOpenTransaction(current);
+    }, {
+      resolve: () => captured.every(({ key }) => this.readAppliedHead(key) === null)
+        ? 'committed'
+        : 'not-committed',
+      retry: () => {
+        for (const current of captured) this.deleteAppliedHeadInOpenTransaction(current);
+      },
+      resolvedCommittedResult: () => undefined,
+    });
+  }
+
+  private deleteAppliedHeadInOpenTransaction(currentInput: Readonly<{
+    input: DeleteAppliedCatalogHeadInputV1;
+    key: ReturnType<typeof encodeAppliedHeadKey>;
+    expected: Uint8Array;
+  }>): void {
+    const { input, key, expected } = currentInput;
+    const current = this.readAppliedHead(key);
+    if (current === null) return;
+    if (current.currentCatalogHeadDigest !== input.expectedCurrentCatalogHeadDigest) {
+      throw appliedHeadCasConflict(
+        current.currentCatalogHeadDigest,
+        input.expectedCurrentCatalogHeadDigest,
+      );
+    }
+    const statement = this.prepare(INVENTORY_V1_STATEMENT_SQL.deleteAppliedHeadCas);
+    const result = this.statement(() => statement.run({
+      scope: key.scope,
+      author: key.author,
+      expectedHead: expected,
+    }));
+    if (Number(result.changes) !== 1 || this.readAppliedHead(key) !== null) {
+      throw new InventoryV1CandidateError(
+        'applied-head-database-corrupt',
+        'applied-head deletion did not remove exactly the expected row',
+      );
+    }
   }
 
   compareAndSwapAppliedCatalogHeadV1(
@@ -1041,6 +1162,127 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         { cause },
       );
     }
+  }
+
+  listFinalizedPrivatePlacementRepairs(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[] {
+    this.assertOpen();
+    return this.readTransaction(() => {
+      const query = this.prepare(INVENTORY_V1_STATEMENT_SQL.listFinalizedPrivatePlacementRepairs);
+      const rows = this.statement(() => query.all() as SqlRowV1[]);
+      return Object.freeze(rows.map((row) => this.decodeFinalizedPrivatePlacementRepair(row)));
+    });
+  }
+
+  putFinalizedPrivatePlacementRepair(
+    input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+  ): void {
+    this.assertOpen();
+    const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1(input);
+    const bytes = encodeRfc64FinalizedPrivatePlacementRepairV1(repair);
+    const digest = digestRfc64FinalizedPrivatePlacementRepairV1(bytes);
+    const repairJson = new TextDecoder().decode(bytes);
+    this.writeTransaction('put finalized-private placement repair', () => {
+      const statement = this.prepare(
+        INVENTORY_V1_STATEMENT_SQL.insertFinalizedPrivatePlacementRepair,
+      );
+      const result = this.statement(() => statement.run({ repairDigest: digest, repairJson }));
+      if (Number(result.changes) === 0) {
+        const existing = this.readFinalizedPrivatePlacementRepairRow(digest);
+        if (existing?.repair_json !== repairJson) {
+          throw new InventoryV1CandidateError(
+            'candidate-database-corrupt',
+            'finalized-private placement repair digest is not bound to its bytes',
+          );
+        }
+      }
+    }, {
+      resolve: () => this.readFinalizedPrivatePlacementRepairRow(digest) === null
+        ? 'not-committed' : 'committed',
+      retry: () => {
+        const statement = this.prepare(
+          INVENTORY_V1_STATEMENT_SQL.insertFinalizedPrivatePlacementRepair,
+        );
+        this.statement(() => statement.run({ repairDigest: digest, repairJson }));
+      },
+    });
+  }
+
+  deleteFinalizedPrivatePlacementRepair(
+    input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+  ): void {
+    this.assertOpen();
+    const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1(input);
+    const bytes = encodeRfc64FinalizedPrivatePlacementRepairV1(repair);
+    const digest = digestRfc64FinalizedPrivatePlacementRepairV1(bytes);
+    const repairJson = new TextDecoder().decode(bytes);
+    this.writeTransaction('delete finalized-private placement repair', () => {
+      const current = this.readFinalizedPrivatePlacementRepairRow(digest);
+      if (current === null) return;
+      if (current.repair_json !== repairJson) {
+        throw new InventoryV1CandidateError(
+          'candidate-database-corrupt',
+          'finalized-private placement repair changed before deletion',
+        );
+      }
+      const statement = this.prepare(
+        INVENTORY_V1_STATEMENT_SQL.deleteFinalizedPrivatePlacementRepair,
+      );
+      const result = this.statement(() => statement.run({ repairDigest: digest, repairJson }));
+      if (Number(result.changes) !== 1) {
+        throw new InventoryV1CandidateError(
+          'candidate-database-corrupt',
+          'finalized-private placement repair deletion did not remove exactly one row',
+        );
+      }
+    }, {
+      resolve: () => this.readFinalizedPrivatePlacementRepairRow(digest) === null
+        ? 'committed' : 'not-committed',
+      retry: () => {
+        const statement = this.prepare(
+          INVENTORY_V1_STATEMENT_SQL.deleteFinalizedPrivatePlacementRepair,
+        );
+        this.statement(() => statement.run({ repairDigest: digest, repairJson }));
+      },
+    });
+  }
+
+  private readFinalizedPrivatePlacementRepairRow(
+    digest: Uint8Array,
+  ): SqlRowV1 | null {
+    const query = this.prepare(
+      `SELECT repair_digest, repair_json
+       FROM rfc64_finalized_private_placement_repairs_v1
+       WHERE repair_digest = :repairDigest;`,
+    );
+    return (this.statement(() => query.get({ repairDigest: digest })) as SqlRowV1 | undefined) ?? null;
+  }
+
+  private decodeFinalizedPrivatePlacementRepair(
+    row: SqlRowV1,
+  ): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> {
+    if (!(row.repair_digest instanceof Uint8Array)
+      || row.repair_digest.byteLength !== 32
+      || typeof row.repair_json !== 'string') {
+      throw new InventoryV1CandidateError(
+        'candidate-database-corrupt',
+        'finalized-private placement repair row has invalid storage types',
+      );
+    }
+    const bytes = new TextEncoder().encode(row.repair_json);
+    const repair = parseRfc64FinalizedPrivatePlacementRepairV1(bytes);
+    if (!sqlBlobsEqualV1(
+      row.repair_digest,
+      digestRfc64FinalizedPrivatePlacementRepairV1(bytes),
+    ) || !sqlBlobsEqualV1(
+      bytes,
+      encodeRfc64FinalizedPrivatePlacementRepairV1(repair),
+    )) {
+      throw new InventoryV1CandidateError(
+        'candidate-database-corrupt',
+        'finalized-private placement repair row is not canonical or digest-bound',
+      );
+    }
+    return repair;
   }
 
   private assertCandidateHeadBinding(
@@ -1572,10 +1814,14 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       author: key.author,
     }) as SqlRowV1 | undefined);
     if (row === undefined) return null;
+    return this.decodeAppliedHeadRow({ ...row, ...key });
+  }
+
+  private decodeAppliedHeadRow(row: SqlRowV1): AppliedCatalogHeadSnapshotV1 {
     try {
       return Object.freeze({
-        catalogScopeDigest: sqlBlobToDigest32V1(key.scope),
-        authorAddress: sqlBlobToEvmAddressV1(key.author),
+        catalogScopeDigest: sqlBlobToDigest32V1(row.scope ?? row.catalog_scope_digest),
+        authorAddress: sqlBlobToEvmAddressV1(row.author ?? row.author_address),
         currentCatalogHeadDigest: sqlBlobToDigest32V1(row.current_catalog_head_digest),
         appliedInventoryDigest: sqlBlobToDigest32V1(row.applied_inventory_digest),
         catalogVersion: sqlBlobToDecimalU64V1(row.catalog_version_u64be),
@@ -1627,6 +1873,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         throw appliedHeadCasConflict(current.currentCatalogHeadDigest, inputDigest(expected));
       }
     }
+    this.updateStagedCatalogHeadInOpenTransaction(next);
     const committed = this.readAppliedHead(next);
     if (committed === null || !appliedHeadSnapshotEquals(committed, next.publicSnapshot)) {
       throw new InventoryV1CandidateError(
@@ -1642,7 +1889,11 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     expected: Uint8Array | null,
   ): IndeterminateCommitResolutionV1 {
     const current = this.readAppliedHead(next);
-    if (current !== null && appliedHeadSnapshotEquals(current, next.publicSnapshot)) {
+    if (
+      current !== null
+      && appliedHeadSnapshotEquals(current, next.publicSnapshot)
+      && this.isAppliedHeadStageStateExact(next)
+    ) {
       return 'committed';
     }
     if (
@@ -1661,6 +1912,34 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     throw appliedHeadCasConflict(
       current?.currentCatalogHeadDigest ?? null,
       expected === null ? null : inputDigest(expected),
+    );
+  }
+
+  private updateStagedCatalogHeadInOpenTransaction(next: EncodedAppliedCatalogHeadV1): void {
+    const statement = this.prepare(next.stageOnly
+      ? INVENTORY_V1_STATEMENT_SQL.upsertStagedHead
+      : INVENTORY_V1_STATEMENT_SQL.deleteStagedHead);
+    const result = this.statement(() => statement.run(next.stageOnly
+      ? { scope: next.scope, author: next.author, head: next.currentHead }
+      : { scope: next.scope, author: next.author }));
+    if (next.stageOnly && Number(result.changes) !== 1) {
+      throw new InventoryV1CandidateError(
+        'applied-head-database-corrupt',
+        'staged catalog-head write did not affect exactly one row',
+      );
+    }
+  }
+
+  private isAppliedHeadStageStateExact(next: EncodedAppliedCatalogHeadV1): boolean {
+    const query = this.prepare(INVENTORY_V1_STATEMENT_SQL.getStagedHead);
+    const row = this.statement(() => query.get({
+      scope: next.scope,
+      author: next.author,
+    }) as SqlRowV1 | undefined);
+    if (!next.stageOnly) return row === undefined;
+    return row !== undefined && sqlBlobsEqualV1(
+      assertSqlBlobWidthV1(row.current_catalog_head_digest, 32, 'staged catalog head'),
+      next.currentHead,
     );
   }
 
@@ -2240,6 +2519,9 @@ function encodeAppliedHead(input: unknown): EncodedAppliedCatalogHeadV1 {
     throw new InventoryV1CandidateError('applied-head-input', 'applied-head CAS input is invalid');
   }
   const candidate = input as CompareAndSwapAppliedCatalogHeadInputV1;
+  if (candidate.stageOnly !== undefined && typeof candidate.stageOnly !== 'boolean') {
+    throw new InventoryV1CandidateError('applied-head-input', 'stageOnly must be boolean');
+  }
   const key = encodeAppliedHeadKey(candidate.catalogScopeDigest, candidate.authorAddress);
   let catalogVersion: DecimalU64V1;
   let inventoryRowCount: DecimalU64V1;
@@ -2281,6 +2563,7 @@ function encodeAppliedHead(input: unknown): EncodedAppliedCatalogHeadV1 {
     inventoryDigest,
     catalogVersion: decimalU64ToSqlBlobV1(catalogVersion),
     inventoryRowCount: decimalU64ToSqlBlobV1(inventoryRowCount),
+    stageOnly: candidate.stageOnly === true,
     publicSnapshot,
   };
 }

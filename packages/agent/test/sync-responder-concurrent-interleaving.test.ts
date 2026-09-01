@@ -1,5 +1,10 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  ChangelogStore,
+  GraphSetIndexStore,
+  OxigraphStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -10,6 +15,7 @@ import {
   createResponderGraphListMemo,
   createResponderSubGraphRegistrationMemo,
 } from '../src/sync/responder/graph-plan.js';
+import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
@@ -1652,6 +1658,69 @@ describe('sync responder pagination interleaving', () => {
     expect(duplicateListing).not.toBe(membershipChange);
     expect(duplicateListing.graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(calls).toBe(4);
+  });
+
+  it('uses the outer sorted catalog without exposing reserved decorator graphs', async () => {
+    const visible = 'did:dkg:context-graph:sorted-boundary/data';
+    const reserved = 'did:dkg:context-graph:sorted-boundary/internal';
+    const added = 'did:dkg:context-graph:sorted-boundary/added';
+    const base = new OxigraphStore();
+    await base.insert([q(visible, 1), q(reserved, 2)]);
+    const indexed = new GraphSetIndexStore(base, { revalidateMs: 100_000 });
+    const visibleStore = new ChangelogStore(indexed, { reservedGraphs: [reserved] });
+    // Initialize the changelog plane before measuring identity so its one-time
+    // reserved graph creation is not confused with a content-only mutation.
+    await visibleStore.insert([q(visible, 3)]);
+    const listGraphs = vi.spyOn(visibleStore, 'listGraphs').mockRejectedValue(
+      new Error('unsorted graph enumeration must not be selected'),
+    );
+    const store = createListContextGraphsCacheInvalidatingStore(visibleStore, () => undefined);
+    const memo = createResponderGraphListMemo(store);
+
+    const initialCatalog = await store.listGraphsSorted!();
+
+    const initial = await memo.get({ refresh: true });
+    expect(initial.graphs).toContain(visible);
+    expect(initial.graphs).not.toContain(reserved);
+    expect(listGraphs).not.toHaveBeenCalled();
+
+    await store.insert([q(visible, 4)]);
+    const contentOnlyCatalog = await store.listGraphsSorted!();
+    expect(contentOnlyCatalog).toBe(initialCatalog);
+    const contentOnly = await memo.get({ refresh: true });
+    expect(contentOnly).toBe(initial);
+    expect(contentOnly.graphs).not.toContain(reserved);
+    expect(listGraphs).not.toHaveBeenCalled();
+
+    await store.insert([q(added, 5)]);
+    const changedCatalog = await store.listGraphsSorted!();
+    expect(changedCatalog).not.toBe(initialCatalog);
+    expect(changedCatalog).toContain(added);
+    expect(changedCatalog).not.toContain(reserved);
+  });
+
+  it('does not traverse through an outer visibility decorator for a sorted catalog', async () => {
+    const visible = 'did:dkg:context-graph:visibility-boundary/data';
+    const hidden = 'did:dkg:context-graph:visibility-boundary/hidden';
+    const base = new OxigraphStore();
+    await base.insert([q(visible, 1), q(hidden, 2)]);
+    const indexed = new GraphSetIndexStore(base, { revalidateMs: 100_000 });
+    let outerListGraphsCalls = 0;
+    const store = {
+      // Deliberately documented traversal surface: the sorted capability must
+      // still stop here because this decorator changes listGraphs semantics.
+      innerStore: indexed,
+      listGraphs: async () => {
+        outerListGraphsCalls += 1;
+        return (await indexed.listGraphs()).filter((graph) => graph !== hidden);
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const snapshot = await memo.get({ refresh: true });
+    expect(snapshot.graphs).toContain(visible);
+    expect(snapshot.graphs).not.toContain(hidden);
+    expect(outerListGraphsCalls).toBe(1);
   });
 
   it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {

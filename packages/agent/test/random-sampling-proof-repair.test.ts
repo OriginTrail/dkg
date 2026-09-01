@@ -93,6 +93,7 @@ describe('Random Sampling proof-time exact repair', () => {
       },
       log: { info: vi.fn() },
       resolveLocalCgIdByOnChainId: vi.fn(() => 'food-safety'),
+      resolveRandomSamplingLocalContextGraphId: vi.fn(async () => 'food-safety'),
       resolveCuratorPeerIdsForCg: vi.fn(async () => ({ peerIds: [] })),
       vmReconcileObservedCandidatePeerIds: vi.fn(() => peers),
       preferredSyncPeers: new Map(),
@@ -174,6 +175,7 @@ describe('Random Sampling proof-time exact repair', () => {
       },
       log: { info: vi.fn() },
       resolveLocalCgIdByOnChainId: vi.fn(() => 'food-safety'),
+      resolveRandomSamplingLocalContextGraphId: vi.fn(async () => 'food-safety'),
       resolveCuratorPeerIdsForCg,
       vmReconcileObservedCandidatePeerIds: vi.fn(() => []),
       preferredSyncPeers: new Map(),
@@ -406,6 +408,7 @@ describe('Random Sampling proof-time exact repair', () => {
         },
         log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
         resolveLocalCgIdByOnChainId: vi.fn(() => localContextGraphId),
+        resolveRandomSamplingLocalContextGraphId: vi.fn(async () => localContextGraphId),
         resolveCuratorPeerIdsForCg: vi.fn(async () => ({ peerIds: [] })),
         vmReconcileObservedCandidatePeerIds: vi.fn(() => ['peer-history']),
         preferredSyncPeers: new Map(),
@@ -487,6 +490,7 @@ describe('Random Sampling proof-time exact repair', () => {
       node: { stopSignal: undefined },
       log: { info: vi.fn() },
       resolveLocalCgIdByOnChainId: vi.fn(() => undefined),
+      resolveRandomSamplingLocalContextGraphId: vi.fn(async () => undefined),
     };
 
     await expect(
@@ -500,6 +504,58 @@ describe('Random Sampling proof-time exact repair', () => {
         },
       ).result,
     ).rejects.toThrow('cannot resolve local CG 1');
+  });
+
+  it('awaits the required cold-binding resolver before provider discovery', async () => {
+    const resolverSignal: AbortSignal[] = [];
+    const resolveRandomSamplingLocalContextGraphId = vi.fn(async (
+      _cgId: bigint,
+      signal: AbortSignal,
+    ) => {
+      resolverSignal.push(signal);
+      return 'cold-public-proof-cg';
+    });
+    const resolveCuratorPeerIdsForCg = vi.fn(async () => ({ peerIds: [] }));
+    const agentLike = {
+      started: true,
+      peerId: 'self',
+      chain: {
+        chainId: 'base:8453',
+        getDKGKnowledgeAssetsAddress: vi.fn(async () =>
+          '0x00000000000000000000000000000000000000aa'),
+      },
+      node: {
+        stopSignal: undefined,
+        libp2p: { getConnections: () => [] },
+      },
+      log: { info: vi.fn() },
+      resolveRandomSamplingLocalContextGraphId,
+      resolveCuratorPeerIdsForCg,
+      vmReconcileObservedCandidatePeerIds: vi.fn(() => []),
+      preferredSyncPeers: new Map(),
+      selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),
+    };
+
+    await expect(
+      (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
+        agentLike,
+        {
+          kaId: 7n,
+          cgId: 317n,
+          expectedRoot: new Uint8Array(32),
+          expectedLeafCount: 1n,
+        },
+      ).result,
+    ).rejects.toThrow('no providers for cold-public-proof-cg');
+
+    expect(resolveRandomSamplingLocalContextGraphId).toHaveBeenCalledWith(
+      317n,
+      expect.any(AbortSignal),
+    );
+    expect(resolveCuratorPeerIdsForCg).toHaveBeenCalledWith(
+      'cold-public-proof-cg',
+      expect.objectContaining({ signal: resolverSignal[0] }),
+    );
   });
 
   it('aborts a stalled peer-setup stage under the shared deadline', async () => {

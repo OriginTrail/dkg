@@ -52,7 +52,7 @@ function resolveScopedCaller(ctx: RequestContext): string | undefined {
   // anonymous loopback caller the node default agent's feed). When auth is
   // enabled, httpAuthGuard already 401s tokenless requests before dispatch, so
   // this only guards the loopback-no-auth case.
-  if (!ctx.requestToken) return undefined;
+  if (!ctx.authentication.acceptedToken) return undefined;
   // A token IS present (valid). Resolve it to the caller's agent: a per-agent
   // delegation token → that agent; the node's own API token (the owner's
   // normal UI token, which is NOT in the per-agent index → resolveAgentByToken
@@ -60,8 +60,9 @@ function resolveScopedCaller(ctx: RequestContext): string | undefined {
   // default for a present node token is REQUIRED: the original B1 fix
   // over-corrected by failing closed for it too, so the owner saw "Verifying
   // access…" on their own node.
-  const resolved = ctx.agent.resolveAgentByToken(ctx.requestToken)
-    ?? ctx.agent.getDefaultAgentAddress();
+  const resolved = ctx.authentication.principal.kind === 'agent'
+    ? ctx.authentication.principal.agentAddress
+    : ctx.agent.getDefaultAgentAddress();
   return addressFromAgentDid(resolved);
 }
 

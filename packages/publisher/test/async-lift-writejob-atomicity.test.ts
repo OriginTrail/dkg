@@ -168,7 +168,7 @@ describe('#1863 async-lift writeJob atomicity', () => {
   });
 
   it('falls back when a store implements replaceSubject but refuses it (non-atomic backend)', async () => {
-    // Mirrors SparqlHttpStore with atomicUpdates:false: replaceSubject is present
+    // Mirrors a best-effort SparqlHttpStore: replaceSubject is present
     // but raises a clean capability refusal, so the publisher must delete-then-insert.
     const inner = new OxigraphStore();
     let replaceSubjectCalls = 0;

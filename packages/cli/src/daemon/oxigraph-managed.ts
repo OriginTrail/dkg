@@ -23,7 +23,12 @@
  * matching the Blazegraph-Docker provisioner's contract.
  */
 import { join } from 'node:path';
-import { DEFAULT_SPARQL_HTTP_TIMEOUT_MS } from '@origintrail-official/dkg-storage';
+import {
+  createManagedOxigraphRuntimeStoreConfigV1,
+  DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
+  type ManagedOxigraphRuntimeStoreConfigV1,
+  type TripleStoreConfig,
+} from '@origintrail-official/dkg-storage';
 import {
   OXIGRAPH_VERSION,
   resolveOxigraphBinary,
@@ -322,7 +327,6 @@ export function planManagedOxigraph(
     // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
     options: {
       managedByDkg: true,
-      managedOxigraph: true,
       timeout: clientTimeoutMs,
     },
   };
@@ -347,11 +351,7 @@ export function planManagedOxigraph(
 export interface ManagedOxigraphResult {
   handle: OxigraphServerHandle;
   /** Drop-in replacement for `config.store`. */
-  storeConfig: {
-    backend: 'sparql-http';
-    options: Record<string, unknown>;
-    graphSetIndex?: StoreConfigLike['graphSetIndex'];
-  };
+  storeConfig: ManagedOxigraphRuntimeStoreConfigV1;
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
   /** Set only when the operator enabled the feature (else leave config as-is). */
   sharedMemoryPublicSnapshotStorage?: ManagedSnapshotStorageConfig;
@@ -412,7 +412,7 @@ export async function startManagedOxigraph(
     io: opts.serverIo,
   });
 
-  const storeConfig: ManagedOxigraphResult['storeConfig'] = {
+  const runtimeStoreConfig: TripleStoreConfig = {
     backend: 'sparql-http',
     options: {
       ...plan.storeConfigTemplate.options,
@@ -426,8 +426,9 @@ export async function startManagedOxigraph(
     },
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
-    storeConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
+    runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
+  const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig);
 
   return {
     handle,

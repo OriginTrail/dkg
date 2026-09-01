@@ -212,6 +212,48 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(validated))?.status).toBe('validated');
   });
 
+  it('rejects malformed runtime clear authorities as nonterminal without mutation', async () => {
+    const p = createPublisher();
+    const validated = await driveToValidated(
+      p,
+      {},
+      { admittedByAgentAddress: '0xCCcCCc00000000000000000000000000000000Cc' },
+    );
+    const runtimeOptions = (pendingTransactionOverride: unknown) => ({
+      pendingTransactionOverride,
+    }) as unknown as Parameters<typeof p.clearTerminalJob>[1];
+
+    for (const malformedAuthority of [
+      { requestedBy: 42 },
+      { kind: 'legacyOwner', agentAddress: '0xCCcCCc00000000000000000000000000000000Cc' },
+      { kind: 'agent' },
+    ]) {
+      expect(await p.clearTerminalJob(validated, runtimeOptions(malformedAuthority)))
+        .toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+      expect((await p.getStatus(validated))?.status).toBe('validated');
+    }
+  });
+
+  it('keeps the deprecated requestedBy override agent-scoped', async () => {
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const p = createPublisher();
+    const jobId = await driveToValidated(
+      p,
+      { name: 'legacy-shape' },
+      { admittedByAgentAddress: OWNER },
+    );
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OTHER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect(await p.getStatus(jobId)).not.toBeNull();
+
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OWNER },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
+  });
+
   it('lets only the admission owner explicitly clear one pre-broadcast validated job', async () => {
     const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
     const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
@@ -219,12 +261,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const validated = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
 
     expect(await p.clearTerminalJob(validated, {
-      pendingTransactionOverride: { requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(validated))?.status).toBe('validated');
 
     expect(await p.clearTerminalJob(validated, {
-      pendingTransactionOverride: { requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(validated)).toBeNull();
   });
@@ -270,12 +312,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await p.update(broadcast, 'broadcast', { broadcast: bx });
 
     expect(await p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
 
     expect(await p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(broadcast)).toBeNull();
   });
@@ -300,7 +342,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await resolverEntered;
     let clearSettled = false;
     const clearing = p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     }).then((outcome) => {
       clearSettled = true;
       return outcome;
@@ -359,7 +401,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // The AUTHOR is not the enqueuer, so the author's token gets nothing — this is the exact
     // confusion the previous version had backwards.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: AUTHOR },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: AUTHOR },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
@@ -367,53 +409,41 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // sole entitlement, so the GH#1778 hint sitting in the request grants nothing — this is
     // what fails if ownership ever falls back to reading the payload.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: PAYLOAD_CALLER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: PAYLOAD_CALLER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });
 
-  it('a NODE-TOKEN job can be force-cleared by that node token [followup]', async () => {
-    // 🔴 3824484639 — a node-level API token is the ordinary client, and it resolves to no
-    // `callerAgentAddress` at all: that field is an author RESOLUTION HINT and is deliberately
-    // absent for node tokens. Authorizing on it therefore denied the force-clear to the most
-    // common caller, reproducing the exact dead end this PR set out to remove — the daemon handed
-    // back a command that could never work.
-    //
-    // Job-level admission metadata records the authenticated enqueuer instead, for every
-    // admission, and carries no author-selection meaning.
-    const NODE = '0xNNnNNn00000000000000000000000000000000Nn';
+  it('lets the node operator force-clear a job admitted by another agent', async () => {
+    const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
     const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
     const p = createPublisher();
-    // No callerAgentAddress in the REQUEST: the node-token shape. The principal travels
-    // beside it, as admission metadata.
-    const jobId = await driveToTerminalFailed(p, {}, { admittedByAgentAddress: NODE });
+    const jobId = await driveToTerminalFailed(p, {}, { admittedByAgentAddress: OWNER });
     const job = await p.getStatus(jobId);
     if (!job || !('failure' in job)) throw new Error('expected a failed job');
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
     await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
 
-    // An unrelated token is still refused...
+    // An unrelated agent token is still refused...
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
 
-    // ...and the token that admitted it can clear it, which is what the daemon advertises.
+    // ...while the explicit node-operator principal may clear any job in this node's queue.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: NODE },
+      pendingTransactionOverride: { kind: 'nodeOperator' },
     })).toEqual({ outcome: 'cleared' });
   });
 
-  it('an UNOWNED job grants the override to nobody, including its payload caller [3825861808]', async () => {
-    // Fail-closed half. A record with no admission stamp (one admitted before ownership existed,
-    // or by a path that never stamped) has nobody to match. If ownership ever fell back to the
-    // payload's `callerAgentAddress`, this is the row that catches it: that identity is present,
-    // and it must still be refused.
+  it('lets only the node operator force-clear an unowned legacy job', async () => {
+    // A record admitted before ownership stamps existed has no agent owner. Its payload caller
+    // must not gain the right by fallback, but the operator still needs an upgrade escape hatch.
     const PAYLOAD_CALLER = '0xDDdDDd00000000000000000000000000000000Dd';
     const p = createPublisher();
     const jobId = await driveToTerminalFailed(p, { callerAgentAddress: PAYLOAD_CALLER });
@@ -425,9 +455,14 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
 
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: PAYLOAD_CALLER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: PAYLOAD_CALLER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
+
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { kind: 'nodeOperator' },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
   });
 
   it('refuses to REASSIGN the admission owner through a transition [3825861806]', async () => {
@@ -455,7 +490,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
   it('refuses an explicit `undefined` for an immutable field, which would ERASE it', async () => {
     // The merge spreads the patch, so an explicit `undefined` overwrites rather than being skipped.
     // Treating it as "nothing supplied" let a transition delete the owner outright — worse than
-    // reassigning it, because the job is then held with nobody able to clear it at all.
+    // reassigning it, because the job is then held with no agent able to clear it.
     const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
     const p = createPublisher();
     const jobId = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
