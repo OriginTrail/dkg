@@ -190,6 +190,7 @@ export {
   resolveReceiptTimeoutMs,
 } from './evm-adapter-constants.js';
 export {
+  InvalidRpcLogResponseError,
   waitForTransactionReceiptWithFailover,
   type TransactionReceiptEndpoint,
   type TransactionReceiptWaitOptions,

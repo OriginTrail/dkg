@@ -546,7 +546,15 @@ export class ChainEventLaneRunner {
       await this.restoreReplayRetryWindow(lane, ctx);
     }
 
-    const replay = lane.state.pendingRescanRetry ?? rescan;
+    // While the durable replay window is UNREAD (review r27-bot: a load
+    // outage spanning a scheduled-rescan tick), a NEW periodic rescan must
+    // not run: its write-ahead save would overwrite — and its success would
+    // clear — durable state this process has never seen, losing the older
+    // window's events. Forward scanning continues; the periodic rescan
+    // resumes once a restore attempt completes.
+    const replay = lane.state.replayRestorePending
+      ? undefined
+      : lane.state.pendingRescanRetry ?? rescan;
     if (replay) {
       // WRITE-AHEAD (review r24): the window is marked pending — in memory
       // AND durably — BEFORE the dispatch runs. A crash while the callback

@@ -44,9 +44,10 @@ import {
 } from '../src/evm-adapter.js';
 import {
   KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
+  SERVED_EVENT_TYPES,
   type KnowledgeAssetRootMutationEventType,
 } from '../src/evm-adapter-events.js';
-import { RpcFailoverClient, type RpcEndpoint } from '../src/rpc-failover-client.js';
+import { InvalidRpcLogResponseError, RpcFailoverClient, type RpcEndpoint } from '../src/rpc-failover-client.js';
 import type { ChainEvent } from '../src/chain-adapter.js';
 
 const ABI_DIR = join(import.meta.dirname, '..', 'abi');
@@ -389,7 +390,7 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     const iterator = adapter
       .listenForEvents({ eventTypes: ['KnowledgeAssetMerkleRootAdded'], fromBlock: 1, toBlock: 9_000 })
       [Symbol.asyncIterator]();
-    await expect(iterator.next()).rejects.toThrow(/malformed root-mutation log/);
+    await expect(iterator.next()).rejects.toThrow(/malformed log at block/);
   });
 
   it('a short-but-parsable hex topic never mints a WRONG kaId (reviews r2+r14)', async () => {
@@ -411,7 +412,7 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     const iterator = adapter
       .listenForEvents({ eventTypes: ['KnowledgeAssetMerkleRootAdded'], fromBlock: 1, toBlock: 9_000 })
       [Symbol.asyncIterator]();
-    await expect(iterator.next()).rejects.toThrow(/malformed root-mutation log/);
+    await expect(iterator.next()).rejects.toThrow(/malformed log at block/);
   });
 
   it('never decodes the dynamic root array of KnowledgeAssetMerkleRootsUpdated', async () => {
@@ -667,7 +668,99 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
   });
 });
 
+describe('validated raw-log scan — typed corruption classification (review r3-bot)', () => {
+  it('corruption escapes as InvalidRpcLogResponseError, no ethers code inspected or forged', async () => {
+    // The classification is a NAMED transport error routed through
+    // ReadOpts.isRetryable — the previous shape mutated `.code = 'BAD_DATA'`
+    // onto a plain Error to satisfy the generic classifier, coupling this
+    // feature to an incidental ethers string.
+    const iface = new Interface(KA_ABI as never);
+    const good = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
+    const malformed: FakeLog = { ...good, topics: [good.topics[0], 'not-a-hex-word'] };
+    const { adapter } = makeAdapter({
+      logsByEvent: { KnowledgeAssetMerkleRootAdded: [malformed] },
+    });
+
+    const iterator = adapter
+      .listenForEvents({ eventTypes: ['KnowledgeAssetMerkleRootAdded'], fromBlock: 1, toBlock: 9_000 })
+      [Symbol.asyncIterator]();
+    await expect(iterator.next()).rejects.toBeInstanceOf(InvalidRpcLogResponseError);
+  });
+});
 describe('EVMChainAdapter.supportsEventTypes', () => {
+  it('accepts EACH alias spelling independently, not only the primary (review r3-bot)', async () => {
+    // Both fixtures previously carried the FIRST spelling only, so dropping
+    // or mis-probing the fallback would stay green. One minimal ABI per
+    // SPELLING, bound to the owning contract, each probed alone.
+    const cases = [
+      {
+        name: 'KCCreated',
+        owner: 'knowledgeAssetStorage',
+        spellings: [
+          { fragment: 'KnowledgeAssetCreated' },
+          { fragment: 'KCCreated' },
+        ],
+      },
+      {
+        name: 'ContextGraphNameClaimed',
+        owner: 'contextGraphNameRegistry',
+        spellings: [
+          { fragment: 'NameClaimed' },
+          { fragment: 'ContextGraphNameClaimed' },
+        ],
+      },
+    ] as const;
+    for (const { name, owner, spellings } of cases) {
+      for (const spelling of spellings) {
+        const abi = [{
+          type: 'event', name: spelling.fragment, anonymous: false,
+          inputs: [{ indexed: true, internalType: 'uint256', name: 'id', type: 'uint256' }],
+        }];
+        const contract = new ethers.Contract('0x' + '44'.repeat(20), abi as never);
+        const { adapter } = makeAdapter({});
+        (adapter as unknown as { contracts: Record<string, unknown> }).contracts[owner] = contract;
+
+        await expect(
+          adapter.supportsEventTypes([name]),
+          `${name} must be supported by a ${spelling.fragment}-ONLY ABI`,
+        ).resolves.toEqual([]);
+      }
+      // And an owning ABI with NEITHER spelling refuses the name — the
+      // aliases widen acceptance, they do not disable the probe.
+      const emptyAbi = [{
+        type: 'event', name: 'SomethingUnrelated', anonymous: false,
+        inputs: [{ indexed: true, internalType: 'uint256', name: 'id', type: 'uint256' }],
+      }];
+      const bare = new ethers.Contract('0x' + '45'.repeat(20), emptyAbi as never);
+      const { adapter } = makeAdapter({});
+      (adapter as unknown as { contracts: Record<string, unknown> }).contracts[owner] = bare;
+      await expect(adapter.supportsEventTypes([name])).resolves.toEqual([name]);
+    }
+  });
+
+  it('the served roster equals an INDEPENDENTLY written vocabulary (review r3-bot)', () => {
+    // SERVED_EVENT_TYPES is the implementation output; using it as the test
+    // input let an omitted ownership row hide (the probe would refuse an
+    // event listenForEvents still serves, while every parity assertion
+    // stayed green). This roster is written BY HAND — update it only when
+    // the public event vocabulary genuinely changes.
+    const EXPECTED_ROSTER = [
+      'KnowledgeBatchCreated',
+      'ContextGraphExpanded',
+      'KnowledgeAssetRegisteredToContextGraph',
+      'KCCreated',
+      'KnowledgeAssetCreated',
+      'NameClaimed',
+      'ContextGraphNameClaimed',
+      'ContextGraphCreated',
+      'RelayCapabilityUpdated',
+      'KnowledgeAssetUpdated',
+      'KnowledgeAssetMerkleRootAdded',
+      'KnowledgeAssetMerkleRootsUpdated',
+      'KnowledgeAssetMerkleRootRemoved',
+    ];
+    expect([...SERVED_EVENT_TYPES].sort()).toEqual([...EXPECTED_ROSTER].sort());
+  });
   it('reports nothing missing when the bound ABI declares every name', async () => {
     const { adapter } = makeAdapter({});
     await expect(
