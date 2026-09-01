@@ -10,7 +10,6 @@ import { encodeRootlessWorkspaceRequest } from
   '../../publisher/test/_helpers/rootless-workspace.js';
 
 const CONTEXT_GRAPH = 'rfc64-live-share-authority-wiring';
-const WIRE_CONTEXT_GRAPH = `0x${'ab'.repeat(32)}`;
 const PEER = '12D3KooWRfc64LiveSharePeer';
 
 describe('agent wires RFC-64 authority into legacy live SHARE materialization', () => {
@@ -20,7 +19,7 @@ describe('agent wires RFC-64 authority into legacy live SHARE materialization', 
     try { await agent?.stop(); } catch { /* not started */ }
   });
 
-  it('declines wire-form live SHARE when its cleartext graph is catalog-owned', async () => {
+  it('declines the first wire-form live SHARE before reverse discovery is populated', async () => {
     agent = await DKGAgent.create({
       name: 'Rfc64LiveShareAuthorityWiring',
       chainAdapter: new MockChainAdapter(),
@@ -28,6 +27,7 @@ describe('agent wires RFC-64 authority into legacy live SHARE materialization', 
     const internals = agent as unknown as {
       config: DKGAgent['config'];
       wireIdToLocalCgId: Map<string, string>;
+      contextGraphWireId(contextGraphId: string): string;
       rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
       getOrCreateSharedMemoryHandler(): {
         handle(data: Uint8Array, from: string): Promise<{
@@ -50,14 +50,15 @@ describe('agent wires RFC-64 authority into legacy live SHARE materialization', 
         },
       },
     });
-    internals.wireIdToLocalCgId.set(WIRE_CONTEXT_GRAPH, CONTEXT_GRAPH);
+    const wireContextGraph = internals.contextGraphWireId(CONTEXT_GRAPH);
+    expect(internals.wireIdToLocalCgId.has(wireContextGraph)).toBe(false);
     const authority = vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph');
     const handler = internals.getOrCreateSharedMemoryHandler();
     const wire = encodeRootlessWorkspaceRequest({
-      contextGraphId: WIRE_CONTEXT_GRAPH,
+      contextGraphId: wireContextGraph,
       nquads: new TextEncoder().encode(
         `<urn:test:rfc64-live-share> <http://schema.org/name> "Catalog owned" `
-          + `<${contextGraphDataUri(WIRE_CONTEXT_GRAPH)}> .`,
+          + `<${contextGraphDataUri(wireContextGraph)}> .`,
       ),
       publisherPeerId: PEER,
       shareOperationId: 'rfc64-live-share-authority',
@@ -71,8 +72,9 @@ describe('agent wires RFC-64 authority into legacy live SHARE materialization', 
       retryable: false,
       reason: expect.stringContaining('not authoritative'),
     });
-    expect(authority).toHaveBeenCalledWith(WIRE_CONTEXT_GRAPH);
-    await expect(internals.store.hasGraph(contextGraphDataUri(WIRE_CONTEXT_GRAPH)))
+    expect(authority).toHaveBeenCalledWith(wireContextGraph);
+    expect(internals.wireIdToLocalCgId.get(wireContextGraph)).toBe(CONTEXT_GRAPH);
+    await expect(internals.store.hasGraph(contextGraphDataUri(wireContextGraph)))
       .resolves.toBe(false);
   });
 });

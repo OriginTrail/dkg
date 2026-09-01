@@ -615,9 +615,28 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
-    const authorityContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
-      ? this.wireIdToLocalCgId.get(contextGraphId.toLowerCase()) ?? contextGraphId
-      : contextGraphId;
+    const wireContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
+      ? contextGraphId.toLowerCase()
+      : null;
+    let authorityContextGraphId = wireContextGraphId === null
+      ? contextGraphId
+      : this.wireIdToLocalCgId.get(wireContextGraphId) ?? wireContextGraphId;
+    if (wireContextGraphId !== null && authorityContextGraphId === wireContextGraphId) {
+      // The immutable operator plan is cleartext-keyed, while the first live
+      // SHARE can arrive on the hashed topic before beacon/chain discovery has
+      // installed the authenticated reverse binding. Resolve that bounded
+      // configured set directly and cache the exact local->wire commitment so
+      // RFC-64 authority is fail-closed from the first frame rather than only
+      // after discovery catches up.
+      for (const selectedContextGraphId of Object.keys(
+        this.config.rfc64CatalogExecutionPlan.selectedAuthority,
+      )) {
+        if (this.contextGraphWireId(selectedContextGraphId) !== wireContextGraphId) continue;
+        authorityContextGraphId = selectedContextGraphId;
+        this.wireIdToLocalCgId.set(wireContextGraphId, selectedContextGraphId);
+        break;
+      }
+    }
     return resolveRfc64CatalogExecutionPlanAuthorityV1(
       this.config.rfc64CatalogExecutionPlan,
       authorityContextGraphId,
