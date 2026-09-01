@@ -14,7 +14,6 @@ import {
   ethers,
 } from 'ethers';
 import {
-  EVMChainAdapter,
 } from '../src/evm-adapter.js';
 import {
   KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,

@@ -12,7 +12,6 @@ import {
   compareEventPosition,
   deriveVmUpdateScopeId,
   isDiscardedByResume,
-  orderedLogCommitment,
   sameEventIdentity,
   type FinalizedEventPositionV1,
   type FinalizedUpdatePageProofV1,
@@ -28,23 +27,6 @@ const HASH_A = `0x${'11'.repeat(32)}`;
 const HASH_B = `0x${'22'.repeat(32)}`;
 const HASH_C = `0x${'33'.repeat(32)}`;
 
-function scope(overrides: Partial<VmUpdateScopeV1> = {}): VmUpdateScopeV1 {
-  const identity = {
-    chainId: '84532',
-    deploymentId: '84532:hub=0x00000000000000000000000000000000000000ff',
-    knowledgeAssetStorageAddress: KA_STORAGE,
-    contextGraphStorageAddress: CG_STORAGE,
-    ...overrides,
-  };
-  return {
-    ...identity,
-    scopeId: deriveVmUpdateScopeId(identity),
-    deploymentBlock: 47_682_200,
-    deploymentBlockSource: 'shipped',
-    deploymentBlockHistoricallyValidated: true,
-    ...overrides,
-  } as VmUpdateScopeV1;
-}
 
 function position(overrides: Partial<FinalizedEventPositionV1> = {}): FinalizedEventPositionV1 {
   return {
@@ -57,17 +39,6 @@ function position(overrides: Partial<FinalizedEventPositionV1> = {}): FinalizedE
   };
 }
 
-function proof(overrides: Partial<FinalizedUpdatePageProofV1> = {}): FinalizedUpdatePageProofV1 {
-  return {
-    assurance: 'dual-origin-corroborated',
-    normalizedOrigins: ['https://a.example.com', 'https://b.example.com'],
-    from: { blockNumber: 100, blockHash: HASH_A },
-    through: { blockNumber: 200, blockHash: HASH_B },
-    finalizedAnchor: { blockNumber: 300, blockHash: HASH_C },
-    orderedLogCommitment: `0x${'44'.repeat(32)}`,
-    ...overrides,
-  };
-}
 
 function codeOf(fn: () => unknown): string {
   try {
