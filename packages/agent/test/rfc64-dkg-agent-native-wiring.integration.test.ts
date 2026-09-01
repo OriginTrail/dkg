@@ -356,6 +356,7 @@ interface SeedSignedSwmWorkspaceParamsV1 {
   readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
   readonly allowedPeers?: readonly string[];
   readonly publicQuads?: readonly Quad[];
+  readonly assertionVersion?: CanonicalGraphScopedAuthorSealV1['assertionVersion'];
 }
 
 async function seedSignedSwmWorkspaceV1(
@@ -367,16 +368,25 @@ async function seedSignedSwmWorkspaceV1(
   assertionUri: string;
 }>> {
   const publicQuads = params.publicQuads ?? PROJECTION_QUADS;
-  const canonicalSeal = await authorSeal(params.kaNumber, publicQuads);
+  const baseSeal = await authorSeal(params.kaNumber, publicQuads);
+  const canonicalSeal = params.assertionVersion === undefined
+    ? baseSeal
+    : Object.freeze({
+      ...baseSeal,
+      assertionVersion: params.assertionVersion,
+    }) as CanonicalGraphScopedAuthorSealV1;
+  assertCanonicalGraphScopedAuthorSealV1(canonicalSeal);
   const seal = assertionSealFromCanonical(canonicalSeal);
   const assertionUri = contextGraphAssertionUri(
     params.contextGraphId,
     AUTHOR,
     params.assertionCoordinate,
   );
+  const metaGraph = contextGraphMetaUri(params.contextGraphId);
+  await agent.store.deleteByPattern({ graph: metaGraph, subject: assertionUri });
   await agent.store.insert(buildAssertionSealQuads({
     assertionUri,
-    metaGraph: contextGraphMetaUri(params.contextGraphId),
+    metaGraph,
     merkleRoot: seal.merkleRoot,
     authorAddress: seal.authorAddress,
     authorAttestationR: seal.authorAttestationR,
@@ -5485,6 +5495,138 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogVersion: '2',
       inventoryRowCount: '2',
     });
+
+    // Re-establish the v1 inventory row, then advance the catalog through the
+    // finalized-private repair path before the detached v2 inventory observer.
+    // This is the production ordering where the durable catalog/workspace/seal
+    // are on v2 while the live inventory still retains v1.
+    const retainedV1ShareOperationId = 'finalized-private-retained-version-1-operation';
+    await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: retainedV1ShareOperationId,
+      assertionCoordinate: repairOnlyAssertionCoordinate,
+      kaNumber: repairOnlyKaNumber,
+      accessPolicy: 'ownerOnly',
+    });
+    await author.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: repairOnlyAssertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: retainedV1ShareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        assertionCoordinate: repairOnlyAssertionCoordinate,
+        assertionVersion: repairIdentity.assertionVersion,
+        sealDigest: repairIdentity.sealDigest,
+      }),
+    ]));
+
+    const v2ShareOperationId = 'finalized-private-repair-version-2-operation';
+    const v2Workspace = await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: v2ShareOperationId,
+      assertionCoordinate: repairOnlyAssertionCoordinate,
+      kaNumber: repairOnlyKaNumber,
+      accessPolicy: 'ownerOnly',
+      assertionVersion: '2',
+    });
+    const v2RepairIdentity = Object.freeze({
+      version: 1,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      inventoryScope,
+      assertionCoordinate: repairOnlyAssertionCoordinate,
+      assertionVersion: v2Workspace.canonicalSeal.assertionVersion,
+      kaUal: v2Workspace.canonicalSeal.kaUal,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(
+        v2Workspace.canonicalSeal,
+      ),
+    } satisfies Rfc64FinalizedPrivatePlacementRepairV1);
+    await repairStore.put(v2RepairIdentity);
+    await expect(author.repairRfc64FinalizedPrivateCatalogPlacementV1(v2RepairIdentity))
+      .resolves.toBe('repaired');
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    const v2Head = author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    });
+    expect(v2Head).toMatchObject({ catalogVersion: '3', inventoryRowCount: '2' });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        assertionCoordinate: repairOnlyAssertionCoordinate,
+        assertionVersion: repairIdentity.assertionVersion,
+        sealDigest: repairIdentity.sealDigest,
+      }),
+    ]));
+    // A delayed v1 marker is covered by the newer v2 catalog row even though
+    // the exact v1 inventory row remains. It must not reconstruct or roll back.
+    await repairStore.put(repairIdentity);
+    await expect(author.repairRfc64FinalizedPrivateCatalogPlacementV1(repairIdentity))
+      .resolves.toBe('already-complete');
+    expect(repairStore.list()).not.toContainEqual(repairIdentity);
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toEqual(v2Head);
+
+    // Confirmation may also beat the detached inventory observer while the
+    // exact private workspace is still present. This production branch must
+    // publish from that workspace without requiring a finalized VM fallback.
+    const workspaceOnlyCoordinate = 'finalized-private-workspace-only-repair';
+    const workspaceOnlyKaNumber = repairOnlyKaNumber + 1n;
+    const workspaceOnly = await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: 'finalized-private-workspace-only-operation',
+      assertionCoordinate: workspaceOnlyCoordinate,
+      kaNumber: workspaceOnlyKaNumber,
+      accessPolicy: 'ownerOnly',
+    });
+    const workspaceOnlyRepair = Object.freeze({
+      version: 1,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      inventoryScope,
+      assertionCoordinate: workspaceOnlyCoordinate,
+      assertionVersion: workspaceOnly.canonicalSeal.assertionVersion,
+      kaUal: workspaceOnly.canonicalSeal.kaUal,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(
+        workspaceOnly.canonicalSeal,
+      ),
+    } satisfies Rfc64FinalizedPrivatePlacementRepairV1);
+    const workspaceOnlyVmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(
+        workspaceOnly.canonicalSeal.kaUal,
+        workspaceOnly.canonicalSeal.assertionVersion,
+      ),
+    );
+    await expect(author.store.hasGraph(workspaceOnlyVmGraph)).resolves.toBe(false);
+    await repairStore.put(workspaceOnlyRepair);
+    await expect(author.repairRfc64FinalizedPrivateCatalogPlacementV1(workspaceOnlyRepair))
+      .resolves.toBe('repaired');
+    expect(repairStore.list()).not.toContainEqual(workspaceOnlyRepair);
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '3' });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows.some(({ assertionCoordinate: coordinate }) => (
+      coordinate === workspaceOnlyCoordinate
+    ))).toBe(false);
+    await expect(author.store.hasGraph(workspaceOnlyVmGraph)).resolves.toBe(false);
   }, 90_000);
 
   it('awaits production private retirement and reports a real finalized missing-placement path', async () => {

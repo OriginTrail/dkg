@@ -30,8 +30,8 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
-import type { Rfc64CatalogSuccessorAssetInputV1 } from
-  '../dkg-agent-rfc64-catalog.js';
+import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
+  './public-catalog-successor-asset-v1.js';
 import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
   '../durable-author-seal-resolver-v1.js';
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './abort-v1.js';
@@ -62,7 +62,7 @@ export async function resolveRfc64InventoryWorkspaceCatalogAssetV1(
     readonly laneKind: 'public' | 'private';
     readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   }>,
-): Promise<Rfc64CatalogSuccessorAssetInputV1> {
+): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> {
   const { graphManager, seal } = await resolveStrictSealV1(params, params.row);
   const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
     store: params.store,
@@ -107,7 +107,7 @@ export async function resolveRfc64ConfirmedVmRepairCatalogAssetV1(
     readonly identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>;
     readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   }>,
-): Promise<Rfc64CatalogSuccessorAssetInputV1> {
+): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> {
   const { graphManager, seal } = await resolveStrictSealV1(params, params.identity);
   const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
     store: params.store,
@@ -211,7 +211,7 @@ function catalogAssetV1(
   assertionCoordinate: SwmAuthorInventoryRowV1['assertionCoordinate'],
   projectionBytes: Uint8Array,
   seal: CanonicalGraphScopedAuthorSealV1,
-): Rfc64CatalogSuccessorAssetInputV1 {
+): Rfc64PublicCatalogSuccessorAssetInputV1 {
   return Object.freeze({ assertionCoordinate, projectionBytes, seal });
 }
 

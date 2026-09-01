@@ -164,12 +164,12 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ...inventoryScope,
       bucketCount: '1',
     }) as AuthorCatalogScopeV1;
+    if (await this.rfc64CatalogCoversConfirmedSwmRowV1({
+      scope,
+      expectedRow: params,
+    })) return null;
     let asset: Rfc64CatalogSuccessorAssetInputV1;
     if (row === undefined) {
-      if (await this.rfc64CatalogContainsConfirmedSwmRowV1({
-        scope,
-        expectedRow: params,
-      })) return null;
       asset = await resolveRfc64ConfirmedVmRepairCatalogAssetV1({
         store: this.store,
         publicSnapshotStore: this.publicSnapshotStore,

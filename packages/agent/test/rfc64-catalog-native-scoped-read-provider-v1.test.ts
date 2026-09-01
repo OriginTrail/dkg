@@ -5,6 +5,7 @@ import {
   KA_TRANSFER_CHUNK_SIZE_V1,
   KA_TRANSFER_CODEC_V1,
   KA_TRANSFER_PROJECTION_V1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   assertAuthorCatalogRowV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
@@ -38,8 +39,11 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   produceEmptyAuthorCatalogGenesisV1,
 } from '../src/rfc64/author-catalog-producer.js';
-import { assertRfc64BoundedCatalogPredecessorV1 } from
-  '../src/rfc64/catalog-head-lineage-v1.js';
+import {
+  RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1,
+  assertRfc64BoundedCatalogPredecessorV1,
+  walkRfc64BoundedCatalogHeadLineageV1,
+} from '../src/rfc64/catalog-head-lineage-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from '../src/rfc64/catalog-native-scoped-read-provider-v1.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-access-policy-v1.js';
 import { produceDirectAuthorCatalogIssuerDelegationV1 } from '../src/rfc64/public-catalog-issuer-delegation-v1.js';
@@ -369,6 +373,101 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
       child,
       scope,
     )).toThrow(/contiguous bounded signed head/u);
+
+    const digest = `0x${'97'.repeat(32)}` as Digest32V1;
+    const rejectedLinks: Array<Readonly<{
+      label: string;
+      predecessor: SignedAuthorCatalogHeadEnvelopeV1;
+      child: SignedAuthorCatalogHeadEnvelopeV1;
+    }>> = [
+      {
+        label: 'skipped version',
+        predecessor,
+        child: Object.freeze({
+          ...child,
+          payload: Object.freeze({ ...child.payload, version: '2' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+      },
+      {
+        label: 'timestamp rollback',
+        predecessor,
+        child: Object.freeze({
+          ...child,
+          payload: Object.freeze({ ...child.payload, issuedAt: '0' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+      },
+      {
+        label: 'wrong previous digest',
+        predecessor,
+        child: Object.freeze({
+          ...child,
+          payload: Object.freeze({ ...child.payload, previousHeadDigest: digest }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+      },
+      {
+        label: 'linked genesis',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({ ...predecessor.payload, previousHeadDigest: digest }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child,
+      },
+      {
+        label: 'unlinked non-genesis',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({ ...predecessor.payload, version: '1' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child: Object.freeze({
+          ...child,
+          payload: Object.freeze({ ...child.payload, version: '2' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+      },
+      {
+        label: 'row bound',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({
+            ...predecessor.payload,
+            totalRows: String(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 + 1),
+          }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child,
+      },
+      {
+        label: 'bucket shape',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({ ...predecessor.payload, bucketCount: '2' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child,
+      },
+      {
+        label: 'directory shape',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({ ...predecessor.payload, directoryHeight: '1' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child,
+      },
+    ];
+    for (const mutation of rejectedLinks) {
+      expect(
+        () => assertRfc64BoundedCatalogPredecessorV1(
+          mutation.predecessor,
+          mutation.child,
+          scope,
+        ),
+        mutation.label,
+      ).toThrow();
+    }
+
+    await expect(walkRfc64BoundedCatalogHeadLineageV1({
+      target: child,
+      catalogScope: scope,
+      maxPredecessors: RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 + 1,
+      readPredecessor: async () => null,
+    })).rejects.toThrow(/invalid bounded window/u);
   });
 
   it('closes one exact signed bounded head and exposes only its reachable digests', async () => {

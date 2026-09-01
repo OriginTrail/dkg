@@ -110,7 +110,7 @@ export interface FinalizedVmRuntimeConfigV1 {
   readonly knowledgeAssetsLifecycleAddress: EvmAddressV1;
   readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
   readonly materialize: FinalizedVmMaterializerV1;
-  readonly verifyExistingMaterialization?: FinalizedVmExistingMaterializationVerifierV1;
+  readonly verifyExistingMaterialization: FinalizedVmExistingMaterializationVerifierV1;
 }
 
 export interface FinalizedVmRuntimeRequestV1 {
@@ -160,7 +160,7 @@ interface RuntimeConfigSnapshotV1 {
   readonly knowledgeAssetsLifecycleAddress: EvmAddressV1;
   readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
   readonly materialize: FinalizedVmMaterializerV1;
-  readonly verifyExistingMaterialization?: FinalizedVmExistingMaterializationVerifierV1;
+  readonly verifyExistingMaterialization: FinalizedVmExistingMaterializationVerifierV1;
 }
 
 interface RuntimeRequestSnapshotV1 {
@@ -231,12 +231,6 @@ export function createFinalizedVmRuntimeV1(
     try {
       for (const prepared of verified.composed.existingMaterializationChecks) {
         request.signal.throwIfAborted();
-        if (config.verifyExistingMaterialization === undefined) {
-          fail(
-            'finalized-vm-runtime-materialization',
-            `no durable verifier is configured for existing finalized ordinal ${prepared.candidate.ordinal}`,
-          );
-        }
         try {
           await config.verifyExistingMaterialization(Object.freeze({
             acceptedPolicy: request.acceptedPolicy,
@@ -321,10 +315,7 @@ function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapsho
     assertNonzeroAddress(input.knowledgeAssetsLifecycleAddress, 'knowledgeAssetsLifecycleAddress');
     if (typeof input.snapshot !== 'function') throw new TypeError('snapshot is not callable');
     if (typeof input.materialize !== 'function') throw new TypeError('materialize is not callable');
-    if (
-      input.verifyExistingMaterialization !== undefined
-      && typeof input.verifyExistingMaterialization !== 'function'
-    ) {
+    if (typeof input.verifyExistingMaterialization !== 'function') {
       throw new TypeError('verifyExistingMaterialization is not callable');
     }
   } catch (cause) {
@@ -338,9 +329,7 @@ function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapsho
     knowledgeAssetsLifecycleAddress: input.knowledgeAssetsLifecycleAddress,
     snapshot: input.snapshot,
     materialize: input.materialize,
-    ...(input.verifyExistingMaterialization === undefined
-      ? {}
-      : { verifyExistingMaterialization: input.verifyExistingMaterialization }),
+    verifyExistingMaterialization: input.verifyExistingMaterialization,
   });
 }
 

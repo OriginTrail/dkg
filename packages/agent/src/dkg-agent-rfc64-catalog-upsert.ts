@@ -12,6 +12,7 @@ import {
   computeControlSignatureVariantDigestHex,
   decodeOpaqueKaBundleV1,
   parseCanonicalGraphScopedAuthorSealV1,
+  type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
   type Digest32V1,
@@ -118,11 +119,13 @@ interface Rfc64CatalogMutationStateV1 {
 
 export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   /** Package-internal positive proof used by crash-safe confirmed-row retirement. */
-  async rfc64CatalogContainsConfirmedSwmRowV1(
+  async rfc64CatalogCoversConfirmedSwmRowV1(
     this: DKGAgent,
     params: Readonly<{
       readonly scope: AuthorCatalogScopeV1;
-      readonly expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
+      readonly expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 & Readonly<{
+        assertionCoordinate: AssertionCoordinateV1;
+      }>;
     }>,
   ): Promise<boolean> {
     const persistence = this.rfc64PersistenceV1;
@@ -132,12 +135,24 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       computeAuthorCatalogScopeDigestV1(params.scope),
       params.scope.authorAddress,
     );
-    return state?.assets.some((asset) => (
-      asset.seal.kaUal === params.expectedRow.kaUal
-      && asset.seal.assertionVersion === params.expectedRow.assertionVersion
+    const asset = state?.assets.find((candidate) => (
+      candidate.seal.kaUal === params.expectedRow.kaUal
+    ));
+    if (
+      asset === undefined
+      || asset.assertionCoordinate !== params.expectedRow.assertionCoordinate
+    ) return false;
+    const catalogVersion = BigInt(asset.seal.assertionVersion);
+    const expectedVersion = BigInt(params.expectedRow.assertionVersion);
+    if (catalogVersion > expectedVersion) {
+      // A newer assertion on the same stable KA and coordinate is durable
+      // completion for an obsolete confirmation repair. Never reconstruct or
+      // roll it back to the older workspace/seal generation.
+      return true;
+    }
+    return catalogVersion === expectedVersion
       && computeCanonicalGraphScopedAuthorSealDigestV1(asset.seal)
-        === params.expectedRow.sealDigest
-    )) ?? false;
+        === params.expectedRow.sealDigest;
   }
 
   /**
