@@ -6,6 +6,10 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
+    "@origintrail-official/dkg-semantic-runtime#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "generated/**"]
+    },
     "build:ui": {
       "dependsOn": ["build"],
       "outputs": ["dist-ui/**"]

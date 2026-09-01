@@ -179,7 +179,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.run_node == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -221,6 +221,16 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Rust, Wasm target, and wasm-bindgen CLI
+        run: |
+          rustup toolchain install 1.98.0 \
+            --profile minimal \
+            --target wasm32-unknown-unknown
+          if ! command -v wasm-bindgen >/dev/null 2>&1 \
+            || [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.127" ]]; then
+            cargo +1.98.0 install wasm-bindgen-cli --version 0.2.127 --locked
+          fi
 
       - name: Lint source and repository tooling
         run: pnpm lint
@@ -315,12 +325,15 @@ jobs:
         run: |
           set -euo pipefail
           # Collect every emitted output: tsc dist/, optional Vite dist-ui/,
-          # and the generated network/ dir the CLI copies during build.
+          # the locally built semantic-runtime Wasm, and the generated network/
+          # dir the CLI copies during build.
+          test -d packages/semantic-runtime/generated
           mapfile -t PATHS < <(
             find packages -maxdepth 2 -type d \
               \( -name dist -o -name dist-ui -o -name network \) \
               2>/dev/null | sort -u
           )
+          PATHS+=(packages/semantic-runtime/generated)
           echo "Packing ${#PATHS[@]} output dirs…"
           tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
           ls -lh /tmp/build-outputs.tgz
@@ -332,10 +345,10 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Rust/Wasm falsification gate. Generated bindings are committed so normal
-  # Node builds only verify their hash/ABI; this lane independently rebuilds
-  # them with the pinned toolchain, checks native/Wasm byte equivalence, and
-  # proves the Worker watchdog/recovery contract.
+  # Rust/Wasm falsification gate. Generated bindings are local build outputs,
+  # not repository inputs. This lane builds them with the pinned toolchain,
+  # checks native/Wasm byte equivalence, and proves the Worker
+  # watchdog/recovery contract.
   semantic-runtime:
     name: Rust/Wasm semantic runtime
     needs: changes

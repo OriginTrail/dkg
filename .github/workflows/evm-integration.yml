@@ -119,6 +119,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install pinned Rust, Wasm target, and wasm-bindgen CLI
+        run: |
+          rustup toolchain install 1.98.0 \
+            --profile minimal \
+            --target wasm32-unknown-unknown
+          if ! command -v wasm-bindgen >/dev/null 2>&1 \
+            || [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.127" ]]; then
+            cargo +1.98.0 install wasm-bindgen-cli --version 0.2.127 --locked
+          fi
+
       - name: Cache Hardhat artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

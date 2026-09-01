@@ -1,7 +1,7 @@
 {
   "name": "@origintrail-official/dkg-semantic-runtime",
   "version": "10.0.14",
-  "description": "Integrity-verified Rust/Wasm semantic runtime host for DKG V10",
+  "description": "Locally built, integrity-verified Rust/Wasm semantic runtime host for DKG V10",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,15 +16,15 @@
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
   },
   "scripts": {
-    "prebuild": "node ../../scripts/build-semantic-runtime.mjs --verify-only",
+    "prebuild": "node ../../scripts/build-semantic-runtime.mjs",
     "build": "tsc",
     "build:wasm": "node ../../scripts/build-semantic-runtime.mjs",
-    "check:wasm": "node ../../scripts/build-semantic-runtime.mjs --check",
+    "check:wasm": "node ../../scripts/build-semantic-runtime.mjs",
     "prepack": "pnpm run build && node ../../scripts/build-semantic-runtime.mjs --verify-only",
     "pretest": "pnpm run build",
     "test": "vitest run",
     "test:differential": "vitest run test/differential.test.ts",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist generated tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "better-sqlite3": "12.11.1",

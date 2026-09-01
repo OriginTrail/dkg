@@ -241,46 +241,22 @@ export function verifyGenerated(root = GENERATED_ROOT) {
   return manifest;
 }
 
-function compareGenerated(expectedRoot, actualRoot) {
-  const expectedFiles = generatedFiles(expectedRoot);
-  const actualFiles = generatedFiles(actualRoot);
-  if (JSON.stringify(expectedFiles) !== JSON.stringify(actualFiles)) {
-    throw new Error(
-      `semantic-runtime: generated file set is stale\nexpected=${expectedFiles.join(',')}\nactual=${actualFiles.join(',')}`,
-    );
-  }
-  for (const relative of expectedFiles) {
-    const expected = fs.readFileSync(path.join(expectedRoot, relative));
-    const actual = fs.readFileSync(path.join(actualRoot, relative));
-    if (!expected.equals(actual)) {
-      throw new Error(`semantic-runtime: generated artifact is stale: ${relative}`);
-    }
-  }
-}
-
 function main() {
   const verifyOnly = process.argv.includes('--verify-only');
-  const check = process.argv.includes('--check');
-  if (verifyOnly && check) throw new Error('semantic-runtime: choose --verify-only or --check');
   if (verifyOnly) {
     verifyGenerated();
-    console.log('semantic-runtime: generated Wasm integrity and ABI verified');
+    console.log('semantic-runtime: local Wasm integrity and ABI verified');
     return;
   }
 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-semantic-runtime-'));
   try {
     buildInto(tempRoot);
-    if (check) {
-      compareGenerated(tempRoot, GENERATED_ROOT);
-      console.log('semantic-runtime: generated artifacts match pinned Rust sources');
-      return;
-    }
     fs.mkdirSync(path.dirname(GENERATED_ROOT), { recursive: true });
     fs.rmSync(GENERATED_ROOT, { recursive: true, force: true });
     fs.renameSync(tempRoot, GENERATED_ROOT);
     verifyGenerated();
-    console.log(`semantic-runtime: generated artifacts written to ${GENERATED_ROOT}`);
+    console.log(`semantic-runtime: local artifacts built and verified at ${GENERATED_ROOT}`);
   } finally {
     if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
   }
