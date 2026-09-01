@@ -13,21 +13,38 @@ export interface LaneReplayRetryWindow {
 }
 
 /**
+ * Durable persistence for a rejected replay window, as ONE capability
+ * (review r21): both operations or neither — a half-implemented pair is
+ * UNREPRESENTABLE rather than policed at runtime. `save(lane, undefined)`
+ * clears the persisted window.
+ */
+export interface LaneReplayRetryPersistence {
+  load(lane: ChainEventPollerLane): Promise<LaneReplayRetryWindow | undefined>;
+  save(lane: ChainEventPollerLane, window: LaneReplayRetryWindow | undefined): Promise<void>;
+}
+
+/**
  * Lane-aware cursor persistence for saving/loading independent lane cursors.
  *
- * The replay-retry methods are OPTIONAL (review r20): the in-process retained
- * window (r19) survives a restart only when the store persists it — the
- * forward cursor is durable, so without these a rejected replay discovery
- * could be lost across a restart while the cursor stays ahead of it. A store
- * that implements one must implement all three; `saveLaneReplayRetry` with
- * `undefined` clears the persisted window.
+ * `replayRetry` is OPTIONAL (reviews r20/r21): without it, the retained
+ * replay window (r19) is process-lifetime only — the forward cursor is
+ * durable, so a store that wants restart-safe replay recovery supplies the
+ * nested capability, atomically.
  */
 export interface LaneCursorPersistence {
   loadLane(lane: ChainEventPollerLane): Promise<number | undefined>;
   saveLane(lane: ChainEventPollerLane, blockNumber: number): Promise<void>;
-  loadLaneReplayRetry?(lane: ChainEventPollerLane): Promise<LaneReplayRetryWindow | undefined>;
-  saveLaneReplayRetry?(lane: ChainEventPollerLane, window: LaneReplayRetryWindow | undefined): Promise<void>;
+  replayRetry?: LaneReplayRetryPersistence;
 }
+
+// Zero-emit type proof (review r21): a half-implemented replay capability
+// cannot type-check — the nested object requires BOTH operations.
+type Expect<T extends true> = T;
+type NotAssignable<A, B> = A extends B ? false : true;
+type _halfPairIsUnrepresentable = Expect<NotAssignable<
+  { load: LaneReplayRetryPersistence['load'] },
+  LaneReplayRetryPersistence
+>>;
 
 export type CursorPersistence = LegacyCursorPersistence | LaneCursorPersistence;
 
@@ -36,8 +53,7 @@ export type LaneCursorStore =
       kind: 'lane';
       loadLane(lane: ChainEventPollerLane): Promise<number | undefined>;
       saveLane(lane: ChainEventPollerLane, blockNumber: number): Promise<void>;
-      loadLaneReplayRetry?(lane: ChainEventPollerLane): Promise<LaneReplayRetryWindow | undefined>;
-      saveLaneReplayRetry?(lane: ChainEventPollerLane, window: LaneReplayRetryWindow | undefined): Promise<void>;
+      replayRetry?: LaneReplayRetryPersistence;
     }
   | {
       kind: 'legacy';
@@ -59,13 +75,7 @@ export function createLaneCursorStore(cursorPersistence?: CursorPersistence): La
       kind: 'lane',
       loadLane: (lane) => laneStore.loadLane(lane),
       saveLane: (lane, blockNumber) => laneStore.saveLane(lane, blockNumber),
-      ...(laneStore.loadLaneReplayRetry && laneStore.saveLaneReplayRetry
-        ? {
-            loadLaneReplayRetry: (lane: ChainEventPollerLane) => laneStore.loadLaneReplayRetry!(lane),
-            saveLaneReplayRetry: (lane: ChainEventPollerLane, window: LaneReplayRetryWindow | undefined) =>
-              laneStore.saveLaneReplayRetry!(lane, window),
-          }
-        : {}),
+      ...(laneStore.replayRetry ? { replayRetry: laneStore.replayRetry } : {}),
     };
   }
 

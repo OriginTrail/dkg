@@ -349,10 +349,12 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     const store = {
       async loadLane() { return cursor; },
       async saveLane(_lane: ChainEventPollerLane, block: number) { cursor = block; },
-      async loadLaneReplayRetry() { return persisted; },
-      async saveLaneReplayRetry(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
-        saves.push(w ? { ...w } : undefined);
-        persisted = w ? { ...w } : undefined;
+      replayRetry: {
+        async load() { return persisted; },
+        async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+          saves.push(w ? { ...w } : undefined);
+          persisted = w ? { ...w } : undefined;
+        },
       },
     } satisfies LaneCursorPersistence;
 

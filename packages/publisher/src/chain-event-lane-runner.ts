@@ -291,7 +291,7 @@ export class ChainEventLaneRunner {
   ): Promise<void> {
     try {
       if (this.cursorStore?.kind === 'lane') {
-        await this.cursorStore.saveLaneReplayRetry?.(lane.spec.name, window);
+        await this.cursorStore.replayRetry?.save(lane.spec.name, window);
       }
     } catch (err) {
       this.log.warn(
@@ -321,7 +321,7 @@ export class ChainEventLaneRunner {
       // the forward cursor is durable, so an in-memory-only retained window
       // would let a rejected replay discovery be lost across a restart.
       if (this.cursorStore.kind === 'lane') {
-        const retainedReplay = await this.cursorStore.loadLaneReplayRetry?.(lane.spec.name);
+        const retainedReplay = await this.cursorStore.replayRetry?.load(lane.spec.name);
         if (retainedReplay) {
           lane.state.pendingRescanRetry = { ...retainedReplay };
           this.log.info(
