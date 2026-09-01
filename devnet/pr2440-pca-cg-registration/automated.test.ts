@@ -55,6 +55,8 @@ const PCA_ABI = [
   'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
   'function ownerOf(uint256 accountId) view returns (address)',
   'function transferFrom(address from, address to, uint256 accountId)',
+  'function registerAgent(uint256 accountId, address agent)',
+  'function deregisterAgent(uint256 accountId, address agent)',
   'function agentToAccountId(address agent) view returns (uint256)',
   'function accounts(uint256 accountId) view returns (uint96 committedTRAC, uint40 createdAtEpoch, uint40 expiresAtEpoch, uint40 createdAtTimestamp, uint40 expiresAtTimestamp, uint72 primaryNode, uint96 cumulativeSpent, uint40 lastSettledWindow, bool fullySwept)',
 ];
@@ -300,6 +302,18 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
     expect(await pca.balanceOf(walletB.address), 'wallet B must own exactly one fixture PCA').toBe(1n);
     const accountId = BigInt(await pca.tokenOfOwnerByIndex(walletB.address, 0n));
     expect(lower(await pca.ownerOf(accountId))).toBe(lower(walletB.address));
+
+    // VM publishing itself is PCA-covered only for registered publishing
+    // agents. Register the selected publisher as its own PCA agent so the live
+    // flow isolates the registration-deposit waiver while remaining a valid
+    // zero-liquid-TRAC publish. Owner-only registration coverage is exercised
+    // separately by the focused contract suite.
+    await (await (pca.connect(walletB) as ethers.Contract).registerAgent(
+      accountId,
+      walletB.address,
+      { nonce: await nextNonce(state.provider, walletB.address) },
+    )).wait();
+    expect(await pca.agentToAccountId(walletB.address)).toBe(accountId);
 
     const account = await pca.accounts(accountId);
     expect(BigInt(account.committedTRAC ?? account[0])).toBe(commitment);
@@ -609,8 +623,10 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
     await setRegistrationDeposit(DEPOSIT);
     walletStateChanged = true;
     pcaAccountId = await createEligiblePcaOwnedByB();
-    expect(await pca.agentToAccountId(walletB.address), 'wallet B coverage must use ownership')
-      .toBe(0n);
+    expect(
+      await pca.agentToAccountId(walletB.address),
+      'wallet B must be the selected PCA-qualified publishing agent',
+    ).toBe(pcaAccountId);
 
     // Make ordinary deposit fallback impossible for both pool candidates. A
     // false coverage selection now fails loudly instead of spending pre-funded
@@ -628,6 +644,13 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
       try {
         const currentOwner = ethers.getAddress(await pca.ownerOf(pcaAccountId));
         if (lower(currentOwner) === lower(walletB.address)) {
+          if (BigInt(await pca.agentToAccountId(walletB.address)) === pcaAccountId) {
+            await (await (pca.connect(walletB) as ethers.Contract).deregisterAgent(
+              pcaAccountId,
+              walletB.address,
+              { nonce: await nextNonce(state.provider, walletB.address) },
+            )).wait();
+          }
           await (await (pca.connect(walletB) as ethers.Contract).transferFrom(
             walletB.address,
             pcaCleanupAddress,
@@ -636,6 +659,8 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
           )).wait();
         }
         expect(await pca.balanceOf(walletB.address), 'fixture PCA must be detached from real wallet B')
+          .toBe(0n);
+        expect(await pca.agentToAccountId(walletB.address), 'fixture PCA agent binding must be removed')
           .toBe(0n);
       } catch (error) {
         failures.push(`fixture PCA ownership cleanup failed: ${(error as Error).message}`);
