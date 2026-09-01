@@ -4,7 +4,6 @@ import { expect } from 'chai';
 import {
   BaseContract,
   ContractTransactionReceipt,
-  ContractTransactionResponse,
   LogDescription,
   ethers,
 } from 'ethers';
@@ -34,6 +33,19 @@ type Fixture = {
   Waiver: ContextGraphWaiverStorage;
   NFT: DKGPublishingConvictionNFT;
   CSS: ConvictionStakingStorage;
+};
+
+type WaivedRegistrationScenario = {
+  caller: SignerWithAddress;
+  selector?: 'coverage' | 'legacy';
+  participantAgents?: string[];
+  metadataBatchId?: bigint;
+  accessPolicy: number;
+  publishPolicy: number;
+  publishAuthority: string;
+  publishAuthorityAccountId: bigint;
+  nameHash: string;
+  coverageAccountId: bigint;
 };
 
 async function deployFixture(): Promise<Fixture> {
@@ -122,25 +134,20 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     return NFT.totalSupply();
   }
 
-  async function assertWaivedRegistration(input: {
-    caller: SignerWithAddress;
-    coverageAccountId: bigint;
-    accessPolicy: number;
-    publishPolicy: number;
-    publishAuthority: string;
-    publishAuthorityAccountId: bigint;
-    nameHash: string;
-    submit: () => Promise<ContractTransactionResponse>;
-  }): Promise<bigint> {
+  async function assertWaivedRegistration(
+    input: WaivedRegistrationScenario,
+  ): Promise<bigint> {
     const {
       caller,
+      selector = 'coverage',
+      participantAgents = [],
+      metadataBatchId = 0n,
       coverageAccountId,
       accessPolicy,
       publishPolicy,
       publishAuthority,
       publishAuthorityAccountId,
       nameHash,
-      submit,
     } = input;
     const latestBefore = await CGS.getLatestContextGraphId();
     const waivedBefore = await Waiver.waivedCgCount(coverageAccountId);
@@ -149,7 +156,22 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     const committedBefore = (await NFT.accounts(coverageAccountId))[0];
     const deposit = await Params.contextGraphRegistrationDeposit();
 
-    const tx = await submit();
+    const connectedFacade = Facade.connect(caller);
+    const createArgs = [
+      participantAgents,
+      metadataBatchId,
+      accessPolicy,
+      publishPolicy,
+      publishAuthority,
+      publishAuthorityAccountId,
+      nameHash,
+    ] as const;
+    const tx = selector === 'legacy'
+      ? await connectedFacade.createContextGraph(...createArgs)
+      : await connectedFacade.createContextGraphWithPcaCoverage(
+        ...createArgs,
+        coverageAccountId,
+      );
     const receipt = await tx.wait();
     if (!receipt) throw new Error('Context Graph registration transaction was not mined');
     const contextGraphId = await CGS.getLatestContextGraphId();
@@ -171,8 +193,8 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     expect(created[0]).to.equal(contextGraphId);
     expect(created[1]).to.equal(caller.address);
     expect(created[2]).to.equal(nameHash);
-    expect([...created[3]]).to.deep.equal([]);
-    expect(created[4]).to.equal(0n);
+    expect([...created[3]]).to.deep.equal(participantAgents);
+    expect(created[4]).to.equal(metadataBatchId);
     expect(created[5]).to.equal(BigInt(accessPolicy));
     expect(created[6]).to.equal(BigInt(publishPolicy));
     expect(created[7]).to.equal(publishAuthority);
@@ -199,6 +221,9 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     expect(await CGS.getPublishAuthorityAccountId(contextGraphId)).to.equal(
       publishAuthorityAccountId,
     );
+    const storedGraph = await CGS.getContextGraph(contextGraphId);
+    expect([...storedGraph.participantAgents]).to.deep.equal(participantAgents);
+    expect(storedGraph.metadataBatchId).to.equal(metadataBatchId);
     expect(await TokenContract.balanceOf(caller.address)).to.equal(callerBalanceBefore);
     expect(await TokenContract.balanceOf(await CSS.getAddress())).to.equal(cssBalanceBefore);
     expect((await NFT.accounts(coverageAccountId))[0]).to.equal(committedBefore);
@@ -273,22 +298,13 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     await NFT.connect(owner).registerAgent(accountId, agent.address);
     await assertWaivedRegistration({
       caller: agent,
+      selector: 'legacy',
       coverageAccountId: accountId,
       accessPolicy: 0,
       publishPolicy: 0,
       publishAuthority: owner.address,
       publishAuthorityAccountId: accountId,
       nameHash: ethers.keccak256(ethers.toUtf8Bytes('legacy-pca-curated')),
-      submit: () =>
-        Facade.connect(agent).createContextGraph(
-          [],
-          0,
-          0,
-          0,
-          owner.address,
-          accountId,
-          ethers.keccak256(ethers.toUtf8Bytes('legacy-pca-curated')),
-        ),
     });
   });
 
@@ -306,25 +322,17 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
       const nameHash = ethers.keccak256(
         ethers.toUtf8Bytes(`open-${testCase.accessPolicy}-${testCase.relation}`),
       );
+      const useSentinelGraphFields = testCase.accessPolicy === 0;
       const contextGraphId = await assertWaivedRegistration({
         caller,
         coverageAccountId: accountId,
+        participantAgents: useSentinelGraphFields ? [accounts[8].address] : [],
+        metadataBatchId: useSentinelGraphFields ? 42n : 0n,
         accessPolicy: testCase.accessPolicy,
         publishPolicy: 1,
         publishAuthority: ethers.ZeroAddress,
         publishAuthorityAccountId: 0n,
         nameHash,
-        submit: () =>
-          Facade.connect(caller).createContextGraphWithPcaCoverage(
-            [],
-            0,
-            testCase.accessPolicy,
-            1,
-            ethers.ZeroAddress,
-            0,
-            nameHash,
-            accountId,
-          ),
       });
       expect(await Facade.isAuthorizedPublisher(contextGraphId, accounts[9].address)).to.equal(true);
     });
@@ -348,17 +356,6 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
       publishAuthority: publishAuthority.address,
       publishAuthorityAccountId: 0n,
       nameHash,
-      submit: () =>
-        Facade.connect(creator).createContextGraphWithPcaCoverage(
-          [],
-          0,
-          1,
-          0,
-          publishAuthority.address,
-          0,
-          nameHash,
-          accountId,
-        ),
     });
 
     expect(await Facade.isAuthorizedPublisher(contextGraphId, publishAuthority.address)).to.equal(true);
@@ -398,17 +395,6 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
       publishAuthority: authorityOwner.address,
       publishAuthorityAccountId: authorityAccountId,
       nameHash,
-      submit: () =>
-        Facade.connect(creator).createContextGraphWithPcaCoverage(
-          [],
-          0,
-          0,
-          0,
-          authorityOwner.address,
-          authorityAccountId,
-          nameHash,
-          coverageAccountId,
-        ),
     });
 
     expect(await Waiver.waivedCgCount(authorityAccountId)).to.equal(0n);
@@ -486,17 +472,6 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
         publishAuthority: ethers.ZeroAddress,
         publishAuthorityAccountId: 0n,
         nameHash,
-        submit: () =>
-          Facade.connect(caller).createContextGraphWithPcaCoverage(
-            [],
-            0,
-            0,
-            1,
-            ethers.ZeroAddress,
-            0,
-            nameHash,
-            accountId,
-          ),
       });
     }
     expect(await Waiver.waivedCgCount(accountId)).to.equal(2n);
