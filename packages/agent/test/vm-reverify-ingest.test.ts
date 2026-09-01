@@ -329,23 +329,38 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
       observed: { blockNumber: 0 },
     });
 
-    // Idempotent: a re-run (the crash-recovery path) changes nothing.
+    // Idempotent: a re-run (the crash-recovery path) changes nothing —
+    // asserted on the CURRENT row (review r4: a replaced map entry would
+    // leave a stale captured reference green), and on the upsert outcome.
     await internals.bootstrapVmReverifyAuditIfFirstActivation(ctx);
     expect(await intents.countPending(CG)).toBe(1);
-    expect(row.generation).toBe(0);
+    const rerunRow = intents.rows.get(ual)!;
+    expect(rerunRow.generation).toBe(0);
+    expect(rerunRow.observed).toEqual(row.observed);
   }, 60_000);
 
-  it('an EXISTING cursor under either key means not-first-activation: no audit (review r3)', async () => {
+  it('only the OWN lane cursor suppresses the audit; a retired cursor does NOT (review r4)', async () => {
     const { internals, ualFor } = await boot();
     await insertHeldMetadata(internals.store, await ualFor(96n));
-    for (const key of ['kaRootMutations', 'collectionUpdates']) {
-      (internals.config as Record<string, unknown>).chainEventCursorStore = {
-        loadLane: async (lane: string) => (lane === key ? 12_345 : undefined),
-        saveLane: async () => undefined,
-      };
-      await internals.bootstrapVmReverifyAuditIfFirstActivation(ctx);
-    }
-    expect(await intents.countPending(CG), `a cursor is proof of prior coverage`).toBe(0);
+
+    // The own key is completed-audit evidence: no re-audit.
+    (internals.config as Record<string, unknown>).chainEventCursorStore = {
+      loadLane: async (lane: string) => (lane === 'kaRootMutations' ? 12_345 : undefined),
+      saveLane: async () => undefined,
+    };
+    await internals.bootstrapVmReverifyAuditIfFirstActivation(ctx);
+    expect(await intents.countPending(CG), 'own cursor = prior audit completed').toBe(0);
+
+    // The retired collectionUpdates cursor covered ONE event type: an
+    // upgrade-with-migration must still audit — a held asset made stale by
+    // a root-added far below the adopted cursor is otherwise invisible
+    // forever (review r4’s block-80,000 example).
+    (internals.config as Record<string, unknown>).chainEventCursorStore = {
+      loadLane: async (lane: string) => (lane === 'collectionUpdates' ? 100_000 : undefined),
+      saveLane: async () => undefined,
+    };
+    await internals.bootstrapVmReverifyAuditIfFirstActivation(ctx);
+    expect(await intents.countPending(CG), 'retired cursor must NOT suppress the audit').toBe(1);
   }, 60_000);
 
   it('without durable cursor persistence there is no first-activation signal: no audit (review r3)', async () => {
@@ -375,6 +390,70 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     expect(attempts, 'the broken peer must not end the traversal').toEqual(['peer-a', 'peer-b']);
   }, 60_000);
 
+  it('a per-peer DEADLINE abort is a peer failure, not shutdown (review r4)', async () => {
+    // AbortError is overloaded: protocol deadlines abort with the same name
+    // as lifecycle cancellation. Classification is CAUSAL — the lifecycle
+    // signal is NOT aborted here, so the traversal must fail over to peer-b.
+    const { internals } = await boot();
+    internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];
+    const attempts: string[] = [];
+    internals.recoverContextGraphSwmFromPeer = async (peerId: string) => {
+      attempts.push(peerId);
+      if (peerId === 'peer-a') {
+        const deadline = new Error('peer deadline elapsed');
+        deadline.name = 'AbortError';
+        throw deadline;
+      }
+      return { insertedDataQuads: 0, insertedMetaQuads: 1, replacedGraphs: 0, replacedRoots: 0 };
+    };
+
+    await internals.recoverContextGraphSwmForReverify(
+      'w2r-loop-cg',
+      async () => true,
+    );
+
+    expect(attempts, 'the deadline-shaped abort must not end the traversal')
+      .toEqual(['peer-a', 'peer-b']);
+  }, 60_000);
+
+  it('an AbortError DURING actual lifecycle shutdown aborts the traversal (review r4)', async () => {
+    const { internals } = await boot();
+    internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];
+    internals.vmReconcileLifecycleController.abort();
+    const attempts: string[] = [];
+    internals.recoverContextGraphSwmFromPeer = async (peerId: string) => {
+      attempts.push(peerId);
+      const abort = new Error('operation aborted');
+      abort.name = 'AbortError';
+      throw abort;
+    };
+
+    await expect(internals.recoverContextGraphSwmForReverify(
+      'w2r-loop-cg',
+      async () => true,
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(attempts, 'real shutdown is not failover').toEqual(['peer-a']);
+  }, 60_000);
+
+  it('an audit I/O failure latches the feature OFF instead of failing a half-started boot (review r4)', async () => {
+    const { internals, ualFor } = await boot();
+    await insertHeldMetadata(internals.store, await ualFor(98n));
+    (internals.config as Record<string, unknown>).chainEventCursorStore = {
+      loadLane: async () => { throw new Error('cursor store EIO'); },
+      saveLane: async () => undefined,
+    };
+
+    await expect(
+      internals.runVmReverifyBootstrapAudit(ctx),
+      'the boundary must swallow the failure',
+    ).resolves.toBeUndefined();
+
+    expect(internals.vmReverifyIntents, 'the feature is disarmed').toBeUndefined();
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
+      effective: false,
+      reason: 'bootstrap-audit-failed',
+    });
+  }, 60_000);
   it('CLEAN exhaustion — every peer answered, none served — returns normally (review r3)', async () => {
     // The opposite polarity of the incomplete-traversal throw: peers that
     // all cleanly report nothing ARE the evidence the park countdown

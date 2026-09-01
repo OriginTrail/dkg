@@ -7,7 +7,7 @@
  * and a hand-made item would assert the decision while silently skipping the
  * plumbing that carries it.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 // Hand-rolled call recorder: wraps an implementation, records every argument
 // tuple, returns the result.
@@ -27,6 +27,7 @@ import {
   position,
 } from './_helpers/vm-reverify-fixtures.js';
 import { buildReconciledKnowledgeAssetUal } from '../src/ka-identity.js';
+import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 import {
   runExactAssetFetch,
   type ContextGraphAssetFetchResult,
@@ -640,6 +641,123 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     ).toBe(ualOf(99n));
   });
 
+  it('a closed lifecycle takes ONE call per chunk — no singleton storm (review r4)', async () => {
+    // A closed lifecycle rejects every call identically; retrying the chunk
+    // as singletons would turn one shutdown-time failure into batchSize
+    // more, per drain turn.
+    const intents = new InMemoryVmReverifyIntentStore();
+    for (const n of [75n, 76n, 77n]) await seed(intents, n, 100);
+    let calls = 0;
+    const closed = async () => {
+      calls += 1;
+      throw new VmReconcileQueueClosedError();
+    };
+    const worker = new VmReverifyWorker({
+      intents,
+      fetchContextGraphAssets: closed as never,
+      log: { info: () => undefined, warn: () => undefined },
+      now: () => 10_000,
+    });
+
+    const run = await worker.runOnce();
+
+    expect(calls, 'one chunk call, zero singleton retries').toBe(1);
+    expect(run.outcomes['leave:lifecycle-closed']).toBe(3);
+    expect(await intents.countPending()).toBe(3);
+  });
+
+  it('a full batch with NO committed progress backs off instead of zero-delay looping (review r4)', async () => {
+    // The shutdown storm: every row leaves lifecycle-closed, the batch is
+    // full, and the fast path would reschedule immediately forever.
+    vi.useFakeTimers();
+    try {
+      const intents = new InMemoryVmReverifyIntentStore();
+      for (const n of [78n, 79n]) await seed(intents, n, 100);
+      let calls = 0;
+      const closed = async () => {
+        calls += 1;
+        throw new VmReconcileQueueClosedError();
+      };
+      const worker = new VmReverifyWorker({
+        intents,
+        fetchContextGraphAssets: closed as never,
+        log: { info: () => undefined, warn: () => undefined },
+        settings: { batchSize: 2, pollIntervalMs: 30_000 } as never,
+      });
+      worker.start();
+
+      await vi.advanceTimersByTimeAsync(5);
+      expect(calls, 'the first run made its one chunk call').toBe(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(calls, 'no zero-delay rerun: a no-progress batch waits the full interval').toBe(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(calls, 'the next INTERVAL tick retries normally').toBe(2);
+      await worker.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the worker re-arms its own poll timer — retries are autonomous (review r4)', async () => {
+    vi.useFakeTimers();
+    try {
+      const intents = new InMemoryVmReverifyIntentStore();
+      const ual = await seed(intents, 80n, 300);
+      let served = false;
+      const fetch = makeFetch({
+        snapshotFor: () => (served ? snapshot(300) : snapshot(299)),
+      });
+      const worker = new VmReverifyWorker({
+        intents,
+        fetchContextGraphAssets: fetch,
+        log: { info: () => undefined, warn: () => undefined },
+        settings: { pollIntervalMs: 30_000 } as never,
+      });
+      worker.start();
+
+      await vi.advanceTimersByTimeAsync(5);
+      expect(fetch.requested, 'first run retried snapshot-behind-event').toHaveLength(1);
+      served = true;
+      // The retry delay (30s flat) and the poll interval both elapse: a
+      // worker that failed to re-arm would never fetch again, and the
+      // intent would stay pending forever with every retry test green.
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(fetch.requested.length).toBeGreaterThanOrEqual(2);
+      expect(await intents.countPending(), `${ual} must resolve on the re-armed tick`).toBe(0);
+      await worker.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop() waits for the in-flight run before resolving (review r4)', async () => {
+    const intents = new InMemoryVmReverifyIntentStore();
+    await seed(intents, 81n, 100);
+    let release: (() => void) | undefined;
+    let settled = false;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slow = async () => {
+      await gate;
+      settled = true;
+      throw new VmReconcileQueueClosedError();
+    };
+    const worker = new VmReverifyWorker({
+      intents,
+      fetchContextGraphAssets: slow as never,
+      log: { info: () => undefined, warn: () => undefined },
+    });
+
+    const run = worker.runOnce();
+    let stopResolved = false;
+    const stopping = worker.stop().then(() => { stopResolved = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stopResolved, 'stop must not resolve past an in-flight run').toBe(false);
+
+    release!();
+    await stopping;
+    await run;
+    expect(settled, 'the in-flight fetch completed before stop resolved').toBe(true);
+  });
   it('serializes overlapping runs instead of racing two planners over one row', async () => {
     const intents = new InMemoryVmReverifyIntentStore();
     await seed(intents, 30n, 100);

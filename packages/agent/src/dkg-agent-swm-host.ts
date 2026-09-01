@@ -3337,6 +3337,32 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * audit is skipped — an embedder without a cursor store re-seeds every
    * boot and would re-audit every boot too.
    */
+  /**
+   * The audit’s LIFECYCLE BOUNDARY (review r4): a cursor-store, triple-store
+   * or intent-store rejection from the one-time audit must not escape into a
+   * startup the node has already half-performed. The feature latches OFF for
+   * this process instead — the lane callback and the worker key off store
+   * presence, so neither arms and the mutation cursor cannot advance past an
+   * un-audited held set — and the still-cursor-less node retries the audit
+   * on its next boot.
+   */
+  async runVmReverifyBootstrapAudit(this: DKGAgent, ctx: OperationContext): Promise<void> {
+    try {
+      await this.bootstrapVmReverifyAuditIfFirstActivation(ctx);
+    } catch (error) {
+      this.log.error(
+        ctx,
+        `W2 first-activation audit failed; chain-triggered re-verification is DISABLED `
+        + `for this process and the audit retries on the next boot: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      await this.vmReverifyRuntime
+        .close(this.config.vmReverifyIntentStore)
+        .catch(() => undefined);
+      this.vmReverifyActivation = { effective: false, reason: 'bootstrap-audit-failed' };
+    }
+  }
+
   async bootstrapVmReverifyAuditIfFirstActivation(
     this: DKGAgent,
     ctx: OperationContext,
@@ -3347,14 +3373,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       | { loadLane?: (lane: string) => Promise<number | undefined> }
       | undefined;
     if (typeof cursorStore?.loadLane !== 'function') return;
-    const [own, retired] = await Promise.all([
-      cursorStore.loadLane('kaRootMutations'),
-      cursorStore.loadLane('collectionUpdates'),
-    ]);
-    // A cursor under EITHER key means this is not first activation: the own
-    // key is real coverage, and the retired key is the migration case whose
-    // pre-rename lane had already been auditing lifecycle updates.
-    if ((own ?? 0) > 0 || (retired ?? 0) > 0) return;
+    const own = await cursorStore.loadLane('kaRootMutations');
+    // Only the lane’s OWN cursor suppresses the audit (review r4): it exists
+    // exactly when a prior W2 activation completed this audit and scanned
+    // all four mutation types forward from it. A RETIRED collectionUpdates
+    // cursor is deliberately NOT audit evidence — that lane covered
+    // lifecycle updates only, so an upgrade-with-migration still runs the
+    // one-time audit; the adopted cursor keeps its polling role unchanged.
+    if ((own ?? 0) > 0) return;
 
     let audited = 0;
     for (const [localCgId, subscription] of this.subscribedContextGraphs) {

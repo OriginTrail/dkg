@@ -2058,6 +2058,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // the finalization inbox, but in its OWN file and only when the feature
       // is effectively on — see `prepareVmReverifyIntentStore`.
       await this.prepareVmReverifyIntentStore();
+      // The FIRST-ACTIVATION audit runs HERE (review r4) — before networking,
+      // before the poller exists, inside its own boundary: an I/O failure in
+      // this OPTIONAL feature must neither fail a startup the node has
+      // already half-performed nor leave the mutation lane armed to advance
+      // its cursor past an un-audited held set. On failure the feature is
+      // latched off for this process (the lane callback and worker key off
+      // store presence and never arm) and the cursor-less node retries the
+      // audit on its next boot.
+      await this.runVmReverifyBootstrapAudit(ctx);
       // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
       // so the local store is clean before this node serves or syncs anything.
       // Marker-gated (runs once per data dir), never throws, no-op on stores
@@ -3214,11 +3223,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           : undefined,
       });
-      // FIRST-ACTIVATION audit (review r3): must complete BEFORE the poller
-      // can persist its first cursor — that ordering is what makes a crash
-      // mid-audit re-run it on the next boot instead of half-covering the
-      // held set forever.
-      await this.bootstrapVmReverifyAuditIfFirstActivation(ctx);
       await this.chainPoller.start();
 
       // The drain. Started after the lane so an event ingested during startup
@@ -8096,12 +8100,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         r = await this.recoverContextGraphSwmFromPeer(peerId, localCgId);
       } catch (error) {
         // Lifecycle closure aborts the traversal — shutdown is not a peer
-        // failure. A recoverable per-peer failure (timeout, transfer abort)
-        // must NOT stop the traversal (review r3): the next peer may hold
-        // the version this one could not serve.
+        // failure. But `AbortError` is OVERLOADED in this stack (review r4):
+        // per-peer protocol deadlines abort with the same name, and treating
+        // those as shutdown defeats the failover this loop exists for. The
+        // classification is CAUSAL: only the lifecycle signal actually being
+        // aborted makes an AbortError mean shutdown; a deadline-shaped abort
+        // is a peer failure and the traversal continues.
         if (
           error instanceof VmReconcileQueueClosedError
-          || (error instanceof Error && error.name === 'AbortError')
+          || (error instanceof Error && error.name === 'AbortError'
+            && this.vmReconcileLifecycleController?.signal.aborted === true)
         ) {
           throw error;
         }

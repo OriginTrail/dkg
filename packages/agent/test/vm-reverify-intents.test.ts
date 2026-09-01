@@ -431,7 +431,7 @@ describe('planTransition — the 24 h park', () => {
       relation: 'equal',
       firstAttemptAt,
       now: firstAttemptAt + VM_REVERIFY_PARK_AFTER_MS,
-      swmRecoveryAvailable: false,
+      swmRecovery: 'unavailable',
     })).toEqual({ action: 'abandon', reason: 'version-regression-unsupported' });
   });
 

@@ -185,7 +185,7 @@ function conflictTransition(
 }
 
 /** Shutdown and lifecycle rotation. The row is untouched and retried later. */
-function isLifecycleClosure(error: unknown): boolean {
+export function isLifecycleClosure(error: unknown): boolean {
   return error instanceof VmReconcileQueueClosedError
     || error instanceof VmReconcileUnavailableError
     || error instanceof ExactAssetFetchLifecycleClosedError

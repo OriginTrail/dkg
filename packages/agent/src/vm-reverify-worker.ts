@@ -29,6 +29,7 @@ import {
 } from './sync/exact-asset-fetch.js';
 import {
   VM_REVERIFY_PARK_AFTER_MS,
+  isLifecycleClosure,
   planTransition,
   type VmReverifyTransition,
 } from './vm-reverify-intents.js';
@@ -377,6 +378,14 @@ export class VmReverifyWorker {
         outcomes.set(uals[0]!, { kind: 'error', error });
         return outcomes;
       }
+      // A CLOSED lifecycle rejects every call identically (review r4): the
+      // singleton fallback would turn one shutdown-time failure into
+      // batchSize more — the storm, not the isolation, so the whole chunk
+      // takes the same lifecycle outcome at the cost of one call.
+      if (isLifecycleClosure(error)) {
+        for (const ual of uals) outcomes.set(ual, { kind: 'error', error });
+        return outcomes;
+      }
       this.deps.log.warn(
         `vm-reverify chunk of ${uals.length} for cg=${localCgId} rejected `
         + `(${error instanceof Error ? error.message : String(error)}); `
@@ -623,17 +632,28 @@ export class VmReverifyWorker {
 
   private async runBatch(): Promise<void> {
     let inspected = 0;
+    let progressed = 0;
     try {
-      inspected = (await this.runOnce()).inspected;
+      const summary = await this.runOnce();
+      inspected = summary.inspected;
+      progressed = summary.resolved + summary.retried + summary.abandoned + summary.superseded;
     } catch (error) {
       this.deps.log.warn(
         `vm-reverify drain run failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       if (this.#running) {
-        // A full batch means there is probably more work; drain again at once
-        // rather than idling for a whole interval behind a backlog.
-        this.schedule(inspected >= this.#settings.batchSize ? 0 : this.#settings.pollIntervalMs);
+        // A full batch that made PROGRESS probably has more work behind it;
+        // drain again at once rather than idling a whole interval behind a
+        // backlog. A full batch with NO committed progress — lifecycle
+        // closure leaves every row untouched and due — must back off
+        // (review r4): rescheduling it at zero delay is a CPU/RPC/log storm
+        // for the whole tail of shutdown.
+        this.schedule(
+          inspected >= this.#settings.batchSize && progressed > 0
+            ? 0
+            : this.#settings.pollIntervalMs,
+        );
       }
     }
   }

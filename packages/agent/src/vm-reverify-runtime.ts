@@ -164,11 +164,28 @@ export class VmReverifyRuntime {
   async close(configInjected: VmReverifyIntentStore | undefined): Promise<void> {
     const worker = this.#worker;
     this.#worker = undefined;
-    await worker?.stop();
+    let stopFailed = false;
+    let stopFailure: unknown;
+    try {
+      await worker?.stop();
+    } catch (error) {
+      // A throwing stop is a broken worker, not a reason to leave the store
+      // and the latch ATTACHED (review r4: the audit boundary depends on
+      // close detaching even mid-failure). Detach everything, then report.
+      stopFailed = true;
+      stopFailure = error;
+    }
     const store = this.#store;
     this.#store = undefined;
     this.#activation = undefined;
-    if (!store || store === configInjected) return;
-    await store.close();
+    try {
+      if (store && store !== configInjected) await store.close();
+    } catch (closeFailure) {
+      if (stopFailed) {
+        throw new AggregateError([stopFailure, closeFailure], 'VM re-verify teardown failed');
+      }
+      throw closeFailure;
+    }
+    if (stopFailed) throw stopFailure;
   }
 }
