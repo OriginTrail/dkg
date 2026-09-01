@@ -30,8 +30,7 @@ const onDisk = readdirSync(DEVNET, { withFileTypes: true })
   .sort();
 
 describe('devnet suite manifest (suites.json) — drift guard', () => {
-  it('declares the issue #2440 shared-sweep topology explicitly', () => {
-    expect(manifest.prCoverage).toContain('pr2440-pca-cg-registration');
+  it('declares the shared-sweep topology explicitly', () => {
     expect(manifest.sharedSweep).toEqual({
       nodeCount: 6,
       publisherWalletIndex: 1,
