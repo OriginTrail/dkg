@@ -402,7 +402,6 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
 

@@ -684,7 +684,16 @@ describe('DKGAgent.update inline encryption routing', () => {
       createV10UpdateACKProvider: recorder(() => undefined),
       node: { peerId: { toString: () => 'peer-1' } },
       publisher: {
-        updateKnowledgeAssetFromSharedMemory: publisherUpdate,
+        stageKnowledgeAssetSharedWorkingMemoryV1: recorder(async (input: any) => ({
+          contextGraphId: input.contextGraphId,
+          shareOperationId: input.shareOperationId,
+          kaUal: input.kaUal,
+          assertionVersion: String(input.assertionVersion),
+          ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+          swmGraph: 'urn:test:staged-swm',
+          tripleCount: input.quads.length,
+        })),
+        updateKnowledgeAssetFromStagedSharedWorkingMemoryV1: publisherUpdate,
       },
       _resolveEncryptInlinePayload: recorder(async () => updateEncryptInlinePayload),
       _resolveEncryptInlineChunked: recorder(async () => updateEncryptInlineChunked),
@@ -919,6 +928,7 @@ function makeQueuedAgentHarness(options: {
     _resolveEncryptInlinePayload: recorder(async () => options.encryptInlinePayload),
     _resolveEncryptInlineChunked: recorder(async () => options.encryptInlineChunked),
     _stampPointer: recorder(async () => undefined),
+    resolveRfc64CatalogAuthoringLaneV1: () => null,
   };
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;

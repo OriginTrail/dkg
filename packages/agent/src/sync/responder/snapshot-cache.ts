@@ -124,6 +124,18 @@ export class SyncRowSnapshotLimitError extends Error {
   }
 }
 
+/**
+ * The one canonical marker for an intrinsic snapshot-size refusal. These
+ * errors may safely switch a responder session to its bounded page loader;
+ * transient store failures must retain their own types and propagate instead.
+ */
+export function isSyncRowSnapshotPagingRequiredError(
+  error: unknown,
+): error is SyncRowSnapshotBudgetError {
+  return error instanceof SyncRowSnapshotBudgetError
+    && (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes');
+}
+
 function asAbortError(reason: unknown): Error {
   const error = reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
   error.name = 'AbortError';
@@ -310,7 +322,7 @@ export function createResponderSyncRowListMemo(
           // fallback without re-materializing. Global (process-wide) pressure is
           // transient and is NOT remembered — a retry re-attempts admission and
           // succeeds once other sessions drain (and the drop above eases pressure).
-          if (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes') {
+          if (isSyncRowSnapshotPagingRequiredError(error)) {
             rememberRejected(key, error, refreshGeneration);
           }
         }
@@ -453,10 +465,7 @@ export function createResponderSyncRowListMemo(
           // a response/heap safety bound. Remember intrinsic rejections exactly
           // like storeCached() does, so later pages in this responder session go
           // straight to bounded store paging instead of repeating the full load.
-          if (
-            error instanceof SyncRowSnapshotBudgetError &&
-            (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')
-          ) {
+          if (isSyncRowSnapshotPagingRequiredError(error)) {
             const stale = cached.get(key);
             if (stale) deleteCached(key, 'replaced');
             rememberRejected(key, error, options?.refreshGeneration);

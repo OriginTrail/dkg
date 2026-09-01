@@ -3,6 +3,8 @@ import type { ServerResponse } from 'node:http';
 import type { RequestContext } from '../../../src/daemon/routes/context.js';
 import type { RoutePlugin } from '../../../src/daemon/plugin-api.js';
 import { handlePluginRoutes } from '../../../src/daemon/routes/plugins.js';
+import { createRequestActor } from '../../../src/daemon/routes/context.js';
+import { requestAuthentication } from '../../_helpers/request-authentication.js';
 import {
   createInitialPublisherState,
   type PublisherRuntime,
@@ -76,6 +78,10 @@ function makeCtx(
     routePlugins,
     path: '/api/test',
     publisherState,
+    actor: createRequestActor(
+      requestAuthentication({ kind: 'anonymous' }),
+      () => 'did:dkg:agent:default',
+    ),
   } as unknown as RequestContext;
   return { ctx, res };
 }
@@ -96,6 +102,25 @@ describe('handlePluginRoutes', () => {
   });
   afterEach(() => {
     console.error = originalConsoleError;
+  });
+
+  it('keeps the deprecated plugin requestToken alias tied to the accepted credential', async () => {
+    const seen: Array<string | undefined> = [];
+    const plugin: RoutePlugin = {
+      name: 'compat-request-token',
+      handle(ctx) {
+        seen.push(ctx.requestToken);
+      },
+    };
+    const { ctx } = makeCtx([plugin]);
+    (ctx as { actor: RequestContext['actor'] }).actor = createRequestActor(
+      requestAuthentication({ kind: 'agent', agentAddress: 'did:dkg:agent:alice', token: 'accepted-agent-token' }),
+      () => 'did:dkg:agent:default',
+    );
+
+    await handlePluginRoutes(ctx);
+
+    expect(seen).toEqual(['accepted-agent-token']);
   });
 
   it('returns without writing when routePlugins is empty', async () => {

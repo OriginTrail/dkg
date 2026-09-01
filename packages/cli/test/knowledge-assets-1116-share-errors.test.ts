@@ -45,6 +45,7 @@ import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -169,8 +170,14 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: routeOverrides.requestToken,
           requestAgentAddress: routeOverrides.requestAgentAddress ?? 'did:dkg:agent:test',
+          authentication: routeOverrides.requestToken && agent.resolveAgentByToken(routeOverrides.requestToken)
+            ? requestAuthentication({
+                kind: 'agent',
+                agentAddress: agent.resolveAgentByToken(routeOverrides.requestToken),
+                token: routeOverrides.requestToken,
+              })
+            : requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

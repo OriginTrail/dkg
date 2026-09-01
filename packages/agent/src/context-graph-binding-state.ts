@@ -1,5 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { ethers } from 'ethers';
+
+const CHAIN_ATTESTED_RESOLUTION_MAX_ENTRIES = 256;
+const CHAIN_ATTESTED_RESOLUTION_MISS_TTL_MS = 60_000;
+const CHAIN_ATTESTED_RESOLUTION_POSITIVE_TTL_MS = 5 * 60_000;
+
+type ChainAttestedResolutionEntry =
+  | {
+      readonly kind: 'resolved';
+      readonly localCgId: string;
+      readonly requiresSubscription: boolean;
+      readonly expiresAt: number;
+    }
+  | {
+      readonly kind: 'miss';
+      readonly expiresAt: number;
+    };
+
+export type ChainAttestedResolutionLookup =
+  | { readonly hit: false }
+  | { readonly hit: true; readonly localCgId?: string };
+
 export type AuthoritativeContextGraphBinding = {
   bindingKind: 'authoritative';
   onChainId: string;
@@ -46,6 +68,26 @@ export function isCanonicalPositiveContextGraphId(value: unknown): value is stri
   return typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
 }
 
+/** Shared cleartext-or-host-wire identity proof for one committed name hash. */
+export function localContextGraphIdMatchesCommittedNameHash(
+  localCgId: string,
+  committedNameHash: string,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+): boolean {
+  const normalizedCommitment = committedNameHash.toLowerCase();
+  try {
+    if (
+      ethers.keccak256(ethers.toUtf8Bytes(localCgId)).toLowerCase()
+      === normalizedCommitment
+    ) return true;
+  } catch {
+    return false;
+  }
+  return /^0x[0-9a-fA-F]{64}$/.test(localCgId)
+    && isWireIdKeyedSubscription(localCgId)
+    && localCgId.toLowerCase() === normalizedCommitment;
+}
+
 function requireCanonicalPositiveContextGraphId(value: string): string {
   if (!isCanonicalPositiveContextGraphId(value)) {
     throw new TypeError(`Invalid Context Graph on-chain id: ${JSON.stringify(value)}`);
@@ -79,6 +121,12 @@ export class ContextGraphBindingState {
   >();
 
   private readonly generations = new Map<string, number>();
+
+  /** Bounded, short-lived chain attestations keyed by numeric on-chain id. */
+  private readonly chainAttestedResolutions = new Map<
+    string,
+    ChainAttestedResolutionEntry
+  >();
 
   /** Never reset: a deleted and recreated local id must not reuse an old fence. */
   private nextGeneration = 0;
@@ -136,6 +184,7 @@ export class ContextGraphBindingState {
     const reverseCandidateCleared = retainsReverseCandidate
       ? false
       : this.clear(localCgId);
+    if (!admitted) this.forgetChainAttestedResolutionsForLocalId(localCgId);
     return {
       reverseCandidateCleared,
       admitted,
@@ -156,7 +205,10 @@ export class ContextGraphBindingState {
     };
     this.reverseCandidates.delete(localCgId);
     const changed = !bindingsEqual(previous, current);
-    if (changed) this.bump(localCgId);
+    if (changed) {
+      this.forgetChainAttestedResolutionsForLocalId(localCgId);
+      this.bump(localCgId);
+    }
     subscription.onChainId = canonicalOnChainId;
     return {
       previous,
@@ -192,6 +244,7 @@ export class ContextGraphBindingState {
     };
     const changed = !bindingsEqual(previous, current);
     if (changed) {
+      this.forgetChainAttestedResolutionsForLocalId(localCgId);
       this.reverseCandidates.set(localCgId, current);
       this.bump(localCgId);
     }
@@ -205,7 +258,9 @@ export class ContextGraphBindingState {
 
   /** Clear a reverse candidate and invalidate work captured against it. */
   clear(localCgId: string): boolean {
-    if (!this.reverseCandidates.delete(localCgId)) return false;
+    const cleared = this.reverseCandidates.delete(localCgId);
+    this.forgetChainAttestedResolutionsForLocalId(localCgId);
+    if (!cleared) return false;
     this.bump(localCgId);
     return true;
   }
@@ -213,6 +268,7 @@ export class ContextGraphBindingState {
   /** Invalidate every captured target even when there is no reverse candidate. */
   invalidate(localCgId: string): number {
     this.reverseCandidates.delete(localCgId);
+    this.forgetChainAttestedResolutionsForLocalId(localCgId);
     return this.bump(localCgId);
   }
 
@@ -220,6 +276,7 @@ export class ContextGraphBindingState {
   delete(localCgId: string): void {
     this.reverseCandidates.delete(localCgId);
     this.generations.delete(localCgId);
+    this.forgetChainAttestedResolutionsForLocalId(localCgId);
   }
 
   bump(localCgId: string): number {
@@ -244,6 +301,74 @@ export class ContextGraphBindingState {
     const current = this.currentBindingFor(localCgId, subscription);
     return bindingsEqual(current, target)
       && this.isGenerationCurrent(localCgId, target.bindingGeneration);
+  }
+
+  getChainAttestedResolution(
+    onChainId: string,
+    isSubscribed: (localCgId: string) => boolean,
+    now = Date.now(),
+  ): ChainAttestedResolutionLookup {
+    const entry = this.chainAttestedResolutions.get(onChainId);
+    if (!entry) return { hit: false };
+    if (entry.expiresAt <= now) {
+      this.chainAttestedResolutions.delete(onChainId);
+      return { hit: false };
+    }
+    if (
+      entry.kind === 'resolved'
+      && entry.requiresSubscription
+      && !isSubscribed(entry.localCgId)
+    ) {
+      this.chainAttestedResolutions.delete(onChainId);
+      return { hit: false };
+    }
+    this.chainAttestedResolutions.delete(onChainId);
+    this.chainAttestedResolutions.set(onChainId, entry);
+    return entry.kind === 'resolved'
+      ? { hit: true, localCgId: entry.localCgId }
+      : { hit: true };
+  }
+
+  rememberChainAttestedResolutionMiss(onChainId: string, now = Date.now()): void {
+    this.setChainAttestedResolution(onChainId, {
+      kind: 'miss',
+      expiresAt: now + CHAIN_ATTESTED_RESOLUTION_MISS_TTL_MS,
+    });
+  }
+
+  rememberChainAttestedResolution(
+    onChainId: string,
+    localCgId: string,
+    requiresSubscription: boolean,
+    now = Date.now(),
+  ): void {
+    this.setChainAttestedResolution(onChainId, {
+      kind: 'resolved',
+      localCgId,
+      requiresSubscription,
+      expiresAt: now + CHAIN_ATTESTED_RESOLUTION_POSITIVE_TTL_MS,
+    });
+  }
+
+  private setChainAttestedResolution(
+    onChainId: string,
+    entry: ChainAttestedResolutionEntry,
+  ): void {
+    this.chainAttestedResolutions.delete(onChainId);
+    this.chainAttestedResolutions.set(onChainId, entry);
+    while (this.chainAttestedResolutions.size > CHAIN_ATTESTED_RESOLUTION_MAX_ENTRIES) {
+      const oldest = this.chainAttestedResolutions.keys().next().value;
+      if (oldest === undefined) break;
+      this.chainAttestedResolutions.delete(oldest);
+    }
+  }
+
+  private forgetChainAttestedResolutionsForLocalId(localCgId: string): void {
+    for (const [onChainId, entry] of this.chainAttestedResolutions) {
+      if (entry.kind === 'resolved' && entry.localCgId === localCgId) {
+        this.chainAttestedResolutions.delete(onChainId);
+      }
+    }
   }
 
   /** Test/diagnostic visibility without exposing the backing maps. */

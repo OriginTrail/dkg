@@ -80,7 +80,7 @@ describe('#1933 async-promote-queue writeJob atomicity', () => {
    *  - `real`   — delegate to the real (atomic) replaceSubject.
    *  - `absent` — no replaceSubject capability at all (tryReplaceSubjectAtomically → false).
    *  - `refuse` — replaceSubject present but raises a clean capability refusal
-   *               (SparqlHttpStore with atomicUpdates:false parity).
+   *               (best-effort SparqlHttpStore parity).
    */
   function countingStore(
     inner: OxigraphStore,

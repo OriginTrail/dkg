@@ -71,12 +71,18 @@ import {
   type OnChainProvenance,
 } from './metadata.js';
 import {
+  resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
   storeWorkspaceOperationPublicQuads,
   tryResolveKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
+import {
+  stageKnowledgeAssetSharedWorkingMemoryStorageV1,
+  type StageKnowledgeAssetSharedWorkingMemoryInputV1,
+  type StagedKnowledgeAssetSharedWorkingMemoryV1,
+} from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
 import {
@@ -1254,6 +1260,21 @@ export class DKGPublisher implements Publisher {
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
     return stripOptionalLiteral(result.bindings[0]?.['id'])?.trim();
+  }
+
+  /** Stage immutable graph-scoped SWM bytes in this publisher's canonical lock domain. */
+  async stageKnowledgeAssetSharedWorkingMemoryV1(
+    input: StageKnowledgeAssetSharedWorkingMemoryInputV1,
+  ): Promise<StagedKnowledgeAssetSharedWorkingMemoryV1> {
+    return stageKnowledgeAssetSharedWorkingMemoryStorageV1({
+      ...input,
+      store: this.store,
+      writeLocks: this.writeLocks,
+      graphManager: this.graphManager,
+      ...(this.publicSnapshotStore === undefined
+        ? {}
+        : { publicSnapshotStore: this.publicSnapshotStore }),
+    });
   }
 
   private async onChainContextGraphMatchesLocalId(
@@ -4477,6 +4498,76 @@ export class DKGPublisher implements Publisher {
       scope,
       { quadFilter: (quad) => !isSwmMerkleExcludedQuad(quad) },
     );
+    return this.updateKnowledgeAssetFromResolvedSharedWorkingMemory(
+      kaId,
+      options,
+      descriptor,
+      quads,
+    );
+  }
+
+  /**
+   * Immutable graph-scoped update entrypoint. Unlike the compatibility live
+   * SWM method, this always consumes the exact operation snapshot named by a
+   * required staging reference.
+   */
+  async updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(
+    kaId: bigint,
+    options: Omit<PublishOptions, 'quads'> & Readonly<{
+      stagedOperation: StagedKnowledgeAssetSharedWorkingMemoryV1;
+    }>,
+  ): Promise<PublishResult> {
+    const { stagedOperation, ...publishOptions } = options;
+    const descriptor = resolveGraphScopedPublishDescriptor({
+      ...publishOptions,
+      quads: [],
+    });
+    if (!descriptor) {
+      throw new Error('Graph-scoped staged SWM update requires a complete V2 content envelope');
+    }
+    if (
+      stagedOperation.contextGraphId !== publishOptions.contextGraphId
+      || stagedOperation.kaUal !== descriptor.scope.ual
+      || stagedOperation.assertionVersion !== descriptor.scope.assertionVersion
+      || stagedOperation.subGraphName !== publishOptions.subGraphName
+    ) {
+      throw new Error('Staged SWM operation identity differs from the graph-scoped update');
+    }
+    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId: stagedOperation.contextGraphId,
+      shareOperationId: stagedOperation.shareOperationId,
+      kaUal: stagedOperation.kaUal,
+      assertionVersion: stagedOperation.assertionVersion,
+      ...(stagedOperation.subGraphName === undefined
+        ? {}
+        : { subGraphName: stagedOperation.subGraphName }),
+      ...(this.publicSnapshotStore === undefined
+        ? {}
+        : { publicSnapshotStore: this.publicSnapshotStore }),
+    });
+    const quads = snapshot.quads.filter((quad) => !isSwmMerkleExcludedQuad(quad));
+    if (snapshot.publicQuadsDigest !== stagedOperation.publicQuadsDigest) {
+      throw new Error('Staged SWM operation snapshot differs from its immutable reference');
+    }
+    if (quads.length !== stagedOperation.tripleCount) {
+      throw new Error('Staged SWM operation triple count differs from its filtered snapshot');
+    }
+    return this.updateKnowledgeAssetFromResolvedSharedWorkingMemory(
+      kaId,
+      publishOptions,
+      descriptor,
+      quads,
+    );
+  }
+
+  private async updateKnowledgeAssetFromResolvedSharedWorkingMemory(
+    kaId: bigint,
+    options: Omit<PublishOptions, 'quads'>,
+    descriptor: GraphScopedPublishDescriptor,
+    quads: readonly Quad[],
+  ): Promise<PublishResult> {
     const hasTrustedCatalogTriples =
       trustedCatalogTripleKeySet(options.trustedNonManifestCatalogTriples).size > 0;
     if (hasTrustedCatalogTriples) {

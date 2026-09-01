@@ -43,6 +43,36 @@ export interface EncodedOpaqueKaBundleV1 {
   readonly blobDigest: Digest32V1;
 }
 
+/** Incremental form of the exact cg-shared-v1 projection digest. */
+export interface KaProjectionDigestAccumulatorV1 {
+  update(chunk: Uint8Array): void;
+  digest(): Digest32V1;
+}
+
+/**
+ * Create a one-way projection digest accumulator for bounded streaming reads.
+ * It is byte-for-byte equivalent to {@link computeKaProjectionDigestV1}
+ * without requiring callers to materialize the complete projection.
+ */
+export function createKaProjectionDigestAccumulatorV1(): KaProjectionDigestAccumulatorV1 {
+  const hasher = sha256.create();
+  hasher.update(PROJECTION_DIGEST_DOMAIN_BYTES);
+  let completed: Digest32V1 | undefined;
+  return Object.freeze({
+    update(chunk: Uint8Array): void {
+      if (completed !== undefined) {
+        throw new Error('projection digest accumulator is already finalized');
+      }
+      assertUint8Array(chunk, 'projection digest chunk');
+      hasher.update(chunk);
+    },
+    digest(): Digest32V1 {
+      if (completed === undefined) completed = bytesToLowerHexDigest(hasher.digest());
+      return completed;
+    },
+  });
+}
+
 export interface DecodedOpaqueKaBundleV1 {
   /**
    * Borrowed zero-copy view into the received bundle. It carries no RDF semantic
@@ -245,7 +275,10 @@ function digestToLowerHex(domain: Uint8Array, ...chunks: readonly Uint8Array[]):
   const hasher = sha256.create();
   hasher.update(domain);
   for (const chunk of chunks) hasher.update(chunk);
-  const digest = hasher.digest();
+  return bytesToLowerHexDigest(hasher.digest());
+}
+
+function bytesToLowerHexDigest(digest: Uint8Array): Digest32V1 {
   let result = '0x';
   for (const byte of digest) result += byte.toString(16).padStart(2, '0');
   assertCanonicalDigest(result);

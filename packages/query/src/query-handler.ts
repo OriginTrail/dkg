@@ -1,6 +1,10 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
 import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
-import { quadsToNQuads } from '@origintrail-official/dkg-storage';
+import {
+  isStoreSchedulerBusyError,
+  quadsToNQuads,
+  type StoreSchedulerBusyErrorLike,
+} from '@origintrail-official/dkg-storage';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
@@ -10,7 +14,9 @@ import type {
   QueryAccessConfig,
   ContextGraphQueryPolicy,
   LookupType,
-  QueryStatus,
+  NonBusyQueryStatus,
+  QueryBusyResponse,
+  QueryNonBusyResponse,
 } from './query-types.js';
 
 const DEFAULT_LIMIT = 100;
@@ -18,6 +24,7 @@ const MAX_LIMIT = 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TIMEOUT_MS = 30000;
 const MAX_RESULT_BYTES = 1_048_576; // 1 MB
+const STORE_BUSY_RETRY_AFTER_MS = 1_000;
 // PR #1107 review (🔴): cache isContextGraphPublic verdicts so repeated
 // remote queries against the same CG don't each burn an RPC round-trip on
 // the chain adapter. Short TTL keeps policy flips (public → private)
@@ -29,6 +36,13 @@ const PUBLIC_CG_CACHE_MAX_ENTRIES = 1000;
 interface RateBucket {
   count: number;
   resetAt: number;
+}
+
+class UalResolutionError extends Error {
+  constructor(readonly ual: string, cause: unknown) {
+    super(`Failed to resolve UAL: ${ual}`, { cause });
+    this.name = 'UalResolutionError';
+  }
 }
 
 /**
@@ -118,7 +132,7 @@ export class QueryHandler {
       const timeout = Math.min(request.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
       const contextGraphPolicy = this.contextGraphPolicy(contextGraphId);
 
-      let response: QueryResponse;
+      let response: QueryNonBusyResponse;
 
       switch (request.lookupType) {
         case 'ENTITY_BY_UAL':
@@ -145,6 +159,11 @@ export class QueryHandler {
 
       return this.enforceResultSize(response);
     } catch (err) {
+      const busyError = storeSchedulerBusyCause(err);
+      if (busyError) return storeBusyResponse(opId, busyError);
+      if (err instanceof UalResolutionError) {
+        return errorResponse(opId, 'ERROR', err.message);
+      }
       return errorResponse(opId, 'ERROR', 'Internal error processing query');
     }
   }
@@ -153,7 +172,7 @@ export class QueryHandler {
     lookupType: LookupType,
     contextGraphId: string | undefined,
     peerId: string,
-  ): Promise<QueryResponse | null> {
+  ): Promise<QueryNonBusyResponse | null> {
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
 
     // ENTITY_BY_UAL: the target CG is only known AFTER the UAL resolves, so
@@ -181,7 +200,7 @@ export class QueryHandler {
     lookupType: LookupType,
     contextGraphId: string,
     peerId: string,
-  ): Promise<QueryResponse | null> {
+  ): Promise<QueryNonBusyResponse | null> {
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
     const cgConfig = this.config.contextGraphs?.[contextGraphId];
     if (!cgConfig) {
@@ -258,7 +277,7 @@ export class QueryHandler {
     return this.config.contextGraphs?.[contextGraphId];
   }
 
-  private checkRateLimit(peerId: string): QueryResponse | null {
+  private checkRateLimit(peerId: string): QueryNonBusyResponse | null {
     const now = Date.now();
     let bucket = this.rateBuckets.get(peerId);
 
@@ -280,37 +299,39 @@ export class QueryHandler {
     return null;
   }
 
-  private async lookupByUAL(opId: string, ual: string, peerId: string): Promise<QueryResponse> {
+  private async lookupByUAL(opId: string, ual: string, peerId: string): Promise<QueryNonBusyResponse> {
     if (!ual) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing ual');
     }
 
+    let resolved;
     try {
-      const resolved = this.queryEngine.resolveKnowledgeAsset
+      resolved = this.queryEngine.resolveKnowledgeAsset
         ? await this.queryEngine.resolveKnowledgeAsset(ual)
         : await this.queryEngine.resolveKA(ual);
-      // PR #1107 review (🔴): enforce the RESOLVED context graph's access
-      // policy — config entry first (operator override), then the #1105
-      // on-chain public resolver. Pre-fix, UAL lookups bypassed per-CG
-      // evaluation entirely: they were denied for on-chain-public CGs on
-      // default configs, yet allowed THROUGH explicitly denied CGs whenever
-      // any other public CG existed on the node.
-      const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
-      if (denied) return { ...denied, operationId: opId };
-      const ntriples = quadsToNQuads(
-        resolved.quads.map((quad) => ({ ...quad, graph: '' })),
-      );
-
-      return {
-        operationId: opId,
-        status: 'OK',
-        ntriples,
-        truncated: false,
-        resultCount: resolved.quads.length,
-      };
-    } catch {
-      return errorResponse(opId, 'ERROR', `Failed to resolve UAL: ${ual}`);
+    } catch (cause) {
+      throw new UalResolutionError(ual, cause);
     }
+
+    // PR #1107 review (🔴): enforce the RESOLVED context graph's access
+    // policy — config entry first (operator override), then the #1105
+    // on-chain public resolver. Pre-fix, UAL lookups bypassed per-CG
+    // evaluation entirely: they were denied for on-chain-public CGs on
+    // default configs, yet allowed THROUGH explicitly denied CGs whenever
+    // any other public CG existed on the node.
+    const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
+    if (denied) return { ...denied, operationId: opId };
+    const ntriples = quadsToNQuads(
+      resolved.quads.map((quad) => ({ ...quad, graph: '' })),
+    );
+
+    return {
+      operationId: opId,
+      status: 'OK',
+      ntriples,
+      truncated: false,
+      resultCount: resolved.quads.length,
+    };
   }
 
   private async lookupByType(
@@ -318,7 +339,7 @@ export class QueryHandler {
     contextGraphId: string,
     rdfType: string,
     limit: number,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!rdfType) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing rdfType');
     }
@@ -343,7 +364,7 @@ export class QueryHandler {
     opId: string,
     contextGraphId: string,
     entityUri: string,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!entityUri) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing entityUri');
     }
@@ -372,7 +393,7 @@ export class QueryHandler {
     sparql: string,
     limit: number,
     timeout: number,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!sparql) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing sparql');
     }
@@ -440,7 +461,7 @@ export class QueryHandler {
     };
   }
 
-  private enforceResultSize(response: QueryResponse): QueryResponse {
+  private enforceResultSize(response: QueryNonBusyResponse): QueryNonBusyResponse {
     const serialized = JSON.stringify(response);
     if (serialized.length <= MAX_RESULT_BYTES) return response;
 
@@ -453,13 +474,44 @@ export class QueryHandler {
   }
 }
 
-function errorResponse(opId: string, status: QueryStatus, error: string): QueryResponse {
+function errorResponse(
+  opId: string,
+  status: NonBusyQueryStatus,
+  error: string,
+): QueryNonBusyResponse {
   return {
     operationId: opId,
     status,
     truncated: false,
     resultCount: 0,
     error,
+  };
+}
+
+function storeSchedulerBusyCause(
+  error: unknown,
+): StoreSchedulerBusyErrorLike | null {
+  if (isStoreSchedulerBusyError(error)) return error;
+  if (error instanceof UalResolutionError && isStoreSchedulerBusyError(error.cause)) {
+    return error.cause;
+  }
+  return null;
+}
+
+function storeBusyResponse(
+  opId: string,
+  error: StoreSchedulerBusyErrorLike,
+): QueryBusyResponse {
+  return {
+    operationId: opId,
+    status: 'BUSY',
+    truncated: false,
+    resultCount: 0,
+    error: 'Node storage is temporarily busy. Retry later.',
+    code: 'STORE_BUSY',
+    retryable: true,
+    retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
+    reason: error.reason,
   };
 }
 

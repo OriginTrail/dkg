@@ -418,7 +418,6 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
 

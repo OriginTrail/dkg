@@ -12,6 +12,7 @@ function responseStarted(res: RequestContext['res']): boolean {
 export async function handlePluginRoutes(ctx: RequestContext): Promise<void> {
   const pluginContext: PluginRequestContext = {
     ...ctx,
+    requestToken: ctx.actor.authentication.acceptedToken,
     publisherRuntime: ctx.publisherState.runtime,
     publisherAvailability: ctx.publisherState.availability,
   };

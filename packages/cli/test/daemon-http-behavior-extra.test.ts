@@ -56,6 +56,7 @@ import { ethers } from 'ethers';
 import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { ApiClient } from '../src/api-client.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { daemonState } from '../src/daemon/state.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -884,8 +885,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -974,8 +975,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -1110,8 +1111,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -1227,8 +1228,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -1344,8 +1345,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -2498,8 +2499,8 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: CALLER,
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;

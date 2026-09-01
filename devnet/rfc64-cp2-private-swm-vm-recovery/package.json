@@ -9,7 +9,7 @@
     "ethers": "6.16.0"
   },
   "scripts": {
-    "test": "node --import tsx --test batch-plan.test.ts",
+    "test": "node --import tsx --test batch-plan.test.ts lifecycle-receipts.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "live": "node --import tsx launch-live.ts"
   }

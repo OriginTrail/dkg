@@ -241,7 +241,9 @@ describe('GH#2270 failed-job retry disposition', () => {
       admission: { byAgentAddress: owner },
       request: { jobType: 'lift', lift: {} },
     } as unknown as LiftJob);
-    const override = (requestedBy: string) => ({ pendingTransactionOverride: { requestedBy } });
+    const override = (agentAddress: string) => ({
+      pendingTransactionOverride: { kind: 'agent' as const, agentAddress },
+    });
 
     // EVM: case-insensitive, both directions.
     const EVM = '0xAbCdEf0000000000000000000000000000001234';
@@ -252,6 +254,30 @@ describe('GH#2270 failed-job retry disposition', () => {
     const PEER = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
     expect(isTargetedClearableLiftJob(held(PEER), override(PEER))).toBe(true);
     expect(isTargetedClearableLiftJob(held(PEER), override(PEER.toLowerCase()))).toBe(false);
+  });
+
+  it('accepts the exact legacy owner shape but fails closed for non-owner and malformed variants', () => {
+    const heldJob = {
+      status: 'failed',
+      failure: { resolution: 'retry_recovery' },
+      admission: { byAgentAddress: '0xAbCdEf0000000000000000000000000000001234' },
+      request: { jobType: 'lift', lift: {} },
+    } as unknown as LiftJob;
+    const runtimeOptions = (pendingTransactionOverride: unknown) => ({
+      pendingTransactionOverride,
+    }) as unknown as Parameters<typeof isTargetedClearableLiftJob>[1];
+
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      requestedBy: '0xAbCdEf0000000000000000000000000000001234',
+    }))).toBe(true);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      requestedBy: '0x0000000000000000000000000000000000000001',
+    }))).toBe(false);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      kind: 'legacyOwner',
+      agentAddress: '0xAbCdEf0000000000000000000000000000001234',
+    }))).toBe(false);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({ kind: 'agent' }))).toBe(false);
   });
 
   it('names the two settlement ROLES explicitly, without inferring either from wiring [3825614002]', () => {
@@ -333,10 +359,10 @@ describe('GH#2270 failed-job retry disposition', () => {
       failure: { ...admitted.failure, resolution: 'retry_recovery' },
     } as PersistedFailedJob;
     expect(isTargetedClearableLiftJob(heldAfterReset, {
-      pendingTransactionOverride: { requestedBy: ADMITTED_BY },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: ADMITTED_BY },
     })).toBe(true);
     expect(isTargetedClearableLiftJob(heldAfterReset, {
-      pendingTransactionOverride: { requestedBy: '0xBBbBBb00000000000000000000000000000000Bb' },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: '0xBBbBBb00000000000000000000000000000000Bb' },
     })).toBe(false);
     // ...and with no override at all, ownership alone never grants the clear.
     expect(isTargetedClearableLiftJob(heldAfterReset)).toBe(false);

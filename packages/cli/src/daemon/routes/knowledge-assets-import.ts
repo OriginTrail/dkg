@@ -71,7 +71,7 @@ import {
   getExtractionStatusRecord,
   setExtractionStatusRecord,
 } from "../../extraction-status.js";
-import { SignedRequestRejectedError } from "../../auth.js";
+import { authenticatedAgentAddress, SignedRequestRejectedError } from "../../auth.js";
 
 type AssertionArtifactKind = 'source' | 'markdown' | 'original';
 
@@ -585,13 +585,18 @@ export async function handleKaImportArtifactReadMarkdown(ctx: RequestContext): P
 // POST /api/knowledge-assets/semantic-enrichment/write
 // Write model-derived semantic triples into the completed imported assertion with provenance.
 export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
+  const {
+    req,
+    res,
+    agent,
+    requestAgentAddress,
+    authentication,
+    emitMemoryGraphChanged,
+  } = ctx;
   // Mirror the legacy assertion-route preflight: resolve the caller agent
   // from the bearer token so `resolveRequiredWriteContextGraphId` validates
   // the write CG against the caller's known graphs before any mutation.
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
-    : undefined;
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
@@ -709,16 +714,14 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
     fileStore,
     extractionStatus,
     assertionImportLocks,
-    requestToken,
     requestAgentAddress,
+    authentication,
     emitMemoryGraphChanged,
   } = ctx;
   // Mirror the legacy assertion-route preflight: resolve the caller agent from
   // the bearer token so `resolveRequiredWriteContextGraphId` validates the write
   // CG against the caller's known graphs before any mutation.
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
-    : undefined;
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,

@@ -10,6 +10,7 @@ import {
   VmReconcileUnavailableError,
 } from '@origintrail-official/dkg-agent';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 describe('context graph targeted reconcile route', () => {
   let server: Server | undefined;
@@ -74,8 +75,10 @@ describe('context graph targeted reconcile route', () => {
         routePlugins: [],
         url,
         path: url.pathname,
-        requestToken: options.requestToken,
         requestAgentAddress: options.agentAddress,
+        authentication: options.agentAddress
+          ? requestAuthentication({ kind: 'agent', agentAddress: options.agentAddress, token: options.requestToken })
+          : requestAuthentication({ kind: 'nodeOperator', token: options.requestToken }),
       } as any);
       if (!res.writableEnded) {
         res.statusCode = 404;

@@ -2044,7 +2044,10 @@ export interface ChainAdapter {
    * path, but cores SHOULD cache the result per (chainId, cgId) to
    * avoid one RPC per publish.
    */
-  getContextGraphAccessPolicy?(contextGraphId: bigint): Promise<number>;
+  getContextGraphAccessPolicy?(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<number>;
 
   /**
    * On-chain liveness probe for `contextGraphId`. Read from
@@ -2069,7 +2072,10 @@ export interface ChainAdapter {
    * inactive; transient RPC/read failures should reject so callers can choose
    * their own fail-closed or ACK-backed fallback behavior.
    */
-  isContextGraphActiveOnChain?(contextGraphId: bigint): Promise<boolean>;
+  isContextGraphActiveOnChain?(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<boolean>;
 
   /**
    * On-chain publish policy for `contextGraphId`. Read from
