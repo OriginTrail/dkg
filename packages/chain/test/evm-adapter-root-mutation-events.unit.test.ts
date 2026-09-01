@@ -471,6 +471,76 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(req?.toBlock).toBe(9_000);
   });
 
+  it('a MIXED legacy ABI degrades per event: declared kinds deliver, the missing kind leaves the OR-set (review r5-bot)', async () => {
+    // The endpoints (all four / none) were both covered; the middle was
+    // not. A regression treating the group as all-or-nothing would silence
+    // three supported mutation kinds because one fragment is missing.
+    const partialAbi = (KA_ABI as Array<Record<string, unknown>>).filter(
+      (entry) => !(entry.type === 'event' && entry.name === 'KnowledgeAssetMerkleRootRemoved'),
+    );
+    const fullIface = new Interface(KA_ABI as never);
+    const partialIface = new Interface(partialAbi as never);
+    const updated = encodeLog(partialIface, 'KnowledgeAssetUpdated', [KA_ID, AUTHOR, 'op-1', ROOT, 4_096n, 10n]);
+    const { adapter, scans } = makeAdapter({
+      abi: partialAbi,
+      logsByEvent: { KnowledgeAssetRootMutations: [updated] },
+    });
+
+    const events = await drain(adapter, [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+
+    expect(events.map((e) => e.type), 'the declared update still arrives').toEqual(['KnowledgeAssetUpdated']);
+    expect(scans).toHaveLength(1);
+    const topics = scans[0].request?.topics as string[][];
+    const missingTopic = fullIface.getEvent('KnowledgeAssetMerkleRootRemoved')!.topicHash;
+    expect(topics[0], 'the undeclared kind must not be requested').not.toContain(missingTopic);
+    expect(topics[0], 'the three declared kinds are the whole OR-set').toHaveLength(3);
+  });
+
+  it('probe-plus-listen agree on a fallback-only KCCreated ABI (review r5-bot)', async () => {
+    // The probe accepts EITHER alias spelling; the scan branch must build
+    // its filter from the SAME resolution. Before the fix this passed the
+    // capability gate and then threw on the hard-coded primary fragment,
+    // aborting every scan at runtime.
+    const kcOnlyAbi = (KA_ABI as Array<Record<string, unknown>>).map((entry) =>
+      entry.type === 'event' && entry.name === 'KnowledgeAssetCreated'
+        ? { ...entry, name: 'KCCreated' }
+        : entry,
+    );
+    const { adapter, scans } = makeAdapter({ abi: kcOnlyAbi });
+
+    await expect(adapter.supportsEventTypes(['KCCreated']), 'the fallback spelling IS served').resolves.toEqual([]);
+    await expect(drain(adapter, ['KCCreated']), 'and listening must not throw').resolves.toEqual([]);
+    expect(
+      scans.map((scan) => scan.label),
+      'the scan asked for the spelling the ABI declares',
+    ).toContain('kas.queryFilter(KCCreated)');
+  });
+
+  it('probe-plus-listen agree on a fallback-only ContextGraphNameClaimed ABI (review r5-bot)', async () => {
+    const claimOnlyAbi = [{
+      type: 'event',
+      name: 'ContextGraphNameClaimed',
+      anonymous: false,
+      inputs: [
+        { name: 'nameHash', type: 'uint256', indexed: true },
+        { name: 'creator', type: 'address', indexed: true },
+        { name: 'accessPolicy', type: 'uint8', indexed: false },
+      ],
+    }];
+    const { adapter, scans } = makeAdapter({});
+    const priv = adapter as unknown as { contracts: Record<string, unknown> };
+    priv.contracts.contextGraphNameRegistry = new ethers.Contract('0x' + '33'.repeat(20), claimOnlyAbi as never);
+
+    await expect(
+      adapter.supportsEventTypes(['ContextGraphNameClaimed']),
+      'the fallback spelling IS served',
+    ).resolves.toEqual([]);
+    await expect(drain(adapter, ['ContextGraphNameClaimed']), 'and listening must not throw').resolves.toEqual([]);
+    expect(
+      scans.map((scan) => scan.label),
+      'the scan asked for the spelling the ABI declares',
+    ).toContain('cgNameRegistry.queryFilter(ContextGraphNameClaimed)');
+  });
   it('a corrupt endpoint FAILS OVER instead of yielding a successful empty scan (review r14)', async () => {
     // A wrong-sized indexed-id topic on a log matching our filter cannot
     // originate on-chain — it is endpoint corruption. Silently skipping it

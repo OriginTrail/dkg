@@ -9,7 +9,7 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { InvalidRpcLogResponseError } from './rpc-failover-client.js';
+import { InvalidRpcLogResponseError, type ReadOpts } from './rpc-failover-client.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
@@ -72,6 +72,25 @@ const EVENT_ABI_ALIASES: Readonly<Record<string, readonly string[]>> = Object.fr
   ContextGraphNameClaimed: ['NameClaimed', 'ContextGraphNameClaimed'],
 });
 
+/**
+ * Resolve the ABI spelling the bound contract ACTUALLY declares for a
+ * served public name (review r5-bot). The capability probe accepts either
+ * alias spelling, so every scan branch must build its event filter from
+ * the SAME resolution: a fallback-only ABI that passes the gate must scan
+ * its declared fragment, not throw on a hard-coded primary name — a throw
+ * there turns an advertised capability into a runtime failure on every
+ * scan.
+ */
+function resolveDeclaredAbiEventName(
+  hasEvent: (name: string) => boolean,
+  publicName: string,
+): string | undefined {
+  for (const abiName of EVENT_ABI_ALIASES[publicName] ?? [publicName]) {
+    if (hasEvent(abiName)) return abiName;
+  }
+  return undefined;
+}
+
 // The `satisfies` clause makes a root-mutation name WITHOUT an ownership row
 // a compile error (review r8): adding a fifth name to
 // `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES` breaks this file until the row
@@ -104,11 +123,19 @@ const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> =
 export const SERVED_EVENT_TYPES: readonly string[] =
   Object.freeze(Object.keys(EVENT_OWNING_CONTRACT));
 
-/** The tip-sensitive read the validated scan routes through (readTipProvider). */
+/**
+ * The tip-sensitive read the validated scan routes through
+ * (`readTipProvider`). The options are a Pick of the CANONICAL transport
+ * `ReadOpts` (review r5-bot): a lookalike type with `policy?: string`
+ * erased exactly the policy contract this helper exists to centralize —
+ * a typo like 'wideLogsScan' satisfied the local shape, and the `as never`
+ * cast at the call site kept TypeScript from ever comparing it against
+ * the real contract.
+ */
 type ValidatedLogReader = <T>(
   label: string,
   fn: (provider: ethers.JsonRpcProvider) => Promise<T>,
-  opts?: { policy?: string; isRetryable?: (err: unknown) => boolean },
+  opts?: Pick<ReadOpts, 'policy' | 'isRetryable'>,
 ) => Promise<T>;
 /**
  * A VALIDATED wide raw-log scan (review r3-bot): one place owns the
@@ -325,7 +352,7 @@ export class EventsMethods extends EVMChainAdapterBase {
 
     const address = await kaStorage.getAddress();
     const logs = await readValidatedTopicLogs(
-      (label, fn, opts) => this.readTipProvider(label, fn, opts as never),
+      (label, fn, opts) => this.readTipProvider(label, fn, opts),
       {
       label: 'kas.getLogs(KnowledgeAssetRootMutations)',
       address,
@@ -510,13 +537,14 @@ export class EventsMethods extends EVMChainAdapterBase {
           const toB = filter.toBlock ?? 'latest';
 
           const isGreenfield = this.contractHasEvent(kaStorage, 'KnowledgeAssetCreated');
-          const createEventName = isGreenfield
-            ? 'KnowledgeAssetCreated'
-            : 'KnowledgeAssetCreated';
+          const createEventName = resolveDeclaredAbiEventName(
+            (name) => this.contractHasEvent(kaStorage, name),
+            'KCCreated',
+          ) ?? 'KnowledgeAssetCreated';
 
           const kcFilter = kaStorage.filters[createEventName]();
           const kcLogs = await this.queryFilterWithFailover(
-            kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter, fromB, toB,
+            kaStorage, `kas.queryFilter(${createEventName})`, kcFilter, fromB, toB,
           );
 
           // Legacy mint range. `KnowledgeAssetsMinted` is still declared on the
@@ -610,9 +638,13 @@ export class EventsMethods extends EVMChainAdapterBase {
       if (eventType === 'NameClaimed' || eventType === 'ContextGraphNameClaimed') {
         const registry = this.contracts.contextGraphNameRegistry;
         if (registry) {
-          const eventFilter = registry.filters.NameClaimed();
+          const claimEventName = resolveDeclaredAbiEventName(
+            (name) => this.contractHasEvent(registry, name),
+            'ContextGraphNameClaimed',
+          ) ?? 'NameClaimed';
+          const eventFilter = registry.filters[claimEventName]();
           const logs = await this.queryFilterWithFailover(
-            registry, 'cgNameRegistry.queryFilter(NameClaimed)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+            registry, `cgNameRegistry.queryFilter(${claimEventName})`, eventFilter, filter.fromBlock ?? 0, filter.toBlock,
           );
           for (const log of logs) {
             const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });

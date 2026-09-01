@@ -464,6 +464,15 @@ export class ChainEventLaneRunner {
         }
         state.cursorOrigin = 'current';
       }
+      // The live seed is BOUNDED coverage by design (review r5-bot): it
+      // claims nothing about mutations older than the activation lookback.
+      // Coverage for assets a node ALREADY HOLDS is the stacked consumer’s
+      // obligation — the first-activation bootstrap audit (dkg-agent,
+      // #2435 PR-B) enqueues a zero-position re-verify intent for every
+      // held KA whenever this lane’s OWN durable cursor is absent, ordered
+      // before the first cursor persist so a crash cannot skip it. The two
+      // ship together: this lane triggers on what CHANGES; the audit
+      // covers what already existed.
       if (state.lastBlock === 0 && state.cursorOrigin === undefined && !lane.requiresFullHistory) {
         state.lastBlock = Math.max(0, head - lane.liveSeedLookbackBlocks);
         this.log.info(ctx, `Seeded poller cursor near chain head: lane=${lane.spec.name} head=${head} scanning from ${state.lastBlock}`);
