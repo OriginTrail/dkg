@@ -536,7 +536,7 @@ describe('graph-scoped finalization handler', () => {
     const { message, metaGraph, reconcileHandler } = await stageConfirmedThenLowerStamp();
 
     await expect(
-      reconcileGraphScoped(reconcileHandler, message, { inspectOnly: true }),
+      reconcileGraphScoped(reconcileHandler, message, { suppressAlreadyCurrentStamp: true }),
     ).resolves.toBe('already-confirmed');
 
     expect(

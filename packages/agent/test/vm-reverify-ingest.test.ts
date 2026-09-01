@@ -180,10 +180,10 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     expect(await intents.countPending(CG)).toBe(0);
     expect(kicks.count, 'a held event must not kick the drain').toBe(0);
   }, 60_000);
-  it('forwards inspectOnly and admissionPriority through the REAL host fetch (review r1)', async () => {
+  it('forwards suppressAlreadyCurrentStamp and admissionPriority through the REAL host fetch (review r1)', async () => {
     // Not a stub-shaped echo test: this drives the real
     // `fetchContextGraphAssets` and asserts at the two layers the options
-    // are consumed — the finalizer must see `inspectOnly: true` and the
+    // are consumed — the finalizer must see `suppressAlreadyCurrentStamp: true` and the
     // exact-peer sync must see `admissionPriority: 200`. Deleting either
     // production forwarding makes this red.
     const { internals, ualFor } = await boot();
@@ -222,15 +222,15 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     };
 
     await internals.fetchContextGraphAssets(CG, [ual], {
-      inspectOnly: true,
+      suppressAlreadyCurrentStamp: true,
       admissionPriority: VM_REVERIFY_ADMISSION_PRIORITY,
       peerIds: ['peer-x'],
     });
 
     expect(finalizerInputs.length).toBeGreaterThanOrEqual(1);
     expect(
-      finalizerInputs.every((input) => input.inspectOnly === true),
-      'every finalizer inspection must carry inspectOnly',
+      finalizerInputs.every((input) => input.suppressAlreadyCurrentStamp === true),
+      'every finalizer inspection must carry suppressAlreadyCurrentStamp',
     ).toBe(true);
     expect(syncCalls).toHaveLength(1);
     expect(syncCalls[0]!.options.admissionPriority).toBe(VM_REVERIFY_ADMISSION_PRIORITY);
@@ -242,7 +242,7 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     await internals.fetchContextGraphAssets(CG, [ual], { peerIds: ['peer-x'] });
     expect(finalizerInputs.length).toBeGreaterThanOrEqual(1);
     expect(
-      finalizerInputs.every((input) => !('inspectOnly' in input)),
+      finalizerInputs.every((input) => !('suppressAlreadyCurrentStamp' in input)),
       'the operator default must NOT suppress stamps',
     ).toBe(true);
     expect(syncCalls[0]!.options.admissionPriority).toBeUndefined();

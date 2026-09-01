@@ -31,7 +31,12 @@ import {
   ExactAssetFetchLifecycleClosedError,
   type ContextGraphAssetFetchItemResult,
 } from './sync/exact-asset-fetch.js';
-import type { VmReverifyAbandonReason } from './vm-reverify-intent-store.js';
+import type {
+  VmReverifyAbandonReason,
+  VmReverifyLeaveReason,
+  VmReverifyResolveReason,
+  VmReverifyRetryReason,
+} from './vm-reverify-vocabulary.js';
 
 /**
  * Why the last attempt did not settle the intent.
@@ -90,40 +95,14 @@ export function backoffMs(outcomeClass: VmReverifyOutcomeClass, attemptNumber: n
   return Math.min(VM_REVERIFY_MAX_BACKOFF_MS, exponential);
 }
 
-export type VmReverifyResolveReason = 'already-present' | 'materialized' | 'fetched';
-
-export type VmReverifyRetryReason =
-  /** The chain view we got was read BEFORE the event. Never resolve on it. */
-  | 'snapshot-behind-event'
-  /** Not every configured endpoint answered the pinned view. */
-  | 'snapshot-unavailable'
-  /** The chain answered, but with a root/block/address this code cannot use. */
-  | 'invalid-evidence'
-  /** The CG is not (currently) subscribed or hosted here. Non-terminal. */
-  | 'context-graph-not-held'
-  /** Evidence was fine; nobody reachable had the version. */
-  | 'unresolved'
-  /**
-   * Unresolvable BY CONFIGURATION: the asset needs its version-scoped shared
-   * working memory recovered before it can be promoted, and the durable plane
-   * that carries SWM is switched off (ADR-W2R-10). Deferred forever rather than
-   * parked — an operator who turns the durable plane back on must find the work
-   * waiting, and `no-peer-has-version` would be a lie about a node that never
-   * got to ask a peer.
-   */
-  | 'durable-sync-disabled'
-  /**
-   * The SWM recovery this repair depends on FAILED as infrastructure (review
-   * r3): a peer timed out, the transfer aborted — the traversal did not
-   * complete, so "no reachable peer has the version" was never established.
-   * Retried on the evidence ladder and, like the deferral above, it must not
-   * consume the peer-unresolved park budget.
-   */
-  | 'swm-recovery-failed'
-  /** An error this table does not recognise. Treated as transient, loudly. */
-  | 'unexpected-error';
-
-export type VmReverifyLeaveReason = 'lifecycle-closed' | 'no-result';
+// The reason unions live in the ONE vocabulary module (review r3) and are
+// re-exported here so the transition table stays the natural import site for
+// its consumers.
+export type {
+  VmReverifyLeaveReason,
+  VmReverifyResolveReason,
+  VmReverifyRetryReason,
+} from './vm-reverify-vocabulary.js';
 
 /**
  * A discriminated union rather than `{action, reason, delayMs?}` so the worker

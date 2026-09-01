@@ -32,6 +32,7 @@ import {
   planTransition,
   type VmReverifyTransition,
 } from './vm-reverify-intents.js';
+import type { VmReverifyOutcomeKey } from './vm-reverify-vocabulary.js';
 import type {
   VmReverifyIntentRecord,
   VmReverifyIntentStore,
@@ -39,7 +40,7 @@ import type {
 
 export const VM_REVERIFY_DEFAULT_POLL_INTERVAL_MS = 30_000;
 export const VM_REVERIFY_DEFAULT_BATCH_SIZE = 10;
-export const VM_REVERIFY_DEFAULT_MAX_CALLS_PER_RUN = 1;
+export const VM_REVERIFY_DEFAULT_MAX_CG_CHUNKS_PER_RUN = 1;
 export const VM_REVERIFY_DEFAULT_KICK_DEBOUNCE_MS = 250;
 
 /**
@@ -66,10 +67,25 @@ function positiveEnvInteger(name: string): number | undefined {
  * variable at module scope would silently get the default and its timing
  * assumptions would be quietly wrong rather than loudly broken.
  */
+/**
+ * A run's exact-fetch budget is THREE explicit caps (review r3), not one
+ * number wearing three meanings:
+
+ *  - `maxContextGraphChunksPerRun` bounds how many Context-Graph CHUNKS a
+    run attempts — the primary chunk calls.
+ *  - a REJECTED chunk is retried as singletons, bounded by `batchSize` per
+    chunk (deliberately outside the chunk budget: one poisoned asset must
+    not strand its siblings for a poll interval), so a poisoned chunk of N
+    due rows costs at most `1 + N` calls — pinned by its own row.
+ *  - the SWM pairing re-fetches the still-stranded subset at most once per
+    PRODUCTIVE recovery peer, and the recovery traversal is bounded by the
+    5-peer recovery cap — so verification adds at most `min(peers, 5)`
+    calls per chunk.
+ */
 export interface VmReverifyWorkerSettings {
   pollIntervalMs: number;
   batchSize: number;
-  maxCallsPerRun: number;
+  maxContextGraphChunksPerRun: number;
   kickDebounceMs: number;
   parkAfterMs: number;
 }
@@ -87,9 +103,9 @@ export function resolveVmReverifyWorkerSettings(
         ?? positiveEnvInteger('DKG_VM_REVERIFY_BATCH_SIZE')
         ?? VM_REVERIFY_DEFAULT_BATCH_SIZE,
     ),
-    maxCallsPerRun: overrides.maxCallsPerRun
-      ?? positiveEnvInteger('DKG_VM_REVERIFY_MAX_CALLS_PER_RUN')
-      ?? VM_REVERIFY_DEFAULT_MAX_CALLS_PER_RUN,
+    maxContextGraphChunksPerRun: overrides.maxContextGraphChunksPerRun
+      ?? positiveEnvInteger('DKG_VM_REVERIFY_MAX_CG_CHUNKS_PER_RUN')
+      ?? VM_REVERIFY_DEFAULT_MAX_CG_CHUNKS_PER_RUN,
     kickDebounceMs: overrides.kickDebounceMs
       ?? positiveEnvInteger('DKG_VM_REVERIFY_KICK_DEBOUNCE_MS')
       ?? VM_REVERIFY_DEFAULT_KICK_DEBOUNCE_MS,
@@ -107,7 +123,7 @@ export interface VmReverifyDrainItem {
   status?: ContextGraphAssetFetchItemStatus;
   versionBlock?: number;
   action: VmReverifyTransition['action'];
-  reason: string;
+  reason: VmReverifyTransition['reason'] | 'stale-generation';
 }
 
 export interface VmReverifyRunSummary {
@@ -131,10 +147,10 @@ export interface VmReverifyRunSummary {
    * Roll-up keyed by `action:reason`.
    *
    * Deliberately separate from `items`: this is the shape PR-C turns into
-   * metric attributes, so its keys must come from the bounded transition
-   * vocabulary and never from a UAL, a KA id or a Context Graph id.
+   * metric attributes. The key TYPE is derived from the closed vocabulary
+   * (review r3), so a UAL-, KA- or peer-bearing key cannot compile.
    */
-  outcomes: Record<string, number>;
+  outcomes: Partial<Record<VmReverifyOutcomeKey, number>>;
   items: VmReverifyDrainItem[];
 }
 
@@ -148,7 +164,7 @@ export interface VmReverifyWorkerDependencies {
   fetchContextGraphAssets(
     localCgId: string,
     uals: readonly string[],
-    options: { inspectOnly?: boolean; admissionPriority?: number },
+    options: { suppressAlreadyCurrentStamp?: boolean; admissionPriority?: number },
   ): Promise<ContextGraphAssetFetchResult>;
   /**
    * Recover a Context Graph's shared working memory from peers (ADR-W2R-10).
@@ -192,6 +208,18 @@ export interface VmReverifyWorkerDependencies {
 type CallOutcome =
   | { kind: 'item'; status: ContextGraphAssetFetchItemStatus; versionBlock: number }
   | { kind: 'error'; error: unknown };
+
+/** Per-branch construction, so the template-literal key type holds with no cast. */
+function outcomeKeyOf(transition: VmReverifyTransition): VmReverifyOutcomeKey {
+  switch (transition.action) {
+    case 'resolve': return `resolve:${transition.reason}`;
+    case 'retry': return `retry:${transition.reason}`;
+    case 'abandon': return `abandon:${transition.reason}`;
+    case 'leave':
+    default:
+      return `leave:${transition.reason}`;
+  }
+}
 
 function emptySummary(): VmReverifyRunSummary {
   return {
@@ -296,10 +324,10 @@ export class VmReverifyWorker {
       else groups.set(record.localCgId, [record]);
     }
 
-    let callsRemaining = this.#settings.maxCallsPerRun;
+    let chunksRemaining = this.#settings.maxContextGraphChunksPerRun;
     for (const [localCgId, records] of groups) {
-      if (callsRemaining <= 0) break;
-      callsRemaining -= 1;
+      if (chunksRemaining <= 0) break;
+      chunksRemaining -= 1;
       const chunkOutcomes = await this.resolveChunkOutcomes(localCgId, records, summary);
       // Recovery availability travels WITH the chunk result (review r2):
       // worker-instance state would leak one chunk's availability decision
@@ -356,10 +384,11 @@ export class VmReverifyWorker {
       );
     }
 
-    // The singleton fallback is NOT charged against `maxCallsPerRun`: that
-    // budget bounds how many chunks a run attempts, and letting one bad asset
-    // consume the budget would strand its siblings for a whole poll interval —
-    // the exact starvation the fallback exists to prevent.
+    // The singleton fallback is NOT charged against the chunk budget — an
+    // EXPLICIT policy (review r3), bounded by `batchSize` per rejected chunk:
+    // letting one bad asset consume the chunk budget would strand its
+    // siblings for a whole poll interval, the exact starvation the fallback
+    // exists to prevent.
     for (const ual of uals) {
       try {
         const result = await this.call(localCgId, [ual], summary);
@@ -449,13 +478,13 @@ export class VmReverifyWorker {
     summary: VmReverifyRunSummary,
   ): Promise<ContextGraphAssetFetchResult> {
     summary.calls += 1;
-    // `inspectOnly` on EVERY call, not only on the ones that turn out to be
-    // already-current (ADR-W2R-8). The option only suppresses the stamp on the
-    // already-current path — the promoted path still records its version — so
-    // passing it unconditionally gives exactly the ADR's property without the
-    // drain having to predict the outcome it is about to observe.
+    // `suppressAlreadyCurrentStamp` on EVERY call, not only on the ones that
+    // turn out to be already-current (ADR-W2R-8). The option suppresses ONLY
+    // the already-current ordering stamp — the promoted path still records
+    // its version — so passing it unconditionally gives exactly the ADR's
+    // property without the drain predicting the outcome it is about to observe.
     const result = await this.deps.fetchContextGraphAssets(localCgId, uals, {
-      inspectOnly: true,
+      suppressAlreadyCurrentStamp: true,
       admissionPriority: VM_REVERIFY_ADMISSION_PRIORITY,
     });
     summary.peerAttempts += result.peerAttempts;
@@ -540,7 +569,7 @@ export class VmReverifyWorker {
       // The CAS refused the write: a newer generation redefined the row while
       // this run was planning (review r2). The newer intent is intact and due;
       // claiming the planned transition would be a false operator signal.
-      const key = 'superseded:stale-generation';
+      const key: VmReverifyOutcomeKey = 'superseded:stale-generation';
       summary.outcomes[key] = (summary.outcomes[key] ?? 0) + 1;
       summary.superseded += 1;
       this.deps.log.info(
@@ -550,7 +579,7 @@ export class VmReverifyWorker {
       );
       return;
     }
-    const key = `${transition.action}:${transition.reason}`;
+    const key = outcomeKeyOf(transition);
     summary.outcomes[key] = (summary.outcomes[key] ?? 0) + 1;
     if (transition.action === 'resolve') summary.resolved += 1;
     else if (transition.action === 'retry') summary.retried += 1;

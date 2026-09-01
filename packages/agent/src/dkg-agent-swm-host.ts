@@ -3487,11 +3487,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     options: {
       peerIds?: readonly string[];
       /**
-       * Check without stamping `materializedVersion` on an already-current
-       * asset (#2435, ADR-W2R-8). Defaults off, so the operator route keeps its
-       * existing behaviour exactly.
+       * Suppress ONLY the `materializedVersion` ordering stamp on an asset
+       * found already-current (#2435, ADR-W2R-8; named for exactly that
+       * contract, review r3): a missing asset is still fetched, promoted and
+       * stamped — this is a stamp policy, not a read-only mode. Defaults off,
+       * so the operator route keeps its existing behaviour exactly.
        */
-      inspectOnly?: boolean;
+      suppressAlreadyCurrentStamp?: boolean;
       /**
        * Admission priority for the peer fetches this call issues. Defaults to
        * the operator route's `vm-recovery` priority; the automatic re-verify
@@ -3567,7 +3569,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           batchId: item.batchId,
           versionBlock: item.versionBlock,
           authorAddress: item.authorAddress,
-          ...(options.inspectOnly ? { inspectOnly: true } : {}),
+          ...(options.suppressAlreadyCurrentStamp ? { suppressAlreadyCurrentStamp: true } : {}),
         }, ctx);
         if (outcome === 'promoted') return 'materialized';
         if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';

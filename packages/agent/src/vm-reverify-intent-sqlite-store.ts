@@ -15,6 +15,7 @@ import {
   fsyncVmReverifyIntentDatabase,
   openVmReverifyIntentDatabase,
 } from './vm-reverify-intent-sqlite-schema.js';
+import type { VmReverifyRetryReason } from './vm-reverify-vocabulary.js';
 import {
   eventRedefinesIntent,
   type VmReverifyAbandonReason,
@@ -211,7 +212,7 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
   recordAttempt(
     ual: string,
     generation: number,
-    lastOutcome: string,
+    lastOutcome: VmReverifyRetryReason,
     retryDelayMs: number,
     now: number,
     startsParkBudget: boolean,

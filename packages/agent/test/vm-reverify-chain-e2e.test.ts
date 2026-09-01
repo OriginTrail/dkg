@@ -630,13 +630,13 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       'a resolved intent must be deleted, not left to retry forever',
     ).toBe(0);
 
-    // ADR-W2R-8, the OTHER polarity. `inspectOnly` is passed on every drain
+    // ADR-W2R-8, the OTHER polarity. `suppressAlreadyCurrentStamp` is passed on every drain
     // call, and it must suppress the version stamp ONLY on the already-current
     // path. A genuine PROMOTION still has to record its version — otherwise the
     // node would materialize new content while claiming, forever, to be at the
     // older version, and the next ordering decision would be made on a lie.
     // SC-3 below asserts the same flag does NOT stamp when nothing was
-    // promoted; measuring only that side would leave "inspectOnly suppresses
+    // promoted; measuring only that side would leave "suppressAlreadyCurrentStamp suppresses
     // everything" indistinguishable from correct.
     const stampAfterRepair = await materializedStamp(host);
     expect(
@@ -698,7 +698,7 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
     // It cannot be measured in this file. `advanceExactGraphScopedVersion`
     // writes only when the new version is strictly greater, and by this point
     // SC-1's promotion has already stored exactly the value the already-current
-    // path would write — so removing the `inspectOnly` guard changes nothing
+    // path would write — so removing the `suppressAlreadyCurrentStamp` guard changes nothing
     // observable, and a solo-removal mutant SURVIVES 4/4 here. Forcing a lower
     // stamp to create the gap does not rescue it either: this node also runs the
     // ordinary chain-driven VM reconcile sweep, which writes the same stamp on
@@ -706,7 +706,7 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
     // discriminating.
     //
     // An assertion that cannot fail is worse than none — it reports the guard
-    // as covered. What IS proven here: the drain passes `inspectOnly` on every
+    // as covered. What IS proven here: the drain passes `suppressAlreadyCurrentStamp` on every
     // call (unit mutant, killed). What is NOT: that the handler honours it.
     // That needs a fixture where nothing else can write the stamp, and is
     // recorded as owed rather than faked.

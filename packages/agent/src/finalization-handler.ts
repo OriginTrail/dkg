@@ -370,7 +370,7 @@ export interface ChainReconciledKCInput {
    * lower block — permanently unapplicable. An inspection must be able to
    * observe state without changing what the node will later accept.
    */
-  inspectOnly?: boolean;
+  suppressAlreadyCurrentStamp?: boolean;
 }
 
 export type ChainReconciledKCOutcome =
@@ -1428,7 +1428,7 @@ export class FinalizationHandler {
     batchId: bigint;
     versionBlock: number;
     subGraphName?: string;
-    inspectOnly?: boolean;
+    suppressAlreadyCurrentStamp?: boolean;
   }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
     const resolution = await resolveConfirmedGraphScopedVm(this.store, {
       contextGraphId: input.contextGraphId,
@@ -1455,7 +1455,7 @@ export class FinalizationHandler {
       contextGraphId: input.contextGraphId,
       scope: resolution.scope,
       materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
-      inspectOnly: input.inspectOnly,
+      suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
     });
     this.log.info(
       ctx,
@@ -1555,7 +1555,7 @@ export class FinalizationHandler {
     authorAddress?: string;
     subGraphName?: string;
     trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
-    inspectOnly?: boolean;
+    suppressAlreadyCurrentStamp?: boolean;
   }, ctx: OperationContext): Promise<
     | 'promoted'
     | 'already-confirmed'
@@ -1620,7 +1620,7 @@ export class FinalizationHandler {
           batchId,
           versionBlock,
           ...(subGraphName ? { subGraphName } : {}),
-          ...(input.inspectOnly ? { inspectOnly: true } : {}),
+          ...(input.suppressAlreadyCurrentStamp ? { suppressAlreadyCurrentStamp: true } : {}),
         }, ctx)) ?? 'no-swm';
       }
       // Named recovery carries receipt/seal-validated immutable evidence. A
@@ -1636,7 +1636,7 @@ export class FinalizationHandler {
         batchId,
         versionBlock,
         ...(subGraphName ? { subGraphName } : {}),
-        ...(input.inspectOnly ? { inspectOnly: true } : {}),
+        ...(input.suppressAlreadyCurrentStamp ? { suppressAlreadyCurrentStamp: true } : {}),
       }, ctx);
     }
 
@@ -1740,7 +1740,7 @@ export class FinalizationHandler {
           contextGraphId,
           scope,
           materializedVersion,
-          inspectOnly: input.inspectOnly,
+          suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
         });
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
@@ -1763,7 +1763,7 @@ export class FinalizationHandler {
             contextGraphId,
             scope,
             materializedVersion,
-            inspectOnly: input.inspectOnly,
+            suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
           });
           this.log.info(
             ctx,
@@ -2582,7 +2582,7 @@ export class FinalizationHandler {
    * have survived a mutant that forced the other two. One writer, one decision,
    * one site to mutate.
    *
-   * `inspectOnly` is optional and defaults to advancing, so the PROMOTION path
+   * `suppressAlreadyCurrentStamp` is optional and defaults to advancing, so the PROMOTION path
    * — which must always record the version it just materialized — is untouched
    * by construction rather than by remembering not to pass the flag.
    */
@@ -2590,9 +2590,9 @@ export class FinalizationHandler {
     contextGraphId: string;
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     materializedVersion: MaterializedVersion;
-    inspectOnly?: boolean;
+    suppressAlreadyCurrentStamp?: boolean;
   }): Promise<void> {
-    if (input.inspectOnly) return;
+    if (input.suppressAlreadyCurrentStamp) return;
     const metaGraph = contextGraphMetaUri(input.contextGraphId);
     await withMaterializationLock(metaGraph, input.scope.ual, async () => {
       const current = await readMaterializedVersion(
@@ -3203,7 +3203,7 @@ export class FinalizationHandler {
       authorAddress,
       subGraphName,
       trustedAssertionEvidence,
-      ...(input.inspectOnly ? { inspectOnly: true } : {}),
+      ...(input.suppressAlreadyCurrentStamp ? { suppressAlreadyCurrentStamp: true } : {}),
     }, ctx);
     if (graphScopedOutcome !== undefined) {
       return { outcome: graphScopedOutcome, legacyEligible: false, input };

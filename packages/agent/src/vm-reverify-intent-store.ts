@@ -22,26 +22,19 @@ import {
   type KnowledgeAssetRootMutationKindV1,
 } from '@origintrail-official/dkg-core';
 
+import type {
+  VmReverifyAbandonReason,
+  VmReverifyRetryReason,
+} from './vm-reverify-vocabulary.js';
+
 export const VM_REVERIFY_INTENTS_DATABASE_FILENAME = 'vm-reverify-intents-v1.sqlite3';
 
 /** Live work vs. terminal-until-revived. There is deliberately no third state. */
 export type VmReverifyIntentState = 'PENDING' | 'ABANDONED';
 
-/**
- * Why a row stopped being retried. Every one of these is loud (warn + counter)
- * and every one is revivable by a strictly-newer event or by the CG being
- * (re-)subscribed / (re-)hosted — nothing here is a permanent verdict about
- * the asset, only about the evidence available so far.
- */
-export type VmReverifyAbandonReason =
-  /** `root-removed`: the chain moved BACKWARDS; this design cannot repair that. */
-  | 'version-regression-unsupported'
-  /** Not registered / no committed version / CG binding mismatch on chain. */
-  | 'chain-identity-conflict'
-  /** The repair primitive rejected our own arguments — a bug, not a condition. */
-  | 'programmer-error'
-  /** The 24 h budget expired with no reachable peer holding the version. */
-  | 'no-peer-has-version';
+// The abandonment vocabulary lives with the other reason unions (review r3);
+// re-exported so store consumers keep their import site.
+export type { VmReverifyAbandonReason } from './vm-reverify-vocabulary.js';
 
 /**
  * Chain position of the observed mutation. Structurally core's
@@ -140,6 +133,10 @@ export interface VmReverifyIntentRecord {
    *  serve the version, and must not consume the window that measures that. */
   firstAttemptAt?: number;
   nextAttemptAt?: number;
+  /** RAW persisted value, diagnostic-only (review r3): writes go through the
+   *  typed `recordAttempt`, but a row written by an older release may carry a
+   *  spelling outside the current union — it is surfaced verbatim and never
+   *  branched on. */
   lastOutcome?: string;
   createdAt: number;
   updatedAt: number;
@@ -176,7 +173,7 @@ export interface VmReverifyIntentStore {
   recordAttempt(
     ual: string,
     generation: number,
-    lastOutcome: string,
+    lastOutcome: VmReverifyRetryReason,
     retryDelayMs: number,
     now: number,
     startsParkBudget: boolean,

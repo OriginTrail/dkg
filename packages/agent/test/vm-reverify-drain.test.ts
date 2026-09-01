@@ -74,12 +74,12 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     fetchFromPeer?: (peerId: string, uals: readonly string[]) => Promise<void>;
     contextGraphIdFor?: (kaId: bigint) => bigint;
   } = {}) {
-    const options: Array<{ inspectOnly?: boolean; admissionPriority?: number }> = [];
+    const options: Array<{ suppressAlreadyCurrentStamp?: boolean; admissionPriority?: number }> = [];
     const requested: string[][] = [];
     const fetch = async (
       localCgId: string,
       uals: readonly string[],
-      callOptions: { inspectOnly?: boolean; admissionPriority?: number },
+      callOptions: { suppressAlreadyCurrentStamp?: boolean; admissionPriority?: number },
     ): Promise<ContextGraphAssetFetchResult> => {
       options.push(callOptions);
       requested.push([...uals]);
@@ -375,9 +375,25 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     ).toEqual([3, 1, 1, 1]);
   });
 
+  it('a poisoned chunk costs EXACTLY 1 + N calls — the explicit singleton cap (review r3)', async () => {
+    // The chunk budget bounds chunks; the isolation fallback is bounded by
+    // batchSize per rejected chunk. Three due rows whose combined call is
+    // poisoned: one chunk call plus exactly three singletons, never more.
+    const intents = new InMemoryVmReverifyIntentStore();
+    for (const n of [70n, 71n, 72n]) await seed(intents, n, 100);
+    const fetch = makeFetch({
+      snapshotFor: (kaId) => (kaId === kaIdFor(71n) ? null : snapshot(200)),
+    });
+    const { worker } = makeWorker(intents, fetch, { maxContextGraphChunksPerRun: 1 });
+
+    const run = await worker.runOnce();
+
+    expect(run.calls, 'chunk + one singleton per due row, exactly').toBe(4);
+    expect(fetch.requested.map((uals) => uals.length)).toEqual([3, 1, 1, 1]);
+  });
   it('does not let a poisoned chunk spend the budget another Context Graph needed', async () => {
     // The singleton fallback is deliberately NOT charged against
-    // `maxCallsPerRun`: that budget bounds how many CHUNKS a run attempts. If
+    // `maxContextGraphChunksPerRun`: that budget bounds how many CHUNKS a run attempts. If
     // the fallback drew from it, one bad asset would eat the whole run and the
     // next Context Graph's work would wait a full poll interval behind it —
     // reintroducing, one level up, the starvation the fallback exists to
@@ -396,7 +412,7 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     const fetch = makeFetch({
       snapshotFor: (kaId) => (kaId === kaIdFor(51n) ? null : snapshot(200)),
     });
-    const { worker } = makeWorker(intents, fetch, { maxCallsPerRun: 2 });
+    const { worker } = makeWorker(intents, fetch, { maxContextGraphChunksPerRun: 2 });
 
     const run = await worker.runOnce();
 
@@ -556,7 +572,7 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
 
     expect(fetch.options).toHaveLength(1);
     expect(fetch.options[0]).toEqual({
-      inspectOnly: true,
+      suppressAlreadyCurrentStamp: true,
       admissionPriority: VM_REVERIFY_ADMISSION_PRIORITY,
     });
     expect(
