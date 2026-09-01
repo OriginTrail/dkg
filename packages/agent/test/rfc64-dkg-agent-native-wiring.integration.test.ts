@@ -4990,7 +4990,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
   }, 60_000);
 
-  it('publishes finalized private recovery placement only after chain confirmation', async () => {
+  it('keeps finalized private SWM and VM placements in one tier-neutral catalog', async () => {
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
     const kaNumber = 39n;
     const finalizedAsset = Object.freeze({
@@ -5150,14 +5150,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest,
       authorAddress: AUTHOR,
     })).toMatchObject({ head: { payload: { totalRows: '1' } } });
-    expect(author.readRfc64AppliedCatalogHeadV1({
+    const swmOnlyHead = author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
-    })).toBeNull();
-    expect(announce).not.toHaveBeenCalled();
+    });
+    expect(swmOnlyHead).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    expect(announce).toHaveBeenCalledTimes(1);
 
-    // A durable pre-confirmation row is intentionally not repairable. Restart
-    // cannot infer chain confirmation from its mere presence.
+    // The durable author row is already catalog-visible before VM confirmation;
+    // restart must preserve it without inventing a finalized-placement repair.
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
     let failedPlacementAttempts = 0;
@@ -5187,7 +5188,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
-    })).toBeNull();
+    })).toEqual(swmOnlyHead);
     expect(failedPlacementAttempts).toBe(0);
 
     await author.observeRfc64ConfirmedVmV1({
@@ -5203,7 +5204,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
-    })).toBeNull();
+    })).toEqual(swmOnlyHead);
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest,
       authorAddress: AUTHOR,
@@ -5212,15 +5213,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
-    let releaseStartupRepair!: () => void;
-    let markStartupRepairEntered!: () => void;
-    const startupRepairGate = new Promise<void>((resolve) => {
-      releaseStartupRepair = resolve;
-    });
-    const startupRepairEntered = new Promise<void>((resolve) => {
-      markStartupRepairEntered = resolve;
-    });
-    let failedRemovalAttempts = 0;
     author = await startNativeAgentWithOptions({
       name: 'finalized-private-auto-publish-author-confirmed-restart',
       existingDataDir: authorDataDir,
@@ -5230,24 +5222,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
         );
-        const original = (agent as any)
-          .publishRfc64FinalizedPrivateCatalogPlacementV1.bind(agent);
-        vi.spyOn(agent as any, 'publishRfc64FinalizedPrivateCatalogPlacementV1')
-          .mockImplementation(async (...args: unknown[]) => {
-            markStartupRepairEntered();
-            await startupRepairGate;
-            return original(...args);
-          });
-        vi.spyOn(agent, 'removeRfc64SwmAuthorInventoryConfirmedRowV1')
-          .mockImplementation(async () => {
-            failedRemovalAttempts += 1;
-            throw new Error('simulated post-publication SWM removal failure');
-          });
       },
     });
     allowAllNetworkAdmissionForTest(author);
     peerAddresses.set(author.peerId, AUTHOR);
-    await startupRepairEntered;
     await connectBothWays(author, provider);
     await author.afterDurableSwmPromotionV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -5256,8 +5234,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       shareOperationId,
       ctx: createOperationContext('share'),
     });
-    announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
-    releaseStartupRepair();
     await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     await author.awaitInFlightRfc64SwmInventoryObserversV1();
     const publishedHead = author.readRfc64AppliedCatalogHeadV1({
@@ -5270,13 +5246,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })).toMatchObject({ head: { payload: { totalRows: '1' } } });
     expect((author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.list())
-      .toHaveLength(1);
-    expect(failedRemovalAttempts).toBeGreaterThanOrEqual(1);
-    expect(announce).toHaveBeenCalledTimes(1);
+      .toHaveLength(0);
 
-    // Restart after publication. The exact catalog upsert must replay as
-    // existing, then the SWM row and its colocated repair queue entry can be
-    // removed from the same inventory persistence owner.
+    // Restart after confirmation. The catalog upsert replays as existing while
+    // the tier-neutral author row remains the durable projection source.
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
     author = await startNativeAgentWithOptions({
@@ -5300,12 +5273,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest,
       authorAddress: AUTHOR,
-    })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
+    })).toMatchObject({ head: { payload: { totalRows: '1' } } });
     expect((author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.list())
       .toHaveLength(0);
 
-    // A final restart positively proves the row is already represented by the
-    // unchanged catalog head and does not replay a consumed queue entry.
+    // A final restart positively proves the unchanged catalog and source row
+    // do not replay a consumed finalized-placement queue entry.
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
     author = await startNativeAgentWithOptions({
@@ -5345,7 +5318,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest,
       authorAddress: AUTHOR,
-    })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
+    })).toMatchObject({ head: { payload: { totalRows: '1' } } });
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
@@ -5421,7 +5394,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest,
       authorAddress: AUTHOR,
-    })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
+    })).toMatchObject({ head: { payload: { totalRows: '1' } } });
     expect((author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.list())
       .toHaveLength(0);
 

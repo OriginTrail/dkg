@@ -85,6 +85,15 @@ interface ResolvedRfc64CatalogNativeScopedReadCapabilityV1 {
 const RFC64_CATALOG_NATIVE_SCOPED_READ_CAPABILITY_CACHE_MAX_ENTRIES_V1 = 128;
 
 /**
+ * Exact-head reads may expose only the signed head objects on this bounded
+ * ancestor tail. They do not expose ancestor buckets or bundles. A receiver
+ * uses the tail solely to prove that a coalesced current head descends from its
+ * durable applied head before replacing one exact snapshot with another.
+ */
+export const RFC64_CATALOG_NATIVE_HEAD_LINEAGE_WINDOW_V1 =
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
+
+/**
  * Create a resolver for the currently supported bounded root lane: one
  * directory node, zero or one bucket, and 0..1,024 exact rows.
  */
@@ -206,6 +215,16 @@ async function resolveExactBoundedHeadCapability(
     [delegation.objectDigest as Digest32V1, AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1],
     [directory.objectDigest as Digest32V1, AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1],
   ]);
+  for (const ancestor of await readBoundedAuthorCatalogHeadAncestorsV1(
+    options,
+    head,
+    catalogScope,
+  )) {
+    allowedControlObjects.set(
+      ancestor.objectDigest as Digest32V1,
+      AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+    );
+  }
   const allowedBundles = new Map<Digest32V1, number>();
 
   if (head.payload.totalRows === '0') {
@@ -296,6 +315,55 @@ async function resolveExactBoundedHeadCapability(
     },
   });
   return Object.freeze({ capability, catalogScope });
+}
+
+async function readBoundedAuthorCatalogHeadAncestorsV1(
+  options: Rfc64CatalogNativeScopedReadProviderOptionsV1,
+  target: SignedAuthorCatalogHeadEnvelopeV1,
+  catalogScope: Readonly<AuthorCatalogScopeV1>,
+): Promise<readonly SignedAuthorCatalogHeadEnvelopeV1[]> {
+  const ancestors: SignedAuthorCatalogHeadEnvelopeV1[] = [];
+  let child = target;
+  for (
+    let index = 0;
+    index < RFC64_CATALOG_NATIVE_HEAD_LINEAGE_WINDOW_V1;
+    index += 1
+  ) {
+    const predecessorDigest = child.payload.previousHeadDigest;
+    if (predecessorDigest === null) break;
+    const stored = await readStored(options, predecessorDigest);
+    if (stored === null) break;
+    assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
+    const predecessor = stored.envelope;
+    assertAuthorCatalogHeadScopeBindingV1(predecessor.payload, catalogScope);
+    const totalRows = Number(BigInt(predecessor.payload.totalRows));
+    if (
+      predecessor.objectDigest !== predecessorDigest
+      || predecessor.issuer !== target.issuer
+      || predecessor.payload.catalogIssuerDelegationDigest
+        !== target.payload.catalogIssuerDelegationDigest
+      || BigInt(predecessor.payload.version) + 1n !== BigInt(child.payload.version)
+      || BigInt(predecessor.payload.issuedAt) > BigInt(child.payload.issuedAt)
+      || predecessor.payload.bucketCount !== '1'
+      || predecessor.payload.directoryHeight !== '0'
+      || !Number.isSafeInteger(totalRows)
+      || totalRows < 0
+      || totalRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
+      || (
+        predecessor.payload.version === '0'
+        && predecessor.payload.previousHeadDigest !== null
+      )
+      || (
+        predecessor.payload.version !== '0'
+        && predecessor.payload.previousHeadDigest === null
+      )
+    ) {
+      throw new Error('stored catalog predecessor is not a contiguous bounded head');
+    }
+    ancestors.push(predecessor);
+    child = predecessor;
+  }
+  return Object.freeze(ancestors);
 }
 
 function exactScopeCacheKey(

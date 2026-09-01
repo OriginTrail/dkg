@@ -78,6 +78,8 @@ interface ReconcileRfc64SwmInventoryCatalogExactSetParamsV1
 }
 
 interface Rfc64CatalogExactSetMutationOptionsV1 {
+  /** Preserve catalog-only rows and merge the durable source rows by KA id. */
+  readonly preserveExistingAssets?: boolean;
   readonly commitAppliedHead?: (
     commit: () => AppliedCatalogHeadSnapshotV1,
   ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
@@ -223,6 +225,17 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     });
   }
 
+  /** Finalized-private projection keeps authored rows independent of SWM/VM placement. */
+  async reconcileRfc64SwmInventoryCatalogUnionV1(
+    this: DKGAgent,
+    params: ReconcileRfc64SwmInventoryCatalogExactSetParamsV1,
+  ): Promise<ReconcileRfc64SwmInventoryCatalogExactSetResultV1> {
+    return this.reconcileRfc64PublicRootCatalogExactSetCoreV1(params, {
+      preserveExistingAssets: true,
+      commitAppliedHead: params.commitAppliedHeadIfInventoryCurrent,
+    });
+  }
+
   private async reconcileRfc64PublicRootCatalogExactSetCoreV1(
     this: DKGAgent,
     params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
@@ -233,11 +246,11 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     if (params.scope.subGraphName !== null) {
       throw new Error('RFC-64 exact-set reconciliation requires the root catalog lane');
     }
-    const targetAssets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
+    const requestedAssets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
       params.assets,
       'RFC-64 exact-set target assets',
     );
-    for (const asset of targetAssets) {
+    for (const asset of requestedAssets) {
       if (asset.seal.authorAddress !== params.scope.authorAddress) {
         throw new Error('RFC-64 exact-set target author differs from the catalog scope');
       }
@@ -265,7 +278,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         params.scope.authorAddress,
       );
       throwIfAbortedV1(params.signal);
-      if (state === null && targetAssets.length === 0) {
+      if (state === null && requestedAssets.length === 0) {
         return Object.freeze({
           status: 'empty' as const,
           appliedHead: null,
@@ -276,6 +289,17 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       }
       state ??= await this.createRfc64CatalogGenesisStateV1(params);
       throwIfAbortedV1(params.signal);
+      const targetAssets = options.preserveExistingAssets
+        ? snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
+          [
+            ...state.assets.filter((existing) => !requestedAssets.some(
+              (requested) => requested.seal.reservedKaId === existing.seal.reservedKaId,
+            )),
+            ...requestedAssets,
+          ],
+          'RFC-64 union target assets',
+        )
+        : requestedAssets;
       assertReplacementHistoryIsContiguousV1(state.assets, targetAssets);
       if (sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
         return Object.freeze({

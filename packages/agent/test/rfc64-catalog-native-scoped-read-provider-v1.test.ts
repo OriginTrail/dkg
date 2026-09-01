@@ -350,10 +350,13 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     await expect(capability?.readKaBundleByDigest(fixture.bundle.blobDigest))
       .resolves.toEqual(fixture.bundle.bundleBytes);
 
-    // This is a valid signed object in the same shared store, but it is not in
-    // the requested successor closure.
+    // The signed ancestor HEAD is reachable for bounded lineage proofs. Its
+    // directory/bucket closure is not exposed by the current-head capability.
     await expect(capability?.readCatalogObjectByDigest(
       fixture.genesis.head.objectDigest as Digest32V1,
+    )).resolves.toEqual(fixture.genesis.head);
+    await expect(capability?.readCatalogObjectByDigest(
+      fixture.genesis.directoryPath[0]!.objectDigest as Digest32V1,
     )).resolves.toBeNull();
     await expect(capability?.readKaBundleByDigest(
       `0x${'91'.repeat(32)}` as Digest32V1,
@@ -371,7 +374,7 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
       .resolves.toEqual(fixture.bundle.bundleBytes);
     await expect(capability?.readCatalogObjectByDigest(
       fixture.genesis.head.objectDigest as Digest32V1,
-    )).resolves.toBeNull();
+    )).resolves.toEqual(fixture.genesis.head);
     await expect(capability?.readKaBundleByDigest(
       `0x${'91'.repeat(32)}` as Digest32V1,
     )).resolves.toBeNull();
@@ -493,13 +496,13 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     const capability = await fixture.resolve(fixture.scope);
     expect(capability).not.toBeNull();
     expect(fixture.rows).toHaveLength(500);
-    expect(fixture.controlRead).toHaveBeenCalledTimes(4);
+    expect(fixture.controlRead).toHaveBeenCalledTimes(5);
     expect(onAuthorCatalogBucketProof).toHaveBeenCalledTimes(1);
 
     for (let index = 0; index < 500; index += 1) {
       await expect(fixture.resolve(fixture.scope)).resolves.toBe(capability);
     }
-    expect(fixture.controlRead).toHaveBeenCalledTimes(4);
+    expect(fixture.controlRead).toHaveBeenCalledTimes(5);
     expect(onAuthorCatalogBucketProof).toHaveBeenCalledTimes(1);
   }, 15_000);
 
@@ -521,7 +524,7 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     const capabilities = await Promise.all(resolutions);
     expect(capabilities[0]).not.toBeNull();
     expect(capabilities.every((capability) => capability === capabilities[0])).toBe(true);
-    expect(fixture.controlRead).toHaveBeenCalledTimes(4);
+    expect(fixture.controlRead).toHaveBeenCalledTimes(5);
   });
 
   it('denies a cached exact-head capability after private author membership is revoked', async () => {
@@ -545,6 +548,6 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     const restored = await fixture.resolve(fixture.scope);
     expect(restored).not.toBeNull();
     expect(restored).not.toBe(capability);
-    expect(fixture.controlRead).toHaveBeenCalledTimes(8);
+    expect(fixture.controlRead).toHaveBeenCalledTimes(10);
   });
 });

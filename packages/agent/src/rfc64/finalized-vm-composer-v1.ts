@@ -1,5 +1,6 @@
 import {
   FinalizedVmSetAccumulatorV1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   assertSubGraphNameV1,
@@ -109,8 +110,10 @@ export class FinalizedVmCompositionErrorV1 extends Error {
  * Join author-authorized catalog placement to a same-anchor finalized chain inventory.
  *
  * Placement rows may be a strict subset of the CG-wide on-chain inventory because
- * one catalog lane can be the root or one named subgraph. Every supplied placement
- * must resolve exactly once; output retains the authoritative on-chain ordinal order.
+ * one catalog lane can be the root or one named subgraph. They may also be a
+ * strict superset: RFC-64 catalogs are tier-neutral, so an author-authorized row
+ * absent from finalized chain inventory remains SWM-only. Output contains only
+ * the placement/inventory intersection in authoritative on-chain ordinal order.
  */
 export function composeFinalizedVmSetV1(
   untrustedRequest: ComposeFinalizedVmSetRequestV1,
@@ -159,7 +162,7 @@ export function composeFinalizedVmSetV1(
     placements = snapshotDenseArray(
       request.placements,
       'finalized VM placements',
-      inventory.rows.length,
+      MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
     );
   } catch (cause) {
     fail(
@@ -276,13 +279,10 @@ export function composeFinalizedVmSetV1(
       row,
     }));
   }
-  if (placementsByKaId.size !== 0) {
-    const [missingKaId] = placementsByKaId.keys();
-    fail(
-      'finalized-vm-composition-mismatch',
-      `catalog placement KA ${missingKaId} is absent from the finalized chain inventory`,
-    );
-  }
+  // Remaining placements are valid, author-authorized SWM-only rows. They do
+  // not participate in VM materialization until the same KA is present in a
+  // future finalized chain snapshot. Private completeness still fails above
+  // when any finalized asset authored in this lane is absent from the catalog.
 
   const frozenMaterializations = Object.freeze(materializations);
   return Object.freeze({

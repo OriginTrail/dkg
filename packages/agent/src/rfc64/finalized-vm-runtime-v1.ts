@@ -1,4 +1,5 @@
 import {
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   assertCanonicalChainId,
   assertCanonicalDecimalU256,
   assertCanonicalDecimalU64,
@@ -24,7 +25,6 @@ import {
   type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 import {
-  FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
   scanFinalizedVmChainInventoryInSnapshotV1,
   type FinalizedContextGraphReadV1,
   type FinalizedVmChainCandidateV1,
@@ -320,7 +320,7 @@ function snapshotRequest(input: FinalizedVmRuntimeRequestV1): RuntimeRequestSnap
     const catalogLane = snapshotCatalogLane(input.catalogLane);
     if (
       !Array.isArray(input.placements)
-      || input.placements.length > FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1
+      || input.placements.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
     ) {
       throw new TypeError('placements exceed the finalized VM runtime bound');
     }

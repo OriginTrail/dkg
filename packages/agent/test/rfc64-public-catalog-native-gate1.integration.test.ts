@@ -342,6 +342,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.successor.head.objectDigest,
       fixture.catalogIssuerDelegation.objectDigest,
       fixture.successor.head.payload.directoryRootDigest,
+      fixture.genesis.head.objectDigest,
       fixture.successor.bucket?.objectDigest,
       fixture.successor.head.payload.directoryRootDigest,
       fixture.successor.bucket?.objectDigest,
@@ -482,6 +483,36 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       inventoryRowCount: '2',
     });
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+  }, 30_000);
+
+  it('proves a bounded signed lineage and converges after announcements coalesce', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+
+    const evidence = await fixture.synchronizeAny(fixture.threeAssetAnnouncement);
+
+    expect(evidence).toMatchObject({
+      catalogHeadDigest: fixture.threeAssetSuccessor.head.objectDigest,
+      inventoryRowCount: 3,
+      activatedTripleCount: 6,
+      appliedHeadStatus: 'applied',
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.threeAssetSuccessor.head.objectDigest,
+      catalogVersion: '3',
+      inventoryRowCount: '3',
+    });
+    await expect(fixture.receiverPersistence.controlObjects.getVerifiedObjectByDigest({
+      objectDigest: fixture.multiAssetSuccessor.head.objectDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).resolves.toMatchObject({
+      envelope: { objectDigest: fixture.multiAssetSuccessor.head.objectDigest },
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(48);
   }, 30_000);
 
   it('replays a cold-bootstrapped current exact head without staging its predecessor', async () => {

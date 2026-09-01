@@ -60,9 +60,11 @@ const PUBLISHER = `0x${'66'.repeat(20)}` as EvmAddressV1;
 const BLOCK_HASH = `0x${'77'.repeat(32)}` as Digest32V1;
 const ROOT_1 = `0x${'88'.repeat(32)}` as Digest32V1;
 const ROOT_2 = `0x${'99'.repeat(32)}` as Digest32V1;
+const ROOT_3 = `0x${'ab'.repeat(32)}` as Digest32V1;
 const ZERO_DIGEST = `0x${'00'.repeat(32)}` as Digest32V1;
 const KA_1 = packKaId(1n);
 const KA_2 = packKaId(2n);
+const KA_3 = packKaId(3n);
 
 describe('RFC-64 finalized VM placement composition', () => {
   it('joins an authorized root-lane subset in finalized chain ordinal order', async () => {
@@ -208,18 +210,26 @@ describe('RFC-64 finalized VM placement composition', () => {
     }), 'finalized-vm-composition-mismatch');
   });
 
-  it('rejects placements absent from the finalized inventory and malformed unplaced rows', async () => {
+  it('keeps author-authorized off-chain placements SWM-only and rejects malformed chain rows', async () => {
     const placement = await createPlacement(KA_2, ROOT_2);
+    const swmOnlyPlacement = await createPlacement(KA_3, ROOT_3);
     const base = requestFor([placement]);
     const firstOnly = {
       ...structuredClone(base.inventory),
       highestFinalizedOrdinal: '0',
       rows: [structuredClone(base.inventory.rows[0])],
     };
-    expectCode(
-      () => composeFinalizedVmSetV1({ ...base, inventory: firstOnly } as never),
-      'finalized-vm-composition-mismatch',
-    );
+    const mixed = composeFinalizedVmSetV1({
+      ...base,
+      placements: [placement, swmOnlyPlacement],
+    });
+    expect(mixed.rows.map(({ ual }) => ual)).toEqual([ual(2n)]);
+    expect(mixed.materializations).toHaveLength(1);
+    expect(composeFinalizedVmSetV1({
+      ...base,
+      inventory: firstOnly,
+      placements: [placement, swmOnlyPlacement],
+    } as never).rows).toEqual([]);
 
     const malformed = structuredClone(base.inventory);
     (malformed.rows[0] as { ual: string }).ual = ual(999n);
@@ -364,7 +374,7 @@ async function createPlacement(
   assertionRoot: Digest32V1,
   validAttestation = true,
 ): Promise<FinalizedVmPlacementEvidenceV1> {
-  const assertionVersion = kaId === KA_1 ? '1' : '2';
+  const assertionVersion = String(BigInt(kaId) & ((1n << 96n) - 1n));
   const scope = {
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_NAME,

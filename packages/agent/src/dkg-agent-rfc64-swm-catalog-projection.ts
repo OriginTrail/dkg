@@ -349,7 +349,10 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         lane.networkId,
       );
       throwIfAbortedV1(params.signal);
-      const reconciled = await this.reconcileRfc64SwmInventoryCatalogExactSetV1({
+      const reconcile = lane.projectionLifecycle === 'confirmation-gated-append'
+        ? this.reconcileRfc64SwmInventoryCatalogUnionV1.bind(this)
+        : this.reconcileRfc64SwmInventoryCatalogExactSetV1.bind(this);
+      const reconciled = await reconcile({
           scope: prepared.catalogScope,
           author: this.createRfc64CatalogAuthorSignerV1(
             params.authorAddress,

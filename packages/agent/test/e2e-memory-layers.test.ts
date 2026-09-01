@@ -1994,9 +1994,17 @@ describe('rootless graph-scoped KA lifecycle', () => {
     ]);
     await agent.assertion.finalize(cg, name);
 
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
     const promoted = await agent.assertion.promote(cg, name);
     expect(promoted.sealed).toBe(true);
     expect(promoted.publishReady).toBe(true);
+    expect(publisherPromote).toHaveBeenCalledWith(
+      cg,
+      name,
+      callerAgentAddress,
+      expect.objectContaining({ accessPolicy: 'ownerOnly' }),
+    );
+    publisherPromote.mockRestore();
 
     const cgDid = `did:dkg:context-graph:${cg}`;
     const swmGraph = `${cgDid}/_shared_memory`;

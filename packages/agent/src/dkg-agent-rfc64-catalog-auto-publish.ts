@@ -175,10 +175,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * Background observer body; failures are contained and logged. A durable
-   * inventory mutation for a selected CG requests its scope-owned exact
-   * signed catalog target. Retrying an already-present row also re-requests a
-   * catalog reconciliation that may have failed after the prior inventory
-   * commit, without making the detached observer own projection lifetime.
+   * inventory mutation for a selected CG requests its scope-owned signed
+   * catalog target. Public lanes reconcile an exact SWM set; finalized private
+   * lanes monotonically merge the same tier-neutral rows so VM placement does
+   * not remove authored content. Retrying an already-present row also
+   * re-requests a catalog reconciliation that may have failed after the prior
+   * inventory commit, without making the detached observer own projection
+   * lifetime.
    */
   async observeRfc64DurableSwmPromotionV1(
     this: DKGAgent,
@@ -187,11 +190,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     try {
       const result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
       if (result.status === 'applied' || result.status === 'existing') {
-        const lane = this.resolveRfc64CatalogAuthoringLaneV1(
-          params.contextGraphId,
-          params.subGraphName,
-        );
-        if (lane?.projectionLifecycle === 'confirmation-gated-append') return;
         this.requestRfc64SwmCatalogProjectionV1({
           contextGraphId: params.contextGraphId as ContextGraphIdV1,
           authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
@@ -243,10 +241,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical post-confirmation observer. SWM-only lanes retract the pending
-   * row. A finalized private lane first appends the now-chain-backed placement
-   * to its durable recovery catalog, then removes only the pending inventory
-   * row. The irreversible publish response never waits for this observer.
+   * Canonical post-confirmation observer. Public SWM-only lanes retract the
+   * pending row. A finalized private lane appends the now-chain-backed
+   * placement to its durable recovery catalog while retaining its tier-neutral
+   * author-inventory row. The irreversible publish response never waits for
+   * this observer.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
@@ -371,10 +370,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         outcome = 'already-complete';
         return;
       }
-      await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
-        scope: repair.inventoryScope,
-        expectedRow: repair,
-      });
       await persistence.finalizedPrivatePlacementRepairs.delete(repair);
       outcome = 'repaired';
     });

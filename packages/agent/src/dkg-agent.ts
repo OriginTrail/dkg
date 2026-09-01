@@ -878,6 +878,14 @@ export class DKGAgent extends DKGAgentBase {
               roster: accepted.rosterEnvelope?.payload,
             });
           }
+          // Bootstrap and projection are independent workload owners. The
+          // runtime starts both synchronously, while bootstrap accepts Track-2
+          // policy snapshots on its first asynchronous pass. Re-enter the
+          // idempotent projection boundary after acceptance so restart repair
+          // sees the now-authorized lanes and durable author inventories.
+          this.startRfc64SwmCatalogProjectionSupervisorV1(
+            createOperationContext('system'),
+          );
         },
         connectToPeerId: (peerId, options) => this.connectToPeerId(peerId, options),
         queueRecoveryPlan: (plan, onError, delayMs) => {
@@ -908,7 +916,7 @@ export class DKGAgent extends DKGAgentBase {
         ),
         acceptsPublicRootLane: (contextGraphId) => {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
-          return lane?.projectionLifecycle === 'immediate-exact-set';
+          return lane !== null;
         },
         acceptsFinalizedPrivateLane: (contextGraphId) => (
           this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
@@ -3104,7 +3112,7 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
-      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
+      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean; accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: readonly string[] }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         if (opts?.skipSeal) {
           throw Object.assign(
@@ -3201,6 +3209,28 @@ export class DKGAgent extends DKGAgentBase {
           { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
           createOperationContext('share'),
         );
+        // A private Context Graph is an access boundary even when a particular
+        // KA contains only public RDF triples. The publisher's content-only
+        // default cannot infer that boundary: zero private triples otherwise
+        // produces a `public` workspace head, which the private RFC-64 catalog
+        // lane must reject to avoid widening access. Resolve the immutable CG
+        // access policy here, at the common sync/async SHARE execution seam, so
+        // ordinary clients do not need to duplicate graph policy on every KA.
+        // Unknown policy retains the publisher's existing content-based,
+        // fail-closed-for-private-content default; an explicit per-KA envelope
+        // remains authoritative for direct callers.
+        let shareAccessPolicy = opts?.accessPolicy;
+        if (shareAccessPolicy === undefined) {
+          const graphPolicy = await agent.getContextGraphOnChainPolicy(contextGraphId);
+          if (graphPolicy.accessPolicy === 1) shareAccessPolicy = 'ownerOnly';
+          else if (graphPolicy.accessPolicy === 0) shareAccessPolicy = 'public';
+          else if (await agent.readLocalAccessPolicyEnum(contextGraphId) === 1) {
+            // A not-yet-registered local private CG has no authoritative chain
+            // answer. Its local creation intent may safely make a share more
+            // restrictive, but never use local intent to infer `public`.
+            shareAccessPolicy = 'ownerOnly';
+          }
+        }
         const {
           promotedCount,
           gossipPayload,
@@ -3213,6 +3243,8 @@ export class DKGAgent extends DKGAgentBase {
             publisherPeerId: agent.node.peerId.toString(),
             senderAgentAddress: gossipSigner?.agentAddress,
             confirmBeforeCommit,
+            ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
+            ...(opts?.allowedPeers !== undefined ? { allowedPeers: [...opts.allowedPeers] } : {}),
           },
         );
         if (gossipPayload) {
