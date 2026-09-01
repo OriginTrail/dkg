@@ -456,6 +456,57 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(sequence[2]).toBe('save:clear');
   });
 
+  it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
+    // Best-effort contract: losing the save costs restart-safety for this
+    // window, not the retry itself. A regression that lets the save
+    // rejection abort the dispatch, or drop the retained window, passes
+    // every other row.
+    let now = 0;
+    let saveAttempts = 0;
+    let deliveries = 0;
+    const seen: number[] = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() { return undefined; },
+          async save() {
+            saveAttempts += 1;
+            throw new Error('disk full');
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => {
+        deliveries += 1;
+        seen.push(e.position.blockNumber);
+        if (deliveries === 1) throw new Error('transient consumer failure');
+      },
+    });
+
+    // Through the rescan tick: the write-ahead save THROWS; the dispatch
+    // must still run, and its rejection retains the in-memory window.
+    for (let tick = 1; tick <= 25; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    expect(saveAttempts, 'the write-ahead mark was attempted').toBeGreaterThanOrEqual(1);
+    expect(seen, 'the save failure must not abort the dispatch').toEqual([45_000]);
+
+    // The next due tick re-dispatches the RETAINED window and succeeds.
+    await poll(poller);
+    expect(seen, 'the in-memory retry survives the failed save').toEqual([45_000, 45_000]);
+
+    // Released after the clean dispatch: no third delivery.
+    now += CADENCE_MS;
+    await poll(poller);
+    expect(seen).toEqual([45_000, 45_000]);
+  });
   it('an UNREAD durable replay window survives a load outage that spans the rescan tick (review r27-bot)', async () => {
     // The dangerous collision: the store holds an OLDER window (30,001–40,000
     // — outside anything a new rescan would compute) whose event at 35,000
