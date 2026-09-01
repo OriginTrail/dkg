@@ -238,6 +238,35 @@ describe('kaRootMutations — activation contract', () => {
     await expect(poller.start()).rejects.toThrow(/requires a ChainAdapter with getBlockNumber/);
   });
 
+  it('start() refuses the root-mutation lane when the capability probe names a missing event kind (review r15-bot)', async () => {
+    // A binding that cannot serve one kind would let the cursor advance
+    // past mutations it never saw; activation must refuse and NAME it.
+    const chain = makeChain(50_000);
+    (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
+      .supportsEventTypes = async () => ['KnowledgeAssetMerkleRootRemoved'];
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    await expect(poller.start()).rejects.toThrow(/does not declare KnowledgeAssetMerkleRootRemoved/);
+    expect(chain.filters, 'no scan may run under an unsupported subscription').toHaveLength(0);
+  });
+
+  it('start() proceeds when the capability probe reports every kind served', async () => {
+    const chain = makeChain(50_000);
+    (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
+      .supportsEventTypes = async () => [];
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    await expect(poller.start()).resolves.toBeUndefined();
+    await poller.stop();
+  });
   it('an adapter without getBlockNumber still starts when the root-mutation callback is not wired', async () => {
     const chain = makeChain(50_000);
     delete (chain.adapter as { getBlockNumber?: unknown }).getBlockNumber;

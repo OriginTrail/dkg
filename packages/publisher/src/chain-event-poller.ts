@@ -241,6 +241,19 @@ export class ChainEventPoller {
         + 'kaRootMutations lane scans only to the finalized head and cannot run without one',
       );
     }
+    // The capability probe exists so an empty scan is never mistaken for
+    // "no events" (review r15-bot): a binding that cannot serve one of the
+    // four kinds would let the cursor advance past mutations it never saw.
+    // Refuse activation and NAME the missing kinds.
+    if (this.onKnowledgeAssetRootMutated && typeof this.chain.supportsEventTypes === 'function') {
+      const missing = await this.chain.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+      if (missing.length > 0) {
+        throw new Error(
+          `onKnowledgeAssetRootMutated cannot be served by this chain adapter: the ABI does `
+          + `not declare ${missing.join(', ')}; the kaRootMutations lane will not start`,
+        );
+      }
+    }
     if (this.running) return;
     // Serialize a restart behind an unfinished stop() (review r10): without
     // this await, a start() issued mid-drain re-arms the interval and

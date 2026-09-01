@@ -651,6 +651,47 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
 
     expect(saves[saves.length - 1], 'the remainder from the failed chunk is what stays owed').toEqual({ fromBlock: 50_001, toBlock: 53_000 });
   });
+  it('a rescan that comes due during a persistence-load outage is retained and recovered after restore (review r15-bot)', async () => {
+    // Load fails through tick 25 — the tick that computes [41,001, 50,000] —
+    // and returns no stored window on tick 26; the head then advances a full
+    // lookback, so no later periodic window covers 45,000. The window due
+    // during the outage must be held (in memory, never persisted over
+    // unknown state) and dispatched once the store is readable.
+    let now = 0;
+    let loads = 0;
+    const seen: number[] = [];
+    const saves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() {
+            loads += 1;
+            if (loads <= 26) throw new Error('SQLITE_BUSY');
+            return undefined;
+          },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            saves.push(w ? { ...w } : undefined);
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    for (let tick = 1; tick <= 25; tick += 1) { await poll(poller); now += CADENCE_MS; }
+    expect(saves, 'nothing persists over unread state').toHaveLength(0);
+    expect(seen, 'nothing replays over unread state').toEqual([]);
+
+    chain.setHead(61_000); // a full lookback past the skipped window
+    await poll(poller);    // tick 26: the store recovers with no stored window
+    expect([...new Set(seen)], 'the window due during the outage is recovered').toEqual([45_000]);
+  });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
     // window, not the retry itself. A regression that lets the save

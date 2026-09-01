@@ -45,6 +45,14 @@ export interface LaneReplayCoordinatorDeps {
 
 export class LaneReplayCoordinator {
   #pendingRetry: LaneReplayRetryWindow | undefined;
+  /**
+   * A periodic window that came due while the durable state was still
+   * UNREAD (review r15-bot): held in memory only — never persisted over
+   * unknown durable state — and merged into the obligation once the
+   * restore completes, so the recovery the schedule promised is delayed,
+   * not lost.
+   */
+  #deferredScheduled: LaneReplayRetryWindow | undefined;
   #restorePending = false;
   #pollCount = 0;
 
@@ -73,6 +81,19 @@ export class LaneReplayCoordinator {
           `[${retained.fromBlock}, ${retained.toBlock}]`,
         );
       }
+      // The durable state is now KNOWN: fold in any window that came due
+      // while it was not, and make the merged obligation durable.
+      if (this.#deferredScheduled) {
+        const due = this.#deferredScheduled;
+        this.#deferredScheduled = undefined;
+        this.#pendingRetry = this.#pendingRetry
+          ? {
+            fromBlock: Math.min(this.#pendingRetry.fromBlock, due.fromBlock),
+            toBlock: Math.max(this.#pendingRetry.toBlock, due.toBlock),
+          }
+          : due;
+        await this.persist(this.#pendingRetry);
+      }
     } catch (err) {
       this.#restorePending = true;
       this.deps.logWarn(
@@ -98,7 +119,19 @@ export class LaneReplayCoordinator {
       await this.restoreFromPersistence();
     }
     const scheduled = this.takeDueScheduledWindow(lastBlock);
-    if (this.#restorePending) return undefined;
+    if (this.#restorePending) {
+      // Unread durable state: nothing replays and nothing is persisted, but
+      // a window that came due is NOT forgotten (review r15-bot).
+      if (scheduled) {
+        this.#deferredScheduled = this.#deferredScheduled
+          ? {
+            fromBlock: Math.min(this.#deferredScheduled.fromBlock, scheduled.fromBlock),
+            toBlock: Math.max(this.#deferredScheduled.toBlock, scheduled.toBlock),
+          }
+          : scheduled;
+      }
+      return undefined;
+    }
     // A due periodic obligation is never DISCARDED behind a pending retry
     // (review r13-bot): the forward cursor keeps advancing during a long
     // callback outage, so a rescan window dropped here would leave the
