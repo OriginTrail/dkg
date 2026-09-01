@@ -51,10 +51,12 @@ interface RemoteFailure {
   error: string;
 }
 
+class RemoteInvocationRejected extends Error {}
+
 export function createRemoteExecuteAdapter(
   agent: DKGAgent,
   contextGraphId: string,
-  callerAgentAddress: string | undefined,
+  executingAgentAddress: string,
   programLayer: SemanticMemoryLayer,
   executionLayer: SemanticMemoryLayer,
 ): RuntimeAdapterOperation<RemoteExecuteInput, string> {
@@ -67,7 +69,7 @@ export function createRemoteExecuteAdapter(
     witInterface: 'origintrail:semantic-runtime/remote-execute@0.1.0',
     implementationVersion: '1',
     implementationHash,
-    enabled: () => Boolean(resolveCallerSigner(agent, callerAgentAddress)),
+    enabled: () => Boolean(resolveExecutionSigner(agent, executingAgentAddress)),
     effectClass: 'remote-execution',
     verb: 'execute',
     idempotencyClass: 'idempotent_with_key',
@@ -94,8 +96,8 @@ export function createRemoteExecuteAdapter(
           'REMOTE_INVOCATION_PRIVATE_GRAPH_REQUIRED:remote-execute is restricted to private Context Graphs',
         );
       }
-      const signer = resolveCallerSigner(agent, callerAgentAddress);
-      if (!signer) throw new Error('CALLER_SIGNATURE_UNAVAILABLE');
+      const signer = resolveExecutionSigner(agent, executingAgentAddress);
+      if (!signer) throw new Error('EXECUTOR_SIGNATURE_UNAVAILABLE');
       const invocationId = invocationUuid(authorization.effectId);
       const unsigned: Omit<SemanticInboxInvocationV2, 'authorization'> = {
         version: 2,
@@ -128,7 +130,9 @@ export function createRemoteExecuteAdapter(
       }
       if (!response.success) {
         const failure = decodeFailure(response.outputData);
-        throw new Error(`${failure?.code ?? 'REMOTE_INVOCATION_FAILED'}:${failure?.error ?? response.error ?? 'Remote node rejected the invocation'}`);
+        throw new RemoteInvocationRejected(
+          `${failure?.code ?? 'REMOTE_INVOCATION_FAILED'}:${failure?.error ?? response.error ?? 'Remote node rejected the invocation'}`,
+        );
       }
       const result = decodeRemoteResult(response.outputData, executionLayer);
       if (
@@ -153,7 +157,8 @@ export function createRemoteExecuteAdapter(
     couldHaveReachedTarget: (error) => !(
       error instanceof Error
       && (
-        error.message === 'CALLER_SIGNATURE_UNAVAILABLE'
+        error instanceof RemoteInvocationRejected
+        || error.message === 'EXECUTOR_SIGNATURE_UNAVAILABLE'
         || error.message === 'INVALID_REMOTE_EXECUTE_ARGUMENT'
         || error.message.startsWith('PROGRAM_CONTEXT_GRAPH_FORBIDDEN:')
         || error.message.startsWith('REMOTE_INVOCATION_PRIVATE_GRAPH_REQUIRED:')
@@ -180,14 +185,13 @@ export function semanticInvocationScope(
   return `dkg.semantic-runtime.invoke.v2:${digest}`;
 }
 
-function resolveCallerSigner(
+function resolveExecutionSigner(
   agent: DKGAgent,
-  callerAgentAddress: string | undefined,
+  executingAgentAddress: string,
 ): { address: string; privateKey: string } | null {
-  if (!callerAgentAddress) return null;
   let address: string;
   try {
-    address = ethers.getAddress(callerAgentAddress);
+    address = ethers.getAddress(executingAgentAddress);
   } catch {
     return null;
   }

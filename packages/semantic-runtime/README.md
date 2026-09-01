@@ -82,12 +82,12 @@ component:
 ```
 
 The child inherits the parent Context Graph and selected Program/Execution
-layers. The invoking wallet never comes from the S-expression. The host takes
-it from the authenticated execution capability, signs a target-bound DKG inbox
-delegation, and the target independently requires a private Context Graph and
-current membership for that wallet before executing the replicated Program as
-its own node operator. Nested forwarding is fail-closed when the current node
-does not custody the original invoker wallet.
+layers. The signing wallet never comes from the S-expression. Each executing
+node signs the next target-bound DKG inbox delegation with its current operator
+wallet. The target independently requires a private Context Graph and current
+membership for that immediate caller before executing the replicated Program
+as its own node operator. This makes composition transitive without propagating
+the root caller's wallet authority across hops.
 
 Admission can be exercised without activating the daemon integration:
 
