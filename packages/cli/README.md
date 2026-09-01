@@ -92,21 +92,23 @@ The operator must also select one DKG-published execution policy. For example:
 }
 ```
 
-`GET /api/semantic-runtime/resolve?contextGraphId=...&programIri=...` exposes the
+`GET /api/semantic-runtime/resolve?contextGraphId=...&programIri=...&programLayer=vm` exposes the
 effective authority used by the native Program panel: Program requirements,
 operator Tool offers, the selected policy, and locally installed and enabled
 adapters. `POST /api/semantic-runtime/invoke` requires
-`{ "contextGraphId": "...", "programIri": "...", "invocationId": "<UUID>" }`.
-It loads the Program from Verifiable Memory and executes its admitted plan in
-the packaged Wasm runtime. The current closed adapter registry supports
+`{ "contextGraphId": "...", "programIri": "...", "invocationId": "<UUID>",
+"programLayer": "wm|swm|vm", "executionLayer": "wm|swm|vm" }`.
+It loads the Program from the explicitly selected memory layer and executes its
+admitted plan in the packaged Wasm runtime. The current closed adapter registry supports
 `agent/investigate@1` through Codex or the configured OpenAI-compatible LLM;
 undeclared or unavailable effects fail closed.
 
 A successful response is returned only after the exact LLM output and its
-SHA-256 hash have been published in an `sr:Execution` Knowledge Asset in the
-same Context Graph. The response contains `executionIri`, `executionUal`, and
-`persisted: true`. Reusing the same invocation UUID resumes the durable effect
-journal and does not repeat an already completed LLM call.
+SHA-256 hash have been stored as an `sr:Execution` Knowledge Asset in the
+selected layer of the same Context Graph. The response contains `executionIri`,
+`executionLayer`, and `persisted: true`; `executionUal` is present only for VM.
+Reusing the same invocation UUID resumes the durable effect journal and does
+not repeat an already completed LLM call. A retry cannot change either layer.
 
 ## Running a Core Node (relay operator)
 

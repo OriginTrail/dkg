@@ -11,6 +11,7 @@ esac
 STRATEGY_PATH="${SMOKE_STRATEGY_PATH:-$REPO_ROOT/packages/semantic-runtime/smoke/llm-agent.scm}"
 CONTEXT_GRAPH_ID="${SMOKE_CONTEXT_GRAPH_ID:-devnet-test}"
 PROGRAM_IRI="${SMOKE_PROGRAM_IRI:-urn:sr:program:codex-live}"
+FORK_PROGRAM_IRI="${SMOKE_FORK_PROGRAM_IRI:-urn:sr:program:codex-live-fork}"
 TOOL_IRI="${SMOKE_TOOL_IRI:-urn:sr:tool:investigator-v1}"
 POLICY_IRI="${SMOKE_POLICY_IRI:-urn:sr:policy:devnet-codex}"
 SMOKE_DEVNET_DIR="$OUTPUT_DIR/devnet"
@@ -21,13 +22,22 @@ VM_QUERY_REQUEST_PATH="$OUTPUT_DIR/program-vm-query-request.json"
 VM_QUERY_PATH="$OUTPUT_DIR/program-vm-query.json"
 INVOKE_REQUEST_PATH="$OUTPUT_DIR/program-invoke-request.json"
 INVOKE_PATH="$OUTPUT_DIR/program-invoke.json"
+REMOTE_INVOKE_DENIAL_PATH="$OUTPUT_DIR/program-remote-invoke-denial.json"
 AUTHORITY_REQUEST_PATH="$OUTPUT_DIR/operator-authority-request.json"
 AUTHORITY_PUBLISH_PATH="$OUTPUT_DIR/operator-authority-publish.json"
+FORK_OWNER_AUTHORITY_REQUEST_PATH="$OUTPUT_DIR/fork-owner-authority-request.json"
+FORK_OWNER_AUTHORITY_PUBLISH_PATH="$OUTPUT_DIR/fork-owner-authority-publish.json"
+FORK_PATH="$OUTPUT_DIR/program-fork.json"
+FORK_VM_QUERY_REQUEST_PATH="$OUTPUT_DIR/program-fork-vm-query-request.json"
+FORK_VM_QUERY_PATH="$OUTPUT_DIR/program-fork-vm-query-node-3.json"
+FORK_RESOLVE_PATH="$OUTPUT_DIR/program-fork-resolve-node-1.json"
+PROGRAM_AUTHOR_IDENTITY_PATH="$OUTPUT_DIR/program-author-identity.json"
+INVOKING_NODE_IDENTITY_PATH="$OUTPUT_DIR/invoking-node-identity.json"
+PARTICIPANT_ADD_PATH="$OUTPUT_DIR/invoking-wallet-membership.json"
 CROSS_NODE_QUERY_REQUEST_PATH="$OUTPUT_DIR/execution-vm-query-request.json"
 CROSS_NODE_QUERY_PATH="$OUTPUT_DIR/execution-vm-query-node-3.json"
 AUDIT_QUERY_REQUEST_PATH="$OUTPUT_DIR/execution-audit-vm-query-request.json"
 AUDIT_QUERY_PATH="$OUTPUT_DIR/execution-audit-vm-query-node-3.json"
-UI_SCREENSHOT_PATH="$OUTPUT_DIR/dkg-node-ui-execution.png"
 RECEIPT_PATH="$OUTPUT_DIR/receipt.json"
 HARDHAT_PORT="${SMOKE_HARDHAT_PORT:-28545}"
 API_PORT_BASE="${SMOKE_API_PORT:-29251}"
@@ -35,6 +45,10 @@ LIBP2P_PORT_BASE="${SMOKE_LIBP2P_PORT:-30051}"
 OXIGRAPH_BASE="${SMOKE_OXIGRAPH_BASE:-37950}"
 BLAZEGRAPH_PORT="${SMOKE_BLAZEGRAPH_PORT:-39950}"
 LLM_PROVIDER="${SMOKE_LLM_PROVIDER:-codex}"
+PRIVATE_REMOTE="${SMOKE_PRIVATE_REMOTE:-0}"
+PRIVATE_CONTEXT_SLUG="${SMOKE_PRIVATE_CONTEXT_SLUG:-semantic-runtime-private}"
+QUERYING_NODE_IDENTITY_PATH="$OUTPUT_DIR/querying-node-identity.json"
+PRIVATE_CREATE_PATH="$OUTPUT_DIR/private-context-graph-create.json"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -89,8 +103,72 @@ if [ "$LLM_PROVIDER" != "codex" ] && [ -n "${SMOKE_LLM_API_KEY:-}" ]; then
     --output "$OUTPUT_DIR/llm-settings.json"
 fi
 
+echo "semantic-runtime-live-smoke: loading Program-author and invoking-wallet identities"
+curl --fail-with-body --silent --show-error \
+  "$API_URL/api/agent/identity" \
+  --output "$PROGRAM_AUTHOR_IDENTITY_PATH"
+curl --fail-with-body --silent --show-error \
+  "$API_URL_NODE_B/api/agent/identity" \
+  --output "$INVOKING_NODE_IDENTITY_PATH"
+curl --fail-with-body --silent --show-error \
+  "$API_URL_NODE_C/api/agent/identity" \
+  --output "$QUERYING_NODE_IDENTITY_PATH"
+
+if [ "$PRIVATE_REMOTE" = "1" ]; then
+  curator_address=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).agentAddress)' "$PROGRAM_AUTHOR_IDENTITY_PATH")
+  CONTEXT_GRAPH_ID="${curator_address}/${PRIVATE_CONTEXT_SLUG}"
+  echo "semantic-runtime-live-smoke: creating private Context Graph $CONTEXT_GRAPH_ID"
+  for target in "$API_URL_NODE_B" "$API_URL_NODE_C"; do
+    SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
+    SMOKE_PROGRAM_AUTHOR_IDENTITY_PATH="$PROGRAM_AUTHOR_IDENTITY_PATH" \
+    SMOKE_INVOKING_NODE_IDENTITY_PATH="$INVOKING_NODE_IDENTITY_PATH" \
+    SMOKE_QUERYING_NODE_IDENTITY_PATH="$QUERYING_NODE_IDENTITY_PATH" \
+    node --input-type=module -e '
+      import fs from "node:fs";
+      const identities = [
+        process.env.SMOKE_PROGRAM_AUTHOR_IDENTITY_PATH,
+        process.env.SMOKE_INVOKING_NODE_IDENTITY_PATH,
+        process.env.SMOKE_QUERYING_NODE_IDENTITY_PATH,
+      ].map((path) => JSON.parse(fs.readFileSync(path, "utf8")).agentAddress);
+      process.stdout.write(JSON.stringify({
+        id: process.env.SMOKE_CONTEXT_GRAPH_ID,
+        name: "Semantic runtime private remote smoke",
+        accessPolicy: 1,
+        publishPolicy: 1,
+        allowedAgents: identities,
+      }));
+    ' | curl --fail-with-body --silent --show-error \
+      --request POST -H "Content-Type: application/json" --data-binary @- \
+      "$target/api/context-graph/create" >/dev/null
+  done
+  SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
+  SMOKE_PROGRAM_AUTHOR_IDENTITY_PATH="$PROGRAM_AUTHOR_IDENTITY_PATH" \
+  SMOKE_INVOKING_NODE_IDENTITY_PATH="$INVOKING_NODE_IDENTITY_PATH" \
+  SMOKE_QUERYING_NODE_IDENTITY_PATH="$QUERYING_NODE_IDENTITY_PATH" \
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const identities = [
+      process.env.SMOKE_PROGRAM_AUTHOR_IDENTITY_PATH,
+      process.env.SMOKE_INVOKING_NODE_IDENTITY_PATH,
+      process.env.SMOKE_QUERYING_NODE_IDENTITY_PATH,
+    ].map((path) => JSON.parse(fs.readFileSync(path, "utf8")).agentAddress);
+    process.stdout.write(JSON.stringify({
+      id: process.env.SMOKE_CONTEXT_GRAPH_ID,
+      name: "Semantic runtime private remote smoke",
+      accessPolicy: 1,
+      publishPolicy: 1,
+      allowedAgents: identities,
+      register: true,
+    }));
+  ' | curl --fail-with-body --silent --show-error \
+    --request POST -H "Content-Type: application/json" --data-binary @- \
+    "$API_URL/api/context-graph/create" --output "$PRIVATE_CREATE_PATH"
+  sleep 3
+fi
+
 SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
 SMOKE_PROGRAM_IRI="$PROGRAM_IRI" \
+SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" \
 SMOKE_TOOL_IRI="$TOOL_IRI" \
 SMOKE_STRATEGY_PATH="$STRATEGY_PATH" \
 SMOKE_PROGRAM_REQUEST_PATH="$PROGRAM_REQUEST_PATH" \
@@ -125,8 +203,10 @@ node --input-type=module -e '
   }));
   fs.writeFileSync(process.env.SMOKE_INVOKE_REQUEST_PATH, JSON.stringify({
     contextGraphId,
-    programIri,
+    programIri: process.env.SMOKE_FORK_PROGRAM_IRI,
     invocationId: crypto.randomUUID(),
+    programLayer: "vm",
+    executionLayer: "vm",
   }));
 '
 
@@ -137,46 +217,71 @@ curl --fail-with-body --silent --show-error \
   "$API_URL/api/knowledge-assets" \
   --output "$PUBLISH_PATH"
 
-echo "semantic-runtime-live-smoke: publishing node B's Tool offer and selected Policy"
-curl --fail-with-body --silent --show-error \
-  "$API_URL_NODE_B/api/agent/identity" \
-  --output "$OUTPUT_DIR/node-b-identity.json"
-SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
-SMOKE_TOOL_IRI="$TOOL_IRI" \
-SMOKE_POLICY_IRI="$POLICY_IRI" \
-SMOKE_NODE_IDENTITY_PATH="$OUTPUT_DIR/node-b-identity.json" \
-SMOKE_AUTHORITY_REQUEST_PATH="$AUTHORITY_REQUEST_PATH" \
+echo "semantic-runtime-live-smoke: adding node B's wallet to the Program Context Graph"
+if [ "$PRIVATE_REMOTE" != "1" ]; then
+SMOKE_NODE_IDENTITY_PATH="$INVOKING_NODE_IDENTITY_PATH" \
 node --input-type=module -e '
   import fs from "node:fs";
-  const sr = "https://origintrail.io/semantic-runtime/v1#";
-  const rdfType = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
   const identity = JSON.parse(fs.readFileSync(process.env.SMOKE_NODE_IDENTITY_PATH, "utf8"));
-  const tool = process.env.SMOKE_TOOL_IRI;
-  const policy = process.env.SMOKE_POLICY_IRI;
-  const operator = identity.agentDid;
-  fs.writeFileSync(process.env.SMOKE_AUTHORITY_REQUEST_PATH, JSON.stringify({
-    contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
-    name: "semantic-runtime-codex-authority",
-    quads: [
-      { subject: operator, predicate: `${sr}offersTool`, object: tool },
-      { subject: tool, predicate: rdfType, object: `${sr}Tool` },
-      { subject: tool, predicate: `${sr}operation`, object: JSON.stringify("agent/investigate") },
-      { subject: tool, predicate: `${sr}version`, object: JSON.stringify("1") },
-      { subject: tool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-tools/investigator@1") },
-      { subject: operator, predicate: `${sr}usesExecutionPolicy`, object: policy },
-      { subject: policy, predicate: rdfType, object: `${sr}ExecutionPolicy` },
-      { subject: policy, predicate: `${sr}version`, object: JSON.stringify("1") },
-      { subject: policy, predicate: `${sr}allowsTool`, object: tool },
-    ],
-    alsoShareSwm: true,
-    alsoPublishVm: true,
-  }));
-'
+  process.stdout.write(JSON.stringify({ agentAddress: identity.agentAddress }));
+' | curl --fail-with-body --silent --show-error \
+  --request POST \
+  -H "Content-Type: application/json" \
+  --data-binary @- \
+  "$API_URL/api/context-graph/$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$CONTEXT_GRAPH_ID")/add-participant" \
+  --output "$PARTICIPANT_ADD_PATH"
+fi
+
+write_authority_request() {
+  SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
+  SMOKE_TOOL_IRI="$TOOL_IRI" \
+  SMOKE_POLICY_IRI="$POLICY_IRI" \
+  SMOKE_NODE_IDENTITY_PATH="$1" \
+  SMOKE_AUTHORITY_REQUEST_PATH="$2" \
+  SMOKE_AUTHORITY_NAME="$3" \
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const sr = "https://origintrail.io/semantic-runtime/v1#";
+    const rdfType = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    const identity = JSON.parse(fs.readFileSync(process.env.SMOKE_NODE_IDENTITY_PATH, "utf8"));
+    const tool = process.env.SMOKE_TOOL_IRI;
+    const policy = process.env.SMOKE_POLICY_IRI;
+    const operator = identity.agentDid;
+    fs.writeFileSync(process.env.SMOKE_AUTHORITY_REQUEST_PATH, JSON.stringify({
+      contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+      name: process.env.SMOKE_AUTHORITY_NAME,
+      quads: [
+        { subject: operator, predicate: `${sr}offersTool`, object: tool },
+        { subject: tool, predicate: rdfType, object: `${sr}Tool` },
+        { subject: tool, predicate: `${sr}operation`, object: JSON.stringify("agent/investigate") },
+        { subject: tool, predicate: `${sr}version`, object: JSON.stringify("1") },
+        { subject: tool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-tools/investigator@1") },
+        { subject: operator, predicate: `${sr}usesExecutionPolicy`, object: policy },
+        { subject: policy, predicate: rdfType, object: `${sr}ExecutionPolicy` },
+        { subject: policy, predicate: `${sr}version`, object: JSON.stringify("1") },
+        { subject: policy, predicate: `${sr}allowsTool`, object: tool },
+      ],
+      alsoShareSwm: true,
+      alsoPublishVm: true,
+    }));
+  '
+}
+
+echo "semantic-runtime-live-smoke: publishing both Program owners' Tool offers and selected Policies"
+write_authority_request "$PROGRAM_AUTHOR_IDENTITY_PATH" "$AUTHORITY_REQUEST_PATH" \
+  "semantic-runtime-codex-authority"
 curl --fail-with-body --silent --show-error \
   -H "Content-Type: application/json" \
   --data @"$AUTHORITY_REQUEST_PATH" \
-  "$API_URL_NODE_B/api/knowledge-assets" \
+  "$API_URL/api/knowledge-assets" \
   --output "$AUTHORITY_PUBLISH_PATH"
+write_authority_request "$INVOKING_NODE_IDENTITY_PATH" "$FORK_OWNER_AUTHORITY_REQUEST_PATH" \
+  "semantic-runtime-codex-authority-fork-owner"
+curl --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  --data @"$FORK_OWNER_AUTHORITY_REQUEST_PATH" \
+  "$API_URL_NODE_B/api/knowledge-assets" \
+  --output "$FORK_OWNER_AUTHORITY_PUBLISH_PATH"
 
 echo "semantic-runtime-live-smoke: querying the stored source from VM"
 vm_ready=0
@@ -202,69 +307,134 @@ if [ "$vm_ready" != "1" ]; then
   exit 1
 fi
 
-echo "semantic-runtime-live-smoke: opening the real node B DKG UI and clicking Run Program"
-(
-  cd "$REPO_ROOT/packages/node-ui"
-  SMOKE_UI_URL="$API_URL_NODE_B/ui" \
-  SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
-  SMOKE_PROGRAM_IRI="$PROGRAM_IRI" \
-  SMOKE_INVOKE_PATH="$INVOKE_PATH" \
-  SMOKE_SCREENSHOT_PATH="$UI_SCREENSHOT_PATH" \
-  SMOKE_VIDEO_DIR="$OUTPUT_DIR/video" \
-  node --input-type=module -e '
+echo "semantic-runtime-live-smoke: forking the Program on node B under node B's wallet"
+SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
+SMOKE_PROGRAM_IRI="$PROGRAM_IRI" \
+SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" \
+node --input-type=module -e '
+  process.stdout.write(JSON.stringify({
+    contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+    sourceProgramIri: process.env.SMOKE_PROGRAM_IRI,
+    newProgramIri: process.env.SMOKE_FORK_PROGRAM_IRI,
+    sourceLayer: "vm",
+    targetLayer: "vm",
+  }));
+' | curl --fail-with-body --silent --show-error \
+  --request POST \
+  -H "Content-Type: application/json" \
+  --data-binary @- \
+  "$API_URL_NODE_B/api/semantic-runtime/programs/fork" \
+  --output "$FORK_PATH"
+
+SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
+SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" \
+SMOKE_FORK_VM_QUERY_REQUEST_PATH="$FORK_VM_QUERY_REQUEST_PATH" \
+node --input-type=module -e '
+  import fs from "node:fs";
+  const sr = "https://origintrail.io/semantic-runtime/v1#";
+  const prov = "http://www.w3.org/ns/prov#";
+  const programIri = process.env.SMOKE_FORK_PROGRAM_IRI;
+  fs.writeFileSync(process.env.SMOKE_FORK_VM_QUERY_REQUEST_PATH, JSON.stringify({
+    contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+    view: "verifiable-memory",
+    sparql: `SELECT ?g ?language ?version ?source ?tool ?derivedFrom WHERE {
+      GRAPH ?g {
+        <${programIri}> a <${sr}Program> ;
+          <${sr}language> ?language ;
+          <${sr}version> ?version ;
+          <${sr}source> ?source ;
+          <${sr}requiresTool> ?tool ;
+          <${prov}wasDerivedFrom> ?derivedFrom .
+      }
+    }`,
+  }));
+'
+
+echo "semantic-runtime-live-smoke: querying node C VM for the fork and its author provenance"
+fork_ready=0
+for _ in $(seq 1 90); do
+  curl --fail-with-body --silent --show-error \
+    -H "Content-Type: application/json" \
+    --data @"$FORK_VM_QUERY_REQUEST_PATH" \
+    "$API_URL_NODE_C/api/query" \
+    --output "$FORK_VM_QUERY_PATH"
+  if SMOKE_FORK_VM_QUERY_PATH="$FORK_VM_QUERY_PATH" node --input-type=module -e '
     import fs from "node:fs";
-    import { chromium } from "@playwright/test";
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ recordVideo: { dir: process.env.SMOKE_VIDEO_DIR } });
-    const page = await context.newPage();
-    await page.goto(process.env.SMOKE_UI_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
-    await page.locator(".v10-app").waitFor({ state: "visible", timeout: 60_000 });
-    const projectName = /devnet-test|Devnet Test/i;
-    const myProject = page.locator(".v10-peer-group-body .v10-tree-section-header")
-      .filter({ hasText: projectName }).first();
-    if (await myProject.isVisible().catch(() => false)) {
-      await myProject.click();
-    } else {
-      // Node B is not the graph curator, so an open devnet graph correctly
-      // appears in the native Context Oracle rather than "My Context Graphs".
-      await page.locator(".v10-tree-mode-btn").filter({ hasText: "Context Oracle" }).click();
-      const discovered = page.locator(".v10-tree-section-header")
-        .filter({ hasText: projectName }).first();
-      await discovered.waitFor({ state: "visible", timeout: 60_000 });
-      const browse = discovered.getByRole("button", { name: /Browse/i });
-      if (await browse.isVisible().catch(() => false)) await browse.click();
-      else await discovered.click();
+    const body = JSON.parse(fs.readFileSync(process.env.SMOKE_FORK_VM_QUERY_PATH, "utf8"));
+    process.exit(body.result?.bindings?.length === 1 ? 0 : 1);
+  '; then
+    fork_ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "$fork_ready" != "1" ]; then
+  echo "semantic-runtime-live-smoke: node C did not observe exactly one forked Program" >&2
+  cat "$FORK_VM_QUERY_PATH" >&2
+  exit 1
+fi
+
+FORK_RESOLVE_URL="$API_URL/api/semantic-runtime/resolve?$(SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" node --input-type=module -e '
+  process.stdout.write(new URLSearchParams({
+    contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+    programIri: process.env.SMOKE_FORK_PROGRAM_IRI,
+    programLayer: "vm",
+  }).toString());
+')"
+fork_executable=0
+for _ in $(seq 1 90); do
+  if curl --fail-with-body --silent --show-error "$FORK_RESOLVE_URL" --output "$FORK_RESOLVE_PATH" \
+    && SMOKE_FORK_RESOLVE_PATH="$FORK_RESOLVE_PATH" node --input-type=module -e '
+      import fs from "node:fs";
+      const body = JSON.parse(fs.readFileSync(process.env.SMOKE_FORK_RESOLVE_PATH, "utf8"));
+      process.exit(body.executable === true ? 0 : 1);
+    '; then
+    fork_executable=1
+    break
+  fi
+  sleep 1
+done
+if [ "$fork_executable" != "1" ]; then
+  echo "semantic-runtime-live-smoke: fork did not become executable from node A" >&2
+  test -f "$FORK_RESOLVE_PATH" && cat "$FORK_RESOLVE_PATH" >&2
+  exit 1
+fi
+
+if [ "$PRIVATE_REMOTE" = "1" ]; then
+  echo "semantic-runtime-live-smoke: invoking node B's private-CG fork remotely through node A"
+  curl --fail-with-body --silent --show-error \
+    -H "Content-Type: application/json" \
+    --data @"$INVOKE_REQUEST_PATH" \
+    "$API_URL/api/semantic-runtime/invoke" \
+    --output "$INVOKE_PATH"
+else
+  echo "semantic-runtime-live-smoke: proving the public CG cannot invoke node B's fork remotely"
+  remote_invoke_status=$(curl --silent --show-error \
+    --write-out '%{http_code}' \
+    -H "Content-Type: application/json" \
+    --data @"$INVOKE_REQUEST_PATH" \
+    "$API_URL/api/semantic-runtime/invoke" \
+    --output "$REMOTE_INVOKE_DENIAL_PATH")
+  if [ "$remote_invoke_status" != "403" ]; then
+    echo "semantic-runtime-live-smoke: expected public remote invocation to return 403, got $remote_invoke_status" >&2
+    cat "$REMOTE_INVOKE_DENIAL_PATH" >&2
+    exit 1
+  fi
+  SMOKE_REMOTE_DENIAL_PATH="$REMOTE_INVOKE_DENIAL_PATH" node --input-type=module -e '
+    import fs from "node:fs";
+    const denial = JSON.parse(fs.readFileSync(process.env.SMOKE_REMOTE_DENIAL_PATH, "utf8"));
+    if (denial.code !== "REMOTE_INVOCATION_PRIVATE_GRAPH_REQUIRED") {
+      throw new Error(`unexpected public remote-invocation denial: ${JSON.stringify(denial)}`);
     }
-    await page.locator(".v10-memory-explorer").waitFor({ state: "visible", timeout: 60_000 });
-    const panel = page.locator("[data-testid=semantic-program-panel]");
-    for (let attempt = 0; attempt < 30 && !(await panel.isVisible().catch(() => false)); attempt += 1) {
-      await page.evaluate(({ contextGraphId, entityUri }) => {
-        window.dispatchEvent(new CustomEvent("v10:open-entity", { detail: { contextGraphId, entityUri } }));
-      }, { contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID, entityUri: process.env.SMOKE_PROGRAM_IRI });
-      await page.waitForTimeout(1_000);
-    }
-    await panel.waitFor({ state: "visible", timeout: 30_000 });
-    const authority = await panel.textContent();
-    for (const expected of ["requested", "offered", "policy allowed", "installed", "enabled"]) {
-      if (!authority?.includes(expected)) throw new Error(`DKG UI did not show ${expected}: ${authority}`);
-    }
-    const responsePromise = page.waitForResponse((response) =>
-      response.url().includes("/api/semantic-runtime/invoke")
-      && response.request().method() === "POST", { timeout: 180_000 });
-    await page.locator("[data-testid=run-semantic-program]").click();
-    const response = await responsePromise;
-    const body = await response.json();
-    if (!response.ok() || body.persisted !== true || !body.executionIri || !body.executionUal) {
-      throw new Error(`UI invocation did not confirm persistence: ${response.status()} ${JSON.stringify(body)}`);
-    }
-    fs.writeFileSync(process.env.SMOKE_INVOKE_PATH, JSON.stringify(body, null, 2));
-    await page.locator(".v10-ka-ual").filter({ hasText: body.executionIri })
-      .waitFor({ state: "visible", timeout: 30_000 });
-    await page.screenshot({ path: process.env.SMOKE_SCREENSHOT_PATH, fullPage: true });
-    await context.close();
-    await browser.close();
   '
-)
+
+  echo "semantic-runtime-live-smoke: invoking node B's fork locally on its author node"
+  curl --fail-with-body --silent --show-error \
+    -H "Content-Type: application/json" \
+    --data @"$INVOKE_REQUEST_PATH" \
+    "$API_URL_NODE_B/api/semantic-runtime/invoke" \
+    --output "$INVOKE_PATH"
+fi
 
 EXECUTION_IRI=$(SMOKE_INVOKE_PATH="$INVOKE_PATH" node --input-type=module -e '
   import fs from "node:fs";
@@ -293,9 +463,10 @@ node --input-type=module -e '
   fs.writeFileSync(process.env.SMOKE_AUDIT_QUERY_REQUEST_PATH, JSON.stringify({
     contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
     view: "verifiable-memory",
-    sparql: `SELECT ?executedBy ?policy ?tool ?adapterVersion ?adapterHash WHERE {
+    sparql: `SELECT ?program ?executedBy ?policy ?tool ?adapterVersion ?adapterHash WHERE {
       GRAPH ?g {
         <${process.env.SMOKE_EXECUTION_IRI}>
+          <${sr}usedProgram> ?program ;
           <${sr}executedBy> ?executedBy ;
           <${sr}appliedPolicy> ?policy ;
           <${sr}usedTool> ?tool ;
@@ -338,9 +509,18 @@ curl --fail-with-body --silent --show-error \
 
 SMOKE_STATUS_PATH="$STATUS_PATH" \
 SMOKE_PUBLISH_PATH="$PUBLISH_PATH" \
+SMOKE_FORK_PATH="$FORK_PATH" \
+SMOKE_FORK_QUERY_PATH="$FORK_VM_QUERY_PATH" \
 SMOKE_INVOKE_PATH="$INVOKE_PATH" \
+SMOKE_REMOTE_DENIAL_PATH="$REMOTE_INVOKE_DENIAL_PATH" \
+SMOKE_PRIVATE_REMOTE="$PRIVATE_REMOTE" \
 SMOKE_CROSS_QUERY_PATH="$CROSS_NODE_QUERY_PATH" \
 SMOKE_AUDIT_QUERY_PATH="$AUDIT_QUERY_PATH" \
+SMOKE_PROGRAM_AUTHOR_IDENTITY_PATH="$PROGRAM_AUTHOR_IDENTITY_PATH" \
+SMOKE_INVOKING_NODE_IDENTITY_PATH="$INVOKING_NODE_IDENTITY_PATH" \
+SMOKE_PROGRAM_IRI="$PROGRAM_IRI" \
+SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" \
+SMOKE_STRATEGY_PATH="$STRATEGY_PATH" \
 SMOKE_RECEIPT_PATH="$RECEIPT_PATH" \
 SMOKE_WASM_MANIFEST="$REPO_ROOT/packages/semantic-runtime/generated/integrity.json" \
 node --input-type=module -e '
@@ -348,9 +528,37 @@ node --input-type=module -e '
   import fs from "node:fs";
   const term = (value) => typeof value === "object" && value !== null ? value.value :
     (typeof value === "string" && value.startsWith("\"") ? JSON.parse(value) : value);
+  const fork = JSON.parse(fs.readFileSync(process.env.SMOKE_FORK_PATH, "utf8"));
+  const forkQuery = JSON.parse(fs.readFileSync(process.env.SMOKE_FORK_QUERY_PATH, "utf8"));
   const invocation = JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKE_PATH, "utf8"));
+  const privateRemote = process.env.SMOKE_PRIVATE_REMOTE === "1";
+  const remoteInvocationDenial = privateRemote
+    ? null
+    : JSON.parse(fs.readFileSync(process.env.SMOKE_REMOTE_DENIAL_PATH, "utf8"));
+  const sourceAuthor = JSON.parse(fs.readFileSync(process.env.SMOKE_PROGRAM_AUTHOR_IDENTITY_PATH, "utf8"));
+  const forkOwner = JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKING_NODE_IDENTITY_PATH, "utf8"));
   const query = JSON.parse(fs.readFileSync(process.env.SMOKE_CROSS_QUERY_PATH, "utf8"));
   const audit = JSON.parse(fs.readFileSync(process.env.SMOKE_AUDIT_QUERY_PATH, "utf8"));
+  const forkRows = forkQuery.result?.bindings ?? [];
+  if (forkRows.length !== 1) throw new Error(`expected exactly one forked Program, got ${forkRows.length}`);
+  const forkRow = Object.fromEntries(Object.entries(forkRows[0]).map(([key, value]) => [key, term(value)]));
+  const expectedSource = fs.readFileSync(process.env.SMOKE_STRATEGY_PATH, "utf8");
+  if (fork.programIri !== process.env.SMOKE_FORK_PROGRAM_IRI || fork.persisted !== true || !fork.programUal) {
+    throw new Error(`fork response did not confirm VM persistence: ${JSON.stringify(fork)}`);
+  }
+  if (fork.authorAgentAddress.toLowerCase() !== forkOwner.agentAddress.toLowerCase()) {
+    throw new Error(`fork author ${fork.authorAgentAddress} did not match copier ${forkOwner.agentAddress}`);
+  }
+  if (fork.derivedFrom !== process.env.SMOKE_PROGRAM_IRI || forkRow.derivedFrom !== process.env.SMOKE_PROGRAM_IRI) {
+    throw new Error(`fork provenance mismatch: ${JSON.stringify({ response: fork.derivedFrom, vm: forkRow.derivedFrom })}`);
+  }
+  if (forkRow.language !== "sexpr-v1" || forkRow.version !== "1.0.0" || forkRow.source !== expectedSource) {
+    throw new Error("forked Program definition differs from its source Program");
+  }
+  if (forkRow.tool !== "urn:sr:tool:investigator-v1") throw new Error(`unexpected fork tool: ${forkRow.tool}`);
+  if (!String(forkRow.g).toLowerCase().includes(`/_verifiable_memory/${forkOwner.agentAddress.toLowerCase()}/`)) {
+    throw new Error(`fork VM graph was not authored by the copier: ${forkRow.g}`);
+  }
   const rows = query.result?.bindings ?? [];
   if (rows.length !== 1) throw new Error(`expected exactly one Execution, got ${rows.length}`);
   const output = term(rows[0].output);
@@ -363,15 +571,34 @@ node --input-type=module -e '
   const auditRows = audit.result?.bindings ?? [];
   if (auditRows.length !== 1) throw new Error(`expected exactly one Execution audit row, got ${auditRows.length}`);
   const auditRow = Object.fromEntries(Object.entries(auditRows[0]).map(([key, value]) => [key, term(value)]));
+  if (auditRow.program !== process.env.SMOKE_FORK_PROGRAM_IRI) throw new Error(`unexpected executed Program: ${auditRow.program}`);
   if (auditRow.policy !== "urn:sr:policy:devnet-codex") throw new Error(`unexpected policy: ${auditRow.policy}`);
   if (auditRow.tool !== "urn:sr:tool:investigator-v1") throw new Error(`unexpected tool: ${auditRow.tool}`);
   if (auditRow.adapterVersion !== "1") throw new Error(`unexpected adapter version: ${auditRow.adapterVersion}`);
   if (!/^sha256:[0-9a-f]{64}$/.test(String(auditRow.adapterHash))) throw new Error(`invalid adapter hash: ${auditRow.adapterHash}`);
-  if (!String(auditRow.executedBy).startsWith("did:dkg:agent:")) throw new Error(`invalid executing node: ${auditRow.executedBy}`);
+  if (auditRow.executedBy !== forkOwner.agentDid) {
+    throw new Error(`Fork executed by ${auditRow.executedBy}, expected copier node ${forkOwner.agentDid}`);
+  }
+  if (sourceAuthor.agentAddress.toLowerCase() === forkOwner.agentAddress.toLowerCase()) {
+    throw new Error("smoke requires distinct source-author and fork-owner wallets");
+  }
   const evidence = {
     recordedAt: new Date().toISOString(),
-    mode: "real-four-node-dkg-ui-wasm-codex-cross-node-vm",
+    mode: privateRemote
+      ? "real-four-node-dkg-private-remote-inbox-wasm-codex-cross-node-vm"
+      : "real-four-node-dkg-public-remote-denial-local-wasm-codex-cross-node-vm",
+    sourceProgramAuthor: { node: "node-a", agentDid: sourceAuthor.agentDid, agentAddress: sourceAuthor.agentAddress },
+    forkedBy: { node: "node-b", agentDid: forkOwner.agentDid, agentAddress: forkOwner.agentAddress },
+    ...(remoteInvocationDenial
+      ? { rejectedRemoteInvocationFrom: { node: "node-a", ...remoteInvocationDenial } }
+      : {}),
+    invokedFrom: privateRemote
+      ? { node: "node-a", agentDid: sourceAuthor.agentDid, agentAddress: sourceAuthor.agentAddress }
+      : { node: "node-b", agentDid: forkOwner.agentDid, agentAddress: forkOwner.agentAddress },
+    executedOn: { node: "node-b", agentDid: forkOwner.agentDid, agentAddress: forkOwner.agentAddress },
     queriedNode: "node-c",
+    fork,
+    crossNodeForkVmResult: forkRows[0],
     invocation,
     crossNodeVmResult: rows[0],
     crossNodeVmAudit: auditRow,

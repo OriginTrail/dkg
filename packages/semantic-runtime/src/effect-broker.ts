@@ -95,6 +95,7 @@ export interface RuntimeAdapterDescriptor {
   implementationHash: string | null;
   enabled: boolean;
   effectClass: string;
+  verb: string;
 }
 
 const REGISTERED_ADAPTERS = new WeakMap<RuntimeAdapterRegistry, Map<string, RuntimeAdapterOperation>>();
@@ -131,6 +132,7 @@ export class RuntimeAdapterRegistry {
       implementationHash: operation.implementationHash ?? null,
       enabled: operation.enabled?.() ?? true,
       effectClass: operation.effectClass,
+      verb: operation.verb,
     };
   }
 }
@@ -139,6 +141,12 @@ export interface RuntimeEffectOutcome {
   state: EffectRecord['state'];
   output?: unknown;
   evidenceRef?: string;
+}
+
+export interface RuntimeReadOutcome {
+  state: 'succeeded' | 'failed';
+  output: unknown;
+  evidenceRef: string;
 }
 
 export interface AdmittedPlanAuthority {
@@ -205,6 +213,32 @@ export class RuntimeEffectBroker {
     };
   }
 
+  /** Authorize and dispatch a pure read without creating a protected effect journal entry. */
+  async dispatchRead(proposal: EffectProposal): Promise<RuntimeReadOutcome> {
+    const operation = this.requirePlanAdapter(proposal.adapterId, proposal.adapterVersion);
+    if (operation.effectClass !== 'read') {
+      throw new Error('only pure reads may bypass the protected effect journal');
+    }
+    if (operation.verb !== proposal.verb) throw new Error('effect verb does not match adapter schema');
+    const input = operation.validateInput(proposal.normalizedInput);
+    const requestDigest = computeEffectRequestDigest(
+      proposal.adapterId,
+      proposal.adapterVersion,
+      proposal.verb,
+      proposal.resource,
+      input,
+    );
+    const { policyDecisionId } = await this.authorize(proposal, requestDigest);
+    const result = await operation.dispatch(Object.freeze({
+      effectId: proposal.effectId,
+      attemptId: proposal.attemptId,
+      requestDigest,
+      capabilityId: proposal.capabilityId,
+      policyDecisionId,
+    }), input);
+    return { state: result.status, output: result.output, evidenceRef: result.evidenceRef };
+  }
+
   async prepareEffect(proposal: EffectProposal): Promise<EffectRecord> {
     const operation = this.requirePlanAdapter(proposal.adapterId, proposal.adapterVersion);
     if (operation.effectClass === 'read') {
@@ -242,33 +276,9 @@ export class RuntimeEffectBroker {
       }
       return existing;
     }
-    const capability = this.requireActiveCapability(proposal, requestDigest);
     const approvalId = this.requireApproval(proposal, operation.effectClass, requestDigest);
-    const policyDecision = await this.policy.evaluate({
-      executionId: proposal.executionId,
-      principal: proposal.principal,
-      capabilityId: proposal.capabilityId,
-      adapterId: proposal.adapterId,
-      adapterVersion: proposal.adapterVersion,
-      verb: proposal.verb,
-      resource: proposal.resource,
-      requestDigest,
-      policyEpoch: capability.policyEpoch,
-    });
-    if (policyDecision.decision !== 'allow') {
-      throw new Error(`runtime policy denied effect: ${policyDecision.reasonCode}`);
-    }
-    if (policyDecision.policyEpoch !== capability.policyEpoch) {
-      throw new Error('runtime policy decision epoch does not match capability epoch');
-    }
-    assertDigest(policyDecision.factsDigest, 'policy facts digest');
-    const policyDecisionId = digestHex(
-      'DKG-SEMANTIC-RUNTIME-POLICY-DECISION-V1\0',
-      proposal.effectId,
-      policyDecision.policyId,
-      policyDecision.policyEpoch.toString(),
-      policyDecision.factsDigest,
-    );
+    const { decision: policyDecision, policyDecisionId } =
+      await this.authorize(proposal, requestDigest);
     const effect = this.store.prepareEffect({
       effectId: proposal.effectId,
       executionId: proposal.executionId,
@@ -441,6 +451,45 @@ export class RuntimeEffectBroker {
       throw new Error(`effect class ${operation.effectClass} is outside the admitted upper bound`);
     }
     return operation;
+  }
+
+  private async authorize(proposal: EffectProposal, requestDigest: Uint8Array) {
+    const capability = this.requireActiveCapability(proposal, requestDigest);
+    const execution = requireValue(
+      this.store.execution(proposal.executionId),
+      'runtime execution does not exist',
+    );
+    if (execution.status !== 'active' || execution.policyEpoch !== capability.policyEpoch) {
+      throw new Error('runtime execution is inactive or has a stale policy epoch');
+    }
+    const decision = await this.policy.evaluate({
+      executionId: proposal.executionId,
+      principal: proposal.principal,
+      capabilityId: proposal.capabilityId,
+      adapterId: proposal.adapterId,
+      adapterVersion: proposal.adapterVersion,
+      verb: proposal.verb,
+      resource: proposal.resource,
+      requestDigest,
+      policyEpoch: capability.policyEpoch,
+    });
+    if (decision.decision !== 'allow') {
+      throw new Error(`runtime policy denied request: ${decision.reasonCode}`);
+    }
+    if (decision.policyEpoch !== capability.policyEpoch) {
+      throw new Error('runtime policy decision epoch does not match capability epoch');
+    }
+    assertDigest(decision.factsDigest, 'policy facts digest');
+    return {
+      decision,
+      policyDecisionId: digestHex(
+        'DKG-SEMANTIC-RUNTIME-POLICY-DECISION-V1\0',
+        proposal.effectId,
+        decision.policyId,
+        decision.policyEpoch.toString(),
+        decision.factsDigest,
+      ),
+    };
   }
 
   private requireActiveCapability(

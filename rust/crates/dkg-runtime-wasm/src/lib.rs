@@ -210,8 +210,8 @@ pub fn runtime_admit_plan(input: &[u8]) -> Vec<u8> {
 }
 
 /// Re-admits and materializes a supervised plan into live logical processes.
-/// The initial executor supports only ordered emits and one investigator call
-/// per agent; every other expression or external operation fails closed.
+/// The initial executor supports ordered emits and one registered investigator
+/// or DKG query call per agent; every other expression fails closed.
 #[wasm_bindgen]
 #[must_use]
 pub fn runtime_start_plan(input: &[u8]) -> Vec<u8> {
@@ -503,19 +503,19 @@ impl PlanRuntime {
                 self.pending = Some(pending);
                 return Err("PLAN_EFFECT_RESULT_REQUIRED");
             }
-            (None, PlanApplyInput::EffectResult { .. }) => {
-                return Err("PLAN_EFFECT_NOT_PENDING");
-            }
+            (None, PlanApplyInput::EffectResult { .. }) => return Err("PLAN_EFFECT_NOT_PENDING"),
             (Some((expected, agent_index)), PlanApplyInput::EffectResult { effect_id, result }) => {
                 if expected != effect_id {
                     self.pending = Some((expected, agent_index));
                     return Err("PLAN_EFFECT_ID_MISMATCH");
                 }
+                let (budget_kind, budget_amount) = pending_call_budget(&self.agents[agent_index])
+                    .ok_or("PLAN_EFFECT_NOT_AT_CALL")?;
                 let agent = &mut self.agents[agent_index];
                 if let Ok(value) = result {
                     self.kernel
                         .budget_mut(agent.process_id)
-                        .and_then(|budget| budget.settle(BudgetKind::ModelTokens, 512, 512))
+                        .and_then(|budget| budget.settle(budget_kind, budget_amount, budget_amount))
                         .map_err(|_| "PLAN_BUDGET_SETTLEMENT")?;
                     agent.cursor += 1;
                     self.outputs.push(PlanValue {
@@ -535,7 +535,7 @@ impl PlanRuntime {
                 } else {
                     self.kernel
                         .budget_mut(agent.process_id)
-                        .and_then(|budget| budget.release(BudgetKind::ModelTokens, 512))
+                        .and_then(|budget| budget.release(budget_kind, budget_amount))
                         .map_err(|_| "PLAN_BUDGET_RELEASE")?;
                     self.kernel
                         .terminate(
@@ -575,10 +575,12 @@ impl PlanRuntime {
                 }
                 PlanInstruction::Call(call) => {
                     let agent = &self.agents[index];
+                    let (budget_kind, budget_amount) =
+                        call_budget(&call).ok_or("PLAN_MATERIALIZATION_AGENT_BODY")?;
                     self.kernel
                         .budget_mut(agent.process_id)
-                        .and_then(|budget| budget.reserve(BudgetKind::ModelTokens, 512))
-                        .map_err(|_| "PLAN_MODEL_BUDGET")?;
+                        .and_then(|budget| budget.reserve(budget_kind, budget_amount))
+                        .map_err(|_| "PLAN_EFFECT_BUDGET")?;
                     self.kernel
                         .wait(agent.process_id)
                         .map_err(|_| "PLAN_PROCESS_WAIT")?;
@@ -603,15 +605,14 @@ fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntim
         || plan
             .required_capabilities
             .iter()
-            .any(|value| value != "agent.invoke.investigator")
+            .any(|value| !matches!(value.as_str(), "agent.invoke.investigator" | "dkg.query"))
         || plan
             .effect_upper_bound
             .iter()
-            .any(|value| *value != EffectClass::ModelInvocation)
-        || plan
-            .adapter_versions
-            .iter()
-            .any(|(operation, version)| operation != "agent/investigate" || *version != 1)
+            .any(|value| !matches!(value, EffectClass::ModelInvocation | EffectClass::Read))
+        || plan.adapter_versions.iter().any(|(operation, version)| {
+            *version != 1 || !matches!(operation.as_str(), "agent/investigate" | "dkg/query")
+        })
     {
         return Err("PLAN_MATERIALIZATION_UNSUPPORTED_EFFECT");
     }
@@ -653,15 +654,15 @@ fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntim
     let mut children = Vec::with_capacity(definitions.len());
     for (index, (role, instructions)) in definitions.into_iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| "PLAN_MATERIALIZATION_AGENT_COUNT")?;
-        let model_call = instructions
-            .iter()
-            .any(|value| matches!(value, PlanInstruction::Call(_)));
+        let model_call = has_call(&instructions, "agent/investigate");
+        let dkg_query = has_call(&instructions, "dkg/query");
         let (process_id, child) = materialize_agent(
             &plan.canonical_hash,
             &role,
             index,
             *max_restarts,
             model_call,
+            dkg_query,
         );
         children.push((process_id, child));
         agents.push(PlanAgent {
@@ -703,6 +704,7 @@ fn materialize_agent(
     index: u32,
     max_restarts: u16,
     model_call: bool,
+    dkg_query: bool,
 ) -> (ProcessId, ChildSpec) {
     let process_id = ProcessId::new(derive_id(
         b"DKG-SEMANTIC-PROCESS-V1\0",
@@ -741,6 +743,7 @@ fn materialize_agent(
                 (BudgetKind::Steps, 10_000),
                 (BudgetKind::ModelTokens, if model_call { 512 } else { 0 }),
                 (BudgetKind::ToolCalls, 0),
+                (BudgetKind::DkgQueries, u64::from(dkg_query)),
                 (BudgetKind::Restarts, u64::from(max_restarts)),
             ]),
         },
@@ -761,7 +764,7 @@ fn collect_plan_agents(
         PlanExpr::Delegate { role, grants, body } => {
             if grants
                 .iter()
-                .any(|value| value != "agent.invoke.investigator")
+                .any(|value| !matches!(value.as_str(), "agent.invoke.investigator" | "dkg.query"))
             {
                 return Err("PLAN_MATERIALIZATION_AGENT_GRANT");
             }
@@ -789,7 +792,10 @@ fn collect_instructions(
 ) -> Result<(), &'static str> {
     match expression {
         PlanExpr::Emit(value) => instructions.push(PlanInstruction::Emit(value.clone())),
-        PlanExpr::Call(call) if call.operation == "agent/investigate" && call.version == 1 => {
+        PlanExpr::Call(call)
+            if call.version == 1
+                && matches!(call.operation.as_str(), "agent/investigate" | "dkg/query") =>
+        {
             instructions.push(PlanInstruction::Call(call.clone()));
         }
         PlanExpr::Sequence(children) => {
@@ -800,6 +806,27 @@ fn collect_instructions(
         _ => return Err("PLAN_MATERIALIZATION_AGENT_BODY"),
     }
     Ok(())
+}
+
+fn call_budget(call: &RegisteredCall) -> Option<(BudgetKind, u64)> {
+    match (call.operation.as_str(), call.version) {
+        ("agent/investigate", 1) => Some((BudgetKind::ModelTokens, 512)),
+        ("dkg/query", 1) => Some((BudgetKind::DkgQueries, 1)),
+        _ => None,
+    }
+}
+
+fn pending_call_budget(agent: &PlanAgent) -> Option<(BudgetKind, u64)> {
+    match agent.instructions.get(agent.cursor)? {
+        PlanInstruction::Call(call) => call_budget(call),
+        PlanInstruction::Emit(_) => None,
+    }
+}
+
+fn has_call(instructions: &[PlanInstruction], operation: &str) -> bool {
+    instructions.iter().any(|instruction| {
+        matches!(instruction, PlanInstruction::Call(call) if call.operation == operation)
+    })
 }
 
 fn derive_id(domain: &[u8], plan_hash: &[u8; 32], role: &str, index: u32) -> [u8; 32] {

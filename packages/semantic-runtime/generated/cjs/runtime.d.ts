@@ -82,8 +82,8 @@ export function runtime_snapshot(handle: number, input: Uint8Array): Uint8Array;
 
 /**
  * Re-admits and materializes a supervised plan into live logical processes.
- * The initial executor supports only ordered emits and one investigator call
- * per agent; every other expression or external operation fails closed.
+ * The initial executor supports ordered emits and one registered investigator
+ * or DKG query call per agent; every other expression fails closed.
  */
 export function runtime_start_plan(input: Uint8Array): Uint8Array;
 

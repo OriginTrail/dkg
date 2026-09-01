@@ -274,6 +274,92 @@ describe('RuntimeEffectBroker', () => {
     return { temporary, store, broker, proposal };
   }
 
+  it('authorizes a pure read without creating or consuming a protected journal entry', async () => {
+    const temporary = databasePath();
+    const store = new SemanticRuntimeStore(temporary.path);
+    seedExecution(store);
+    store.putCapability({
+      capabilityId: 'cap-read',
+      executionId: 'exec-1',
+      metadataCbor: encodeCapabilityMetadata({
+        subject: 'operator-1',
+        audience: 'dkg-semantic-runtime',
+        executionId: 'exec-1',
+        verbs: ['query'],
+        resources: ['urn:sr:tool:dkg-query-v1'],
+        delegationDepth: 0,
+        oneShot: false,
+        budgetMicros: 0n,
+      }),
+      hostBindingKey: 'binding/dkg-query',
+      policyEpoch: 7n,
+      notBefore: 1,
+      expiresAt: 1_000,
+      oneShot: false,
+      consumedAt: null,
+      revokedAt: null,
+    });
+    const registry = new RuntimeAdapterRegistry();
+    registry.register({
+      id: 'dkg/query',
+      version: '1',
+      effectClass: 'read',
+      verb: 'query',
+      idempotencyClass: 'pure_read',
+      reconciliationRule: 'not-required',
+      validateInput: (value) => value as { selector: string },
+      dispatch: async (authorization, input) => ({
+        status: 'succeeded',
+        output: `${input.selector}:ok`,
+        evidenceRef: `evidence:${authorization.effectId}`,
+      }),
+      reconcile: async () => ({ status: 'not_applied', evidenceRef: 'unused' }),
+      couldHaveReachedTarget: () => false,
+    });
+    const broker = new RuntimeEffectBroker(
+      store,
+      { evaluate: async () => ({
+        decision: 'allow',
+        policyId: 'policy-1',
+        policyEpoch: 7n,
+        factsDigest: new Uint8Array(32).fill(4),
+        reasonCode: 'POLICY_ALLOW',
+      }) },
+      registry,
+      {
+        adapterVersions: new Map([['dkg/query', '1']]),
+        allowedEffectClasses: new Set(['read']),
+      },
+    );
+    try {
+      await expect(broker.dispatchRead({
+        effectId: 'read-1',
+        executionId: 'exec-1',
+        processId: 'reader',
+        stepId: 'query',
+        attemptId: 'attempt-1',
+        principal: 'operator-1',
+        adapterId: 'dkg/query',
+        adapterVersion: '1',
+        verb: 'query',
+        resource: 'urn:sr:tool:dkg-query-v1',
+        normalizedInput: { selector: 'configuration-trace' },
+        capabilityId: 'cap-read',
+        idempotencyKey: 'read-1',
+        budgetReservation: 0n,
+        now: 100,
+      })).resolves.toMatchObject({
+        state: 'succeeded',
+        output: 'configuration-trace:ok',
+      });
+      expect(store.effect('read-1')).toBeNull();
+      expect(store.capability('cap-read')?.consumedAt).toBeNull();
+    } finally {
+      store.close();
+      fs.rmSync(temporary.directory, { recursive: true, force: true });
+    }
+  });
+
   it('commits preparation before dispatch and preserves the audit chain', async () => {
     let dispatched = 0;
     const fixture = setup({

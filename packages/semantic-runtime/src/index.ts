@@ -61,6 +61,7 @@ export {
   type RuntimeAdapterOperation,
   type RuntimeAdapterDescriptor,
   type RuntimeEffectOutcome,
+  type RuntimeReadOutcome,
   type RuntimeCapabilityMetadata,
   type RuntimePolicyAdapter,
   type RuntimePolicyDecision,
