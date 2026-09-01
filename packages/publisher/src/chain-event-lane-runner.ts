@@ -460,11 +460,22 @@ export class ChainEventLaneRunner {
     // the same finalized view, so a tip event is not dispatched until its
     // block has the configured confirmation depth — the rewind remains
     // reorg protection, not a substitute for finality.
-    if (lane.spec.scanOnlyFinalizedHead && head != null) {
-      const bound = this.chain.finalizedEventScanBound?.(head);
-      if (bound !== undefined && Number.isFinite(bound)) {
-        head = Math.max(0, Math.min(head, Math.floor(bound)));
+    if (lane.spec.scanOnlyFinalizedHead) {
+      // FAIL CLOSED (review r12-bot): a finalized lane without a readable
+      // head has no bound to honor — a forward scan would run to
+      // `fromBlock + maxRange`, past any observed tip, and a replay could
+      // release an unfinalized retained tail. Hold the lane: no forward
+      // scan, no replay, no cursor movement; the next tick re-reads the head.
+      const bound = head != null ? this.chain.finalizedEventScanBound?.(head) ?? head : undefined;
+      if (head == null || bound === undefined || !Number.isFinite(bound)) {
+        this.log.warn(
+          ctx,
+          `Finalized lane held: no readable chain head this tick (lane=${lane.spec.name})`,
+        );
+        this.applyLaneSchedule(lane, { kind: 'noWork', now });
+        return { lane, blockNumber: state.lastBlock, advanced: false };
       }
+      head = Math.max(0, Math.min(head, Math.floor(bound)));
     }
 
     this.applyHistoryModeTransition(lane, head, ctx);

@@ -397,6 +397,105 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect([...new Set(seen2)], 'the restored tail delivers its event once finalized').toEqual([49_945]);
     expect(persisted, 'and the tail is released durably').toBeUndefined();
   });
+  it('a finalized lane HOLDS when the head read fails: no scan, no callback, no cursor save (review r12-bot)', async () => {
+    // Depth 5, cursor 49,996, actual head 50,000, a mutation at 49,998 and
+    // a retained replay tail. With the head unreadable there is no bound to
+    // honor: an unbounded forward scan would dispatch 49,998 as finalized
+    // and record a cursor beyond any observed tip; a replay could release
+    // the unfinalized tail.
+    let now = 0;
+    let headReadable = false;
+    const seen: number[] = [];
+    const cursorSaves: number[] = [];
+    let persisted: { fromBlock: number; toBlock: number } | undefined = { fromBlock: 49_997, toBlock: 49_999 };
+    const replaySaves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_998)]);
+    const realGetBlockNumber = chain.adapter.getBlockNumber!.bind(chain.adapter);
+    chain.adapter.getBlockNumber = async () => {
+      if (!headReadable) throw new Error('rpc head read failed');
+      return realGetBlockNumber();
+    };
+    (chain.adapter as { finalizedEventScanBound?: (head: number) => number })
+      .finalizedEventScanBound = (head) => head - 4;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 49_996; },
+        async saveLane(_lane: ChainEventPollerLane, block: number) { cursorSaves.push(block); },
+        replayRetry: {
+          async load() { return persisted; },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            replaySaves.push(w ? { ...w } : undefined);
+            persisted = w ? { ...w } : undefined;
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    for (let tick = 1; tick <= 3; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    expect(chain.filters, 'no scan may be issued without a readable head').toHaveLength(0);
+    expect(seen, 'no callback').toEqual([]);
+    expect(cursorSaves, 'no cursor save').toEqual([]);
+    expect(replaySaves, 'no replay persistence mutation').toEqual([]);
+
+    // The head becomes readable: bound 49,996 — 49,998 is STILL unfinalized,
+    // so the lane scans but withholds; at head 50,010 (bound 50,006) it delivers.
+    headReadable = true;
+    await poll(poller);
+    expect(seen, 'readable but unfinalized: withheld').toEqual([]);
+    chain.setHead(50_010);
+    now += CADENCE_MS;
+    await poll(poller);
+    expect([...new Set(seen)], 'finalized: delivered').toEqual([49_998]);
+  });
+
+  it('a durable replay window WHOLLY above the finalized head is held untouched, then released (review r12-bot)', async () => {
+    let now = 0;
+    let persisted: { fromBlock: number; toBlock: number } | undefined = { fromBlock: 49_945, toBlock: 49_950 };
+    const replaySaves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    const seen: number[] = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_947)]);
+    (chain.adapter as { finalizedEventScanBound?: (head: number) => number })
+      .finalizedEventScanBound = (head) => head - 59;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() { return persisted; },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            replaySaves.push(w ? { ...w } : undefined);
+            persisted = w ? { ...w } : undefined;
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    await poll(poller);
+    now += CADENCE_MS;
+    await poll(poller);
+    expect(seen, 'nothing dispatches while the whole window is unfinalized').toEqual([]);
+    expect(replaySaves, 'the durable obligation is neither cleared nor rewritten').toEqual([]);
+    expect(persisted).toEqual({ fromBlock: 49_945, toBlock: 49_950 });
+
+    chain.setHead(50_009); // bound 49,950: the window is now wholly finalized
+    now += CADENCE_MS;
+    await poll(poller);
+    expect([...new Set(seen)], 'released once finalized').toEqual([49_947]);
+    expect(persisted, 'and cleared durably').toBeUndefined();
+  });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
     // window, not the retry itself. A regression that lets the save
