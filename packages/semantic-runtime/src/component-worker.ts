@@ -37,7 +37,7 @@ interface ComponentExecution {
   [Symbol.dispose](): void;
 }
 
-interface ComponentRuntime {
+interface ComponentExecutor {
   abiVersion(): number;
   compile(source: string): unknown;
   admit(plan: Uint8Array): unknown;
@@ -46,15 +46,13 @@ interface ComponentRuntime {
     plan: Uint8Array,
     logicalTime: bigint,
   ): [ComponentExecution, unknown];
-  testHang(): void;
-  testTrap(): void;
 }
 
 interface ComponentModule {
   instantiate(
     getCoreModule: (relativePath: string) => Promise<WebAssembly.Module>,
     imports: object,
-  ): Promise<{ runtime: ComponentRuntime }>;
+  ): Promise<{ executor: ComponentExecutor }>;
 }
 
 class ExecutionCapability {
@@ -87,7 +85,7 @@ const instanceId = randomUUID();
 const componentRoot = artifacts.componentRoot;
 const componentModule = await import(pathToFileURL(artifacts.componentJsPath).href) as ComponentModule;
 const component = await componentModule.instantiate(loadCoreModule, componentImports());
-const abi = component.runtime.abiVersion();
+const abi = component.executor.abiVersion();
 if (abi !== bootstrap.expectedAbi) {
   throw new Error(`semantic component ABI mismatch: expected ${bootstrap.expectedAbi}, got ${abi}`);
 }
@@ -137,7 +135,7 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
       case 'compile': {
         if (typeof request.source !== 'string') throw new Error('compile source is missing');
         try {
-          result = { ok: true as const, plan: normalizeAdmittedPlan(component.runtime.compile(request.source)) };
+          result = { ok: true as const, plan: normalizeAdmittedPlan(component.executor.compile(request.source)) };
         } catch (error) {
           const diagnostics = componentErrorPayload(error);
           if (!Array.isArray(diagnostics)) throw error;
@@ -146,13 +144,13 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
         break;
       }
       case 'admit':
-        result = normalizeAdmittedPlan(component.runtime.admit(requirePlan(request)));
+        result = normalizeAdmittedPlan(component.executor.admit(requirePlan(request)));
         break;
       case 'start': {
         if (execution) throw componentFailure('COMPONENT_ALREADY_STARTED', 'lifecycle');
         const descriptor = validateCapability(request.capability);
         const resource = new ExecutionCapability(descriptor);
-        const [created, receiptValue] = component.runtime.start(
+        const [created, receiptValue] = component.executor.start(
           resource,
           requirePlan(request),
           request.logicalTime ?? 0n,
@@ -191,12 +189,11 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
         break;
       case 'test_hang':
         requireTestOperations();
-        component.runtime.testHang();
-        throw new Error('component hang operation unexpectedly returned');
+        await new Promise<never>(() => {});
+        throw new Error('Worker hang injection unexpectedly returned');
       case 'test_trap':
         requireTestOperations();
-        component.runtime.testTrap();
-        throw new Error('component trap operation unexpectedly returned');
+        throw new WebAssembly.RuntimeError('test-only Worker trap injection');
       default:
         throw new Error(`unsupported semantic component operation: ${String(request.op)}`);
     }
