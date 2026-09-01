@@ -52,7 +52,6 @@ import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dk
 
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 import {
-  deriveVerifiedAuthorCatalogBucketRowAuthorshipsV1,
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogRowAuthorshipV1,
   type AuthorAgentDelegationEvidenceV1,
@@ -414,30 +413,21 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           producedBucket.objectDigest,
           'catalog bucket',
         );
-        const anchorRow = producedBucket.payload.rows[0];
-        if (anchorRow === undefined) {
-          fail(
-            'catalog-successor-producer-verification',
-            'a non-empty produced bucket has no authorship anchor row',
-          );
-        }
-        const anchor = verifyAuthorCatalogRowAuthorshipV1({
-          catalogIssuerDelegation: authorization.catalogIssuerDelegation,
-          catalogIssuerDelegationSignature,
-          parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
-          catalogHead: publication.head,
-          catalogHeadSignature: headSignature,
-          directoryPathEnvelopes: publication.directoryPath,
-          directoryPathSignatures,
-          directoryPathProof,
-          catalogBucket: producedBucket,
-          catalogBucketSignature: bucketSignature,
-          targetKaId: anchorRow.kaId,
-        });
-        authorship = deriveVerifiedAuthorCatalogBucketRowAuthorshipsV1(
-          anchor,
-          producedBucket,
-        ).map(readVerifiedAuthorCatalogRowAuthorshipV1);
+        authorship = producedBucket.payload.rows.map((row) =>
+          readVerifiedAuthorCatalogRowAuthorshipV1(verifyAuthorCatalogRowAuthorshipV1({
+            catalogIssuerDelegation: authorization.catalogIssuerDelegation,
+            catalogIssuerDelegationSignature,
+            parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
+            catalogHead: publication.head,
+            catalogHeadSignature: headSignature,
+            directoryPathEnvelopes: publication.directoryPath,
+            directoryPathSignatures,
+            directoryPathProof,
+            catalogBucket: producedBucket,
+            catalogBucketSignature: bucketSignature,
+            targetKaId: row.kaId,
+          })),
+        );
       }
     } catch (cause) {
       fail(
