@@ -80,6 +80,7 @@ export default defineConfig({
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
       'test/workspace-head-cardinality.test.ts',
+      'test/knowledge-asset-swm-staging.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

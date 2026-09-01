@@ -117,7 +117,7 @@ export {
 export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -437,13 +437,12 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     assertionImportLocks,
     vectorStore,
     embeddingProvider,
-    validTokens,
     apiHost,
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
+    authentication,
     emitMemoryGraphChanged,
   } = ctx;
 
@@ -550,63 +549,14 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // in the body). `resolveAgentByToken` returns `undefined` for
       // node-level tokens, so only genuine agent-scoped identities
       // ever reach the A-1 guard.
-      const callerAgentAddress = requestToken
-        ? agent.resolveAgentByToken(requestToken)
-        : undefined;
-      // A-1 follow-up review (iteration 2): close the auth-disabled WM
-      // hole WITHOUT regressing existing node-token clients.
-      //
-      // When we reach this line with `callerAgentAddress === undefined`,
-      // the caller is one of:
-      //
-      //   (a) node-level admin (`~/.dkg/auth.token`, a token present in
-      //       `validTokens`). Admin is already trusted to run as any
-      //       local agent — `packages/adapter-openclaw` relies on this
-      //       by passing a session-specific `agentAddress` alongside the
-      //       admin token. Keep the legacy "skip the A-1 guard" here.
-      //
-      //   (b) unauthenticated (auth disabled at daemon level, OR no
-      //       Authorization header, OR a bogus / mismatched bearer that
-      //       the auth middleware never validated because `authEnabled`
-      //       is false). This is the hole Codex flagged: a raw
-      //       `Authorization: Bearer junk` used to set `requestToken`
-      //       truthy, sliding past a `!requestToken` check and letting
-      //       foreign WM reads through.
-      //
-      //   (c) auth-enabled + rejected — we never reach this line
-      //       because `httpAuthGuard` has already 401'd the request.
-      //
-      // Gate the 403 on "not a known admin token" (i.e. the caller is
-      // not in `validTokens`), which fails closed for (b) regardless of
-      // what garbage they put in the header, and leaves (a) alone.
-      //
-      // Codex PR #242 iter-8: `validTokens` contains BOTH the
-      // node-level admin token (`~/.dkg/auth.token`) AND any
-      // per-agent tokens the node has issued. Treating every
-      // validToken as "admin" means an authenticated agent could
-      // use its OWN token to skip the A-1 guard and read another
-      // local agent's WM via `agentAddress`. Restrict the admin
-      // bypass to tokens that are NOT bound to a specific agent
-      // (`resolveAgentByToken(token) === undefined`), which is the
-      // current signal for "node-level / admin-scoped".
-      //
-      // Codex PR #242 iter-8 re-review: the A-1 fallback 403 must
-      // also NOT fire for authenticated agent callers. An agent
-      // querying its OWN WM (`callerAgentAddress === agentAddress`)
-      // was previously being rejected here unless the target happened
-      // to be the node default / peerId alias, and genuine cross-agent
-      // reads were surfacing as a 403 (leaking existence) instead of
-      // the intended silent empty-per-kind result from
-      // `DKGAgent.query`. Only gate the self-alias fallback when the
-      // caller has no recognised identity at all — neither a
-      // node-level admin token nor an agent-scoped bearer. Authenticated
-      // agent callers flow straight into `agent.query()` below, which
-      // enforces the isolation invariant by returning an empty-per-kind
-      // result for any target that is not `callerAgentAddress`.
+      const callerAgentAddress = authenticatedAgentAddress(authentication);
+      // The authentication boundary distinguishes agent, node-operator, and anonymous callers.
+      // Node operators retain the cross-agent OpenClaw use case; authenticated agents flow into
+      // DKGAgent.query's isolation check; only anonymous working-memory requests need this local
+      // self-alias fallback gate.
       const isAdminToken =
-        !!requestToken
-        && validTokens.has(requestToken)
-        && callerAgentAddress === undefined;
+        canAdministerNode(authentication)
+        && authentication.principal.kind === 'nodeOperator';
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
       if (
         !hasRecognisedIdentity &&

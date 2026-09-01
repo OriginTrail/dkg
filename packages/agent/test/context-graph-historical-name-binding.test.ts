@@ -78,7 +78,16 @@ function selectedFixture(resolved: bigint | null = 42n) {
     chain,
     subscribedContextGraphs: new Map([[LOCAL_ID, subscription]]),
     wireIdToLocalCgId: new Map([[NAME_HASH, LOCAL_ID]]),
-    config: { syncContextGraphs: [] } as Record<string, unknown>,
+    config: {
+      syncContextGraphs: [],
+      rfc64CatalogExecutionPlan: {
+        killSwitchActive: false,
+        legacyContextGraphs: [],
+        track2ContextGraphs: [],
+        selectedAuthority: {},
+        standaloneTrack2Enabled: false,
+      },
+    } as Record<string, unknown>,
     contextGraphWireId: (id: string) => id.toLowerCase(),
     contextGraphNameCommitment: (id: string) => id === LOCAL_ID ? NAME_HASH : id.toLowerCase(),
     localCgIdForWireId: (id: string) => id.toLowerCase() === NAME_HASH ? LOCAL_ID : id,

@@ -335,6 +335,8 @@ export async function callTrySyncFromPeer(
       protocolsKey: string | null;
       connectionKey: string | null;
     }>;
+    resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
+    recordSyncReconcilerFailure: (peerId: string) => void;
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
   agent.trySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer;
@@ -342,6 +344,8 @@ export async function callTrySyncFromPeer(
     protocolsKey: null,
     connectionKey: null,
   });
+  agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: true });
+  agent.recordSyncReconcilerFailure ??= () => {};
   const applyAccounting = agent.applySyncOnConnectAccounting;
   if (onSyncAccounting) {
     agent.applySyncOnConnectAccounting = (

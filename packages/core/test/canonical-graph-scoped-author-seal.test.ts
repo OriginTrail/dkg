@@ -4,6 +4,7 @@ import * as coreBarrel from '../src/index.js';
 import { ASSERTION_SEAL_PREDICATES } from '../src/assertion-seal.js';
 import {
   MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1,
+  CanonicalGraphScopedAuthorSealError,
   assertCanonicalGraphScopedAuthorSealCoordinateV1,
   assertCanonicalGraphScopedAuthorSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
@@ -12,6 +13,7 @@ import {
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   parseCanonicalGraphScopedAuthorSealV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
@@ -119,6 +121,10 @@ describe('CanonicalGraphScopedAuthorSealV1 bytes and projection', () => {
     });
     expect(decodeCanonicalGraphScopedAuthorSealRowsV1(
       toStoreRows(rows),
+      COORDINATE,
+    ).payload).toEqual(privatePayload);
+    expect(decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      rows,
       COORDINATE,
     ).payload).toEqual(privatePayload);
   });
@@ -261,6 +267,66 @@ describe('CanonicalGraphScopedAuthorSealV1 typed store inverse', () => {
     }).object).toBe(`"${AUTHOR}"`);
   });
 
+  it('owns rendered storage-row parsing and exact seal projection in core', () => {
+    const rendered = projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE);
+    const decoded = decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(rendered, COORDINATE);
+    expect(decoded.payload).toEqual(PAYLOAD);
+    expect(decoded.rows).toEqual(rendered);
+    expect(() => decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      rendered.slice(1),
+      COORDINATE,
+    )).toThrow(/canonical-seal-row-cardinality/u);
+  });
+
+  it('validates rendered-row cardinality and descriptors before traversal', () => {
+    const rendered = projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE);
+
+    let indexGetterInvoked = false;
+    const accessorRows = [...rendered];
+    Object.defineProperty(accessorRows, '0', {
+      enumerable: true,
+      get() {
+        indexGetterInvoked = true;
+        return rendered[0];
+      },
+    });
+    expect(() => decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      accessorRows,
+      COORDINATE,
+    )).toThrow(/enumerable data properties/u);
+    expect(indexGetterInvoked).toBe(false);
+
+    let customMapInvoked = false;
+    const adornedRows = [...rendered];
+    Object.defineProperty(adornedRows, 'map', {
+      enumerable: true,
+      get() {
+        customMapInvoked = true;
+        return () => [];
+      },
+    });
+    expect(() => decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      adornedRows,
+      COORDINATE,
+    )).toThrow(/dense and unadorned/u);
+    expect(customMapInvoked).toBe(false);
+
+    let oversizedGetterInvoked = false;
+    const oversized = Array.from({ length: 16 });
+    Object.defineProperty(oversized, '0', {
+      enumerable: true,
+      get() {
+        oversizedGetterInvoked = true;
+        return rendered[0];
+      },
+    });
+    expect(() => decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+      oversized,
+      COORDINATE,
+    )).toThrow(/canonical-seal-row-cardinality/u);
+    expect(oversizedGetterInvoked).toBe(false);
+  });
+
   it('rejects missing, duplicate, unknown, legacy, misplaced, and noncanonical rows', () => {
     const valid = toStoreRows(projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE));
     expect(() => decodeCanonicalGraphScopedAuthorSealRowsV1(valid.slice(1), COORDINATE))
@@ -363,6 +429,33 @@ describe('CanonicalGraphScopedAuthorSealV1 typed store inverse', () => {
       for (const value of ['<urn:wrapped>', 'urn:has space', 'urn:has\u0000control']) {
         expect(() => renderCanonicalAuthorSealStoreRowV1({ ...base, [field]: value }))
           .toThrow(new RegExp(`${field} must contain one bare safe IRI`));
+      }
+    }
+  });
+
+  it('preserves schema-versus-term error codes for malformed typed row IRIs', () => {
+    const base: CanonicalAuthorSealStoreRowV1 = {
+      subjectIri: SUBJECT,
+      predicateIri: 'urn:predicate',
+      graphIri: META_GRAPH,
+      object: { kind: 'literal', value: AUTHOR, datatypeIri: `${XSD}string` },
+    };
+    for (const field of ['subjectIri', 'predicateIri', 'graphIri'] as const) {
+      try {
+        renderCanonicalAuthorSealStoreRowV1({ ...base, [field]: 42 } as never);
+        throw new Error('expected non-string IRI rejection');
+      } catch (error) {
+        expect(error).toBeInstanceOf(CanonicalGraphScopedAuthorSealError);
+        expect((error as CanonicalGraphScopedAuthorSealError).code)
+          .toBe('canonical-seal-row-schema');
+      }
+      try {
+        renderCanonicalAuthorSealStoreRowV1({ ...base, [field]: 'urn:has space' });
+        throw new Error('expected unsafe IRI rejection');
+      } catch (error) {
+        expect(error).toBeInstanceOf(CanonicalGraphScopedAuthorSealError);
+        expect((error as CanonicalGraphScopedAuthorSealError).code)
+          .toBe('canonical-seal-row-term');
       }
     }
   });
@@ -516,6 +609,7 @@ describe('CanonicalGraphScopedAuthorSealV1 public package barrel', () => {
     expect(typeof coreBarrel.computeCanonicalGraphScopedAuthorSealDigestV1).toBe('function');
     expect(typeof coreBarrel.projectCanonicalGraphScopedAuthorSealRowsV1).toBe('function');
     expect(typeof coreBarrel.decodeCanonicalGraphScopedAuthorSealRowsV1).toBe('function');
+    expect(typeof coreBarrel.decodeCanonicalGraphScopedAuthorSealRenderedRowsV1).toBe('function');
     expect(typeof coreBarrel.CanonicalGraphScopedAuthorSealError).toBe('function');
     expect(coreBarrel.MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1)
       .toBe(MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1);

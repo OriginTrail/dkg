@@ -45,6 +45,9 @@ import {
   spawnGate2HarnessAgentV1,
 } from '../rfc64-gate2-multi-asset-completeness/two-agent-harness.ts';
 import { planPrivateCatalogConstructionV1 } from './batch-plan.ts';
+import {
+  assertPrivateColdRetirementLifecycleV1,
+} from './lifecycle-receipts.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ARTIFACT = process.env.DKG_RFC64_PRIVATE_CP2_ARTIFACT
@@ -297,20 +300,27 @@ async function execute(): Promise<void> {
     exact(synchronization.inventoryRowCount, ASSET_COUNT, 'private inventory row count');
     exact(synchronization.activatedTripleCount, ASSET_COUNT * 2, 'private SWM triple count');
     exact(synchronization.appliedHeadStatus, 'applied', 'private applied head status');
-
-    let swmRecovered = 0;
-    let vmRecovered = 0;
+    const lifecycleExpectationsByUal = new Map<string, Readonly<{
+      readonly assertionVersion: string;
+      readonly vmGraphIri: string;
+      readonly lineFramedProjectionNQuads: string;
+    }>>();
     const recoveredChainOrdinals = new Set<number>();
     for (const [index, value] of rows.entries()) {
       const row = record(value, `private row ${index}`);
+      exact(row.activatedTripleCount, 2, `private SWM ${index} activated triple count`);
       const semantic = output(await receiver.request(
         'semanticGraphReadback',
         `private-semantic-${index}`,
         'operation-completed',
         { swmGraph: requiredString(row.swmGraph, `private row ${index} graph`) },
       ), `private semantic ${index}`);
-      exact(semantic.projectionNQuads, PROJECTION_NQUADS, `private SWM ${index}`);
-      swmRecovered += 1;
+      // The catalog activation evidence above proves the exact SWM payload was
+      // authenticated and materialized. Because this same asset is finalized
+      // on chain, the receiver then deliberately retires the duplicate SWM
+      // twin after committing the exact VM graph.
+      exact(semantic.activatedQuadCount, 0, `private SWM ${index} retired triple count`);
+      exact(semantic.projectionNQuads, '\n', `private SWM ${index} retired projection`);
 
       const kaId = requiredString(row.kaId, `private row ${index} KA ID`);
       const kaNumber = BigInt(kaId) & ((1n << 96n) - 1n);
@@ -337,6 +347,14 @@ async function execute(): Promise<void> {
       ), `private VM ${index}`);
       exact(vm.tripleCount, 2, `private VM ${index} triple count`);
       exact(vm.projectionNQuads, PROJECTION_NQUADS, `private VM ${index} projection`);
+      lifecycleExpectationsByUal.set(ual, Object.freeze({
+        assertionVersion: '1',
+        vmGraphIri: vmGraph,
+        lineFramedProjectionNQuads: requiredString(
+          vm.projectionNQuads,
+          `private VM ${index} projection`,
+        ),
+      }));
       const metadata = array(vm.metadataBindings, `private VM ${index} metadata`)
         .map((item, metadataIndex) => record(item, `private VM ${index} metadata ${metadataIndex}`));
       metadataObject(metadata, 'status', '"confirmed"');
@@ -348,12 +366,23 @@ async function execute(): Promise<void> {
       // The mock finalized snapshot places every KA at block 123, transaction index 0.
       // The KA number above, not materializedVersion, proves the exact chain ordinal set.
       metadataObject(metadata, 'materializedVersion', '"123:0"');
-      vmRecovered += 1;
     }
     exactJson(
       [...recoveredChainOrdinals].sort((left, right) => left - right),
       Array.from({ length: ASSET_COUNT }, (_, ordinal) => ordinal),
       'private recovered finalized chain ordinal set',
+    );
+    const decodedLifecycle = assertPrivateColdRetirementLifecycleV1(
+      synchronization,
+      {
+        catalogHeadDigest: headDigest as Digest32V1,
+        inventoryDigest: requiredString(
+          synchronization.inventoryDigest,
+          'private synchronization inventory digest',
+        ) as Digest32V1,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        byUal: lifecycleExpectationsByUal,
+      },
     );
 
     const [authorStopped, receiverStopped] = await Promise.all([
@@ -382,8 +411,16 @@ async function execute(): Promise<void> {
         finalInventoryRowCount: ASSET_COUNT,
       },
       chainExpectedAssets: ASSET_COUNT,
-      swm: { expected: ASSET_COUNT, recovered: swmRecovered },
-      vm: { expected: ASSET_COUNT, recovered: vmRecovered },
+      swm: {
+        expectedActivated: ASSET_COUNT,
+        activated: rows.length,
+        expectedRetiredAfterVm: ASSET_COUNT,
+        retiredAfterVm: rows.length,
+        lifecycleReceipts: Object.freeze(
+          [...decodedLifecycle.receipts],
+        ),
+      },
+      vm: { expected: ASSET_COUNT, recovered: recoveredChainOrdinals.size },
       processBoundary: {
         authorExitCode: authorStopped.exit.code,
         receiverExitCode: receiverStopped.exit.code,
@@ -391,7 +428,7 @@ async function execute(): Promise<void> {
       policyDigest: POLICY_DIGEST,
       repository: { testedHeadCommit, trackedSourceClean: true },
       runtimeManifestDigest: launch.manifest.manifestDigest,
-      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v1',
+      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v4',
       status: 'PASS',
     });
     const receipt = atomicWriteExactBytes(
@@ -399,8 +436,10 @@ async function execute(): Promise<void> {
       new TextEncoder().encode(canonicalDocument(artifact as unknown as CanonicalValue)),
     );
     process.stdout.write(
-      `[rfc64-private-cp2] PASS swm=${swmRecovered}/${ASSET_COUNT} `
-      + `vm=${vmRecovered}/${ASSET_COUNT} artifact=${ARTIFACT} sha256=${receipt.sha256}\n`,
+      `[rfc64-private-cp2] PASS swm-activated=${rows.length}/${ASSET_COUNT} `
+      + `swm-retired=${rows.length}/${ASSET_COUNT} `
+      + `vm=${recoveredChainOrdinals.size}/${ASSET_COUNT} `
+      + `artifact=${ARTIFACT} sha256=${receipt.sha256}\n`,
     );
     operationFailed = false;
   } catch (error) {

@@ -31,7 +31,15 @@ function matchesKeyword(e: IntegrationEntry, needle: string): boolean {
 
 const TIER_RANK: Record<TrustTier, number> = { community: 0, verified: 1, featured: 2 };
 
-export function registerIntegrationCommands(program: Command): void {
+export interface IntegrationCommandDependencies {
+  /** Command-level detector operation; production defaults to real host detection. */
+  detectInstalled?: typeof detectInstalled;
+}
+
+export function registerIntegrationCommands(
+  program: Command,
+  deps: IntegrationCommandDependencies = {},
+): void {
   const integrationCmd = program
     .command('integration')
     .description('Install and inspect community DKG integrations from the registry');
@@ -129,7 +137,7 @@ export function registerIntegrationCommands(program: Command): void {
         const { entries, failures } = await fetchAllEntries(cfg);
         const min = parseTier(opts.tier);
         const candidates = entries.filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[min]);
-        const rows = await detectInstalled(candidates);
+        const rows = await (deps.detectInstalled ?? detectInstalled)(candidates);
 
         if (opts.json) {
           console.log(JSON.stringify({ installed: rows, failures }, null, 2));

@@ -4,8 +4,6 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 
 import {
-  assertCanonicalGraphScopedAuthorSealV1,
-  buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
@@ -34,6 +32,21 @@ import {
   type Gate1TransferEvidence,
 } from './model.js';
 import { assertGate1ProductCapabilities } from './product-capabilities.js';
+import {
+  GATE1_AUTHOR_ADDRESS as AUTHOR_ADDRESS,
+  GATE1_AUTHOR_PRIVATE_KEY as AUTHOR_PRIVATE_KEY,
+  GATE1_DEPLOYMENT as DEPLOYMENT,
+  GATE1_NETWORK_ID as NETWORK_ID,
+  GATE1_PROJECTION_NQUADS as PROJECTION_NQUADS,
+  GATE1_ROLE_MASTER_KEYS as ROLE_MASTER_KEYS,
+  createGate1AuthorSealV1 as authorSeal,
+} from './fixture.js';
+import {
+  cleanupRolloutStoreFixture,
+  createRolloutStoreFixture,
+  type RolloutStoreFixture,
+} from './rollout-store-fixture.js';
+import { rolloutStoreBindingToEnv } from './rollout-store-config.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
@@ -41,39 +54,16 @@ const DEFAULT_RAW_ARTIFACT = join(import.meta.dirname, 'artifacts/gate1-result.j
 const DEFAULT_VERDICT_ARTIFACT = join(import.meta.dirname, 'artifacts/gate1-verdict.json');
 const PROCESS_TIMEOUT_MS = 60_000;
 
-const NETWORK_ID = 'otp:20430';
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/gate-1';
 const FORGED_CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/gate-1-forged-authorization';
-const AUTHOR_PRIVATE_KEY = `0x${'64'.repeat(32)}`;
 const ATTACKER_PRIVATE_KEY = `0x${'65'.repeat(32)}`;
-const AUTHOR_WALLET = new ethers.Wallet(AUTHOR_PRIVATE_KEY);
-const AUTHOR_ADDRESS = AUTHOR_WALLET.address.toLowerCase();
 const ATTACKER_ADDRESS = new ethers.Wallet(ATTACKER_PRIVATE_KEY).address.toLowerCase();
-const KAV10_ADDRESS = '0x4444444444444444444444444444444444444444';
-const DEPLOYMENT = Object.freeze({
-  networkId: NETWORK_ID,
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: KAV10_ADDRESS,
-});
-const KA_NUMBER = 7n;
-const KA_ID = ((BigInt(AUTHOR_ADDRESS) << 96n) | KA_NUMBER).toString();
-const KA_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR_ADDRESS}/${KA_NUMBER}`;
-const ASSERTION_ROOT =
-  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f';
-const PROJECTION_NQUADS =
-  '<https://example.org/alice> <https://schema.org/age> '
-    + '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
-    + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
 const GENESIS_ISSUED_AT = '1773900000000';
 const POSITIVE_ISSUED_AT = '1773900001000';
 const FORGED_ISSUED_AT = '1773900003000';
 const DELEGATION_EFFECTIVE_AT = '1773899999000';
 const DELEGATION_EXPIRES_AT = '1774000000000';
-const ROLE_MASTER_KEYS = Object.freeze({
-  author: '1a'.repeat(32),
-  receiver: '2b'.repeat(32),
-});
 
 async function execute(): Promise<void> {
   const headBefore = readCleanRepositoryHead(REPO_ROOT);
@@ -85,12 +75,19 @@ async function execute(): Promise<void> {
 
   const authorDataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate1-author-'));
   const receiverDataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate1-receiver-'));
+  const temporaryRoots = [authorDataDir, receiverDataDir];
   const children = new ChildProcessRegistry(20_000);
+  let storeFixture: RolloutStoreFixture | undefined;
   let operationFailed = true;
   let primaryFailure: unknown;
   try {
-    const author = spawnAgent('author', authorDataDir, children);
-    const receiver = spawnAgent('receiver', receiverDataDir, children);
+    storeFixture = await createRolloutStoreFixture({
+      backendInput: process.env.DKG_RFC64_GATE1_STORE_BACKEND,
+      blazegraphTestUrl: process.env.BLAZEGRAPH_TEST_URL,
+      storeDataDirs: { author: [authorDataDir], receiver: [receiverDataDir] },
+    });
+    const author = spawnAgent('author', authorDataDir, children, storeFixture);
+    const receiver = spawnAgent('receiver', receiverDataDir, children, storeFixture);
     const [authorReady, receiverReady] = await Promise.all([
       author.waitFor('ready'),
       receiver.waitFor('ready'),
@@ -279,11 +276,20 @@ async function execute(): Promise<void> {
       receiverReady.peerId as string,
       'forged',
     );
+    const notFoundBeforeForged = requiredSafeInteger(
+      statsBeforeForged.notFound,
+      'statsBeforeForged.notFound',
+    );
     const statsAfterForged = await readReceiverStats(receiver, 'after-forged');
     exact(
+      requiredSafeInteger(statsAfterForged.notFound, 'statsAfterForged.notFound'),
+      notFoundBeforeForged + 1,
+      'forged scope-closed provider refusal count',
+    );
+    exact(
       requiredSafeInteger(statsAfterForged.failed, 'statsAfterForged.failed'),
-      requiredSafeInteger(statsBeforeForged.failed, 'statsBeforeForged.failed') + 1,
-      'forged terminal failure count',
+      requiredSafeInteger(statsBeforeForged.failed, 'statsBeforeForged.failed'),
+      'forged refusal does not expose an authorization oracle',
     );
     const forgedScopeDigest = computeAuthorCatalogScopeDigestV1({
       networkId: NETWORK_ID,
@@ -319,22 +325,13 @@ async function execute(): Promise<void> {
     exactJson(appliedAfterForged, positiveApplied, 'positive applied state after forged attempt');
     exactJson(semanticAfterForged, positiveSync, 'positive semantic state after forged attempt');
 
-    let terminalFailure: Record<string, unknown> | null = null;
-    let terminalFailureObservabilityError: unknown;
-    try {
-      const failureEvent = await receiver.request(
-        'terminalFailureReadback',
-        'forged-terminal-failure-v1',
-        'operation-completed',
-        { catalogHeadDigest: forgedHeadDigest },
-      );
-      terminalFailure = outputRecord(failureEvent, 'forged terminal failure');
-    } catch (error) {
-      terminalFailureObservabilityError = error;
-    }
-
     const receiverCrashExit = await receiver.killRestartBoundary('receiver-crash-v1');
-    const restartedReceiver = spawnAgent('receiver', receiverDataDir, children);
+    const restartedReceiver = spawnAgent(
+      'receiver',
+      receiverDataDir,
+      children,
+      storeFixture,
+    );
     const restartedReady = await restartedReceiver.waitFor('ready');
     requireRealReady(restartedReady, 'receiver');
     exact(restartedReady.peerId, receiverReady.peerId, 'receiver peer ID after restart');
@@ -393,22 +390,7 @@ async function execute(): Promise<void> {
     const headAfter = readCleanRepositoryHead(REPO_ROOT);
     exact(headAfter, headBefore, 'tracked source commit after process run');
 
-    if (terminalFailure === null) {
-      throw terminalFailureObservabilityError ?? new Error(
-        'receiver returned no exact terminal failure evidence for forged authorization',
-      );
-    }
-    const failureCode = requiredString(
-      terminalFailure.errorCode,
-      'terminalFailure.errorCode',
-    );
-    requiredString(terminalFailure.errorName, 'terminalFailure.errorName');
-    exact(
-      requiredString(terminalFailure.catalogHeadDigest, 'terminalFailure.catalogHeadDigest'),
-      forgedHeadDigest,
-      'terminal failure head digest',
-    );
-    exact(failureCode, 'catalog-native-receiver-authorization', 'terminal failure code');
+    const failureCode = 'catalog-native-receiver-not-found';
     const forged: Gate1ForgedEvidence = Object.freeze({
       attemptedCatalogHeadDigest: forgedHeadDigest,
       catalogAuthorAddress: AUTHOR_ADDRESS,
@@ -508,10 +490,9 @@ async function execute(): Promise<void> {
     await cleanupPreservingPrimaryFailure({
       operationFailed,
       primaryFailure,
-      cleanup: () => children.terminateAllThenCleanup(() => {
-        rmSync(authorDataDir, { force: true, recursive: true });
-        rmSync(receiverDataDir, { force: true, recursive: true });
-      }),
+      cleanup: () => children.terminateAllThenCleanup(
+        () => cleanupRolloutStoreFixture(storeFixture, temporaryRoots),
+      ),
       reportSecondaryFailure: (primary, secondary) => {
         process.stderr.write(
           `[rfc64-gate1-harness] cleanup failure after ${String(primary)}: ${String(secondary)}\n`,
@@ -780,40 +761,6 @@ function verifiedControlObjectCount(
   );
 }
 
-async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
-  const typedData = buildAuthorAttestationTypedData({
-    chainId: BigInt(DEPLOYMENT.assertedAtChainId),
-    kav10Address: DEPLOYMENT.assertedAtKav10Address,
-    merkleRoot: ethers.getBytes(ASSERTION_ROOT),
-    authorAddress: AUTHOR_ADDRESS,
-    reservedKaId: BigInt(KA_ID),
-  });
-  const signature = ethers.Signature.from(await AUTHOR_WALLET.signTypedData(
-    typedData.domain,
-    typedData.types,
-    typedData.message,
-  ));
-  const seal = {
-    assertionMerkleRoot: ASSERTION_ROOT,
-    authorAddress: AUTHOR_ADDRESS,
-    authorAttestationR: signature.r,
-    authorAttestationVS: signature.yParityAndS,
-    authorSchemeVersion: '1',
-    assertedAtChainId: DEPLOYMENT.assertedAtChainId,
-    assertedAtKav10Address: KAV10_ADDRESS,
-    reservedKaId: KA_ID,
-    assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
-    contentScopeVersion: '2',
-    kaUal: KA_UAL,
-    assertionVersion: '1',
-    publicTripleCount: '2',
-    privateTripleCount: '0',
-    privateMerkleRoot: null,
-  } as unknown as CanonicalGraphScopedAuthorSealV1;
-  assertCanonicalGraphScopedAuthorSealV1(seal);
-  return seal;
-}
-
 function stagedHeadRef(output: Record<string, unknown>, label: string): Record<string, unknown> {
   return {
     objectDigest: requiredString(output.headObjectDigest, `${label}.headObjectDigest`),
@@ -828,6 +775,7 @@ function spawnAgent(
   role: 'author' | 'receiver',
   dataDir: string,
   registry: ChildProcessRegistry,
+  storeFixture: RolloutStoreFixture,
 ): Gate1AgentChild {
   return new Gate1AgentChild({
     eventTimeoutMs: PROCESS_TIMEOUT_MS,
@@ -841,6 +789,7 @@ function spawnAgent(
         ...process.env,
         DKG_RFC64_GATE1_ADAPTER_DATA_DIR: dataDir,
         DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[role],
+        ...rolloutStoreBindingToEnv(storeFixture.bindingForRole(role, dataDir)),
         NODE_ENV: 'production',
       },
     },

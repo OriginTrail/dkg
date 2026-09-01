@@ -1,4 +1,7 @@
-import { isSparqlHttpResponseError } from '@origintrail-official/dkg-storage';
+import {
+  asGraphWriteRevisionSource,
+  isSparqlHttpResponseError,
+} from '@origintrail-official/dkg-storage';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -64,6 +67,8 @@ import {
   resolveSparqlPrefixedName,
   type SparqlPrefixName,
 } from './sparql-graph-scope.js';
+import { raceAgainstCallerAbort } from './caller-abort.js';
+import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -145,29 +150,6 @@ function createQueryStoreReadContext(
       ]),
     },
   };
-}
-
-function raceAgainstCallerAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) {
-    const reason = signal.reason;
-    return Promise.reject(
-      reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')),
-    );
-  }
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    void work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }
 
 /**
@@ -371,13 +353,14 @@ export function resolveViewGraphs(
 export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
-  // Collapse the dashboard's parallel WM/SWM/VM count scans without retaining
-  // a completed allow-list that could miss newly-created assertion graphs.
-  private readonly scopedContentGraphAllowListInFlight = new Map<string, Promise<string[]>>();
+  private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
 
   constructor(store: TripleStore) {
     this.store = store;
     this.graphManager = new GraphManager(store);
+    this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
+      asGraphWriteRevisionSource(store),
+    );
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -1064,29 +1047,20 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     contextGraphId: string,
     reads: QueryStoreReadContext,
     subGraphName?: string,
-  ): Promise<string[]> {
-    const key = JSON.stringify([
-      contextGraphId,
-      subGraphName ?? null,
-      reads.shared.cacheKey,
-    ]);
-    const cached = this.scopedContentGraphAllowListInFlight.get(key);
-    if (cached) {
-      return raceAgainstCallerAbort(cached, reads.signal);
-    }
-
-    const promise = this.discoverScopedContentGraphAllowList(
-      contextGraphId,
-      reads.shared,
-      subGraphName,
-    );
-    this.scopedContentGraphAllowListInFlight.set(key, promise);
-    void promise.finally(() => {
-      if (this.scopedContentGraphAllowListInFlight.get(key) === promise) {
-        this.scopedContentGraphAllowListInFlight.delete(key);
-      }
-    }).catch(() => undefined);
-    return raceAgainstCallerAbort(promise, reads.signal);
+  ): Promise<readonly string[]> {
+    const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
+    const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
+    return this.scopedContentGraphDiscoveryMemo.get({
+      contentKey,
+      laneKey: reads.shared.cacheKey,
+      graphPrefix,
+      signal: reads.signal,
+      load: () => this.discoverScopedContentGraphAllowList(
+        contextGraphId,
+        reads.shared,
+        subGraphName,
+      ),
+    });
   }
 
   private async discoverScopedContentGraphAllowList(

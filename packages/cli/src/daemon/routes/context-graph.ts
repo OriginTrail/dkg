@@ -123,7 +123,7 @@ import {
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -344,6 +344,7 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -605,7 +606,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     res,
     agent,
     publisherControl,
-    config,
     startedAt,
     dashDb,
     opWallets,
@@ -622,27 +622,22 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     assertionImportLocks,
     vectorStore,
     embeddingProvider,
-    validTokens,
     apiHost,
     apiPortRef,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
     emitMemoryGraphChanged,
   } = ctx;
-  // Operator gate for the node-wide subscription endpoints. When auth is ENABLED,
-  // require a node-level admin token — a recognised token (in validTokens) that
-  // resolves to no agent (agent-scoped tokens resolve to an address; a
-  // missing/unrecognised token isn't in validTokens). When auth is DISABLED the
-  // daemon runs admin maintenance routes tokenless (trusted local), so don't 403.
-  const authEnabled = config.auth?.enabled !== false;
-  const isNodeAdminCaller = (): boolean =>
-    !authEnabled ||
-    (!!requestToken && validTokens.has(requestToken) && !agent.resolveAgentByToken(requestToken));
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
-    : undefined;
+  const actor = actorFromRequestContext(ctx);
+  const {
+    authentication,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
+  // Node-wide gates consume the principal established by authentication; route code must not
+  // reinterpret token storage or agent-token resolution.
+  const isNodeAdminCaller = (): boolean => canAdministerNode(authentication);
+  const writePreflightCallerAgentAddress = actor.authenticatedAgentAddress;
+  const requestToken = authentication.acceptedToken;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
@@ -1448,13 +1443,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "POST" && signJoinMatch) {
     const contextGraphId = decodeURIComponent(signJoinMatch[1]);
     try {
-      const callerAddress = agent.resolveAgentAddress(
-        extractBearerToken(req.headers.authorization),
-      );
       // Body is intentionally ignored — sign-only. Drain it so a JSON body
       // sent by older clients doesn't sit on the socket.
       try { await readBody(req, SMALL_BODY_BYTES); } catch { /* ignored */ }
-      const delegation = await agent.signJoinRequest(contextGraphId, callerAddress);
+      const delegation = await agent.signJoinRequest(contextGraphId, requestAgentAddress);
       return jsonResponse(res, 200, {
         ok: true,
         contextGraphId,

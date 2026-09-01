@@ -233,6 +233,46 @@ describe('selected snapshot walk continuation', () => {
 });
 
 describe('sync requester progress accounting', () => {
+  it.each(['data', 'meta'] as const)(
+    'rejects RFC-64 control graphs returned in verified %s before insert',
+    async (verifiedPhase) => {
+    const contextGraphId = 'rfc64-control-boundary';
+    const controlQuad = {
+      ...quad('urn:dkg:sync:applied-cg:test'),
+      graph: `did:dkg:context-graph:${contextGraphId}/_sync/applied-cg`,
+    };
+    const storeInsert = recorder(async () => {});
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-legacy',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }) => pageResult(contextGraphId, phase, {
+        quads: phase === 'data' ? [controlQuad] : [],
+      }),
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        verifiedData: verifiedPhase === 'data' ? [controlQuad] : [],
+        verifiedMeta: verifiedPhase === 'meta' ? [controlQuad] : [],
+        totalFetchedDataQuads: verifiedPhase === 'data' ? 1 : 0,
+        totalFetchedMetaQuads: verifiedPhase === 'meta' ? 1 : 0,
+      }),
+      storeInsert,
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(storeInsert.calls).toHaveLength(0);
+    expect(summary.insertedTriples).toBe(0);
+    expect(summary.failedPhases).toBe(1);
+    },
+  );
+
   it('does not count a denied durable graph but counts the subsequent clean-empty graph', async () => {
     const deniedCgs: string[] = [];
     const fetchSyncPages = durableFetchRecorder(async ({

@@ -493,6 +493,11 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     /^      abi_freshness: \$\{\{ steps\.plan\.outputs\.abi_freshness \}\}$/m,
     'the trusted planner output must be exposed to the ABI freshness job',
   );
+  assert.doesNotMatch(
+    workflowJobBlock(primaryWorkflow, 'changes'),
+    /candidate\/scripts\/ci\/check-tracked-text-nul\.mjs/,
+    'an untrusted candidate must never supply its own security gate',
+  );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
       > primaryWorkflow.indexOf('node trusted-ci/scripts/ci/plan-ci.mjs'),
