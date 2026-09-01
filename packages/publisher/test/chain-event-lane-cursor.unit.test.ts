@@ -456,6 +456,42 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(sequence[2]).toBe('save:clear');
   });
 
+  it('a tip mutation is WITHHELD until the configured confirmation depth (review r6-bot)', async () => {
+    // FinalizedEventPositionV1 promises finality: a mutation mined at the
+    // current head must not be durably dispatched while a reorg can still
+    // orphan it — no later scan of the canonical chain would retract the
+    // persisted callback result.
+    let now = 0;
+    const seen: number[] = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_998)]);
+    (chain.adapter as { finalizedEventScanConfirmations?: () => number })
+      .finalizedEventScanConfirmations = () => 5;
+    const saves: number[] = [];
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 49_000; },
+        async saveLane(_lane: ChainEventPollerLane, block: number) { saves.push(block); },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    await poll(poller);
+    expect(seen, 'head 50,000 with depth 5 finalizes 49,996 — the event at 49,998 is not eligible').toEqual([]);
+    expect(
+      Math.max(0, ...saves),
+      'the durable cursor must not pass the finalized head',
+    ).toBeLessThanOrEqual(49_996);
+
+    // Five more blocks: 49,998 reaches depth 5 and dispatches.
+    chain.setHead(50_002);
+    now += CADENCE_MS;
+    await poll(poller);
+    expect(seen, 'the SAME event dispatches once its depth is reached').toEqual([49_998]);
+  });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
     // window, not the retry itself. A regression that lets the save

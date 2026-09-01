@@ -1312,6 +1312,15 @@ export interface ChainAdapter {
    */
   supportsEventTypes?(names: readonly string[]): Promise<string[]>;
 
+  /**
+   * The confirmation depth an event scan must respect before treating a
+   * position as FINAL (review r6-bot): confirmation 1 is the current head,
+   * larger values finalize at `head - confirmations + 1` — the same
+   * convention `readKnowledgeAssetVersionSnapshot` documents. Optional:
+   * an adapter without a policy (mock, tests) finalizes at the head.
+   */
+  finalizedEventScanConfirmations?(): number;
+
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;
     submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;

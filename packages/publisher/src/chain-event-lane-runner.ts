@@ -118,6 +118,14 @@ export interface ChainEventPollerLaneSpec {
    * persisted under the NEW key immediately, so the handoff happens once.
    */
   adoptCursorFromRetiredKeys?: readonly ChainEventRetiredCursorKey[];
+  /**
+   * Bound every scan of this lane — seed, forward, replay — at the
+   * adapter's confirmation depth (review r6-bot): a lane whose callback
+   * contract advertises FINALIZED positions must not dispatch a tip block
+   * that a reorg can still orphan, because no later scan of the canonical
+   * chain would ever retract the durably persisted callback result.
+   */
+  scanOnlyFinalizedHead?: boolean;
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
 }
@@ -445,6 +453,19 @@ export class ChainEventLaneRunner {
     ctx: OperationContext,
   ): Promise<ChainEventPollerLaneScanResult> {
     const state = lane.state;
+
+    // The finalized-head bound applies BEFORE any use of the head (review
+    // r6-bot): the live seed, the cursor-lag metric, the forward upper
+    // bound and the replay windows (which trail `state.lastBlock`) all see
+    // the same finalized view, so a tip event is not dispatched until its
+    // block has the configured confirmation depth — the rewind remains
+    // reorg protection, not a substitute for finality.
+    if (lane.spec.scanOnlyFinalizedHead && head != null) {
+      const confirmations = this.chain.finalizedEventScanConfirmations?.() ?? 1;
+      if (Number.isFinite(confirmations) && confirmations > 1) {
+        head = Math.max(0, head - (Math.floor(confirmations) - 1));
+      }
+    }
 
     this.applyHistoryModeTransition(lane, head, ctx);
 

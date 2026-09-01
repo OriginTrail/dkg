@@ -650,6 +650,11 @@ export class EVMChainAdapterBase {
   protected readonly receiptTimeoutMs: number;
   protected readonly finalityConfirmations: number;
 
+  /** The operator confirmation policy, exposed for finalized event scans. */
+  finalizedEventScanConfirmations(): number {
+    return this.finalityConfirmations;
+  }
+
   protected readonly maxFeePerGasWei?: bigint;
 
   protected readonly configuredStaticChainId?: bigint;

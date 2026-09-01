@@ -396,6 +396,11 @@ export class ChainEventPoller {
         // activation covers a restart that spanned a deploy.
         liveSeedLookbackBlocks: ChainEventPoller.MAX_RANGE,
         rewindOnRestoreBlocks: KA_ROOT_MUTATION_REWIND_ON_RESTORE_BLOCKS,
+        // FinalizedEventPositionV1 promises finality; the scan must supply
+        // it (review r6-bot). The other lanes keep their tip behavior —
+        // their consumers re-verify against live chain state instead of
+        // persisting positions durably.
+        scanOnlyFinalizedHead: true,
         // The lane this one replaced (review r22): adopt its durable cursor
         // so an embedder migrating across the rename does not fall back to
         // the bounded live seed and silently skip blocks the old cursor had

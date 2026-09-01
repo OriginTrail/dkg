@@ -471,6 +471,35 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(req?.toBlock).toBe(9_000);
   });
 
+  it('yields logs in PROVIDER order, not requested-constant order (review r6-bot)', async () => {
+    // The scan promises provider log order. Every other ordering-sensitive
+    // fixture happens to follow the event-name constant, so an
+    // implementation that regrouped results by requested type would stay
+    // green — while consumers that update one asset by event position
+    // would see mutations out of chain order.
+    const iface = new Interface(KA_ABI as never);
+    const added = encodeLog(iface, 'KnowledgeAssetMerkleRootAdded', [KA_ID, ROOT], {
+      blockNumber: 4_100, transactionIndex: 1, index: 0,
+    });
+    const updated = encodeLog(iface, 'KnowledgeAssetUpdated', [KA_ID, AUTHOR, 'op-1', ROOT, 4_096n, 10n], {
+      blockNumber: 4_100, transactionIndex: 2, index: 0,
+    });
+    // Provider order (root-added first) deliberately differs from the
+    // requested-constant order (KnowledgeAssetUpdated first).
+    const { adapter } = makeAdapter({
+      logsByEvent: { KnowledgeAssetRootMutations: [added, updated] },
+    });
+
+    const events = await drain(adapter, [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+
+    expect(
+      events.map((e) => [e.type, e.data['txIndex']]),
+      'the iterator preserves the provider sequence exactly',
+    ).toEqual([
+      ['KnowledgeAssetMerkleRootAdded', 1],
+      ['KnowledgeAssetUpdated', 2],
+    ]);
+  });
   it('a MIXED legacy ABI degrades per event: declared kinds deliver, the missing kind leaves the OR-set (review r5-bot)', async () => {
     // The endpoints (all four / none) were both covered; the middle was
     // not. A regression treating the group as all-or-nothing would silence
