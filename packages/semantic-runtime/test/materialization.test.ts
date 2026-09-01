@@ -162,6 +162,54 @@ describe('real Wasm supervised-plan materialization', () => {
       await host.stop();
     }
   });
+
+  it('lets Wasm invoke only the explicit typed remote-execute import', async () => {
+    const source = `(strategy smoke/composition
+      (version "1.0.0")
+      (scope network:devnet)
+      (goal execute-child-on-peer-b)
+      (supervise one-for-one (max-restarts 1) (window-ms 60000)
+        (delegate composer
+          (grant program.remote-execute)
+          (call remote-execute@1 "12D3KooWPeerB" "urn:sr:program:child"))))`;
+    const admission = new WasmStrategyAdmissionClient({ workerUrl: componentWorkerUrl });
+    const compilation = await admission.compileAndAdmit(source);
+    expect(compilation.ok).toBe(true);
+    if (!compilation.ok) return;
+
+    const host = new SemanticRuntimeHost({ workerUrl, componentWorkerUrl, config: { watchdogMs: 1_000 } });
+    await host.start();
+    try {
+      const capability = toolCapability(compilation.plan.canonicalPlan, {
+        operation: 'remote-execute',
+        witInterface: 'origintrail:semantic-runtime/remote-execute@0.1.0',
+      });
+      const started = await host.startPlan(
+        compilation.plan.canonicalPlan,
+        0n,
+        capability,
+        async (call) => {
+          expect(call).toEqual({
+            kind: 'remote-execute',
+            effectId: 1n,
+            nodeId: '12D3KooWPeerB',
+            programIri: 'urn:sr:program:child',
+          });
+          return {
+            kind: 'remote-execute',
+            executionIri: 'urn:sr:execution:child',
+            executionUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/7',
+          };
+        },
+      );
+      await expect(host.applyPlan(started.handle)).resolves.toMatchObject({
+        kind: 'completed',
+        outputs: [{ role: 'composer', value: 'urn:sr:execution:child' }],
+      });
+    } finally {
+      await host.stop();
+    }
+  });
 });
 
 function toolCapability(

@@ -22,7 +22,7 @@ use bindings::exports::origintrail::semantic_runtime::executor::{
     SourcePosition, SourceSpan, Step,
 };
 use bindings::origintrail::semantic_runtime::capability::ExecutionCapability;
-use bindings::origintrail::semantic_runtime::{investigator, query_catalog};
+use bindings::origintrail::semantic_runtime::{investigator, query_catalog, remote_execute};
 use dkg_runtime_codec::{
     AbiResponse, PlanApplyInput, decode_response, encode_admit_request, encode_apply_plan_request,
     encode_compile_request, encode_empty_request, encode_start_plan_request, message_type,
@@ -336,17 +336,46 @@ async fn dispatch_tool(
             .map(|result| result.json)
             .map_err(|error| tool_diagnostic(error.code, error.message, error.retryable))
         }
+        "remote-execute" => {
+            let [node_id, program_iri] =
+                text_arguments::<2>(effect.arguments, "INVALID_REMOTE_EXECUTE_ARGUMENT")?;
+            remote_execute::execute(
+                capability,
+                remote_execute::Request {
+                    effect_id: effect.effect_id,
+                    node_id,
+                    program_iri,
+                },
+            )
+            .await
+            .map(|result| result.execution_iri)
+            .map_err(|error| tool_diagnostic(error.code, error.message, error.retryable))
+        }
         _ => Err(diagnostic("COMPONENT_TOOL_NOT_IMPORTED", "tool")),
     }
 }
 
 fn only_text_argument(arguments: Vec<String>, code: &str) -> Result<String, Diagnostic> {
-    let [value]: [String; 1] = arguments.try_into().map_err(|_| diagnostic(code, "tool"))?;
-    value
-        .strip_prefix("t:")
-        .or_else(|| value.strip_prefix("s:"))
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| diagnostic(code, "tool"))
+    text_arguments::<1>(arguments, code).map(|[value]| value)
+}
+
+fn text_arguments<const N: usize>(
+    arguments: Vec<String>,
+    code: &str,
+) -> Result<[String; N], Diagnostic> {
+    let values: [String; N] = arguments.try_into().map_err(|_| diagnostic(code, "tool"))?;
+    values
+        .map(|value| {
+            value
+                .strip_prefix("t:")
+                .or_else(|| value.strip_prefix("s:"))
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| diagnostic(code, "tool"))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| diagnostic(code, "tool"))
 }
 
 fn tool_diagnostic(code: String, message: String, retryable: bool) -> Diagnostic {

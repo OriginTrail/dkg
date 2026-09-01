@@ -60,6 +60,8 @@ pub enum EffectClass {
     Read,
     /// External inference that has cost but no mutation authority.
     ModelInvocation,
+    /// Invocation of a DKG Program on an explicitly named remote node.
+    RemoteExecution,
     /// Repository mutation.
     RepositoryWrite,
     /// Infrastructure mutation.
@@ -77,6 +79,7 @@ impl EffectClass {
         match self {
             Self::Read => "read",
             Self::ModelInvocation => "model-invocation",
+            Self::RemoteExecution => "remote-execution",
             Self::RepositoryWrite => "repository-write",
             Self::InfrastructureChange => "infrastructure-change",
             Self::Publish => "publish",
@@ -210,6 +213,17 @@ impl AdapterRegistry {
                 IdempotencyClass::ReconcileBeforeRetry,
                 1,
                 1,
+                None,
+                false,
+            ),
+            adapter(
+                "remote-execute",
+                1,
+                "program.remote-execute",
+                EffectClass::RemoteExecution,
+                IdempotencyClass::Idempotent,
+                2,
+                2,
                 None,
                 false,
             ),
@@ -878,7 +892,7 @@ fn decode_string_set(
 
 fn decode_effect_set(decoder: &mut Decoder<'_>) -> CanonicalResult<BTreeSet<EffectClass>> {
     let count = require_definite_array(decoder)?;
-    if count > 6 {
+    if count > 7 {
         return Err(CanonicalPlanError::Malformed);
     }
     let mut effects = BTreeSet::new();
@@ -894,6 +908,7 @@ fn decode_effect_class(value: &str) -> CanonicalResult<EffectClass> {
     match value {
         "read" => Ok(EffectClass::Read),
         "model-invocation" => Ok(EffectClass::ModelInvocation),
+        "remote-execution" => Ok(EffectClass::RemoteExecution),
         "repository-write" => Ok(EffectClass::RepositoryWrite),
         "infrastructure-change" => Ok(EffectClass::InfrastructureChange),
         "publish" => Ok(EffectClass::Publish),
@@ -1969,6 +1984,30 @@ mod tests {
         );
         assert_eq!(
             compile(&extra_prompt).unwrap_err()[0].code,
+            DiagnosticCode::SchemaMismatch,
+        );
+    }
+
+    #[test]
+    fn remote_execute_requires_a_target_node_and_program() {
+        let valid = envelope(
+            "(delegate composer (grant program.remote-execute) (call remote-execute@1 peer-b urn:sr:program:child))",
+        );
+        let plan = compile(&valid).expect("typed remote execution is admitted");
+        assert!(
+            plan.required_capabilities
+                .contains("program.remote-execute")
+        );
+        assert!(
+            plan.effect_upper_bound
+                .contains(&EffectClass::RemoteExecution)
+        );
+
+        let missing_program = envelope(
+            "(delegate composer (grant program.remote-execute) (call remote-execute@1 peer-b))",
+        );
+        assert_eq!(
+            compile(&missing_program).unwrap_err()[0].code,
             DiagnosticCode::SchemaMismatch,
         );
     }

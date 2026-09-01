@@ -65,11 +65,18 @@ export type ComponentToolCall =
     effectId: bigint;
     queryId: string;
     parameters: Array<{ name: string; value: string }>;
+  }
+  | {
+    kind: 'remote-execute';
+    effectId: bigint;
+    nodeId: string;
+    programIri: string;
   };
 
 export type ComponentToolResult =
   | { kind: 'investigator'; output: string }
-  | { kind: 'query-catalog'; json: string };
+  | { kind: 'query-catalog'; json: string }
+  | { kind: 'remote-execute'; executionIri: string; executionUal?: string };
 
 export type ComponentToolDispatcher = (
   call: ComponentToolCall,
