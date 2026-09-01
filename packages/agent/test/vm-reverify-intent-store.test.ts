@@ -546,3 +546,48 @@ describe('VM re-verify intent store — durability across a reopen', () => {
     }
   });
 });
+
+describe('VM re-verify intent store — queued transactions (review r4)', () => {
+  it('concurrent mutations serialize in enqueue order through the queued transaction', async () => {
+    await withStore(async (store) => {
+      // Fired without awaiting: every write joins the connection tail, so
+      // the interleaving is enqueue order — the insert lands first and each
+      // later event advances it, never a duplicate insert or a lost update.
+      const results = await Promise.all([
+        store.upsert(intent()),
+        store.upsert(intent({ position: at(101) })),
+        store.upsert(intent({ position: at(102) })),
+      ]);
+      expect(results).toEqual(['inserted', 'advanced', 'advanced']);
+      const records = await store.listDue(10_000, 10);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.generation, 'both advances committed, in order').toBe(2);
+    });
+  });
+
+  it('close() drains enqueued queued-transactions before checkpointing', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteVmReverifyIntentStore(directory, { now: () => 1_000 });
+      const pending = [
+        store.upsert(intent()),
+        store.upsert(intent({ ual: OTHER_UAL, position: at(101) })),
+      ];
+      const closed = store.close();
+      await expect(Promise.all(pending)).resolves.toEqual(['inserted', 'inserted']);
+      await closed;
+      // Both enqueued writes are IN the checkpointed durable file.
+      const database = new DatabaseSync(join(directory, VM_REVERIFY_INTENTS_DATABASE_FILENAME));
+      try {
+        const count = database
+          .prepare('SELECT COUNT(*) AS n FROM vm_reverify_intents_v1')
+          .get() as { n: number };
+        expect(Number(count.n)).toBe(2);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});

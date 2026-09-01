@@ -318,14 +318,26 @@ export class OwnedSqliteSerializedConnectionV1 {
     return run;
   }
 
-  transaction(operation: () => void): void {
+  /**
+   * The queued transaction (review r4): joins the tail AND owns
+   * BEGIN IMMEDIATE/COMMIT/ROLLBACK in one operation, so transactionality
+   * cannot be invoked outside the serialization discipline — the raw
+   * mechanics are private. `mutate` remains for operations whose atomicity
+   * is a single statement, and for reads that must settle behind the tail.
+   */
+  mutateTransaction<T>(operation: () => T): Promise<T> {
+    return this.mutate(() => this.#runTransaction(operation));
+  }
+
+  #runTransaction<T>(operation: () => T): T {
     let open = false;
     try {
       this.database.exec('BEGIN IMMEDIATE');
       open = true;
-      operation();
+      const result = operation();
       this.database.exec('COMMIT');
       open = false;
+      return result;
     } catch (error) {
       if (open) {
         try { this.database.exec('ROLLBACK'); } catch { /* retain transaction failure */ }

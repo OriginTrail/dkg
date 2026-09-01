@@ -230,12 +230,15 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
 
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult> {
     if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return { status: 'closed' };
       if (input.rawMessage.byteLength > this.#policy.maxEnvelopeBytes) {
         return { status: 'capacity' };
       }
-      this.prune();
+      // Housekeeping joins the SAME transaction as the insert (review r4):
+      // prune is idempotent, so an insert failure rolling it back merely
+      // defers it to the next receive.
+      this.pruneWithinTransaction(this.#policy.now());
       const existingRow = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
       ).get(input.key);
@@ -284,14 +287,10 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         if (!hasFinalizationRecoveryDeferredCapacity(this.database, this.#policy, input)) {
           return { status: 'capacity' };
         }
-        this.transaction(() => {
-          this.insertPendingWithinTransaction(input, digest, now);
-        });
+        this.insertPendingWithinTransaction(input, digest, now);
         return { status: 'pending' };
       }
-      this.transaction(() => {
-        this.insertLiveWithinTransaction(input, digest, now);
-      });
+      this.insertLiveWithinTransaction(input, digest, now);
       const row = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
       ).get(input.key);
@@ -303,44 +302,42 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   promotePending(limit: number): Promise<number> {
     if (this.#closed || this.#closing) return Promise.resolve(0);
     const boundedLimit = Math.max(1, Math.trunc(limit));
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return 0;
       let promoted = 0;
-      this.transaction(() => {
-        const now = this.#policy.now();
-        this.pruneWithinTransaction(now);
-        const rows = this.database.prepare(`
+      const now = this.#policy.now();
+      this.pruneWithinTransaction(now);
+      const rows = this.database.prepare(`
           SELECT * FROM finalization_pending_v2
           ORDER BY created_at ASC, key ASC
           LIMIT ?
         `).all(this.#policy.maxDeferredEntries) as unknown as PendingFinalizationRow[];
-        for (const row of rows) {
-          if (promoted >= boundedLimit) break;
-          let input: FinalizationRecoveryReceiveInput;
-          try {
-            input = pendingRowToReceiveInput(row);
-          } catch {
-            this.database.prepare(
-              'DELETE FROM finalization_pending_v2 WHERE key = ?',
-            ).run(row.key);
-            continue;
-          }
-          if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
-            continue;
-          }
-          this.insertLiveWithinTransaction(
-            input,
-            row.envelope_sha256,
-            row.created_at,
-            now,
-            row.trusted_publisher_peer_id ?? undefined,
-          );
+      for (const row of rows) {
+        if (promoted >= boundedLimit) break;
+        let input: FinalizationRecoveryReceiveInput;
+        try {
+          input = pendingRowToReceiveInput(row);
+        } catch {
           this.database.prepare(
             'DELETE FROM finalization_pending_v2 WHERE key = ?',
           ).run(row.key);
-          promoted += 1;
+          continue;
         }
-      });
+        if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
+          continue;
+        }
+        this.insertLiveWithinTransaction(
+          input,
+          row.envelope_sha256,
+          row.created_at,
+          now,
+          row.trusted_publisher_peer_id ?? undefined,
+        );
+        this.database.prepare(
+          'DELETE FROM finalization_pending_v2 WHERE key = ?',
+        ).run(row.key);
+        promoted += 1;
+      }
       return promoted;
     });
   }
@@ -468,12 +465,11 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       || publisherPeerId.length === 0
       || publisherPeerId.trim() !== publisherPeerId
     ) return Promise.resolve(false);
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return false;
       let changed = false;
-      this.transaction(() => {
-        const now = this.#policy.now();
-        const result = this.database.prepare(`
+      const now = this.#policy.now();
+      const result = this.database.prepare(`
           UPDATE finalization_inbox_v1
           SET state = 'REORGED',
               trusted_publisher_peer_id = ?,
@@ -492,15 +488,14 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             AND publisher_upgrade_pending = 1
             AND trusted_publisher_peer_id = ?
         `).run(
-          publisherPeerId,
-          lastError,
-          now,
-          key,
-          generation,
-          publisherPeerId,
-        );
-        changed = result.changes > 0;
-      });
+        publisherPeerId,
+        lastError,
+        now,
+        key,
+        generation,
+        publisherPeerId,
+      );
+      changed = result.changes > 0;
       return changed;
     });
   }
@@ -511,7 +506,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     commit: FinalizationRecoveryVerifiedEvidenceCommit,
   ): Promise<FinalizationRecoveryVerifyResult> {
     if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return { status: 'closed' };
       return this.commitVerifiedEvidenceWithinTransaction(
         key,
@@ -526,28 +521,24 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     generation: number,
     commit: FinalizationRecoveryVerifiedEvidenceCommit,
   ): FinalizationRecoveryVerifyResult {
-    let outcome: FinalizationRecoveryVerifyResult = { status: 'conflict' };
-    this.transaction(() => {
-      const row = this.database.prepare(
-        'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
-      ).get(key);
-      if (!row) {
-        outcome = { status: 'missing' };
-        return;
-      }
-      const current = finalizationRecoveryRowToEntry(row);
-      const plan = planFinalizationRecoveryVerifiedEvidenceTransition(
-        current,
-        generation,
-        commit,
-      );
-      if (plan.status === 'existing') {
-        outcome = plan;
-        return;
-      }
-      if (plan.status === 'conflict') return;
-      const { fields } = plan;
-      const update = this.database.prepare(`
+    const row = this.database.prepare(
+      'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
+    ).get(key);
+    if (!row) {
+      return { status: 'missing' };
+    }
+    const current = finalizationRecoveryRowToEntry(row);
+    const plan = planFinalizationRecoveryVerifiedEvidenceTransition(
+      current,
+      generation,
+      commit,
+    );
+    if (plan.status === 'existing') {
+      return plan;
+    }
+    if (plan.status === 'conflict') return plan;
+    const { fields } = plan;
+    const update = this.database.prepare(`
         UPDATE finalization_inbox_v1
         SET state = ?,
             block_number = ?,
@@ -564,51 +555,48 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         WHERE key = ? AND generation = ? AND state = ?
           AND verified_evidence_json IS NULL
       `).run(
-        fields.state,
-        fields.verifiedEvidence.blockNumber,
-        fields.verifiedEvidence.blockHash,
-        fields.verifiedEvidence.txIndex,
-        fields.verifiedEvidence.publisherAddress,
-        fields.verifiedEvidence.authorAddress ?? null,
-        JSON.stringify(fields.verifiedEvidence),
-        fields.generation,
-        fields.attemptCount,
-        fields.nextAttemptAt,
-        fields.lastError,
-        this.#policy.now(),
-        key,
-        generation,
-        current.state,
-      );
-      if (update.changes === 0) return;
-      const updated = this.database.prepare(
-        'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
-      ).get(key);
-      if (!updated) {
-        outcome = { status: 'missing' };
-        return;
-      }
-      const entry = finalizationRecoveryRowToEntry(updated);
-      if (
-        entry.generation === fields.generation
-        && entry.verifiedEvidence
-        && VerifiedGraphScopedFinalizationEvidenceCodec.same(
-          entry.verifiedEvidence,
-          fields.verifiedEvidence,
-        )
-      ) outcome = { status: 'verified', entry };
-    });
-    return outcome;
+      fields.state,
+      fields.verifiedEvidence.blockNumber,
+      fields.verifiedEvidence.blockHash,
+      fields.verifiedEvidence.txIndex,
+      fields.verifiedEvidence.publisherAddress,
+      fields.verifiedEvidence.authorAddress ?? null,
+      JSON.stringify(fields.verifiedEvidence),
+      fields.generation,
+      fields.attemptCount,
+      fields.nextAttemptAt,
+      fields.lastError,
+      this.#policy.now(),
+      key,
+      generation,
+      current.state,
+    );
+    if (update.changes === 0) return { status: 'conflict' };
+    const updated = this.database.prepare(
+      'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
+    ).get(key);
+    if (!updated) {
+      return { status: 'missing' };
+    }
+    const entry = finalizationRecoveryRowToEntry(updated);
+    if (
+      entry.generation === fields.generation
+      && entry.verifiedEvidence
+      && VerifiedGraphScopedFinalizationEvidenceCodec.same(
+        entry.verifiedEvidence,
+        fields.verifiedEvidence,
+      )
+    ) return { status: 'verified', entry };
+    return { status: 'conflict' };
   }
 
   markReorged(key: string, generation: number, lastError: string): Promise<boolean> {
     if (this.#closed || this.#closing) return Promise.resolve(false);
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return false;
       let changed = false;
-      this.transaction(() => {
-        const now = this.#policy.now();
-        const result = this.database.prepare(`
+      const now = this.#policy.now();
+      const result = this.database.prepare(`
           UPDATE finalization_inbox_v1
           SET state = 'REORGED',
               block_number = NULL,
@@ -624,8 +612,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               updated_at = ?
           WHERE key = ? AND generation = ? AND state IN ('RECEIVED','VERIFIED','SETTLED')
         `).run(lastError, now, key, generation);
-        changed = result.changes > 0;
-      });
+      changed = result.changes > 0;
       return changed;
     });
   }
@@ -647,12 +634,11 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
 
   rejectSettled(key: string, generation: number, lastError: string): Promise<boolean> {
     if (this.#closed || this.#closing) return Promise.resolve(false);
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return false;
       let changed = false;
-      this.transaction(() => {
-        const now = this.#policy.now();
-        const result = this.database.prepare(`
+      const now = this.#policy.now();
+      const result = this.database.prepare(`
           UPDATE finalization_inbox_v1
           SET state = 'REJECTED',
               publisher_upgrade_pending = 0,
@@ -661,9 +647,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               updated_at = ?
           WHERE key = ? AND generation = ? AND state = 'SETTLED'
         `).run(lastError, now, key, generation);
-        changed = result.changes > 0;
-        this.pruneWithinTransaction(now);
-      });
+      changed = result.changes > 0;
+      this.pruneWithinTransaction(now);
       return changed;
     });
   }
@@ -733,12 +718,11 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     lastError?: string,
   ): Promise<boolean> {
     if (this.#closed || this.#closing) return Promise.resolve(false);
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return false;
       let changed = false;
-      this.transaction(() => {
-        const now = this.#policy.now();
-        const result = this.database.prepare(`
+      const now = this.#policy.now();
+      const result = this.database.prepare(`
           UPDATE finalization_inbox_v1
           SET state = ?,
               publisher_upgrade_pending = 0,
@@ -749,9 +733,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           WHERE key = ? AND generation = ?
             AND state IN ('RECEIVED','VERIFIED','REORGED')
         `).run(state, state, lastError ?? null, now, key, generation);
-        changed = result.changes > 0;
-        this.pruneWithinTransaction(now);
-      });
+      changed = result.changes > 0;
+      this.pruneWithinTransaction(now);
       return changed;
     });
   }
@@ -868,16 +851,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return this.#connection.mutate(operation);
   }
 
-  private transaction(operation: () => void): void {
-    this.#connection.transaction(operation);
-  }
 
-  private prune(): void {
-    const now = this.#policy.now();
-    this.transaction(() => {
-      this.pruneWithinTransaction(now);
-    });
-  }
 
   private pruneWithinTransaction(now: number): void {
     pruneFinalizationRecoveryRowsWithinTransaction(

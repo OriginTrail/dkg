@@ -112,16 +112,14 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
     if (this.#closed || this.#closing) {
       return Promise.reject(new Error('VM re-verify intent store is closed'));
     }
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) throw new Error('VM re-verify intent store is closed');
-      let outcome: VmReverifyIntentUpsertResult = 'unchanged';
-      this.transaction(() => {
-        const now = this.#now();
-        const existing = this.database
-          .prepare('SELECT * FROM vm_reverify_intents_v1 WHERE ual = ?')
-          .get(input.ual);
-        if (!existing) {
-          this.database.prepare(`
+      const now = this.#now();
+      const existing = this.database
+        .prepare('SELECT * FROM vm_reverify_intents_v1 WHERE ual = ?')
+        .get(input.ual);
+      if (!existing) {
+        this.database.prepare(`
             INSERT INTO vm_reverify_intents_v1 (
               ual, local_cg_id, ka_id, kind,
               observed_block, observed_block_hash, observed_tx_hash,
@@ -129,29 +127,28 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
               state, generation, attempt_count, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 0, ?, ?)
           `).run(
-            input.ual,
-            input.localCgId,
-            input.kaId,
-            input.kind,
-            input.position.blockNumber,
-            input.position.blockHash,
-            input.position.transactionHash,
-            input.position.transactionIndex,
-            input.position.logIndex,
-            now,
-            now,
-          );
-          outcome = 'inserted';
-          return;
-        }
-        const record = rowToRecord(existing);
-        if (!eventRedefinesIntent(input.position, record.observed, record.state)) return;
-        // A strictly-newer event redefines the work, so the ENTIRE retry budget
-        // resets — including `first_attempt_at`. Carrying the old timestamp
-        // forward would re-park a revived row against a 24 h window that
-        // started before this event existed, silently turning "any newer event
-        // revives ABANDONED rows" (ADR-W2R-4) into a no-op.
-        this.database.prepare(`
+          input.ual,
+          input.localCgId,
+          input.kaId,
+          input.kind,
+          input.position.blockNumber,
+          input.position.blockHash,
+          input.position.transactionHash,
+          input.position.transactionIndex,
+          input.position.logIndex,
+          now,
+          now,
+        );
+        return 'inserted';
+      }
+      const record = rowToRecord(existing);
+      if (!eventRedefinesIntent(input.position, record.observed, record.state)) return 'unchanged';
+      // A strictly-newer event redefines the work, so the ENTIRE retry budget
+      // resets — including `first_attempt_at`. Carrying the old timestamp
+      // forward would re-park a revived row against a 24 h window that
+      // started before this event existed, silently turning "any newer event
+      // revives ABANDONED rows" (ADR-W2R-4) into a no-op.
+      this.database.prepare(`
           UPDATE vm_reverify_intents_v1
           SET local_cg_id = ?,
               ka_id = ?,
@@ -171,20 +168,18 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
               updated_at = ?
           WHERE ual = ?
         `).run(
-          input.localCgId,
-          input.kaId,
-          input.kind,
-          input.position.blockNumber,
-          input.position.blockHash,
-          input.position.transactionHash,
-          input.position.transactionIndex,
-          input.position.logIndex,
-          now,
-          input.ual,
-        );
-        outcome = 'advanced';
-      });
-      return outcome;
+        input.localCgId,
+        input.kaId,
+        input.kind,
+        input.position.blockNumber,
+        input.position.blockHash,
+        input.position.transactionHash,
+        input.position.transactionIndex,
+        input.position.logIndex,
+        now,
+        input.ual,
+      );
+      return 'advanced';
     });
   }
 
@@ -249,14 +244,13 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
 
   reviveForContextGraph(localCgId: string): Promise<number> {
     if (this.#closed || this.#closing) return Promise.resolve(0);
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return 0;
       let revived = 0;
-      this.transaction(() => {
-        // Same total budget reset as `upsert`'s advance, for the same reason:
-        // re-hosting a CG is new evidence about reachability, so a row parked
-        // under the old evidence must start its 24 h window over.
-        revived = Number(this.database.prepare(`
+      // Same total budget reset as `upsert`'s advance, for the same reason:
+      // re-hosting a CG is new evidence about reachability, so a row parked
+      // under the old evidence must start its 24 h window over.
+      revived = Number(this.database.prepare(`
           UPDATE vm_reverify_intents_v1
           SET state = 'PENDING',
               abandon_reason = NULL,
@@ -268,7 +262,6 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
               updated_at = ?
           WHERE local_cg_id = ? AND state = 'ABANDONED'
         `).run(this.#now(), localCgId).changes);
-      });
       return revived;
     });
   }
@@ -309,14 +302,12 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
 
   gcAbandoned(olderThanMs: number): Promise<number> {
     if (this.#closed || this.#closing) return Promise.resolve(0);
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return 0;
       let removed = 0;
-      this.transaction(() => {
-        removed = Number(this.database.prepare(
-          "DELETE FROM vm_reverify_intents_v1 WHERE state = 'ABANDONED' AND updated_at <= ?",
-        ).run(this.#now() - Math.max(0, Math.trunc(olderThanMs))).changes);
-      });
+      removed = Number(this.database.prepare(
+        "DELETE FROM vm_reverify_intents_v1 WHERE state = 'ABANDONED' AND updated_at <= ?",
+      ).run(this.#now() - Math.max(0, Math.trunc(olderThanMs))).changes);
       return removed;
     });
   }
@@ -339,21 +330,14 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
 
   private casMutation(operation: () => boolean): Promise<boolean> {
     if (this.#closed || this.#closing) return Promise.resolve(false);
-    return this.mutate(() => {
+    return this.#connection.mutateTransaction(() => {
       if (this.#closed) return false;
       let changed = false;
-      this.transaction(() => { changed = operation(); });
+      changed = operation();
       return changed;
     });
   }
 
-  private mutate<T>(operation: () => T): Promise<T> {
-    return this.#connection.mutate(operation);
-  }
-
-  private transaction(operation: () => void): void {
-    this.#connection.transaction(operation);
-  }
 }
 
 export async function openSqliteVmReverifyIntentStore(
