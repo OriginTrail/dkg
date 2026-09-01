@@ -12,8 +12,10 @@ import { assertCanonicalDigest, type Digest32V1 } from './sync-wire-scalars.js';
 
 export interface FinalizedEventPositionV1 {
   blockNumber: number;
-  blockHash: string;
-  transactionHash: string;
+  /** Branded (review r18): only the validator can mint these, so a validated
+   *  position is distinguishable from an arbitrary object literal. */
+  blockHash: Digest32V1;
+  transactionHash: Digest32V1;
   transactionIndex: number;
   logIndex: number;
 }
@@ -86,3 +88,18 @@ export function sameEventIdentity(a: FinalizedEventPositionV1, b: FinalizedEvent
     a.transactionHash === b.transactionHash
   );
 }
+
+// Type-level proof (review r18; kept in SRC because package test directories
+// are not typechecked): a plain string cannot populate a validated position's
+// digest fields — only the validator (or core's canonical producers) mint the
+// brand.
+const _plainStringsCannotForgePositions: FinalizedEventPositionV1 = {
+  blockNumber: 1,
+  // @ts-expect-error -- a plain string is not Digest32V1
+  blockHash: 'not-a-digest',
+  // @ts-expect-error -- a plain string is not Digest32V1
+  transactionHash: 'also-not-a-digest',
+  transactionIndex: 0,
+  logIndex: 0,
+};
+void _plainStringsCannotForgePositions;

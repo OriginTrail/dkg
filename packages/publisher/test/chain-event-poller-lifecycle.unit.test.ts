@@ -71,13 +71,17 @@ describe('ChainEventPoller — lifecycle', () => {
     expect(scansStarted).toBe(1);
   });
 
-  it('start-stop-start restarts a working poller (review r10)', async () => {
+  it('start-stop-start restarts a working poller through the PUBLIC lifecycle (reviews r10/r18)', async () => {
+    // The restarted start()'s OWN startup poll must produce the scan — no
+    // private seam (review r18): a regression that returned from start()
+    // without re-arming would otherwise stay green behind forceScan.
+    let now = 0;
     const { adapter, filters, setHead } = makeChain(50_000);
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
-      intervalMs: 60_000,
-      clock: () => 0,
+      intervalMs: CADENCE_MS, // the lane's cadence tracks intervalMs
+      clock: () => now,
       onKnowledgeAssetRootMutated: async () => { /* sink */ },
     });
     await poller.start();
@@ -85,12 +89,13 @@ describe('ChainEventPoller — lifecycle', () => {
     await poller.stop();
     const scansAfterStop = filters.length;
 
+    setHead(50_010);
+    now += CADENCE_MS;          // the lane is DUE again: the restarted
+                                // startup poll itself must take the window
     await poller.start();
     await poller.waitForCurrentPoll();
-    setHead(50_010);
-    await forceScan(poller);
+    expect(filters.length).toBe(scansAfterStop + 1);
     const last = filters[filters.length - 1];
-    expect(filters.length).toBeGreaterThan(scansAfterStop);
     expect(last.fromBlock).toBe(50_001);
     expect(last.toBlock).toBe(50_010);
     await poller.stop();
@@ -100,11 +105,13 @@ describe('ChainEventPoller — lifecycle', () => {
     let active = 0;
     let maxActive = 0;
     let scans = 0;
+    let now = 0;
+    let head = 50_000;
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const adapter = {
       chainId: 'mock:0',
-      getBlockNumber: async () => 50_000,
+      getBlockNumber: async () => head,
       listenForEvents: async function* (): AsyncIterable<ChainEvent> {
         active += 1;
         maxActive = Math.max(maxActive, active);
@@ -117,24 +124,31 @@ describe('ChainEventPoller — lifecycle', () => {
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
-      intervalMs: 60_000,
-      clock: () => 0,
+      intervalMs: CADENCE_MS,
+      clock: () => now,
       onKnowledgeAssetRootMutated: async () => { /* sink */ },
     });
 
     await poller.start();                  // startup scan gated
     await new Promise((r) => setTimeout(r, 10));
+    head = 50_010;                         // fresh work for the restart…
+    now += CADENCE_MS;                     // …and the lane is due again
     const stopped = poller.stop();         // begins draining the gated scan
     const restarted = poller.start();      // must WAIT for the drain
     await new Promise((r) => setTimeout(r, 10));
+    // Nothing may have advanced while the drain held the gate: the restarted
+    // startup poll comes AFTER release, through the public lifecycle only.
+    expect(scans).toBe(1);
     release();
-    await Promise.allSettled([stopped, restarted]);
+    await Promise.all([stopped, restarted]); // both must FULFILL (review r18)
     await poller.waitForCurrentPoll();
 
     // Never two scans in flight: a start() that jumped the drain would have
-    // launched its own startup poll while the first was still gated.
+    // launched its own startup poll while the first was still gated — and the
+    // restart is REAL because the second scan came from the restarted
+    // start()'s own startup poll, not a private seam.
     expect(maxActive).toBe(1);
-    await expect(forceScan(poller)).resolves.toBeUndefined();
+    expect(scans).toBe(2);
     await poller.stop();
   });
 });

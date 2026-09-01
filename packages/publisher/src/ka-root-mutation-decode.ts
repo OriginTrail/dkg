@@ -22,6 +22,7 @@ import {
   type KnowledgeAssetRootMutationKindV1,
 } from '@origintrail-official/dkg-core';
 import type { ChainEvent, KnowledgeAssetRootMutationEventType } from '@origintrail-official/dkg-chain';
+import type { Digest32V1, EvmAddressV1, KaIdV1 } from '@origintrail-official/dkg-core';
 
 /**
  * One on-chain mutation of a Knowledge Asset's committed Merkle-root set.
@@ -39,7 +40,7 @@ import type { ChainEvent, KnowledgeAssetRootMutationEventType } from '@origintra
  */
 interface KnowledgeAssetRootMutationBaseV1 {
   /** On-chain KA id, canonical unsigned decimal (never hex, never `bigint`). */
-  kaId: string;
+  kaId: KaIdV1;
   /** Chain position, for ordering and de-duplication. */
   position: FinalizedEventPositionV1;
 }
@@ -52,7 +53,7 @@ export interface KnowledgeAssetLifecycleUpdateEventV1 extends KnowledgeAssetRoot
    * best-effort enrichment off `parseLog` — `kaId`/`position` come from the
    * indexed topics and survive a payload that fails to decode.
    */
-  merkleRoot?: string;
+  merkleRoot?: Digest32V1;
   /**
    * EIP-712-attested author; `null` for the unattributed publish path (the
    * chain legally emits the zero address there). Optional for the same
@@ -64,7 +65,7 @@ export interface KnowledgeAssetLifecycleUpdateEventV1 extends KnowledgeAssetRoot
 /** `pushMerkleRoot` — append-only admin push. Carries no author field on chain. */
 export interface KnowledgeAssetRootAddedEventV1 extends KnowledgeAssetRootMutationBaseV1 {
   kind: 'root-added';
-  merkleRoot?: string;
+  merkleRoot?: Digest32V1;
 }
 
 /**
@@ -81,7 +82,7 @@ export interface KnowledgeAssetRootsReplacedEventV1 extends KnowledgeAssetRootMu
 export interface KnowledgeAssetRootRemovedEventV1 extends KnowledgeAssetRootMutationBaseV1 {
   kind: 'root-removed';
   /** The REMOVED root (best-effort decode), not a new latest root. */
-  merkleRoot?: string;
+  merkleRoot?: Digest32V1;
 }
 
 /**
@@ -159,7 +160,7 @@ export type KnowledgeAssetRootMutationDecodeResult =
  * decide delivery. `parseLog` returns checksummed addresses while core's
  * canonical form is lowercase, so the lowercasing here is load-bearing.
  */
-function degradeAuthor(value: unknown): string | null | undefined {
+function degradeAuthor(value: unknown): EvmAddressV1 | null | undefined {
   if (typeof value !== 'string') return undefined;
   try {
     return canonicalNullableAuthorAddress(value.toLowerCase());
@@ -169,7 +170,7 @@ function degradeAuthor(value: unknown): string | null | undefined {
 }
 
 /** A lowercase canonical 32-byte digest, or `undefined` for best-effort fields. */
-function degradeDigest(value: unknown): string | undefined {
+function degradeDigest(value: unknown): Digest32V1 | undefined {
   if (typeof value !== 'string') return undefined;
   try {
     return canonicalDigest32(value.toLowerCase());
@@ -192,11 +193,13 @@ export function decodeKnowledgeAssetRootMutationEvent(
 
   const { data } = event;
 
-  let kaId: string;
+  let kaId: KaIdV1;
   try {
     // Core's canonical unsigned decimal: rejects leading zeros, signs,
-    // non-digits and anything above u256 — the payload contract's exact words.
-    kaId = canonicalUnsignedDecimal(data['kaId'], 'kaId').toString();
+    // non-digits and anything above u256 — the payload contract's exact
+    // words. Canonical BY CONSTRUCTION (BigInt#toString has no leading-zero
+    // or sign alias for a validated u256), which is what licenses the brand.
+    kaId = canonicalUnsignedDecimal(data['kaId'], 'kaId').toString() as KaIdV1;
   } catch {
     return { ok: false, reason: 'noncanonical-ka-id' };
   }
