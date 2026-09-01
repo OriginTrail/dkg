@@ -19,7 +19,7 @@ test('locally built semantic-runtime artifacts have pinned hashes, ABI, and boun
   assert.equal(manifest.abiVersion, 1);
   assert.deepEqual(manifest.memory, { initialPages: 256, maximumPages: 4096 });
   assert.deepEqual(manifest.component.exports, [
-    'origintrail:semantic-runtime/runtime@0.1.0',
+    'origintrail:semantic-runtime/executor@0.1.0',
   ]);
   assert.equal(manifest.component.wasiVersion, '0.3.0');
   assert.equal(manifest.component.targetCarrier, 'wasm32-wasip2');
