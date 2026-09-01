@@ -1479,6 +1479,28 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       .toBe(walletB.address.toLowerCase());
   });
 
+  it('treats generic adapter address inference as advisory for CG registration', async () => {
+    const walletA = new ethers.Wallet(TEST_KEY);
+    const chain = new MockChainAdapter();
+    const prepare = vi.spyOn(chain, 'prepareOnChainContextGraphRegistration');
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async () => walletA.address,
+      publisherAddressResolverPinsRegistration: false,
+    });
+
+    await publisher.prepareContextGraphRegistration();
+
+    expect(prepare).toHaveBeenCalledWith({
+      registrationPcaAccountId: undefined,
+      registrationSignerAddress: undefined,
+      preferPcaCoveredSigner: true,
+    });
+  });
+
   it('invokes adapter-owned planning before signer discovery and binds the planned address', async () => {
     const wallet = new ethers.Wallet(TEST_KEY_ALT);
     const chain = new PlanOnlySigningChain(wallet);

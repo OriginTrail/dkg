@@ -102,6 +102,7 @@ function configureSubmission(
     if (method === 'contextGraphRegistrationDeposit') return 100n;
     throw new Error(`unexpected read ${method}`);
   };
+  adapter.isCurrentHubContractAddress = async () => true;
   return contextGraphs;
 }
 
@@ -309,19 +310,25 @@ describe('facade capability and allowance/stale-Hub behavior', () => {
     expect(send.calls[0][2]).toHaveLength(7);
   });
 
-  it('rejects explicit decoupled coverage on a confirmed old facade before any transaction', async () => {
-    const adapter = makeAdapter();
-    configureSubmission(adapter, '10.0.4');
-    const send = recorder(async (..._args: unknown[]) => successfulReceipt());
-    adapter.sendContractTransaction = send;
-    const prepared = await adapter.prepareOnChainContextGraphRegistration({ registrationPcaAccountId: 5n });
+  it('rejects explicit decoupled coverage on old or floor-prerelease facades before any transaction', async () => {
+    for (const version of ['10.0.4', '10.0.5-rc.1']) {
+      const adapter = makeAdapter();
+      configureSubmission(adapter, version);
+      const send = recorder(async (..._args: unknown[]) => successfulReceipt());
+      adapter.sendContractTransaction = send;
+      const prepared = await adapter.prepareOnChainContextGraphRegistration({ registrationPcaAccountId: 5n });
 
-    await expect(prepared.submit(CREATE_PARAMS)).rejects.toBeInstanceOf(PcaCoverageUnsupportedError);
-    expect(send.calls).toEqual([]);
+      await expect(prepared.submit(CREATE_PARAMS)).rejects.toBeInstanceOf(PcaCoverageUnsupportedError);
+      expect(send.calls).toEqual([]);
+    }
   });
 
   it('treats malformed and unreadable facade versions as retryable unknown, with no transaction', async () => {
-    for (const version of ['release-candidate', new Error('RPC unavailable')]) {
+    for (const version of [
+      'release-candidate',
+      '999999999999999999999999.0.0',
+      new Error('RPC unavailable'),
+    ]) {
       const adapter = makeAdapter();
       configureSubmission(adapter, version);
       const send = recorder(async (..._args: unknown[]) => successfulReceipt());
@@ -381,6 +388,48 @@ describe('facade capability and allowance/stale-Hub behavior', () => {
     expect(approve.calls[0][0]).toBe(walletB);
     expect(approve.calls[0][1]).toBe(await contextGraphs.getAddress());
     expect(approve.calls[0][4]).toBe(true);
+  });
+
+  it('refreshes a retired old facade before rejecting explicit coverage as unsupported', async () => {
+    const adapter = makeAdapter();
+    const oldFacade = { getAddress: async () => OLD_FACADE };
+    const newFacade = { getAddress: async () => NEW_FACADE };
+    const storage = storageDouble();
+    adapter.contracts = {
+      contextGraphs: oldFacade,
+      contextGraphStorage: storage,
+      parametersStorage: { kind: 'parameters' },
+    };
+    adapter.readContract = async (
+      contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (method === 'version') return contract === oldFacade ? '10.0.4' : '10.0.5';
+      throw new Error(`unexpected read ${method}`);
+    };
+    adapter.isCurrentHubContractAddress = async (
+      _name: string,
+      boundAddress: string,
+    ) => boundAddress === NEW_FACADE;
+    adapter.invalidateAllBoundContracts = () => {
+      adapter.contracts = {
+        contextGraphs: newFacade,
+        contextGraphStorage: storage,
+        parametersStorage: { kind: 'parameters' },
+      };
+    };
+    const send = recorder(async (..._args: unknown[]) => successfulReceipt());
+    adapter.sendContractTransaction = send;
+    const prepared = await adapter.prepareOnChainContextGraphRegistration({
+      registrationPcaAccountId: 5n,
+    });
+
+    await prepared.submit(CREATE_PARAMS);
+
+    expect(send.calls).toHaveLength(1);
+    expect(send.calls[0][0]).toBe(newFacade);
+    expect(send.calls[0][1]).toBe('createContextGraphWithPcaCoverage');
   });
 
   it('re-resolves facade/version/spender after stale Hub while retaining signer and coverage', async () => {

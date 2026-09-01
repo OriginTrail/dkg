@@ -18,6 +18,9 @@ import type {
   KAUpdateVerification,
   CreateOnChainContextGraphParams,
   CreateOnChainContextGraphResult,
+  PrepareContextGraphRegistrationOptions,
+  PreparedContextGraphRegistration,
+  PreparedCreateOnChainContextGraphParams,
   VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
@@ -1213,6 +1216,59 @@ export class MockChainAdapter implements ChainAdapter {
     nameHash?: string | null;
   }>();
   private nextContextGraphId = 1n;
+
+  async getSignerAddress(): Promise<string> {
+    return ethers.getAddress(this.signerAddress);
+  }
+
+  async prepareOnChainContextGraphRegistration(
+    options: PrepareContextGraphRegistrationOptions = {},
+  ): Promise<PreparedContextGraphRegistration> {
+    let signerAddress: string;
+    try {
+      signerAddress = ethers.getAddress(await this.getSignerAddress());
+    } catch {
+      const signerList = (this as unknown as {
+        getSignerAddresses?: () => Promise<string[]>;
+      }).getSignerAddresses;
+      const candidates = typeof signerList === 'function'
+        ? await signerList.call(this)
+        : [];
+      const candidate = candidates.find((address) =>
+        ethers.isAddress(address) && ethers.getAddress(address) !== ethers.ZeroAddress);
+      if (!candidate) {
+        throw new Error('Mock adapter does not expose its registration-tx signer');
+      }
+      signerAddress = ethers.getAddress(candidate);
+    }
+    if (
+      options.registrationSignerAddress !== undefined
+      && ethers.getAddress(options.registrationSignerAddress) !== signerAddress
+    ) {
+      throw new Error(
+        `Mock: registration signer ${options.registrationSignerAddress} is unavailable`,
+      );
+    }
+
+    const coverage = Object.freeze(options.registrationPcaAccountId !== undefined
+      ? { source: 'explicit' as const, accountId: options.registrationPcaAccountId }
+      : { source: 'none' as const });
+    const submit = async (
+      params: PreparedCreateOnChainContextGraphParams,
+    ): Promise<CreateOnChainContextGraphResult> => {
+      const runtimeParams = params as CreateOnChainContextGraphParams;
+      if (
+        Object.prototype.hasOwnProperty.call(runtimeParams, 'registrationPcaAccountId')
+        || Object.prototype.hasOwnProperty.call(runtimeParams, 'registrationSignerAddress')
+      ) {
+        throw new Error(
+          'Prepared context-graph registration does not accept signer or PCA coverage overrides.',
+        );
+      }
+      return this.createOnChainContextGraph(params);
+    };
+    return Object.freeze({ signerAddress, coverage, submit });
+  }
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     if (params.accessPolicy === undefined || params.publishPolicy === undefined) {

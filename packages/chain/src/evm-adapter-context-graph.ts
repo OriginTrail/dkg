@@ -84,7 +84,17 @@ class CoverageReadLimiter {
   async run<T>(read: () => Promise<T>): Promise<T> {
     await this.acquire();
     try {
-      return await withCoverageDeadline(Promise.resolve().then(read), this.deadline);
+      // A queued waiter can be handed a semaphore slot at the deadline. Do not
+      // start a fresh RPC after the budget has expired; only the at-most-four
+      // reads already in flight may outlive their local timeout.
+      if (this.expired()) throw new CoverageDiscoveryDeadlineError();
+      return await withCoverageDeadline(
+        Promise.resolve().then(() => {
+          if (this.expired()) throw new CoverageDiscoveryDeadlineError();
+          return read();
+        }),
+        this.deadline,
+      );
     } finally {
       this.release();
     }
@@ -121,17 +131,22 @@ class CoverageReadLimiter {
 
 function parsedFacadeVersion(version: unknown): FacadeCapability | undefined {
   if (typeof version !== 'string') return undefined;
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(version.trim());
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/.exec(
+    version.trim(),
+  );
   if (!match) return undefined;
   const actual = match.slice(1, 4).map(Number);
-  const supported = actual.some((part, index) =>
-    part > MINIMUM_PCA_WAIVER_FACADE_VERSION[index]
-      && actual.slice(0, index).every(
-        (previous, previousIndex) => previous === MINIMUM_PCA_WAIVER_FACADE_VERSION[previousIndex],
-      ),
-  ) || actual.every(
-    (part, index) => part === MINIMUM_PCA_WAIVER_FACADE_VERSION[index],
-  );
+  if (!actual.every(Number.isSafeInteger)) return undefined;
+  let comparison = 0;
+  for (let index = 0; index < actual.length; index += 1) {
+    if (actual[index] === MINIMUM_PCA_WAIVER_FACADE_VERSION[index]) continue;
+    comparison = actual[index] > MINIMUM_PCA_WAIVER_FACADE_VERSION[index] ? 1 : -1;
+    break;
+  }
+  // The floor is a stable release: 10.0.5-rc.x remains below it, while a
+  // prerelease of a later numeric version still necessarily contains the
+  // selector introduced in 10.0.5.
+  const supported = comparison > 0 || (comparison === 0 && match[4] === undefined);
   return { state: supported ? 'supported' : 'unsupported', version: version.trim() };
 }
 
@@ -891,6 +906,25 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           accountId: registrationAccountId,
         });
       } else if (coverage.source === 'explicit') {
+        let currentBinding: boolean;
+        try {
+          currentBinding = await this.isCurrentHubContractAddress(
+            'ContextGraphs',
+            await contextGraphs.getAddress(),
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : '';
+          if (HUB_STALE_ERROR_MARKERS.some((marker) => message.includes(marker))) throw err;
+          throw new ContextGraphFacadeVersionUnknownError({ cause: err });
+        }
+        if (!currentBinding) {
+          // Feed the ordinary stale-Hub recovery path. Unlike a retired facade
+          // write, an early capability rejection would otherwise never expose
+          // the canonical Hub authorization marker.
+          throw new Error(
+            'UnauthorizedAccess(Only Contracts in Hub): stale ContextGraphs facade capability binding',
+          );
+        }
         throw new PcaCoverageUnsupportedError(facade.version);
       }
       // Automatic coverage on a confirmed old facade deliberately falls back

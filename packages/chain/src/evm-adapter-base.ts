@@ -2803,6 +2803,16 @@ export class EVMChainAdapterBase {
     return address;
   }
 
+  /**
+   * Uncached coherence check for a capability decision made before a write.
+   * Most stale bindings self-heal when the retired contract reverts, but a
+   * local "unsupported" decision has no write to expose that marker.
+   */
+  protected async isCurrentHubContractAddress(name: string, boundAddress: string): Promise<boolean> {
+    const currentAddress = await this.readHubContractAddress(name);
+    return ethers.getAddress(currentAddress) === ethers.getAddress(boundAddress);
+  }
+
   protected async resolveAssetStorage(name: string, abiName?: string): Promise<Contract> {
     let address: string;
     try {

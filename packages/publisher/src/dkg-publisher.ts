@@ -451,6 +451,13 @@ export interface DKGPublisherConfig {
   publisherAddress?: string;
   /** Retryable publisher address resolver for adapter-backed signing. */
   publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
+  /**
+   * Whether resolver output is a hard signer pin for CG registration. Defaults
+   * to true for custom resolvers. The agent's generic adapter-inference
+   * resolver sets this false so an unplanned sync publish can choose a
+   * PCA-covered signer from the adapter pool.
+   */
+  publisherAddressResolverPinsRegistration?: boolean;
   /** EVM private key for signing publish requests (hex string with 0x prefix) */
   publisherPrivateKey?: string;
   /**
@@ -1147,6 +1154,7 @@ export class DKGPublisher implements Publisher {
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress?: string;
   private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
+  private readonly publisherAddressResolverPinsRegistration: boolean;
   private readonly publisherWallet?: ethers.Wallet;
   private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
@@ -1176,6 +1184,8 @@ export class DKGPublisher implements Publisher {
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
     this.publisherAddressResolver = config.publisherAddressResolver;
+    this.publisherAddressResolverPinsRegistration =
+      config.publisherAddressResolverPinsRegistration !== false;
 
     const configuredPublisherAddress = normalizePublisherAddress(config.publisherAddress);
     if (config.publisherPrivateKey) {
@@ -1493,8 +1503,12 @@ export class DKGPublisher implements Publisher {
         `prepareContextGraphRegistration: invalid registration signer address ${options.registrationSignerAddress}.`,
       );
     }
+    const resolverPinIsAdvisory =
+      selection.planningPinLabel === 'publisherAddressResolver'
+      && !this.publisherAddressResolverPinsRegistration;
     if (
-      selection.planningPin
+      !resolverPinIsAdvisory
+      && selection.planningPin
       && requestedPin
       && selection.planningPin.toLowerCase() !== requestedPin.toLowerCase()
     ) {
@@ -1504,7 +1518,9 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    const registrationSignerAddress = selection.planningPin ?? requestedPin;
+    const registrationSignerAddress = resolverPinIsAdvisory
+      ? requestedPin
+      : selection.planningPin ?? requestedPin;
     return prepare.call(this.chain, {
       registrationPcaAccountId: options.registrationPcaAccountId,
       registrationSignerAddress,
