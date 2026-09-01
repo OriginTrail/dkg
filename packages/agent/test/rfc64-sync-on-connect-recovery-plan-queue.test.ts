@@ -16,36 +16,43 @@ const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const PEER_B = '12D3KooWRfc64SecondCompleteProvider';
 
 describe('RFC-64 recovery-plan queue authorization', () => {
-  it('bypasses the exact cooldown after graph-wide selection invalidation', async () => {
+  it('queues a widened plan when a newly selected graph had no admission owner', async () => {
     const agent = await createUnstartedAgent('Rfc64SelectionInvalidatesExactCooldown');
     allowAllNetworkAdmission(agent);
     agent.started = true;
     const authorized = {
       kind: 'rfc64-authorized-swm-recovery-v1' as const,
       providerPeerId: PEER_A,
-      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+      targets: [
+        { contextGraphId: 'existing-cg', lane: 'selected-public' as const },
+        { contextGraphId: 'new-selected-cg', lane: 'selected-public' as const },
+      ],
     };
     const selectedRun = vi.fn(async () => undefined);
     installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
-    agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
-    agent.selectedSwmBootstrapAdmission.request(PEER_B, ['selected-cg', 'other-cg']);
+    agent.selectedSwmBootstrapAdmission.request(PEER_A, ['existing-cg']);
     agent.rfc64ExactCatchupOnConnectAt.set(PEER_A, Date.now());
-    agent.rfc64ExactCatchupOnConnectAt.set(PEER_B, Date.now());
+    vi.spyOn(agent, 'resolveRfc64CompleteSwmProviderPeerIdsV1')
+      .mockImplementation((contextGraphId) => (
+        contextGraphId === 'new-selected-cg' ? [PEER_A] : []
+      ));
 
     expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       vi.fn(),
       0,
     )).toBe(false);
-    expect(agent.invalidateRfc64SwmRecoverySelectionStateV1('selected-cg'))
-      .toEqual([PEER_A, PEER_B]);
+    expect(agent.invalidateRfc64SwmRecoverySelectionStateV1('new-selected-cg'))
+      .toEqual([PEER_A]);
     expect(agent.rfc64ExactCatchupOnConnectAt.has(PEER_A)).toBe(false);
-    expect(agent.rfc64ExactCatchupOnConnectAt.has(PEER_B)).toBe(false);
-    expect(agent.selectedSwmBootstrapAdmission.snapshot(PEER_B)).toEqual({
-      contextGraphIds: ['other-cg'],
+    expect(agent.selectedSwmBootstrapAdmission.snapshot(PEER_A)).toEqual({
+      contextGraphIds: ['existing-cg'],
       phase: 'retry-required',
     });
-    agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    agent.selectedSwmBootstrapAdmission.request(
+      PEER_A,
+      ['existing-cg', 'new-selected-cg'],
+    );
 
     expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
@@ -53,6 +60,50 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       0,
     )).toBe(true);
     await vi.waitFor(() => expect(selectedRun).toHaveBeenCalledWith(PEER_A, authorized));
+  });
+
+  it('reports a catalog recovery plan that is not authorized', async () => {
+    const agent = await createUnstartedAgent('Rfc64CatalogPlanNotAuthorized');
+    const activePlan = {
+      kind: 'rfc64-active-swm-recovery-plan-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const authorizeForCatalogPass = vi.fn(() => null);
+    const queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect');
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
+      authorizeForCatalogPass,
+    });
+
+    expect(agent.queueRfc64CatalogRecoveryPlanV1(activePlan, vi.fn(), 0))
+      .toEqual({ kind: 'not-authorized' });
+    expect(authorizeForCatalogPass).toHaveBeenCalledOnce();
+    expect(queue).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [true, 'queued'],
+    [false, 'rejected'],
+  ] as const)('reports catalog queue acceptance=%s as %s', async (accepted, kind) => {
+    const agent = await createUnstartedAgent(`Rfc64CatalogPlan-${kind}`);
+    const activePlan = {
+      kind: 'rfc64-active-swm-recovery-plan-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const authorizedPlan = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: activePlan.targets,
+    };
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
+      authorizeForCatalogPass: vi.fn(() => authorizedPlan),
+    });
+    vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(accepted);
+
+    expect(agent.queueRfc64CatalogRecoveryPlanV1(activePlan, vi.fn(), 0))
+      .toEqual({ kind });
   });
 
   it('rejects a network-denied provider at the authorized queue boundary', async () => {

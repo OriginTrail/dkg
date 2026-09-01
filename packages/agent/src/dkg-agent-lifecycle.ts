@@ -4643,12 +4643,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const configuredProviderPeerIds = [
       ...new Set(this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)),
     ];
-    const providerPeerIds = configuredProviderPeerIds.filter((providerPeerId) => (
-      this.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId).targets.some(
-        (target) => target.contextGraphId === contextGraphId
-          && target.lane === 'selected-public',
-      )
-    ));
+    const providerPeerIds = selected ? configuredProviderPeerIds : [];
     const summary = this.selectedSwmBootstrapAdmission.summarizeContextGraph(
       contextGraphId,
       providerPeerIds,
@@ -9500,13 +9495,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const wasReceiverActive = eligible && (manifestWide || previousSubscribed);
     const isReceiverActive = eligible && (manifestWide || nextSubscribed);
     const receiverSelectionChanged = wasReceiverActive !== isReceiverActive;
-    const recoverySelectionChanged = (
-      this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId, {
-        subscribed: previousSubscribed,
-      }).active
-      !== this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId, {
-        subscribed: nextSubscribed,
-      }).active
+    const recoverySelectionChanged = this.rfc64SwmRecoverySelectionChangedV1(
+      contextGraphId,
+      { previousSubscribed, nextSubscribed },
     );
     if (!receiverSelectionChanged && !recoverySelectionChanged) return;
     if (receiverSelectionChanged && !isReceiverActive) {

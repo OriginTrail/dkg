@@ -467,6 +467,8 @@ describe('RFC-64 rollout authority integration', () => {
       createOperationContext('sync'),
       { requireCompleteProviderMatch: true },
     )).resolves.toEqual({ targets: [] });
+    vi.spyOn(catalog, 'resolveRfc64CompleteSwmProviderPeerIdsV1')
+      .mockReturnValue([providerPeerId, providerPeerId]);
     expect(catalog.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId)).toEqual({
       kind: 'rfc64-active-swm-recovery-plan-v1',
       providerPeerId,

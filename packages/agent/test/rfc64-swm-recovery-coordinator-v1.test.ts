@@ -276,6 +276,23 @@ describe('RFC-64 SWM recovery authorization', () => {
     );
   });
 
+  it('rejects a plan whose live recovery authority is revoked before execution', () => {
+    let activePlan = mixedPlan();
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      activeRecoveryPlan: () => activePlan,
+    }));
+    const authorized = coordinator.authorizeForCatalogPass(mixedPlan(), 10_000);
+    expect(authorized).not.toBeNull();
+    activePlan = {
+      ...activePlan,
+      targets: activePlan.targets.filter(({ contextGraphId }) => contextGraphId !== PRIVATE),
+    };
+
+    expect(() => coordinator.revalidate(authorized!)).toThrow(
+      'RFC-64 SWM recovery plan is not authorized by current configuration',
+    );
+  });
+
   it('rejects forged authorized plans at the execution boundary', () => {
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies());
     const forgedPlans: readonly Rfc64AuthorizedSwmRecoveryPlanV1[] = [
