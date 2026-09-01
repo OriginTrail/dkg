@@ -639,6 +639,20 @@ describe('ApiClient', () => {
       });
     });
 
+    it('registerContextGraph() accepts safe-number and decimal-string PCA inputs', async () => {
+      globalThis.fetch = mockFetchOk({ registered: 'research', onChainId: '42' });
+      await client.registerContextGraph('research', {
+        pcaAccountId: 8,
+        registrationPcaAccountId: '17',
+      });
+
+      const [, opts] = (globalThis.fetch as any)._calls[0];
+      expect(JSON.parse(opts.body)).toMatchObject({
+        pcaAccountId: '8',
+        registrationPcaAccountId: '17',
+      });
+    });
+
     it.each([
       ['pcaAccountId', { pcaAccountId: Number.MAX_SAFE_INTEGER + 1 }],
       ['registrationPcaAccountId', { registrationPcaAccountId: Number.MAX_SAFE_INTEGER + 1 }],
@@ -649,7 +663,22 @@ describe('ApiClient', () => {
         globalThis.fetch = fetch;
 
         await expect(client.registerContextGraph('research', options))
-          .rejects.toThrow(`${field} must be a positive safe integer`);
+          .rejects.toThrow(`${field} must be a positive integer within uint256 range.`);
+        expect(fetch._calls).toHaveLength(0);
+      },
+    );
+
+    it.each([
+      ['pcaAccountId', { pcaAccountId: (1n << 256n).toString() }],
+      ['registrationPcaAccountId', { registrationPcaAccountId: 1n << 256n }],
+    ] as const)(
+      'registerContextGraph() rejects an out-of-range %s before fetch',
+      async (field, options) => {
+        const fetch = mockFetchOk({ registered: 'research', onChainId: '42' });
+        globalThis.fetch = fetch;
+
+        await expect(client.registerContextGraph('research', options))
+          .rejects.toThrow(`${field} must be a positive integer within uint256 range.`);
         expect(fetch._calls).toHaveLength(0);
       },
     );

@@ -55,7 +55,7 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, isPcaUnavailableError, MockChainAdapter, normalizePositiveUint256 } from '@origintrail-official/dkg-chain';
 import {
   ContextGraphAssetFetchConflictError,
   ContextGraphAssetFetchValidationError,
@@ -63,7 +63,6 @@ import {
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
   loadOpWallets,
-  parsePositiveUint256,
   type ContextGraphSyncMode,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
@@ -418,7 +417,7 @@ function parseOptionalPcaAccountId(
   const raw = body[field];
   if (raw === undefined || raw === null || raw === '') return {};
   try {
-    return { value: parsePositiveUint256(raw, field) };
+    return { value: normalizePositiveUint256(raw, field) };
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }

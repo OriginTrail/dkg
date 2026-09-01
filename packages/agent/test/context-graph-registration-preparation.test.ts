@@ -164,6 +164,41 @@ describe('context-graph registration preparation boundary', () => {
     expect(chain.submitCalls[0]).not.toHaveProperty('publishAuthorityAccountId');
   });
 
+  it('normalizes public registration PCA inputs once before chain preparation', async () => {
+    const primarySigner = ethers.Wallet.createRandom();
+    const coveredSigner = ethers.Wallet.createRandom();
+    const chain = new AdvisoryInferredPreparationAdapter(
+      primarySigner.address,
+      coveredSigner.address,
+    );
+    const agent = await createAgent('RegistrationPcaInputBoundary', chain);
+
+    await agent.createContextGraph({
+      id: 'registration-pca-input-boundary',
+      name: 'Registration PCA input boundary',
+      callerAgentAddress: primarySigner.address,
+    });
+
+    await expect(agent.registerContextGraph('registration-pca-input-boundary', {
+      callerAgentAddress: primarySigner.address,
+      registrationPcaAccountId: '23',
+    })).resolves.toMatchObject({ onChainId: '1' });
+    expect(chain.prepareCalls[0]?.registrationPcaAccountId).toBe(23n);
+
+    await agent.createContextGraph({
+      id: 'registration-pca-out-of-range',
+      name: 'Registration PCA out of range',
+      callerAgentAddress: primarySigner.address,
+    });
+    await expect(agent.registerContextGraph('registration-pca-out-of-range', {
+      callerAgentAddress: primarySigner.address,
+      registrationPcaAccountId: (1n << 256n).toString(),
+    })).rejects.toThrow(
+      'Registration PCA account id must be a positive integer within uint256 range.',
+    );
+    expect(chain.prepareCalls).toHaveLength(1);
+  });
+
   it('preserves ordinary direct registration for a custom adapter without optional preparation', async () => {
     const signer = ethers.Wallet.createRandom();
     const chain = new LegacyDirectContextGraphAdapter(signer.address);

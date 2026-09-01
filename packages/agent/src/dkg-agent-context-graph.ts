@@ -94,7 +94,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, normalizePositiveUint256, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type PositiveUint256Input, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   ContextGraphRegistrationPreparationUnsupportedError,
   PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -255,7 +255,6 @@ import {
   strip, stripLiteral, jsonLdToQuads,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
-import { parsePositiveUint256 } from './positive-uint256.js';
 import {
   PRIVATE_DATA_ANCHOR,
   SYNC_PAGE_SIZE,
@@ -460,7 +459,7 @@ export class ContextGraphMethods extends DKGAgentBase {
      * the same deferred-registration reason — without persistence,
      * auto-register would silently drop PCA-curated configs.
      */
-    publishAuthorityAccountId?: bigint | string | number;
+    publishAuthorityAccountId?: PositiveUint256Input;
     /** When true, skips gossip subscription and broadcast. Data stays local-only. */
     private?: boolean;
     /** Caller's agent address (resolved from token). Used for curator/creator triples. */
@@ -524,7 +523,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
     let normalisedPublishAuthorityAccountId: bigint | undefined;
     if (opts.publishAuthorityAccountId !== undefined) {
-      normalisedPublishAuthorityAccountId = parsePositiveUint256(
+      normalisedPublishAuthorityAccountId = normalizePositiveUint256(
         opts.publishAuthorityAccountId,
         '`publishAuthorityAccountId`',
       );
@@ -896,9 +895,9 @@ export class ContextGraphMethods extends DKGAgentBase {
     accessPolicy?: number;
     publishPolicy?: number;
     callerAgentAddress?: string;
-    publishAuthorityAccountId?: bigint;
+    publishAuthorityAccountId?: PositiveUint256Input;
     /** Attempt-scoped PCA economic coverage; never persisted as graph policy. */
-    registrationPcaAccountId?: bigint;
+    registrationPcaAccountId?: PositiveUint256Input;
     /** Narrow registration capability selected by the publish path. */
     publisher?: ContextGraphRegistrationPreparer;
     /**
@@ -933,10 +932,9 @@ export class ContextGraphMethods extends DKGAgentBase {
       throw new Error('On-chain registration requires a configured chain adapter');
     }
 
-    const rawRegistrationPcaAccountId = opts?.registrationPcaAccountId as unknown;
-    const registrationPcaAccountId = rawRegistrationPcaAccountId == null
+    const registrationPcaAccountId = opts?.registrationPcaAccountId == null
       ? undefined
-      : parsePositiveUint256(rawRegistrationPcaAccountId, 'Registration PCA account id');
+      : normalizePositiveUint256(opts.registrationPcaAccountId, 'Registration PCA account id');
 
     // Only the address-scoped curator can register a CG on-chain.
     // Peer IDs are transport contact handles for sync/meta refresh, not EVM
@@ -1117,15 +1115,9 @@ export class ContextGraphMethods extends DKGAgentBase {
     // on every register retry that omits the param. With explicit-only
     // resolution, `undefined` unambiguously means "no PCA".
     //
-    // The option type advertises `bigint`, but untyped / JS callers can
-    // pass `1` or `'1'` — comparing a non-bigint to `0n` would throw a
-    // raw `TypeError: Cannot mix BigInt and other types` instead of the
-    // actionable validation error this API is supposed to provide
-    // (Codex PR #502 round-8). Coerce safely before the `<= 0n` check.
-    const rawPublishAuthorityAccountId = opts?.publishAuthorityAccountId as unknown;
-    const requestedPublishAuthorityAccountId = rawPublishAuthorityAccountId == null
+    const requestedPublishAuthorityAccountId = opts?.publishAuthorityAccountId == null
       ? undefined
-      : parsePositiveUint256(rawPublishAuthorityAccountId, 'PCA account id');
+      : normalizePositiveUint256(opts.publishAuthorityAccountId, 'PCA account id');
     const publishAuthorityAccountId = requestedPublishAuthorityAccountId;
     // PCA account ids are only invalid when the publish policy is
     // open (`publishPolicy === EVM_PUBLISH_OPEN`) — that combination

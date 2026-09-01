@@ -31,20 +31,12 @@ import type {
 } from './catchup-status.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
+import {
+  serializePositiveUint256,
+  type PositiveUint256Input,
+} from '@origintrail-official/dkg-chain';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
-
-type PcaAccountIdInput = string | number | bigint;
-
-function serializePcaAccountId(value: PcaAccountIdInput, field: string): string {
-  if (
-    typeof value === 'number'
-    && (!Number.isSafeInteger(value) || value <= 0)
-  ) {
-    throw new TypeError(`${field} must be a positive safe integer when supplied as a number.`);
-  }
-  return value.toString();
-}
 
 export interface PublisherJobResponse {
   job: PersistedLiftJob;
@@ -1806,7 +1798,7 @@ export class ApiClient {
      * (Codex PR #502 round-5). For a two-step flow, use
      * {@link registerContextGraph} instead.
      */
-    pcaAccountId?: string | number | bigint;
+    pcaAccountId?: PositiveUint256Input;
   }, allowedPeers?: string[]): Promise<{
     created: string;
     uri: string;
@@ -1829,7 +1821,7 @@ export class ApiClient {
       ...(options?.register === true ? { register: true } : {}),
       ...(options?.publishPolicy != null ? { publishPolicy: options.publishPolicy } : {}),
       ...(options?.pcaAccountId != null
-        ? { pcaAccountId: serializePcaAccountId(options.pcaAccountId, 'pcaAccountId') }
+        ? { pcaAccountId: serializePositiveUint256(options.pcaAccountId, 'pcaAccountId') }
         : {}),
     });
   }
@@ -1846,9 +1838,9 @@ export class ApiClient {
     revealOnChain?: boolean;
     accessPolicy?: number;
     publishPolicy?: number;
-    pcaAccountId?: string | number | bigint;
+    pcaAccountId?: PositiveUint256Input;
     /** Attempt-scoped PCA coverage; independent of publish authority. */
-    registrationPcaAccountId?: string | number | bigint;
+    registrationPcaAccountId?: PositiveUint256Input;
   }): Promise<{
     registered: string;
     onChainId: string;
@@ -1859,11 +1851,11 @@ export class ApiClient {
       ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
       ...(opts?.publishPolicy != null ? { publishPolicy: opts.publishPolicy } : {}),
       ...(opts?.pcaAccountId != null
-        ? { pcaAccountId: serializePcaAccountId(opts.pcaAccountId, 'pcaAccountId') }
+        ? { pcaAccountId: serializePositiveUint256(opts.pcaAccountId, 'pcaAccountId') }
         : {}),
       ...(opts?.registrationPcaAccountId != null
         ? {
-            registrationPcaAccountId: serializePcaAccountId(
+            registrationPcaAccountId: serializePositiveUint256(
               opts.registrationPcaAccountId,
               'registrationPcaAccountId',
             ),

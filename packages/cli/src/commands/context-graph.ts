@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import { normalizePositiveUint256, resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
@@ -193,22 +193,24 @@ contextGraphCmd
   .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
   .option('--access-policy <n>', 'Access policy: 0 = public/discoverable, 1 = private/curated', parseInt)
   .option('--publish-policy <n>', 'Publish policy: 0 = curated, 1 = open', parseInt)
-  .option('--pca-account-id <id>', 'Publishing Conviction Account id for curated registration by its owner or an exact-account registered agent')
-  .option('--registration-pca-account-id <id>', 'Publishing Conviction Account id used only for this registration deposit waiver attempt')
+  .option(
+    '--pca-account-id <id>',
+    'Publishing Conviction Account id for curated registration by its owner or an exact-account registered agent',
+    (value: string) => normalizePositiveUint256(value, '--pca-account-id'),
+  )
+  .option(
+    '--registration-pca-account-id <id>',
+    'Publishing Conviction Account id used only for this registration deposit waiver attempt',
+    (value: string) => normalizePositiveUint256(value, '--registration-pca-account-id'),
+  )
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       if (opts.reveal) {
         console.warn('--reveal is deprecated and ignored for V10 ContextGraphs registration.');
       }
-      const pcaAccountId = opts.pcaAccountId as string | undefined;
-      if (pcaAccountId && !/^[1-9]\d*$/.test(pcaAccountId)) {
-        throw new Error('--pca-account-id must be a positive decimal integer');
-      }
-      const registrationPcaAccountId = opts.registrationPcaAccountId as string | undefined;
-      if (registrationPcaAccountId && !/^[1-9]\d*$/.test(registrationPcaAccountId)) {
-        throw new Error('--registration-pca-account-id must be a positive decimal integer');
-      }
+      const pcaAccountId = opts.pcaAccountId as bigint | undefined;
+      const registrationPcaAccountId = opts.registrationPcaAccountId as bigint | undefined;
       const result = await client.registerContextGraph(id, {
         accessPolicy: opts.accessPolicy != null ? Number(opts.accessPolicy) : undefined,
         publishPolicy: opts.publishPolicy != null ? Number(opts.publishPolicy) : undefined,
