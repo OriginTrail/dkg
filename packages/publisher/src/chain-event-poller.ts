@@ -246,7 +246,21 @@ export class ChainEventPoller {
     // four kinds would let the cursor advance past mutations it never saw.
     // Refuse activation and NAME the missing kinds.
     if (this.onKnowledgeAssetRootMutated && typeof this.chain.supportsEventTypes === 'function') {
-      const missing = await this.chain.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+      let missing: string[];
+      try {
+        missing = await this.chain.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+      } catch (err) {
+        // A probe that could not answer (the Hub unreachable at boot) is not
+        // a negative answer, and must not take down the OTHER lanes with it
+        // — but a lane that scans without a known capability set is exactly
+        // the silent failure the probe exists to prevent. Fail the
+        // activation loudly and specifically; the embedder retries start().
+        throw new Error(
+          `onKnowledgeAssetRootMutated activation could not verify the adapter\u2019s event `
+          + `capability (probe failed: ${err instanceof Error ? err.message : String(err)}); `
+          + 'retry start() once the chain binding is reachable',
+        );
+      }
       if (missing.length > 0) {
         throw new Error(
           `onKnowledgeAssetRootMutated cannot be served by this chain adapter: the ABI does `

@@ -254,6 +254,26 @@ describe('kaRootMutations — activation contract', () => {
     expect(chain.filters, 'no scan may run under an unsupported subscription').toHaveLength(0);
   });
 
+  it('a capability probe that THROWS fails activation as a probe failure, not as a negative answer', async () => {
+    // A Hub unreachable at boot is not proof of a legacy ABI; the error must
+    // say so, and start() must leave no lane running to retry into.
+    const chain = makeChain(50_000);
+    (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
+      .supportsEventTypes = async () => { throw new Error('Hub unreachable'); };
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    await expect(poller.start()).rejects.toThrow(/probe failed: Hub unreachable/);
+    expect(chain.filters, 'no lane scans after a refused activation').toHaveLength(0);
+    // The refusal is not sticky: once the probe answers, start() succeeds.
+    (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
+      .supportsEventTypes = async () => [];
+    await expect(poller.start()).resolves.toBeUndefined();
+    await poller.stop();
+  });
   it('start() proceeds when the capability probe reports every kind served', async () => {
     const chain = makeChain(50_000);
     (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
