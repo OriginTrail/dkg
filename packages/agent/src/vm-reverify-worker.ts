@@ -292,8 +292,11 @@ export class VmReverifyWorker {
       // Recorded only after the whole chunk — including any singleton fallback
       // and any SWM-recovery retry — has an outcome, so a poisoned sibling can
       // never cause a healthy row to be written against a result that was later
-      // superseded.
-      await this.recordChunk(records, outcomes, summary, now);
+      // superseded. The clock is read AGAIN here (review r1): the fetches above
+      // are network I/O that can outlast the retry delay, and a `nextAttemptAt`
+      // computed from the pre-I/O clock would already be overdue — an
+      // immediate re-poll instead of a backoff.
+      await this.recordChunk(records, outcomes, summary, this.#now());
     }
     return summary;
   }

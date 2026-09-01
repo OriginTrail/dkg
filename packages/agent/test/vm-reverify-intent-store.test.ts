@@ -112,6 +112,35 @@ describe('VM re-verify intent store — owned file identity', () => {
     }
   });
 
+  it('REJECTS a reopen after schema tampering — missing, altered, or extra object (review r1)', async () => {
+    // `application_id` and `user_version` stay VALID in every case below, so
+    // only the exact-schema verification can produce the rejection — deleting
+    // or weakening that check makes these red.
+    const tampers: Array<{ label: string; sql: string }> = [
+      { label: 'missing object', sql: 'DROP INDEX vm_reverify_intents_v1_cg' },
+      { label: 'altered object', sql: 'ALTER TABLE vm_reverify_intents_v1 RENAME COLUMN last_outcome TO smuggled' },
+      { label: 'extra object', sql: 'CREATE TABLE stowaway (x INTEGER) STRICT' },
+    ];
+    for (const tamper of tampers) {
+      const directory = await temporaryDirectory();
+      try {
+        const store = await openSqliteVmReverifyIntentStore(directory);
+        await store.close();
+        const path = join(directory, VM_REVERIFY_INTENTS_DATABASE_FILENAME);
+        const raw = new DatabaseSync(path);
+        raw.exec('PRAGMA journal_mode = DELETE');
+        raw.exec(tamper.sql);
+        raw.close();
+
+        await expect(
+          openSqliteVmReverifyIntentStore(directory),
+          `a reopen after "${tamper.label}" tampering must fail closed`,
+        ).rejects.toThrow(/exact schema verification failed/i);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  });
   it('refuses a file whose user_version is not the one this code writes', async () => {
     const directory = await temporaryDirectory();
     try {

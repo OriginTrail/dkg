@@ -43,7 +43,7 @@ import {
   VM_REVERIFY_ADMISSION_PRIORITY,
   VmReverifyWorker,
 } from '../src/vm-reverify-worker.js';
-import { VM_REVERIFY_PARK_AFTER_MS } from '../src/vm-reverify-intents.js';
+import { VM_REVERIFY_FLAT_BACKOFF_MS, VM_REVERIFY_PARK_AFTER_MS } from '../src/vm-reverify-intents.js';
 import type {
   VmReverifyIntentHealth,
   VmReverifyIntentPosition,
@@ -630,6 +630,35 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     expect(await intents.countPending()).toBe(0);
   });
 
+  it('schedules the retry from the clock at COMPLETION, not from before the fetch (review r1)', async () => {
+    // The drain pass reads the clock, then does network I/O that can outlast
+    // the whole retry delay. A `nextAttemptAt` computed from the PRE-I/O
+    // clock would already be overdue when written, so a full backlog would
+    // re-poll immediately instead of backing off.
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 71n, 300);
+    let clock = 10_000;
+    const fetch = makeFetch({
+      // The chain read consumes 120s — four times the flat retry delay —
+      // and answers with a view read BEFORE the event, forcing a retry.
+      snapshotFor: () => { clock += 120_000; return snapshot(299); },
+    });
+    const worker = new VmReverifyWorker({
+      intents,
+      fetchContextGraphAssets: fetch,
+      log: { info: () => undefined, warn: () => undefined },
+      now: () => clock,
+    });
+
+    const run = await worker.runOnce();
+
+    expect(run.items[0]).toMatchObject({ ual, action: 'retry', reason: 'snapshot-behind-event' });
+    const record = intents.rows.get(ual)!;
+    // start (10_000) + fetch I/O (120_000) + flat delay — NOT start + delay,
+    // which at 40_000 would be 90s in the past by the time it was written.
+    expect(record.nextAttemptAt).toBe(130_000 + VM_REVERIFY_FLAT_BACKOFF_MS);
+    expect(record.nextAttemptAt! > clock, "the retry must still be in the future").toBe(true);
+  });
   it('RETRIES rather than resolves when the chain view predates the event', async () => {
     // The production shape of the bug this design exists to prevent: every
     // configured endpoint answered, unanimously, with a view read one block

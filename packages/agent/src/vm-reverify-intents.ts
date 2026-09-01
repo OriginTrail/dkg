@@ -95,8 +95,6 @@ export type VmReverifyResolveReason = 'already-present' | 'materialized' | 'fetc
 export type VmReverifyRetryReason =
   /** The chain view we got was read BEFORE the event. Never resolve on it. */
   | 'snapshot-behind-event'
-  /** The item carried no `versionBlock`, so the rule above cannot be applied. */
-  | 'version-block-unknown'
   /** Not every configured endpoint answered the pinned view. */
   | 'snapshot-unavailable'
   /** The chain answered, but with a root/block/address this code cannot use. */
@@ -252,12 +250,11 @@ export function planTransition(input: VmReverifyTransitionInput): VmReverifyTran
   }
 
   // ── the resolve rule ──
-  // An item without a `versionBlock` cannot be checked against the event, so it
-  // cannot be resolved. Fail closed: a missing block is not evidence of
-  // currency, and treating it as one is the exact shape of the bug above.
-  if (item.versionBlock === undefined) {
-    return retry('version-block-unknown', 'evidence-unavailable', attemptNumber);
-  }
+  // `versionBlock` is REQUIRED on the item type, and the honest guard for it
+  // lives at the producer: `resolveEvidence` rejects a non-integer block as
+  // `invalid-evidence` before an item can exist (review r1 — the previous
+  // `=== undefined` branch here had no valid producer and was reachable only
+  // by casting, so it was deleted rather than kept as a defeated type).
   if (item.versionBlock < observedBlock) {
     return retry('snapshot-behind-event', 'evidence-unavailable', attemptNumber);
   }

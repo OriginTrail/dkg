@@ -43,13 +43,12 @@ const FORWARD_KINDS: KnowledgeAssetRootMutationKindV1[] = [
   'roots-replaced',
 ];
 
-type Relation = 'behind' | 'equal' | 'ahead' | 'absent';
+type Relation = 'behind' | 'equal' | 'ahead';
 
-const RELATION_BLOCK: Record<Relation, number | undefined> = {
+const RELATION_BLOCK: Record<Relation, number> = {
   behind: OBSERVED_BLOCK - 1,
   equal: OBSERVED_BLOCK,
   ahead: OBSERVED_BLOCK + 1,
-  absent: undefined,
 };
 
 function plan(input: {
@@ -62,19 +61,14 @@ function plan(input: {
   now?: number;
   swmRecoveryAvailable?: boolean;
 }): VmReverifyTransition {
-  const versionBlock = input.relation === undefined
-    ? undefined
-    : RELATION_BLOCK[input.relation];
   return planTransition({
     kind: input.kind,
-    ...(input.status === undefined
+    ...(input.status === undefined || input.relation === undefined
       ? {}
       : {
         item: {
           status: input.status,
-          // A production item ALWAYS carries a block; `absent` models a caller
-          // (or a future overload) that lost it, which must never resolve.
-          versionBlock: versionBlock as number,
+          versionBlock: RELATION_BLOCK[input.relation],
         },
       }),
     ...(input.error === undefined ? {} : { error: input.error }),
@@ -89,7 +83,7 @@ function plan(input: {
 }
 
 // ── (status x versionBlock relation) for every FORWARD kind ────────────────
-// 4 statuses x 4 relations = 16 cells, each applied to 3 kinds = 48 assertions.
+// 4 statuses x 3 relations = 12 cells, each applied to 3 kinds = 36 assertions.
 const FORWARD_CELLS: Array<{
   status: ContextGraphAssetFetchItemStatus;
   relation: Relation;
@@ -98,49 +92,41 @@ const FORWARD_CELLS: Array<{
   { status: 'already-present', relation: 'behind', expected: { action: 'retry', reason: 'snapshot-behind-event' } },
   { status: 'already-present', relation: 'equal', expected: { action: 'resolve', reason: 'already-present' } },
   { status: 'already-present', relation: 'ahead', expected: { action: 'resolve', reason: 'already-present' } },
-  { status: 'already-present', relation: 'absent', expected: { action: 'retry', reason: 'version-block-unknown' } },
 
   { status: 'materialized', relation: 'behind', expected: { action: 'retry', reason: 'snapshot-behind-event' } },
   { status: 'materialized', relation: 'equal', expected: { action: 'resolve', reason: 'materialized' } },
   { status: 'materialized', relation: 'ahead', expected: { action: 'resolve', reason: 'materialized' } },
-  { status: 'materialized', relation: 'absent', expected: { action: 'retry', reason: 'version-block-unknown' } },
 
   { status: 'fetched', relation: 'behind', expected: { action: 'retry', reason: 'snapshot-behind-event' } },
   { status: 'fetched', relation: 'equal', expected: { action: 'resolve', reason: 'fetched' } },
   { status: 'fetched', relation: 'ahead', expected: { action: 'resolve', reason: 'fetched' } },
-  { status: 'fetched', relation: 'absent', expected: { action: 'retry', reason: 'version-block-unknown' } },
 
   // `unresolved` is decided BEFORE the block rule: no local copy exists to be
   // current, whatever block the chain view was read at.
   { status: 'unresolved', relation: 'behind', expected: { action: 'retry', reason: 'unresolved' } },
   { status: 'unresolved', relation: 'equal', expected: { action: 'retry', reason: 'unresolved' } },
   { status: 'unresolved', relation: 'ahead', expected: { action: 'retry', reason: 'unresolved' } },
-  { status: 'unresolved', relation: 'absent', expected: { action: 'retry', reason: 'unresolved' } },
 ];
 
-// ── the same 16 cells for `root-removed` ──────────────────────────────────
+// ── the same 12 cells for `root-removed` ──────────────────────────────────
 // Only `unresolved` differs: there is no forward version to fetch, so the row
 // stops instead of retrying forever against an unreachable-looking outcome.
 const ROOT_REMOVED_CELLS: typeof FORWARD_CELLS = [
   { status: 'already-present', relation: 'behind', expected: { action: 'retry', reason: 'snapshot-behind-event' } },
   { status: 'already-present', relation: 'equal', expected: { action: 'resolve', reason: 'already-present' } },
   { status: 'already-present', relation: 'ahead', expected: { action: 'resolve', reason: 'already-present' } },
-  { status: 'already-present', relation: 'absent', expected: { action: 'retry', reason: 'version-block-unknown' } },
 
   { status: 'materialized', relation: 'behind', expected: { action: 'retry', reason: 'snapshot-behind-event' } },
   { status: 'materialized', relation: 'equal', expected: { action: 'resolve', reason: 'materialized' } },
   { status: 'materialized', relation: 'ahead', expected: { action: 'resolve', reason: 'materialized' } },
-  { status: 'materialized', relation: 'absent', expected: { action: 'retry', reason: 'version-block-unknown' } },
 
   { status: 'fetched', relation: 'behind', expected: { action: 'retry', reason: 'snapshot-behind-event' } },
   { status: 'fetched', relation: 'equal', expected: { action: 'resolve', reason: 'fetched' } },
   { status: 'fetched', relation: 'ahead', expected: { action: 'resolve', reason: 'fetched' } },
-  { status: 'fetched', relation: 'absent', expected: { action: 'retry', reason: 'version-block-unknown' } },
 
   { status: 'unresolved', relation: 'behind', expected: { action: 'abandon', reason: 'version-regression-unsupported' } },
   { status: 'unresolved', relation: 'equal', expected: { action: 'abandon', reason: 'version-regression-unsupported' } },
   { status: 'unresolved', relation: 'ahead', expected: { action: 'abandon', reason: 'version-regression-unsupported' } },
-  { status: 'unresolved', relation: 'absent', expected: { action: 'abandon', reason: 'version-regression-unsupported' } },
 ];
 
 describe('planTransition — item outcomes, every (kind x status x versionBlock) cell', () => {
