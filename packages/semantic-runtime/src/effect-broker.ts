@@ -63,7 +63,7 @@ interface PreparedEffectToken {
 export interface RuntimeAdapterOperation<I = unknown, O = unknown> {
   readonly id: string;
   readonly version: string;
-  /** Future Component Model import identity, e.g. origintrail:semantic-tools/investigator@1. */
+  /** Component Model interface identity bound to the explicit host import. */
   readonly witInterface?: string;
   /** Version and digest of the locally installed host implementation. */
   readonly implementationVersion?: string;

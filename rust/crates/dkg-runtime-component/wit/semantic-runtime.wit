@@ -4,6 +4,56 @@ interface capability {
   resource execution-capability;
 }
 
+interface investigator {
+  use capability.{execution-capability};
+
+  record tool-error {
+    code: string,
+    message: string,
+    retryable: bool,
+  }
+
+  record request {
+    effect-id: u64,
+    prompt: string,
+  }
+
+  investigate: async func(
+    capability: borrow<execution-capability>,
+    request: request,
+  ) -> result<string, tool-error>;
+}
+
+interface query-catalog {
+  use capability.{execution-capability};
+
+  record tool-error {
+    code: string,
+    message: string,
+    retryable: bool,
+  }
+
+  record parameter {
+    name: string,
+    value: string,
+  }
+
+  record request {
+    effect-id: u64,
+    query-id: string,
+    parameters: list<parameter>,
+  }
+
+  record query-result {
+    json: string,
+  }
+
+  query: async func(
+    capability: borrow<execution-capability>,
+    request: request,
+  ) -> result<query-result, tool-error>;
+}
+
 interface runtime {
   use capability.{execution-capability};
 
@@ -70,19 +120,6 @@ interface runtime {
     agents: list<logical-agent>,
   }
 
-  record effect-request {
-    effect-id: u64,
-    process-id: list<u8>,
-    operation: string,
-    version: u16,
-    arguments: list<string>,
-  }
-
-  record effect-result {
-    effect-id: u64,
-    outcome: result<string, diagnostic>,
-  }
-
   record plan-value {
     role: string,
     process-id: list<u8>,
@@ -95,12 +132,11 @@ interface runtime {
   }
 
   variant step {
-    effect-requested(effect-request),
     completed(completion),
   }
 
   resource execution {
-    advance: async func(effect: option<effect-result>) -> result<step, diagnostic>;
+    advance: async func() -> result<step, diagnostic>;
     inspect: func() -> result<execution-receipt, diagnostic>;
   }
 
@@ -118,5 +154,7 @@ interface runtime {
 
 world semantic-runtime {
   import capability;
+  import investigator;
+  import query-catalog;
   export runtime;
 }

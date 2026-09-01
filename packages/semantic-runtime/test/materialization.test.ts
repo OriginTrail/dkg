@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
 import { WasmStrategyAdmissionClient } from '../src/admission.js';
+import { defaultExecutionCapability } from '../src/component-types.js';
 import { SemanticRuntimeHost } from '../src/host.js';
 
 const workerUrl = new URL('../dist/worker.js', import.meta.url);
@@ -49,7 +51,7 @@ describe('real Wasm supervised-plan materialization', () => {
     }
   });
 
-  it('lets Wasm request and resume one investigator model call', async () => {
+  it('lets Wasm invoke the explicit investigator import', async () => {
     const source = `(strategy smoke/llm
       (version "1.0.0")
       (scope network:devnet)
@@ -68,20 +70,40 @@ describe('real Wasm supervised-plan materialization', () => {
     const host = new SemanticRuntimeHost({ workerUrl, componentWorkerUrl, config: { watchdogMs: 1_000 } });
     await host.start();
     try {
-      const started = await host.startPlan(compilation.plan.canonicalPlan);
-      const requested = await host.applyPlan(started.handle);
-      expect(requested).toMatchObject({
-        kind: 'effect-requested',
+      const unauthorizedDispatcher = async () => ({
+        kind: 'investigator' as const,
+        output: 'must-not-run',
+      });
+      const unauthorized = await host.startPlan(
+        compilation.plan.canonicalPlan,
+        0n,
+        undefined,
+        unauthorizedDispatcher,
+      );
+      await expect(host.applyPlan(unauthorized.handle)).rejects.toMatchObject({
+        code: 'COMPONENT_TOOL_NOT_AUTHORIZED',
+        category: 'tool',
+      });
+      await host.dropPlan(unauthorized.handle);
+
+      const capability = toolCapability(compilation.plan.canonicalPlan, {
         operation: 'agent/investigate',
-        version: 1,
-        arguments: ['t:Say hello'],
+        witInterface: 'origintrail:semantic-runtime/investigator@0.1.0',
       });
-      if (requested.kind !== 'effect-requested') return;
-      const completed = await host.applyPlan(started.handle, {
-        effectId: requested.effectId,
-        ok: true,
-        value: 'Hello from the model',
-      });
+      const started = await host.startPlan(
+        compilation.plan.canonicalPlan,
+        0n,
+        capability,
+        async (call) => {
+          expect(call).toEqual({
+            kind: 'investigator',
+            effectId: 1n,
+            prompt: 'Say hello',
+          });
+          return { kind: 'investigator', output: 'Hello from the model' };
+        },
+      );
+      const completed = await host.applyPlan(started.handle);
       expect(completed).toMatchObject({
         kind: 'completed',
         events: [
@@ -95,7 +117,7 @@ describe('real Wasm supervised-plan materialization', () => {
     }
   });
 
-  it('lets Wasm request and resume one catalog-backed DKG query', async () => {
+  it('lets Wasm invoke the explicit query-catalog import', async () => {
     const source = `(strategy smoke/query
       (version "1.0.0")
       (scope network:devnet)
@@ -112,21 +134,26 @@ describe('real Wasm supervised-plan materialization', () => {
     const host = new SemanticRuntimeHost({ workerUrl, componentWorkerUrl, config: { watchdogMs: 1_000 } });
     await host.start();
     try {
-      const started = await host.startPlan(compilation.plan.canonicalPlan);
-      const requested = await host.applyPlan(started.handle);
-      expect(requested).toMatchObject({
-        kind: 'effect-requested',
-        operation: 'dkg/query',
-        version: 1,
-        arguments: ['t:configuration-trace'],
-      });
-      if (requested.kind !== 'effect-requested') return;
       const output = '{"queryIri":"urn:query:configuration-trace","result":{"bindings":[],"type":"bindings"}}';
-      const completed = await host.applyPlan(started.handle, {
-        effectId: requested.effectId,
-        ok: true,
-        value: output,
+      const capability = toolCapability(compilation.plan.canonicalPlan, {
+        operation: 'dkg/query',
+        witInterface: 'origintrail:semantic-runtime/query-catalog@0.1.0',
       });
+      const started = await host.startPlan(
+        compilation.plan.canonicalPlan,
+        0n,
+        capability,
+        async (call) => {
+          expect(call).toEqual({
+            kind: 'query-catalog',
+            effectId: 1n,
+            queryId: 'configuration-trace',
+            parameters: [],
+          });
+          return { kind: 'query-catalog', json: output };
+        },
+      );
+      const completed = await host.applyPlan(started.handle);
       expect(completed).toMatchObject({
         kind: 'completed',
         outputs: [{ role: 'reader', value: output }],
@@ -136,3 +163,19 @@ describe('real Wasm supervised-plan materialization', () => {
     }
   });
 });
+
+function toolCapability(
+  plan: Uint8Array,
+  tool: { operation: string; witInterface: string },
+) {
+  const planHash = createHash('sha256')
+    .update('DKG-STRATEGY-PLAN-V1\0')
+    .update(plan)
+    .digest('hex');
+  const capability = defaultExecutionCapability(planHash);
+  capability.tools = [{ operation: tool.operation, version: '1', witInterface: tool.witInterface }];
+  capability.budgets.maxToolCalls = 1;
+  capability.budgets.maxModelTokens = tool.operation === 'agent/investigate' ? 512 : 0;
+  capability.budgets.maxDkgQueries = tool.operation === 'dkg/query' ? 1 : 0;
+  return capability;
+}

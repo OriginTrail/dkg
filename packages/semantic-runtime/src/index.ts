@@ -53,6 +53,10 @@ export {
 } from './component-supervisor.js';
 export {
   defaultExecutionCapability,
+  type ComponentExecutionResult,
+  type ComponentToolCall,
+  type ComponentToolDispatcher,
+  type ComponentToolResult,
   type ExecutionCapabilityDescriptor,
 } from './component-types.js';
 export {
