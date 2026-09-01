@@ -676,7 +676,6 @@ import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './star
 import {
   isRfc64PrivateRecoveryOwnerV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
-  resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
   resolveRfc64SelectedRecoveryContextGraphIdsV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
@@ -4623,19 +4622,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
   ): readonly string[] {
-    const selected = new Set(
-      this.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs,
-    );
-    return resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
-      this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      remotePeer,
-    ).filter((contextGraphId) => (
-      selected.has(contextGraphId)
-      && resolveRfc64SwmRecoveryLaneV1(
-        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-        contextGraphId,
-      ) === 'selected-public'
-    ));
+    return this.resolveActiveRfc64SwmRecoveryPlanV1(remotePeer).targets
+      .filter(({ lane }) => lane === 'selected-public')
+      .map(({ contextGraphId }) => contextGraphId);
   }
 
   /**
@@ -4654,9 +4643,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
         contextGraphId,
       ) === 'selected-public';
-    const providerPeerIds = [
+    const configuredProviderPeerIds = [
       ...new Set(this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)),
     ];
+    const providerPeerIds = configuredProviderPeerIds.filter((providerPeerId) => (
+      this.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId).targets.some(
+        (target) => target.contextGraphId === contextGraphId
+          && target.lane === 'selected-public',
+      )
+    ));
     const summary = this.selectedSwmBootstrapAdmission.summarizeContextGraph(
       contextGraphId,
       providerPeerIds,
@@ -5076,15 +5071,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const requestedScope: SelectedSharedMemoryRequestedScope = validatedRecoveryPlan === null
       ? {
         kind: 'selected-public',
-        targets: sharedMemoryPlanTargets(
-          await this.planSharedMemorySyncContextGraphs(
-            remotePeer,
-            selectedPublicContextGraphIds,
-            createOperationContext('sync'),
-            { requireCompleteProviderMatch: true },
-          ),
-          'selected-public',
-        ),
+        targets: selectedPublicContextGraphIds.map((contextGraphId) => Object.freeze({
+          contextGraphId,
+          lane: 'selected-public' as const,
+        })),
       }
       : {
         kind: 'rfc64-recovery-plan',
@@ -5196,13 +5186,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
         contextGraphId,
       );
-      const selectedCatalogRecovery = options.requireCompleteProviderMatch === true
-        && acceptedRecoveryLane === 'selected-public'
-        && authority.active
-        && authority.track2Enabled
-        && remotePeerId !== undefined
-        && completeSwmProviders.includes(remotePeerId);
-      if (!authority.legacySyncAllowed && !selectedCatalogRecovery) {
+      if (!authority.legacySyncAllowed) {
         this.log.debug(
           ctx,
           `Skipping legacy SWM planning for catalog-authoritative CG "${contextGraphId.slice(0, 28)}"`,

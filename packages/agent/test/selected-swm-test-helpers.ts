@@ -292,6 +292,10 @@ export interface SelectedProviderSelectionAgent {
   readRfc64CatalogRuntimeSelectionV1: () => {
     readonly selectedContextGraphs: readonly string[];
   };
+  resolveActiveRfc64SwmRecoveryPlanV1: (providerPeerId: string) => {
+    readonly providerPeerId: string;
+    readonly targets: readonly Rfc64SwmRecoveryTargetV1[];
+  };
   selectedSwmBootstrapContextGraphIdsForPeer: (peerId: string) => readonly string[];
   getPeerProtocols: () => Promise<string[]>;
   planSharedMemorySyncContextGraphs: (

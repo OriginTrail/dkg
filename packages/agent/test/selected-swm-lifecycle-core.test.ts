@@ -351,7 +351,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       config: {
         syncOnConnect: true,
         syncSharedMemoryOnConnect: true,
-        syncContextGraphs: [publicCg],
+        syncContextGraphs: [],
         rfc64CatalogBootstrap: {
           acceptedPolicies: [
             { contextGraphId: publicCg, accessPolicy: 0 as const },
@@ -380,7 +380,14 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         ),
       },
       readRfc64CatalogRuntimeSelectionV1: () => ({
-        selectedContextGraphs: [publicCg],
+        selectedContextGraphs: [publicCg, privateCg],
+      }),
+      resolveActiveRfc64SwmRecoveryPlanV1: (providerPeerId) => ({
+        providerPeerId,
+        targets: [
+          { contextGraphId: publicCg, lane: 'selected-public' },
+          { contextGraphId: privateCg, lane: 'ordinary-private' },
+        ],
       }),
       selectedSwmBootstrapContextGraphIdsForPeer:
         LifecycleSyncMethods.prototype.selectedSwmBootstrapContextGraphIdsForPeer,
@@ -442,8 +449,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       { contextGraphIds: [privateCg], selected: false },
     ]);
     expect(plannedScopes).toEqual([
-      [publicCg],
-      [publicCg, privateCg],
+      [privateCg],
     ]);
     expect(plannedScopes.every((scope) => !scope.includes(unselectedPublicCg)))
       .toBe(true);
@@ -483,6 +489,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       },
       readRfc64CatalogRuntimeSelectionV1: () => ({
         selectedContextGraphs: [publicCg],
+      }),
+      resolveActiveRfc64SwmRecoveryPlanV1: (providerPeerId) => ({
+        providerPeerId,
+        targets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
       }),
       selectedSwmBootstrapContextGraphIdsForPeer:
         LifecycleSyncMethods.prototype.selectedSwmBootstrapContextGraphIdsForPeer,

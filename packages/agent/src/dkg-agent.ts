@@ -453,10 +453,7 @@ import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { Rfc64SwmRecoveryCoordinatorV1 } from
   './rfc64/swm-recovery-coordinator-v1.js';
-import {
-  resolveRfc64PeerSwmRecoveryPlanV1,
-  resolveRfc64SwmRecoveryLaneV1,
-} from
+import { resolveRfc64SwmRecoveryLaneV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
@@ -867,6 +864,9 @@ export class DKGAgent extends DKGAgentBase {
         resolveReceiverAuthority: (contextGraphId) => (
           this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)
         ),
+        resolveRecoveryPlan: (providerPeerId) => (
+          this.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId)
+        ),
         acceptTrack2Policies: (policies) => {
           if (policies.length === 0) return;
           const service = this.rfc64PublicCatalogServiceV1;
@@ -962,20 +962,9 @@ export class DKGAgent extends DKGAgentBase {
           ),
         selectedPublicAdmissionSnapshot: (peerId) =>
           this.selectedSwmBootstrapAdmission.snapshot(peerId),
-        configuredRecoveryPlan: (peerId) => {
-          const plan = resolveRfc64PeerSwmRecoveryPlanV1(
-            this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-            peerId,
-          );
-          return Object.freeze({
-            ...plan,
-            targets: Object.freeze(plan.targets.filter(({ contextGraphId }) => {
-              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-              return authority.legacySyncAllowed
-                || (authority.active && authority.track2Enabled);
-            })),
-          });
-        },
+        configuredRecoveryPlan: (peerId) => (
+          this.resolveActiveRfc64SwmRecoveryPlanV1(peerId)
+        ),
         isCatalogReady: (peerId) =>
           this.isRfc64CatalogBootstrapSwmRecoveryReadyV1(peerId),
         isPeerAccepted: (peerId) =>

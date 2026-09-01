@@ -2463,6 +2463,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       listenPort: 0,
       bootstrapPeers: [],
       store: new OxigraphStore(),
+      contextGraphSubscriptionStore: seededSubscriptionStore(CONTEXT_GRAPH_ID),
       syncOnConnectEnabled: true,
       syncReconcilerEnabled: false,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
@@ -2786,6 +2787,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
 
     await receiver.start();
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(authorizedPlans).toHaveLength(1);
     expect(authorizeForCatalogPass).toHaveBeenCalledWith(

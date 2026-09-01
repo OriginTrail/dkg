@@ -28,6 +28,11 @@ type Rfc64RecoveryConfigV1 = Readonly<
   Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1
 >;
 
+export interface Rfc64SwmRecoveryRuntimeAuthorityV1 {
+  readonly legacySyncAllowed: boolean;
+  readonly track2Enabled: boolean;
+}
+
 /** Locale-independent ordering shared by recovery plans and admission state. */
 export function compareRfc64ContextGraphIdsV1(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -94,6 +99,32 @@ export function resolveRfc64PeerSwmRecoveryPlanV1(
     targets: Object.freeze([...byContextGraph]
       .sort(([left], [right]) => compareRfc64ContextGraphIdsV1(left, right))
       .map(([contextGraphId, lane]) => Object.freeze({ contextGraphId, lane }))),
+  });
+}
+
+/**
+ * Canonical live recovery plan for one graph-complete provider. Configuration
+ * proves provider ownership; receiver authority and runtime selection prove
+ * whether that lane may execute now. Catalog mode never widens legacy gossip:
+ * it admits only an explicitly configured target that is selected for Track-2.
+ */
+export function resolveRfc64ActivePeerSwmRecoveryPlanV1(
+  config: Rfc64RecoveryConfigV1 | undefined,
+  providerPeerId: string,
+  selectedContextGraphIds: readonly string[],
+  resolveReceiverAuthority: (
+    contextGraphId: string,
+  ) => Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1>,
+): Readonly<Rfc64PeerSwmRecoveryPlanV1> {
+  const selected = new Set(selectedContextGraphIds);
+  const configured = resolveRfc64PeerSwmRecoveryPlanV1(config, providerPeerId);
+  return Object.freeze({
+    ...configured,
+    targets: Object.freeze(configured.targets.filter(({ contextGraphId }) => {
+      const authority = resolveReceiverAuthority(contextGraphId);
+      return authority.legacySyncAllowed
+        || (authority.track2Enabled && selected.has(contextGraphId));
+    })),
   });
 }
 

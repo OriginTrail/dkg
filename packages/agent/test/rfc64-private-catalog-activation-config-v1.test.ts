@@ -35,6 +35,7 @@ import {
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from '../src/rfc64/catalog-authority-config-v1.js';
 import {
+  resolveRfc64ActivePeerSwmRecoveryPlanV1,
   resolveRfc64PeerSwmRecoveryPlanV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
@@ -234,6 +235,27 @@ describe('RFC-64 private catalog activation', () => {
     })!;
 
     expect(resolveRfc64PeerSwmRecoveryPlanV1(bootstrap, PROVIDER_PEER)).toEqual({
+      providerPeerId: PROVIDER_PEER,
+      targets: [
+        { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC_CG, lane: 'selected-public' },
+      ],
+    });
+    expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
+      bootstrap,
+      PROVIDER_PEER,
+      [PUBLIC_CG],
+      () => ({ legacySyncAllowed: false, track2Enabled: true }),
+    )).toEqual({
+      providerPeerId: PROVIDER_PEER,
+      targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
+    });
+    expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
+      bootstrap,
+      PROVIDER_PEER,
+      [PRIVATE_CG, PUBLIC_CG],
+      () => ({ legacySyncAllowed: false, track2Enabled: true }),
+    )).toEqual({
       providerPeerId: PROVIDER_PEER,
       targets: [
         { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },

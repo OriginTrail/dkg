@@ -455,9 +455,64 @@ describe('RFC-64 rollout authority integration', () => {
       [CONTEXT_GRAPH_ID],
       createOperationContext('sync'),
       { requireCompleteProviderMatch: true },
-    )).resolves.toEqual({
+    )).resolves.toEqual({ targets: [] });
+    expect(catalog.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId)).toEqual({
+      providerPeerId,
       targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
     });
+  });
+
+  it('closes recovery readiness until a subscription-triggered catalog pass settles', async () => {
+    const providerPeerId = '12D3KooWCatalogStalledCompleteProvider';
+    let markCatalogEntered!: () => void;
+    let releaseCatalog!: () => void;
+    const catalogEntered = new Promise<void>((resolve) => { markCatalogEntered = resolve; });
+    const stalledCatalog = new Promise<null>((resolve) => {
+      releaseCatalog = () => resolve(null);
+    });
+    let queue!: ReturnType<typeof vi.spyOn>;
+    const catalog = await startAgent('catalog-readiness-invalidation', {
+      ...activation('catalog'),
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: policyEnvelope(),
+          targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          completeSwmProviders: [providerPeerId],
+        }],
+      },
+    }, undefined, undefined, (agent) => {
+      vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
+      vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
+        .mockImplementation(async () => {
+          markCatalogEntered();
+          return stalledCatalog;
+        });
+      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+        .mockReturnValue(true);
+    }, { syncContextGraphs: [] });
+
+    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs).toEqual([]);
+    expect(catalog.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
+
+    catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await catalogEntered;
+    expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs)
+      .toEqual([CONTEXT_GRAPH_ID]);
+    expect(catalog.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
+    expect(queue).not.toHaveBeenCalled();
+
+    releaseCatalog();
+    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(catalog.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
+    expect(queue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerPeerId,
+        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+      }),
+      expect.any(Function),
+      0,
+    );
   });
 
   it.each(['legacy', 'shadow'] as const)(

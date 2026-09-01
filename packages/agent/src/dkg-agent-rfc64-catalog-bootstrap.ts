@@ -22,7 +22,7 @@ import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
 import { Rfc64CoalescingSupervisorV1 } from
   './rfc64/coalescing-supervisor-v1.js';
-import { resolveRfc64PeerSwmRecoveryPlanV1 } from
+import { resolveRfc64ActivePeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
@@ -171,6 +171,9 @@ interface BootstrapOwnerDependenciesV1 {
     readonly legacySyncAllowed: boolean;
     readonly track2Enabled: boolean;
   }>;
+  readonly resolveRecoveryPlan: (
+    providerPeerId: string,
+  ) => ReturnType<typeof resolveRfc64ActivePeerSwmRecoveryPlanV1>;
   readonly acceptTrack2Policies: (
     policies: readonly Rfc64CatalogBootstrapPolicyV1[],
   ) => void;
@@ -178,7 +181,7 @@ interface BootstrapOwnerDependenciesV1 {
     readonly timeoutMs: number;
   }>) => Promise<unknown>;
   readonly queueRecoveryPlan: (
-    plan: ReturnType<typeof resolveRfc64PeerSwmRecoveryPlanV1>,
+    plan: ReturnType<typeof resolveRfc64ActivePeerSwmRecoveryPlanV1>,
     onError: (peerId: string, error: unknown) => void,
     delayMs: number,
   ) => void;
@@ -263,6 +266,10 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
   }
 
   invalidate(contextGraphId: string): void {
+    // A completed inactive/older pass cannot authorize the newly selected
+    // scope. Close readiness synchronously before aborting/coalescing work so
+    // peer-connect scheduling cannot slip through ahead of the fresh catalog.
+    this.#catalogPhaseReady = false;
     this.#state?.runner.invalidateAndRequest(
       `RFC-64 receiver selection changed for ${contextGraphId}`,
     );
@@ -290,27 +297,17 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     state.pass += 1;
     state.lastPassStartedAtMs = Date.now();
     try {
-      const activeRecoveryPolicies = state.recoveryConfig.acceptedPolicies.filter(
-        ({ policyEnvelope }) => {
-          const authority = this.#dependencies.resolveReceiverAuthority(
-            policyEnvelope.payload.contextGraphId,
-          );
-          // Legacy/shadow recovery remains available through the ordinary lane.
-          // Catalog mode uses the separately admitted complete-provider lane,
-          // which is Track-2 work and must follow live edge selection.
-          return authority.legacySyncAllowed || authority.track2Enabled;
-        },
-      );
-      const activeRecoveryConfig = Object.freeze({
-        ...state.recoveryConfig,
-        acceptedPolicies: Object.freeze(activeRecoveryPolicies),
-      });
-      const completeSwmProviders = [...new Set(activeRecoveryPolicies.flatMap(
-        ({ completeSwmProviders: providers = [] }) => providers,
+      const configuredProviders = [...new Set(state.recoveryConfig.acceptedPolicies.flatMap(
+        ({ completeSwmProviders = [] }) => completeSwmProviders,
       ))];
+      const recoveryPlans = new Map(configuredProviders
+        .map((providerPeerId) => (
+          [providerPeerId, this.#dependencies.resolveRecoveryPlan(providerPeerId)] as const
+        ))
+        .filter(([, plan]) => plan.targets.length > 0));
       const connectedCompleteSwmProviders = new Set<string>();
       await mapWithConcurrency(
-        completeSwmProviders,
+        [...recoveryPlans.keys()],
         MAX_CONCURRENT_TARGETS_V1,
         async (providerPeerId) => {
           if (signal.aborted) return;
@@ -334,11 +331,10 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
       if (signal.aborted) return;
       this.#catalogPhaseReady = true;
       for (const providerPeerId of connectedCompleteSwmProviders) {
+        const recoveryPlan = recoveryPlans.get(providerPeerId);
+        if (recoveryPlan === undefined) continue;
         this.#dependencies.queueRecoveryPlan(
-          resolveRfc64PeerSwmRecoveryPlanV1(
-            activeRecoveryConfig,
-            providerPeerId,
-          ),
+          recoveryPlan,
           (_peerId, error) => {
             this.#dependencies.warn(
               ctx,
@@ -482,6 +478,19 @@ function newPendingTargetV1(
 }
 
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
+  /** One provider's configured recovery proof projected through live selection. */
+  resolveActiveRfc64SwmRecoveryPlanV1(
+    this: DKGAgent,
+    providerPeerId: string,
+  ): ReturnType<typeof resolveRfc64ActivePeerSwmRecoveryPlanV1> {
+    return resolveRfc64ActivePeerSwmRecoveryPlanV1(
+      this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+      providerPeerId,
+      this.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs,
+      (contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+    );
+  }
+
   /**
    * Exact operator-pinned graph-complete SWM providers for one accepted policy.
    * These are deliberately separate from per-author catalog providers: only
