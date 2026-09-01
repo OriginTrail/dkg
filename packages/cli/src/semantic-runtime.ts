@@ -545,7 +545,7 @@ async function resolveInternal(
   registry.register(createRemoteExecuteAdapter(
     agent,
     contextGraphId,
-    callerAgentAddress,
+    operatorAddress,
     programLayer,
     executionLayer,
   ));
@@ -956,6 +956,9 @@ async function invokeResolved(
     invocationId,
     programIri,
     operatorIri: resolved.public.executingNode,
+    callerIri: callerAgentAddress
+      ? `did:dkg:agent:${checksumAgentAddress(callerAgentAddress, 'INVALID_CALLER_WALLET')}`
+      : resolved.public.executingNode,
     policy: resolved.public.selectedPolicy,
     programHash: artifactHash,
     tools: resolved.public.requiredTools,
@@ -999,6 +1002,7 @@ function buildExecutionQuads(input: {
   invocationId: string;
   programIri: string;
   operatorIri: string;
+  callerIri: string;
   policy: { iri: string; version: string; hash: string };
   programHash: string;
   tools: SemanticToolResolution[];
@@ -1013,6 +1017,7 @@ function buildExecutionQuads(input: {
     literalQuad(input.executionIri, `${SR}invocationId`, input.invocationId),
     iriQuad(input.executionIri, `${SR}usedProgram`, input.programIri),
     iriQuad(input.executionIri, `${SR}executedBy`, input.operatorIri),
+    iriQuad(input.executionIri, `${SR}invokedBy`, input.callerIri),
     iriQuad(input.executionIri, `${SR}appliedPolicy`, input.policy.iri),
     literalQuad(input.executionIri, `${SR}version`, input.policy.version),
     literalQuad(input.executionIri, `${SR}policyHash`, input.policy.hash),
