@@ -513,6 +513,27 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     ).toBe(1);
   }, 60_000);
 
+  it('the bootstrap audit SKIPS graphs that are neither subscribed nor core-hosted (review r5)', async () => {
+    // The ingest drop row covers the event lane; this covers the AUDIT’s
+    // own filter — an audit that enqueued zero-position intents for
+    // unsubscribed graphs would re-verify assets this node no longer serves.
+    const { internals, ualFor } = await boot();
+    await insertHeldMetadata(internals.store, await ualFor(122n));
+    (internals.config as Record<string, unknown>).chainEventCursorStore = {
+      loadLane: async () => undefined,
+      saveLane: async () => undefined,
+    };
+    internals.subscribedContextGraphs.set(CG, {
+      syncMode: 'always-on', subscribed: false, synced: false, onChainId: '1',
+    });
+
+    await internals.runVmReverifyBootstrapAudit(ctx);
+
+    expect(
+      await internals.vmReverifyIntents.countPending(),
+      'an unsubscribed, unhosted graph is not audit material',
+    ).toBe(0);
+  }, 60_000);
   it('SWM recovery peers are the canonical resolver capped at FIVE (review r5)', async () => {
     // The cap and ordering are load-bearing (one recovery must not traverse
     // every connected peer) but every traversal row stubs the resolver;
