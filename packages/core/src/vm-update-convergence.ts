@@ -42,6 +42,7 @@ import {
   fail,
 } from './vm-update-errors.js';
 import {
+  type KnowledgeAssetRootMutationKindV1,
   canonicalEventPositionV1,
   compareEventPosition,
   sameEventIdentity,
@@ -402,32 +403,26 @@ export function canonicalVmUpdateScope(input: VmUpdateScopeV1): Readonly<VmUpdat
 
 
 export interface FinalizedKnowledgeAssetUpdateV1 extends FinalizedEventPositionV1 {
-  kind: 'lifecycle-update' | 'root-added';
+  kind: Extract<KnowledgeAssetRootMutationKindV1, 'lifecycle-update' | 'root-added'>;
   kaId: string;
   author: string | null;
   merkleRoot: string;
 }
 
 export interface FinalizedUnsupportedKnowledgeAssetRootMutationV1 extends FinalizedEventPositionV1 {
-  kind: 'roots-replaced' | 'root-removed';
+  kind: Extract<KnowledgeAssetRootMutationKindV1, 'roots-replaced' | 'root-removed'>;
   kaId: string;
 }
 
-/**
- * The kinds of on-chain Knowledge-Asset root mutation, as one NAMED union.
- *
- * Derived from the two record shapes above rather than restated as a literal
- * union, so a kind added to either shape reaches every consumer instead of
- * silently splitting into two vocabularies. The chain adapter's
- * `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES` enumerates the on-chain EVENT
- * NAMES that produce these kinds; this type is the off-chain CLASSIFICATION
- * they map to. Packages that only classify (the publisher's poller lane, the
- * agent's re-verification intents) import this instead of re-declaring
- * `'lifecycle-update' | 'root-added' | 'roots-replaced' | 'root-removed'`.
- */
-export type KnowledgeAssetRootMutationKindV1 =
-  | FinalizedKnowledgeAssetUpdateV1['kind']
-  | FinalizedUnsupportedKnowledgeAssetRootMutationV1['kind'];
+// The kind vocabulary is NEUTRAL and owned by the event model (review r24):
+// VM convergence derives its supported/unsupported SUBSETS from it (the
+// record shapes above use Extract<...>), so adding a kind for delivery does
+// not require choosing a VM disposition first. Re-exported for consumers
+// that reached it through this module.
+export {
+  KNOWLEDGE_ASSET_ROOT_MUTATION_KINDS_V1,
+} from './finalized-event-position-v1.js';
+export type { KnowledgeAssetRootMutationKindV1 } from './finalized-event-position-v1.js';
 
 
 

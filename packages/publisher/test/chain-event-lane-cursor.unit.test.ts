@@ -392,6 +392,98 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(seen).toEqual([45_000, 45_000, 45_000, 45_000]);
   });
 
+  it('the replay window is persisted BEFORE its dispatch runs (review r24)', async () => {
+    // Write-ahead: a crash while the callback is in flight must leave a
+    // durable pending record — persisting only after rejection loses the
+    // window entirely while the forward cursor durably stays ahead of it.
+    const sequence: string[] = [];
+    let now = 0;
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return undefined; },
+        async saveLane() { /* cursor writes not under test */ },
+        replayRetry: {
+          async load() { return undefined; },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            sequence.push(w ? `save:${w.fromBlock}-${w.toBlock}` : 'save:clear');
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => {
+        if (sequence.length > 0 || now >= CADENCE_MS * 24) sequence.push(`deliver:${e.position.blockNumber}`);
+      },
+    });
+    for (let tick = 1; tick <= 25; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    // At the rescan tick the WAL save precedes the replay delivery.
+    expect(sequence[0]).toBe('save:41001-50000');
+    expect(sequence[1]).toBe('deliver:45000');
+    expect(sequence[2]).toBe('save:clear');
+  });
+
+  it('a transient replay-window load failure is retried on a later poll (review r24)', async () => {
+    // A locked store at restore time must not read as nothing-retained for
+    // the lifetime of the runner.
+    let loadAttempts = 0;
+    const seen: number[] = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => 0,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() {
+            loadAttempts += 1;
+            if (loadAttempts === 1) throw new Error('SQLITE_BUSY');
+            return { fromBlock: 41_001, toBlock: 50_000 };
+          },
+          async save() { /* not under test */ },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    await poll(poller);   // restore: load throws once; flagged for retry
+    await poll(poller);   // retry loads the window and dispatches it
+
+    expect(loadAttempts).toBeGreaterThanOrEqual(2);
+    expect(seen).toContain(45_000);
+  });
+
+  it('a failed re-home write does not forfeit the adopted cursor (review r24)', async () => {
+    // The adopted cursor must remain usable in memory when
+    // saveLane('kaRootMutations', …) rejects — live-seeding instead would
+    // skip the very interval the migration preserves.
+    const { adapter, filters } = makeChain(20_000);
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => 0,
+      cursorPersistence: {
+        async loadLane(lane) { return (lane as string) === 'collectionUpdates' ? 1_000 : undefined; },
+        async saveLane(lane) {
+          if ((lane as string) === 'kaRootMutations') throw new Error('disk full');
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+
+    await poll(poller);
+
+    expect(filters[0].fromBlock).toBe(951);
+  });
   it('a rejected replay window SURVIVES a process restart via the optional store methods (review r20)', async () => {
     // The forward cursor is durable; an in-memory-only retained window
     // would let a replay-discovered mutation be lost across a restart while
