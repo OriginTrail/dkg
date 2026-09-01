@@ -348,7 +348,21 @@ export class EventsMethods extends EVMChainAdapterBase {
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     await this.init();
 
-    let rootMutationGroupServed = false;
+    // Chain-triggered re-verification of a held Knowledge Asset (#2435).
+    // The four root-mutation names are ONE grouped operation — a single
+    // topic-OR getLogs (review r6) — so the requested subset is partitioned
+    // out ONCE ahead of the per-event dispatcher (review r21) instead of
+    // being re-derived inside it and suppressed with a served sentinel.
+    // Membership is judged by the SAME constant the poller lane subscribes
+    // with: removing a name stops both the yield and the subscription.
+    const rootMutationNames = filter.eventTypes.filter(
+      (t): t is KnowledgeAssetRootMutationEventType =>
+        (KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES as readonly string[]).includes(t),
+    );
+    if (rootMutationNames.length > 0) {
+      yield* this.yieldKnowledgeAssetRootMutationLogs(rootMutationNames, filter);
+    }
+
     for (const eventType of filter.eventTypes) {
       if (eventType === 'KnowledgeBatchCreated') {
         // V8-only event — emitted by archived KnowledgeAssetsStorage. When the
@@ -639,21 +653,6 @@ export class EventsMethods extends EVMChainAdapterBase {
         }
       }
 
-      // Chain-triggered re-verification of a held Knowledge Asset (#2435).
-      // One membership test rather than four near-identical branches, so the
-      // adapter and the poller lane that subscribes to it are gated by the
-      // SAME constant: removing a name stops both the yield and the
-      // subscription, instead of leaving a lane asking for a name nothing
-      // produces — which looks exactly like "there were no such events".
-      if ((KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES as readonly string[]).includes(eventType)) {
-        // The whole group is served by ONE combined scan on its first member
-        // (review r6); later members of the same filter are already covered.
-        if (rootMutationGroupServed) continue;
-        rootMutationGroupServed = true;
-        const requested = filter.eventTypes.filter((t): t is KnowledgeAssetRootMutationEventType =>
-          (KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES as readonly string[]).includes(t));
-        yield* this.yieldKnowledgeAssetRootMutationLogs(requested, filter);
-      }
     }
   }
 }

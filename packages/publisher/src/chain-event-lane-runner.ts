@@ -31,6 +31,19 @@ interface ChainEventPollerLaneState {
   failureBackoffMs?: number;
   /** Ticks on which this lane was due — drives `periodicRescan`. */
   pollCount?: number;
+  /**
+   * A periodic-replay window whose dispatch REJECTED, retained verbatim and
+   * retried every poll until it succeeds (review r19). Never advances or
+   * rewinds the forward cursor; at most one window is outstanding, and a
+   * due periodic window is superseded while a retry is pending.
+   */
+  pendingRescanRetry?: { fromBlock: number; toBlock: number };
+  /** The restored cursor came from a RETIRED lane key (r22/r25): it must be
+   *  capped at the live-seed floor once the head is known, because it only
+   *  proves coverage for the retired lane's event type. */
+  cursorAdoptedFromRetiredKey?: boolean;
+  /** A replay-window load failed transiently; retry it on a later poll (r24). */
+  replayRestorePending?: boolean;
   /** Chain head observed on the most recent due tick (diagnostics). */
   lastScanHead?: number;
   /** `clock()` at the most recent due tick (diagnostics). */
@@ -99,6 +112,15 @@ export interface ChainEventPollerLaneSpec {
    * loss recoverable rather than permanent.
    */
   periodicRescan?: { everyPolls: number; windowBlocks: number };
+  /**
+   * Retired persistence keys whose durable cursor this lane ADOPTS when it
+   * has none of its own (review r22): a lane rename must not orphan an
+   * embedder's cursor — falling back to the bounded live seed after a long
+   * outage would silently skip valid events the old cursor had reached.
+   * The adopted value goes through the same restore rewind and is
+   * persisted under the NEW key immediately, so the handoff happens once.
+   */
+  adoptCursorFromRetiredKeys?: readonly string[];
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
 }
@@ -272,10 +294,83 @@ export class ChainEventLaneRunner {
     }
   }
 
+  /**
+   * Load the persisted replay-retry window. A TRANSIENT store failure must
+   * not read as "nothing retained" (review r24): the attempt is flagged for
+   * retry on a later poll instead of being permanently skipped for the
+   * lifetime of the runner.
+   */
+  private async restoreReplayRetryWindow(lane: ChainEventPollerLaneRuntime, ctx: OperationContext): Promise<void> {
+    if (this.cursorStore?.kind !== 'lane' || !this.cursorStore.replayRetry) return;
+    try {
+      const retainedReplay = await this.cursorStore.replayRetry.load(lane.spec.name);
+      lane.state.replayRestorePending = false;
+      if (retainedReplay) {
+        lane.state.pendingRescanRetry = { ...retainedReplay };
+        this.log.info(
+          ctx,
+          `Restored replay-retry window from persistence: lane=${lane.spec.name} ` +
+          `[${retainedReplay.fromBlock}, ${retainedReplay.toBlock}]`,
+        );
+      }
+    } catch (err) {
+      lane.state.replayRestorePending = true;
+      this.log.warn(
+        ctx,
+        `Failed to load replay-retry window (will retry on a later poll): lane=${lane.spec.name} ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Best-effort persistence of the retained replay window (review r20): a
+   * store failure must not disturb the in-memory retry — the window is
+   * simply process-lifetime again, exactly the pre-durability behavior.
+   */
+  private async persistReplayRetry(
+    lane: ChainEventPollerLaneRuntime,
+    window: { fromBlock: number; toBlock: number } | undefined,
+    ctx: OperationContext,
+  ): Promise<void> {
+    try {
+      if (this.cursorStore?.kind === 'lane') {
+        await this.cursorStore.replayRetry?.save(lane.spec.name, window);
+      }
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to persist replay-retry window (in-memory retry unaffected): lane=${lane.spec.name} ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   private async restoreLaneCursor(lane: ChainEventPollerLaneRuntime, ctx: OperationContext): Promise<void> {
     if (!this.cursorStore) return;
     try {
-      const saved = await this.loadPersistedLaneCursor(lane);
+      let saved = await this.loadPersistedLaneCursor(lane);
+      if ((saved == null || saved <= 0) && this.cursorStore.kind === 'lane') {
+        for (const retired of lane.spec.adoptCursorFromRetiredKeys ?? []) {
+          // A migration read of a RETIRED key (review r22): the store contract
+          // is key→block, so the retired spelling is passed through the same
+          // accessor. The adopted value is NOT re-homed here (review r25):
+          // it still needs the live-seed CAP, which requires the head — the
+          // first successful forward scan persists the corrected cursor
+          // under the new key instead, so a crash cannot freeze an uncapped
+          // adoption into the new lane's own durable cursor.
+          const adopted = await this.cursorStore.loadLane(retired as ChainEventPollerLane);
+          if (adopted != null && adopted > 0) {
+            saved = adopted;
+            lane.state.cursorAdoptedFromRetiredKey = true;
+            this.log.info(
+              ctx,
+              `Adopted durable cursor from retired lane key: ${retired} -> ${lane.spec.name} block ${adopted}`,
+            );
+            break;
+          }
+        }
+      }
       if (saved != null && saved > 0) {
         const rewound = this.rewindBlocks(lane, saved);
         lane.state.lastBlock = rewound;
@@ -287,6 +382,10 @@ export class ChainEventLaneRunner {
             : `Restored poller cursor from persistence: lane=${lane.spec.name} block ${saved} rewound to ${rewound}`,
         );
       }
+      // A persisted replay-retry window outlives the process (review r20):
+      // the forward cursor is durable, so an in-memory-only retained window
+      // would let a rejected replay discovery be lost across a restart.
+      await this.restoreReplayRetryWindow(lane, ctx);
     } catch (err) {
       this.log.warn(ctx, `Failed to load persisted cursor: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -370,6 +469,20 @@ export class ChainEventLaneRunner {
 
     if (head != null && !state.headKnown) {
       state.headKnown = true;
+      // An ADOPTED cursor proves coverage for the retired lane's ONE event
+      // type, not for the three newly subscribed ones (review r25): cap it
+      // at the live-seed floor, so the new types get at least the normal
+      // activation lookback. Scanning the extra range only re-delivers
+      // idempotent events; skipping it loses mutations forever. An own
+      // (non-adopted) cursor is real all-type coverage and is never capped.
+      if (state.cursorAdoptedFromRetiredKey && !lane.requiresFullHistory) {
+        const seedFloor = Math.max(0, head - lane.liveSeedLookbackBlocks);
+        if (state.lastBlock > seedFloor) {
+          this.log.info(ctx, `Capping adopted cursor at the activation lookback: lane=${lane.spec.name} ${state.lastBlock} -> ${seedFloor}`);
+          state.lastBlock = seedFloor;
+        }
+        state.cursorAdoptedFromRetiredKey = false;
+      }
       if (state.lastBlock === 0 && !state.cursorRestored && !lane.requiresFullHistory) {
         state.lastBlock = Math.max(0, head - lane.liveSeedLookbackBlocks);
         this.log.info(ctx, `Seeded poller cursor near chain head: lane=${lane.spec.name} head=${head} scanning from ${state.lastBlock}`);
@@ -402,16 +515,37 @@ export class ChainEventLaneRunner {
     // failed — the one cursor movement the replay was documented never to
     // cause — and gating the forward scan on it would let a provider that
     // rejects wide history ranges starve fresh events every rescan tick.
-    // A failed re-scan is logged and simply waits for its next scheduled
-    // tick; the forward scan below proceeds regardless.
-    if (rescan) {
+    //
+    // But a failed replay window is NOT forgotten (review r19): the replay
+    // is the only mechanism recovering events a lagging RPC hid, and its
+    // window TRAILS the head — waiting for the next scheduled tick would
+    // re-derive a NEWER window, so a mutation whose durable dispatch
+    // rejected would silently exit the trailing range and be lost despite
+    // the callback documented redelivery contract. The EXACT failed window
+    // is retained on the lane and retried every poll until it dispatches
+    // cleanly; the forward cursor and forward scan stay untouched.
+    // A failed restoration attempt stays eligible (review r24).
+    if (lane.state.replayRestorePending) {
+      await this.restoreReplayRetryWindow(lane, ctx);
+    }
+
+    const replay = lane.state.pendingRescanRetry ?? rescan;
+    if (replay) {
+      // WRITE-AHEAD (review r24): the window is marked pending — in memory
+      // AND durably — BEFORE the dispatch runs. A crash while the callback
+      // is in flight otherwise loses the window entirely while the forward
+      // cursor has already durably passed this history.
+      lane.state.pendingRescanRetry = { fromBlock: replay.fromBlock, toBlock: replay.toBlock };
+      await this.persistReplayRetry(lane, lane.state.pendingRescanRetry, ctx);
       try {
-        await this.dispatchWindow(lane, rescan.fromBlock, rescan.toBlock, ctx);
+        await this.dispatchWindow(lane, replay.fromBlock, replay.toBlock, ctx);
+        lane.state.pendingRescanRetry = undefined;
+        await this.persistReplayRetry(lane, undefined, ctx);
       } catch (err) {
         this.log.warn(
           ctx,
-          `Periodic re-scan failed (forward scan unaffected): lane=${lane.spec.name} ` +
-          `[${rescan.fromBlock}, ${rescan.toBlock}] ${err instanceof Error ? err.message : String(err)}`,
+          `Periodic re-scan failed (forward scan unaffected; window retained for retry): lane=${lane.spec.name} ` +
+          `[${replay.fromBlock}, ${replay.toBlock}] ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }

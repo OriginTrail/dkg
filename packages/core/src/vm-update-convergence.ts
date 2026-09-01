@@ -29,6 +29,7 @@ import {
 } from './ka-ual-identity.js';
 import {
   assertCanonicalDigest,
+  assertNonNegativeSafeInteger,
   assertCanonicalEvmAddress,
   assertCanonicalHexBytes,
   parseCanonicalDecimalU256,
@@ -40,13 +41,13 @@ import {
   boundedString,
   fail,
 } from './vm-update-errors.js';
+import { type KnowledgeAssetRootMutationKindV1 } from './knowledge-asset-root-mutation-v1.js';
 import {
-  canonicalBlockNumber,
-  canonicalDigest32,
   canonicalEventPositionV1,
   compareEventPosition,
   sameEventIdentity,
   type FinalizedEventPositionV1,
+  type LooseEventPositionInputV1,
 } from './finalized-event-position-v1.js';
 
 // The error plumbing and the exact-event-position model were EXTRACTED to
@@ -59,13 +60,37 @@ export {
 } from './vm-update-errors.js';
 export type { VmUpdateErrorCodeV1 } from './vm-update-errors.js';
 export {
-  canonicalBlockNumber,
-  canonicalDigest32,
   canonicalEventPositionV1,
   compareEventPosition,
   sameEventIdentity,
 } from './finalized-event-position-v1.js';
+
+export function canonicalDigest32(value: unknown, label = 'digest'): Digest32V1 {
+  const text = boundedString(value, label);
+  return adapt(label, () => {
+    assertCanonicalDigest(text, label);
+    return text;
+  });
+}
+
+/** The ONE non-negative-safe-integer rule (r23), adapted into W2's typed code. */
+export function canonicalBlockNumber(value: unknown, label = 'blockNumber'): number {
+  return adapt(label, () => {
+    assertNonNegativeSafeInteger(value, label);
+    return value;
+  });
+}
+
+/**
+ * VM-typed adaptation of the NEUTRAL position validator (review r17): W2's
+ * callers keep their `noncanonical-scalar` error contract while unrelated
+ * consumers of `canonicalEventPositionV1` no longer receive VM terminology.
+ */
+function vmEventPosition(input: LooseEventPositionInputV1, label: string): FinalizedEventPositionV1 {
+  return adapt(label, () => canonicalEventPositionV1(input, label));
+}
 export type {
+  CanonicalEventPositionV1,
   FinalizedEventPositionV1,
   LooseEventPositionInputV1,
 } from './finalized-event-position-v1.js';
@@ -378,32 +403,26 @@ export function canonicalVmUpdateScope(input: VmUpdateScopeV1): Readonly<VmUpdat
 
 
 export interface FinalizedKnowledgeAssetUpdateV1 extends FinalizedEventPositionV1 {
-  kind: 'lifecycle-update' | 'root-added';
+  kind: Extract<KnowledgeAssetRootMutationKindV1, 'lifecycle-update' | 'root-added'>;
   kaId: string;
   author: string | null;
   merkleRoot: string;
 }
 
 export interface FinalizedUnsupportedKnowledgeAssetRootMutationV1 extends FinalizedEventPositionV1 {
-  kind: 'roots-replaced' | 'root-removed';
+  kind: Extract<KnowledgeAssetRootMutationKindV1, 'roots-replaced' | 'root-removed'>;
   kaId: string;
 }
 
-/**
- * The kinds of on-chain Knowledge-Asset root mutation, as one NAMED union.
- *
- * Derived from the two record shapes above rather than restated as a literal
- * union, so a kind added to either shape reaches every consumer instead of
- * silently splitting into two vocabularies. The chain adapter's
- * `KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES` enumerates the on-chain EVENT
- * NAMES that produce these kinds; this type is the off-chain CLASSIFICATION
- * they map to. Packages that only classify (the publisher's poller lane, the
- * agent's re-verification intents) import this instead of re-declaring
- * `'lifecycle-update' | 'root-added' | 'roots-replaced' | 'root-removed'`.
- */
-export type KnowledgeAssetRootMutationKindV1 =
-  | FinalizedKnowledgeAssetUpdateV1['kind']
-  | FinalizedUnsupportedKnowledgeAssetRootMutationV1['kind'];
+// The kind vocabulary is NEUTRAL and owned by the event model (review r24):
+// VM convergence derives its supported/unsupported SUBSETS from it (the
+// record shapes above use Extract<...>), so adding a kind for delivery does
+// not require choosing a VM disposition first. Re-exported for consumers
+// that reached it through this module.
+export {
+  KNOWLEDGE_ASSET_ROOT_MUTATION_KINDS_V1,
+} from './knowledge-asset-root-mutation-v1.js';
+export type { KnowledgeAssetRootMutationKindV1 } from './knowledge-asset-root-mutation-v1.js';
 
 
 
@@ -424,7 +443,7 @@ export function canonicalFinalizedUpdate(
     kaId: canonicalUnsignedDecimal(input.kaId, 'update.kaId').toString(),
     author: canonicalNullableAuthorAddress(input.author, 'update.author'),
     merkleRoot: canonicalDigest32(input.merkleRoot, 'update.merkleRoot'),
-    ...canonicalEventPositionV1(input, 'update'),
+    ...vmEventPosition(input, 'update'),
   });
 }
 
@@ -470,7 +489,7 @@ export function orderedLogCommitment(logs: readonly RawLogV1[]): Digest32V1 {
 
   for (const entry of dense) {
     const log = entry as RawLogV1;
-    const position = canonicalEventPositionV1(log.position, 'log');
+    const position = vmEventPosition(log.position, 'log');
     if (previous !== undefined) {
       const order = compareEventPosition(previous, position);
       if (order > 0) fail('page-malformed', 'logs are not in ascending chain order');
@@ -672,7 +691,7 @@ export function canonicalCoverageCursor(
   const resumeAfter =
     input.resumeAfter === undefined
       ? undefined
-      : Object.freeze(canonicalEventPositionV1(input.resumeAfter, 'cursor.resumeAfter'));
+      : Object.freeze(vmEventPosition(input.resumeAfter, 'cursor.resumeAfter'));
   const scanned =
     input.scannedThroughUnattested === undefined
       ? undefined

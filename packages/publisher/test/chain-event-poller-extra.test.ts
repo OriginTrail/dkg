@@ -532,7 +532,9 @@ describe('ChainEventPoller — SG-6 flipped: KA root mutations dispatch end to e
       },
     });
 
-    await poller.pollNow();
+    (poller as unknown as { laneRunner: { clearActiveLaneSchedules(): void } })
+      .laneRunner.clearActiveLaneSchedules(); // force-scan seam (pollNow deleted, review r17)
+    await (poller as unknown as { poll(): Promise<void> }).poll();
     await poller.stop();
 
     expect(seen.map((e) => e.kind)).toEqual([

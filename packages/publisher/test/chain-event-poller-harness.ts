@@ -85,3 +85,16 @@ export function rootMutation(
 export function poll(poller: ChainEventPoller): Promise<void> {
   return (poller as unknown as { poll(): Promise<void> }).poll();
 }
+
+/**
+ * Force a scan NOW regardless of lane cadence — the TEST SEAM that replaced
+ * the deleted public `pollNow()` (PR #2436 review r17: no production caller
+ * existed, and the manual-queue lifecycle it required was the source of four
+ * review rounds of coordination bugs). Clears the lane schedules, then drives
+ * the private `poll()`; a whole-poll rejection propagates to the caller.
+ */
+export async function forceScan(poller: ChainEventPoller): Promise<void> {
+  (poller as unknown as { laneRunner: { clearActiveLaneSchedules(): void } })
+    .laneRunner.clearActiveLaneSchedules();
+  await (poller as unknown as { poll(): Promise<void> }).poll();
+}
