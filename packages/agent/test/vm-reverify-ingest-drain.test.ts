@@ -365,6 +365,101 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     expect(await intents.countPending(CG)).toBe(0);
     expect(kicks.count, 'a held event must not kick the drain').toBe(0);
   }, 60_000);
+  it('forwards inspectOnly and admissionPriority through the REAL host fetch (review r1)', async () => {
+    // Not a stub-shaped echo test: this drives the real
+    // `fetchContextGraphAssets` and asserts at the two layers the options
+    // are consumed — the finalizer must see `inspectOnly: true` and the
+    // exact-peer sync must see `admissionPriority: 200`. Deleting either
+    // production forwarding makes this red.
+    const { internals, ualFor } = await boot();
+    const ual = await ualFor(41n);
+    internals.chain.getKAContextGraphId = async () => 1n;
+    internals.chain.readKnowledgeAssetVersionSnapshot = async () => ({
+      latestRoot: `0x${'09'.repeat(32)}`,
+      rootCount: 2n,
+      latestAuthor: AUTHOR,
+      latestPublisher: AUTHOR,
+      blockNumber: 200,
+    });
+    internals.requireLocalCgMatchesOnChainSlot = async () => true;
+    const finalizerInputs: Array<Record<string, unknown>> = [];
+    internals.getOrCreateFinalizationHandler = () => ({
+      handleExactChainReconciledKC: async (input: Record<string, unknown>) => {
+        finalizerInputs.push(input);
+        return 'no-swm';
+      },
+    });
+    internals.ensurePeerConnected = async () => undefined;
+    internals.node.libp2p.getConnections = () => [
+      { remotePeer: { toString: () => 'peer-x' } },
+    ];
+    internals.waitForSyncProtocol = async () => true;
+    internals.ensurePeerAdmittedForRecovery = async () => true;
+    const syncCalls: Array<{ peerId: string; options: Record<string, unknown> }> = [];
+    internals.syncExactKnowledgeAssetsFromPeerDetailed = async (
+      peerId: string,
+      _cg: string,
+      _uals: readonly string[],
+      options: Record<string, unknown>,
+    ) => {
+      syncCalls.push({ peerId, options });
+      return { result: {}, disposition: 'incomplete' };
+    };
+
+    await internals.fetchContextGraphAssets(CG, [ual], {
+      inspectOnly: true,
+      admissionPriority: VM_REVERIFY_ADMISSION_PRIORITY,
+      peerIds: ['peer-x'],
+    });
+
+    expect(finalizerInputs.length).toBeGreaterThanOrEqual(1);
+    expect(
+      finalizerInputs.every((input) => input.inspectOnly === true),
+      'every finalizer inspection must carry inspectOnly',
+    ).toBe(true);
+    expect(syncCalls).toHaveLength(1);
+    expect(syncCalls[0]!.options.admissionPriority).toBe(VM_REVERIFY_ADMISSION_PRIORITY);
+
+    // Opposite polarity: the operator route passes neither, and neither may
+    // materialize out of thin air.
+    finalizerInputs.length = 0;
+    syncCalls.length = 0;
+    await internals.fetchContextGraphAssets(CG, [ual], { peerIds: ['peer-x'] });
+    expect(finalizerInputs.length).toBeGreaterThanOrEqual(1);
+    expect(
+      finalizerInputs.every((input) => !('inspectOnly' in input)),
+      'the operator default must NOT suppress stamps',
+    ).toBe(true);
+    expect(syncCalls[0]!.options.admissionPriority).toBeUndefined();
+  }, 60_000);
+
+  it('submits the forwarded priority to the admission layer (review r1)', async () => {
+    // The last link: the REAL syncExactKnowledgeAssetsFromPeerDetailed must
+    // hand `admissionPriority` to the admission job, and default to the
+    // operator priority when the caller passes none.
+    const { internals } = await boot();
+    const admissions: Array<Record<string, unknown>> = [];
+    internals.runLegacyDurableSyncDetailed = async (
+      ..._args: unknown[]
+    ) => {
+      admissions.push(_args[6] as Record<string, unknown>);
+      return { result: {}, exactFetchDisposition: 'complete' };
+    };
+
+    await internals.syncExactKnowledgeAssetsFromPeerDetailed('peer-x', CG, [
+      'did:dkg:evm:31337/0x00000000000000000000000000000000000000aa/1',
+    ], { admissionPriority: VM_REVERIFY_ADMISSION_PRIORITY });
+    await internals.syncExactKnowledgeAssetsFromPeerDetailed('peer-x', CG, [
+      'did:dkg:evm:31337/0x00000000000000000000000000000000000000aa/1',
+    ]);
+
+    expect(admissions).toHaveLength(2);
+    expect(admissions[0]!.priority, 'the drain priority reaches admission')
+      .toBe(VM_REVERIFY_ADMISSION_PRIORITY);
+    expect(admissions[1]!.priority, 'and the operator default stays 1000')
+      .toBe(EXACT_ASSET_FETCH_ADMISSION_PRIORITY);
+    expect(admissions[0]!.source).toBe('vm-recovery');
+  }, 60_000);
   it('the SWM peer loop continues past a partially useful first peer (review r1)', async () => {
     // The production loop, driven directly: peer A writes something
     // unrelated (verdict false), peer B serves the target (verdict true),
