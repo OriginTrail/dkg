@@ -86,7 +86,7 @@ export class LaneReplayCoordinator {
    * (review r27-bot) — forward scanning continues and the periodic schedule
    * resumes once a restore attempt completes.
    */
-  async takeWindow(lastBlock: number): Promise<LaneReplayRetryWindow | undefined> {
+  private async takeWindow(lastBlock: number): Promise<LaneReplayRetryWindow | undefined> {
     if (this.#restorePending) {
       await this.restoreFromPersistence();
     }
@@ -96,21 +96,37 @@ export class LaneReplayCoordinator {
   }
 
   /**
-   * WRITE-AHEAD (review r24): the window is marked pending — in memory AND
-   * durably — BEFORE the dispatch runs. A crash while the callback is in
-   * flight otherwise loses the window entirely while the forward cursor has
-   * already durably passed this history. A dispatch failure needs no further
-   * bookkeeping: the retained window IS this mark.
+   * The ONE dispatch operation (review r6-bot): selects the due window,
+   * write-ahead marks it — in memory AND durably, BEFORE the dispatch runs
+   * (review r24: a crash while the callback is in flight otherwise loses
+   * the window entirely while the forward cursor has durably passed this
+   * history) — invokes the dispatch, and releases the mark only after a
+   * clean dispatch. A dispatch failure needs no further bookkeeping: the
+   * retained window IS the write-ahead mark, retried on the next poll.
+   * Owning the whole protocol here makes dispatch-without-mark and
+   * clear-after-failure structurally impossible at every call site.
    */
-  async markDispatching(window: LaneReplayRetryWindow): Promise<void> {
+  async dispatchDue(
+    lastBlock: number,
+    dispatchWindow: (window: LaneReplayRetryWindow) => Promise<void>,
+  ): Promise<{ window: LaneReplayRetryWindow; dispatched: boolean } | undefined> {
+    const window = await this.takeWindow(lastBlock);
+    if (!window) return undefined;
     this.#pendingRetry = { fromBlock: window.fromBlock, toBlock: window.toBlock };
     await this.persist(this.#pendingRetry);
-  }
-
-  /** The window dispatched cleanly: release it, in memory and durably. */
-  async markDispatched(): Promise<void> {
+    try {
+      await dispatchWindow(window);
+    } catch (err) {
+      this.deps.logWarn(
+        `Periodic re-scan failed (forward scan unaffected; window retained for retry): ` +
+        `lane=${this.deps.lane} [${window.fromBlock}, ${window.toBlock}] ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { window, dispatched: false };
+    }
     this.#pendingRetry = undefined;
     await this.persist(undefined);
+    return { window, dispatched: true };
   }
 
   private takeDueScheduledWindow(lastBlock: number): LaneReplayRetryWindow | undefined {

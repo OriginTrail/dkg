@@ -537,20 +537,8 @@ export class ChainEventLaneRunner {
     // The trailing replay — scheduling, retained-retry priority, the
     // unread-window guard and durable bookkeeping — is the coordinator’s
     // (review r3-bot); this scheduler only dispatches what it hands over.
-    const replay = await lane.replay.takeWindow(state.lastBlock);
-    if (replay) {
-      await lane.replay.markDispatching(replay);
-      try {
-        await this.dispatchWindow(lane, replay.fromBlock, replay.toBlock, ctx);
-        await lane.replay.markDispatched();
-      } catch (err) {
-        this.log.warn(
-          ctx,
-          `Periodic re-scan failed (forward scan unaffected; window retained for retry): lane=${lane.spec.name} ` +
-          `[${replay.fromBlock}, ${replay.toBlock}] ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    await lane.replay.dispatchDue(state.lastBlock, (window) =>
+      this.dispatchWindow(lane, window.fromBlock, window.toBlock, ctx));
     if (fromBlock > upperBound) {
       this.applyLaneSchedule(lane, { kind: 'noWork', now });
       return { lane, blockNumber: state.lastBlock, advanced: false };
