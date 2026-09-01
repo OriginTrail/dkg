@@ -170,7 +170,8 @@ export default defineConfig({
       // config; these are the unit lanes.
       "test/vm-reverify-intent-store.test.ts",
       "test/vm-reverify-intents.test.ts",
-      "test/vm-reverify-ingest-drain.test.ts",
+      "test/vm-reverify-ingest.test.ts",
+      "test/vm-reverify-drain.test.ts",
       "test/vm-reverify-wiring.test.ts",
       "test/named-ka-publish-recovery.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
