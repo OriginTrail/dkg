@@ -133,8 +133,8 @@ import {
   loadExactAppliedCatalogRowsV1 as loadExactCatalogRowsForHeadV1,
 } from './applied-catalog-authority-transition-v1.js';
 import {
-  assertRfc64BoundedCatalogPredecessorV1,
   RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1,
+  walkRfc64BoundedCatalogHeadLineageV1,
 } from './catalog-head-lineage-v1.js';
 
 export {
@@ -1514,11 +1514,10 @@ export class Rfc64PublicCatalogNativeReceiverV1<
 
     const currentVersion = BigInt(current.catalogVersion);
     const targetVersion = BigInt(target.payload.version);
-    const intermediateCount = targetVersion - currentVersion - 1n;
     if (
       targetVersion <= currentVersion
-      || intermediateCount < 1n
-      || intermediateCount > BigInt(RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1)
+      || targetVersion - currentVersion - 1n
+        > BigInt(RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1)
     ) {
       fail(
         'catalog-native-receiver-history',
@@ -1526,48 +1525,43 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       );
     }
 
-    const fetchedAncestors: FetchedRfc64PublicCatalogObjectV1[] = [];
-    let child = target;
-    for (let index = 0; index < Number(intermediateCount); index += 1) {
-      throwIfAborted(signal);
-      const predecessorDigest = child.payload.previousHeadDigest;
-      if (predecessorDigest === null) {
-        fail('catalog-native-receiver-history', 'coalesced successor lineage ended before the durable head');
-      }
-      const fetched = await this.fetchCatalogObjectWithCacheV1(
-        remotePeerId,
-        scope,
-        AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
-        predecessorDigest,
-        signal,
+    let lineage: Awaited<ReturnType<typeof walkRfc64BoundedCatalogHeadLineageV1<
+      FetchedRfc64PublicCatalogObjectV1
+    >>>;
+    try {
+      lineage = await walkRfc64BoundedCatalogHeadLineageV1({
+        target,
+        catalogScope: trustedCatalogScope,
+        anchorHeadDigest: current.currentCatalogHeadDigest,
+        readPredecessor: async (predecessorDigest) => {
+          throwIfAborted(signal);
+          const fetched = await this.fetchCatalogObjectWithCacheV1(
+            remotePeerId,
+            scope,
+            AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+            predecessorDigest,
+            signal,
+          );
+          if (fetched === null) return null;
+          assertSignedAuthorCatalogHeadEnvelopeV1(fetched.envelope);
+          return Object.freeze({ head: fetched.envelope, evidence: fetched });
+        },
+      });
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-history',
+        'coalesced successor has an invalid signed predecessor lineage',
+        cause,
       );
-      if (fetched === null) {
-        fail('catalog-native-receiver-not-found', 'coalesced successor predecessor head was not found');
-      }
-      let predecessor: SignedAuthorCatalogHeadEnvelopeV1;
-      try {
-        assertSignedAuthorCatalogHeadEnvelopeV1(fetched.envelope);
-        predecessor = fetched.envelope;
-        assertRfc64BoundedCatalogPredecessorV1(
-          predecessor,
-          child,
-          trustedCatalogScope,
-        );
-      } catch (cause) {
-        fail(
-          'catalog-native-receiver-history',
-          'coalesced successor has an invalid signed predecessor lineage',
-          cause,
-        );
-      }
-      fetchedAncestors.push(fetched);
-      child = predecessor;
     }
 
     if (
-      child.payload.previousHeadDigest !== current.currentCatalogHeadDigest
-      || BigInt(child.payload.version) !== currentVersion + 1n
+      lineage.disposition !== 'anchor'
+      || BigInt(lineage.terminalChild.payload.version) !== currentVersion + 1n
     ) {
+      if (lineage.disposition === 'missing') {
+        fail('catalog-native-receiver-not-found', 'coalesced successor predecessor head was not found');
+      }
       fail(
         'catalog-native-receiver-history',
         'coalesced successor does not descend from the durable current head',
@@ -1576,10 +1570,12 @@ export class Rfc64PublicCatalogNativeReceiverV1<
     try {
       for (
         let offset = 0;
-        offset < fetchedAncestors.length;
+        offset < lineage.ancestors.length;
         offset += RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS
       ) {
-        await this.options.controlObjects.stageVerifiedObjects(fetchedAncestors.slice(
+        await this.options.controlObjects.stageVerifiedObjects(lineage.ancestors.map(
+          ({ evidence }) => evidence,
+        ).slice(
           offset,
           offset + RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS,
         ));

@@ -44,7 +44,6 @@ import type {
 } from './dkg-agent-rfc64-catalog.js';
 import type {
   ReconcileRfc64PublicRootCatalogExactSetResultV1,
-  Rfc64CatalogProjectionTargetPolicyV1,
 } from './dkg-agent-rfc64-catalog-upsert.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
@@ -81,8 +80,11 @@ interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
   readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
-  readonly projectionTargetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
 }
+
+export type Rfc64CatalogProjectionModeV1 =
+  | 'immediate-exact-replacement'
+  | 'confirmation-gated-monotonic-union';
 
 interface Rfc64DurableCatalogAssetIdentityV1 {
   readonly assertionCoordinate: AssertionCoordinateV1;
@@ -104,11 +106,11 @@ type Rfc64DurableCatalogAssetSourceV1 =
 type ResolvedRfc64CatalogAuthoringLaneV1 =
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'public';
-    readonly projectionLifecycle: 'immediate-exact-set';
+    readonly projectionMode: 'immediate-exact-replacement';
   }>
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'private';
-    readonly projectionLifecycle: 'immediate-exact-set' | 'confirmation-gated-append';
+    readonly projectionMode: Rfc64CatalogProjectionModeV1;
   }>;
 
 type Rfc64CatalogAuthoringLaneDecisionV1 =
@@ -160,7 +162,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }>,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
-    if (lane === null || lane.projectionLifecycle !== 'confirmation-gated-append') {
+    if (lane === null || lane.projectionMode !== 'confirmation-gated-monotonic-union') {
       throw new Error('RFC-64 finalized-private placement repair lane is inactive');
     }
     const currentInventoryScope = Object.freeze({
@@ -362,7 +364,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         lane.networkId,
       );
       throwIfAbortedV1(params.signal);
-      const reconcile = lane.projectionTargetPolicy === 'monotonic-union'
+      const reconcile = lane.projectionMode === 'confirmation-gated-monotonic-union'
         ? this.reconcileRfc64SwmInventoryCatalogUnionV1.bind(this)
         : this.reconcileRfc64SwmInventoryCatalogExactSetV1.bind(this);
       const reconciled = await reconcile({
@@ -496,18 +498,14 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ? Object.freeze({
         ...commonLane,
         kind: 'public',
-        projectionLifecycle: 'immediate-exact-set',
-        projectionTargetPolicy: 'exact-replacement',
+        projectionMode: 'immediate-exact-replacement',
       })
       : Object.freeze({
         ...commonLane,
         kind: 'private',
-        projectionLifecycle: acceptedPolicy.policy.source.kind === 'finalized-chain'
-          ? 'confirmation-gated-append'
-          : 'immediate-exact-set',
-        projectionTargetPolicy: acceptedPolicy.policy.source.kind === 'finalized-chain'
-          ? 'monotonic-union'
-          : 'exact-replacement',
+        projectionMode: acceptedPolicy.policy.source.kind === 'finalized-chain'
+          ? 'confirmation-gated-monotonic-union'
+          : 'immediate-exact-replacement',
       });
     return Object.freeze({
       status: 'active',

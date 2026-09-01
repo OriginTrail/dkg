@@ -249,13 +249,21 @@ export function composeFinalizedVmSetV1(
       }
       continue;
     }
-    assertCandidateMatchesPlacement(
+    const match = classifyCandidatePlacement(
       candidate,
       inventory,
       assertedAtKav10Address,
       placement.authorship,
       placement.sealBinding,
     );
+    if (match === 'newer-swm-only') {
+      // One catalog bucket has one row per KA, while the chain can still
+      // finalize an older assertion version. A newer author-sealed catalog
+      // row is therefore SWM-only evidence, not placement evidence for the
+      // older finalized version. Leave the existing VM untouched; the chain
+      // inventory remains its authoritative catalog and recovery source.
+      continue;
+    }
     placementsByKaId.delete(candidate.kaId);
 
     const row = Object.freeze({
@@ -294,13 +302,13 @@ export function composeFinalizedVmSetV1(
   });
 }
 
-function assertCandidateMatchesPlacement(
+function classifyCandidatePlacement(
   candidate: Readonly<FinalizedVmChainCandidateV1>,
   inventory: Readonly<FinalizedVmChainInventoryV1>,
   assertedAtKav10Address: EvmAddressV1,
   authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>,
   sealBinding: ReturnType<typeof readVerifiedCatalogSealBindingV1>,
-): void {
+): 'exact-finalized-placement' | 'newer-swm-only' {
   const seal = sealBinding.seal;
   if (
     candidate.chainId !== seal.assertedAtChainId
@@ -308,8 +316,6 @@ function assertCandidateMatchesPlacement(
     || candidate.kaId !== sealBinding.kaId
     || candidate.ual !== seal.kaUal
     || candidate.authorAddress !== sealBinding.authorAddress
-    || candidate.assertionVersion !== seal.assertionVersion
-    || candidate.assertionRoot !== seal.assertionMerkleRoot
     || candidate.attestedAuthorAddress === null
     || candidate.attestedAuthorAddress !== seal.authorAddress
     || candidate.publisherAddress === null
@@ -320,6 +326,19 @@ function assertCandidateMatchesPlacement(
       `catalog placement for KA ${candidate.kaId} differs from finalized chain truth`,
     );
   }
+  const candidateVersion = BigInt(candidate.assertionVersion);
+  const placementVersion = BigInt(seal.assertionVersion);
+  if (placementVersion > candidateVersion) return 'newer-swm-only';
+  if (
+    placementVersion !== candidateVersion
+    || candidate.assertionRoot !== seal.assertionMerkleRoot
+  ) {
+    fail(
+      'finalized-vm-composition-mismatch',
+      `catalog placement for KA ${candidate.kaId} differs from finalized chain truth`,
+    );
+  }
+  return 'exact-finalized-placement';
 }
 
 function snapshotCatalogLane(input: unknown): Readonly<FinalizedVmCatalogLaneV1> {

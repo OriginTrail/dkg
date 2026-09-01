@@ -282,7 +282,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     let finalizedPrivateInventoryScope: SwmAuthorInventoryScopeV1 | null = null;
     try {
       const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
-      if (lane?.projectionLifecycle === 'confirmation-gated-append') {
+      if (lane?.projectionMode === 'confirmation-gated-monotonic-union') {
         finalizedPrivateInventoryScope = Object.freeze({
           ...lane.scopeBase,
           authorAddress: confirmedSeal.authorAddress,

@@ -4,6 +4,7 @@ import {
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   buildAuthorAttestationTypedData,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   computeAuthorCatalogScopeDigestV1,
@@ -27,6 +28,7 @@ import {
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
+  FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
   verifyControlEnvelopeIssuerSignatureV1,
   type FinalizedVmChainInventoryV1,
 } from '@origintrail-official/dkg-chain';
@@ -239,6 +241,45 @@ describe('RFC-64 finalized VM placement composition', () => {
     );
   });
 
+  it('keeps a newer SWM assertion independent of an older finalized VM version', async () => {
+    const newerSwm = await createPlacement(KA_1, ROOT_3, true, '2');
+
+    const composed = composeFinalizedVmSetV1(requestFor([newerSwm]));
+
+    expect(composed.rows).toEqual([]);
+    expect(composed.materializations).toEqual([]);
+
+    const stalePlacement = await createPlacement(KA_2, ROOT_2, true, '1');
+    expectCode(
+      () => composeFinalizedVmSetV1(requestFor([stalePlacement])),
+      'finalized-vm-composition-mismatch',
+    );
+  });
+
+  it('accepts the catalog placement superset bound and rejects only above 1024', async () => {
+    const placementCount = FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 + 1;
+    const placements = await Promise.all([
+      createPlacement(KA_2, ROOT_2),
+      ...Array.from({ length: placementCount - 1 }, (_, index) => (
+        createPlacement(packKaId(BigInt(index + 1_000)), ROOT_3)
+      )),
+    ]);
+
+    const composed = composeFinalizedVmSetV1(requestFor(placements));
+    expect(placements).toHaveLength(placementCount);
+    expect(composed.rows).toHaveLength(1);
+    expect(composed.rows[0]?.ual).toBe(ual(2n));
+
+    const aboveCatalogBound = Array.from(
+      { length: MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 + 1 },
+      () => placements[0]!,
+    );
+    expectCode(
+      () => composeFinalizedVmSetV1(requestFor(aboveCatalogBound)),
+      'finalized-vm-composition-placement',
+    );
+  }, 60_000);
+
   it('binds the cleartext catalog lane to the exact same-anchor numeric Context Graph', async () => {
     const placement = await createPlacement(KA_2, ROOT_2);
     const base = requestFor([placement]);
@@ -373,8 +414,10 @@ async function createPlacement(
   kaId: KaIdV1,
   assertionRoot: Digest32V1,
   validAttestation = true,
+  assertionVersionOverride?: string,
 ): Promise<FinalizedVmPlacementEvidenceV1> {
-  const assertionVersion = String(BigInt(kaId) & ((1n << 96n) - 1n));
+  const assertionVersion = assertionVersionOverride
+    ?? String(BigInt(kaId) & ((1n << 96n) - 1n));
   const scope = {
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_NAME,

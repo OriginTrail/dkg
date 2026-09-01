@@ -3635,6 +3635,18 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       successorsApplied: 2,
       appliedHead: { catalogVersion: '5', inventoryRowCount: '2' },
     });
+    const v4Head = author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    });
+    await expect(author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+      ...common,
+      asset: firstV2,
+    })).resolves.toEqual(v4Head);
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toEqual(v4Head);
     await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
       ...common,
       assets: [firstV2, secondAsset],

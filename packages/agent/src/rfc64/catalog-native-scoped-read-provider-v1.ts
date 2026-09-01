@@ -41,8 +41,7 @@ import type {
 } from '@origintrail-official/dkg-chain';
 
 import {
-  assertRfc64BoundedCatalogPredecessorV1,
-  RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1,
+  walkRfc64BoundedCatalogHeadLineageV1,
 } from './catalog-head-lineage-v1.js';
 import {
   verifyAuthorCatalogRowAuthorshipV1,
@@ -317,24 +316,17 @@ async function readBoundedAuthorCatalogHeadAncestorsV1(
   target: SignedAuthorCatalogHeadEnvelopeV1,
   catalogScope: Readonly<AuthorCatalogScopeV1>,
 ): Promise<readonly SignedAuthorCatalogHeadEnvelopeV1[]> {
-  const ancestors: SignedAuthorCatalogHeadEnvelopeV1[] = [];
-  let child = target;
-  for (
-    let index = 0;
-    index < RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1;
-    index += 1
-  ) {
-    const predecessorDigest = child.payload.previousHeadDigest;
-    if (predecessorDigest === null) break;
-    const stored = await readStored(options, predecessorDigest);
-    if (stored === null) break;
-    assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
-    const predecessor = stored.envelope;
-    assertRfc64BoundedCatalogPredecessorV1(predecessor, child, catalogScope);
-    ancestors.push(predecessor);
-    child = predecessor;
-  }
-  return Object.freeze(ancestors);
+  const lineage = await walkRfc64BoundedCatalogHeadLineageV1({
+    target,
+    catalogScope,
+    readPredecessor: async (predecessorDigest) => {
+      const stored = await readStored(options, predecessorDigest);
+      if (stored === null) return null;
+      assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
+      return Object.freeze({ head: stored.envelope, evidence: stored.envelope });
+    },
+  });
+  return Object.freeze(lineage.ancestors.map(({ head }) => head));
 }
 
 function exactScopeCacheKey(

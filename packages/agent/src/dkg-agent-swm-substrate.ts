@@ -1796,6 +1796,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           markContextGraphMetaDirtyFromQuads: (quads) => {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
+          writeLocks: this.writeLocks,
           retireConfirmedGraphScopedSwmTwin: async (candidate, ctx) => {
             await this.publisher.clearPublishedKnowledgeAssetSwm(
               candidate.contextGraphId,

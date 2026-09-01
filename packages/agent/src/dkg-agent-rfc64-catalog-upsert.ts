@@ -186,6 +186,32 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         }
         return state.current;
       }
+      if (existingIndex >= 0) {
+        const existing = assets[existingIndex]!;
+        const existingVersion = BigInt(existing.seal.assertionVersion);
+        const requestedVersion = BigInt(params.asset.seal.assertionVersion);
+        if (
+          existing.assertionCoordinate === params.asset.assertionCoordinate
+          && requestedVersion < existingVersion
+        ) {
+          // A delayed VM-confirmation repair for vN must not roll a catalog
+          // back after SWM vN+1 has already become its current author row.
+          // The newer row covers the same KA lineage, so the repair is
+          // durably complete without publishing another head.
+          if (state.current === null) {
+            throw new Error('RFC-64 staged genesis unexpectedly contains an ordinary asset');
+          }
+          return state.current;
+        }
+        if (
+          existing.assertionCoordinate !== params.asset.assertionCoordinate
+          || requestedVersion <= existingVersion
+        ) {
+          throw new Error(
+            `RFC-64 catalog upsert for KA ${params.asset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
+          );
+        }
+      }
       if (existingIndex >= 0) assets[existingIndex] = params.asset;
       else assets.push(params.asset);
       const committed = await this.applyRfc64CatalogSuccessorV1(
