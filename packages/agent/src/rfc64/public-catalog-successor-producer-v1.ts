@@ -20,7 +20,6 @@ import {
   calculateOpaqueKaBundleByteLengthV1,
   canonicalizeAuthorCatalogRowV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
-  computeAuthorCatalogScopeDigestV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaChunkTreeRootV1,
   encodeOpaqueKaBundleV1,
@@ -133,17 +132,6 @@ export interface Rfc64PublicCatalogSuccessorProducerOptionsV1 {
 
 /** Bound independent immutable-bundle reads/writes without serializing an entire successor. */
 const RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1 = 8;
-const RFC64_SUCCESSOR_VERIFIED_BUNDLE_CACHE_MAX_V1 =
-  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 8;
-
-interface CachedRfc64SuccessorVerifiedBundleV1 {
-  readonly rowCanonical: string;
-  readonly catalogScopeDigest: Digest32V1;
-  readonly deployment: Readonly<CatalogSealDeploymentProfileV1>;
-  readonly sealBinding: VerifiedCatalogSealBindingSnapshotV1;
-  readonly transfer: VerifiedTransferredCatalogBundleMetadataV1;
-  readonly projection: VerifiedCgSharedProjectionMetadataV1;
-}
 
 export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
@@ -219,10 +207,6 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
   readonly #stageKaBundle: Rfc64PublicCatalogSuccessorProducerOptionsV1['stageKaBundle'];
   readonly #readKaBundleByDigest:
     Rfc64PublicCatalogSuccessorProducerOptionsV1['readKaBundleByDigest'];
-  readonly #verifiedBundleCache = new Map<
-    Digest32V1,
-    CachedRfc64SuccessorVerifiedBundleV1
-  >();
 
   constructor(options: Rfc64PublicCatalogSuccessorProducerOptionsV1) {
     if (
@@ -341,12 +325,6 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    const previousBundleByKaId = new Map(
-      (input.previousBucket?.payload.rows ?? []).map((row) => [
-        row.kaId,
-        row.transfer.blobDigest,
-      ] as const),
-    );
     const verifiedAssets = producedRows.map((producedRow, index) => {
       const prepared = preparedAssets[index];
       if (prepared === undefined || producedRow.kaId !== prepared.row.kaId) {
@@ -354,26 +332,6 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           'catalog-successor-producer-verification',
           'produced bucket did not retain the canonical exact-set row order',
         );
-      }
-      const cached = previousBundleByKaId.get(producedRow.kaId)
-        === prepared.encoded.blobDigest
-        ? this.#readVerifiedBundleCache(prepared, producedRow)
-        : undefined;
-      if (cached !== undefined) {
-        return {
-          prepared,
-          row: producedRow,
-          durableCacheHit: true,
-          sealBinding: cached.sealBinding,
-          transfer: Object.freeze({
-            ...cached.transfer,
-            headObjectDigest: publication.head.objectDigest as Digest32V1,
-          }),
-          projection: Object.freeze({
-            ...cached.projection,
-            headObjectDigest: publication.head.objectDigest as Digest32V1,
-          }),
-        };
       }
       try {
         const transferred = verifyTransferredCatalogBundleV1(
@@ -403,14 +361,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           producedRow,
           prepared.deployment,
         );
-        return {
-          prepared,
-          row: producedRow,
-          durableCacheHit: false,
-          sealBinding,
-          transfer,
-          projection,
-        };
+        return { prepared, row: producedRow, sealBinding, transfer, projection };
       } catch (cause) {
         fail(
           'catalog-successor-producer-verification',
@@ -496,12 +447,17 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
+    const previousBundleByKaId = new Map(
+      (input.previousBucket?.payload.rows ?? []).map((row) => [
+        row.kaId,
+        row.transfer.blobDigest,
+      ] as const),
+    );
     await mapWithConcurrency(
       verifiedAssets,
       RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1,
-      async ({ prepared, row, durableCacheHit }): Promise<void> => {
+      async ({ prepared, row }): Promise<void> => {
         try {
-          if (durableCacheHit) return;
           if (
             previousBundleByKaId.get(row.kaId) === prepared.encoded.blobDigest
             && this.#readKaBundleByDigest !== undefined
@@ -527,14 +483,6 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         }
       },
     );
-
-    for (const { prepared, row, sealBinding, transfer, projection } of verifiedAssets) {
-      this.#rememberVerifiedBundle(prepared, row, {
-        sealBinding,
-        transfer,
-        projection,
-      });
-    }
 
     let stagedControlObjects: StageVerifiedControlObjectsResultV1;
     try {
@@ -570,48 +518,6 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       assets: Object.freeze(assets),
       stagedControlObjects,
     });
-  }
-
-  #readVerifiedBundleCache(
-    prepared: ReturnType<typeof prepareRowAndBundle>,
-    row: Readonly<AuthorCatalogRowV1>,
-  ): CachedRfc64SuccessorVerifiedBundleV1 | undefined {
-    const key = prepared.encoded.blobDigest;
-    const cached = this.#verifiedBundleCache.get(key);
-    if (
-      cached === undefined
-      || cached.rowCanonical !== canonicalizeAuthorCatalogRowV1(row)
-      || cached.catalogScopeDigest !== computeAuthorCatalogScopeDigestV1(prepared.scope)
-      || cached.deployment.networkId !== prepared.deployment.networkId
-      || cached.deployment.assertedAtChainId !== prepared.deployment.assertedAtChainId
-      || cached.deployment.assertedAtKav10Address !== prepared.deployment.assertedAtKav10Address
-    ) return undefined;
-    this.#verifiedBundleCache.delete(key);
-    this.#verifiedBundleCache.set(key, cached);
-    return cached;
-  }
-
-  #rememberVerifiedBundle(
-    prepared: ReturnType<typeof prepareRowAndBundle>,
-    row: Readonly<AuthorCatalogRowV1>,
-    verified: Readonly<Pick<
-      CachedRfc64SuccessorVerifiedBundleV1,
-      'sealBinding' | 'transfer' | 'projection'
-    >>,
-  ): void {
-    const key = prepared.encoded.blobDigest;
-    this.#verifiedBundleCache.delete(key);
-    this.#verifiedBundleCache.set(key, Object.freeze({
-      rowCanonical: canonicalizeAuthorCatalogRowV1(row),
-      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(prepared.scope),
-      deployment: Object.freeze({ ...prepared.deployment }),
-      ...verified,
-    }));
-    while (this.#verifiedBundleCache.size > RFC64_SUCCESSOR_VERIFIED_BUNDLE_CACHE_MAX_V1) {
-      const oldest = this.#verifiedBundleCache.keys().next().value as Digest32V1 | undefined;
-      if (oldest === undefined) break;
-      this.#verifiedBundleCache.delete(oldest);
-    }
   }
 }
 

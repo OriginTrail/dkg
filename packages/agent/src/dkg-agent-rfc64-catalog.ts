@@ -116,11 +116,6 @@ import {
   type Rfc64CatalogAuthorityPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 
-const rfc64SuccessorProducersByPersistenceV1 = new WeakMap<
-  Rfc64PersistenceV1,
-  Rfc64PublicCatalogSuccessorProducerV1
->();
-
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
   readonly address: string;
@@ -691,15 +686,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       );
     }
 
-    let producer = rfc64SuccessorProducersByPersistenceV1.get(persistence);
-    if (producer === undefined) {
-      producer = new Rfc64PublicCatalogSuccessorProducerV1({
-        controlObjects: persistence.controlObjects,
-        stageKaBundle: persistence.kaBundles.putKaBundle,
-        readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
-      });
-      rfc64SuccessorProducersByPersistenceV1.set(persistence, producer);
-    }
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: persistence.controlObjects,
+      stageKaBundle: persistence.kaBundles.putKaBundle,
+      readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
+    });
     const produced = await producer.produceAndStageExactSet({
       previousHead: history.previousHead,
       previousDirectoryPath: history.previousDirectoryPath,

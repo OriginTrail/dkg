@@ -218,7 +218,7 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(ordered.publication.head).toEqual(unordered.publication.head);
     expect(ordered.publication.directoryPath).toEqual(unordered.publication.directoryPath);
     expect(ordered.publication.bucket).toEqual(unordered.publication.bucket);
-    expect(stageKaBundle).toHaveBeenCalledTimes(3);
+    expect(stageKaBundle).toHaveBeenCalledTimes(5);
     expect(stageVerifiedObjects).toHaveBeenCalledTimes(3);
   });
 
@@ -261,7 +261,7 @@ describe('RFC-64 public/open one-row successor producer', () => {
       catalogIssuerAuthorization: authorization,
     });
 
-    const second = await producer.produceAndStageExactSet({
+    await producer.produceAndStageExactSet({
       previousHead: first.publication.head,
       previousDirectoryPath: first.publication.directoryPath,
       previousBucket: first.publication.bucket,
@@ -280,14 +280,8 @@ describe('RFC-64 public/open one-row successor producer', () => {
       catalogIssuerAuthorization: authorization,
     });
 
-    expect(readKaBundleByDigest).not.toHaveBeenCalled();
+    expect(readKaBundleByDigest).toHaveBeenCalledOnce();
     expect(stageKaBundle).toHaveBeenCalledTimes(2);
-    expect(second.assets[0]?.transfer.headObjectDigest).toBe(
-      second.publication.head.objectDigest,
-    );
-    expect(second.assets[0]?.projection.headObjectDigest).toBe(
-      second.publication.head.objectDigest,
-    );
   });
 
   it('shares one ordered immutable asset snapshot across producer and reconciler boundaries', async () => {
