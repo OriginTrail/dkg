@@ -19,10 +19,9 @@ export {
   type McpClientLike,
 } from './runtime.js';
 export {
-  localModelEndpointUrls,
   probeLocalModelEndpoint,
   type LocalModelEndpointAvailability,
-  type LocalModelEndpointProvider,
+  type LocalModelEndpointProbeStrategy,
   type ProbeLocalModelEndpointOptions,
 } from './model-endpoint.js';
 export {

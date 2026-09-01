@@ -269,13 +269,17 @@ curl -sS http://127.0.0.1:11434/v1/models
 ```
 
 Require `ollama ps` to report `CONTEXT` of at least `8192` for `qwen3:8b`.
-`/v1/models` returning HTTP 200 is not proof of the allocated context length.
+`/v1/models` returning HTTP 200 is not proof of the allocated context length,
+and its `data` array must list the configured `qwen3:8b` model (the implicit
+`qwen3:latest` alias is also accepted). A different non-empty model list is not
+ready for this configuration.
 
 Use these DKG settings for Ollama:
 
 ```bash
 export DKG_LLM_URL=http://127.0.0.1:11434/v1/chat/completions
 export DKG_LLM_MODEL=qwen3:8b
+export DKG_LLM_BACKEND=ollama
 ```
 
 Ollama documents its OpenAI-compatible chat-completions, model-list, streaming,
@@ -483,32 +487,11 @@ curl -sS http://127.0.0.1:8080/v1/models
 
 ### Option B: Ollama
 
-Pull the model once, start Ollama if it is not already running, and verify its
-OpenAI-compatible model list:
-
-```bash
-ollama pull qwen3:8b
-```
-
-In the model-server terminal, if the desktop application or system service is
-not already running:
-
-```bash
-OLLAMA_CONTEXT_LENGTH=8192 ollama serve
-```
-
-From another terminal:
-
-```bash
-ollama run qwen3:8b "Reply with OK."
-ollama ps
-curl -sS http://127.0.0.1:11434/v1/models
-```
-
-If the desktop application already owns port `11434`, omit `ollama serve`, set
-its Context length slider to at least `8192`, and restart it. If systemd owns the
-port, use the `OLLAMA_CONTEXT_LENGTH=8192` service override above. Require
-`ollama ps` to report at least `8192` before starting DKG chat.
+Complete the canonical [Install and run Ollama](#install-and-run-ollama)
+procedure above. It owns the installation, server-ownership, minimum-context,
+model-list, and readiness policy; this terminal walkthrough intentionally does
+not repeat it. Leave the verified Ollama server running, then continue with the
+DKG client below.
 
 ## Terminal 3: start DKG chat
 
@@ -581,6 +564,7 @@ daemon. For llama.cpp:
 ```bash
 export DKG_LLM_URL=http://127.0.0.1:8080/v1/chat/completions
 export DKG_LLM_MODEL=qwen3-8b-q4-k-m
+export DKG_LLM_BACKEND=llama.cpp
 dkg start
 ```
 
@@ -589,14 +573,17 @@ For Ollama:
 ```bash
 export DKG_LLM_URL=http://127.0.0.1:11434/v1/chat/completions
 export DKG_LLM_MODEL=qwen3:8b
+export DKG_LLM_BACKEND=ollama
 dkg start
 ```
 
 If the daemon is already running, restart it after changing these variables.
 Keep the selected local model server running, then open Node UI and select **DKG
 Local LLM** in the Agents panel. There is no separate provider selector in the
-browser: Node UI uses `DKG_LLM_URL` and `DKG_LLM_MODEL` from the daemon
-environment. The integration remains read-only: the daemon always creates this
+browser: Node UI uses `DKG_LLM_URL`, `DKG_LLM_MODEL`, and `DKG_LLM_BACKEND`
+from the daemon environment. `DKG_LLM_BACKEND` accepts `ollama`, `llama.cpp`,
+or the backward-compatible default `auto`. The integration remains read-only:
+the daemon always creates this
 UI runtime with writes disabled. The HTTP surface is also node-admin-only.
 Agent-scoped bearer tokens receive `403` and cannot start, continue, or clear
 the daemon-owned operator session.

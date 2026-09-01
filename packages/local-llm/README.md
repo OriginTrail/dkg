@@ -65,28 +65,11 @@ curl -sS http://127.0.0.1:8080/v1/models
 Continue only when `/v1/models` returns HTTP 200. The llama.cpp `/health`
 response should also be `{"status":"ok"}`.
 
-Alternatively, use Ollama in the model-server terminal:
-
-```bash
-ollama pull qwen3:8b
-OLLAMA_CONTEXT_LENGTH=8192 ollama serve
-```
-
-If Ollama is already running as a desktop application or service, omit
-`ollama serve`. DKG requires at least an 8192-token context: set the desktop
-application's **Context length** slider to at least `8192`, or add
-`Environment="OLLAMA_CONTEXT_LENGTH=8192"` to a Linux systemd service override
-and restart that owner. See Ollama's official
-[`Context length`](https://docs.ollama.com/context-length) guidance. Load the
-model and verify its effective allocation before requiring HTTP 200:
-
-```bash
-ollama run qwen3:8b "Reply with OK."
-ollama ps
-curl -sS http://127.0.0.1:11434/v1/models
-```
-
-The selected model's `CONTEXT` value from `ollama ps` must be at least `8192`.
+Alternatively, complete the full guide's canonical
+[Ollama setup procedure](../../docs/use-dkg/local-llm.md#install-and-run-ollama).
+That section is the sole source for installation, server ownership, context,
+model loading, and readiness policy. Leave the verified server running, then
+use the Ollama client options below.
 
 ### Terminal 2: start interactive DKG chat
 

@@ -60,13 +60,39 @@ describe('daemon local LLM service', () => {
     expect(resolveDaemonLocalLlmSettings('/tmp/dkg', {
       DKG_LLM_URL: ' http://127.0.0.1:9090/v1/chat/completions ',
       DKG_LLM_MODEL: ' qwen ',
+      DKG_LLM_BACKEND: ' llama-cpp ',
       DKG_PROJECT: ' testing ',
     })).toEqual({
       llamaUrl: 'http://127.0.0.1:9090/v1/chat/completions',
       model: 'qwen',
+      probeStrategy: { kind: 'llama.cpp' },
       defaultProjectId: 'testing',
       logDir: '/tmp/dkg/logs/local-llm',
     });
+  });
+
+  it('maps an invalid configured backend to structured offline health and chat errors', async () => {
+    const fetcher = vi.fn();
+    const createSession = vi.fn(async () => fakeSession());
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg',
+      env: { DKG_LLM_BACKEND: 'unknown-provider' },
+      fetch: fetcher as typeof fetch,
+      createSession,
+    });
+
+    expect(await service.health()).toEqual(expect.objectContaining({
+      ok: false,
+      ready: false,
+      reachable: false,
+      offline: true,
+      error: expect.stringContaining('DKG_LLM_BACKEND must be one of'),
+    }));
+    await expect(service.chat({ message: 'hello' })).rejects.toMatchObject({
+      code: 'LOCAL_LLM_OFFLINE', status: 503,
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
   });
 
   it('accepts Ollama readiness through /v1/models without requiring /health', async () => {
@@ -83,6 +109,7 @@ describe('daemon local LLM service', () => {
       env: {
         DKG_LLM_URL: 'http://127.0.0.1:11434/v1/chat/completions',
         DKG_LLM_MODEL: 'qwen3:8b',
+        DKG_LLM_BACKEND: 'ollama',
       },
       fetch: fetcher as typeof fetch,
       createSession,
@@ -106,6 +133,60 @@ describe('daemon local LLM service', () => {
       ]);
   });
 
+  it('keeps health and chat not-ready when the configured model is absent', async () => {
+    const fetcher = vi.fn(async () => Response.json({
+      object: 'list',
+      data: [{ id: 'llama3.2' }],
+    }));
+    const createSession = vi.fn(async () => fakeSession());
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg',
+      env: {
+        DKG_LLM_URL: 'http://127.0.0.1:11434/v1/chat/completions',
+        DKG_LLM_MODEL: 'qwen3:8b',
+        DKG_LLM_BACKEND: 'ollama',
+      },
+      fetch: fetcher as typeof fetch,
+      createSession,
+    });
+
+    expect(await service.health()).toEqual(expect.objectContaining({
+      ok: false,
+      ready: false,
+      reachable: true,
+      offline: false,
+      error: expect.stringContaining("Configured model 'qwen3:8b' is not listed"),
+    }));
+    await expect(service.chat({ message: 'hello' })).rejects.toMatchObject({
+      code: 'LOCAL_LLM_NOT_READY', status: 503,
+    });
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it('maps a malformed endpoint URL to structured offline health and chat errors', async () => {
+    const fetcher = vi.fn();
+    const createSession = vi.fn(async () => fakeSession());
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg',
+      env: { DKG_LLM_URL: 'not-a-url' },
+      fetch: fetcher as typeof fetch,
+      createSession,
+    });
+
+    expect(await service.health()).toEqual(expect.objectContaining({
+      ok: false,
+      ready: false,
+      reachable: false,
+      offline: true,
+      error: expect.stringContaining('endpoint configuration is invalid'),
+    }));
+    await expect(service.chat({ message: 'hello' })).rejects.toMatchObject({
+      code: 'LOCAL_LLM_OFFLINE', status: 503,
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
   it('keeps llama.cpp compatible through its /health readiness fallback', async () => {
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -114,7 +195,10 @@ describe('daemon local LLM service', () => {
       return new Response('not found', { status: 404 });
     });
     const service = createDaemonLocalLlmService({
-      dkgHome: '/tmp/dkg', fetch: fetcher as typeof fetch, createSession: vi.fn(),
+      dkgHome: '/tmp/dkg',
+      env: { DKG_LLM_BACKEND: 'llama.cpp' },
+      fetch: fetcher as typeof fetch,
+      createSession: vi.fn(),
     });
 
     expect(await service.health()).toEqual(expect.objectContaining({
@@ -143,7 +227,10 @@ describe('daemon local LLM service', () => {
     });
     const createSession = vi.fn(async () => fakeSession());
     const service = createDaemonLocalLlmService({
-      dkgHome: '/tmp/dkg', fetch: fetcher as typeof fetch, createSession,
+      dkgHome: '/tmp/dkg',
+      env: { DKG_LLM_BACKEND: 'llama.cpp' },
+      fetch: fetcher as typeof fetch,
+      createSession,
     });
 
     expect(await service.health()).toEqual(expect.objectContaining({

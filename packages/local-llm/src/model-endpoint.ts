@@ -1,11 +1,12 @@
-export type LocalModelEndpointProvider = 'openai-models' | 'llama.cpp-health';
+export type LocalModelEndpointProbeStrategy =
+  | Readonly<{ kind: 'auto' }>
+  | Readonly<{ kind: 'ollama' }>
+  | Readonly<{ kind: 'llama.cpp' }>;
 
 export type LocalModelEndpointAvailability =
   | Readonly<{
     status: 'ready';
     reachable: true;
-    provider: LocalModelEndpointProvider;
-    endpoint: string;
   }>
   | Readonly<{
     status: 'not-ready';
@@ -20,6 +21,8 @@ export type LocalModelEndpointAvailability =
 
 export interface ProbeLocalModelEndpointOptions {
   chatCompletionsUrl: string;
+  model: string;
+  strategy?: LocalModelEndpointProbeStrategy;
   fetch?: typeof fetch;
   timeoutMs?: number;
 }
@@ -33,6 +36,11 @@ interface ModelListEntry {
   readonly id: string;
   readonly metadataState: 'absent' | 'loading' | 'loaded';
 }
+
+type ModelListInspection =
+  | Readonly<{ status: 'ready' }>
+  | Readonly<{ status: 'fallback'; reason: string }>
+  | Readonly<{ status: 'not-ready'; reason: string }>;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -54,33 +62,26 @@ function endpointUrl(
   return url.toString();
 }
 
-/** Derive provider probes while preserving a reverse-proxy path prefix. */
-export function localModelEndpointUrls(
-  chatCompletionsUrl: string,
-): Readonly<LocalModelEndpointUrls> {
-  return Object.freeze({
+function localModelEndpointUrls(chatCompletionsUrl: string): LocalModelEndpointUrls {
+  return {
     models: endpointUrl(chatCompletionsUrl, '/v1/models'),
     health: endpointUrl(chatCompletionsUrl, '/health'),
-  });
+  };
 }
 
-function inspectModelList(value: unknown):
-  | Readonly<{ status: 'ready' }>
-  | Readonly<{ status: 'fallback'; reason: string }> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return Object.freeze({
-      status: 'fallback',
-      reason: 'OpenAI-compatible models probe returned a non-object response',
-    });
-  }
+function canonicalModelId(value: string): string {
+  return value.trim().toLowerCase().replace(/:latest$/, '');
+}
+
+function modelIdsMatch(configured: string, listed: string): boolean {
+  return canonicalModelId(configured) === canonicalModelId(listed);
+}
+
+function parseModelList(value: unknown): ModelListEntry[] | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const data = (value as { data?: unknown }).data;
-  if (!Array.isArray(data)) {
-    return Object.freeze({
-      status: 'fallback',
-      reason: 'OpenAI-compatible models probe returned no model list',
-    });
-  }
-  const entries = data.flatMap((candidate): ModelListEntry[] => {
+  if (!Array.isArray(data)) return undefined;
+  return data.flatMap((candidate): ModelListEntry[] => {
     if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return [];
     const record = candidate as Record<string, unknown>;
     if (typeof record.id !== 'string' || record.id.trim().length === 0) return [];
@@ -91,25 +92,62 @@ function inspectModelList(value: unknown):
       : 'absent';
     return [{ id: record.id, metadataState }];
   });
-  if (entries.length === 0) {
-    return Object.freeze({
-      status: 'fallback',
-      reason: 'OpenAI-compatible models probe returned no usable model',
-    });
+}
+
+function inspectModelList(
+  value: unknown,
+  configuredModel: string,
+  strategy: LocalModelEndpointProbeStrategy,
+): ModelListInspection {
+  const entries = parseModelList(value);
+  if (!entries) {
+    return {
+      status: 'not-ready',
+      reason: 'OpenAI-compatible models probe returned no valid model list',
+    };
   }
-  if (entries.some(({ metadataState }) => metadataState !== 'loading')) {
-    return Object.freeze({ status: 'ready' });
+  const matching = entries.filter(({ id }) => modelIdsMatch(configuredModel, id));
+  if (matching.length === 0) {
+    return {
+      status: 'not-ready',
+      reason: `Configured model '${configuredModel}' is not listed by the local endpoint`,
+    };
   }
+
+  if (strategy.kind === 'ollama') return { status: 'ready' };
+  if (strategy.kind === 'llama.cpp') {
+    return matching.some(({ metadataState }) => metadataState === 'loaded')
+      ? { status: 'ready' }
+      : {
+        status: 'fallback',
+        reason: 'llama.cpp model metadata does not report the configured model as loaded',
+      };
+  }
+
+  // Auto preserves the provider-neutral model-list contract while recognizing
+  // llama.cpp's explicit loading marker. Callers that know the backend can
+  // select a strategy and avoid response-shape provider detection entirely.
+  return matching.some(({ metadataState }) => metadataState !== 'loading')
+    ? { status: 'ready' }
+    : { status: 'fallback', reason: 'llama.cpp model is still loading' };
+}
+
+function offline(error: string): LocalModelEndpointAvailability {
+  return Object.freeze({ status: 'offline', reachable: false, error });
+}
+
+function notReady(attempts: readonly string[]): LocalModelEndpointAvailability {
   return Object.freeze({
-    status: 'fallback',
-    reason: 'llama.cpp models are still loading',
+    status: 'not-ready',
+    reachable: true,
+    error: `Local LLM server is reachable but not ready: ${attempts.join('; ')}`,
   });
 }
 
 /**
- * Probe an OpenAI-compatible local model server without leaking provider
- * branching into daemon lifecycle code. `/v1/models` is primary for Ollama and
- * loaded llama.cpp models; `/health` remains the bounded llama.cpp fallback.
+ * Probe the exact configured model through an explicit backend strategy.
+ * `auto` preserves legacy llama.cpp and Ollama configuration; callers that know
+ * their backend can select its strategy without exposing endpoint details.
  */
 export async function probeLocalModelEndpoint(
   options: ProbeLocalModelEndpointOptions,
@@ -119,9 +157,21 @@ export async function probeLocalModelEndpoint(
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
     throw new TypeError('Local model probe timeout must be a positive integer');
   }
-  const urls = localModelEndpointUrls(options.chatCompletionsUrl);
+  const configuredModel = options.model.trim();
+  if (!configuredModel) {
+    return offline('Local LLM endpoint configuration is invalid: model must be non-empty');
+  }
+  const strategy = options.strategy ?? { kind: 'auto' };
+  let urls: LocalModelEndpointUrls;
+  try {
+    urls = localModelEndpointUrls(options.chatCompletionsUrl);
+  } catch (error) {
+    return offline(`Local LLM endpoint configuration is invalid: ${errorMessage(error)}`);
+  }
+
   const attempts: string[] = [];
   let reachable = false;
+  let useHealthFallback = strategy.kind !== 'ollama';
 
   try {
     const response = await fetcher(urls.models, {
@@ -132,24 +182,26 @@ export async function probeLocalModelEndpoint(
     reachable = true;
     if (response.ok) {
       try {
-        const inspection = inspectModelList(await response.json());
+        const inspection = inspectModelList(await response.json(), configuredModel, strategy);
         if (inspection.status === 'ready') {
-          return Object.freeze({
-            status: 'ready',
-            reachable: true,
-            provider: 'openai-models',
-            endpoint: urls.models,
-          });
+          return Object.freeze({ status: 'ready', reachable: true });
         }
         attempts.push(inspection.reason);
+        if (inspection.status === 'not-ready') return notReady(attempts);
       } catch (error) {
         attempts.push(`OpenAI-compatible models probe returned invalid JSON: ${errorMessage(error)}`);
+        return notReady(attempts);
       }
     } else {
       attempts.push(`OpenAI-compatible models probe returned HTTP ${response.status}`);
+      useHealthFallback = useHealthFallback && [404, 405, 501].includes(response.status);
     }
   } catch (error) {
     attempts.push(`OpenAI-compatible models probe failed: ${errorMessage(error)}`);
+  }
+
+  if (!useHealthFallback) {
+    return reachable ? notReady(attempts) : offline(`Local LLM server is offline: ${attempts.join('; ')}`);
   }
 
   try {
@@ -160,28 +212,28 @@ export async function probeLocalModelEndpoint(
     });
     reachable = true;
     if (response.ok) {
-      return Object.freeze({
-        status: 'ready',
-        reachable: true,
-        provider: 'llama.cpp-health',
-        endpoint: urls.health,
-      });
+      try {
+        const payload = await response.json() as { status?: unknown };
+        if (
+          typeof payload === 'object'
+          && payload !== null
+          && !Array.isArray(payload)
+          && payload.status === 'ok'
+        ) {
+          return Object.freeze({ status: 'ready', reachable: true });
+        }
+        attempts.push('llama.cpp health fallback did not return {"status":"ok"}');
+      } catch (error) {
+        attempts.push(`llama.cpp health fallback returned invalid JSON: ${errorMessage(error)}`);
+      }
+    } else {
+      attempts.push(`llama.cpp health fallback returned HTTP ${response.status}`);
     }
-    attempts.push(`llama.cpp health fallback returned HTTP ${response.status}`);
   } catch (error) {
     attempts.push(`llama.cpp health fallback failed: ${errorMessage(error)}`);
   }
 
-  if (reachable) {
-    return Object.freeze({
-      status: 'not-ready',
-      reachable: true,
-      error: `Local LLM server is reachable but not ready: ${attempts.join('; ')}`,
-    });
-  }
-  return Object.freeze({
-    status: 'offline',
-    reachable: false,
-    error: `Local LLM server is offline: ${attempts.join('; ')}`,
-  });
+  return reachable
+    ? notReady(attempts)
+    : offline(`Local LLM server is offline: ${attempts.join('; ')}`);
 }

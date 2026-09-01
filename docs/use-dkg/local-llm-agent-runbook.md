@@ -101,50 +101,12 @@ OpenAI-compatible contract and DKG smoke tests.
 
 ## Install Ollama when selected
 
-Use the official [`Ollama Quickstart`](https://docs.ollama.com/quickstart) for
-the detected operating system. Resolve and verify the executable, then pull the
-model:
-
-```bash
-command -v ollama
-ollama --version
-ollama pull qwen3:8b
-```
-
-Start `ollama serve` only if the desktop application or system service is not
-already listening on `127.0.0.1:11434`. DKG requires at least an 8192-token
-Ollama context. Configure it through one of the supported ownership paths:
-
-- **Ollama desktop application:** open Settings, set **Context length** to at
-  least `8192`, then restart the application.
-- **Terminal-owned server:** start it with
-  `OLLAMA_CONTEXT_LENGTH=8192 ollama serve`.
-- **Linux systemd service:** run `sudo systemctl edit ollama`, add the override
-  below, then run `sudo systemctl daemon-reload` and
-  `sudo systemctl restart ollama`:
-
-  ```ini
-  [Service]
-  Environment="OLLAMA_CONTEXT_LENGTH=8192"
-  ```
-
-These are the official Ollama
-[`Context length`](https://docs.ollama.com/context-length) and
-[`server configuration`](https://docs.ollama.com/faq#how-do-i-configure-ollama-server)
-paths. Load the model once and verify the allocation before starting DKG chat:
-
-```bash
-ollama run qwen3:8b "Reply with OK."
-ollama ps
-```
-
-Require the selected model's `CONTEXT` value from `ollama ps` to be at least
-`8192`; HTTP 200 from `/v1/models` alone does not prove the context allocation.
-Then verify the shared readiness route:
-
-```bash
-curl -sS http://127.0.0.1:11434/v1/models
-```
+Complete the full guide's canonical
+[Install and run Ollama](local-llm.md#install-and-run-ollama) procedure. That
+single section owns installation, desktop/terminal/systemd server ownership,
+the minimum context, model loading, and readiness checks. Record the resolved
+executable, version, selected model tag, `ollama ps` context, and exact
+`/v1/models` match as agent evidence; do not restate or vary the policy here.
 
 ## Model decision table
 
@@ -187,9 +149,8 @@ Constraints:
 Procedure:
 1. Detect macOS, Linux, or Windows. For llama.cpp, install `llama-server`, set
    `LLAMA_SERVER` to its absolute path, and run `llama-server --version`. For
-   Ollama, install it from the official Quickstart, run `ollama --version`, and
-   pull the selected model tag. Do not continue if the selected executable
-   cannot run.
+   Ollama, complete the canonical Ollama procedure linked above. Do not continue
+   if the selected executable or its readiness gates fail.
 2. Detect whether this is an installed DKG or a source checkout. For an
    installed DKG, run `dkg doctor --json`, `dkg --version`, and `dkg status`.
    In a source checkout, build the CLI, MCP, and local-LLM packages and use
@@ -217,11 +178,8 @@ Procedure:
    Fix or remove any selector that errors or returns the wrong result shape.
 10. Start the selected backend. For llama.cpp, use an 8192-token context, Jinja
     templates, temperature 0.15, top-p 0.9, repeat penalty 1.05, host
-    127.0.0.1, and port 8080. For Ollama, configure at least 8192 tokens through
-    the desktop Context length setting, `OLLAMA_CONTEXT_LENGTH=8192 ollama serve`,
-    or the systemd service override; ensure the service is listening on
-    127.0.0.1:11434 and the selected model tag is pulled. Load it once and
-    require `ollama ps` to report `CONTEXT` of at least 8192.
+    127.0.0.1, and port 8080. For Ollama, complete every gate in the canonical
+    Ollama procedure linked above without copying or changing that policy.
 11. Run `curl -sS <server-origin>/v1/models` and require HTTP 200. For
     llama.cpp, also check `/health` and require `{"status":"ok"}`.
 12. Start the final chat with
@@ -294,35 +252,13 @@ dkg llm \
 
 ### Ollama launch
 
-Pull the model, start the service if it is not already running, and verify the
-model list:
+Complete the canonical
+[Install and run Ollama](local-llm.md#install-and-run-ollama) procedure first.
+It is the sole source for installation, context ownership, and readiness. Once
+that procedure passes, start the read-only DKG chat against the verified server:
 
 ```bash
 export DKG_PROJECT=<exact-context-graph-id>
-ollama pull qwen3:8b
-```
-
-Run the server in its own terminal if no Ollama service is already active:
-
-```bash
-OLLAMA_CONTEXT_LENGTH=8192 ollama serve
-```
-
-Then verify it from the DKG client terminal:
-
-```bash
-ollama run qwen3:8b "Reply with OK."
-ollama ps
-curl -sS http://127.0.0.1:11434/v1/models
-```
-
-Omit `ollama serve` if an existing Ollama desktop application or service
-already owns port `11434`; configure that owner through the desktop setting or
-systemd override documented above. Do not continue unless `ollama ps` reports
-at least `8192` for the selected model. Start the same read-only DKG chat against
-Ollama:
-
-```bash
 dkg llm \
   --interactive \
   --project "$DKG_PROJECT" \
@@ -332,7 +268,8 @@ dkg llm \
 ```
 
 For Node UI, export those endpoint and model values as `DKG_LLM_URL` and
-`DKG_LLM_MODEL` in the daemon environment before starting or restarting DKG.
+`DKG_LLM_MODEL`, and set `DKG_LLM_BACKEND=ollama`, in the daemon environment
+before starting or restarting DKG.
 
 For an explicitly approved Query Catalog build, use the recommended Qwen
 llama.cpp server and temporarily start this client:

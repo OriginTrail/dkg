@@ -3,6 +3,7 @@ import process from 'node:process';
 import {
   probeLocalModelEndpoint,
   type LocalModelEndpointAvailability,
+  type LocalModelEndpointProbeStrategy,
 } from '@origintrail-official/dkg-local-llm';
 import {
   createDkgLocalLlmRuntimeSession,
@@ -96,6 +97,7 @@ export interface DaemonLocalLlmServiceOptions {
   cwd?: string;
   fetch?: typeof fetch;
   createSession?: SessionFactory;
+  probeStrategy?: LocalModelEndpointProbeStrategy;
   probeTimeoutMs?: number;
   stderr?: (line: string) => void;
 }
@@ -108,15 +110,41 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function resolveProbeStrategy(value: string | undefined): {
+  strategy: LocalModelEndpointProbeStrategy;
+  error?: string;
+} {
+  const configured = trimmed(value)?.toLowerCase();
+  if (!configured || configured === 'auto') return { strategy: { kind: 'auto' } };
+  if (configured === 'ollama') return { strategy: { kind: 'ollama' } };
+  if (['llama.cpp', 'llama-cpp', 'llamacpp'].includes(configured)) {
+    return { strategy: { kind: 'llama.cpp' } };
+  }
+  return {
+    strategy: { kind: 'auto' },
+    error: `DKG_LLM_BACKEND must be one of: auto, ollama, llama.cpp (received '${value?.trim()}')`,
+  };
+}
+
 export function resolveDaemonLocalLlmSettings(
   dkgHome: string,
   env: NodeJS.ProcessEnv = process.env,
-): { llamaUrl: string; model: string; defaultProjectId?: string; logDir: string } {
+): {
+  llamaUrl: string;
+  model: string;
+  probeStrategy: LocalModelEndpointProbeStrategy;
+  probeConfigurationError?: string;
+  defaultProjectId?: string;
+  logDir: string;
+} {
+  const probe = resolveProbeStrategy(env.DKG_LLM_BACKEND);
   return {
     llamaUrl: trimmed(env.DKG_LLM_URL)
       ?? trimmed(env.LLAMA_URL)
       ?? 'http://127.0.0.1:8080/v1/chat/completions',
     model: trimmed(env.DKG_LLM_MODEL) ?? trimmed(env.LLAMA_MODEL) ?? 'local-model',
+    probeStrategy: probe.strategy,
+    ...(probe.error ? { probeConfigurationError: probe.error } : {}),
     defaultProjectId: trimmed(env.DKG_PROJECT),
     logDir: path.join(dkgHome, 'logs', 'local-llm'),
   };
@@ -141,11 +169,22 @@ export function createDaemonLocalLlmService(
   let closePromise: Promise<void> | undefined;
   let initFailure: string | undefined;
 
-  const probe = (): Promise<LocalModelEndpointAvailability> => probeLocalModelEndpoint({
-    chatCompletionsUrl: settings.llamaUrl,
-    fetch: fetcher,
-    timeoutMs: probeTimeoutMs,
-  });
+  const probe = (): Promise<LocalModelEndpointAvailability> => {
+    if (settings.probeConfigurationError) {
+      return Promise.resolve(Object.freeze({
+        status: 'offline',
+        reachable: false,
+        error: `Local LLM endpoint configuration is invalid: ${settings.probeConfigurationError}`,
+      }));
+    }
+    return probeLocalModelEndpoint({
+      chatCompletionsUrl: settings.llamaUrl,
+      model: settings.model,
+      strategy: options.probeStrategy ?? settings.probeStrategy,
+      fetch: fetcher,
+      timeoutMs: probeTimeoutMs,
+    });
+  };
 
   const unavailableError = (
     availability: Exclude<LocalModelEndpointAvailability, { status: 'ready' }>,
