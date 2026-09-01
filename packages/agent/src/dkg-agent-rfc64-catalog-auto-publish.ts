@@ -62,8 +62,6 @@ import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
 } from './rfc64/finalized-private-placement-repair-store-v1.js';
-import { snapshotRfc64RemoteCatalogAnnouncementPeersV1 } from
-  './rfc64/catalog-peers-v1.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -686,10 +684,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       author: this.createRfc64CatalogAuthorSignerV1(seal.authorAddress),
       asset,
       deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-      peers: snapshotRfc64RemoteCatalogAnnouncementPeersV1(
-        lane.announcementPeers,
-        this.peerId,
-      ),
+      peers: lane.announcementPeers,
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     });

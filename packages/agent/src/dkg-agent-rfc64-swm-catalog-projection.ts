@@ -47,8 +47,6 @@ import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
   './durable-author-seal-resolver-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
-import { snapshotRfc64RemoteCatalogAnnouncementPeersV1 } from
-  './rfc64/catalog-peers-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from
   './rfc64/public-catalog-service-v1.js';
 import { prepareRfc64SwmInventoryCatalogTargetV1 } from
@@ -188,10 +186,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
       asset,
       deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-      peers: snapshotRfc64RemoteCatalogAnnouncementPeersV1(
-        lane.announcementPeers,
-        this.peerId,
-      ),
+      peers: lane.announcementPeers,
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     });
@@ -342,10 +337,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           ),
           assets: prepared.assets,
           deployment,
-          peers: snapshotRfc64RemoteCatalogAnnouncementPeersV1(
-            lane.announcementPeers,
-            this.peerId,
-          ),
+          peers: lane.announcementPeers,
           catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
           catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
           commitAppliedHeadIfInventoryCurrent: (commit) => (

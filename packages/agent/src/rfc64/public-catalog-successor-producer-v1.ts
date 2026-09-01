@@ -50,7 +50,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
-import { mapWithConcurrency } from '../map-with-concurrency.js';
+import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogRowAuthorshipV1,
@@ -443,7 +443,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         row.transfer.blobDigest,
       ] as const),
     );
-    await mapWithConcurrency(
+    const bundleStageResults = await mapWithConcurrencySettled(
       verifiedAssets,
       RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1,
       async ({ prepared, row }): Promise<void> => {
@@ -473,6 +473,10 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         }
       },
     );
+    const bundleStageFailure = bundleStageResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (bundleStageFailure !== undefined) throw bundleStageFailure.reason;
 
     let stagedControlObjects: StageVerifiedControlObjectsResultV1;
     try {

@@ -222,18 +222,24 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(stageVerifiedObjects).toHaveBeenCalledTimes(3);
   });
 
-  it('does not re-fsync an unchanged predecessor bundle', async () => {
+  it.each([
+    ['exact durable bytes', (bytes: Uint8Array) => new Uint8Array(bytes), 1],
+    ['missing durable bytes', (_bytes: Uint8Array) => null, 2],
+    ['mismatched durable bytes', (bytes: Uint8Array) => {
+      const corrupted = new Uint8Array(bytes);
+      corrupted[0] = (corrupted[0] ?? 0) ^ 0xff;
+      return corrupted;
+    }, 2],
+  ] as const)(
+    'rechecks unchanged predecessor bundles after restart: %s',
+    async (_label, durableRead, expectedSuccessorStages) => {
     const { genesis, authorization } = await producerHistory();
     const durableBundles = new Map<string, Uint8Array>();
-    const stageKaBundle = vi.fn(async (input) => {
+    const firstStageKaBundle = vi.fn(async (input) => {
       durableBundles.set(input.blobDigest, new Uint8Array(input.bundleBytes));
       return durableBundleReceipt(input);
     });
-    const readKaBundleByDigest = vi.fn(async (digest: string) => {
-      const bytes = durableBundles.get(digest);
-      return bytes === undefined ? null : new Uint8Array(bytes);
-    });
-    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+    const firstProducer = new Rfc64PublicCatalogSuccessorProducerV1({
       controlObjects: {
         stageVerifiedObjects: async () => Object.freeze({
           durable: true as const,
@@ -241,12 +247,11 @@ describe('RFC-64 public/open one-row successor producer', () => {
           objects: Object.freeze([]),
         }),
       } as never,
-      stageKaBundle,
-      readKaBundleByDigest: readKaBundleByDigest as never,
+      stageKaBundle: firstStageKaBundle,
     });
     const firstSeal = await authorSeal(AUTHOR_WALLET);
     const secondSeal = await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER);
-    const first = await producer.produceAndStageExactSet({
+    const first = await firstProducer.produceAndStageExactSet({
       previousHead: genesis.head,
       previousDirectoryPath: genesis.directoryPath,
       previousBucket: null,
@@ -260,8 +265,24 @@ describe('RFC-64 public/open one-row successor producer', () => {
       catalogSigner: catalogSigner(),
       catalogIssuerAuthorization: authorization,
     });
+    const successorStageKaBundle = vi.fn(durableBundleReceipt);
+    const readKaBundleByDigest = vi.fn(async (digest: string) => {
+      const bytes = durableBundles.get(digest);
+      return bytes === undefined ? null : durableRead(bytes);
+    });
+    const restartedProducer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: {
+        stageVerifiedObjects: async () => Object.freeze({
+          durable: true as const,
+          namespaceDurability: 'test-exact-durable' as never,
+          objects: Object.freeze([]),
+        }),
+      } as never,
+      stageKaBundle: successorStageKaBundle,
+      readKaBundleByDigest: readKaBundleByDigest as never,
+    });
 
-    await producer.produceAndStageExactSet({
+    await restartedProducer.produceAndStageExactSet({
       previousHead: first.publication.head,
       previousDirectoryPath: first.publication.directoryPath,
       previousBucket: first.publication.bucket,
@@ -281,7 +302,90 @@ describe('RFC-64 public/open one-row successor producer', () => {
     });
 
     expect(readKaBundleByDigest).toHaveBeenCalledOnce();
+    expect(firstStageKaBundle).toHaveBeenCalledOnce();
+    expect(successorStageKaBundle).toHaveBeenCalledTimes(expectedSuccessorStages);
+  });
+
+  it('drains every started bundle mutation before reporting a staging failure', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const firstSeal = await authorSeal(AUTHOR_WALLET);
+    const secondSeal = await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER);
+    const firstProducer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: {
+        stageVerifiedObjects: async () => Object.freeze({
+          durable: true as const,
+          namespaceDurability: 'test-exact-durable' as never,
+          objects: Object.freeze([]),
+        }),
+      } as never,
+      stageKaBundle: durableBundleReceipt,
+    });
+    const first = await firstProducer.produceAndStageExactSet({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assets: [{
+        assertionCoordinate: 'gate-1-object' as never,
+        projectionBytes: PROJECTION,
+        seal: firstSeal,
+      }],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+    const slowStage = deferred<void>();
+    const slowStageStarted = deferred<void>();
+    let slowStageFinished = false;
+    let stageCalls = 0;
+    const stageKaBundle = vi.fn(async (input: BundleStageInput) => {
+      stageCalls += 1;
+      if (stageCalls === 1) throw new Error('first durable write failed');
+      slowStageStarted.resolve(undefined);
+      await slowStage.promise;
+      slowStageFinished = true;
+      return durableBundleReceipt(input);
+    });
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    const producing = producer.produceAndStageExactSet({
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      previousBucket: first.publication.bucket,
+      assets: [{
+        assertionCoordinate: 'gate-1-object' as never,
+        projectionBytes: PROJECTION,
+        seal: firstSeal,
+      }, {
+        assertionCoordinate: 'gate-2-object' as never,
+        projectionBytes: PROJECTION,
+        seal: secondSeal,
+      }],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+    let settled = false;
+    void producing.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    await slowStageStarted.promise;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    slowStage.resolve(undefined);
+    await expect(producing).rejects.toMatchObject({
+      code: 'catalog-successor-producer-bundle-stage',
+    });
+    expect(slowStageFinished).toBe(true);
     expect(stageKaBundle).toHaveBeenCalledTimes(2);
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
 
   it('shares one ordered immutable asset snapshot across producer and reconciler boundaries', async () => {
@@ -870,6 +974,12 @@ function durableBundleReceipt(
     blobDigest: input.blobDigest,
     byteLength: input.bundleBytes.byteLength,
   }));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
 }
 
 function catalogSigner() {
