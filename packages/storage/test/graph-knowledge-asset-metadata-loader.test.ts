@@ -30,26 +30,30 @@ describe('tagged metadata lookup — failure provenance as data (W2 r1)', () => 
       .rejects.toBe(boom);
   });
 
-  it('reports malformed V2 metadata as malformed, distinct from query failure', async () => {
-    // One marker binding with a mangled payload: the parser throws, the
-    // query itself succeeded. The two variants must not be conflatable.
+  it('reports malformed V2 metadata as malformed, with the parser error as cause (review r2)', async () => {
+    // A NON-EMPTY marker binding set with no contentScopeVersion: the parser
+    // deterministically THROWS on it. The exact discriminant matters — a
+    // catch that classified this as resolved/absent would silently turn data
+    // corruption into “not held here” and the ingest would drop the event.
     const store = {
       query: vi.fn(async (): Promise<QueryResult> => ({
         type: 'bindings',
-        bindings: [{
-          g: { value: `${META}` },
-          p: { value: 'http://dkg.io/ontology/contextGraphId' },
-          o: { value: '' },
-        } as never],
+        bindings: [{ g: META } as never],
       })),
     } as Pick<TripleStore, 'query'> as TripleStore;
 
     const lookup = await lookupGraphScopedOrLegacyMetadata(store, UAL, async () => null);
 
-    // Whether this particular shape parses as absent or malformed is the
-    // parser's contract; what THIS row pins is that a lookup on a succeeded
-    // query can never be query-failed.
-    expect(lookup.kind === 'query-failed').toBe(false);
+    expect(lookup.kind).toBe('malformed');
+    const cause = (lookup as { cause: unknown }).cause;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as Error).message).toMatch(/contentScopeVersion/);
+
+    // And the throwing variant surfaces the parser error (a fresh lookup, so
+    // message equality is the honest assertion — object identity is pinned by
+    // the query-failed row, whose cause is a caller-held singleton).
+    await expect(resolveGraphScopedOrLegacyMetadata(store, UAL, async () => null))
+      .rejects.toThrow(/contentScopeVersion/);
   });
 
   it('does not classify a legacy-reader rejection — it belongs to the caller', async () => {

@@ -608,6 +608,10 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
       graph: `did:dkg:context-graph:${CG}/_meta`,
     }]);
 
+    const warns: string[] = [];
+    const realWarn = internals.log.warn.bind(internals.log);
+    internals.log.warn = (c: unknown, message: string) => { warns.push(message); realWarn(c, message); };
+
     await expect(internals.handleKaRootMutationEvent({
       kind: 'lifecycle-update',
       kaId: kaIdFor(7n).toString(),
@@ -615,6 +619,11 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
       position: position(103),
     }, ctx), 'a deterministic local failure must NOT reject').resolves.toBeUndefined();
     expect(await intents.countPending()).toBe(0);
+    // The MALFORMED branch specifically (review r2): corruption reported as
+    // absence would log the not-held skip instead, and a provenance
+    // regression in the lookup would go unseen here.
+    expect(warns.some((message) => message.includes('malformed local Knowledge Asset metadata')))
+      .toBe(true);
   }, 60_000);
 
   it('PROPAGATES a store-query rejection so the lane holds its cursor and re-scans', async () => {
