@@ -496,6 +496,66 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect([...new Set(seen)], 'released once finalized').toEqual([49_947]);
     expect(persisted, 'and cleared durably').toBeUndefined();
   });
+  it('a due rescan is MERGED into a pending retry, never discarded — both obligations replay (review r13-bot)', async () => {
+    // A replay window stays pending across many ticks because the callback
+    // keeps rejecting. Meanwhile the forward cursor advances past a block
+    // whose mutation a lagging RPC omitted. The next periodic tick must not
+    // drop its newly due window behind the old retry: once the callback
+    // recovers, BOTH the old and the newly omitted event must be delivered.
+    let now = 0;
+    let outage = true;
+    const seen: number[] = [];
+    const saves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    const events = [rootMutation('KnowledgeAssetUpdated', 45_000)];
+    const chain = makeChain(50_000, events);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() { return undefined; },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            saves.push(w ? { ...w } : undefined);
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => {
+        if (outage) throw new Error('consumer down');
+        seen.push(e.position.blockNumber);
+      },
+    });
+
+    // Tick 25: the first rescan (41,001–50,000) is rejected and retained.
+    for (let tick = 1; tick <= 25; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    expect(saves[0]).toEqual({ fromBlock: 41_001, toBlock: 50_000 });
+
+    // The head moves; the forward scan passes 52,000 while the RPC omits
+    // that mutation, which only becomes visible afterwards.
+    chain.setHead(53_000);
+    await poll(poller);
+    now += CADENCE_MS;
+    events.push(rootMutation('KnowledgeAssetUpdated', 52_000));
+
+    // Tick 50: the second rescan (44,001–53,000) comes due behind the
+    // still-pending retry — it must merge, not vanish.
+    for (let tick = 27; tick <= 50; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    expect(saves[saves.length - 1], 'the merged obligation is durable').toEqual({ fromBlock: 41_001, toBlock: 53_000 });
+
+    outage = false;
+    await poll(poller);
+    expect([...new Set(seen)].sort(), 'both the old and the newly omitted event replay').toEqual([45_000, 52_000]);
+    expect(saves[saves.length - 1], 'and the obligation clears').toBeUndefined();
+  });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
     // window, not the retry itself. A regression that lets the save

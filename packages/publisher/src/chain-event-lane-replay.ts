@@ -92,6 +92,24 @@ export class LaneReplayCoordinator {
     }
     const scheduled = this.takeDueScheduledWindow(lastBlock);
     if (this.#restorePending) return undefined;
+    // A due periodic obligation is never DISCARDED behind a pending retry
+    // (review r13-bot): the forward cursor keeps advancing during a long
+    // callback outage, so a rescan window dropped here would leave the
+    // events a lagging RPC omitted in that stretch with no retained
+    // recovery obligation — and once they age past the trailing lookback
+    // they are lost for good. The two windows MERGE into one durable
+    // obligation (range union, persisted write-ahead like any mark): the
+    // retained window widens, it never shrinks or resets.
+    if (this.#pendingRetry && scheduled) {
+      const merged = {
+        fromBlock: Math.min(this.#pendingRetry.fromBlock, scheduled.fromBlock),
+        toBlock: Math.max(this.#pendingRetry.toBlock, scheduled.toBlock),
+      };
+      if (merged.fromBlock !== this.#pendingRetry.fromBlock || merged.toBlock !== this.#pendingRetry.toBlock) {
+        this.#pendingRetry = merged;
+        await this.persist(merged);
+      }
+    }
     return this.#pendingRetry ?? scheduled;
   }
 
