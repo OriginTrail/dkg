@@ -1,0 +1,17 @@
+[package]
+name = "dkg-runtime-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dkg-runtime-types.workspace = true
+dkg-runtime-kernel.workspace = true
+dkg-trace-model.workspace = true
+dkg-strategy-compiler.workspace = true
+dkg-ir.workspace = true
+minicbor.workspace = true
+
+[lints]
+workspace = true

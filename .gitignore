@@ -3,6 +3,8 @@ node_modules/
 dist/
 dist-ui/
 .turbo/
+rust/target/
+packages/semantic-runtime/generated/
 *.tsbuildinfo
 coverage/
 test-results/
@@ -57,6 +59,7 @@ snapshots/_cache_phase1_neuroweb_epoch16.json
 .claude/
 .orchestrator/
 .worktrees/
+artifacts/semantic-runtime-smoke/
 
 # isolated admin-demo devnet runtime dir (see DKG-NODE-UI-ADMIN-PAGE-PLAN.md)
 .devnet-admin/

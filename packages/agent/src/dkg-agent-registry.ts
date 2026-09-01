@@ -611,6 +611,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return this.discovery.findAgentByPeerId(peerId);
   }
 
+  async findAgentPeerIdsByAddress(this: DKGAgent, agentAddress: string, limit = 2): Promise<string[]> {
+    return this.discovery.findAgentPeerIdsByAddress(agentAddress, { limit });
+  }
+
   // ---------------------------------------------------------------------------
   // Agent Registry — multi-agent identity management
   // ---------------------------------------------------------------------------
@@ -1843,17 +1847,24 @@ export class AgentRegistryMethods extends DKGAgentBase {
     this.messageHandler.setSkillAcl(check);
   }
 
+  registerSkill(this: DKGAgent, skillUri: string, handler: SkillHandler): void {
+    if (!this.messageHandler) throw new Error('Agent not started');
+    this.messageHandler.registerSkill(skillUri, handler);
+  }
+
   async invokeSkill(this: DKGAgent,
     recipientPeerId: string,
     skillUri: string,
     inputData: Uint8Array,
+    options: { messageId?: string; timeoutMs?: number; requestOwned?: boolean } = {},
   ): Promise<SkillResponse> {
     if (!this.messageHandler) throw new Error('Agent not started');
     return this.messageHandler.sendSkillRequest(recipientPeerId, {
       skillUri,
       inputData,
+      timeoutMs: options.timeoutMs,
       callback: 'inline',
-    });
+    }, options);
   }
 
   async assertPeerAdmittedForExplicitConnect(

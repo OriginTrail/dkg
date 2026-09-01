@@ -88,6 +88,90 @@ export class LocalAgentApiError extends Error {
 // --- Status ---
 export const fetchStatus = () => get<any>('/api/status');
 
+// --- DKG-native semantic runtime ---
+export interface SemanticToolResolution {
+  toolIri: string;
+  operation: string | null;
+  semanticVersion: string | null;
+  witInterface: string | null;
+  requested: true;
+  offered: boolean;
+  policyAllowed: boolean;
+  locallyInstalled: boolean;
+  locallyEnabled: boolean;
+  adapterVersion: string | null;
+  adapterHash: string | null;
+  effective: boolean;
+  unavailableReason: string | null;
+}
+
+export interface SemanticProgramResolution {
+  contextGraphId: string;
+  programIri: string;
+  programLayer: SemanticMemoryLayer;
+  executingNode: string;
+  selectedPolicy: { iri: string; version: string; hash: string };
+  requiredTools: SemanticToolResolution[];
+  previousExecutions: string[];
+  executable: boolean;
+}
+
+export type SemanticMemoryLayer = 'wm' | 'swm' | 'vm';
+
+export interface SemanticInvocationResult {
+  invocationId: string;
+  executionIri: string;
+  executionLayer: SemanticMemoryLayer;
+  executionUal?: string;
+  persisted: true;
+}
+
+export interface SemanticProgramForkResult {
+  programIri: string;
+  programLayer: SemanticMemoryLayer;
+  programUal?: string;
+  authorAgentAddress: string;
+  derivedFrom: string;
+  persisted: true;
+}
+
+export const resolveSemanticProgram = (
+  contextGraphId: string,
+  programIri: string,
+  programLayer: SemanticMemoryLayer,
+) => {
+  const query = new URLSearchParams({ contextGraphId, programIri, programLayer });
+  return get<SemanticProgramResolution>(`/api/semantic-runtime/resolve?${query}`);
+};
+
+export const invokeSemanticProgram = (
+  contextGraphId: string,
+  programIri: string,
+  invocationId: string,
+  programLayer: SemanticMemoryLayer,
+  executionLayer: SemanticMemoryLayer,
+) => post<SemanticInvocationResult>('/api/semantic-runtime/invoke', {
+  contextGraphId,
+  programIri,
+  invocationId,
+  programLayer,
+  executionLayer,
+});
+
+export const forkSemanticProgram = (
+  contextGraphId: string,
+  sourceProgramIri: string,
+  newProgramIri: string,
+  sourceLayer: SemanticMemoryLayer,
+  targetLayer: SemanticMemoryLayer,
+) => post<SemanticProgramForkResult>('/api/semantic-runtime/programs/fork', {
+  contextGraphId,
+  sourceProgramIri,
+  newProgramIri,
+  sourceLayer,
+  targetLayer,
+});
+
 // --- LLM Settings ---
 export interface LlmSettingsResponse {
   configured: boolean;
