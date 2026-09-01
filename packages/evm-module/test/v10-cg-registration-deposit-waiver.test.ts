@@ -165,7 +165,7 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     expect(createdEvents).to.have.length(1);
     expect(storageWaiverEvents).to.have.length(1);
     expect(facadeWaiverEvents).to.have.length(1);
-    expect(await eventsFrom(receipt, Facade, 'ContextGraphRegistrationDeposited')).to.be.empty;
+    expect(await eventsFrom(receipt, Facade, 'ContextGraphRegistrationDeposited')).to.have.length(0);
 
     const created = createdEvents[0].args;
     expect(created[0]).to.equal(contextGraphId);
@@ -240,8 +240,8 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     expect(depositEvents[0].args[0]).to.equal(contextGraphId);
     expect(depositEvents[0].args[1]).to.equal(caller.address);
     expect(depositEvents[0].args[2]).to.equal(deposit);
-    expect(await eventsFrom(receipt, Facade, 'ContextGraphRegistrationDepositWaived')).to.be.empty;
-    expect(await eventsFrom(receipt, Waiver, 'RegistrationDepositWaived')).to.be.empty;
+    expect(await eventsFrom(receipt, Facade, 'ContextGraphRegistrationDepositWaived')).to.have.length(0);
+    expect(await eventsFrom(receipt, Waiver, 'RegistrationDepositWaived')).to.have.length(0);
     expect(await eventsFrom(receipt, CGS, 'ContextGraphCreated')).to.have.length(1);
 
     expect(await Waiver.waivedCgCount(coverageAccountId)).to.equal(waivedBefore);
