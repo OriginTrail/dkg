@@ -165,6 +165,46 @@ describe('DkgLocalLlmRuntime', () => {
     expect(secondRequest.messages.at(-1).content).toContain('Structured DKG evidence');
   });
 
+  it('repairs one ignored required tool choice from an OpenAI-compatible backend', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(answerResponse('I can answer without a tool.'))
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
+      .mockResolvedValueOnce(answerResponse('One saved query: supply/lifecycle.'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
+
+    const result = await runtime.run('Which DKG query catalog queries are saved?');
+
+    expect(result.answer).toBe('One saved query: supply/lifecycle.');
+    expect(mcp.callTool).toHaveBeenCalledOnce();
+    const firstRequest = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    const repairRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    expect(firstRequest.tool_choice).toBe('required');
+    expect(repairRequest.tool_choice).toBe('required');
+    expect(repairRequest.messages.at(-1).content)
+      .toContain('Retry once with exactly one available tool call and no prose');
+  });
+
+  it('fails closed when an OpenAI-compatible backend ignores required tool choice twice', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(answerResponse('First unsupported prose answer.'))
+      .mockResolvedValueOnce(answerResponse('Second unsupported prose answer.'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
+
+    await expect(runtime.run('Which DKG query catalog queries are saved?'))
+      .rejects.toThrow('One-retry limit reached');
+    expect(mcp.callTool).not.toHaveBeenCalled();
+  });
+
   it('strictly pins model-supplied graph arguments and excludes unscoped discovery tools', async () => {
     const strictCatalogList: McpToolDefinition = {
       ...catalogList,

@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createDaemonLocalLlmService,
   DaemonLocalLlmError,
+  localLlmHealthUrl,
+  localLlmModelsUrl,
   resolveDaemonLocalLlmSettings,
 } from '../src/daemon/local-llm-service.js';
 import { listLocalAgentIntegrations } from '../src/daemon/local-agents.js';
 
 function onlineFetch(): typeof fetch {
-  return vi.fn(async () => new Response('{"status":"ok"}', { status: 200 })) as unknown as typeof fetch;
+  return vi.fn(async () => Response.json({ object: 'list', data: [] })) as unknown as typeof fetch;
 }
 
 function fakeSession(options: {
@@ -63,6 +65,89 @@ describe('daemon local LLM service', () => {
       model: 'qwen',
       defaultProjectId: 'testing',
       logDir: '/tmp/dkg/logs/local-llm',
+    });
+  });
+
+  it('derives provider-neutral models probes while retaining the llama.cpp health fallback', () => {
+    expect(localLlmModelsUrl('http://127.0.0.1:11434/v1/chat/completions'))
+      .toBe('http://127.0.0.1:11434/v1/models');
+    expect(localLlmModelsUrl('http://localhost:9000/proxy/v1/chat/completions?token=ignored'))
+      .toBe('http://localhost:9000/proxy/v1/models');
+    expect(localLlmHealthUrl('http://127.0.0.1:8080/v1/chat/completions'))
+      .toBe('http://127.0.0.1:8080/health');
+  });
+
+  it('accepts Ollama readiness through /v1/models without requiring /health', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === 'http://127.0.0.1:11434/v1/models') {
+        return Response.json({ object: 'list', data: [{ id: 'qwen3:8b' }] });
+      }
+      return new Response('not found', { status: 404 });
+    });
+    const createSession = vi.fn(async () => fakeSession());
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg',
+      env: {
+        DKG_LLM_URL: 'http://127.0.0.1:11434/v1/chat/completions',
+        DKG_LLM_MODEL: 'qwen3:8b',
+      },
+      fetch: fetcher as typeof fetch,
+      createSession,
+    });
+
+    expect(await service.health()).toEqual(expect.objectContaining({
+      ok: true, ready: true, reachable: true, offline: false,
+    }));
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(String(fetcher.mock.calls[0][0])).toBe('http://127.0.0.1:11434/v1/models');
+    await expect(service.chat({ message: 'List saved queries', contextGraphId: 'testing' }))
+      .resolves.toEqual(expect.objectContaining({ text: 'DKG evidence answer' }));
+    expect(createSession).toHaveBeenCalledWith(expect.objectContaining({
+      llamaUrl: 'http://127.0.0.1:11434/v1/chat/completions',
+      model: 'qwen3:8b',
+    }));
+    expect(fetcher.mock.calls.map(([input]) => String(input)))
+      .toEqual([
+        'http://127.0.0.1:11434/v1/models',
+        'http://127.0.0.1:11434/v1/models',
+      ]);
+  });
+
+  it('keeps llama.cpp compatible through its /health readiness fallback', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
+      if (url.endsWith('/health')) return Response.json({ status: 'ok' });
+      return new Response('not found', { status: 404 });
+    });
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg', fetch: fetcher as typeof fetch, createSession: vi.fn(),
+    });
+
+    expect(await service.health()).toEqual(expect.objectContaining({
+      ok: true, ready: true, reachable: true, offline: false,
+    }));
+    expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
+      .toEqual(['/v1/models', '/health']);
+  });
+
+  it('distinguishes a reachable but incompatible server from an offline server', async () => {
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg',
+      fetch: vi.fn(async () => new Response('not found', { status: 404 })) as unknown as typeof fetch,
+      createSession: vi.fn(),
+    });
+
+    expect(await service.health()).toEqual(expect.objectContaining({
+      ok: false,
+      ready: false,
+      reachable: true,
+      offline: false,
+      error: expect.stringContaining('reachable but not ready'),
+    }));
+    await expect(service.chat({ message: 'hello' })).rejects.toMatchObject({
+      code: 'LOCAL_LLM_NOT_READY', status: 503,
     });
   });
 

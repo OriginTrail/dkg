@@ -29,6 +29,7 @@ const DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS = [
 
 export type LocalLlmErrorCode =
   | 'LOCAL_LLM_OFFLINE'
+  | 'LOCAL_LLM_NOT_READY'
   | 'LOCAL_LLM_BUSY'
   | 'LOCAL_LLM_PROJECT_MISMATCH'
   | 'LOCAL_LLM_INVALID_REQUEST'
@@ -121,6 +122,24 @@ export function localLlmHealthUrl(llamaUrl: string): string {
   return url.toString();
 }
 
+/**
+ * Resolve the OpenAI-compatible model-list endpoint from a chat-completions
+ * URL. Both llama.cpp and Ollama expose this route, so it is the primary
+ * provider-neutral readiness contract. `/health` remains a fallback for older
+ * or specially configured llama.cpp servers.
+ */
+export function localLlmModelsUrl(llamaUrl: string): string {
+  const url = new URL(llamaUrl);
+  const chatSuffix = '/v1/chat/completions';
+  const normalizedPath = url.pathname.replace(/\/+$/, '');
+  url.pathname = normalizedPath.endsWith(chatSuffix)
+    ? `${normalizedPath.slice(0, -chatSuffix.length)}/v1/models`
+    : '/v1/models';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -144,19 +163,48 @@ export function createDaemonLocalLlmService(
   let closePromise: Promise<void> | undefined;
   let initFailure: string | undefined;
 
-  const probe = async (): Promise<{ reachable: boolean; error?: string }> => {
-    try {
-      const response = await fetcher(localLlmHealthUrl(settings.llamaUrl), {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(probeTimeoutMs),
-      });
-      if (response.ok) return { reachable: true };
-      return { reachable: false, error: `llama.cpp health returned HTTP ${response.status}` };
-    } catch (error) {
-      return { reachable: false, error: `Local llama.cpp server is offline: ${errorMessage(error)}` };
+  const probe = async (): Promise<{ ready: boolean; reachable: boolean; error?: string }> => {
+    const attempts: string[] = [];
+    let reachable = false;
+    const targets = [
+      { label: 'OpenAI-compatible models probe', url: localLlmModelsUrl(settings.llamaUrl) },
+      { label: 'llama.cpp health fallback', url: localLlmHealthUrl(settings.llamaUrl) },
+    ];
+
+    for (const target of targets) {
+      try {
+        const response = await fetcher(target.url, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(probeTimeoutMs),
+        });
+        reachable = true;
+        if (response.ok) return { ready: true, reachable: true };
+        attempts.push(`${target.label} returned HTTP ${response.status}`);
+      } catch (error) {
+        attempts.push(`${target.label} failed: ${errorMessage(error)}`);
+      }
     }
+
+    const prefix = reachable
+      ? 'Local LLM server is reachable but not ready'
+      : 'Local LLM server is offline';
+    return {
+      ready: false,
+      reachable,
+      error: `${prefix}: ${attempts.join('; ')}`,
+    };
   };
+
+  const unavailableError = (
+    availability: { ready: boolean; reachable: boolean; error?: string },
+  ): DaemonLocalLlmError => new DaemonLocalLlmError(
+    availability.reachable ? 'LOCAL_LLM_NOT_READY' : 'LOCAL_LLM_OFFLINE',
+    503,
+    availability.error ?? (availability.reachable
+      ? 'The local LLM server is reachable but not ready.'
+      : 'The local LLM server is offline.'),
+  );
 
   const closeSession = async (clearHistory: boolean): Promise<void> => {
     const current = session;
@@ -169,7 +217,7 @@ export function createDaemonLocalLlmService(
   return {
     async health() {
       const availability = await probe();
-      const ready = availability.reachable && !initFailure && !closed;
+      const ready = availability.ready && !initFailure && !closed;
       return {
         ok: ready,
         ready,
@@ -235,13 +283,7 @@ export function createDaemonLocalLlmService(
       try {
         const availability = await probe();
         signal.throwIfAborted();
-        if (!availability.reachable) {
-          throw new DaemonLocalLlmError(
-            'LOCAL_LLM_OFFLINE',
-            503,
-            availability.error ?? 'The local llama.cpp server is offline.',
-          );
-        }
+        if (!availability.ready) throw unavailableError(availability);
         if (!session) {
           try {
             const created = await createSession({
@@ -314,13 +356,7 @@ export function createDaemonLocalLlmService(
           if (error instanceof DaemonLocalLlmError) throw error;
           if (signal.aborted) signal.throwIfAborted();
           const availabilityAfterFailure = await probe();
-          if (!availabilityAfterFailure.reachable) {
-            throw new DaemonLocalLlmError(
-              'LOCAL_LLM_OFFLINE',
-              503,
-              availabilityAfterFailure.error ?? 'The local llama.cpp server is offline.',
-            );
-          }
+          if (!availabilityAfterFailure.ready) throw unavailableError(availabilityAfterFailure);
           throw new DaemonLocalLlmError(
             'LOCAL_LLM_RUNTIME_ERROR',
             502,

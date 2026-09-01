@@ -7,11 +7,11 @@ doc_type: how-to
 
 # Run a Local LLM with DKG
 
-Use this guide to connect a local GGUF model to the DKG MCP tools through the
-OpenAI-compatible `llama.cpp` server. The model does not connect to the DKG
-daemon directly: `dkg llm` starts an MCP client, discovers the available tools
-with `tools/list`, validates every tool call, and writes a readable interaction
-trace.
+Use this guide to connect a local model to the DKG MCP tools through an
+OpenAI-compatible `llama.cpp` or Ollama server. The model does not connect to
+the DKG daemon directly: `dkg llm` starts an MCP client, discovers the available
+tools with `tools/list`, validates every tool call, and writes a readable
+interaction trace.
 
 The runtime is read-only by default. Write tools are exposed only with
 `--allow-write`, and the user must still explicitly request the mutation.
@@ -21,11 +21,13 @@ If you are delegating setup to a coding agent, give it the dedicated
 copy-paste instruction, model decision table, Query Catalog gate, exact launch
 commands, and completion checks.
 
-## Proposal: use llama.cpp as the reference LLM server
+## Supported local model servers
 
 Use [`llama.cpp`](https://github.com/ggml-org/llama.cpp) and its
 `llama-server` executable as the default, documented local inference server for
-DKG.
+DKG. [`Ollama`](https://docs.ollama.com/) is also supported through the same
+OpenAI-compatible API boundary. Choose one server per DKG local-LLM session;
+adding Ollama support does not remove or replace llama.cpp support.
 
 This selects the inference runtime, not the model family: `llama-server` can
 serve Qwen, Bonsai, Llama, and other compatible GGUF models. Qwen3-8B Q4_K_M
@@ -33,27 +35,28 @@ remains the recommended model below.
 
 The boundary should remain explicit:
 
-- `llama-server` is an operator-managed process. DKG does not silently install,
-  upgrade, start, or stop it.
+- The local model server is operator-managed. DKG does not silently install,
+  upgrade, start, or stop llama.cpp or Ollama.
 - `dkg llm` owns the MCP client, tool discovery, metadata-driven relevance
   routing, DKG system context, schema validation, retry policy, bounded chat
   history, and text trace.
-- Do not bypass that harness by attaching the DKG MCP server directly through
-  llama.cpp's own MCP configuration. That would skip DKG's tested system
-  context, tool-budget routing, validation, retry, and readable interaction log.
+- Do not bypass that harness by attaching the DKG MCP server directly through a
+  model server's own tool or MCP configuration. That would skip DKG's tested
+  system context, tool-budget routing, validation, retry, and readable
+  interaction log.
 - The default endpoint is
   `http://127.0.0.1:8080/v1/chat/completions`; `--llama-url` and `DKG_LLM_URL`
   remain escape hatches for another compatible server.
-- A supported server build must provide `llama-server`, GGUF model loading,
-  Jinja chat templates, the OpenAI-compatible chat-completions endpoint, and
-  the public `/health` endpoint.
+- A supported server must provide `POST /v1/chat/completions`, non-streaming
+  OpenAI-compatible responses, and OpenAI-style tool calls. `GET /v1/models` is
+  the provider-neutral readiness contract; llama.cpp's `GET /health` remains a
+  compatibility fallback if `/v1/models` is unavailable.
 - Keep the server bound to `127.0.0.1` by default. Remote or LAN exposure needs
   an explicit authentication and network-security decision.
 
-This gives DKG one reproducible reference path across macOS, Linux, and
-Windows without making the local-LLM client llama.cpp-specific internally. The
-upstream server documents the OpenAI-compatible API and reports readiness with
-HTTP 200 plus `{"status":"ok"}`.
+This gives DKG a reproducible llama.cpp reference path across macOS, Linux, and
+Windows while keeping the client provider-neutral. Readiness succeeds through
+`/v1/models` on either backend, or through llama.cpp's `/health` fallback.
 
 ## Install llama.cpp and llama-server
 
@@ -210,7 +213,7 @@ hf auth whoami
 Do not put a Hugging Face token in a command line, repository file, or DKG
 interaction log. Use `hf auth login` or the `HF_TOKEN` environment variable.
 
-### Verify the server contract
+### Verify the llama.cpp server contract
 
 Start one of the models below, wait for loading to finish, and verify both
 readiness and the OpenAI-compatible surface:
@@ -221,7 +224,42 @@ curl -sS http://127.0.0.1:8080/v1/models
 ```
 
 Windows PowerShell can use `curl.exe` with the same URLs. Do not start
-`dkg llm` until `/health` returns HTTP 200 and `{"status":"ok"}`.
+`dkg llm` until `/v1/models` returns HTTP 200. `/health` should also return HTTP
+200 and `{"status":"ok"}` for the reference llama.cpp server.
+
+## Install and run Ollama
+
+Install Ollama using its official
+[`Quickstart`](https://docs.ollama.com/quickstart), then pull and start a model:
+
+```bash
+ollama --version
+ollama pull qwen3:8b
+ollama serve
+```
+
+The desktop application may already have the server running. If `ollama serve`
+reports that port `11434` is already in use, keep the existing Ollama server and
+do not start a second one. Verify the shared OpenAI-compatible contract:
+
+```bash
+curl -sS http://127.0.0.1:11434/v1/models
+```
+
+Use these DKG settings for Ollama:
+
+```bash
+export DKG_LLM_URL=http://127.0.0.1:11434/v1/chat/completions
+export DKG_LLM_MODEL=qwen3:8b
+```
+
+Ollama documents its OpenAI-compatible chat-completions, model-list, streaming,
+and tools support in the
+[`OpenAI compatibility guide`](https://docs.ollama.com/api/openai-compatibility).
+DKG uses non-streaming requests. Some Ollama versions or models may return
+prose even when a tool is required; the DKG runtime retries once with an
+explicit tool-only instruction and then fails closed instead of accepting an
+ungrounded DKG answer.
 
 ## Recommended model
 
@@ -236,8 +274,9 @@ Silicon machine.
 | Qwen3.8-27B UD-IQ1_M | 9/13 | High memory pressure and very slow on 16 GB | Not recommended on 16 GB; the 1-bit quantization did not outperform Qwen3-8B Q4 |
 
 These scores compare the same 13 scenarios against a real DKG daemon and MCP
-server. They are reference results, not a universal hardware benchmark. A new
-model should pass the bundled real-DKG benchmark before it becomes a recommended
+server using the documented llama.cpp reference path. They are not Ollama
+parity claims or universal hardware results. A new model and server combination
+should pass the bundled real-DKG benchmark before it becomes a recommended
 default.
 
 ## Small-model rule: build the Query Catalog first
@@ -294,8 +333,8 @@ available to the small model.
 
 - A configured DKG node and Context Graph.
 - A built or installed `dkg` CLI containing the `dkg llm` command.
-- A recent `llama.cpp` build with `llama-server`.
-- Enough memory for the selected GGUF model and an 8192-token context.
+- A recent llama.cpp `llama-server` or Ollama installation.
+- Enough memory for the selected local model and its context window.
 
 Verify an installed node:
 
@@ -334,11 +373,15 @@ DKG_HOME="$DKG_HOME" \
 
 Leave the daemon running. Its default API is `http://127.0.0.1:9200`.
 
-## Terminal 2: start one local model
+## Terminal 2: start one local model server
+
+Choose either llama.cpp or Ollama. Do not run two servers on the same port.
+
+### Option A: llama.cpp reference server
 
 Run only one `llama-server` on port 8080 at a time.
 
-### Recommended: Qwen3-8B Q4_K_M
+#### Recommended: Qwen3-8B Q4_K_M
 
 ```bash
 /absolute/path/to/llama.cpp/build/bin/llama-server \
@@ -354,7 +397,7 @@ Run only one `llama-server` on port 8080 at a time.
   --port 8080
 ```
 
-### Low-memory experiment: Bonsai-8B Q1_0
+#### Low-memory experiment: Bonsai-8B Q1_0
 
 Use this model only after completing the Query-Catalog-first workflow above.
 
@@ -372,7 +415,7 @@ Use this model only after completing the Query-Catalog-first workflow above.
   --port 8080
 ```
 
-### 27B 1-bit experiment
+#### 27B 1-bit experiment
 
 This configuration is not recommended on a 16 GB machine. If testing it, use
 one slot and disable the unused vision projector:
@@ -406,6 +449,36 @@ Expected result:
 ```json
 {"status":"ok"}
 ```
+
+Also verify the provider-neutral readiness route:
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/models
+```
+
+### Option B: Ollama
+
+Pull the model once, start Ollama if it is not already running, and verify its
+OpenAI-compatible model list:
+
+```bash
+ollama pull qwen3:8b
+```
+
+In the model-server terminal, if the desktop application or system service is
+not already running:
+
+```bash
+ollama serve
+```
+
+From another terminal:
+
+```bash
+curl -sS http://127.0.0.1:11434/v1/models
+```
+
+If the desktop application already owns port `11434`, omit `ollama serve`.
 
 ## Terminal 3: start DKG chat
 
@@ -450,6 +523,20 @@ The default endpoint is
 `http://127.0.0.1:8080/v1/chat/completions`. Override it with `--llama-url` or
 `DKG_LLM_URL`.
 
+For Ollama, use its endpoint and exact model tag:
+
+```bash
+dkg llm \
+  --interactive \
+  --project "$DKG_PROJECT" \
+  --llama-url http://127.0.0.1:11434/v1/chat/completions \
+  --model qwen3:8b
+```
+
+`--llama-url` is the existing compatibility option name; it accepts any
+supported OpenAI-compatible local endpoint and does not select llama.cpp by
+itself.
+
 ## Use the local LLM from Node UI
 
 Node UI exposes the same tested local-LLM runtime in the **Agents** panel. It
@@ -459,7 +546,7 @@ owns the session, MCP child process, DKG tool discovery, schema validation,
 read-only policy, and text trace.
 
 Set the model endpoint and model name in the environment that starts the DKG
-daemon:
+daemon. For llama.cpp:
 
 ```bash
 export DKG_LLM_URL=http://127.0.0.1:8080/v1/chat/completions
@@ -467,12 +554,22 @@ export DKG_LLM_MODEL=qwen3-8b-q4-k-m
 dkg start
 ```
 
+For Ollama:
+
+```bash
+export DKG_LLM_URL=http://127.0.0.1:11434/v1/chat/completions
+export DKG_LLM_MODEL=qwen3:8b
+dkg start
+```
+
 If the daemon is already running, restart it after changing these variables.
-Keep `llama-server` running in its own terminal, then open Node UI and select
-**DKG Local LLM** in the Agents panel. The integration remains read-only: the
-daemon always creates this UI runtime with writes disabled. The HTTP surface is
-also node-admin-only. Agent-scoped bearer tokens receive `403` and cannot start,
-continue, or clear the daemon-owned operator session.
+Keep the selected local model server running, then open Node UI and select **DKG
+Local LLM** in the Agents panel. There is no separate provider selector in the
+browser: Node UI uses `DKG_LLM_URL` and `DKG_LLM_MODEL` from the daemon
+environment. The integration remains read-only: the daemon always creates this
+UI runtime with writes disabled. The HTTP surface is also node-admin-only.
+Agent-scoped bearer tokens receive `403` and cannot start, continue, or clear
+the daemon-owned operator session.
 
 The selected Context Graph is sent with the first chat turn and becomes the
 session lock. Selecting another graph does not silently retarget the active
@@ -499,19 +596,24 @@ Graph lock reset are both complete.
 ```mermaid
 sequenceDiagram
   actor Operator
-  participant Llama as llama-server
+  participant Model as Local model server
   participant Daemon as DKG daemon
   participant Service as LocalLlmService
   participant UI as Node UI
 
-  Operator->>Llama: Start GGUF model on 127.0.0.1:8080
+  Operator->>Model: Start llama.cpp or Ollama
   Operator->>Daemon: Start DKG with DKG_LLM_URL and DKG_LLM_MODEL
   Daemon->>Service: Create read-only service
   Note over Service: No MCP child and no model session yet
   UI->>Daemon: GET /api/local-llm/health
   Daemon->>Service: health()
-  Service->>Llama: GET /health
-  Llama-->>Service: 200 {status: "ok"}
+  Service->>Model: GET /v1/models
+  alt OpenAI-compatible models route is ready
+    Model-->>Service: 200 model list
+  else Models route unavailable
+    Service->>Model: GET /health (llama.cpp fallback)
+    Model-->>Service: 200 {status: "ok"}
+  end
   Service-->>Daemon: ready, reachable, busy, initialized
   Daemon-->>UI: Render DKG Local LLM as available
 ```
@@ -530,7 +632,7 @@ sequenceDiagram
   participant API as DKG daemon API
   participant Service as LocalLlmService
   participant Runtime as DkgLocalLlmRuntime
-  participant Llama as llama-server
+  participant Model as Local model server
   participant MCP as dkg mcp serve
   participant DKG as DKG node and store
   participant Trace as Text trace
@@ -539,7 +641,7 @@ sequenceDiagram
   UI->>API: POST /api/local-llm/chat<br/>{message, sessionId, contextGraphId}
   API->>API: Validate body and Context Graph ID
   API->>Service: chat(message, contextGraphId)
-  Service->>Llama: GET /health
+  Service->>Model: GET /v1/models (or llama.cpp /health fallback)
   alt First turn in the daemon-owned session
     Service->>MCP: Start private stdio MCP child
     Service->>Runtime: Create read-only bounded runtime
@@ -547,15 +649,15 @@ sequenceDiagram
     MCP-->>Runtime: Tool names and JSON schemas
     Service->>Service: Lock session to Context Graph
   end
-  Runtime->>Llama: System context, history, and routed tool schemas
-  Llama-->>Runtime: dkg_query_catalog_list or dkg_query_catalog_run
+  Runtime->>Model: System context, history, and routed tool schemas
+  Model-->>Runtime: dkg_query_catalog_list or dkg_query_catalog_run
   Runtime->>Runtime: Validate schema, policy, and tool budget
   Runtime->>MCP: tools/call with explicit projectId
   MCP->>DKG: Execute catalog read
   DKG-->>MCP: DKG evidence
   MCP-->>Runtime: Structured tool result
-  Runtime->>Llama: DKG evidence for final answer
-  Llama-->>Runtime: Grounded response
+  Runtime->>Model: DKG evidence for final answer
+  Model-->>Runtime: Grounded response
   Runtime->>Trace: Append requests, tool calls, evidence, and answer
   Runtime-->>Service: Answer, tool calls, and trace path
   Service-->>API: Read-only response envelope
@@ -679,13 +781,19 @@ operator approval gate.
 
 ## Troubleshooting
 
-### `connection refused` on port 8080
+### `connection refused` on port 8080 or 11434
 
-The model is not loaded or `llama-server` stopped. Check:
+The selected model server is stopped or the configured URL uses the wrong
+port. Check its provider-neutral readiness route:
 
 ```bash
-curl -sS http://127.0.0.1:8080/health
+curl -sS http://127.0.0.1:8080/v1/models   # llama.cpp default
+curl -sS http://127.0.0.1:11434/v1/models  # Ollama default
 ```
+
+For llama.cpp, `curl -sS http://127.0.0.1:8080/health` is also supported as a
+readiness fallback. Confirm that the daemon's `DKG_LLM_URL` points to the same
+server and port, then restart the daemon if you changed the environment.
 
 ### The model invents selectors or SPARQL
 

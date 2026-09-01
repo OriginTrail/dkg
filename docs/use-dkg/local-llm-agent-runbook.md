@@ -8,12 +8,23 @@ doc_type: runbook
 # Local LLM Agent Runbook
 
 Use this runbook when an operator asks an AI coding agent to start a local
-`llama.cpp` model, connect it to DKG, and prove that DKG tool use works. The
-agent must not report the setup as ready until the DKG daemon, model endpoint,
-Query Catalog policy, and smoke tests have all been checked.
+llama.cpp or Ollama model, connect it to DKG, and prove that DKG tool use works.
+The agent must not report the setup as ready until the DKG daemon, model
+endpoint, Query Catalog policy, and smoke tests have all been checked.
 
 For architecture, troubleshooting, and benchmark details, see
 [`Run a Local LLM with DKG`](local-llm.md).
+
+## Select the backend
+
+Keep the operator's explicit choice. If no backend is named, use llama.cpp as
+the reference server. Ollama is a supported alternative, not a replacement for
+llama.cpp.
+
+| Backend | Chat endpoint | Readiness | Recommended model value |
+| --- | --- | --- | --- |
+| llama.cpp | `http://127.0.0.1:8080/v1/chat/completions` | `/v1/models`, with `/health` fallback | `qwen3-8b-q4-k-m` |
+| Ollama | `http://127.0.0.1:11434/v1/chat/completions` | `/v1/models` | `qwen3:8b` |
 
 ## Install the default llama.cpp server
 
@@ -84,9 +95,28 @@ If Winget is unavailable or a custom CUDA build is required, use the Visual
 Studio or release-binary procedure in the full
 [`Windows instructions`](local-llm.md#windows).
 
-Do not silently replace `llama-server` with Ollama, LM Studio, vLLM, or another
-runtime. Another server is allowed only when the operator explicitly chooses
-it and its OpenAI-compatible endpoint passes the same DKG smoke tests.
+Do not silently change the selected backend. llama.cpp and Ollama are supported;
+any other runtime requires an explicit operator choice and must pass the same
+OpenAI-compatible contract and DKG smoke tests.
+
+## Install Ollama when selected
+
+Use the official [`Ollama Quickstart`](https://docs.ollama.com/quickstart) for
+the detected operating system. Resolve and verify the executable, then pull the
+model:
+
+```bash
+command -v ollama
+ollama --version
+ollama pull qwen3:8b
+```
+
+Start `ollama serve` only if the desktop application or system service is not
+already listening on `127.0.0.1:11434`. Verify the shared readiness route:
+
+```bash
+curl -sS http://127.0.0.1:11434/v1/models
+```
 
 ## Model decision table
 
@@ -97,8 +127,9 @@ it and its OpenAI-compatible endpoint passes the same DKG smoke tests.
 | Qwen3.8-27B UD-IQ1_M | Download `Qwen3.8-27B-UD-IQ1_M.gguf` from `unsloth/Qwen3.8-27B-GGUF`, then use `-m` | `qwen3.8-27b-iq1` | 9/13 | Not recommended on 16 GB. Slow and memory-heavy; catalog-first is mandatory |
 
 The score is from the repository's 13-scenario real-DKG benchmark on the
-reference 16 GB Apple Silicon machine. It is comparative evidence, not a
-universal hardware guarantee.
+reference 16 GB Apple Silicon machine using llama.cpp. It is comparative
+evidence, not an Ollama parity claim or universal hardware guarantee. An Ollama
+model/server combination must pass the smoke test and benchmark independently.
 
 ## Instruction to give an AI coding agent
 
@@ -112,9 +143,9 @@ ready for the operator.
 Constraints:
 - Work from the active DKG installation or repository; do not clone another DKG.
 - Discover absolute executable paths. Do not assume a user-specific home path.
-- Use llama.cpp `llama-server` as the reference inference server. If it is not
-  installed, follow "Install the default llama.cpp server" in this runbook;
-  do not substitute another server silently.
+- Keep the backend named by the operator: llama.cpp or Ollama. If none is
+  named, use llama.cpp as the reference. Follow the matching install section;
+  do not change backends silently.
 - Default to Qwen3-8B Q4_K_M unless the operator names another model.
 - Treat Bonsai Q1_0, 1-bit models, and other tool-weak models as catalog-first.
 - For a catalog-first model, do not start the final demo chat until a reviewed,
@@ -123,12 +154,14 @@ Constraints:
 - Never invent Context Graph IDs, query selectors, parameters, or DKG evidence.
 - Keep DKG writes disabled except during an explicitly approved catalog-build
   step. Never share, publish, register, or delete data without explicit approval.
-- Run one llama-server on port 8080 at a time.
+- Run one selected local model server on its configured port at a time.
 
 Procedure:
-1. Detect macOS, Linux, or Windows. Install `llama-server` with the matching
-   section in this runbook, set `LLAMA_SERVER` to its absolute path, and run
-   `llama-server --version`. Do not continue if the executable cannot run.
+1. Detect macOS, Linux, or Windows. For llama.cpp, install `llama-server`, set
+   `LLAMA_SERVER` to its absolute path, and run `llama-server --version`. For
+   Ollama, install it from the official Quickstart, run `ollama --version`, and
+   pull the selected model tag. Do not continue if the selected executable
+   cannot run.
 2. Detect whether this is an installed DKG or a source checkout. For an
    installed DKG, run `dkg doctor --json`, `dkg --version`, and `dkg status`.
    In a source checkout, build the CLI, MCP, and local-LLM packages and use
@@ -154,13 +187,16 @@ Procedure:
    representative values:
    `dkg query-catalog run "$DKG_PROJECT" <selector> --param name=value`.
    Fix or remove any selector that errors or returns the wrong result shape.
-10. Start the selected llama-server with an 8192-token context, Jinja templates,
-   temperature 0.15, top-p 0.9, repeat penalty 1.05, host 127.0.0.1, and port
-   8080. Wait for the model-loaded message.
-11. Run `curl -sS http://127.0.0.1:8080/health` and require `{"status":"ok"}`.
-12. Start the final chat with `dkg llm --interactive --project "$DKG_PROJECT"`.
+10. Start the selected backend. For llama.cpp, use an 8192-token context, Jinja
+    templates, temperature 0.15, top-p 0.9, repeat penalty 1.05, host
+    127.0.0.1, and port 8080. For Ollama, ensure its service is listening on
+    127.0.0.1:11434 and the selected model tag is pulled.
+11. Run `curl -sS <server-origin>/v1/models` and require HTTP 200. For
+    llama.cpp, also check `/health` and require `{"status":"ok"}`.
+12. Start the final chat with
+    `dkg llm --interactive --project "$DKG_PROJECT" --llama-url <chat-endpoint> --model <model>`.
     For catalog-first models also pass `--profile catalog`; do not pass
-    `--allow-write`. For the default Qwen model use `--profile auto`.
+    `--allow-write`. For the recommended Qwen model use `--profile auto`.
 13. Smoke test: ordinary `hello` must not call DKG; a node-status question must
     call `dkg_status`; a saved-query question must call
     `dkg_query_catalog_list`; running a selector must call
@@ -188,6 +224,8 @@ pnpm --filter @origintrail-official/dkg build
 Then use `node packages/cli/dist/cli.js` in place of `dkg` in the commands
 below. Set `DKG_HOME` explicitly when the source checkout must use a non-default
 node home.
+
+### llama.cpp reference launch
 
 Set values once in the shell running the client:
 
@@ -219,11 +257,49 @@ dkg llm \
   --interactive \
   --project "$DKG_PROJECT" \
   --profile auto \
+  --llama-url http://127.0.0.1:8080/v1/chat/completions \
   --model qwen3-8b-q4-k-m
 ```
 
+### Ollama launch
+
+Pull the model, start the service if it is not already running, and verify the
+model list:
+
+```bash
+export DKG_PROJECT=<exact-context-graph-id>
+ollama pull qwen3:8b
+```
+
+Run the server in its own terminal if no Ollama service is already active:
+
+```bash
+ollama serve
+```
+
+Then verify it from the DKG client terminal:
+
+```bash
+curl -sS http://127.0.0.1:11434/v1/models
+```
+
+Omit `ollama serve` if an existing Ollama desktop application or service
+already owns port `11434`. Start the same read-only DKG chat against Ollama:
+
+```bash
+dkg llm \
+  --interactive \
+  --project "$DKG_PROJECT" \
+  --profile auto \
+  --llama-url http://127.0.0.1:11434/v1/chat/completions \
+  --model qwen3:8b
+```
+
+For Node UI, export those endpoint and model values as `DKG_LLM_URL` and
+`DKG_LLM_MODEL` in the daemon environment before starting or restarting DKG.
+
 For an explicitly approved Query Catalog build, use the recommended Qwen
-server and temporarily start this client:
+llama.cpp server and temporarily start this client:
 
 ```bash
 dkg llm \
