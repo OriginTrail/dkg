@@ -42,6 +42,20 @@ export {
   type WorkerSupervisorOptions,
 } from './worker-supervisor.js';
 export {
+  ComponentExecutionPool,
+  ComponentOperationError,
+  ComponentOverloadError,
+  ComponentRequestTimeoutError,
+  ComponentUnavailableError,
+  ComponentWorkerClient,
+  type ComponentExecutionPoolOptions,
+  type ComponentSupervisorOptions,
+} from './component-supervisor.js';
+export {
+  defaultExecutionCapability,
+  type ExecutionCapabilityDescriptor,
+} from './component-types.js';
+export {
   DurableSemanticRuntimeHost,
   type DurableRuntimeExecution,
   type DurableSemanticRuntimeOptions,

@@ -1,20 +1,12 @@
+import type { AdmittedPlanSummary, CompileStrategyResult } from './codec.js';
 import {
-  MESSAGE_TYPE,
-  decodeAbiSuccess,
-  decodeAdmittedPlan,
-  decodeCompileResult,
-  encodeAdmitRequest,
-  encodeCompileRequest,
-  type AdmittedPlanSummary,
-  type CompileStrategyResult,
-} from './codec.js';
-import {
-  WorkerSupervisor,
-  type WorkerSupervisorOptions,
-} from './worker-supervisor.js';
+  ComponentWorkerClient,
+  type ComponentSupervisorOptions,
+} from './component-supervisor.js';
+import type { ComponentCompileOutcome } from './component-types.js';
 
 export interface WasmStrategyAdmissionOptions extends Pick<
-  WorkerSupervisorOptions,
+  ComponentSupervisorOptions,
   'artifactRoot' | 'workerUrl' | 'requestTimeoutMs' | 'startupTimeoutMs' | 'resourceLimits' | 'log'
 > {}
 
@@ -25,30 +17,18 @@ export interface WasmStrategyAdmissionOptions extends Pick<
  * the admitted upper bounds.
  */
 export class WasmStrategyAdmissionClient {
-  private requestSequence = 0n;
-
   constructor(private readonly options: WasmStrategyAdmissionOptions = {}) {}
 
   async compileStrategy(source: string): Promise<CompileStrategyResult> {
-    return this.withDisposableWorker(async (supervisor) => {
-      const requestId = this.nextRequestId();
-      const response = await supervisor.call('compile', encodeCompileRequest(requestId, source));
-      return decodeCompileResult(
-        decodeAbiSuccess(response.body, requestId, MESSAGE_TYPE.compile),
-      );
+    return this.withDisposableWorker(async (worker) => {
+      const result = await worker.call('compile', { source }) as ComponentCompileOutcome;
+      return result;
     });
   }
 
   async admitPlan(canonicalPlan: Uint8Array): Promise<AdmittedPlanSummary> {
-    return this.withDisposableWorker(async (supervisor) => {
-      const requestId = this.nextRequestId();
-      const response = await supervisor.call(
-        'admit',
-        encodeAdmitRequest(requestId, canonicalPlan),
-      );
-      return decodeAdmittedPlan(
-        decodeAbiSuccess(response.body, requestId, MESSAGE_TYPE.admit),
-      );
+    return this.withDisposableWorker(async (worker) => {
+      return await worker.call('admit', { plan: canonicalPlan }) as AdmittedPlanSummary;
     });
   }
 
@@ -63,23 +43,18 @@ export class WasmStrategyAdmissionClient {
   }
 
   private async withDisposableWorker<T>(
-    operation: (supervisor: WorkerSupervisor) => Promise<T>,
+    operation: (worker: ComponentWorkerClient) => Promise<T>,
   ): Promise<T> {
-    const supervisor = new WorkerSupervisor({
+    const worker = new ComponentWorkerClient({
       ...this.options,
       requestTimeoutMs: this.options.requestTimeoutMs ?? 5_000,
     });
-    await supervisor.start();
+    await worker.start();
     try {
-      return await operation(supervisor);
+      return await operation(worker);
     } finally {
-      await supervisor.stop();
+      await worker.stop();
     }
-  }
-
-  private nextRequestId(): bigint {
-    this.requestSequence += 1n;
-    return this.requestSequence;
   }
 }
 

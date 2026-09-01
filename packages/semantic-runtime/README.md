@@ -1,22 +1,27 @@
 # DKG semantic runtime
 
-This package contains the default-off TypeScript host and Rust/Wasm foundation
-for the DKG V10 supervised semantic runtime. A package build compiles the pinned
-Rust sources into the gitignored `generated/` directory, then verifies that
-local Wasm and its generated glue before starting a Node Worker. Published npm
-packages include those build outputs. The host enforces watchdog deadlines,
-replaces failed Workers, and restores a verified snapshot.
+This package contains the default-off TypeScript host and shared Rust semantic
+kernel for DKG V10. Program S-expressions remain RDF data; every invocation
+loads and admits one immutable Program plan into the same kernel.
 
-Building from a source checkout requires Rust 1.98.0 with the
-`wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.127. Run
-`pnpm build:semantic-runtime`; no generated Wasm or JavaScript glue is stored in
-Git.
+The execution boundary is a versioned WebAssembly component with typed,
+asynchronous WIT. The official Rust WASI 0.3 build flow uses a
+`wasm32-wasip2` carrier component plus async component-model bindings rather
+than a Rust `wasm32-wasip3` target. This repository pins nightly
+`2026-08-18`, `wit-bindgen` 0.61.1, and jco 1.32.1. See
+[`docs/architecture/semantic-runtime-wasi-0.3.md`](../../docs/architecture/semantic-runtime-wasi-0.3.md).
 
-The packaged Wasm also owns bounded S-expression parsing, deterministic plan
+Run `pnpm build:semantic-runtime` from a source checkout. It builds the
+gitignored local artifacts, validates their WIT world and bounded memories, and
+requires them to match `artifact-lock.json`. Generated Wasm and JavaScript glue
+are packaged in npm but are not stored in Git.
+
+The packaged component owns bounded S-expression parsing, deterministic plan
 compilation, and canonical-plan re-admission. Compilation uses a disposable
-Worker; a fresh Worker re-decodes the immutable plan, resolves its pinned
-adapter registry, recomputes effects, capabilities, approval paths, conflicts,
-and resource bounds, and rejects metadata-only or hash-only admission.
+component Worker. Each active execution then has its own component instance and
+Worker, with an ordered per-execution queue and a bounded global execution
+count. A timeout, trap, or memory failure terminates only that execution
+partition.
 
 The host-side V1 modules provide:
 
@@ -49,8 +54,12 @@ The daemon integration is opt-in:
 }
 ```
 
-When enabled, a missing or modified local artifact, incompatible ABI, failed Worker
-handshake, or restore mismatch fails closed.
+When enabled, a missing or modified local artifact, build-lock mismatch,
+unexpected component import/export, incompatible ABI, failed Worker handshake,
+or restore mismatch fails closed. Carrier WASI imports receive deny-only stubs:
+the component receives no filesystem, network, environment, stdio, random, or
+clock authority. Its sole repository-owned import is an opaque, host-created
+execution capability.
 
 Programs are stored in the DKG as `sr:Program` resources with `sr:language`,
 `sr:version`, and `sr:source` triples. The authenticated

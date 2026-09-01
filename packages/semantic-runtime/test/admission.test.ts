@@ -5,7 +5,7 @@ import {
   WasmStrategyAdmissionClient,
 } from '../src/index.js';
 
-const workerUrl = new URL('../dist/worker.js', import.meta.url);
+const workerUrl = new URL('../dist/component-worker.js', import.meta.url);
 
 const listenerBoy = `
   (strategy sre/keep-network-healthy

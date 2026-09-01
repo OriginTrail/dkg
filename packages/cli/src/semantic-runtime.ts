@@ -19,6 +19,7 @@ import {
   type SemanticRuntimeConfig,
   type SemanticRuntimeHost,
   type SemanticRuntimeHostOptions,
+  type ExecutionCapabilityDescriptor,
 } from '@origintrail-official/dkg-semantic-runtime';
 
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
@@ -739,7 +740,38 @@ async function invokeResolved(
   }
 
   const startedAt = new Date();
-  const receipt = await runtime.host.startPlan(resolved.plan.canonicalPlan, 0n);
+  const capability: ExecutionCapabilityDescriptor = {
+    executionId: executionIri,
+    invocationId,
+    contextGraphId,
+    callerPrincipal: callerAgentAddress
+      ? `did:dkg:agent:${callerAgentAddress}`
+      : resolved.public.executingNode,
+    programIri,
+    sourceHash: createHash('sha256').update(resolved.program.source, 'utf8').digest('hex'),
+    planHash: artifactHash,
+    outputLayer: executionLayer.toUpperCase() as ExecutionCapabilityDescriptor['outputLayer'],
+    tools: resolved.public.requiredTools.map((tool) => ({
+      operation: tool.operation!,
+      version: tool.semanticVersion!,
+      witInterface: tool.witInterface!,
+    })),
+    policy: {
+      iri: resolved.public.selectedPolicy.iri,
+      epoch: 1n,
+      hash: resolved.policyHashHex,
+    },
+    budgets: {
+      maxOperations: config?.maxOperationsPerExecution ?? 10_000,
+      maxToolCalls: resolved.plan.resourceBounds.hostCommands,
+      maxModelTokens: resolved.plan.effectUpperBound.includes('model-invocation') ? 512 : 0,
+      maxDkgQueries: resolved.plan.effectUpperBound.includes('read') ? 1 : 0,
+    },
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1_000,
+    revoked: false,
+    approvals: [...resolved.plan.approvalRequirements],
+  };
+  const receipt = await runtime.host.startPlan(resolved.plan.canonicalPlan, 0n, capability);
   if (!bytesEqual(receipt.canonicalHash, resolved.plan.canonicalHash)) {
     throw new Error('materialized strategy hash differs from admitted strategy hash');
   }
@@ -790,75 +822,81 @@ async function invokeResolved(
     });
   }
 
-  let execution = await runtime.host.applyPlan(receipt.handle);
-  while (execution.kind === 'effect-requested') {
-    const effect = execution;
-    const tool = resolved.public.requiredTools.find((candidate) =>
-      candidate.operation === effect.operation
-      && candidate.semanticVersion === String(effect.version));
-    if (!tool) {
-      throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
-    }
-    const descriptor = resolved.registry.describe(effect.operation, String(effect.version));
-    if (!descriptor) {
-      throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
-    }
-    const effectId = `urn:sr:effect:${invocationId}:${effect.effectId}`;
-    const proposal = {
-      effectId,
-      executionId: executionIri,
-      processId: toHex(effect.processId),
-      stepId: `wasm-effect-${effect.effectId}`,
-      attemptId: 'attempt-1',
-      principal: resolved.public.executingNode,
-      adapterId: effect.operation,
-      adapterVersion: String(effect.version),
-      verb: descriptor.verb,
-      resource: tool.toolIri,
-      normalizedInput: normalizeEffectInput(effect.operation, effect.arguments),
-      capabilityId,
-      idempotencyKey: `${executionIri}:${effect.effectId}`,
-      budgetReservation: 0n,
-      now: Date.now(),
-    };
-    let outcome;
-    if (descriptor.effectClass === 'read') {
-      try {
-        outcome = await broker.dispatchRead(proposal);
-      } catch (error) {
-        runtime.store.setExecutionStatus(executionIri, 'failed');
-        throw new SemanticProgramError(
-          'QUERY_REQUEST_FAILED',
-          `DKG query failed: ${safeMessage(error)}`,
-          502,
-        );
+  let execution;
+  let inspection;
+  try {
+    execution = await runtime.host.applyPlan(receipt.handle);
+    while (execution.kind === 'effect-requested') {
+      const effect = execution;
+      const tool = resolved.public.requiredTools.find((candidate) =>
+        candidate.operation === effect.operation
+        && candidate.semanticVersion === String(effect.version));
+      if (!tool) {
+        throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
       }
-    } else {
-      await broker.prepareEffect(proposal);
-      outcome = broker.readOutcome(effectId);
-      if (outcome?.state === 'prepared') {
-        await broker.dispatchPrepared(effectId, Date.now());
+      const descriptor = resolved.registry.describe(effect.operation, String(effect.version));
+      if (!descriptor) {
+        throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
+      }
+      const effectId = `urn:sr:effect:${invocationId}:${effect.effectId}`;
+      const proposal = {
+        effectId,
+        executionId: executionIri,
+        processId: toHex(effect.processId),
+        stepId: `wasm-effect-${effect.effectId}`,
+        attemptId: 'attempt-1',
+        principal: resolved.public.executingNode,
+        adapterId: effect.operation,
+        adapterVersion: String(effect.version),
+        verb: descriptor.verb,
+        resource: tool.toolIri,
+        normalizedInput: normalizeEffectInput(effect.operation, effect.arguments),
+        capabilityId,
+        idempotencyKey: `${executionIri}:${effect.effectId}`,
+        budgetReservation: 0n,
+        now: Date.now(),
+      };
+      let outcome;
+      if (descriptor.effectClass === 'read') {
+        try {
+          outcome = await broker.dispatchRead(proposal);
+        } catch (error) {
+          runtime.store.setExecutionStatus(executionIri, 'failed');
+          throw new SemanticProgramError(
+            'QUERY_REQUEST_FAILED',
+            `DKG query failed: ${safeMessage(error)}`,
+            502,
+          );
+        }
+      } else {
+        await broker.prepareEffect(proposal);
         outcome = broker.readOutcome(effectId);
+        if (outcome?.state === 'prepared') {
+          await broker.dispatchPrepared(effectId, Date.now());
+          outcome = broker.readOutcome(effectId);
+        }
       }
-    }
-    if (outcome?.state !== 'succeeded' || typeof outcome.output !== 'string') {
-      if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling') {
-        throw new SemanticProgramError(
-          'INVOCATION_REQUIRES_RECONCILIATION',
-          'The LLM call may have reached Codex; it will not be dispatched again automatically',
-          409,
-        );
+      if (outcome?.state !== 'succeeded' || typeof outcome.output !== 'string') {
+        if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling') {
+          throw new SemanticProgramError(
+            'INVOCATION_REQUIRES_RECONCILIATION',
+            'The LLM call may have reached Codex; it will not be dispatched again automatically',
+            409,
+          );
+        }
+        runtime.store.setExecutionStatus(executionIri, 'failed');
+        throw new SemanticProgramError('LLM_REQUEST_FAILED', 'LLM request failed', 502);
       }
-      runtime.store.setExecutionStatus(executionIri, 'failed');
-      throw new SemanticProgramError('LLM_REQUEST_FAILED', 'LLM request failed', 502);
+      execution = await runtime.host.applyPlan(receipt.handle, {
+        effectId: effect.effectId,
+        ok: true,
+        value: outcome.output,
+      });
     }
-    execution = await runtime.host.applyPlan(receipt.handle, {
-      effectId: effect.effectId,
-      ok: true,
-      value: outcome.output,
-    });
+    inspection = await runtime.host.inspectPlan(receipt.handle);
+  } finally {
+    await runtime.host.dropPlan(receipt.handle).catch(() => undefined);
   }
-  const inspection = await runtime.host.inspectPlan(receipt.handle);
   const finishedAt = new Date();
   const quads = buildExecutionQuads({
     executionIri,
@@ -1075,6 +1113,16 @@ export function validateSemanticRuntimeConfig(config: SemanticRuntimeConfig): vo
   validatePositiveInteger(config.watchdogMs, 'semanticRuntime.watchdogMs', 60_000);
   validatePositiveInteger(config.startupTimeoutMs, 'semanticRuntime.startupTimeoutMs', 120_000);
   validatePositiveInteger(config.maxEvents, 'semanticRuntime.maxEvents', 100_000);
+  validatePositiveInteger(
+    config.maxActiveExecutions,
+    'semanticRuntime.maxActiveExecutions',
+    1_024,
+  );
+  validatePositiveInteger(
+    config.maxOperationsPerExecution,
+    'semanticRuntime.maxOperationsPerExecution',
+    10_000_000,
+  );
   if (config.partitionId !== undefined && !/^[0-9a-fA-F]{64}$/.test(config.partitionId)) {
     throw new Error('semanticRuntime.partitionId must be 64 hexadecimal characters');
   }
