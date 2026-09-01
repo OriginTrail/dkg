@@ -844,8 +844,11 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
   const execute: KnowledgeAssetVmPublishHandler['execute'] = async (
     { request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput,
   ) => {
+    if (!publisher) {
+      throw new Error('Async VM publish execution requires its selected publisher.');
+    }
     const publishOpts: QueuedKnowledgeAssetVmPublishOptions = {
-      ...(publisher ? { publisherOverride: publisher } : {}),
+      publisherOverride: publisher,
     };
     try {
       return await agent.publishQueuedKnowledgeAssetVmPublish(
@@ -873,6 +876,7 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
       // is the same first-writer-wins the sync lane already has.
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
         ...(request.callerAgentAddress ? { callerAgentAddress: request.callerAgentAddress } : {}),
+        publisher,
       });
       return await agent.publishQueuedKnowledgeAssetVmPublish(
         request,

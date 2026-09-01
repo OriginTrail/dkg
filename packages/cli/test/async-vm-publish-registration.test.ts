@@ -14,11 +14,16 @@ import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js
 const CALLER = `0x${'11'.repeat(20)}`; // operator / token holder that enqueued
 const MEMBER = `0x${'22'.repeat(20)}`; // resolved KA author (must NOT be the registrant)
 const CG = 'construction';
+const SELECTED_PUBLISHER = { id: 'publisher-wallet-b' };
 
-function makeMockAgent(registrationCalls: Array<Record<string, unknown> | undefined>) {
+function makeMockAgent(
+  registrationCalls: Array<Record<string, unknown> | undefined>,
+  publishPublisherCalls: unknown[] = [],
+) {
   let attempts = 0;
   return {
-    async publishQueuedKnowledgeAssetVmPublish() {
+    async publishQueuedKnowledgeAssetVmPublish(_request: unknown, _options: unknown, publishOpts: any) {
+      publishPublisherCalls.push(publishOpts?.publisherOverride);
       attempts += 1;
       if (attempts === 1) {
         throw Object.assign(new Error('context graph not registered on-chain'), { code: 'CG_NOT_REGISTERED' });
@@ -34,13 +39,18 @@ function makeMockAgent(registrationCalls: Array<Record<string, unknown> | undefi
 describe('GH#1778 async VM publish CG auto-registration', () => {
   it('registers under the enqueuing caller, not the resolved member author', async () => {
     const registrationCalls: Array<Record<string, unknown> | undefined> = [];
-    const handler = createKnowledgeAssetVmPublishHandler(makeMockAgent(registrationCalls));
+    const publishPublisherCalls: unknown[] = [];
+    const handler = createKnowledgeAssetVmPublishHandler(makeMockAgent(registrationCalls, publishPublisherCalls));
 
     const request: any = { contextGraphId: CG, name: 'report', agentAddress: MEMBER, callerAgentAddress: CALLER };
-    const result = await handler.execute({ request, publishOptions: {}, publisher: undefined } as any);
+    const result = await handler.execute({ request, publishOptions: {}, publisher: SELECTED_PUBLISHER } as any);
 
     expect(result.status).toBe('confirmed');
-    expect(registrationCalls).toEqual([{ callerAgentAddress: CALLER }]);
+    expect(registrationCalls).toEqual([{
+      callerAgentAddress: CALLER,
+      publisher: SELECTED_PUBLISHER,
+    }]);
+    expect(publishPublisherCalls).toEqual([SELECTED_PUBLISHER, SELECTED_PUBLISHER]);
   });
 
   it('passes no caller when the request has none (defers to the node-default curator stamp)', async () => {
@@ -51,8 +61,21 @@ describe('GH#1778 async VM publish CG auto-registration', () => {
     // fall back to the resolved member author — it passes nothing, and the real
     // stampAddressCurator falls back to the node default (as the sync lane does).
     const request: any = { contextGraphId: CG, name: 'report', agentAddress: MEMBER };
-    await handler.execute({ request, publishOptions: {}, publisher: undefined } as any);
+    await handler.execute({ request, publishOptions: {}, publisher: SELECTED_PUBLISHER } as any);
 
-    expect(registrationCalls).toEqual([{}]);
+    expect(registrationCalls).toEqual([{ publisher: SELECTED_PUBLISHER }]);
+  });
+
+  it('fails closed when async execution is not bound to a selected publisher', async () => {
+    const registrationCalls: Array<Record<string, unknown> | undefined> = [];
+    const publishPublisherCalls: unknown[] = [];
+    const handler = createKnowledgeAssetVmPublishHandler(makeMockAgent(registrationCalls, publishPublisherCalls));
+
+    const request: any = { contextGraphId: CG, name: 'report', agentAddress: MEMBER };
+    await expect(
+      handler.execute({ request, publishOptions: {}, publisher: undefined } as any),
+    ).rejects.toThrow(/requires its selected publisher/i);
+    expect(registrationCalls).toEqual([]);
+    expect(publishPublisherCalls).toEqual([]);
   });
 });

@@ -194,6 +194,7 @@ contextGraphCmd
   .option('--access-policy <n>', 'Access policy: 0 = public/discoverable, 1 = private/curated', parseInt)
   .option('--publish-policy <n>', 'Publish policy: 0 = curated, 1 = open', parseInt)
   .option('--pca-account-id <id>', 'Publishing Conviction Account id for curated registration by its owner or an exact-account registered agent')
+  .option('--registration-pca-account-id <id>', 'Publishing Conviction Account id used only for this registration deposit waiver attempt')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -204,16 +205,24 @@ contextGraphCmd
       if (pcaAccountId && !/^[1-9]\d*$/.test(pcaAccountId)) {
         throw new Error('--pca-account-id must be a positive decimal integer');
       }
+      const registrationPcaAccountId = opts.registrationPcaAccountId as string | undefined;
+      if (registrationPcaAccountId && !/^[1-9]\d*$/.test(registrationPcaAccountId)) {
+        throw new Error('--registration-pca-account-id must be a positive decimal integer');
+      }
       const result = await client.registerContextGraph(id, {
         accessPolicy: opts.accessPolicy != null ? Number(opts.accessPolicy) : undefined,
         publishPolicy: opts.publishPolicy != null ? Number(opts.publishPolicy) : undefined,
         pcaAccountId,
+        registrationPcaAccountId,
       });
       console.log(`Context graph registered on-chain:`);
       console.log(`  ID:         ${id}`);
       console.log(`  On-chain:   ${result.onChainId}`);
       if (pcaAccountId) {
         console.log(`  PCA account id: ${pcaAccountId}`);
+      }
+      if (registrationPcaAccountId) {
+        console.log(`  Registration PCA account id: ${registrationPcaAccountId}`);
       }
       console.log(`  ${result.hint ?? 'You can now publish SWM to Verifiable Memory.'}`);
     } catch (err) {

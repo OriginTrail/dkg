@@ -94,7 +94,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -867,6 +867,10 @@ export class ContextGraphMethods extends DKGAgentBase {
     publishPolicy?: number;
     callerAgentAddress?: string;
     publishAuthorityAccountId?: bigint;
+    /** Attempt-scoped PCA economic coverage; never persisted as graph policy. */
+    registrationPcaAccountId?: bigint;
+    /** Publisher execution context selected by the publish path. */
+    publisher?: DKGPublisher;
     /**
      * When `true`, refuse curated EOA-mode registration if the
      * calling agent's address differs from the configured chain
@@ -898,6 +902,46 @@ export class ContextGraphMethods extends DKGAgentBase {
     if (this.chain.chainId === 'none') {
       throw new Error('On-chain registration requires a configured chain adapter');
     }
+
+    const rawRegistrationPcaAccountId = opts?.registrationPcaAccountId as unknown;
+    let registrationPcaAccountId: bigint | undefined;
+    if (rawRegistrationPcaAccountId !== undefined && rawRegistrationPcaAccountId !== null) {
+      try {
+        if (typeof rawRegistrationPcaAccountId === 'bigint') {
+          registrationPcaAccountId = rawRegistrationPcaAccountId;
+        } else if (
+          typeof rawRegistrationPcaAccountId === 'number'
+          && Number.isSafeInteger(rawRegistrationPcaAccountId)
+        ) {
+          registrationPcaAccountId = BigInt(rawRegistrationPcaAccountId);
+        } else if (
+          typeof rawRegistrationPcaAccountId === 'string'
+          && /^[1-9]\d*$/.test(rawRegistrationPcaAccountId)
+        ) {
+          registrationPcaAccountId = BigInt(rawRegistrationPcaAccountId);
+        } else {
+          throw new Error();
+        }
+      } catch {
+        throw new Error('Registration PCA account id must be a positive uint256 integer.');
+      }
+      if (registrationPcaAccountId <= 0n || registrationPcaAccountId > ((1n << 256n) - 1n)) {
+        throw new Error('Registration PCA account id must be a positive uint256 integer.');
+      }
+    }
+
+    const preparationOptions: PrepareContextGraphRegistrationOptions | undefined =
+      registrationPcaAccountId !== undefined ? { registrationPcaAccountId } : undefined;
+    let preparedRegistration: PreparedContextGraphRegistration;
+    if (opts?.publisher) {
+      preparedRegistration = await opts.publisher.prepareContextGraphRegistration(preparationOptions);
+    } else {
+      if (typeof this.chain.prepareOnChainContextGraphRegistration !== 'function') {
+        throw new Error('prepareOnChainContextGraphRegistration not available on chain adapter');
+      }
+      preparedRegistration = await this.chain.prepareOnChainContextGraphRegistration(preparationOptions);
+    }
+    const preparedSignerAddress = ethers.getAddress(preparedRegistration.signerAddress);
 
     // Only the address-scoped curator can register a CG on-chain.
     // Peer IDs are transport contact handles for sync/meta refresh, not EVM
@@ -1252,7 +1296,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           throw lookupErr;
         }
       } else {
-        publishAuthority = await this.getChainPublishAuthorityAddress(id);
+        publishAuthority = preparedSignerAddress;
       }
       // PCA registration mirrors the post-#1366 on-chain authorization:
       // either the PCA owner OR a wallet registered to this exact PCA may
@@ -1268,14 +1312,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       // mode the registered agent owns the newly minted CG NFT while the PCA
       // owner and every registered PCA agent remain authorized publishers.
       if (isPcaCurated && publishAuthority) {
-        const chainSigner = await this.getRegistrationTxSignerAddress();
-        if (!chainSigner) {
-          throw new Error(
-            `Context graph "${id}" cannot be PCA-registered: the chain adapter does not expose its registration-tx signer, so PCA owner/agent authorization cannot be verified. PCA mode requires a chain adapter that surfaces its signer (e.g. via \`signerAddress\` / \`getSignerAddress()\` / \`getOperationalPrivateKey()\`).`,
-          );
-        }
-
-        const normalizedChainSigner = ethers.getAddress(chainSigner);
+        const normalizedChainSigner = preparedSignerAddress;
         const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
         if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase()) {
           throw new Error(
@@ -1431,7 +1468,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       ...(isPcaCurated ? { publishAuthorityAccountId } : {}),
       participantAgents,
       nameHash,
-    });
+    }, preparedRegistration);
     const onChainId = result.contextGraphId.toString();
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);

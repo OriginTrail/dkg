@@ -143,6 +143,43 @@ describe('POST /api/context-graph/register — effective publishPolicy resolutio
     expect(registerOpts.publishAuthorityAccountId).toBeUndefined();
   });
 
+  it('forwards attempt-only registrationPcaAccountId independently of open publish policy', async () => {
+    const { status, registerOpts, storedReads } = await runRegisterRouteCaptureOpts(
+      { id: 'open-covered-cg', publishPolicy: 1, registrationPcaAccountId: '17' },
+      {},
+    );
+    expect(status).toBe(200);
+    expect(storedReads).toEqual([]);
+    expect(registerOpts.publishPolicy).toBe(1);
+    expect(registerOpts.publishAuthorityAccountId).toBeUndefined();
+    expect(registerOpts.registrationPcaAccountId).toBe(17n);
+  });
+
+  it('keeps publish-authority PCA and registration-coverage PCA as separate fields', async () => {
+    const { status, registerOpts } = await runRegisterRouteCaptureOpts(
+      {
+        id: 'curated-decoupled-cg',
+        publishPolicy: 0,
+        pcaAccountId: '8',
+        registrationPcaAccountId: '17',
+      },
+      {},
+    );
+    expect(status).toBe(200);
+    expect(registerOpts.publishAuthorityAccountId).toBe(8n);
+    expect(registerOpts.registrationPcaAccountId).toBe(17n);
+  });
+
+  it('rejects malformed registrationPcaAccountId before registration', async () => {
+    const { status, json, registerOpts } = await runRegisterRouteCaptureOpts(
+      { id: 'bad-coverage-cg', registrationPcaAccountId: '0' },
+      {},
+    );
+    expect(status).toBe(400);
+    expect(json.error).toMatch(/registrationPcaAccountId must be a positive decimal integer string/);
+    expect(registerOpts).toBeNull();
+  });
+
   it('#1085 stored-read throw is best-effort AT THE ROUTE — 200, request/default policy, warns', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {

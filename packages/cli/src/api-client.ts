@@ -1833,6 +1833,8 @@ export class ApiClient {
     accessPolicy?: number;
     publishPolicy?: number;
     pcaAccountId?: string | number | bigint;
+    /** Attempt-scoped PCA coverage; independent of publish authority. */
+    registrationPcaAccountId?: string | number | bigint;
   }): Promise<{
     registered: string;
     onChainId: string;
@@ -1843,6 +1845,9 @@ export class ApiClient {
       ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
       ...(opts?.publishPolicy != null ? { publishPolicy: opts.publishPolicy } : {}),
       ...(opts?.pcaAccountId != null ? { pcaAccountId: opts.pcaAccountId.toString() } : {}),
+      ...(opts?.registrationPcaAccountId != null
+        ? { registrationPcaAccountId: opts.registrationPcaAccountId.toString() }
+        : {}),
     });
   }
 

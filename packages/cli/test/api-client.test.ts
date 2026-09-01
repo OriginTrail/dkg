@@ -621,6 +621,24 @@ describe('ApiClient', () => {
       });
     });
 
+    it('registerContextGraph() serializes attempt-only PCA coverage separately', async () => {
+      globalThis.fetch = mockFetchOk({ registered: 'research', onChainId: '42' });
+      await client.registerContextGraph('research', {
+        publishPolicy: 0,
+        pcaAccountId: 8n,
+        registrationPcaAccountId: 17n,
+      });
+
+      const [url, opts] = (globalThis.fetch as any)._calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/register`);
+      expect(JSON.parse(opts.body)).toEqual({
+        id: 'research',
+        publishPolicy: 0,
+        pcaAccountId: '8',
+        registrationPcaAccountId: '17',
+      });
+    });
+
     it('createSubGraph() posts context graph id and sub-graph name', async () => {
       const { fetch, calls } = createTrackingFetch({
         ok: true,
