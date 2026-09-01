@@ -44,6 +44,11 @@ export const VM_REVERIFY_DEFAULT_BATCH_SIZE = 10;
 export const VM_REVERIFY_DEFAULT_MAX_CG_CHUNKS_PER_RUN = 1;
 export const VM_REVERIFY_DEFAULT_KICK_DEBOUNCE_MS = 250;
 
+/** How long an ABANDONED row keeps its diagnostic value before gc (review r4). */
+export const VM_REVERIFY_ABANDONED_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+/** How often the drain sweeps expired abandoned rows — not every pass. */
+export const VM_REVERIFY_GC_INTERVAL_MS = 60 * 60 * 1_000;
+
 /**
  * Sync-admission priority for the drain's peer fetches (ADR-W2R-9).
  *
@@ -261,6 +266,7 @@ export class VmReverifyWorker {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #kickTimer: ReturnType<typeof setTimeout> | undefined;
   #inFlight: Promise<VmReverifyRunSummary> | undefined;
+  #lastGcAt = 0;
 
   constructor(private readonly deps: VmReverifyWorkerDependencies) {
     this.#settings = resolveVmReverifyWorkerSettings(deps.settings);
@@ -662,6 +668,24 @@ export class VmReverifyWorker {
       );
     } finally {
       if (this.#running) {
+        // The file-size bound (review r4): abandoned rows are diagnostics,
+        // and the documented gc was previously unreachable from any runtime
+        // path. Swept on its own hourly cadence — not per pass — and
+        // best-effort: a failed sweep never disturbs scheduling.
+        const gcNow = this.#now();
+        if (gcNow - this.#lastGcAt >= VM_REVERIFY_GC_INTERVAL_MS) {
+          this.#lastGcAt = gcNow;
+          try {
+            const removed = await this.deps.intents.gcAbandoned(VM_REVERIFY_ABANDONED_RETENTION_MS);
+            if (removed > 0) {
+              this.deps.log.info(`vm-reverify gc removed ${removed} expired abandoned intent(s)`);
+            }
+          } catch (error) {
+            this.deps.log.warn(
+              `vm-reverify gc failed (retried next interval): ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
         // A full batch that made PROGRESS probably has more work behind it;
         // drain again at once rather than idling a whole interval behind a
         // backlog. A full batch with NO committed progress — lifecycle

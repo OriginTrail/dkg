@@ -20,7 +20,7 @@ export type GraphScopedOrLegacyMetadata<TLegacy> =
  * to that caller — and propagates as-is.
  */
 export type GraphScopedMetadataLookup<TLegacy> =
-  | { readonly kind: 'resolved'; readonly value: GraphScopedOrLegacyMetadata<TLegacy> }
+  | GraphScopedOrLegacyMetadata<TLegacy>
   | { readonly kind: 'query-failed'; readonly cause: unknown }
   | { readonly kind: 'malformed'; readonly cause: unknown };
 
@@ -43,10 +43,10 @@ export async function resolveGraphScopedOrLegacyMetadata<TLegacy>(
     loadLegacyMetadata,
     queryOptions,
   );
-  if (lookup.kind === 'resolved') return lookup.value;
   // The throwing contract predates the tagged lookup: existing callers see
   // the ORIGINAL error object, exactly as before the classification existed.
-  throw lookup.cause;
+  if (lookup.kind === 'query-failed' || lookup.kind === 'malformed') throw lookup.cause;
+  return lookup;
 }
 
 /** The tagged variant — see {@link GraphScopedMetadataLookup}. */
@@ -87,13 +87,10 @@ export async function lookupGraphScopedOrLegacyMetadata<TLegacy>(
   } catch (cause) {
     return { kind: 'malformed', cause };
   }
-  if (parsed.kind === 'graph') return { kind: 'resolved', value: parsed };
+  if (parsed.kind === 'graph') return parsed;
 
   const legacyMetadata = await loadLegacyMetadata();
-  return {
-    kind: 'resolved',
-    value: legacyMetadata === null
-      ? { kind: 'absent' }
-      : { kind: 'legacy', metadata: legacyMetadata },
-  };
+  return legacyMetadata === null
+    ? { kind: 'absent' }
+    : { kind: 'legacy', metadata: legacyMetadata };
 }

@@ -40,7 +40,7 @@ export interface VmReverifyPrepareInput {
   /** The config-injected store, when the embedder supplied one. */
   injected?: VmReverifyIntentStore;
   /** The agent's ONE effective-state resolver (gate + capability probe). */
-  resolveState(): Promise<VmReverifyActivation>;
+  resolveState(options?: { skipAdapterProbe?: boolean }): Promise<VmReverifyActivation>;
   /** ERROR-level reporting for the loud-not-fatal open failure. */
   logError(message: string): void;
 }
@@ -91,12 +91,16 @@ export class VmReverifyRuntime {
    */
   async prepare(input: VmReverifyPrepareInput): Promise<void> {
     if (this.#store) return;
-    // No durable backing of either kind means the feature CANNOT arm, and the
-    // answer must not cost a capability probe: agents without a chain adapter
-    // (synthetic lifecycle tests, chainless tooling) prepare too, and the
-    // reconcile gate inside the resolver reads the adapter directly.
+    // No durable backing of either kind means the feature CANNOT arm and the
+    // capability probe would be pure cost — but the latched reason must still
+    // respect the resolver's precedence (review r4): an operator whose flag
+    // is off, or whose reconciler is off, must not be sent chasing a data
+    // directory. The probe-free resolver mode runs the cheap gates in order.
     if (!input.dataDir && !input.injected) {
-      this.#activation = { effective: false, reason: 'no-data-dir' };
+      const gated = await input.resolveState({ skipAdapterProbe: true });
+      this.#activation = gated.effective
+        ? { effective: false, reason: 'no-data-dir' }
+        : gated;
       return;
     }
     // The effective gate runs FIRST, before an injected store is accepted

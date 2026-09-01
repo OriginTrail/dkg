@@ -139,8 +139,15 @@ export class InMemoryVmReverifyIntentStore implements VmReverifyIntentStore {
     };
   }
 
-  async gcAbandoned(): Promise<number> {
-    return 0;
+  async gcAbandoned(olderThanMs: number): Promise<number> {
+    let removed = 0;
+    for (const [ual, row] of this.rows) {
+      if (row.state === 'ABANDONED' && row.updatedAt <= this.now - Math.max(0, olderThanMs)) {
+        this.rows.delete(ual);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async close(): Promise<void> {}

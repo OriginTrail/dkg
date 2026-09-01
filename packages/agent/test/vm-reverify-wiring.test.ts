@@ -339,6 +339,38 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     });
   }, 60_000);
 
+  it('the no-backing latch preserves the resolver reason PRECEDENCE (review r4)', async () => {
+    // With no durable backing, preparation must still send the operator to
+    // the right remediation: a disabled reconciler outranks the flag, the
+    // flag outranks the missing data directory — the same order the live
+    // resolver documents.
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    const combos: Array<{ config: Record<string, unknown>; env?: string; reason: string }> = [
+      { config: { vmUpdateConvergenceEnabled: false }, reason: 'flag-off' },
+      { config: {}, env: '0', reason: 'reconcile-disabled' },
+      { config: {}, reason: 'no-data-dir' },
+    ];
+    for (const combo of combos) {
+      if (combo.env === undefined) delete process.env[RECONCILER_ENV];
+      else process.env[RECONCILER_ENV] = combo.env;
+      const agent = await DKGAgent.create({
+        name: 'W2RWiringNoBackingReasons',
+        chainAdapter: capableChain(),
+        ...combo.config,
+      } as any);
+      agents.push(agent);
+      stubNode(agent);
+      const internals = agent as any;
+
+      await internals.prepareVmReverifyIntentStore();
+
+      expect(
+        await internals.vmUpdateConvergenceState(),
+        `no-backing prepare must latch ${combo.reason}`,
+      ).toEqual({ effective: false, reason: combo.reason });
+    }
+  }, 120_000);
   it('an INJECTED store cannot bypass the kill switch (review r1)', async () => {
     // Injection substitutes for the durable FILE, not for the operator flag:
     // with the switch off, an injected store must wire neither lane nor

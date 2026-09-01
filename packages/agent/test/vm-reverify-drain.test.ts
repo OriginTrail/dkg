@@ -746,6 +746,51 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     }
   });
 
+  it('gc sweeps EXPIRED abandoned rows on its own cadence, not per pass (review r4)', async () => {
+    vi.useFakeTimers();
+    try {
+      const intents = new InMemoryVmReverifyIntentStore();
+      intents.now = 1_000;
+      // An expired abandoned row, a fresh abandoned row, and a pending row.
+      for (const [n, block] of [[84n, 100], [85n, 101], [86n, 102]] as const) {
+        await seed(intents, n, block);
+      }
+      const uals = [...intents.rows.keys()];
+      await intents.abandon(uals[0]!, 0, 'no-peer-has-version');
+      await intents.abandon(uals[1]!, 0, 'no-peer-has-version');
+      intents.rows.get(uals[0]!)!.updatedAt = 1_000;
+      const NOW = 1_000 + 8 * 24 * 60 * 60 * 1_000;
+      intents.rows.get(uals[1]!)!.updatedAt = NOW - 1_000;   // fresh abandonment
+      intents.now = NOW;
+      let gcCalls = 0;
+      const realGc = intents.gcAbandoned.bind(intents);
+      intents.gcAbandoned = async (olderThan: number) => { gcCalls += 1; return realGc(olderThan); };
+      // A snapshot BEHIND the pending row's event keeps it retry-material:
+      // resolve() removes rows, which would vacuously pass the pending check.
+      const fetch = makeFetch({ snapshotFor: () => snapshot(50) });
+      const worker = new VmReverifyWorker({
+        intents,
+        fetchContextGraphAssets: fetch,
+        log: { info: () => undefined, warn: () => undefined },
+        now: () => NOW,
+        settings: { pollIntervalMs: 30_000 } as never,
+      });
+      worker.start();
+      await vi.advanceTimersByTimeAsync(5);
+
+      expect(gcCalls, 'one sweep on the first pass').toBe(1);
+      expect(intents.rows.has(uals[0]!), 'the EXPIRED abandoned row is gone').toBe(false);
+      expect(intents.rows.get(uals[1]!)?.state, 'a fresh abandonment keeps its diagnostic value').toBe('ABANDONED');
+      expect(intents.rows.get(uals[2]!)?.state, 'pending rows are never gc material').toBe('PENDING');
+
+      // The next pass inside the hour must NOT sweep again.
+      await vi.advanceTimersByTimeAsync(30_010);
+      expect(gcCalls, 'sweeps ride an hourly cadence, not every pass').toBe(1);
+      await worker.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it('stop() waits for the in-flight run before resolving (review r4)', async () => {
     const intents = new InMemoryVmReverifyIntentStore();
     await seed(intents, 81n, 100);

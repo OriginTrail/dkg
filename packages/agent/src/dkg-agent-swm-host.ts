@@ -2892,13 +2892,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * coalescer so non-V10 / no-chain nodes pay nothing.
    */
   vmReconcileEnabled(this: DKGAgent): boolean {
+    // `this.chain` may be absent on synthetic/chainless agents (review r4):
+    // for them the honest answer is simply "not reconcilable".
     return (
       resolveSyncReconcilerEnabled(this.config.syncReconcilerEnabled)
-      &&
-      this.chain.chainId !== 'none' &&
-      typeof this.chain.getContextGraphKCCount === 'function' &&
-      typeof this.chain.getContextGraphKCAt === 'function' &&
-      typeof this.chain.getLatestMerkleRoot === 'function'
+      && this.chain != null
+      && this.chain.chainId !== 'none'
+      && typeof this.chain.getContextGraphKCCount === 'function'
+      && typeof this.chain.getContextGraphKCAt === 'function'
+      && typeof this.chain.getLatestMerkleRoot === 'function'
     );
   }
 
@@ -2931,6 +2933,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   async vmUpdateConvergenceState(
     this: DKGAgent,
+    options: {
+      /**
+       * Stop before the adapter capability probe (review r4): store
+       * preparation uses this on the no-durable-backing path so the latched
+       * reason preserves the resolver's documented precedence — reconcile,
+       * flag, THEN no-data-dir — without a probe no arming could use.
+       */
+      skipAdapterProbe?: boolean;
+    } = {},
   ): Promise<{ effective: boolean; reason?: string }> {
     // What this process actually ARMED wins over a live re-probe (review r1):
     // once startup has decided, a capability that recovers later — the Hub
@@ -2949,6 +2960,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!this.config.dataDir && !this.config.vmReverifyIntentStore) {
       return { effective: false, reason: 'no-data-dir' };
     }
+    if (options.skipAdapterProbe) return { effective: true };
     const requested: string[] = [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES];
     // `supportsEventTypes` is an OPTIONAL adapter capability (PR-A) and is
     // ASYNC — contract bindings resolve lazily from the Hub, so a probe that
@@ -3530,7 +3542,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       return;
     }
-    const resolved = lookup.value;
+    // The remaining variants ARE the resolution (review r4: flat union).
+    const resolved = lookup;
 
     if (resolved.kind !== 'graph') {
       // Not held here — which deliberately also covers a pre-V2 LEGACY holding.

@@ -1932,7 +1932,7 @@ export class DKGAgentBase {
       ...(this.config.vmReverifyIntentStore === undefined
         ? {}
         : { injected: this.config.vmReverifyIntentStore }),
-      resolveState: () => (this as unknown as DKGAgent).vmUpdateConvergenceState(),
+      resolveState: (options) => (this as unknown as DKGAgent).vmUpdateConvergenceState(options),
       logError: (message) =>
         this.log.error(createOperationContext('system'), message),
     });
