@@ -5,17 +5,12 @@ import {
   decodeAbiSuccess,
   decodeHandle,
   decodeInspection,
-  decodePlanApplyResult,
-  decodeStartedPlanInspection,
-  decodeStartedPlanReceipt,
   decodeStatus,
   decodeStepOutput,
   encodeCreateRequest,
-  encodeApplyPlanRequest,
   encodeEmptyRequest,
   encodeEventRequest,
   encodeRestoreRequest,
-  encodeStartPlanRequest,
   type Phase0Inspection,
   type Phase0RuntimeEvent,
   type Phase0StepOutput,
@@ -23,6 +18,11 @@ import {
   type StartedPlanInspection,
   type StartedPlanReceipt,
 } from './codec.js';
+import {
+  ComponentExecutionPool,
+  type ComponentExecutionPoolOptions,
+} from './component-supervisor.js';
+import type { ExecutionCapabilityDescriptor } from './component-types.js';
 import {
   WorkerRequestTimeoutError,
   WorkerSupervisor,
@@ -39,12 +39,15 @@ export interface SemanticRuntimeConfig {
   maxEvents?: number;
   maxAccumulator?: bigint | number | string;
   partitionId?: string;
+  maxActiveExecutions?: number;
+  maxOperationsPerExecution?: number;
 }
 
 export interface SemanticRuntimeHostOptions {
   config?: SemanticRuntimeConfig;
   artifactRoot?: string;
   workerUrl?: URL;
+  componentWorkerUrl?: URL;
   allowTestOperations?: boolean;
   initialSnapshot?: Uint8Array;
   log?: (message: string) => void;
@@ -52,6 +55,7 @@ export interface SemanticRuntimeHostOptions {
 
 export class SemanticRuntimeHost {
   private readonly supervisor: WorkerSupervisor;
+  private readonly componentPool: ComponentExecutionPool;
   private readonly config: SemanticRuntimeConfig;
   private readonly allowTestOperations: boolean;
   private readonly initialSnapshot: Uint8Array | null;
@@ -60,8 +64,7 @@ export class SemanticRuntimeHost {
   private expectedStateDigest: Uint8Array | null = null;
   private abiRequestSequence = 0n;
   private recovery: Promise<void> | null = null;
-  private operationTail: Promise<void> = Promise.resolve();
-  private readonly planHandles = new Set<number>();
+  private stateOperationTail: Promise<void> = Promise.resolve();
 
   constructor(options: SemanticRuntimeHostOptions = {}) {
     this.config = options.config ?? {};
@@ -78,10 +81,25 @@ export class SemanticRuntimeHost {
       log: options.log,
     };
     this.supervisor = new WorkerSupervisor(supervisorOptions);
+    const componentOptions: ComponentExecutionPoolOptions = {
+      artifactRoot: options.artifactRoot,
+      workerUrl: options.componentWorkerUrl,
+      requestTimeoutMs: Math.max(this.config.watchdogMs ?? 100, 1_000),
+      startupTimeoutMs: this.config.startupTimeoutMs ?? 10_000,
+      allowTestOperations: this.allowTestOperations,
+      maxActiveExecutions: this.config.maxActiveExecutions ?? 8,
+      maxOperations: this.config.maxOperationsPerExecution ?? 10_000,
+      log: options.log,
+    };
+    this.componentPool = new ComponentExecutionPool(componentOptions);
   }
 
   get workerRestartCount(): number {
     return this.supervisor.restartCount;
+  }
+
+  get activeComponentExecutions(): number {
+    return this.componentPool.activeCount;
   }
 
   async start(): Promise<void> {
@@ -122,56 +140,37 @@ export class SemanticRuntimeHost {
   async startPlan(
     canonicalPlan: Uint8Array,
     logicalTime = 0n,
+    capability?: ExecutionCapabilityDescriptor,
   ): Promise<StartedPlanReceipt> {
-    return this.runExclusive(async () => {
-      this.requireHandle();
-      const requestId = this.nextAbiRequestId();
-      const response = await this.supervisor.call(
-        'start_plan',
-        encodeStartPlanRequest(requestId, canonicalPlan, logicalTime),
-        { timeoutMs: Math.max(this.config.startupTimeoutMs ?? 10_000, 5_000) },
-      );
-      const receipt = decodeStartedPlanReceipt(
-        decodeAbiSuccess(response.body, requestId, MESSAGE_TYPE.startPlan),
-      );
-      this.planHandles.add(receipt.handle);
-      return receipt;
-    });
+    this.requireHandle();
+    return this.componentPool.startPlan(canonicalPlan, logicalTime, capability);
   }
 
   async applyPlan(
     handle: number,
     result?: { effectId: bigint; ok: boolean; value: string },
   ): Promise<PlanApplyResult> {
-    return this.runExclusive(async () => {
-      this.requireHandle();
-      if (!this.planHandles.has(handle)) throw new WorkerUnavailableError('unknown supervised plan handle');
-      const requestId = this.nextAbiRequestId();
-      const response = await this.supervisor.call(
-        'apply_plan',
-        encodeApplyPlanRequest(requestId, result),
-        { handle, timeoutMs: Math.max(this.config.startupTimeoutMs ?? 10_000, 5_000) },
-      );
-      return decodePlanApplyResult(
-        decodeAbiSuccess(response.body, requestId, MESSAGE_TYPE.applyPlan),
-      );
-    });
+    this.requireHandle();
+    return this.componentPool.applyPlan(handle, result);
   }
 
   async inspectPlan(handle: number): Promise<StartedPlanInspection> {
-    return this.runExclusive(async () => {
-      this.requireHandle();
-      if (!this.planHandles.has(handle)) throw new WorkerUnavailableError('unknown supervised plan handle');
-      const requestId = this.nextAbiRequestId();
-      const response = await this.supervisor.call(
-        'inspect_plan',
-        encodeEmptyRequest(requestId, MESSAGE_TYPE.inspectPlan),
-        { handle },
-      );
-      return decodeStartedPlanInspection(
-        decodeAbiSuccess(response.body, requestId, MESSAGE_TYPE.inspectPlan),
-      );
-    });
+    this.requireHandle();
+    return this.componentPool.inspectPlan(handle);
+  }
+
+  async dropPlan(handle: number): Promise<void> {
+    await this.componentPool.dropPlan(handle);
+  }
+
+  async componentTestTrap(handle: number): Promise<void> {
+    if (!this.allowTestOperations) throw new Error('component test operations are disabled');
+    await this.componentPool.testTrap(handle);
+  }
+
+  async componentTestHang(handle: number): Promise<void> {
+    if (!this.allowTestOperations) throw new Error('component test operations are disabled');
+    await this.componentPool.testHang(handle);
   }
 
   private async applyEventInternal(event: Phase0RuntimeEvent): Promise<Phase0StepOutput> {
@@ -254,20 +253,7 @@ export class SemanticRuntimeHost {
   }
 
   private async stopInternal(): Promise<void> {
-    for (const planHandle of this.planHandles) {
-      const requestId = this.nextAbiRequestId();
-      try {
-        const response = await this.supervisor.call(
-          'drop_plan',
-          encodeEmptyRequest(requestId, MESSAGE_TYPE.dropPlan),
-          { handle: planHandle },
-        );
-        decodeStatus(decodeAbiSuccess(response.body, requestId, MESSAGE_TYPE.dropPlan));
-      } catch {
-        // Worker termination below is the ownership boundary if drop cannot run.
-      }
-    }
-    this.planHandles.clear();
+    await this.componentPool.stop();
     const handle = this.handle;
     this.handle = null;
     this.snapshot = null;
@@ -340,8 +326,8 @@ export class SemanticRuntimeHost {
   }
 
   private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.operationTail.then(operation, operation);
-    this.operationTail = result.then(
+    const result = this.stateOperationTail.then(operation, operation);
+    this.stateOperationTail = result.then(
       () => undefined,
       () => undefined,
     );

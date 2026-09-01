@@ -1,0 +1,122 @@
+package origintrail:semantic-runtime@0.1.0;
+
+interface capability {
+  resource execution-capability;
+}
+
+interface runtime {
+  use capability.{execution-capability};
+
+  record diagnostic {
+    code: string,
+    message: string,
+    category: string,
+    retryable: bool,
+  }
+
+  record source-position {
+    line: u64,
+    column: u64,
+  }
+
+  record source-span {
+    start: source-position,
+    end: source-position,
+  }
+
+  record admission-diagnostic {
+    code: string,
+    primary: source-span,
+    message: string,
+    help: option<string>,
+  }
+
+  record adapter-version {
+    operation: string,
+    version: u16,
+  }
+
+  record resource-bounds {
+    processes: u32,
+    host-commands: u32,
+    retry-attempts: u32,
+    depth: u16,
+  }
+
+  record admitted-plan {
+    canonical-plan: list<u8>,
+    canonical-hash: list<u8>,
+    strategy-ref: string,
+    scope: string,
+    goal: string,
+    required-capabilities: list<string>,
+    effect-upper-bound: list<string>,
+    approval-requirements: list<string>,
+    adapter-versions: list<adapter-version>,
+    bounds: resource-bounds,
+  }
+
+  record logical-agent {
+    role: string,
+    process-id: list<u8>,
+    status: string,
+  }
+
+  record execution-receipt {
+    canonical-hash: list<u8>,
+    strategy-ref: string,
+    logical-time: u64,
+    state-digest: list<u8>,
+    agents: list<logical-agent>,
+  }
+
+  record effect-request {
+    effect-id: u64,
+    process-id: list<u8>,
+    operation: string,
+    version: u16,
+    arguments: list<string>,
+  }
+
+  record effect-result {
+    effect-id: u64,
+    outcome: result<string, diagnostic>,
+  }
+
+  record plan-value {
+    role: string,
+    process-id: list<u8>,
+    value: string,
+  }
+
+  record completion {
+    events: list<plan-value>,
+    outputs: list<plan-value>,
+  }
+
+  variant step {
+    effect-requested(effect-request),
+    completed(completion),
+  }
+
+  resource execution {
+    advance: async func(effect: option<effect-result>) -> result<step, diagnostic>;
+    inspect: func() -> result<execution-receipt, diagnostic>;
+  }
+
+  abi-version: func() -> u32;
+  compile: func(source: string) -> result<admitted-plan, list<admission-diagnostic>>;
+  admit: func(plan: list<u8>) -> result<admitted-plan, diagnostic>;
+  start: func(
+    capability: execution-capability,
+    plan: list<u8>,
+    logical-time: u64,
+  ) -> result<tuple<execution, execution-receipt>, diagnostic>;
+  test-hang: func();
+  test-trap: func();
+}
+
+world semantic-runtime {
+  import capability;
+  export runtime;
+}

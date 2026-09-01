@@ -37,24 +37,29 @@ export function createInvestigatorAdapter(
       ) throw new Error('INVALID_LLM_ARGUMENT');
       return { prompt: value.prompt };
     },
-    async dispatch(_authorization, input) {
+    async dispatch(authorization, input) {
       if (!useCodex && !llmConfig?.apiKey) throw new Error('LLM_NOT_CONFIGURED');
-      const output = useCodex
-        ? await completeWithCodex(input.prompt)
-        : (await new LlmClient().complete({
-          config: llmConfig!,
-          request: {
-            messages: [{ role: 'user', content: input.prompt }],
-            temperature: 0,
-            maxTokens: 512,
-            stream: false,
-          },
-        })).message.content ?? '';
-      return {
-        status: 'succeeded',
-        output,
-        evidenceRef: `urn:sr:adapter-output:${createHash('sha256').update(output, 'utf8').digest('hex')}`,
-      };
+      traceTiming('start', authorization.effectId);
+      try {
+        const output = useCodex
+          ? await completeWithCodex(input.prompt)
+          : (await new LlmClient().complete({
+            config: llmConfig!,
+            request: {
+              messages: [{ role: 'user', content: input.prompt }],
+              temperature: 0,
+              maxTokens: 512,
+              stream: false,
+            },
+          })).message.content ?? '';
+        return {
+          status: 'succeeded',
+          output,
+          evidenceRef: `urn:sr:adapter-output:${createHash('sha256').update(output, 'utf8').digest('hex')}`,
+        };
+      } finally {
+        traceTiming('finish', authorization.effectId);
+      }
     },
     reconcile: async () => ({
       status: 'unknown',
@@ -65,6 +70,16 @@ export function createInvestigatorAdapter(
       && (error.message === 'LLM_NOT_CONFIGURED' || error.message === 'INVALID_LLM_ARGUMENT')
     ),
   };
+}
+
+function traceTiming(phase: 'start' | 'finish', effectId: string): void {
+  if (process.env.SEMANTIC_RUNTIME_TRACE_ADAPTER_TIMING !== '1') return;
+  console.info(`semantic-runtime-tool-timing ${JSON.stringify({
+    operation: 'agent/investigate',
+    phase,
+    effectId,
+    monotonicNs: process.hrtime.bigint().toString(),
+  })}`);
 }
 
 function completeWithCodex(prompt: string): Promise<string> {

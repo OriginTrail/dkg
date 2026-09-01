@@ -51,37 +51,42 @@ export function createDkgQueryAdapter(
       ) throw new Error('INVALID_QUERY_SELECTOR');
       return { selector: value.selector };
     },
-    async dispatch(_authorization, input) {
-      if (!(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))) {
-        throw new Error('QUERY_CONTEXT_GRAPH_ACCESS_DENIED');
+    async dispatch(authorization, input) {
+      traceTiming('start', authorization.effectId);
+      try {
+        if (!(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))) {
+          throw new Error('QUERY_CONTEXT_GRAPH_ACCESS_DENIED');
+        }
+        const rows = await readContextGraphQueryCatalogBindings(agent, contextGraphId, {
+          callerAgentAddress,
+          source: 'semantic-runtime-query-catalog',
+        });
+        const item = findSavedQuery(
+          decodeQueryCatalogBindings(rows, { contextGraphId }),
+          input.selector,
+        );
+        if (!item) throw new Error('QUERY_CATALOG_ENTRY_NOT_FOUND');
+        const execution = prepareQueryCatalogExecution(item);
+        const result = await agent.query(execution.sparql, {
+          contextGraphId,
+          source: 'semantic-runtime-dkg-query',
+          ...(execution.subGraphName ? { subGraphName: execution.subGraphName } : {}),
+          ...(execution.view ? { view: execution.view } : {}),
+          ...(callerAgentAddress ? { callerAgentAddress } : {}),
+        });
+        assertBoundedResult(result);
+        const output = canonicalizeJson(
+          { queryIri: item.queryIri, result } as unknown as CanonicalJsonValue,
+          { maxBytes: MAX_OUTPUT_BYTES },
+        );
+        return {
+          status: 'succeeded',
+          output,
+          evidenceRef: `urn:sr:adapter-output:${createHash('sha256').update(output, 'utf8').digest('hex')}`,
+        };
+      } finally {
+        traceTiming('finish', authorization.effectId);
       }
-      const rows = await readContextGraphQueryCatalogBindings(agent, contextGraphId, {
-        callerAgentAddress,
-        source: 'semantic-runtime-query-catalog',
-      });
-      const item = findSavedQuery(
-        decodeQueryCatalogBindings(rows, { contextGraphId }),
-        input.selector,
-      );
-      if (!item) throw new Error('QUERY_CATALOG_ENTRY_NOT_FOUND');
-      const execution = prepareQueryCatalogExecution(item);
-      const result = await agent.query(execution.sparql, {
-        contextGraphId,
-        source: 'semantic-runtime-dkg-query',
-        ...(execution.subGraphName ? { subGraphName: execution.subGraphName } : {}),
-        ...(execution.view ? { view: execution.view } : {}),
-        ...(callerAgentAddress ? { callerAgentAddress } : {}),
-      });
-      assertBoundedResult(result);
-      const output = canonicalizeJson(
-        { queryIri: item.queryIri, result } as unknown as CanonicalJsonValue,
-        { maxBytes: MAX_OUTPUT_BYTES },
-      );
-      return {
-        status: 'succeeded',
-        output,
-        evidenceRef: `urn:sr:adapter-output:${createHash('sha256').update(output, 'utf8').digest('hex')}`,
-      };
     },
     reconcile: async () => ({
       status: 'not_applied',
@@ -89,6 +94,16 @@ export function createDkgQueryAdapter(
     }),
     couldHaveReachedTarget: () => false,
   };
+}
+
+function traceTiming(phase: 'start' | 'finish', effectId: string): void {
+  if (process.env.SEMANTIC_RUNTIME_TRACE_ADAPTER_TIMING !== '1') return;
+  console.info(`semantic-runtime-tool-timing ${JSON.stringify({
+    operation: 'dkg/query',
+    phase,
+    effectId,
+    monotonicNs: process.hrtime.bigint().toString(),
+  })}`);
 }
 
 function qualifiedSelector(item: QueryCatalogItem): string {
@@ -106,18 +121,27 @@ function findSavedQuery(items: QueryCatalogItem[], selector: string): QueryCatal
 }
 
 function assertBoundedResult(result: unknown): void {
-  if (typeof result !== 'object' || result === null || !('type' in result)) {
+  if (typeof result !== 'object' || result === null) {
     throw new Error('QUERY_RESULT_INVALID');
   }
-  const value = result as { type: unknown; bindings?: unknown; quads?: unknown; value?: unknown };
-  if (value.type === 'bindings' && Array.isArray(value.bindings)) {
+  const value = result as { type?: unknown; bindings?: unknown; quads?: unknown; value?: unknown };
+  if (
+    Array.isArray(value.bindings)
+    && (value.type === undefined || value.type === 'bindings')
+  ) {
     if (value.bindings.length > MAX_RESULT_ITEMS) throw new Error('QUERY_RESULT_TOO_LARGE');
     return;
   }
-  if (value.type === 'quads' && Array.isArray(value.quads)) {
+  if (
+    Array.isArray(value.quads)
+    && (value.type === undefined || value.type === 'quads')
+  ) {
     if (value.quads.length > MAX_RESULT_ITEMS) throw new Error('QUERY_RESULT_TOO_LARGE');
     return;
   }
-  if (value.type === 'boolean' && typeof value.value === 'boolean') return;
+  if (
+    typeof value.value === 'boolean'
+    && (value.type === undefined || value.type === 'boolean')
+  ) return;
   throw new Error('QUERY_RESULT_INVALID');
 }
