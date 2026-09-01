@@ -97,7 +97,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, lookupGraphScopedOrLegacyMetadata, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, probeVmReverifyCapability, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -2961,57 +2961,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { effective: false, reason: 'no-data-dir' };
     }
     if (options.skipAdapterProbe) return { effective: true };
-    const requested: string[] = [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES];
-    // `supportsEventTypes` is an OPTIONAL adapter capability (PR-A) and is
-    // ASYNC — contract bindings resolve lazily from the Hub, so a probe that
-    // did not await `init()` would see no bindings and report every name
-    // missing. Read structurally, because an adapter that predates the branch
-    // must gate to "supports none of the four" rather than fail to compile.
-    const supportsEventTypes = (
-      this.chain as {
-        supportsEventTypes?: (names: readonly string[]) => Promise<string[]> | string[];
-      }
-    ).supportsEventTypes;
-    if (typeof supportsEventTypes !== 'function') {
-      return { effective: false, reason: `abi-missing:${requested[0]}` };
-    }
-    // Only a PRESENT, ARRAY-SHAPED, EMPTY missing-list means capable. Every
-    // other answer fails closed, and each failure names itself.
-    //
-    // The awaited call is the reason this whole resolver is async: awaiting a
-    // non-promise is harmless, whereas NOT awaiting a promise yields an object
-    // whose `.length` is `undefined`, and `undefined > 0` is false — so the
-    // pre-await version of this gate reported EVERY adapter capable, including
-    // ones that can serve none of the four. That is the one failure direction
-    // a capability gate must never have, and it is invisible: the feature would
-    // simply subscribe to a lane that yields nothing, forever.
-    let missing: unknown;
-    try {
-      missing = await supportsEventTypes.call(this.chain, requested);
-    } catch {
-      // A transient probe failure (the Hub unreachable at boot) is not proof of
-      // capability. Off for this process, and named so an operator can tell it
-      // apart from a genuinely legacy ABI.
-      return { effective: false, reason: 'abi-probe-failed' };
-    }
-    if (!Array.isArray(missing)) return { effective: false, reason: 'abi-probe-failed' };
-    if (missing.length > 0) {
-      return { effective: false, reason: `abi-missing:${String(missing[0])}` };
-    }
-    // Emitting events is not the whole capability (review r1): every mutation
-    // must also be MAPPED to a UAL (the storage address) and REPAIRED (the
-    // exact-snapshot reads). An adapter that can only emit would have every
-    // event dropped-and-acknowledged after the lane armed — the cursor
-    // advances forever past mutations that never became intents. Fail closed
-    // and name the missing method.
-    for (const capability of [
-      'getDKGKnowledgeAssetsAddress',
-      'getKAContextGraphId',
-      'readKnowledgeAssetVersionSnapshot',
-    ] as const) {
-      if (typeof (this.chain as unknown as Record<string, unknown>)[capability] !== 'function') {
-        return { effective: false, reason: `adapter-missing:${capability}` };
-      }
+    // The capability itself is probed at the CHAIN boundary (review r4):
+    // `probeVmReverifyCapability` is typed against the adapter interface, so
+    // an operation rename breaks the chain package at compile time instead
+    // of letting this gate drift. The discriminated reasons are the same
+    // diagnostics this resolver always reported.
+    const capability = await probeVmReverifyCapability(this.chain);
+    if (!capability.supported) {
+      return { effective: false, reason: capability.reason };
     }
     // A failed store open reaches callers through the LATCH above — store
     // preparation records `store-open-failed` on the same path that logs it,
