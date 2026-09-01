@@ -104,6 +104,86 @@ const EVENT_OWNING_CONTRACT: Readonly<Record<string, keyof ContractCache>> =
 export const SERVED_EVENT_TYPES: readonly string[] =
   Object.freeze(Object.keys(EVENT_OWNING_CONTRACT));
 
+/** The tip-sensitive read the validated scan routes through (readTipProvider). */
+type ValidatedLogReader = <T>(
+  label: string,
+  fn: (provider: ethers.JsonRpcProvider) => Promise<T>,
+  opts?: { policy?: string; isRetryable?: (err: unknown) => boolean },
+) => Promise<T>;
+/**
+ * A VALIDATED wide raw-log scan (review r3-bot): one place owns the
+ * tip-sensitive routing (`readTipProvider` — the canonical carve-out for
+ * reads whose coverage must align with the head that advances a cursor),
+ * the `wideLogScan` timeout policy, request-envelope validation, and
+ * retry classification.
+ *
+ * Whole-response validation runs INSIDE the per-provider callback: an
+ * impossible EVM shape (review r14) or a log that violates the request it
+ * claims to answer (review r16 — wrong address, outside the window) is
+ * ENDPOINT corruption, thrown as the typed
+ * {@link InvalidRpcLogResponseError} and classified retryable EXPLICITLY
+ * through `ReadOpts.isRetryable` — no ethers error code is inspected or
+ * manufactured — so the read fails over and a lane cursor can never
+ * advance on an untrustworthy response. Logs outside the requested topic
+ * set remain droppable noise; only a matching topic0 asserts anything.
+ *
+ * Event-specific callers contribute their address/topics and a
+ * `validateMatchedLog` shape check, and DECODE what comes back.
+ */
+function readValidatedTopicLogs(
+reader: ValidatedLogReader,
+request: {
+  label: string;
+  address: string;
+  topics: (string | string[])[];
+  fromBlock: number;
+  toBlock?: number;
+  /** Return a corruption description to refuse the response, undefined to accept. */
+  validateMatchedLog?: (log: ethers.Log) => string | undefined;
+},
+): Promise<ethers.Log[]> {
+  const matchable = new Set(
+    (Array.isArray(request.topics[0]) ? request.topics[0] : [request.topics[0]])
+      .filter((topic): topic is string => typeof topic === 'string')
+      .map((topic) => topic.toLowerCase()),
+  );
+  return reader(
+    request.label,
+    async (provider) => {
+      const raw = await provider.getLogs({
+        address: request.address,
+        topics: request.topics,
+        fromBlock: request.fromBlock,
+        toBlock: request.toBlock ?? 'latest',
+      });
+      for (const log of raw) {
+        const topic0 = log.topics[0]?.toLowerCase();
+        if (topic0 == null || !matchable.has(topic0)) continue;
+        if (log.address?.toLowerCase() !== request.address.toLowerCase()
+          || log.blockNumber < request.fromBlock
+          || (typeof request.toBlock === 'number' && log.blockNumber > request.toBlock)) {
+          throw new InvalidRpcLogResponseError(
+            `RPC endpoint returned a log outside the requested filter: `
+            + `address=${String(log.address).slice(0, 60)} block=${log.blockNumber} `
+            + `(requested ${request.address} blocks ${request.fromBlock}..${typeof request.toBlock === 'number' ? request.toBlock : 'latest'})`,
+          );
+        }
+        const corruption = request.validateMatchedLog?.(log);
+        if (corruption !== undefined) {
+          throw new InvalidRpcLogResponseError(
+            `RPC endpoint returned a malformed log at block ${log.blockNumber}: ${corruption}`,
+          );
+        }
+      }
+      return raw;
+    },
+    {
+      policy: 'wideLogScan',
+      isRetryable: (err) => err instanceof InvalidRpcLogResponseError || isRetryableRpcError(err),
+    },
+  );
+}
+
 export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
   // Events
@@ -220,76 +300,6 @@ export class EventsMethods extends EVMChainAdapterBase {
    * never parsed: no consumer wants the array — the repair path re-reads the
    * committed set from chain regardless.
    */
-  /**
-   * A VALIDATED wide raw-log scan (review r3-bot): one place owns the
-   * tip-sensitive routing (`readTipProvider` — the canonical carve-out for
-   * reads whose coverage must align with the head that advances a cursor),
-   * the `wideLogScan` timeout policy, request-envelope validation, and
-   * retry classification.
-   *
-   * Whole-response validation runs INSIDE the per-provider callback: an
-   * impossible EVM shape (review r14) or a log that violates the request it
-   * claims to answer (review r16 — wrong address, outside the window) is
-   * ENDPOINT corruption, thrown as the typed
-   * {@link InvalidRpcLogResponseError} and classified retryable EXPLICITLY
-   * through `ReadOpts.isRetryable` — no ethers error code is inspected or
-   * manufactured — so the read fails over and a lane cursor can never
-   * advance on an untrustworthy response. Logs outside the requested topic
-   * set remain droppable noise; only a matching topic0 asserts anything.
-   *
-   * Event-specific callers contribute their address/topics and a
-   * `validateMatchedLog` shape check, and DECODE what comes back.
-   */
-  private readValidatedTopicLogs(request: {
-    label: string;
-    address: string;
-    topics: (string | string[])[];
-    fromBlock: number;
-    toBlock?: number;
-    /** Return a corruption description to refuse the response, undefined to accept. */
-    validateMatchedLog?: (log: ethers.Log) => string | undefined;
-  }): Promise<ethers.Log[]> {
-    const matchable = new Set(
-      (Array.isArray(request.topics[0]) ? request.topics[0] : [request.topics[0]])
-        .filter((topic): topic is string => typeof topic === 'string')
-        .map((topic) => topic.toLowerCase()),
-    );
-    return this.readTipProvider(
-      request.label,
-      async (provider) => {
-        const raw = await provider.getLogs({
-          address: request.address,
-          topics: request.topics,
-          fromBlock: request.fromBlock,
-          toBlock: request.toBlock ?? 'latest',
-        });
-        for (const log of raw) {
-          const topic0 = log.topics[0]?.toLowerCase();
-          if (topic0 == null || !matchable.has(topic0)) continue;
-          if (log.address?.toLowerCase() !== request.address.toLowerCase()
-            || log.blockNumber < request.fromBlock
-            || (typeof request.toBlock === 'number' && log.blockNumber > request.toBlock)) {
-            throw new InvalidRpcLogResponseError(
-              `RPC endpoint returned a log outside the requested filter: `
-              + `address=${String(log.address).slice(0, 60)} block=${log.blockNumber} `
-              + `(requested ${request.address} blocks ${request.fromBlock}..${typeof request.toBlock === 'number' ? request.toBlock : 'latest'})`,
-            );
-          }
-          const corruption = request.validateMatchedLog?.(log);
-          if (corruption !== undefined) {
-            throw new InvalidRpcLogResponseError(
-              `RPC endpoint returned a malformed log at block ${log.blockNumber}: ${corruption}`,
-            );
-          }
-        }
-        return raw;
-      },
-      {
-        policy: 'wideLogScan',
-        isRetryable: (err) => err instanceof InvalidRpcLogResponseError || isRetryableRpcError(err),
-      },
-    );
-  }
 
   private async *yieldKnowledgeAssetRootMutationLogs(
     requested: readonly KnowledgeAssetRootMutationEventType[],
@@ -314,20 +324,23 @@ export class EventsMethods extends EVMChainAdapterBase {
     if (nameByTopic.size === 0) return;
 
     const address = await kaStorage.getAddress();
-    const logs = await this.readValidatedTopicLogs({
+    const logs = await readValidatedTopicLogs(
+      (label, fn, opts) => this.readTipProvider(label, fn, opts as never),
+      {
       label: 'kas.getLogs(KnowledgeAssetRootMutations)',
       address,
       topics: [[...nameByTopic.keys()]],
       fromBlock: filter.fromBlock ?? 0,
       toBlock: filter.toBlock,
-      validateMatchedLog: (log) => {
-        const kaIdTopic = log.topics[1];
-        if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) {
-          return `indexed KA-id topic is ${kaIdTopic == null ? 'missing' : String(kaIdTopic).slice(0, 80)}`;
-        }
-        return undefined;
+        validateMatchedLog: (log) => {
+          const kaIdTopic = log.topics[1];
+          if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) {
+            return `indexed KA-id topic is ${kaIdTopic == null ? 'missing' : String(kaIdTopic).slice(0, 80)}`;
+          }
+          return undefined;
+        },
       },
-    });
+    );
 
     for (const log of logs) {
       const topic0 = log.topics[0]?.toLowerCase();
