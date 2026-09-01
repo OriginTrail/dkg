@@ -1796,6 +1796,21 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           markContextGraphMetaDirtyFromQuads: (quads) => {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
+          retireConfirmedGraphScopedSwmTwin: async (candidate, ctx) => {
+            await this.publisher.clearPublishedKnowledgeAssetSwm(
+              candidate.contextGraphId,
+              {
+                kind: 'named-lifecycle',
+                identity: {
+                  agentAddress: candidate.agentAddress,
+                  kaNumber: candidate.kaNumber,
+                },
+              },
+              candidate.subGraphName,
+              ctx,
+              candidate.ual,
+            );
+          },
           runtime: this.finalizationRuntime,
         },
       );

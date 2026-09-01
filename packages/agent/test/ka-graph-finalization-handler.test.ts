@@ -3145,6 +3145,57 @@ describe('graph-scoped finalization handler', () => {
     }, createOperationContext('system'))).resolves.toBe('no-swm');
   });
 
+  it('retires an orphaned exact-recovery SWM twin after confirming VM without a workspace head', async () => {
+    const staged = await stageGraph();
+    const message = { ...staged.message, batchId: 42n };
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+    expect(await store.countQuads(staged.swmGraph)).toBe(2);
+
+    const retire = vi.fn(async (candidate: {
+      contextGraphId: string;
+      ual: string;
+      agentAddress: string;
+      kaNumber: bigint;
+    }) => {
+      expect(candidate).toMatchObject({
+        contextGraphId: CG,
+        ual: UAL,
+        agentAddress: AUTHOR,
+        kaNumber: 7n,
+      });
+      await store.dropGraph(staged.swmGraph);
+    });
+    const recoveringHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      { retireConfirmedGraphScopedSwmTwin: retire },
+    );
+    const internals = recoveringHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(recoveringHandler.handleExactChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      batchId: 42n,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+    expect(retire).toHaveBeenCalledOnce();
+    expect(await store.countQuads(staged.vmGraph)).toBe(2);
+    expect(await store.countQuads(staged.swmGraph)).toBe(0);
+  });
+
   it('uses one confirmed VM resolver for absent, matching, and invalid metadata', async () => {
     await expect(resolveConfirmedGraphScopedVm(store, {
       contextGraphId: CG,

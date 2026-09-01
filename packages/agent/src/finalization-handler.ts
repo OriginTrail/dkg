@@ -165,6 +165,17 @@ export type ResolveContextGraphOnChainId = (
 
 export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
 
+export type RetireConfirmedGraphScopedSwmTwin = (
+  input: Readonly<{
+    contextGraphId: string;
+    ual: string;
+    agentAddress: string;
+    kaNumber: bigint;
+    subGraphName?: string;
+  }>,
+  ctx: OperationContext,
+) => Promise<void>;
+
 function stripOptionalLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
   if (value.startsWith('"')) {
@@ -306,6 +317,7 @@ export interface FinalizationHandlerOptions {
   eventBus?: EventBus;
   resolveContextGraphOnChainId?: ResolveContextGraphOnChainId;
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
+  retireConfirmedGraphScopedSwmTwin?: RetireConfirmedGraphScopedSwmTwin;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
@@ -406,6 +418,8 @@ export class FinalizationHandler {
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
+  private readonly retireConfirmedGraphScopedSwmTwin:
+    RetireConfirmedGraphScopedSwmTwin | undefined;
   private readonly recovery: FinalizationRecovery<PreparedGraphScopedMaterialization>;
   private readonly log = new Logger('FinalizationHandler');
   private readonly lifecycle: FinalizationLifecycleLogger;
@@ -465,6 +479,7 @@ export class FinalizationHandler {
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
+    this.retireConfirmedGraphScopedSwmTwin = options.retireConfirmedGraphScopedSwmTwin;
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,
       options.runtime ?? options.lifecycleLogOptions,
@@ -1442,6 +1457,19 @@ export class FinalizationHandler {
       scope: resolution.scope,
       materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
     });
+    // Exact VM recovery stages the fetched public assertion in graph-scoped
+    // SWM before atomically materializing VM. Without a mutable workspace head,
+    // that graph is an orphaned transport twin, not a live SWM asset. Retire it
+    // only after the immutable VM envelope and chain binding have both verified.
+    // A cleanup failure propagates so the ordinal retries rather than caching a
+    // contaminated success.
+    await this.retireConfirmedGraphScopedSwmTwin?.({
+      contextGraphId: input.contextGraphId,
+      ual: resolution.scope.ual,
+      agentAddress: resolution.scope.agentAddress,
+      kaNumber: BigInt(resolution.scope.kaNumber),
+      ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
+    }, ctx);
     this.log.info(
       ctx,
       `Chain-reconcile: exact confirmed VM state survives without a workspace head for ${input.ual}`,
