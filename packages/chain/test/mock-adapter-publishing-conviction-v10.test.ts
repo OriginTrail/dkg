@@ -44,6 +44,35 @@ describe('MockChainAdapter — explicit context-graph registration coverage pari
     });
   });
 
+  it('submits with the prepared signer as creator, manager, and default authority', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+    await mock.registerPublishingConvictionAgent(accountId, AGENT);
+    mock.getSignerAddress = async () => ethers.getAddress(AGENT);
+    const prepared = await mock.prepareOnChainContextGraphRegistration({
+      registrationPcaAccountId: accountId,
+    });
+
+    const created = await prepared.submit({ accessPolicy: 1, publishPolicy: 0 });
+
+    const graph = mock.getContextGraph(created.contextGraphId);
+    expect(graph?.manager).toBe(ethers.getAddress(AGENT));
+    await expect(mock.getContextGraphPublishPolicy(created.contextGraphId)).resolves.toEqual({
+      publishPolicy: 0,
+      publishAuthority: ethers.getAddress(AGENT),
+    });
+    const events = [];
+    for await (const event of mock.listenForEvents({ eventTypes: ['ContextGraphCreated'] })) {
+      events.push(event);
+    }
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toMatchObject({
+      creator: ethers.getAddress(AGENT),
+      owner: ethers.getAddress(AGENT),
+      manager: ethers.getAddress(AGENT),
+    });
+  });
+
   it.each([
     ['missing account', 999n],
     ['signer mismatch', 1n],

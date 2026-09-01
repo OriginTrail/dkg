@@ -972,18 +972,18 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
     } catch (err) {
       if (isHubStaleError(err)) throw err;
+      await this.assertCurrentContextGraphsFacade(contextGraphs);
       throw new ContextGraphFacadeVersionUnknownError({ cause: err });
     }
     const capability = parsedFacadeVersion(rawVersion);
-    if (!capability) throw new ContextGraphFacadeVersionUnknownError();
+    if (!capability) {
+      await this.assertCurrentContextGraphsFacade(contextGraphs);
+      throw new ContextGraphFacadeVersionUnknownError();
+    }
     return capability;
   }
 
-  private async rejectUnsupportedRegistrationFacade(
-    contextGraphs: Contract,
-    registrationMode: 'paid' | 'pca',
-    facadeVersion: string,
-  ): Promise<never> {
+  private async assertCurrentContextGraphsFacade(contextGraphs: Contract): Promise<void> {
     const boundAddress = await contextGraphs.getAddress();
     let currentBinding: boolean;
     try {
@@ -1001,6 +1001,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         boundAddress,
       );
     }
+  }
+
+  private async rejectUnsupportedRegistrationFacade(
+    contextGraphs: Contract,
+    registrationMode: 'paid' | 'pca',
+    facadeVersion: string,
+  ): Promise<never> {
+    await this.assertCurrentContextGraphsFacade(contextGraphs);
     if (registrationMode === 'pca') {
       throw new PcaCoverageUnsupportedError(facadeVersion);
     }

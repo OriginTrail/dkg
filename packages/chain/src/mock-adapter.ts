@@ -1275,7 +1275,13 @@ export class MockChainAdapter implements ChainAdapter {
     const submit = async (
       params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
     ): Promise<CreateOnChainContextGraphResult> => {
-      return this.createOnChainContextGraph(params);
+      const registrationDepositPolicy = coverage.source === 'explicit'
+        ? { mode: 'pca' as const, accountId: coverage.accountId }
+        : { mode: 'legacy' as const };
+      return this.createOnChainContextGraphAs(
+        { ...params, registrationDepositPolicy },
+        signerAddress,
+      );
     };
     return Object.freeze({ signerAddress, coverage, submit });
   }
@@ -1295,6 +1301,15 @@ export class MockChainAdapter implements ChainAdapter {
       const prepared = await this.prepareOnChainContextGraphRegistration(preparationOptions);
       return prepared.submit(createParams);
     }
+    return this.createOnChainContextGraphAs(params, this.signerAddress);
+  }
+
+  private async createOnChainContextGraphAs(
+    params: CreateOnChainContextGraphParams,
+    transactionSignerAddress: string,
+  ): Promise<CreateOnChainContextGraphResult> {
+    const normalizedTransactionSigner = ethers.getAddress(transactionSignerAddress);
+    const { registrationDepositPolicy, ...createParams } = params;
     if (createParams.accessPolicy === undefined || createParams.publishPolicy === undefined) {
       throw new Error(
         'Mock createOnChainContextGraph: `accessPolicy` and `publishPolicy` are required (SPEC_CG_MEMORY_MODEL).',
@@ -1328,7 +1343,7 @@ export class MockChainAdapter implements ChainAdapter {
     publishAuthority = ethers.getAddress(publishAuthority);
     if (publishPolicy === 0) {
       if (publishAuthority === ethers.ZeroAddress) {
-        publishAuthority = ethers.getAddress(this.signerAddress);
+        publishAuthority = normalizedTransactionSigner;
       }
       if (publishAuthorityAccountId !== 0n) {
         const pcaOwner = await this.getPublishingConvictionAccountOwner(publishAuthorityAccountId);
@@ -1382,7 +1397,7 @@ export class MockChainAdapter implements ChainAdapter {
 
     const contextGraphId = this.nextContextGraphId++;
     this.contextGraphs.set(contextGraphId, {
-      manager: this.signerAddress,
+      manager: normalizedTransactionSigner,
       participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       metadataBatchId: params.metadataBatchId ?? 0n,
       accessPolicy,
@@ -1396,9 +1411,9 @@ export class MockChainAdapter implements ChainAdapter {
 
     this.pushEvent('ContextGraphCreated', {
       contextGraphId: contextGraphId.toString(),
-      creator: this.signerAddress,
-      owner: this.signerAddress,
-      manager: this.signerAddress,
+      creator: normalizedTransactionSigner,
+      owner: normalizedTransactionSigner,
+      manager: normalizedTransactionSigner,
       participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       accessPolicy,
       publishPolicy,

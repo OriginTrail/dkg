@@ -795,6 +795,59 @@ describe('facade capability and allowance/stale-Hub behavior', () => {
     }
   });
 
+  it.each([
+    ['unreadable', new Error('RPC unavailable')],
+    ['malformed', 'release-candidate'],
+  ])('refreshes a retired %s facade before resolving its unknown version', async (_label, oldVersion) => {
+    const adapter = makeAdapter();
+    const oldFacade = { getAddress: async () => OLD_FACADE };
+    const newFacade = { getAddress: async () => NEW_FACADE };
+    const storage = storageDouble();
+    const pca = { kind: 'pca' };
+    adapter.contracts = {
+      contextGraphs: oldFacade,
+      contextGraphStorage: storage,
+      parametersStorage: { kind: 'old-parameters' },
+      dkgPublishingConvictionNFT: pca,
+    };
+    adapter.readContract = async (
+      contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (method === 'version') {
+        if (contract === oldFacade && oldVersion instanceof Error) throw oldVersion;
+        return contract === oldFacade ? oldVersion : '10.0.5';
+      }
+      if (method === 'ownerOf') return adapter.signerPool[0].address;
+      if (method === 'agentToAccountId') return 0n;
+      throw new Error(`unexpected read ${method}`);
+    };
+    adapter.isCurrentHubContractAddress = async (
+      _name: string,
+      boundAddress: string,
+    ) => boundAddress === NEW_FACADE;
+    adapter.invalidateAllBoundContracts = () => {
+      adapter.contracts = {
+        contextGraphs: newFacade,
+        contextGraphStorage: storage,
+        parametersStorage: { kind: 'new-parameters' },
+        dkgPublishingConvictionNFT: pca,
+      };
+    };
+    const send = recorder(async (..._args: unknown[]) => successfulReceipt());
+    adapter.sendContractTransaction = send;
+    const prepared = await adapter.prepareOnChainContextGraphRegistration({
+      registrationPcaAccountId: 5n,
+    });
+
+    await prepared.submit(CREATE_PARAMS);
+
+    expect(send.calls).toHaveLength(1);
+    expect(send.calls[0][0]).toBe(newFacade);
+    expect(send.calls[0][1]).toBe('createContextGraphWithPcaCoverage');
+  });
+
   it('falls back to a paid legacy registration for automatic coverage on a confirmed old facade', async () => {
     const adapter = makeAdapter();
     configureSubmission(adapter, '10.0.4');
