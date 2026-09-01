@@ -96,7 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, resolveGraphScopedOrLegacyMetadata, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, lookupGraphScopedOrLegacyMetadata, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -525,22 +525,6 @@ import {
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
 
-/**
- * Marks a failure that came from the triple store's own `query`, so the W2
- * ingest can tell a TRANSIENT store rejection from a DETERMINISTIC metadata
- * parse failure.
- *
- * Both surface from `resolveGraphScopedOrLegacyMetadata` as a bare `Error` with
- * no code, and they need opposite handling: one must hold the lane cursor, the
- * other must let it advance. Tagging at the boundary the error crosses is the
- * only discriminator here that does not depend on message text.
- */
-class VmReverifyIngestStoreQueryError extends Error {
-  constructor(readonly cause: unknown) {
-    super('VM re-verify ingest store query failed');
-    this.name = 'VmReverifyIngestStoreQueryError';
-  }
-}
 
 type VmReconcileEngineResult = Awaited<ReturnType<typeof reconcileContextGraph>>;
 type VmReconcileTargetBase = {
@@ -3376,41 +3360,28 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return;
     }
 
-    // Do we hold it? `resolveGraphScopedOrLegacyMetadata` is the canonical
-    // fail-closed reader; the third argument is required and returning `null`
-    // from it means "no legacy fallback for this caller".
-    //
-    // It THROWS both for a store-query rejection (transient) and for malformed
-    // V2 metadata (deterministic), with the same `Error` class and no code —
-    // and the two need opposite handling. Rather than re-implement the query
-    // here to separate them, or match on message text, tag failures at the
-    // boundary they come from: anything raised inside `store.query` is wrapped,
-    // so what escapes unwrapped is a parse failure by construction.
-    let resolved: Awaited<ReturnType<typeof resolveGraphScopedOrLegacyMetadata<null>>>;
-    try {
-      resolved = await resolveGraphScopedOrLegacyMetadata<null>(
-        {
-          query: async (statement: string, options?: QueryOptions) => {
-            try {
-              return await this.store.query(statement, options);
-            } catch (cause) {
-              throw new VmReverifyIngestStoreQueryError(cause);
-            }
-          },
-        },
-        ual,
-        async () => null,
-        { source: 'agent.vmReverify.ingest' },
-      );
-    } catch (err) {
-      if (err instanceof VmReverifyIngestStoreQueryError) throw err.cause;
+    // Do we hold it? The TAGGED metadata lookup (review r1) carries failure
+    // provenance as data: a store-query rejection is transient and must hold
+    // the lane cursor, malformed V2 metadata is deterministic and must let it
+    // advance — opposite handling, decided by an explicit result union
+    // instead of a local store shim. The third argument returning `null`
+    // means "no legacy fallback for this caller".
+    const lookup = await lookupGraphScopedOrLegacyMetadata<null>(
+      this.store,
+      ual,
+      async () => null,
+      { source: 'agent.vmReverify.ingest' },
+    );
+    if (lookup.kind === 'query-failed') throw lookup.cause;
+    if (lookup.kind === 'malformed') {
       this.log.warn(
         ctx,
         `vm-reverify ingest dropped ual=${ual}: malformed local Knowledge Asset metadata `
-        + `(${err instanceof Error ? err.message : String(err)})`,
+        + `(${lookup.cause instanceof Error ? lookup.cause.message : String(lookup.cause)})`,
       );
       return;
     }
+    const resolved = lookup.value;
 
     if (resolved.kind !== 'graph') {
       // Not held here — which deliberately also covers a pre-V2 LEGACY holding.

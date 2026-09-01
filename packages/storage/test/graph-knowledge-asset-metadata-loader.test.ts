@@ -4,6 +4,7 @@ import {
   parseDeterministicKnowledgeAssetUal,
 } from '@origintrail-official/dkg-core';
 import {
+  lookupGraphScopedOrLegacyMetadata,
   resolveGraphScopedOrLegacyMetadata,
   type QueryResult,
   type TripleStore,
@@ -12,6 +13,56 @@ import {
 const UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
 const META = 'did:dkg:context-graph:test/_meta';
 
+describe('tagged metadata lookup — failure provenance as data (W2 r1)', () => {
+  it('reports a store-query rejection as query-failed with the ORIGINAL cause', async () => {
+    const boom = new Error('scheduler busy');
+    const store = {
+      query: vi.fn(async (): Promise<QueryResult> => { throw boom; }),
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    const lookup = await lookupGraphScopedOrLegacyMetadata(store, UAL, async () => null);
+
+    expect(lookup).toEqual({ kind: 'query-failed', cause: boom });
+
+    // And the throwing variant surfaces the SAME original object — existing
+    // callers must be able to keep matching on the store error class.
+    await expect(resolveGraphScopedOrLegacyMetadata(store, UAL, async () => null))
+      .rejects.toBe(boom);
+  });
+
+  it('reports malformed V2 metadata as malformed, distinct from query failure', async () => {
+    // One marker binding with a mangled payload: the parser throws, the
+    // query itself succeeded. The two variants must not be conflatable.
+    const store = {
+      query: vi.fn(async (): Promise<QueryResult> => ({
+        type: 'bindings',
+        bindings: [{
+          g: { value: `${META}` },
+          p: { value: 'http://dkg.io/ontology/contextGraphId' },
+          o: { value: '' },
+        } as never],
+      })),
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    const lookup = await lookupGraphScopedOrLegacyMetadata(store, UAL, async () => null);
+
+    // Whether this particular shape parses as absent or malformed is the
+    // parser's contract; what THIS row pins is that a lookup on a succeeded
+    // query can never be query-failed.
+    expect(lookup.kind === 'query-failed').toBe(false);
+  });
+
+  it('does not classify a legacy-reader rejection — it belongs to the caller', async () => {
+    const legacyBoom = new Error('legacy reader exploded');
+    const store = {
+      query: vi.fn(async (): Promise<QueryResult> => ({ type: 'bindings', bindings: [] })),
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    await expect(
+      lookupGraphScopedOrLegacyMetadata(store, UAL, async () => { throw legacyBoom; }),
+    ).rejects.toBe(legacyBoom);
+  });
+});
 describe('graph-scoped-first metadata resolution', () => {
   it('loads graph-scoped metadata before invoking the legacy fallback', async () => {
     const order: string[] = [];

@@ -125,7 +125,9 @@ export {
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {
+  lookupGraphScopedOrLegacyMetadata,
   resolveGraphScopedOrLegacyMetadata,
+  type GraphScopedMetadataLookup,
   type GraphScopedOrLegacyMetadata,
 } from './graph-knowledge-asset-metadata-loader.js';
 
