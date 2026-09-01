@@ -161,6 +161,163 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     });
   });
 
+  it('prioritizes a verified current head and retires only older ambient work after apply', async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const versions: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      versions.push(head.catalogVersion);
+      if (head.catalogVersion === '1') {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        throw new Error('stale provider');
+      }
+      return 'applied';
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
+    await firstStarted.promise;
+    receiver.schedule(announcement({
+      catalogVersion: '2',
+      catalogHeadObjectDigest: `0x${'a2'.repeat(32)}`,
+    }), 'peer-ambient');
+    receiver.schedule(announcement({
+      catalogVersion: '3',
+      catalogHeadObjectDigest: `0x${'a3'.repeat(32)}`,
+    }), 'peer-ambient');
+    const current = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: announcement({
+        catalogVersion: '100',
+        catalogHeadObjectDigest: `0x${'f1'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-current',
+    }]);
+    releaseFirst.resolve();
+
+    await expect(current).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(versions).toEqual(['1', '100']);
+    expect(receiver.stats()).toMatchObject({
+      applied: 1,
+      failed: 1,
+      supersededQueued: 2,
+      queued: 0,
+      inFlight: 0,
+    });
+  });
+
+  it('preserves older ambient history when a verified current-head jump fails', async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const versions: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      versions.push(head.catalogVersion);
+      if (head.catalogVersion === '1') {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        throw new Error('first head unavailable');
+      }
+      if (head.catalogVersion === '3') throw new Error('jump is not monotonic');
+      return 'applied';
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
+    await firstStarted.promise;
+    receiver.schedule(announcement({
+      catalogVersion: '2',
+      catalogHeadObjectDigest: `0x${'a2'.repeat(32)}`,
+    }), 'peer-ambient');
+    const current = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: announcement({
+        catalogVersion: '3',
+        catalogHeadObjectDigest: `0x${'a3'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-current',
+    }]);
+    releaseFirst.resolve();
+
+    await expect(current).resolves.toMatchObject({ outcome: 'failed' });
+    await receiver.whenIdle();
+    expect(versions).toEqual(['1', '3', '2']);
+    expect(receiver.stats()).toMatchObject({
+      applied: 1,
+      failed: 2,
+      supersededQueued: 0,
+    });
+  });
+
+  it('does not prioritize an unverified awaited provider set', async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const versions: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      versions.push(head.catalogVersion);
+      if (head.catalogVersion === '1') {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      }
+      return 'applied';
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
+    await firstStarted.promise;
+    receiver.schedule(announcement({
+      catalogVersion: '2',
+      catalogHeadObjectDigest: `0x${'a2'.repeat(32)}`,
+    }), 'peer-ambient');
+    const unverified = receiver.scheduleManyAndWait([{
+      announcement: announcement({
+        catalogVersion: '100',
+        catalogHeadObjectDigest: `0x${'f1'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-explicit',
+    }]);
+    releaseFirst.resolve();
+
+    await expect(unverified).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(versions).toEqual(['1', '2', '100']);
+    expect(receiver.stats().supersededQueued).toBe(0);
+  });
+
+  it('never retires an older caller-awaited request as ambient work', async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const versions: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      versions.push(head.catalogVersion);
+      if (head.catalogVersion === '1') {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        throw new Error('stale provider');
+      }
+      return 'applied';
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
+    await firstStarted.promise;
+    const awaitedOlder = receiver.scheduleManyAndWait([{
+      announcement: announcement({
+        catalogVersion: '2',
+        catalogHeadObjectDigest: `0x${'a2'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-explicit',
+    }]);
+    const current = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: announcement({
+        catalogVersion: '100',
+        catalogHeadObjectDigest: `0x${'f1'.repeat(32)}`,
+      }),
+      remotePeerId: 'peer-current',
+    }]);
+    releaseFirst.resolve();
+
+    await expect(current).resolves.toMatchObject({ outcome: 'applied' });
+    await expect(awaitedOlder).resolves.toMatchObject({ outcome: 'applied' });
+    expect(versions).toEqual(['1', '100', '2']);
+    expect(receiver.stats().supersededQueued).toBe(0);
+  });
+
   it('isolates an explicit provider set from pre-existing same-head ambient work', async () => {
     const ambientStarted = deferred<void>();
     const releaseAmbient = deferred<void>();

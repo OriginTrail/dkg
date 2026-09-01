@@ -111,7 +111,10 @@ import {
   type FetchedRfc64PublicCatalogHeadV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './public-catalog-transport-v1.js';
-import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v1.js';
+import {
+  snapshotRfc64PublicCatalogAnnouncementPeersV1,
+  snapshotRfc64RemoteCatalogAnnouncementPeersV1,
+} from './catalog-peers-v1.js';
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 
 export {
@@ -127,6 +130,8 @@ const MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1 = 4;
 export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
+  /** Local libp2p identity removed at the canonical outbound fan-out boundary. */
+  readonly localPeerId?: string;
   /** Omit for an explicit open-only service; required before accepting private policy. */
   readonly accessPolicyAuthority?: Rfc64CatalogAccessPolicyRegistryOptionsV1;
   readonly receiver?: Rfc64PublicCatalogReceiverOptionsV1;
@@ -317,6 +322,7 @@ export class Rfc64PublicCatalogServiceV1 {
     contextGraphId: ContextGraphIdV1,
     direction: Rfc64CatalogAuthorityDirectionV1,
   ) => Rfc64CatalogAuthorityPolicyV1;
+  readonly #localPeerId: string | undefined;
   #started = false;
   #closed = false;
 
@@ -327,6 +333,7 @@ export class Rfc64PublicCatalogServiceV1 {
       options.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
     this.#transportTimeoutMs = options.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
     this.#readNativeResourceStats = options.native?.readResourceStats ?? (() => null);
+    this.#localPeerId = options.localPeerId;
     this.#resolveContextGraphAuthority = options.resolveContextGraphAuthority
       ?? ((contextGraphId, _direction) => Object.freeze({
         contextGraphId,
@@ -796,7 +803,7 @@ export class Rfc64PublicCatalogServiceV1 {
     });
     if (discovered === null) return null;
     if (signal?.aborted) throw signal.reason;
-    const completion = await this.#receiver.scheduleManyAndWait([{
+    const completion = await this.#receiver.scheduleVerifiedCurrentHeadAndWait([{
       announcement: discovered.announcement,
       remotePeerId,
     }]);
@@ -874,7 +881,7 @@ export class Rfc64PublicCatalogServiceV1 {
       exactHeadIdentityV1(discovered.announcement) === selectedIdentity
     ));
     if (signal?.aborted) throw signal.reason;
-    const completion = await this.#receiver.scheduleManyAndWait(selected.map(({
+    const completion = await this.#receiver.scheduleVerifiedCurrentHeadAndWait(selected.map(({
       remotePeerId,
       discovered,
     }) => ({
@@ -942,9 +949,12 @@ export class Rfc64PublicCatalogServiceV1 {
     peers: readonly string[],
     signal?: AbortSignal,
   ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
+    const remotePeers = this.#localPeerId === undefined
+      ? snapshotRfc64PublicCatalogAnnouncementPeersV1(peers)
+      : snapshotRfc64RemoteCatalogAnnouncementPeersV1(peers, this.#localPeerId);
     const announcedPeers: string[] = [];
     const failedPeers: Array<{ peerId: string; error: string }> = [];
-    for (const peerId of peers) {
+    for (const peerId of remotePeers) {
       if (signal?.aborted) break;
       try {
         await this.#transport.announceCatalogHead(

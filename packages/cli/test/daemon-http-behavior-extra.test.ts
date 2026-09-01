@@ -1606,22 +1606,22 @@ describe('CLI-9 — /api/verify & /api/ccl error-code mapping', () => {
     expect(res.status).toBeLessThan(500);
   });
 
-  it('/api/ccl/eval with unknown policy returns 4xx, NOT 500', async () => {
+  it('/api/ccl/eval with unknown policy returns 404', async () => {
     const d = daemon!;
     const res = await fetch(urlFor(d, '/api/ccl/eval'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
       body: JSON.stringify({
         contextGraphId: 'no-such-cg',
-        policyUri: 'did:dkg:policy:does-not-exist',
+        name: 'does-not-exist',
         contextType: 'query',
       }),
     });
-    // Same class of bug — unknown policy → generic 500 with raw chain revert
-    // body per issue #159. Spec expects 4xx.
-    expect(res.status).not.toBe(500);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({
+      code: 'CCL_RESOURCE_NOT_FOUND',
+      resource: 'approved_policy',
+    });
   });
 
   it('500 responses never leak raw chain-revert custom-error hex (PROD-BUG guard)', async () => {

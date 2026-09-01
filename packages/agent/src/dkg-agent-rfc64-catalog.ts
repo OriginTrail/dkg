@@ -377,6 +377,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const service = new Rfc64PublicCatalogServiceV1({
       router: this.router,
       controlObjects: persistence.controlObjects,
+      localPeerId: this.peerId,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
@@ -411,6 +412,19 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
             error,
+          );
+          const failure = this.rfc64PublicCatalogReconciliationFailuresV1.read(
+            announcement.catalogHeadObjectDigest,
+          );
+          this.log.warn(
+            ctx,
+            `RFC-64 catalog reconciliation failed head=${announcement.catalogHeadObjectDigest}`
+              + ` error=${failure?.errorName ?? 'UnknownError'}`
+              + ` code=${failure?.errorCode ?? 'none'}`
+              + ` cause=${failure?.causeCode ?? 'none'}`
+              + ` detail=${error instanceof Rfc64PublicCatalogNativeReceiverErrorV1
+                ? error.message
+                : 'unavailable'}`,
           );
         },
       },
@@ -676,6 +690,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const producer = new Rfc64PublicCatalogSuccessorProducerV1({
       controlObjects: persistence.controlObjects,
       stageKaBundle: persistence.kaBundles.putKaBundle,
+      readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
     });
     const produced = await producer.produceAndStageExactSet({
       previousHead: history.previousHead,

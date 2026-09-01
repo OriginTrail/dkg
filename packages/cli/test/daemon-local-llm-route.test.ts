@@ -204,6 +204,7 @@ describe('daemon local LLM routes', () => {
       ['LOCAL_LLM_BUSY', 409],
       ['LOCAL_LLM_PROJECT_MISMATCH', 409],
       ['LOCAL_LLM_OFFLINE', 503],
+      ['LOCAL_LLM_NOT_READY', 503],
       ['LOCAL_LLM_RUNTIME_ERROR', 502],
     ] as const) {
       const fake = service();

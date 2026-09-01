@@ -92,12 +92,17 @@ async function createFinalizedVmAppliedHeadLifecycleV1(
   >[];
   let materializationReceipts: ReturnType<typeof exactMaterializationReceiptsByUal>;
   try {
-    catalogProjectionEvidence = plan.rows.map((row) =>
-      catalogProjectionEvidenceForRow(plan, row));
     materializationReceipts = exactMaterializationReceiptsByUal(
       finalizedVmTransaction,
       plan,
     );
+    // A tier-neutral catalog can contain SWM-only rows. Reconcile an SWM twin
+    // only when the finalized-VM precommit returned a same-UAL post-read
+    // receipt; the composer has already proved private on-chain completeness.
+    catalogProjectionEvidence = plan.rows.flatMap((row) => {
+      const evidence = catalogProjectionEvidenceForRow(plan, row);
+      return materializationReceipts.has(evidence.kaUal) ? [evidence] : [];
+    });
   } catch (cause) {
     try {
       await finalizedVmTransaction.rollback(cause);
@@ -248,8 +253,16 @@ function exactMaterializationReceiptsByUal(
   if (transaction.kind !== 'rfc64-finalized-vm-agent-precommit-transaction-v1') {
     throw new TypeError('finalized VM precommit returned an unrecognized transaction');
   }
-  if (transaction.materializationReceipts.length !== plan.rows.length) {
-    throw new Error('finalized VM materialization receipts do not cover the exact catalog set');
+  if (transaction.materializationReceipts.length > plan.rows.length) {
+    throw new Error('finalized VM materialization receipts exceed the catalog set');
+  }
+  const catalogRows = new Map<string, ReturnType<typeof readVerifiedCatalogSealBindingV1>>();
+  for (const row of plan.rows) {
+    const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
+    if (catalogRows.has(binding.seal.kaUal)) {
+      throw new Error(`catalog set duplicates ${binding.seal.kaUal}`);
+    }
+    catalogRows.set(binding.seal.kaUal, binding);
   }
   const receipts = new Map<string, Rfc64FinalizedVmAgentPrecommitTransactionV1[
     'materializationReceipts'
@@ -258,20 +271,17 @@ function exactMaterializationReceiptsByUal(
     if (receipts.has(receipt.ual)) {
       throw new Error(`finalized VM materialization receipt duplicates ${receipt.ual}`);
     }
-    receipts.set(receipt.ual, receipt);
-  }
-  for (const row of plan.rows) {
-    const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
-    const receipt = receipts.get(binding.seal.kaUal);
+    const binding = catalogRows.get(receipt.ual);
     if (
-      receipt === undefined
+      binding === undefined
       || receipt.kaId !== binding.kaId
       || receipt.tripleCount !== binding.seal.publicTripleCount
     ) {
       throw new Error(
-        `finalized VM materialization receipt differs from catalog row ${binding.seal.kaUal}`,
+        `finalized VM materialization receipt differs from catalog row ${receipt.ual}`,
       );
     }
+    receipts.set(receipt.ual, receipt);
   }
   return receipts;
 }

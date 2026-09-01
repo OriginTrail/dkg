@@ -21,7 +21,7 @@ function localLlmRecord() {
   return {
     id: 'local-llm',
     name: 'DKG Local LLM',
-    description: 'Chat with this DKG node through a local llama.cpp model.',
+    description: 'Chat with a local llama.cpp or Ollama model through the DKG MCP tool surface.',
     enabled: true,
     transport: { kind: 'dkg-local-llm' },
     capabilities: { localChat: true, connectFromUi: false },
@@ -31,7 +31,7 @@ function localLlmRecord() {
 }
 
 describe('DKG Local LLM Node UI surface', () => {
-  it('keeps the daemon-owned chat visible while llama.cpp is offline and has no Connect flow', async () => {
+  it('keeps the daemon-owned chat visible while the local LLM is offline and has no Connect flow', async () => {
     globalThis.fetch = vi.fn(async (input) => {
       const url = String(input);
       if (url.endsWith('/api/local-agent-integrations')) {
@@ -44,7 +44,7 @@ describe('DKG Local LLM Node UI surface', () => {
           reachable: false,
           offline: true,
           readOnly: true,
-          error: 'Local llama.cpp server is offline: fetch failed',
+          error: 'Local LLM server is offline: fetch failed',
         });
       }
       return json({ error: `Unexpected request: ${url}` }, 500);
@@ -61,7 +61,7 @@ describe('DKG Local LLM Node UI surface', () => {
       chatReady: false,
       status: 'bridge_offline',
       statusLabel: 'Bridge offline',
-      error: 'Local llama.cpp server is offline: fetch failed',
+      error: 'Local LLM server is offline: fetch failed',
     });
     await expect(connectLocalAgentIntegration('local-llm')).rejects.toThrow(
       'local connect is not available',

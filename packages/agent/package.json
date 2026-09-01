@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.14",
+  "version": "10.0.15",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -31,6 +31,7 @@
     "./dist/rfc64/public-catalog-activation-config-v1.js": "./dist/rfc64/public-catalog-activation-config-v1.js",
     "./dist/rfc64/swm-author-inventory-producer-v1.js": "./dist/rfc64/swm-author-inventory-producer-v1.js",
     "./dist/rfc64/swm-inventory-catalog-reconciler-v1.js": null,
+    "./dist/rfc64/swm-catalog-durable-asset-resolver-v1.js": null,
     "./dist/rfc64/abort-v1.js": null,
     "./dist/rfc64/catalog-mutation-runtime-v1.js": null,
     "./dist/rfc64/catalog-runtime-v1.js": null,
@@ -54,6 +55,7 @@
     "./dist/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js": null,
     "./dist/rfc64/catalog-native-scoped-read-capability-v1-internal.js": null,
     "./dist/rfc64/catalog-native-scoped-read-provider-v1.js": null,
+    "./dist/rfc64/catalog-head-lineage-v1.js": null,
     "./dist/rfc64/catalog-synchronization-error-v1.js": null,
     "./dist/rfc64/catalog-peers-v1.js": null,
     "./dist/rfc64/catalog-transport-authorization-v1.js": null,

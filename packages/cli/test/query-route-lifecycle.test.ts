@@ -2,6 +2,10 @@ import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CclResourceNotFoundError,
+  ContextGraphPolicyAuthorizationError,
+} from '@origintrail-official/dkg-agent';
+import {
   SparqlHttpResponseError,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
@@ -13,7 +17,11 @@ import {
   normalizePublicApiQueryResult,
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
-import { respondIfStoreUnavailable } from '../src/daemon/http-utils.js';
+import { handleCclRoutes } from '../src/daemon/routes/ccl.js';
+import {
+  respondIfStoreUnavailable,
+  respondWithDaemonError,
+} from '../src/daemon/http-utils.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -71,7 +79,110 @@ function queryRouteContext(
   } as unknown as RequestContext;
 }
 
+function cclRouteContext(
+  path: string,
+  body: Record<string, unknown>,
+  agent: Record<string, unknown>,
+): { req: RequestStub; res: ResponseStub; ctx: RequestContext } {
+  const req = new RequestStub(body);
+  const res = new ResponseStub();
+  const ctx = queryRouteContext(req, res, agent, {});
+  ctx.path = path;
+  ctx.url = new URL(`http://127.0.0.1${path}`);
+  ctx.requestAgentAddress = '0x1111111111111111111111111111111111111111';
+  return { req, res, ctx };
+}
+
 describe('/api/query request lifecycle', () => {
+  it.each([
+    {
+      path: '/api/ccl/policy/approve',
+      method: 'approveCclPolicy',
+      body: { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      resource: 'policy' as const,
+      message: 'CCL policy not found: did:dkg:policy:missing',
+    },
+    {
+      path: '/api/ccl/policy/revoke',
+      method: 'revokeCclPolicy',
+      body: { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      resource: 'policy_binding' as const,
+      message: 'No active CCL policy binding found',
+    },
+    {
+      path: '/api/ccl/eval',
+      method: 'evaluateCclPolicy',
+      body: { contextGraphId: 'cg', name: 'missing' },
+      resource: 'approved_policy' as const,
+      message: 'No approved policy found for cg/missing',
+    },
+  ])('maps typed CCL absence to 404 for $path', async ({
+    path,
+    method,
+    body,
+    resource,
+    message,
+  }) => {
+    const error = new CclResourceNotFoundError(resource, message);
+    const agent = { [method]: vi.fn(async () => { throw error; }) };
+    const { ctx, res } = cclRouteContext(path, body, agent);
+
+    await handleCclRoutes(ctx);
+
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body)).toEqual({
+      error: message,
+      code: 'CCL_RESOURCE_NOT_FOUND',
+      resource,
+    });
+  });
+
+  it.each([
+    ['/api/ccl/policy/approve', 'approveCclPolicy'],
+    ['/api/ccl/policy/revoke', 'revokeCclPolicy'],
+  ])('maps typed CCL policy authorization failure to 403 for %s', async (path, method) => {
+    const error = new ContextGraphPolicyAuthorizationError(
+      'Only the contextGraph owner can manage policies for "cg".',
+    );
+    const { ctx, res } = cclRouteContext(
+      path,
+      { contextGraphId: 'cg', policyUri: 'did:dkg:policy:one' },
+      { [method]: vi.fn(async () => { throw error; }) },
+    );
+
+    await handleCclRoutes(ctx);
+
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body)).toEqual({ error: error.message });
+  });
+
+  it('does not map an untyped error to 404 merely because its text says not found', async () => {
+    const error = new Error('CCL policy not found: did:dkg:policy:missing');
+    const { ctx, res } = cclRouteContext(
+      '/api/ccl/policy/approve',
+      { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      { approveCclPolicy: vi.fn(async () => { throw error; }) },
+    );
+
+    await expect(handleCclRoutes(ctx)).rejects.toBe(error);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it('keeps an existing policy with a missing body on the integrity-error path', async () => {
+    const error = new Error('CCL policy body missing: did:dkg:policy:incomplete');
+    const { ctx, res } = cclRouteContext(
+      '/api/ccl/eval',
+      { contextGraphId: 'cg', name: 'incomplete' },
+      { evaluateCclPolicy: vi.fn(async () => { throw error; }) },
+    );
+
+    await expect(handleCclRoutes(ctx)).rejects.toBe(error);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toEqual({ error: error.message });
+  });
+
   it('normalizes prefixed SELECT, ASK, and graph results at the daemon boundary', () => {
     expect(normalizePublicApiQueryResult(
       'PREFIX ex: <urn:ex:> SELECT ?s WHERE { ?s ex:p ?o }',

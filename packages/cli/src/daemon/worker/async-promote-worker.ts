@@ -50,6 +50,7 @@ import {
   type PromoteJob,
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
+import { createClaimFailureBackoff } from './claim-failure-backoff.js';
 
 /**
  * Convenience type for the daemon's existing `emitMemoryGraphChanged`
@@ -93,6 +94,8 @@ export interface PromoteWorkerConfig {
   shutdownTimeoutMs?: number;
   /** Deterministic time source for tests. */
   now?: () => number;
+  /** Deterministic randomness source for claim-failure jitter tests. */
+  random?: () => number;
   /** Defaults to `console.warn`. The daemon passes its own logger. */
   log?: PromoteWorkerLogger;
   /** Retry interval for queue-only outcome bookkeeping (default 5s). */
@@ -688,11 +691,16 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   let shuttingDown = false;
   let started = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let claimRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let detachWorkScheduler: (() => void) | null = null;
   let wakeRequested = false;
   let wakeLoop: Promise<void> | null = null;
   let lifecycleAbortController: AbortController | null = null;
   let counters: PromoteWorkerCounters = freshCounters();
+  const claimFailureBackoff = createClaimFailureBackoff({
+    now,
+    random: config.random,
+  });
 
   function freshCounters(): PromoteWorkerCounters {
     return {
@@ -705,15 +713,40 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     };
   }
 
+  function clearClaimRetryTimer(): void {
+    if (claimRetryTimer === null) return;
+    clearTimeout(claimRetryTimer);
+    claimRetryTimer = null;
+  }
+
+  function scheduleClaimRetry(delayMs: number): void {
+    if (!started || shuttingDown || claimRetryTimer !== null) return;
+    const timer = setTimeout(() => {
+      if (claimRetryTimer === timer) claimRetryTimer = null;
+      requestWake();
+    }, delayMs);
+    if (timer.unref) timer.unref();
+    claimRetryTimer = timer;
+  }
+
   async function tickSlot(slot: WorkerSlot): Promise<boolean> {
     if (shuttingDown || slot.inFlight) return false;
-    const claimed = await config.agent.promoteQueue.claimNext(slot.workerId).catch((err: unknown) => {
+    if (!claimFailureBackoff.isDue()) return false;
+    let claimed: PromoteJob | null;
+    try {
+      claimed = await config.agent.promoteQueue.claimNext(slot.workerId);
+      claimFailureBackoff.reset();
+      clearClaimRetryTimer();
+    } catch (err: unknown) {
+      const delayMs = claimFailureBackoff.recordFailure();
+      scheduleClaimRetry(delayMs);
       bestEffortLog(
         log,
-        `claimNext error on ${slot.workerId}: ${err instanceof Error ? err.message : String(err)}`,
+        `claimNext error on ${slot.workerId}; retrying in ${delayMs}ms: `
+          + `${err instanceof Error ? err.message : String(err)}`,
       );
-      return null;
-    });
+      return false;
+    }
     if (!claimed) return false;
 
     counters.attempted += 1;
@@ -872,6 +905,8 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       shuttingDown = false;
       lifecycleAbortController = new AbortController();
       counters = freshCounters();
+      clearClaimRetryTimer();
+      claimFailureBackoff.reset();
       let recovering = true;
       try {
         const summary = await config.agent.promoteQueue.recoverOnStartup();
@@ -900,6 +935,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           clearInterval(pollTimer);
           pollTimer = null;
         }
+        clearClaimRetryTimer();
         lifecycleAbortController.abort();
         lifecycleAbortController = null;
         started = false;
@@ -919,6 +955,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         clearInterval(pollTimer);
         pollTimer = null;
       }
+      clearClaimRetryTimer();
       const activeAtStop = activeShutdownSlotCount();
       if (activeAtStop === 0) {
         lifecycleAbortController?.abort();

@@ -1,5 +1,6 @@
 import {
   FinalizedVmSetAccumulatorV1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   assertSubGraphNameV1,
@@ -78,12 +79,24 @@ export interface FinalizedVmMaterializationPlanRowV1 {
   readonly row: Readonly<FinalizedVmSetRowV1>;
 }
 
+export interface FinalizedVmExistingMaterializationCheckV1 {
+  /**
+   * Exact chain-finalized assertion which a newer catalog row cannot
+   * materialize. The precommit must prove this version is already durable
+   * before the catalog head can advance.
+   */
+  readonly candidate: Readonly<FinalizedVmChainCandidateV1>;
+}
+
 export interface ComposedFinalizedVmSetV1 {
   readonly catalogLane: Readonly<FinalizedVmCatalogLaneV1>;
   readonly evidence: Readonly<FinalizedVmSetEvidenceV1>;
   readonly rows: readonly Readonly<FinalizedVmSetRowV1>[];
   /** Exact placement/inventory join in authoritative finalized ordinal order. */
   readonly materializations: readonly Readonly<FinalizedVmMaterializationPlanRowV1>[];
+  /** Older finalized VM versions which require a positive durable-store proof. */
+  readonly existingMaterializationChecks:
+    readonly Readonly<FinalizedVmExistingMaterializationCheckV1>[];
 }
 
 export type FinalizedVmCompositionErrorCodeV1 =
@@ -109,8 +122,10 @@ export class FinalizedVmCompositionErrorV1 extends Error {
  * Join author-authorized catalog placement to a same-anchor finalized chain inventory.
  *
  * Placement rows may be a strict subset of the CG-wide on-chain inventory because
- * one catalog lane can be the root or one named subgraph. Every supplied placement
- * must resolve exactly once; output retains the authoritative on-chain ordinal order.
+ * one catalog lane can be the root or one named subgraph. They may also be a
+ * strict superset: RFC-64 catalogs are tier-neutral, so an author-authorized row
+ * absent from finalized chain inventory remains SWM-only. Output contains only
+ * the placement/inventory intersection in authoritative on-chain ordinal order.
  */
 export function composeFinalizedVmSetV1(
   untrustedRequest: ComposeFinalizedVmSetRequestV1,
@@ -159,7 +174,7 @@ export function composeFinalizedVmSetV1(
     placements = snapshotDenseArray(
       request.placements,
       'finalized VM placements',
-      inventory.rows.length,
+      MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
     );
   } catch (cause) {
     fail(
@@ -230,6 +245,8 @@ export function composeFinalizedVmSetV1(
   });
   const accumulator = new FinalizedVmSetAccumulatorV1(scope);
   const materializations: Readonly<FinalizedVmMaterializationPlanRowV1>[] = [];
+  const existingMaterializationChecks:
+    Readonly<FinalizedVmExistingMaterializationCheckV1>[] = [];
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
     if (placement === undefined) {
@@ -246,13 +263,24 @@ export function composeFinalizedVmSetV1(
       }
       continue;
     }
-    assertCandidateMatchesPlacement(
+    const match = classifyCandidatePlacement(
       candidate,
       inventory,
       assertedAtKav10Address,
       placement.authorship,
       placement.sealBinding,
     );
+    if (match === 'newer-swm-only') {
+      // One catalog bucket has one row per KA, while the chain can still
+      // finalize an older assertion version. A newer author-sealed catalog
+      // row is therefore SWM-only evidence, not placement evidence for the
+      // older finalized version. The catalog cannot materialize those older
+      // bytes, so the precommit must positively prove the exact chain version
+      // is already durable. A cold store therefore fails closed rather than
+      // applying a head which would hide a missing finalized VM.
+      existingMaterializationChecks.push(Object.freeze({ candidate }));
+      continue;
+    }
     placementsByKaId.delete(candidate.kaId);
 
     const row = Object.freeze({
@@ -276,31 +304,30 @@ export function composeFinalizedVmSetV1(
       row,
     }));
   }
-  if (placementsByKaId.size !== 0) {
-    const [missingKaId] = placementsByKaId.keys();
-    fail(
-      'finalized-vm-composition-mismatch',
-      `catalog placement KA ${missingKaId} is absent from the finalized chain inventory`,
-    );
-  }
+  // Remaining placements are valid, author-authorized SWM-only rows. They do
+  // not participate in VM materialization until the same KA is present in a
+  // future finalized chain snapshot. Private completeness still fails above
+  // when any finalized asset authored in this lane is absent from the catalog.
 
   const frozenMaterializations = Object.freeze(materializations);
+  const frozenExistingMaterializationChecks = Object.freeze(existingMaterializationChecks);
   return Object.freeze({
     catalogLane,
     evidence: accumulator.finalize(),
     // Backward-compatible evidence view derived from the canonical ordered plan.
     rows: Object.freeze(frozenMaterializations.map(({ row }) => row)),
     materializations: frozenMaterializations,
+    existingMaterializationChecks: frozenExistingMaterializationChecks,
   });
 }
 
-function assertCandidateMatchesPlacement(
+function classifyCandidatePlacement(
   candidate: Readonly<FinalizedVmChainCandidateV1>,
   inventory: Readonly<FinalizedVmChainInventoryV1>,
   assertedAtKav10Address: EvmAddressV1,
   authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>,
   sealBinding: ReturnType<typeof readVerifiedCatalogSealBindingV1>,
-): void {
+): 'exact-finalized-placement' | 'newer-swm-only' {
   const seal = sealBinding.seal;
   if (
     candidate.chainId !== seal.assertedAtChainId
@@ -308,8 +335,6 @@ function assertCandidateMatchesPlacement(
     || candidate.kaId !== sealBinding.kaId
     || candidate.ual !== seal.kaUal
     || candidate.authorAddress !== sealBinding.authorAddress
-    || candidate.assertionVersion !== seal.assertionVersion
-    || candidate.assertionRoot !== seal.assertionMerkleRoot
     || candidate.attestedAuthorAddress === null
     || candidate.attestedAuthorAddress !== seal.authorAddress
     || candidate.publisherAddress === null
@@ -320,6 +345,19 @@ function assertCandidateMatchesPlacement(
       `catalog placement for KA ${candidate.kaId} differs from finalized chain truth`,
     );
   }
+  const candidateVersion = BigInt(candidate.assertionVersion);
+  const placementVersion = BigInt(seal.assertionVersion);
+  if (placementVersion > candidateVersion) return 'newer-swm-only';
+  if (
+    placementVersion !== candidateVersion
+    || candidate.assertionRoot !== seal.assertionMerkleRoot
+  ) {
+    fail(
+      'finalized-vm-composition-mismatch',
+      `catalog placement for KA ${candidate.kaId} differs from finalized chain truth`,
+    );
+  }
+  return 'exact-finalized-placement';
 }
 
 function snapshotCatalogLane(input: unknown): Readonly<FinalizedVmCatalogLaneV1> {
