@@ -4,7 +4,7 @@ import {
   modelAssetLifecyclePass,
   validateBenchmarkCall,
 } from './harness.mjs';
-import { applyPersistenceVerification } from './real-dkg.mjs';
+import { applyPersistenceVerification, benchmarkClientInfo } from './real-dkg.mjs';
 
 const target = {
   graphId: 'bench-1',
@@ -13,6 +13,14 @@ const target = {
 };
 
 describe('real-DKG benchmark guard', () => {
+  it('uses the installed local-LLM package version in MCP client metadata', async () => {
+    const packageJson = await import('../package.json', { with: { type: 'json' } });
+    await expect(benchmarkClientInfo()).resolves.toEqual({
+      name: 'dkg-local-llm-real-benchmark',
+      version: packageJson.default.version,
+    });
+  });
+
   it('locks graph, asset, and subgraph write targets', () => {
     expect(validateBenchmarkCall('dkg_context_graph_create', { id: 'other' }, target))
       .toContain('id must equal bench-1');
