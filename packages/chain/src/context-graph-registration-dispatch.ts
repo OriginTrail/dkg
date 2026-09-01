@@ -1,13 +1,31 @@
 import type { ContextGraphRegistrationDepositPolicy } from './chain-adapter.js';
 
-export type ContextGraphCreateDispatch = {
-  method: 'createContextGraph' | 'createContextGraphWithPcaCoverage';
-  args: unknown[];
-};
+export type ContextGraphLegacyCreateArgs = readonly [
+  participantAgents: readonly string[],
+  metadataBatchId: bigint,
+  accessPolicy: number,
+  publishPolicy: number,
+  publishAuthority: string,
+  publishAuthorityAccountId: bigint,
+  nameHash: string,
+];
+
+export type ContextGraphCreateDispatch =
+  | {
+      method: 'createContextGraph';
+      args: ContextGraphLegacyCreateArgs;
+    }
+  | {
+      method: 'createContextGraphWithPcaCoverage';
+      args: readonly [
+        ...ContextGraphLegacyCreateArgs,
+        registrationPcaAccountId: bigint,
+      ];
+    };
 
 /** Keep selector compatibility at the EVM boundary, not in the shared policy. */
 export function resolveContextGraphCreateDispatch(
-  legacyArgs: readonly unknown[],
+  legacyArgs: ContextGraphLegacyCreateArgs,
   policy?: ContextGraphRegistrationDepositPolicy,
 ): ContextGraphCreateDispatch {
   const resolvedPolicy: ContextGraphRegistrationDepositPolicy = policy ?? { mode: 'legacy' };

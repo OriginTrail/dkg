@@ -205,6 +205,45 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
     expect(await approvalCount(coreOp.address, fromBlock + 1)).toBe(0);
   });
 
+  it('explicitly pays despite an eligible PCA publish authority', async () => {
+    await setDeposit(DEPOSIT);
+    const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
+    const accountId = await createPca(coreOp);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, DEPOSIT);
+    expect(await registrationAllowance(coreOp.address)).toBe(0n);
+    const waivedBefore = await waivedCount(accountId);
+    const fromBlock = await provider.getBlockNumber();
+
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const adapterInternals = adapter as unknown as {
+      sendContractTransaction: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalSend = adapterInternals.sendContractTransaction.bind(adapter);
+    const coverageArgs: bigint[] = [];
+    adapterInternals.sendContractTransaction = async (...args: unknown[]) => {
+      if (args[1] === 'createContextGraphWithPcaCoverage') {
+        coverageArgs.push((args[2] as unknown[]).at(-1) as bigint);
+      }
+      return originalSend(...args);
+    };
+
+    const result = await adapter.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 0,
+      publishAuthority: coreOp.address,
+      publishAuthorityAccountId: accountId,
+      registrationDepositPolicy: { mode: 'paid' },
+    });
+
+    expect(coverageArgs).toEqual([0n, 0n]);
+    expect(result.success).toBe(true);
+    expect(await getEscrow(result.contextGraphId)).toBe(DEPOSIT);
+    expect(await waivedCount(accountId)).toBe(waivedBefore);
+    expect(await getPublishAuthorityAccountId(result.contextGraphId)).toBe(accountId);
+    expect(await approvalCount(coreOp.address, fromBlock + 1)).toBe(1);
+    expect(await registrationAllowance(coreOp.address)).toBe(0n);
+  });
+
   it('retries the additive selector with lazy approval when PCA coverage is ineligible', async () => {
     await setDeposit(DEPOSIT);
     const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, provider);

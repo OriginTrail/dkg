@@ -1,8 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { resolveContextGraphCreateDispatch } from '../src/context-graph-registration-dispatch.js';
+import {
+  resolveContextGraphCreateDispatch,
+  type ContextGraphLegacyCreateArgs,
+} from '../src/context-graph-registration-dispatch.js';
 
 describe('Context Graph registration-deposit dispatch', () => {
-  const legacyArgs = ['participants', 42n, 0, 1, 'authority', 7n, 'nameHash'] as const;
+  const legacyArgs: ContextGraphLegacyCreateArgs = [
+    ['participant'],
+    42n,
+    0,
+    1,
+    'authority',
+    7n,
+    'nameHash',
+  ];
 
   it('preserves legacy selector compatibility for omission and explicit legacy policy', () => {
     const omitted = resolveContextGraphCreateDispatch(legacyArgs);
@@ -10,14 +21,20 @@ describe('Context Graph registration-deposit dispatch', () => {
 
     expect(omitted).toEqual({ method: 'createContextGraph', args: [...legacyArgs] });
     expect(explicit).toEqual(omitted);
+    expect(omitted.args).toHaveLength(7);
   });
 
   it('dispatches explicit PCA coverage through the additive selector', () => {
-    expect(resolveContextGraphCreateDispatch(legacyArgs, { mode: 'pca', accountId: 19n }))
-      .toEqual({
-        method: 'createContextGraphWithPcaCoverage',
-        args: [...legacyArgs, 19n],
-      });
+    const dispatch = resolveContextGraphCreateDispatch(
+      legacyArgs,
+      { mode: 'pca', accountId: 19n },
+    );
+
+    expect(dispatch).toEqual({
+      method: 'createContextGraphWithPcaCoverage',
+      args: [...legacyArgs, 19n],
+    });
+    expect(dispatch.args).toHaveLength(8);
   });
 
   it('dispatches explicit paid registration through additive zero coverage', () => {

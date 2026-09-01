@@ -20,7 +20,10 @@ import {
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
-import { resolveContextGraphCreateDispatch } from './context-graph-registration-dispatch.js';
+import {
+  resolveContextGraphCreateDispatch,
+  type ContextGraphLegacyCreateArgs,
+} from './context-graph-registration-dispatch.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -455,7 +458,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     }
 
     const contextGraphs = this.contracts.contextGraphs;
-    const legacyCreateArgs = [
+    const legacyCreateArgs: ContextGraphLegacyCreateArgs = [
       params.participantAgents ?? [],
       params.metadataBatchId ?? 0n,
       params.accessPolicy,
