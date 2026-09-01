@@ -1040,7 +1040,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // delivery so a partial ambient generation cannot race ahead of an
         // authenticated exact catalog head and make cold bootstrap fail closed.
         legacyApplyAllowedOracle: (cgId: string) => (
-          this.resolveRfc64CatalogReceiverAuthorityV1(cgId).legacySyncAllowed
+          this.rfc64LegacySwmGossipAllowedForContextGraph(cgId)
         ),
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist

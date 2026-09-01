@@ -41,6 +41,10 @@ import type {
 } from '@origintrail-official/dkg-chain';
 
 import {
+  assertRfc64BoundedCatalogPredecessorV1,
+  RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1,
+} from './catalog-head-lineage-v1.js';
+import {
   verifyAuthorCatalogRowAuthorshipV1,
 } from './catalog-row-authorship.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
@@ -83,15 +87,6 @@ interface ResolvedRfc64CatalogNativeScopedReadCapabilityV1 {
 
 /** Hard process-memory bound for verified exact-head read capabilities. */
 const RFC64_CATALOG_NATIVE_SCOPED_READ_CAPABILITY_CACHE_MAX_ENTRIES_V1 = 128;
-
-/**
- * Exact-head reads may expose only the signed head objects on this bounded
- * ancestor tail. They do not expose ancestor buckets or bundles. A receiver
- * uses the tail solely to prove that a coalesced current head descends from its
- * durable applied head before replacing one exact snapshot with another.
- */
-export const RFC64_CATALOG_NATIVE_HEAD_LINEAGE_WINDOW_V1 =
-  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
 
 /**
  * Create a resolver for the currently supported bounded root lane: one
@@ -326,7 +321,7 @@ async function readBoundedAuthorCatalogHeadAncestorsV1(
   let child = target;
   for (
     let index = 0;
-    index < RFC64_CATALOG_NATIVE_HEAD_LINEAGE_WINDOW_V1;
+    index < RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1;
     index += 1
   ) {
     const predecessorDigest = child.payload.previousHeadDigest;
@@ -335,31 +330,7 @@ async function readBoundedAuthorCatalogHeadAncestorsV1(
     if (stored === null) break;
     assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
     const predecessor = stored.envelope;
-    assertAuthorCatalogHeadScopeBindingV1(predecessor.payload, catalogScope);
-    const totalRows = Number(BigInt(predecessor.payload.totalRows));
-    if (
-      predecessor.objectDigest !== predecessorDigest
-      || predecessor.issuer !== target.issuer
-      || predecessor.payload.catalogIssuerDelegationDigest
-        !== target.payload.catalogIssuerDelegationDigest
-      || BigInt(predecessor.payload.version) + 1n !== BigInt(child.payload.version)
-      || BigInt(predecessor.payload.issuedAt) > BigInt(child.payload.issuedAt)
-      || predecessor.payload.bucketCount !== '1'
-      || predecessor.payload.directoryHeight !== '0'
-      || !Number.isSafeInteger(totalRows)
-      || totalRows < 0
-      || totalRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
-      || (
-        predecessor.payload.version === '0'
-        && predecessor.payload.previousHeadDigest !== null
-      )
-      || (
-        predecessor.payload.version !== '0'
-        && predecessor.payload.previousHeadDigest === null
-      )
-    ) {
-      throw new Error('stored catalog predecessor is not a contiguous bounded head');
-    }
+    assertRfc64BoundedCatalogPredecessorV1(predecessor, child, catalogScope);
     ancestors.push(predecessor);
     child = predecessor;
   }

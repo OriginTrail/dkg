@@ -133,8 +133,9 @@ import {
   loadExactAppliedCatalogRowsV1 as loadExactCatalogRowsForHeadV1,
 } from './applied-catalog-authority-transition-v1.js';
 import {
-  RFC64_CATALOG_NATIVE_HEAD_LINEAGE_WINDOW_V1,
-} from './catalog-native-scoped-read-provider-v1.js';
+  assertRfc64BoundedCatalogPredecessorV1,
+  RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1,
+} from './catalog-head-lineage-v1.js';
 
 export {
   Rfc64PublicCatalogNativeReceiverErrorV1,
@@ -1517,7 +1518,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
     if (
       targetVersion <= currentVersion
       || intermediateCount < 1n
-      || intermediateCount > BigInt(RFC64_CATALOG_NATIVE_HEAD_LINEAGE_WINDOW_V1)
+      || intermediateCount > BigInt(RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1)
     ) {
       fail(
         'catalog-native-receiver-history',
@@ -1547,23 +1548,11 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       try {
         assertSignedAuthorCatalogHeadEnvelopeV1(fetched.envelope);
         predecessor = fetched.envelope;
-        assertAuthorCatalogHeadScopeBindingV1(predecessor.payload, trustedCatalogScope);
-        const totalRows = Number(BigInt(predecessor.payload.totalRows));
-        if (
-          predecessor.objectDigest !== predecessorDigest
-          || predecessor.issuer !== target.issuer
-          || predecessor.payload.catalogIssuerDelegationDigest
-            !== target.payload.catalogIssuerDelegationDigest
-          || BigInt(predecessor.payload.version) + 1n !== BigInt(child.payload.version)
-          || BigInt(predecessor.payload.issuedAt) > BigInt(child.payload.issuedAt)
-          || predecessor.payload.bucketCount !== '1'
-          || predecessor.payload.directoryHeight !== '0'
-          || !Number.isSafeInteger(totalRows)
-          || totalRows < 0
-          || totalRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
-        ) {
-          throw new Error('predecessor is not one contiguous bounded catalog head');
-        }
+        assertRfc64BoundedCatalogPredecessorV1(
+          predecessor,
+          child,
+          trustedCatalogScope,
+        );
       } catch (cause) {
         fail(
           'catalog-native-receiver-history',

@@ -13,6 +13,7 @@ import {
   computeAuthorCatalogHeadObjectDigestV1,
   computeAuthorCatalogScopeDigestV1,
   computeKaChunkTreeRootV1,
+  deriveAuthorCatalogScopeFromHeadV1,
   encodeOpaqueKaBundleV1,
   type AuthorCatalogBucketV1,
   type AuthorCatalogDirectoryNodeV1,
@@ -26,6 +27,7 @@ import {
   type EvmAddressV1,
   type ContextGraphPolicyV1,
   type MemberRosterV1,
+  type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
@@ -36,6 +38,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   produceEmptyAuthorCatalogGenesisV1,
 } from '../src/rfc64/author-catalog-producer.js';
+import { assertRfc64BoundedCatalogPredecessorV1 } from
+  '../src/rfc64/catalog-head-lineage-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from '../src/rfc64/catalog-native-scoped-read-provider-v1.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-access-policy-v1.js';
 import { produceDirectAuthorCatalogIssuerDelegationV1 } from '../src/rfc64/public-catalog-issuer-delegation-v1.js';
@@ -332,6 +336,41 @@ async function signFixtureEnvelopeV1(
 }
 
 describe('RFC-64 catalog native scoped read provider v1', () => {
+  it('uses one lineage invariant for issuer and delegation continuity', async () => {
+    const fixture = await providerFixture();
+    const predecessor = fixture.genesis.head;
+    const child = fixture.successor.head as SignedAuthorCatalogHeadEnvelopeV1;
+    const scope = deriveAuthorCatalogScopeFromHeadV1(predecessor.payload);
+    expect(() => assertRfc64BoundedCatalogPredecessorV1(
+      predecessor,
+      child,
+      scope,
+    )).not.toThrow();
+
+    const wrongIssuer = Object.freeze({
+      ...predecessor,
+      issuer: `0x${'99'.repeat(20)}`,
+    }) as SignedAuthorCatalogHeadEnvelopeV1;
+    expect(() => assertRfc64BoundedCatalogPredecessorV1(
+      wrongIssuer,
+      child,
+      scope,
+    )).toThrow(/contiguous bounded signed head/u);
+
+    const wrongDelegation = Object.freeze({
+      ...predecessor,
+      payload: Object.freeze({
+        ...predecessor.payload,
+        catalogIssuerDelegationDigest: `0x${'98'.repeat(32)}`,
+      }),
+    }) as SignedAuthorCatalogHeadEnvelopeV1;
+    expect(() => assertRfc64BoundedCatalogPredecessorV1(
+      wrongDelegation,
+      child,
+      scope,
+    )).toThrow(/contiguous bounded signed head/u);
+  });
+
   it('closes one exact signed bounded head and exposes only its reachable digests', async () => {
     const fixture = await providerFixture();
     const capability = await fixture.resolve(fixture.scope);

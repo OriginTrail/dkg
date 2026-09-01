@@ -54,6 +54,7 @@
     "./dist/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js": null,
     "./dist/rfc64/catalog-native-scoped-read-capability-v1-internal.js": null,
     "./dist/rfc64/catalog-native-scoped-read-provider-v1.js": null,
+    "./dist/rfc64/catalog-head-lineage-v1.js": null,
     "./dist/rfc64/catalog-synchronization-error-v1.js": null,
     "./dist/rfc64/catalog-peers-v1.js": null,
     "./dist/rfc64/catalog-transport-authorization-v1.js": null,
