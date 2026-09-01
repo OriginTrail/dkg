@@ -112,7 +112,35 @@ ollama pull qwen3:8b
 ```
 
 Start `ollama serve` only if the desktop application or system service is not
-already listening on `127.0.0.1:11434`. Verify the shared readiness route:
+already listening on `127.0.0.1:11434`. DKG requires at least an 8192-token
+Ollama context. Configure it through one of the supported ownership paths:
+
+- **Ollama desktop application:** open Settings, set **Context length** to at
+  least `8192`, then restart the application.
+- **Terminal-owned server:** start it with
+  `OLLAMA_CONTEXT_LENGTH=8192 ollama serve`.
+- **Linux systemd service:** run `sudo systemctl edit ollama`, add the override
+  below, then run `sudo systemctl daemon-reload` and
+  `sudo systemctl restart ollama`:
+
+  ```ini
+  [Service]
+  Environment="OLLAMA_CONTEXT_LENGTH=8192"
+  ```
+
+These are the official Ollama
+[`Context length`](https://docs.ollama.com/context-length) and
+[`server configuration`](https://docs.ollama.com/faq#how-do-i-configure-ollama-server)
+paths. Load the model once and verify the allocation before starting DKG chat:
+
+```bash
+ollama run qwen3:8b "Reply with OK."
+ollama ps
+```
+
+Require the selected model's `CONTEXT` value from `ollama ps` to be at least
+`8192`; HTTP 200 from `/v1/models` alone does not prove the context allocation.
+Then verify the shared readiness route:
 
 ```bash
 curl -sS http://127.0.0.1:11434/v1/models
@@ -189,8 +217,11 @@ Procedure:
    Fix or remove any selector that errors or returns the wrong result shape.
 10. Start the selected backend. For llama.cpp, use an 8192-token context, Jinja
     templates, temperature 0.15, top-p 0.9, repeat penalty 1.05, host
-    127.0.0.1, and port 8080. For Ollama, ensure its service is listening on
-    127.0.0.1:11434 and the selected model tag is pulled.
+    127.0.0.1, and port 8080. For Ollama, configure at least 8192 tokens through
+    the desktop Context length setting, `OLLAMA_CONTEXT_LENGTH=8192 ollama serve`,
+    or the systemd service override; ensure the service is listening on
+    127.0.0.1:11434 and the selected model tag is pulled. Load it once and
+    require `ollama ps` to report `CONTEXT` of at least 8192.
 11. Run `curl -sS <server-origin>/v1/models` and require HTTP 200. For
     llama.cpp, also check `/health` and require `{"status":"ok"}`.
 12. Start the final chat with
@@ -274,17 +305,22 @@ ollama pull qwen3:8b
 Run the server in its own terminal if no Ollama service is already active:
 
 ```bash
-ollama serve
+OLLAMA_CONTEXT_LENGTH=8192 ollama serve
 ```
 
 Then verify it from the DKG client terminal:
 
 ```bash
+ollama run qwen3:8b "Reply with OK."
+ollama ps
 curl -sS http://127.0.0.1:11434/v1/models
 ```
 
 Omit `ollama serve` if an existing Ollama desktop application or service
-already owns port `11434`. Start the same read-only DKG chat against Ollama:
+already owns port `11434`; configure that owner through the desktop setting or
+systemd override documented above. Do not continue unless `ollama ps` reports
+at least `8192` for the selected model. Start the same read-only DKG chat against
+Ollama:
 
 ```bash
 dkg llm \

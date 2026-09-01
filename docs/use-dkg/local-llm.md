@@ -235,16 +235,41 @@ Install Ollama using its official
 ```bash
 ollama --version
 ollama pull qwen3:8b
-ollama serve
+OLLAMA_CONTEXT_LENGTH=8192 ollama serve
 ```
 
 The desktop application may already have the server running. If `ollama serve`
 reports that port `11434` is already in use, keep the existing Ollama server and
-do not start a second one. Verify the shared OpenAI-compatible contract:
+do not start a second one. DKG's prompt, history, and tool budget require an
+Ollama context of at least 8192 tokens. For the desktop application, set the
+**Context length** slider in Settings to at least `8192` and restart the app. For
+a Linux system service, run `sudo systemctl edit ollama`, add this override, then
+reload and restart the service:
+
+```ini
+[Service]
+Environment="OLLAMA_CONTEXT_LENGTH=8192"
+```
 
 ```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+The commands follow Ollama's official
+[`Context length`](https://docs.ollama.com/context-length) and
+[`server configuration`](https://docs.ollama.com/faq#how-do-i-configure-ollama-server)
+guidance. Load the selected model, then verify both its allocation and the shared
+OpenAI-compatible contract:
+
+```bash
+ollama run qwen3:8b "Reply with OK."
+ollama ps
 curl -sS http://127.0.0.1:11434/v1/models
 ```
+
+Require `ollama ps` to report `CONTEXT` of at least `8192` for `qwen3:8b`.
+`/v1/models` returning HTTP 200 is not proof of the allocated context length.
 
 Use these DKG settings for Ollama:
 
@@ -469,16 +494,21 @@ In the model-server terminal, if the desktop application or system service is
 not already running:
 
 ```bash
-ollama serve
+OLLAMA_CONTEXT_LENGTH=8192 ollama serve
 ```
 
 From another terminal:
 
 ```bash
+ollama run qwen3:8b "Reply with OK."
+ollama ps
 curl -sS http://127.0.0.1:11434/v1/models
 ```
 
-If the desktop application already owns port `11434`, omit `ollama serve`.
+If the desktop application already owns port `11434`, omit `ollama serve`, set
+its Context length slider to at least `8192`, and restart it. If systemd owns the
+port, use the `OLLAMA_CONTEXT_LENGTH=8192` service override above. Require
+`ollama ps` to report at least `8192` before starting DKG chat.
 
 ## Terminal 3: start DKG chat
 

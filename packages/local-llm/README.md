@@ -69,15 +69,24 @@ Alternatively, use Ollama in the model-server terminal:
 
 ```bash
 ollama pull qwen3:8b
-ollama serve
+OLLAMA_CONTEXT_LENGTH=8192 ollama serve
 ```
 
 If Ollama is already running as a desktop application or service, omit
-`ollama serve`. From another terminal, require HTTP 200 from:
+`ollama serve`. DKG requires at least an 8192-token context: set the desktop
+application's **Context length** slider to at least `8192`, or add
+`Environment="OLLAMA_CONTEXT_LENGTH=8192"` to a Linux systemd service override
+and restart that owner. See Ollama's official
+[`Context length`](https://docs.ollama.com/context-length) guidance. Load the
+model and verify its effective allocation before requiring HTTP 200:
 
 ```bash
+ollama run qwen3:8b "Reply with OK."
+ollama ps
 curl -sS http://127.0.0.1:11434/v1/models
 ```
+
+The selected model's `CONTEXT` value from `ollama ps` must be at least `8192`.
 
 ### Terminal 2: start interactive DKG chat
 
@@ -158,8 +167,12 @@ pnpm --filter @origintrail-official/dkg-local-llm benchmark:dkg -- \
 To validate Ollama rather than assume parity, start it with the intended model
 tag and add
 `--llama-url http://127.0.0.1:11434/v1/chat/completions --model qwen3:8b`
-to the benchmark command. Keep each model/server pair's output and score
-separate from the llama.cpp reference result.
+to the benchmark command. On the sub-24-GiB acceptance machine, retain
+`ollama ps` evidence showing at least `8192` context immediately before the run,
+then require the complete 13-scenario benchmark to finish without prompt or tool
+schema truncation at the default eight-tool/18,000-byte routing budget. Keep
+each model/server pair's output and score separate from the llama.cpp reference
+result.
 
 The suite covers Context Graph creation, two subgraphs, model-authored RDF,
 asset retrieval, raw SPARQL, parameterized query-catalog save/list/run, and five

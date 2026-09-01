@@ -315,6 +315,8 @@ dkg llm --interactive --model local-model
 dkg llm --project my-project "Which saved queries are available?"
 
 # Ollama example (llama.cpp remains available on the default port 8080)
+# First configure at least 8192 context in the Ollama app, terminal server, or service.
+# Load qwen3:8b and require `ollama ps` to report CONTEXT >= 8192.
 dkg llm --interactive \
   --llama-url http://127.0.0.1:11434/v1/chat/completions \
   --model qwen3:8b
@@ -322,6 +324,10 @@ dkg llm --interactive \
 
 The existing `--llama-url` option accepts either backend. The daemon and Node
 UI use the equivalent `DKG_LLM_URL` and `DKG_LLM_MODEL` environment variables.
+For a terminal-owned Ollama server, use
+`OLLAMA_CONTEXT_LENGTH=8192 ollama serve`; for the desktop app, set its Context
+length to at least `8192`; for systemd, set the same environment variable in the
+service override. Verify the loaded allocation with `ollama ps` before using DKG.
 
 `--project` explicitly pins the LLM session; inherited `DKG_PROJECT` and the
 MCP config's first Context Graph are not silent agent scopes. Without a pin,

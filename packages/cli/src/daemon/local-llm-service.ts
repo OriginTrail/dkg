@@ -1,6 +1,10 @@
 import path from 'node:path';
 import process from 'node:process';
 import {
+  probeLocalModelEndpoint,
+  type LocalModelEndpointAvailability,
+} from '@origintrail-official/dkg-local-llm';
+import {
   createDkgLocalLlmRuntimeSession,
   type DkgLocalLlmRuntimeSession,
   type DkgLocalLlmRuntimeSessionOptions,
@@ -100,6 +104,10 @@ function trimmed(value: string | undefined): string | undefined {
   return value?.trim() || undefined;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function resolveDaemonLocalLlmSettings(
   dkgHome: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -112,36 +120,6 @@ export function resolveDaemonLocalLlmSettings(
     defaultProjectId: trimmed(env.DKG_PROJECT),
     logDir: path.join(dkgHome, 'logs', 'local-llm'),
   };
-}
-
-export function localLlmHealthUrl(llamaUrl: string): string {
-  const url = new URL(llamaUrl);
-  url.pathname = '/health';
-  url.search = '';
-  url.hash = '';
-  return url.toString();
-}
-
-/**
- * Resolve the OpenAI-compatible model-list endpoint from a chat-completions
- * URL. Both llama.cpp and Ollama expose this route, so it is the primary
- * provider-neutral readiness contract. `/health` remains a fallback for older
- * or specially configured llama.cpp servers.
- */
-export function localLlmModelsUrl(llamaUrl: string): string {
-  const url = new URL(llamaUrl);
-  const chatSuffix = '/v1/chat/completions';
-  const normalizedPath = url.pathname.replace(/\/+$/, '');
-  url.pathname = normalizedPath.endsWith(chatSuffix)
-    ? `${normalizedPath.slice(0, -chatSuffix.length)}/v1/models`
-    : '/v1/models';
-  url.search = '';
-  url.hash = '';
-  return url.toString();
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function createDaemonLocalLlmService(
@@ -163,47 +141,18 @@ export function createDaemonLocalLlmService(
   let closePromise: Promise<void> | undefined;
   let initFailure: string | undefined;
 
-  const probe = async (): Promise<{ ready: boolean; reachable: boolean; error?: string }> => {
-    const attempts: string[] = [];
-    let reachable = false;
-    const targets = [
-      { label: 'OpenAI-compatible models probe', url: localLlmModelsUrl(settings.llamaUrl) },
-      { label: 'llama.cpp health fallback', url: localLlmHealthUrl(settings.llamaUrl) },
-    ];
-
-    for (const target of targets) {
-      try {
-        const response = await fetcher(target.url, {
-          method: 'GET',
-          headers: { Accept: 'application/json' },
-          signal: AbortSignal.timeout(probeTimeoutMs),
-        });
-        reachable = true;
-        if (response.ok) return { ready: true, reachable: true };
-        attempts.push(`${target.label} returned HTTP ${response.status}`);
-      } catch (error) {
-        attempts.push(`${target.label} failed: ${errorMessage(error)}`);
-      }
-    }
-
-    const prefix = reachable
-      ? 'Local LLM server is reachable but not ready'
-      : 'Local LLM server is offline';
-    return {
-      ready: false,
-      reachable,
-      error: `${prefix}: ${attempts.join('; ')}`,
-    };
-  };
+  const probe = (): Promise<LocalModelEndpointAvailability> => probeLocalModelEndpoint({
+    chatCompletionsUrl: settings.llamaUrl,
+    fetch: fetcher,
+    timeoutMs: probeTimeoutMs,
+  });
 
   const unavailableError = (
-    availability: { ready: boolean; reachable: boolean; error?: string },
+    availability: Exclude<LocalModelEndpointAvailability, { status: 'ready' }>,
   ): DaemonLocalLlmError => new DaemonLocalLlmError(
-    availability.reachable ? 'LOCAL_LLM_NOT_READY' : 'LOCAL_LLM_OFFLINE',
+    availability.status === 'not-ready' ? 'LOCAL_LLM_NOT_READY' : 'LOCAL_LLM_OFFLINE',
     503,
-    availability.error ?? (availability.reachable
-      ? 'The local LLM server is reachable but not ready.'
-      : 'The local LLM server is offline.'),
+    availability.error,
   );
 
   const closeSession = async (clearHistory: boolean): Promise<void> => {
@@ -217,19 +166,22 @@ export function createDaemonLocalLlmService(
   return {
     async health() {
       const availability = await probe();
-      const ready = availability.ready && !initFailure && !closed;
+      const reachable = availability.status !== 'offline';
+      const ready = availability.status === 'ready' && !initFailure && !closed;
       return {
         ok: ready,
         ready,
-        reachable: availability.reachable,
-        offline: !availability.reachable,
+        reachable,
+        offline: !reachable,
         busy: Boolean(activeOperation),
         initialized: Boolean(session),
         readOnly: true,
         sessionId: DKG_LOCAL_LLM_UI_SESSION_ID,
         ...(hasProjectLock && lockedProjectId ? { contextGraphId: lockedProjectId } : {}),
         ...(session?.trace.filePath ? { traceFile: session.trace.filePath } : {}),
-        ...(availability.error || initFailure ? { error: availability.error ?? initFailure } : {}),
+        ...(availability.status !== 'ready' || initFailure
+          ? { error: availability.status === 'ready' ? initFailure : availability.error }
+          : {}),
         ...(initFailure ? { initFailure } : {}),
       };
     },
@@ -283,7 +235,7 @@ export function createDaemonLocalLlmService(
       try {
         const availability = await probe();
         signal.throwIfAborted();
-        if (!availability.ready) throw unavailableError(availability);
+        if (availability.status !== 'ready') throw unavailableError(availability);
         if (!session) {
           try {
             const created = await createSession({
@@ -356,7 +308,9 @@ export function createDaemonLocalLlmService(
           if (error instanceof DaemonLocalLlmError) throw error;
           if (signal.aborted) signal.throwIfAborted();
           const availabilityAfterFailure = await probe();
-          if (!availabilityAfterFailure.ready) throw unavailableError(availabilityAfterFailure);
+          if (availabilityAfterFailure.status !== 'ready') {
+            throw unavailableError(availabilityAfterFailure);
+          }
           throw new DaemonLocalLlmError(
             'LOCAL_LLM_RUNTIME_ERROR',
             502,
