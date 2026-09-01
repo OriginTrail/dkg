@@ -5,15 +5,23 @@
 import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
+  assertSafeIri,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
+  computeKaProjectionDigestV1,
   computeSwmAuthorInventoryScopeDigestV1,
+  createGraphKnowledgeAssetScope,
   encodeCanonicalCgSharedPublicRootProjectionV1,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
+  type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
   type CatalogSealDeploymentProfileV1,
   type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
   type Digest32V1,
+  type DecimalU64V1,
   type EvmAddressV1,
   type NetworkIdV1,
   type PositiveDecimalU64V1,
@@ -73,6 +81,13 @@ interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
 }
 
+interface Rfc64DurableCatalogAssetIdentityV1 {
+  readonly assertionCoordinate: AssertionCoordinateV1;
+  readonly assertionVersion: DecimalU64V1;
+  readonly kaUal: CanonicalDeterministicUalV1;
+  readonly sealDigest: Digest32V1;
+}
+
 type ResolvedRfc64CatalogAuthoringLaneV1 =
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'public';
@@ -125,7 +140,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       readonly contextGraphId: ContextGraphIdV1;
       readonly authorAddress: EvmAddressV1;
       readonly inventoryScope: SwmAuthorInventoryScopeV1;
-      readonly assertionCoordinate: string;
+      readonly assertionCoordinate: AssertionCoordinateV1;
       readonly assertionVersion: PositiveDecimalU64V1;
       readonly kaUal: CanonicalDeterministicUalV1;
       readonly sealDigest: Digest32V1;
@@ -165,21 +180,26 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ...inventoryScope,
       bucketCount: '1',
     }) as AuthorCatalogScopeV1;
+    let asset: Rfc64CatalogSuccessorAssetInputV1;
     if (row === undefined) {
       if (await this.rfc64CatalogContainsConfirmedSwmRowV1({
         scope,
         expectedRow: params,
       })) return null;
-      throw new Error(
-        'RFC-64 finalized-private source row is missing without catalog publication proof',
+      asset = await this.resolveRfc64DurableCatalogAssetV1(
+        params.contextGraphId,
+        params.authorAddress,
+        lane,
+        params,
+      );
+    } else {
+      asset = await this.resolveRfc64SwmInventoryCatalogAssetV1(
+        params.contextGraphId,
+        params.authorAddress,
+        lane,
+        row,
       );
     }
-    const asset = await this.resolveRfc64SwmInventoryCatalogAssetV1(
-      params.contextGraphId,
-      params.authorAddress,
-      lane,
-      row,
-    );
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertConfirmedRfc64PublicRootCatalogAssetV1({
       scope,
@@ -483,57 +503,123 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     row: Readonly<SwmAuthorInventoryRowV1>,
     signal?: AbortSignal,
   ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
+    return this.resolveRfc64DurableCatalogAssetV1(
+      contextGraphId,
+      authorAddress,
+      lane,
+      row,
+      row,
+      signal,
+    );
+  }
+
+  /**
+   * Resolve one catalog asset from the durable workspace and strict seal.
+   * A finalized-private repair may legitimately outlive its detached SWM
+   * inventory observer, so the durable confirmation marker supplies the
+   * immutable identity when no signed inventory row was ever committed.
+   */
+  private async resolveRfc64DurableCatalogAssetV1(
+    this: DKGAgent,
+    contextGraphId: ContextGraphIdV1,
+    authorAddress: EvmAddressV1,
+    lane: ResolvedRfc64CatalogAuthoringLaneV1,
+    identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
+    inventoryRow?: Readonly<SwmAuthorInventoryRowV1>,
+    signal?: AbortSignal,
+  ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
     throwIfAbortedV1(signal);
     const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({
       store: this.store,
       contextGraphId,
       agentAddress: authorAddress,
-      assertionCoordinate: row.assertionCoordinate,
+      assertionCoordinate: identity.assertionCoordinate,
       source: 'agent.rfc64.swmInventory.catalogReconcile.seal',
       signal,
     });
     if (candidate === undefined) {
-      throw new Error(`durable SWM inventory asset ${row.kaUal} has no strict author seal`);
+      throw new Error(`durable RFC-64 catalog asset ${identity.kaUal} has no strict author seal`);
     }
     if (
       candidate.coordinate.scope !== contextGraphId
       || candidate.coordinate.agentAddress.toLowerCase() !== authorAddress
-      || candidate.coordinate.name !== row.assertionCoordinate
+      || candidate.coordinate.name !== identity.assertionCoordinate
     ) {
-      throw new Error(`durable SWM inventory asset ${row.kaUal} has a different seal coordinate`);
+      throw new Error(`durable RFC-64 catalog asset ${identity.kaUal} has a different seal coordinate`);
     }
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
+    if (
+      seal.assertionVersion !== identity.assertionVersion
+      || seal.kaUal !== identity.kaUal
+      || computeCanonicalGraphScopedAuthorSealDigestV1(seal) !== identity.sealDigest
+    ) {
+      throw new Error(`durable RFC-64 catalog asset ${identity.kaUal} has a different author seal`);
+    }
     const graphManager = new GraphManager(this.store);
     const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
       store: this.store,
       graphManager,
       contextGraphId,
-      kaUal: row.kaUal,
+      kaUal: identity.kaUal,
     });
     throwIfAbortedV1(signal);
-    if (
-      head === undefined
-      || head.shareOperationId !== row.shareOperationId
-      || head.assertionVersion !== row.assertionVersion
-      || head.publicTripleCount !== Number(row.publicTripleCount)
-      || head.privateTripleCount !== Number(row.privateTripleCount)
-      || !rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)
-    ) {
-      throw new Error(`durable SWM head differs from signed inventory row ${row.kaUal}`);
+    let projectionBytes: Uint8Array;
+    if (head === undefined) {
+      if (lane.projectionLifecycle !== 'confirmation-gated-append') {
+        throw new Error(`durable RFC-64 workspace head is missing for ${identity.kaUal}`);
+      }
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        contextGraphId,
+        MemoryLayer.VerifiableMemory,
+        createGraphKnowledgeAssetScope(identity.kaUal, identity.assertionVersion),
+      );
+      const result = await this.store.query(
+        `CONSTRUCT { ?subject ?predicate ?object } WHERE { GRAPH <${assertSafeIri(vmGraph)}> { ?subject ?predicate ?object } }`,
+        { source: 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection', signal },
+      );
+      throwIfAbortedV1(signal);
+      if (
+        result.type !== 'quads'
+        || result.quads.length !== Number(seal.publicTripleCount)
+      ) {
+        throw new Error(`durable finalized VM projection differs for ${identity.kaUal}`);
+      }
+      projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(result.quads);
+    } else {
+      if (
+        head.assertionVersion !== identity.assertionVersion
+        || head.publicTripleCount !== Number(seal.publicTripleCount)
+        || head.privateTripleCount !== Number(seal.privateTripleCount)
+        || (inventoryRow !== undefined && (
+          head.shareOperationId !== inventoryRow.shareOperationId
+          || head.publicTripleCount !== Number(inventoryRow.publicTripleCount)
+          || head.privateTripleCount !== Number(inventoryRow.privateTripleCount)
+        ))
+        || !rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)
+      ) {
+        throw new Error(`durable RFC-64 workspace head differs for ${identity.kaUal}`);
+      }
+      const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+        store: this.store,
+        graphManager,
+        contextGraphId,
+        shareOperationId: head.shareOperationId,
+        kaUal: identity.kaUal,
+        assertionVersion: identity.assertionVersion,
+        publicSnapshotStore: this.publicSnapshotStore,
+      });
+      throwIfAbortedV1(signal);
+      projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
     }
-    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
-      store: this.store,
-      graphManager,
-      contextGraphId,
-      shareOperationId: row.shareOperationId,
-      kaUal: row.kaUal,
-      assertionVersion: row.assertionVersion,
-      publicSnapshotStore: this.publicSnapshotStore,
-    });
-    throwIfAbortedV1(signal);
+    if (
+      inventoryRow !== undefined
+      && computeKaProjectionDigestV1(projectionBytes) !== inventoryRow.projectionDigest
+    ) {
+      throw new Error(`durable RFC-64 projection differs from signed inventory row ${identity.kaUal}`);
+    }
     return Object.freeze({
-      assertionCoordinate: row.assertionCoordinate,
-      projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads),
+      assertionCoordinate: identity.assertionCoordinate,
+      projectionBytes,
       seal,
     });
   }

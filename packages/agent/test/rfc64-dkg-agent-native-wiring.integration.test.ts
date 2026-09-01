@@ -5000,6 +5000,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       kaId: ((BigInt(AUTHOR) << 96n) | kaNumber).toString(),
       publisherAddress: AUTHOR,
     });
+    const repairOnlyKaNumber = 40n;
+    const repairOnlyFinalizedAsset = Object.freeze({
+      assertionRoot: ASSERTION_ROOT,
+      assertionVersion: '1',
+      authorAddress: AUTHOR,
+      kaId: ((BigInt(AUTHOR) << 96n) | repairOnlyKaNumber).toString(),
+      publisherAddress: AUTHOR,
+    });
     const fixture = Object.freeze({
       accessPolicy: 1 as const,
       active: true,
@@ -5016,7 +5024,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       ownerAddress: AUTHOR,
       publishPolicy: 0 as const,
     } satisfies FinalizedVmLoopbackFixtureConfigV1);
-    const rpc = createFinalizedVmLoopbackRpcV1(fixture);
+    const expandedFixture = Object.freeze({
+      ...fixture,
+      assets: Object.freeze([finalizedAsset, repairOnlyFinalizedAsset]),
+    } satisfies FinalizedVmLoopbackFixtureConfigV1);
+    let rpc = createFinalizedVmLoopbackRpcV1(fixture);
     const rpcServer = await rpcHarness.start((call, response) => {
       try {
         sendJsonRpcResult(response, call, rpc.respond(call.method, call.params));
@@ -5355,6 +5367,83 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
     })).toEqual(authorHead);
+
+    // Production confirmation can beat the detached SWM inventory observer.
+    // The durable finalized-placement marker must be sufficient to reconstruct
+    // the exact workspace asset after a restart, without an inventory row.
+    const repairOnlyAssertionCoordinate = 'finalized-private-repair-without-inventory-row';
+    const {
+      seal: repairOnlySeal,
+      assertionUri: repairOnlyAssertionUri,
+    } = await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: 'finalized-private-repair-without-inventory-row-operation',
+      assertionCoordinate: repairOnlyAssertionCoordinate,
+      kaNumber: repairOnlyKaNumber,
+      accessPolicy: 'ownerOnly',
+    });
+    const repairOnlyVmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(
+        repairOnlySeal.kaUal!,
+        repairOnlySeal.assertionVersion!,
+      ),
+    );
+    await author.store.insert(
+      PROJECTION_QUADS.map((quad) => ({ ...quad, graph: repairOnlyVmGraph })),
+    );
+    await (author as any).publisher.clearPublishedKnowledgeAssetSwm(
+      CONTEXT_GRAPH_ID,
+      {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: AUTHOR, kaNumber: repairOnlyKaNumber },
+      },
+      undefined,
+      createOperationContext('publish'),
+      repairOnlySeal.kaUal!,
+    );
+    rpc = createFinalizedVmLoopbackRpcV1(expandedFixture);
+    await author.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: repairOnlyAssertionCoordinate,
+      seal: repairOnlySeal,
+      assertionUri: repairOnlyAssertionUri,
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    const repairedHead = author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    });
+    expect(repairedHead).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
+    expect((author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.list())
+      .toHaveLength(0);
+
+    await provider.synchronizeRfc64PublicCatalogFromProviderV1({
+      remotePeerId: author.peerId,
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: policy.era,
+      },
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: repairedHead?.currentCatalogHeadDigest,
+      catalogVersion: '2',
+      inventoryRowCount: '2',
+    });
   }, 90_000);
 
   it('awaits production private retirement and reports a real finalized missing-placement path', async () => {
