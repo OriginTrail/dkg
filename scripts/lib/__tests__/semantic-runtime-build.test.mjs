@@ -14,7 +14,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const PACKAGE_ROOT = path.join(REPO_ROOT, 'packages', 'semantic-runtime');
 const GENERATED_ROOT = path.join(PACKAGE_ROOT, 'generated');
 
-test('committed semantic-runtime artifacts have pinned hashes, ABI, and bounded memory', () => {
+test('locally built semantic-runtime artifacts have pinned hashes, ABI, and bounded memory', () => {
   const manifest = verifyGenerated(GENERATED_ROOT);
   assert.equal(manifest.abiVersion, 1);
   assert.deepEqual(manifest.memory, { initialPages: 256, maximumPages: 4096 });

@@ -1,9 +1,16 @@
 # DKG semantic runtime
 
 This package contains the default-off TypeScript host and Rust/Wasm foundation
-for the DKG V10 supervised semantic runtime. It verifies the packaged Wasm and
-generated glue before starting a Node Worker, enforces watchdog deadlines,
+for the DKG V10 supervised semantic runtime. A package build compiles the pinned
+Rust sources into the gitignored `generated/` directory, then verifies that
+local Wasm and its generated glue before starting a Node Worker. Published npm
+packages include those build outputs. The host enforces watchdog deadlines,
 replaces failed Workers, and restores a verified snapshot.
+
+Building from a source checkout requires Rust 1.98.0 with the
+`wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.127. Run
+`pnpm build:semantic-runtime`; no generated Wasm or JavaScript glue is stored in
+Git.
 
 The packaged Wasm also owns bounded S-expression parsing, deterministic plan
 compilation, and canonical-plan re-admission. Compilation uses a disposable
@@ -42,7 +49,7 @@ The daemon integration is opt-in:
 }
 ```
 
-When enabled, a missing or modified artifact, incompatible ABI, failed Worker
+When enabled, a missing or modified local artifact, incompatible ABI, failed Worker
 handshake, or restore mismatch fails closed.
 
 Programs are stored in the DKG as `sr:Program` resources with `sr:language`,

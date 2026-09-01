@@ -4,6 +4,7 @@ dist/
 dist-ui/
 .turbo/
 rust/target/
+packages/semantic-runtime/generated/
 *.tsbuildinfo
 coverage/
 test-results/

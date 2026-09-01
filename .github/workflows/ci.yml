@@ -191,7 +191,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.run_node == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -236,6 +236,17 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Rust, Wasm targets, and wasm-bindgen CLI
+        run: |
+          rustup toolchain install nightly-2026-08-18 \
+            --profile minimal \
+            --target wasm32-unknown-unknown \
+            --target wasm32-wasip2
+          if ! command -v wasm-bindgen >/dev/null 2>&1 \
+            || [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.127" ]]; then
+            cargo +nightly-2026-08-18 install wasm-bindgen-cli --version 0.2.127 --locked
+          fi
 
       - name: Lint source and repository tooling
         run: pnpm lint
@@ -340,14 +351,16 @@ jobs:
         run: |
           set -euo pipefail
           # Collect every emitted output: tsc dist/, optional Vite dist-ui/,
-          # the nested Prime extension/dist, and the generated network/ dir
-          # the CLI copies during build.
+          # the nested Prime extension/dist, locally built semantic-runtime
+          # Wasm, and the generated network/ dir the CLI copies during build.
+          test -d packages/semantic-runtime/generated
           mapfile -t PATHS < <(
             find packages -maxdepth 3 -type d \
               \( -name dist -o -name dist-ui -o -name network \) \
               2>/dev/null | sort -u
           )
           test -d packages/adapter-prime-agent/extension/dist
+          PATHS+=(packages/semantic-runtime/generated)
           echo "Packing ${#PATHS[@]} output dirs…"
           tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
           ls -lh /tmp/build-outputs.tgz
@@ -359,10 +372,10 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Rust/Wasm falsification gate. Generated bindings are committed so normal
-  # Node builds only verify their hash/ABI; this lane independently rebuilds
-  # them with the pinned toolchain, checks native/Wasm byte equivalence, and
-  # proves the Worker watchdog/recovery contract.
+  # Rust/Wasm falsification gate. Generated bindings are local build outputs,
+  # not repository inputs. This lane builds them with the pinned toolchain,
+  # checks native/Wasm byte equivalence, and proves the Worker
+  # watchdog/recovery contract.
   semantic-runtime:
     name: Rust/Wasm semantic runtime
     needs: changes
@@ -379,11 +392,12 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
-      - name: Install pinned Rust and Wasm target
+      - name: Install pinned Rust and Wasm targets
         run: |
-          rustup toolchain install 1.98.0 \
+          rustup toolchain install nightly-2026-08-18 \
             --profile minimal \
             --target wasm32-unknown-unknown \
+            --target wasm32-wasip2 \
             --component rustfmt \
             --component clippy
 
@@ -397,15 +411,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rust/target
-          key: semantic-runtime-${{ runner.os }}-rust-1.98.0-wbg-0.2.127-${{ hashFiles('rust/Cargo.lock') }}
+          key: semantic-runtime-${{ runner.os }}-rust-nightly-2026-08-18-wbg-0.2.127-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            semantic-runtime-${{ runner.os }}-rust-1.98.0-wbg-0.2.127-
+            semantic-runtime-${{ runner.os }}-rust-nightly-2026-08-18-wbg-0.2.127-
 
       - name: Install pinned wasm-bindgen CLI
         run: |
           if ! command -v wasm-bindgen >/dev/null 2>&1 \
             || [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.127" ]]; then
-            cargo +1.98.0 install wasm-bindgen-cli --version 0.2.127 --locked
+            cargo +nightly-2026-08-18 install wasm-bindgen-cli --version 0.2.127 --locked
           fi
 
       - name: Install dependencies
