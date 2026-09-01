@@ -76,6 +76,32 @@ describe('kaRootMutations — cursor restore and failure recovery', () => {
     expect(byLane.get('KnowledgeAssetRegisteredToContextGraph')!.fromBlock).toBe(1_001);
   });
 
+  it('adopts the retired collectionUpdates cursor instead of live-seeding past it (review r22)', async () => {
+    // A lane rename must not orphan an embedder durable cursor: with
+    // collectionUpdates=1,000 persisted and a 20,000-block head, a fresh
+    // kaRootMutations lane would otherwise live-seed to 11,000 and
+    // permanently skip blocks 1,001..11,000.
+    const saves: Array<{ lane: string; block: number }> = [];
+    const { adapter, filters } = makeChain(20_000);
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => 0,
+      cursorPersistence: {
+        async loadLane(lane) { return (lane as string) === 'collectionUpdates' ? 1_000 : undefined; },
+        async saveLane(lane, block) { saves.push({ lane, block }); },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+
+    await poll(poller);
+
+    // Adopted (1,000), re-homed under the new key, rewound by 50, and the
+    // first scan starts where the OLD cursor stood — not at head-9,000.
+    expect(saves.some((s2) => s2.lane === 'kaRootMutations' && s2.block === 1_000)).toBe(true);
+    expect(filters[0].fromBlock).toBe(951);
+  });
   it('a cursor rewound to the ZERO floor scans from block 1, never live-seeds (review r14)', async () => {
     // Zero is also the uninitialized sentinel: without restored-state
     // tracking, a persisted cursor of 25 rewound by 50 reads as "no cursor"

@@ -396,6 +396,14 @@ export class ChainEventPoller {
         // activation covers a restart that spanned a deploy.
         liveSeedLookbackBlocks: ChainEventPoller.MAX_RANGE,
         rewindOnRestoreBlocks: KA_ROOT_MUTATION_REWIND_ON_RESTORE_BLOCKS,
+        // The lane this one replaced (review r22): adopt its durable cursor
+        // so an embedder migrating across the rename does not fall back to
+        // the bounded live seed and silently skip blocks the old cursor had
+        // reached. For the three event types the old lane never scanned,
+        // adoption equals the old behavior; for deeper history the
+        // chain-driven reconcile remains the recovery path, exactly as for
+        // the live seed.
+        adoptCursorFromRetiredKeys: ['collectionUpdates'],
         periodicRescan: {
           everyPolls: KA_ROOT_MUTATION_RESCAN_EVERY_POLLS,
           windowBlocks: ChainEventPoller.MAX_RANGE,

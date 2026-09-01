@@ -22,7 +22,7 @@ import {
   type KnowledgeAssetRootMutationKindV1,
 } from '@origintrail-official/dkg-core';
 import type { ChainEvent, KnowledgeAssetRootMutationEventType } from '@origintrail-official/dkg-chain';
-import type { Digest32V1, EvmAddressV1, KaIdV1 } from '@origintrail-official/dkg-core';
+import type { CanonicalEventPositionV1, Digest32V1, EvmAddressV1, KaIdV1 } from '@origintrail-official/dkg-core';
 
 /**
  * One on-chain mutation of a Knowledge Asset's committed Merkle-root set.
@@ -41,8 +41,10 @@ import type { Digest32V1, EvmAddressV1, KaIdV1 } from '@origintrail-official/dkg
 interface KnowledgeAssetRootMutationBaseV1 {
   /** On-chain KA id, canonical unsigned decimal (never hex, never `bigint`). */
   kaId: KaIdV1;
-  /** Chain position, for ordering and de-duplication. */
-  position: FinalizedEventPositionV1;
+  /** Chain position, for ordering and de-duplication — CANONICAL (r22):
+   *  this newly-introduced type keeps the validator's proof instead of
+   *  discarding it; still assignable wherever the base position is taken. */
+  position: CanonicalEventPositionV1;
 }
 
 /** `updateKnowledgeAsset` — the ordinary V10 lifecycle update. */
@@ -257,3 +259,4 @@ type NotAssignable<A, B> = A extends B ? false : true;
 type _plainStringIsNotKaId = Expect<NotAssignable<'42', KnowledgeAssetLifecycleUpdateEventV1['kaId']>>;
 type _plainStringIsNotMerkleRoot = Expect<NotAssignable<'not-a-digest', NonNullable<KnowledgeAssetLifecycleUpdateEventV1['merkleRoot']>>>;
 type _plainStringIsNotAuthor = Expect<NotAssignable<'not-an-address', NonNullable<KnowledgeAssetLifecycleUpdateEventV1['author']>>>;
+type _unvalidatedPositionCannotForgePayloads = Expect<NotAssignable<FinalizedEventPositionV1, KnowledgeAssetLifecycleUpdateEventV1['position']>>;

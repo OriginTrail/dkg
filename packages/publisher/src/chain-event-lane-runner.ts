@@ -106,6 +106,15 @@ export interface ChainEventPollerLaneSpec {
    * loss recoverable rather than permanent.
    */
   periodicRescan?: { everyPolls: number; windowBlocks: number };
+  /**
+   * Retired persistence keys whose durable cursor this lane ADOPTS when it
+   * has none of its own (review r22): a lane rename must not orphan an
+   * embedder's cursor — falling back to the bounded live seed after a long
+   * outage would silently skip valid events the old cursor had reached.
+   * The adopted value goes through the same restore rewind and is
+   * persisted under the NEW key immediately, so the handoff happens once.
+   */
+  adoptCursorFromRetiredKeys?: readonly string[];
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
 }
@@ -305,7 +314,24 @@ export class ChainEventLaneRunner {
   private async restoreLaneCursor(lane: ChainEventPollerLaneRuntime, ctx: OperationContext): Promise<void> {
     if (!this.cursorStore) return;
     try {
-      const saved = await this.loadPersistedLaneCursor(lane);
+      let saved = await this.loadPersistedLaneCursor(lane);
+      if ((saved == null || saved <= 0) && this.cursorStore.kind === 'lane') {
+        for (const retired of lane.spec.adoptCursorFromRetiredKeys ?? []) {
+          // A migration read of a RETIRED key (review r22): the store contract
+          // is key→block, so the retired spelling is passed through the same
+          // accessor. Adopted once — the save below re-homes it immediately.
+          const adopted = await this.cursorStore.loadLane(retired as ChainEventPollerLane);
+          if (adopted != null && adopted > 0) {
+            saved = adopted;
+            await this.cursorStore.saveLane(lane.spec.name, adopted);
+            this.log.info(
+              ctx,
+              `Adopted durable cursor from retired lane key: ${retired} -> ${lane.spec.name} block ${adopted}`,
+            );
+            break;
+          }
+        }
+      }
       if (saved != null && saved > 0) {
         const rewound = this.rewindBlocks(lane, saved);
         lane.state.lastBlock = rewound;
