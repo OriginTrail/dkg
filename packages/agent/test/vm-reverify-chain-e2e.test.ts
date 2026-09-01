@@ -76,6 +76,7 @@ import { join } from 'node:path';
 import { ethers, Wallet } from 'ethers';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { DKGAgent } from '../src/index.js';
+import { openSqliteVmReverifyIntentStore } from '../src/vm-reverify-intent-sqlite-store.js';
 import {
   AUTHOR_SCHEME_VERSION_V1,
   MemoryLayer,
@@ -789,9 +790,50 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       'the update must now be further back than a head-seeded lane could see',
     ).toBeGreaterThan(MAX_RANGE_BLOCKS);
 
+    // A DUE persisted intent for a foreign CG, seeded straight into the
+    // durable file the restart will reopen (review r1). Its drain outcome is
+    // a no-op retry (`context-graph-not-held`), so it cannot converge
+    // anything — it exists to make the readiness oracle below NON-vacuous:
+    // with no due work at start, “no fetch ran before readiness” would pass
+    // trivially however the worker was started.
+    const PROBE_CG = 'w2r-readiness-probe-cg';
+    {
+      const seedStore = await openSqliteVmReverifyIntentStore(hostDataDir);
+      await seedStore.upsert({
+        ual: `did:dkg:evm:31337/0x00000000000000000000000000000000000000fe/1`,
+        localCgId: PROBE_CG,
+        kaId: '254',
+        kind: 'lifecycle-update',
+        position: {
+          blockNumber: missedBlock,
+          blockHash: `0x${'66'.repeat(32)}`,
+          transactionHash: `0x${'67'.repeat(32)}`,
+          transactionIndex: 0,
+          logIndex: 0,
+        },
+      });
+      await seedStore.close();
+    }
+
     // ── Restart against the SAME dataDir and the SAME durable stores. ──
     const savesBefore = cursorStore.saves.length;
     host = await createHostCore();
+    // State-AT-call oracle (review r1): record what `vmReconcileRuntimeReady`
+    // was at the moment of EVERY drain fetch. A worker started before the
+    // readiness boundary drains the seeded batch mid-startup and this array
+    // records `ready: false`.
+    const drainFetches: Array<{ ready: boolean }> = [];
+    {
+      const realFetch = (host as any).fetchContextGraphAssets.bind(host);
+      (host as any).fetchContextGraphAssets = async (
+        cg: string,
+        uals: readonly string[],
+        options: unknown,
+      ) => {
+        drainFetches.push({ ready: (host as any).vmReconcileRuntimeReady === true });
+        return realFetch(cg, uals, options);
+      };
+    }
     await host.start();
     await host.connectTo(publisher.multiaddrs[0]!);
     await new Promise((r) => setTimeout(r, 2000));
@@ -804,6 +846,18 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
       await heldNames(host),
       'the restarted node still serves the version it had when it went down',
     ).toContain(NAME_V2);
+
+    // The two halves of the readiness contract (review r1): the persisted
+    // batch drained PROMPTLY at the readiness boundary with no explicit kick,
+    // and not one drain fetch ran before that boundary.
+    expect(
+      drainFetches.length,
+      'the due persisted batch must drain promptly once the runtime is ready',
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      drainFetches.every((call) => call.ready),
+      'no drain fetch may run before vmReconcileRuntimeReady',
+    ).toBe(true);
 
     // Catching up ~9,051 blocks takes more than one MAX_RANGE window.
     for (let i = 0; i < 6 && (await countPending(host, CG)) <= 0; i += 1) {

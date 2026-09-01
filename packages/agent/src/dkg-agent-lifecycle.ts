@@ -3233,8 +3233,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             warn: (message) => this.log.warn(ctx, message),
           },
         });
-        this.vmReverifyWorker.start();
-        this.log.info(ctx, 'VM re-verify drain started (#2435)');
+        // Constructed here so the lane’s ingest kicks have a worker object to
+        // land on, but NOT started (review r1): `fetchContextGraphAssets`
+        // rejects every call until `vmReconcileRuntimeReady`, so an early
+        // start with a full persisted batch spins a zero-delay retry loop
+        // against the closed lifecycle for the rest of startup. The start
+        // happens at the readiness boundary below.
       }
       this.log.info(ctx, `Chain event poller started`);
     }
@@ -4186,6 +4190,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // and both initial start and same-object restart retain the cold-start
     // jitter instead of launching an eager sweep against the old runtime.
     this.vmReconcileRuntimeReady = true;
+    // The drain starts HERE, at the same boundary that arms every other VM
+    // consumer (review r1): `start()`’s immediate first run preserves the
+    // guarantee that durable intents recorded before readiness — or during
+    // the startup scan — are drained promptly after it.
+    if (this.vmReverifyWorker && !this.vmReverifyWorker.running) {
+      this.vmReverifyWorker.start();
+      this.log.info(ctx, 'VM re-verify drain started (#2435)');
+    }
     if (this.vmReconcileEnabled()) {
       this.ensureVmReconcileDispatcher();
       const runSweep = (): void => {
