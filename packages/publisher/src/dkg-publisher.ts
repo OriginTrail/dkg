@@ -1,5 +1,14 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type {
+  ChainAdapter,
+  OnChainPublishResult,
+  AddBatchToContextGraphParams,
+  PreBroadcastSignal,
+  PrepareContextGraphRegistrationOptions,
+  PreparedContextGraphRegistration,
+  CreateOnChainContextGraphParams,
+  CreateOnChainContextGraphResult,
+} from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
@@ -442,6 +451,33 @@ export interface KaIdAllocator {
   markReconciled(): void;
 }
 
+export interface PublisherAddressResolverSelection {
+  address: string;
+  registrationPin: 'hard' | 'advisory';
+  /** Human-readable diagnostics only; never interpreted as signer policy. */
+  source: string;
+}
+
+export type PublisherAddressResolverResult =
+  | string
+  | PublisherAddressResolverSelection
+  | undefined;
+
+/**
+ * The selected publisher cannot prepare a sealed context-graph registration
+ * because its chain adapter predates the optional preparation capability.
+ * Callers may use this typed signal to preserve the legacy direct, paid path;
+ * all other preparation failures remain fatal.
+ */
+export class ContextGraphRegistrationPreparationUnsupportedError extends Error {
+  readonly code = 'CONTEXT_GRAPH_REGISTRATION_PREPARATION_UNSUPPORTED' as const;
+
+  constructor() {
+    super('Chain adapter does not support prepared context-graph registration.');
+    this.name = 'ContextGraphRegistrationPreparationUnsupportedError';
+  }
+}
+
 export interface DKGPublisherConfig {
   store: TripleStore;
   chain: ChainAdapter;
@@ -449,8 +485,15 @@ export interface DKGPublisherConfig {
   keypair: Ed25519Keypair;
   publisherNodeIdentityId?: bigint;
   publisherAddress?: string;
-  /** Retryable publisher address resolver for adapter-backed signing. */
-  publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
+  /**
+   * Retryable publisher address resolver for adapter-backed signing. Legacy
+   * string results remain hard registration pins; new callers should return a
+   * typed result so curated authority can be hard while generic adapter
+   * inference remains advisory.
+   */
+  publisherAddressResolver?: (
+    contextGraphId?: bigint,
+  ) => Promise<PublisherAddressResolverResult>;
   /** EVM private key for signing publish requests (hex string with 0x prefix) */
   publisherPrivateKey?: string;
   /**
@@ -538,6 +581,17 @@ interface PublisherAddressResolutionOptions {
   includeReservingPublisherProbe?: boolean;
   includeGenericSignMessageProbe?: boolean;
 }
+
+interface PublisherRegistrationSelection extends PublisherAddressResolution {
+  registrationPin:
+    | { disposition: 'hard'; address: string }
+    | { disposition: 'advisory' };
+}
+
+type PublisherContextGraphRegistrationOptions = Pick<
+  PrepareContextGraphRegistrationOptions,
+  'registrationPcaAccountId' | 'registrationSignerAddress'
+>;
 
 function normalizePublisherAddress(address: string | undefined): string | undefined {
   if (address === undefined) return undefined;
@@ -1146,7 +1200,9 @@ export class DKGPublisher implements Publisher {
   readonly knownBatchContextGraphs: Map<string, string>;
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress?: string;
-  private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
+  private readonly publisherAddressResolver?: (
+    contextGraphId?: bigint,
+  ) => Promise<PublisherAddressResolverResult>;
   private readonly publisherWallet?: ethers.Wallet;
   private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
@@ -1440,7 +1496,7 @@ export class DKGPublisher implements Publisher {
   private async resolvePublisherAddressSelection(
     contextGraphId?: bigint,
     options: PublisherAddressResolutionOptions = {},
-  ): Promise<PublisherAddressResolution> {
+  ): Promise<PublisherRegistrationSelection> {
     if (this.publisherAddress) {
       return {
         address: this.publisherAddress,
@@ -1448,24 +1504,143 @@ export class DKGPublisher implements Publisher {
         planningPinLabel: this.publisherWallet
           ? 'publisherPrivateKey'
           : 'configured publisherAddress',
+        registrationPin: { disposition: 'hard', address: this.publisherAddress },
       };
     }
     if (this.publisherAddressResolver) {
-      const resolved = normalizePublisherAddress(await this.publisherAddressResolver(contextGraphId));
+      const resolverResult = await this.publisherAddressResolver(contextGraphId);
+      const typedResult = typeof resolverResult === 'object' && resolverResult !== null
+        ? resolverResult
+        : undefined;
+      if (
+        typedResult
+        && (
+          (typedResult.registrationPin !== 'hard' && typedResult.registrationPin !== 'advisory')
+          || typeof typedResult.source !== 'string'
+          || typedResult.source.trim().length === 0
+        )
+      ) {
+        throw new Error(
+          'publisherAddressResolver returned an invalid typed result; expected ' +
+          `{ address, registrationPin: 'hard' | 'advisory', source }.`
+        );
+      }
+      const resolved = normalizePublisherAddress(
+        typeof resolverResult === 'string' ? resolverResult : typedResult?.address,
+      );
+      if (typedResult && !resolved) {
+        throw new Error('publisherAddressResolver returned an invalid typed address.');
+      }
       if (resolved) {
+        const registrationDisposition = typedResult?.registrationPin ?? 'hard';
         return {
           address: resolved,
           planningPin: resolved,
-          planningPinLabel: 'publisherAddressResolver',
+          planningPinLabel: typedResult?.source.trim() ?? 'publisherAddressResolver',
+          registrationPin: registrationDisposition === 'hard'
+            ? { disposition: 'hard', address: resolved }
+            : { disposition: 'advisory' },
         };
       }
     }
-    return { address: await this.inferAdapterPublisherAddress(contextGraphId, options) };
+    return {
+      address: await this.inferAdapterPublisherAddress(contextGraphId, options),
+      registrationPin: { disposition: 'advisory' },
+    };
   }
 
   /** RFC-001 §9 fallback author when no agent override is supplied. Returns undefined if no signer configured. */
   async publisherFallbackAuthorAddress(): Promise<string | undefined> {
     return this.resolvePublisherAddress();
+  }
+
+  /**
+   * Prepare context-graph registration in this publisher's execution context.
+   * A configured publisher or hard resolver result is pinned exactly; an
+   * advisory resolver leaves the signer pool unpinned so the adapter performs
+   * deterministic PCA-aware selection. The private adapter and wallet never
+   * escape this boundary.
+   */
+  async prepareContextGraphRegistration(
+    options: PublisherContextGraphRegistrationOptions = {},
+  ): Promise<PreparedContextGraphRegistration> {
+    const prepare = this.chain.prepareOnChainContextGraphRegistration;
+    if (!prepare) {
+      throw new ContextGraphRegistrationPreparationUnsupportedError();
+    }
+
+    const selection = await this.resolvePublisherAddressSelection();
+    const requestedPin = options.registrationSignerAddress
+      ? normalizePublisherAddress(options.registrationSignerAddress)
+      : undefined;
+    if (options.registrationSignerAddress && !requestedPin) {
+      throw new Error(
+        `prepareContextGraphRegistration: invalid registration signer address ${options.registrationSignerAddress}.`,
+      );
+    }
+    const hardRegistrationPin = selection.registrationPin.disposition === 'hard'
+      ? selection.registrationPin.address
+      : undefined;
+    if (
+      hardRegistrationPin
+      && requestedPin
+      && hardRegistrationPin.toLowerCase() !== requestedPin.toLowerCase()
+    ) {
+      throw new Error(
+        `prepareContextGraphRegistration: requested signer ${requestedPin} does not match ` +
+        `${selection.planningPinLabel ?? 'the configured publisher'} ${hardRegistrationPin}.`,
+      );
+    }
+
+    const registrationSignerAddress = hardRegistrationPin ?? requestedPin;
+    return prepare.call(this.chain, {
+      registrationPcaAccountId: options.registrationPcaAccountId,
+      registrationSignerAddress,
+      preferPcaCoveredSigner: registrationSignerAddress === undefined,
+    });
+  }
+
+  /**
+   * Seal the compatibility path for adapters that predate prepared context-
+   * graph registration. Hard publisher identities must match the adapter that
+   * will submit; advisory inference leaves that direct adapter signer in
+   * control. The caller receives only the authoritative signer (when the
+   * adapter exposes it) and a one-purpose submit capability.
+   */
+  async prepareLegacyContextGraphRegistration(): Promise<{
+    readonly signerAddress?: string;
+    submit(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  }> {
+    if (typeof this.chain.createOnChainContextGraph !== 'function') {
+      throw new Error('Chain adapter does not support direct context-graph registration.');
+    }
+
+    const [selection, directSignerAddress] = await Promise.all([
+      this.resolvePublisherAddressSelection(),
+      this.inferAdapterPublisherAddress(undefined, {
+        includeReservingPublisherProbe: false,
+      }),
+    ]);
+    const hardRegistrationPin = selection.registrationPin.disposition === 'hard'
+      ? selection.registrationPin.address
+      : undefined;
+    if (
+      hardRegistrationPin
+      && (
+        !directSignerAddress
+        || hardRegistrationPin.toLowerCase() !== directSignerAddress.toLowerCase()
+      )
+    ) {
+      throw new Error(
+        `Configured publisher ${hardRegistrationPin} does not match the legacy direct chain signer ` +
+        `${directSignerAddress ?? '(unavailable)'}.`,
+      );
+    }
+
+    return {
+      ...(directSignerAddress ? { signerAddress: directSignerAddress } : {}),
+      submit: (params) => this.chain.createOnChainContextGraph!(params),
+    };
   }
 
   /** Sign EIP-712 typed data with the publisher's own wallet. Returns KAv10's compact (r, vs). */

@@ -21,7 +21,7 @@ export interface PublisherSigner {
 export interface PublisherAddressResolution {
   address?: string;
   planningPin?: string;
-  planningPinLabel?: 'publisherPrivateKey' | 'configured publisherAddress' | 'publisherAddressResolver';
+  planningPinLabel?: string;
 }
 
 interface PublisherPlanningStateLocal {

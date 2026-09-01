@@ -17,6 +17,78 @@ import {
 } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 
+export const PCA_COVERAGE_UNSUPPORTED_CODE = 'PCA_COVERAGE_UNSUPPORTED' as const;
+export const CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN_CODE =
+  'CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN' as const;
+export const CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE' as const;
+export const CONTEXT_GRAPH_REGISTRATION_COVERAGE_SIGNER_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_REGISTRATION_COVERAGE_SIGNER_UNAVAILABLE' as const;
+export const STALE_HUB_BINDING_CODE = 'STALE_HUB_BINDING' as const;
+
+/**
+ * An explicit, decoupled PCA coverage request cannot be represented by the
+ * deployed ContextGraphs facade. Explicit intent must never silently become a
+ * paid legacy registration.
+ */
+export class PcaCoverageUnsupportedError extends Error {
+  readonly code = PCA_COVERAGE_UNSUPPORTED_CODE;
+  readonly facadeVersion: string;
+
+  constructor(facadeVersion: string) {
+    super(
+      `Explicit PCA registration coverage requires ContextGraphs 10.0.5 or newer; ` +
+      `the deployed facade reports ${facadeVersion}.`,
+    );
+    this.name = 'PcaCoverageUnsupportedError';
+    this.facadeVersion = facadeVersion;
+  }
+}
+
+/** A facade version could not be classified safely; retry after deployment/RPC recovery. */
+export class ContextGraphFacadeVersionUnknownError extends Error {
+  readonly code = CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN_CODE;
+  readonly retryable = true;
+
+  constructor(options?: { cause?: unknown }) {
+    super(
+      'Unable to determine the deployed ContextGraphs facade capability; retry after the RPC or deployment state stabilizes.',
+      options,
+    );
+    this.name = 'ContextGraphFacadeVersionUnknownError';
+  }
+}
+
+/** The signer sealed into a prepared capability is no longer in the adapter pool. */
+export class ContextGraphRegistrationSignerUnavailableError extends Error {
+  readonly code = CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE_CODE;
+  readonly signerAddress: string;
+
+  constructor(signerAddress: string) {
+    super(
+      `Prepared context-graph registration signer ${signerAddress} is no longer available in the EVM signer pool.`,
+    );
+    this.name = 'ContextGraphRegistrationSignerUnavailableError';
+    this.signerAddress = signerAddress;
+  }
+}
+
+/** No configured signer can exercise one explicitly requested PCA account. */
+export class ContextGraphRegistrationCoverageSignerUnavailableError extends Error {
+  readonly code = CONTEXT_GRAPH_REGISTRATION_COVERAGE_SIGNER_UNAVAILABLE_CODE;
+  readonly accountId: bigint;
+
+  constructor(accountId: bigint, options?: { cause?: unknown }) {
+    super(
+      `No configured EVM signer could be verified as the owner or exact registered agent ` +
+      `of explicit PCA account ${accountId}.`,
+      options,
+    );
+    this.name = 'ContextGraphRegistrationCoverageSignerUnavailableError';
+    this.accountId = accountId;
+  }
+}
+
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   try { return JSON.stringify(err); } catch { return String(err); }
@@ -93,6 +165,29 @@ export const HUB_STALE_ERROR_MARKERS = [
   'Only Contracts in Hub',
   'UnauthorizedAccess(Only Contracts in Hub)',
 ];
+
+/** Local proof that a cached boot-bound contract no longer matches Hub. */
+export class StaleHubBindingError extends Error {
+  readonly code = STALE_HUB_BINDING_CODE;
+  readonly contractName: string;
+  readonly boundAddress?: string;
+
+  constructor(contractName: string, boundAddress?: string) {
+    super(
+      `Cached ${contractName} binding${boundAddress ? ` ${boundAddress}` : ''} is stale relative to Hub.`,
+    );
+    this.name = 'StaleHubBindingError';
+    this.contractName = contractName;
+    this.boundAddress = boundAddress;
+  }
+}
+
+/** Shared classifier for provider-reported Hub authorization and local coherence failures. */
+export function isHubStaleError(err: unknown): boolean {
+  if (err instanceof StaleHubBindingError) return true;
+  const message = err instanceof Error ? err.message : '';
+  return HUB_STALE_ERROR_MARKERS.some((marker) => message.includes(marker));
+}
 
 let _errorInterface: Interface | null = null;
 let _pcaLogicInterface: Interface | null = null;

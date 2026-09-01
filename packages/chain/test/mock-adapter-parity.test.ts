@@ -97,6 +97,20 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'nextSigner',
   'nextAuthorizedSigner',
   'findSignerByAddress',
+  // Prepared CG registration internals. The public capability and compatibility
+  // wrapper are mirrored by MockChainAdapter; these helpers depend on EVM
+  // wallet pools, live PCA/facade reads, and Hub coherence.
+  'registrationSignerByAddress',
+  'resolveExplicitCoverageSigner',
+  'sealContextGraphRegistration',
+  'prepareCoverageDiscoverySnapshot',
+  'discoverCoverageForSigner',
+  'discoverOwnedCoverageForSigner',
+  'discoverAgentCoverageForSigner',
+  'registrationCoverageCandidateEligible',
+  'readContextGraphsFacadeCapability',
+  'submitPreparedContextGraphRegistration',
+  'isCurrentHubContractAddress',
   // PR #2300 r2 — isReceiptBlockFinalAndCanonical is a REAL ChainAdapter capability now (update
   // recognition consumes it), and the mock implements it from its finality seam: no exemption.
   'resolvePinnedPublisherSigner', // EVM signer-pool authorization/funding helper; mock has no wallet pool

@@ -16,6 +16,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { StaleHubBindingError } from '../src/evm-adapter-errors.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
@@ -134,6 +135,67 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
     expect(backupHits).toBe(0); // no failover on a healthy primary
     expect(ensureSpy.calls).toHaveLength(1);
     expect(result.success).toBe(true);
+  });
+
+  it('refreshes contracts when the allowance-recovery deposit read detects a stale Hub binding', async () => {
+    const { a, ensureSpy } = makeCgAdapter({
+      depositRead: async () => {
+        throw new StaleHubBindingError('ParametersStorage');
+      },
+    });
+    const oldFacade = a.contracts.contextGraphs;
+    const newFacade = { getAddress: async () => '0x' + 'bb'.repeat(20) };
+    let refreshedDepositReads = 0;
+    const newParametersStorage = {
+      connect: () => ({
+        contextGraphRegistrationDeposit: async () => {
+          refreshedDepositReads += 1;
+          return DEPOSIT;
+        },
+      }),
+    };
+    a.invalidateAllBoundContracts = () => {
+      a.contracts = {
+        ...a.contracts,
+        contextGraphs: newFacade,
+        parametersStorage: newParametersStorage,
+      };
+    };
+    const attemptsByFacade = new Map<unknown, number>();
+    const receipt = {
+      logs: [{ topics: [], data: '0x' }],
+      hash: '0xhash',
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    };
+    const sendSpy = recorder(async (facade: unknown, ..._args: unknown[]) => {
+      const attempt = (attemptsByFacade.get(facade) ?? 0) + 1;
+      attemptsByFacade.set(facade, attempt);
+      if (attempt === 1) throw tooLowAllowanceRevert();
+      return receipt;
+    });
+    a.sendContractTransaction = sendSpy;
+
+    const result = await a.createOnChainContextGraph(CG_PARAMS);
+
+    expect(sendSpy.calls.map((call) => call[0])).toEqual([
+      oldFacade,
+      newFacade,
+      newFacade,
+    ]);
+    expect(sendSpy.calls.map((call) => call[3])).toEqual([
+      a.signer,
+      a.signer,
+      a.signer,
+    ]);
+    expect(refreshedDepositReads).toBe(1);
+    expect(ensureSpy.calls).toHaveLength(1);
+    expect(ensureSpy.calls[0][0]).toBe(a.signer);
+    expect(ensureSpy.calls[0][1]).toBe(await newFacade.getAddress());
+    expect(ensureSpy.calls[0][2]).toBe(DEPOSIT);
+    expect(result.success).toBe(true);
+    expect(result.contextGraphId).toBe(7n);
   });
 
   it('dormant deposit (reads 0): no approve (deposit===0n branch), original revert propagates', async () => {

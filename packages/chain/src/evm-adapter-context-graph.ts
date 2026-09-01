@@ -15,15 +15,148 @@ import {
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from './evm-adapter-base.js';
 import {
+  ContextGraphFacadeVersionUnknownError,
+  ContextGraphRegistrationCoverageSignerUnavailableError,
+  ContextGraphRegistrationSignerUnavailableError,
+  PcaCoverageUnsupportedError,
+  StaleHubBindingError,
+  isHubStaleError,
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
-import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ethers, Contract, type JsonRpcProvider, type Wallet } from 'ethers';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult, type ContextGraphRegistrationCoverage, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
+  executionPolicyFromCoverage,
+  executionPolicyFromDepositPolicy,
   resolveContextGraphCreateDispatch,
+  type ContextGraphFacadeCapability,
   type ContextGraphLegacyCreateArgs,
+  type ContextGraphRegistrationExecutionPolicy,
 } from './context-graph-registration-dispatch.js';
+import { parsePcaRegistrationCoverageAccount } from './evm-adapter-conviction.js';
+
+export const MAX_AUTO_COVERAGE_CANDIDATES = 32;
+export const AUTO_COVERAGE_DISCOVERY_TIMEOUT_MS = 5_000;
+export const AUTO_COVERAGE_READ_CONCURRENCY = 4;
+
+const MINIMUM_PCA_WAIVER_FACADE_VERSION = [10, 0, 5] as const;
+const PARAMETERS_WAIVER_ABI = [
+  'function contextGraphRegistrationDeposit() view returns (uint96)',
+  'function minPcaCommitmentForCgWaiver() view returns (uint96)',
+] as const;
+
+type CoverageDiscoverySnapshot = {
+  deposit: bigint;
+  minimumCommitment: bigint;
+  latestTimestamp: bigint;
+  pca: Contract;
+  waiverStorage: Contract;
+  reads: CoverageReadLimiter;
+};
+
+type OwnedCoverageDiscovery = {
+  coverage: ContextGraphRegistrationCoverage;
+  allowAgentFallback: boolean;
+};
+
+class CoverageDiscoveryDeadlineError extends Error {
+  constructor() {
+    super('Context-graph PCA coverage discovery exceeded its five-second budget.');
+    this.name = 'CoverageDiscoveryDeadlineError';
+  }
+}
+
+function withCoverageDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return Promise.reject(new CoverageDiscoveryDeadlineError());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new CoverageDiscoveryDeadlineError()), remaining);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+/** A deadline-aware semaphore that caps all discovery RPC reads, not just workers. */
+class CoverageReadLimiter {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(
+    private readonly deadline: number,
+    private readonly concurrency = AUTO_COVERAGE_READ_CONCURRENCY,
+  ) {}
+
+  async run<T>(read: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      // A queued waiter can be handed a semaphore slot at the deadline. Do not
+      // start a fresh RPC after the budget has expired; only the at-most-four
+      // reads already in flight may outlive their local timeout.
+      if (this.expired()) throw new CoverageDiscoveryDeadlineError();
+      return await withCoverageDeadline(
+        Promise.resolve().then(() => {
+          if (this.expired()) throw new CoverageDiscoveryDeadlineError();
+          return read();
+        }),
+        this.deadline,
+      );
+    } finally {
+      this.release();
+    }
+  }
+
+  expired(): boolean {
+    return Date.now() >= this.deadline;
+  }
+
+  private async acquire(): Promise<void> {
+    if (Date.now() >= this.deadline) throw new CoverageDiscoveryDeadlineError();
+    if (this.active < this.concurrency) {
+      this.active += 1;
+      return;
+    }
+    let wake!: () => void;
+    const wait = new Promise<void>((resolve) => { wake = resolve; });
+    this.waiting.push(wake);
+    try {
+      await withCoverageDeadline(wait, this.deadline);
+    } catch (err) {
+      const index = this.waiting.indexOf(wake);
+      if (index >= 0) this.waiting.splice(index, 1);
+      throw err;
+    }
+  }
+
+  private release(): void {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.active -= 1;
+  }
+}
+
+function parsedFacadeVersion(version: unknown): ContextGraphFacadeCapability | undefined {
+  if (typeof version !== 'string') return undefined;
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/.exec(
+    version.trim(),
+  );
+  if (!match) return undefined;
+  const actual = match.slice(1, 4).map(Number);
+  if (!actual.every(Number.isSafeInteger)) return undefined;
+  let comparison = 0;
+  for (let index = 0; index < actual.length; index += 1) {
+    if (actual[index] === MINIMUM_PCA_WAIVER_FACADE_VERSION[index]) continue;
+    comparison = actual[index] > MINIMUM_PCA_WAIVER_FACADE_VERSION[index] ? 1 : -1;
+    break;
+  }
+  // The floor is a stable release: 10.0.5-rc.x remains below it, while a
+  // prerelease of a later numeric version still necessarily contains the
+  // selector introduced in 10.0.5.
+  const supported = comparison > 0 || (comparison === 0 && match[4] === undefined);
+  return { state: supported ? 'supported' : 'unsupported', version: version.trim() };
+}
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -444,12 +577,457 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     ));
   }
 
-  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
+  async prepareOnChainContextGraphRegistration(
+    options: PrepareContextGraphRegistrationOptions = {},
+  ): Promise<PreparedContextGraphRegistration> {
     await this.init();
-    if (!this.contracts.contextGraphs || !this.contracts.contextGraphStorage) {
-      throw new Error('ContextGraphs contract not deployed. Deploy ContextGraphs and ContextGraphStorage first.');
+
+    const explicitAccountId = options.registrationPcaAccountId;
+    if (explicitAccountId !== undefined && explicitAccountId <= 0n) {
+      throw new RangeError('registrationPcaAccountId must be a positive PCA account id.');
+    }
+    const pinnedSigner = options.registrationSignerAddress
+      ? this.registrationSignerByAddress(options.registrationSignerAddress)
+      : undefined;
+
+    if (explicitAccountId !== undefined) {
+      const candidates = pinnedSigner
+        ? [pinnedSigner]
+        : options.preferPcaCoveredSigner
+          ? this.signerPool
+          : [this.signer];
+      const signer = await this.resolveExplicitCoverageSigner(explicitAccountId, candidates);
+      return this.sealContextGraphRegistration(
+        signer,
+        { source: 'explicit', accountId: explicitAccountId },
+      );
     }
 
+    // An unpinned synchronous publisher has not planned a publish signer yet.
+    // Reuse one snapshot/deadline for the whole configured pool and select the
+    // first signer with fully verified coverage. This is deterministic in pool
+    // order and falls back to the primary signer when discovery fails closed.
+    if (options.preferPcaCoveredSigner && !pinnedSigner) {
+      const deadline = Date.now() + AUTO_COVERAGE_DISCOVERY_TIMEOUT_MS;
+      const snapshot = await this.prepareCoverageDiscoverySnapshot(deadline);
+      if (snapshot) {
+        const agentCandidates: Wallet[] = [];
+        for (const signer of this.signerPool) {
+          const owned = await this.discoverOwnedCoverageForSigner(signer, snapshot);
+          if (owned.coverage.source === 'owned') {
+            return this.sealContextGraphRegistration(signer, owned.coverage);
+          }
+          if (owned.allowAgentFallback) agentCandidates.push(signer);
+          if (Date.now() >= deadline) break;
+        }
+        // Ownership has stronger authority than a consent-free agent binding,
+        // so only consult agent mappings after every pool signer has had a
+        // bounded opportunity to prove owned coverage.
+        for (const signer of agentCandidates) {
+          const coverage = await this.discoverAgentCoverageForSigner(signer, snapshot);
+          if (coverage.source === 'agent') {
+            return this.sealContextGraphRegistration(signer, coverage);
+          }
+          if (Date.now() >= deadline) break;
+        }
+      }
+      return this.sealContextGraphRegistration(this.signer, { source: 'none' });
+    }
+
+    const signer = pinnedSigner ?? this.signer;
+    const deadline = Date.now() + AUTO_COVERAGE_DISCOVERY_TIMEOUT_MS;
+    const snapshot = await this.prepareCoverageDiscoverySnapshot(deadline);
+    const coverage = snapshot
+      ? await this.discoverCoverageForSigner(signer, snapshot)
+      : { source: 'none' as const };
+    return this.sealContextGraphRegistration(signer, coverage);
+  }
+
+  async createOnChainContextGraph(
+    params: CreateOnChainContextGraphParams,
+    preparationOptions?: PrepareContextGraphRegistrationOptions,
+  ): Promise<CreateOnChainContextGraphResult> {
+    const { registrationDepositPolicy, ...createParams } = params;
+    if (preparationOptions !== undefined) {
+      if (registrationDepositPolicy && registrationDepositPolicy.mode !== 'legacy') {
+        throw new TypeError(
+          'Prepared context-graph registration seals its deposit policy; ' +
+          'do not also pass registrationDepositPolicy.',
+        );
+      }
+      const prepared = await this.prepareOnChainContextGraphRegistration(preparationOptions);
+      return prepared.submit(createParams);
+    }
+
+    // Preserve the legacy direct-call path: callers that did not ask for a
+    // registration execution context do not incur PCA discovery reads.
+    const executionPolicy = executionPolicyFromDepositPolicy(registrationDepositPolicy);
+    return this.withHubStaleRetryAny(() => this.submitPreparedContextGraphRegistration(
+      createParams,
+      this.signer,
+      executionPolicy,
+    ));
+  }
+
+  private registrationSignerByAddress(address: string): Wallet {
+    let signer: Wallet | undefined;
+    try {
+      signer = this.findSignerByAddress(address);
+    } catch {
+      // Normalize malformed addresses into the same stable capability error as
+      // a valid address that is not present in the configured signer pool.
+    }
+    if (!signer) throw new ContextGraphRegistrationSignerUnavailableError(address);
+    return signer;
+  }
+
+  /**
+   * Resolve one explicitly requested PCA against the configured signer pool.
+   * Ownership wins without per-signer reads; otherwise exact agent mappings
+   * are checked in deterministic pool order. Explicit intent fails closed and
+   * never silently degrades to the primary signer/deposit path.
+   */
+  private async resolveExplicitCoverageSigner(
+    accountId: bigint,
+    candidates: readonly Wallet[],
+  ): Promise<Wallet> {
+    const pca = this.contracts.dkgPublishingConvictionNFT;
+    if (!pca) {
+      throw new Error(
+        'DKGPublishingConvictionNFT is not deployed; explicit PCA registration coverage cannot be verified.',
+      );
+    }
+
+    let firstReadError: unknown;
+    try {
+      const owner = ethers.getAddress(String(await this.readContract(
+        pca,
+        'pca.ownerOf explicit registration coverage',
+        'ownerOf',
+        accountId,
+      )));
+      const ownerSigner = candidates.find(
+        (candidate) => ethers.getAddress(candidate.address) === owner,
+      );
+      if (ownerSigner) return ownerSigner;
+    } catch (err) {
+      firstReadError = err;
+    }
+
+    for (const signer of candidates) {
+      try {
+        const mappedAccountId = BigInt(await this.readContract(
+          pca,
+          'pca.agentToAccountId explicit registration coverage',
+          'agentToAccountId',
+          signer.address,
+        ));
+        if (mappedAccountId === accountId) return signer;
+      } catch (err) {
+        firstReadError ??= err;
+      }
+    }
+
+    // A permanent signer mismatch is knowable only when every relationship
+    // read completed. If any owner/agent verification failed, preserve that
+    // original RPC, stale-binding, or decoded contract error so callers retain
+    // its retryability/classification instead of treating an outage as a
+    // terminal signer-configuration problem.
+    if (firstReadError !== undefined) throw firstReadError;
+    throw new ContextGraphRegistrationCoverageSignerUnavailableError(accountId);
+  }
+
+  private sealContextGraphRegistration(
+    signer: Wallet,
+    coverage: ContextGraphRegistrationCoverage,
+  ): PreparedContextGraphRegistration {
+    if (coverage.source !== 'none' && coverage.accountId <= 0n) {
+      throw new RangeError('Covered context-graph registration requires a positive PCA account id.');
+    }
+    const signerAddress = ethers.getAddress(signer.address);
+    const sealedCoverage = Object.freeze({ ...coverage });
+    const executionPolicy = executionPolicyFromCoverage(sealedCoverage);
+    const submit = async (
+      params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
+    ): Promise<CreateOnChainContextGraphResult> => {
+      if (params == null) throw new TypeError('Prepared context-graph registration requires create parameters.');
+      // A prepared capability may outlive adapter reconfiguration. Fail rather
+      // than substituting another pool signer; the captured wallet remains the
+      // only wallet this capability can use.
+      const available = this.findSignerByAddress(signerAddress);
+      if (!available || available !== signer) {
+        throw new ContextGraphRegistrationSignerUnavailableError(signerAddress);
+      }
+      return this.withHubStaleRetryAny(() =>
+        this.submitPreparedContextGraphRegistration(
+          params,
+          signer,
+          executionPolicy,
+        ));
+    };
+    return Object.freeze({ signerAddress, coverage: sealedCoverage, submit });
+  }
+
+  private async prepareCoverageDiscoverySnapshot(
+    deadline: number,
+  ): Promise<CoverageDiscoverySnapshot | undefined> {
+    const pca = this.contracts.dkgPublishingConvictionNFT;
+    const configuredParameters = this.contracts.parametersStorage;
+    if (!pca || !configuredParameters) return undefined;
+
+    const reads = new CoverageReadLimiter(deadline);
+    try {
+      const parametersAddress = await reads.run(() => configuredParameters.getAddress());
+      const parameters = new Contract(parametersAddress, PARAMETERS_WAIVER_ABI, this.provider);
+      const deposit = BigInt(await reads.run(() => this.readContract(
+        parameters,
+        'parametersStorage.contextGraphRegistrationDeposit',
+        'contextGraphRegistrationDeposit',
+      )));
+      if (deposit === 0n) return undefined;
+
+      const [minimumCommitmentRaw, latestBlock, waiverStorage] = await Promise.all([
+        reads.run(() => this.readContract(
+          parameters,
+          'parametersStorage.minPcaCommitmentForCgWaiver',
+          'minPcaCommitmentForCgWaiver',
+        )),
+        reads.run(() => this.readTipProvider(
+          'latest block for context-graph PCA coverage',
+          (provider) => provider.getBlock('latest'),
+        )),
+        reads.run(() => this.resolveContract('ContextGraphWaiverStorage')),
+      ]);
+      if (!latestBlock) return undefined;
+      return {
+        deposit,
+        minimumCommitment: BigInt(minimumCommitmentRaw),
+        latestTimestamp: BigInt(latestBlock.timestamp),
+        pca,
+        waiverStorage,
+        reads,
+      };
+    } catch {
+      // Discovery is advisory. Any global read/deployment/budget failure retains
+      // the ordinary deposit path; the contract remains the authority at submit.
+      return undefined;
+    }
+  }
+
+  private async discoverCoverageForSigner(
+    signer: Wallet,
+    snapshot: CoverageDiscoverySnapshot,
+  ): Promise<ContextGraphRegistrationCoverage> {
+    const owned = await this.discoverOwnedCoverageForSigner(signer, snapshot);
+    if (owned.coverage.source === 'owned' || !owned.allowAgentFallback) {
+      return owned.coverage;
+    }
+    return this.discoverAgentCoverageForSigner(signer, snapshot);
+  }
+
+  private async discoverOwnedCoverageForSigner(
+    signer: Wallet,
+    snapshot: CoverageDiscoverySnapshot,
+  ): Promise<OwnedCoverageDiscovery> {
+    try {
+      const balance = BigInt(await snapshot.reads.run(() => this.readContract(
+        snapshot.pca,
+        'pca.balanceOf registration signer',
+        'balanceOf',
+        signer.address,
+      )));
+      if (balance > BigInt(MAX_AUTO_COVERAGE_CANDIDATES)) {
+        // Do not consult an unsolicited agent binding after refusing amplified
+        // owner enumeration. The operator can still supply an explicit PCA ID.
+        return { coverage: { source: 'none' }, allowAgentFallback: false };
+      }
+
+      const accountIds = await Promise.all(Array.from(
+        { length: Number(balance) },
+        (_unused, index) => snapshot.reads.run(async () => BigInt(await this.readContract(
+          snapshot.pca,
+          'pca.tokenOfOwnerByIndex registration coverage',
+          'tokenOfOwnerByIndex',
+          signer.address,
+          BigInt(index),
+        ))),
+      ));
+      accountIds.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+
+      const ownerEligibility = await Promise.all(accountIds.map(async (accountId) => ({
+        accountId,
+        eligible: await this.registrationCoverageCandidateEligible(
+          signer.address,
+          accountId,
+          'owned',
+          snapshot,
+        ),
+      })));
+      const owned = ownerEligibility.find((candidate) => candidate.eligible);
+      if (owned) {
+        return {
+          coverage: { source: 'owned', accountId: owned.accountId },
+          allowAgentFallback: false,
+        };
+      }
+      return {
+        coverage: { source: 'none' },
+        allowAgentFallback: !snapshot.reads.expired(),
+      };
+    } catch {
+      // A signer-level owner-enumeration or total-budget failure cannot safely
+      // fall through to an unsolicited agent binding.
+      return { coverage: { source: 'none' }, allowAgentFallback: false };
+    }
+  }
+
+  private async discoverAgentCoverageForSigner(
+    signer: Wallet,
+    snapshot: CoverageDiscoverySnapshot,
+  ): Promise<ContextGraphRegistrationCoverage> {
+    try {
+      const agentAccountId = BigInt(await snapshot.reads.run(() => this.readContract(
+        snapshot.pca,
+        'pca.agentToAccountId registration coverage',
+        'agentToAccountId',
+        signer.address,
+      )));
+      if (
+        agentAccountId > 0n
+        && await this.registrationCoverageCandidateEligible(
+          signer.address,
+          agentAccountId,
+          'agent',
+          snapshot,
+        )
+      ) {
+        return { source: 'agent', accountId: agentAccountId };
+      }
+    } catch {
+      // Agent resolution or total-budget failure makes automatic coverage
+      // unavailable. Never guess a candidate.
+    }
+    return { source: 'none' };
+  }
+
+  private async registrationCoverageCandidateEligible(
+    signerAddress: string,
+    accountId: bigint,
+    relation: 'owned' | 'agent',
+    snapshot: CoverageDiscoverySnapshot,
+  ): Promise<boolean> {
+    try {
+      const [account, waivedCountRaw, owner] = await Promise.all([
+        snapshot.reads.run(() => this.readContract(
+          snapshot.pca,
+          'pca.accounts registration coverage',
+          'accounts',
+          accountId,
+        )),
+        snapshot.reads.run(() => this.readContract(
+          snapshot.waiverStorage,
+          'contextGraphWaiverStorage.waivedCgCount',
+          'waivedCgCount',
+          accountId,
+        )),
+        relation === 'owned'
+          ? snapshot.reads.run(() => this.readContract(
+              snapshot.pca,
+              'pca.ownerOf registration coverage',
+              'ownerOf',
+              accountId,
+            ))
+          : Promise.resolve(signerAddress),
+      ]);
+      if (ethers.getAddress(String(owner)) !== ethers.getAddress(signerAddress)) return false;
+
+      const parsedAccount = parsePcaRegistrationCoverageAccount(account);
+      if (!parsedAccount) return false;
+      const { committedTRAC: committed, expiresAtTimestamp, fullySwept } = parsedAccount;
+      if (
+        committed === 0n
+        || fullySwept
+        || committed < snapshot.minimumCommitment
+        || (expiresAtTimestamp !== 0n && snapshot.latestTimestamp >= expiresAtTimestamp)
+      ) return false;
+
+      const quota = committed / snapshot.deposit;
+      return quota > BigInt(waivedCountRaw);
+    } catch {
+      // Candidate-local failures mark only this candidate unverified; other
+      // owned candidates remain eligible for deterministic evaluation.
+      return false;
+    }
+  }
+
+  private async readContextGraphsFacadeCapability(
+    contextGraphs: Contract,
+  ): Promise<ContextGraphFacadeCapability> {
+    let rawVersion: unknown;
+    try {
+      rawVersion = await this.readContract(
+        contextGraphs,
+        'contextGraphs.version',
+        'version',
+      );
+    } catch (err) {
+      if (isHubStaleError(err)) throw err;
+      await this.assertCurrentContextGraphsFacade(contextGraphs);
+      throw new ContextGraphFacadeVersionUnknownError({ cause: err });
+    }
+    const capability = parsedFacadeVersion(rawVersion);
+    if (!capability) {
+      await this.assertCurrentContextGraphsFacade(contextGraphs);
+      throw new ContextGraphFacadeVersionUnknownError();
+    }
+    return capability;
+  }
+
+  private async assertCurrentContextGraphsFacade(contextGraphs: Contract): Promise<void> {
+    const boundAddress = await contextGraphs.getAddress();
+    let currentBinding: boolean;
+    try {
+      currentBinding = await this.isCurrentHubContractAddress(
+        'ContextGraphs',
+        boundAddress,
+      );
+    } catch (err) {
+      if (isHubStaleError(err)) throw err;
+      throw new ContextGraphFacadeVersionUnknownError({ cause: err });
+    }
+    if (!currentBinding) {
+      throw new StaleHubBindingError(
+        'ContextGraphs',
+        boundAddress,
+      );
+    }
+  }
+
+  private async rejectUnsupportedRegistrationFacade(
+    contextGraphs: Contract,
+    registrationMode: 'paid' | 'pca',
+    facadeVersion: string,
+  ): Promise<never> {
+    await this.assertCurrentContextGraphsFacade(contextGraphs);
+    if (registrationMode === 'pca') {
+      throw new PcaCoverageUnsupportedError(facadeVersion);
+    }
+    throw new Error(
+      `ContextGraphs facade ${facadeVersion} does not support explicit paid registration.`,
+    );
+  }
+
+  private async submitPreparedContextGraphRegistration(
+    params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
+    signer: Wallet,
+    executionPolicy: Readonly<ContextGraphRegistrationExecutionPolicy>,
+  ): Promise<CreateOnChainContextGraphResult> {
+    await this.init();
+    const contextGraphs = this.contracts.contextGraphs;
+    const contextGraphStorage = this.contracts.contextGraphStorage;
+    if (!contextGraphs || !contextGraphStorage) {
+      throw new Error('ContextGraphs contract not deployed. Deploy ContextGraphs and ContextGraphStorage first.');
+    }
     if (params.accessPolicy === undefined || params.publishPolicy === undefined) {
       throw new Error(
         'createOnChainContextGraph: `accessPolicy` and `publishPolicy` are required (SPEC_CG_MEMORY_MODEL). ' +
@@ -457,7 +1035,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
     }
 
-    const contextGraphs = this.contracts.contextGraphs;
     const legacyCreateArgs: ContextGraphLegacyCreateArgs = [
       params.participantAgents ?? [],
       params.metadataBatchId ?? 0n,
@@ -465,67 +1042,53 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       params.publishPolicy,
       params.publishAuthority ?? ethers.ZeroAddress,
       params.publishAuthorityAccountId ?? 0n,
-      // OT-RFC-38 / LU-6 Phase B — opt-in wire-id commitment. Default
-      // `bytes32(0)` opts out; the agent supplies a non-zero hash
-      // (typically `keccak256(bytes(cleartextId))`) to enable cores'
-      // chain-event-driven host-mode auto-subscribe path.
       params.nameHash ?? ethers.ZeroHash,
     ];
-    const createDispatch = resolveContextGraphCreateDispatch(
+    const legacyCoverageAccountId = params.publishAuthorityAccountId ?? 0n;
+    const resolution = await resolveContextGraphCreateDispatch(
       legacyCreateArgs,
-      params.registrationDepositPolicy,
+      legacyCoverageAccountId,
+      executionPolicy,
+      () => this.readContextGraphsFacadeCapability(contextGraphs),
     );
-    const submitCreate = () =>
-      this.sendContractTransaction(
+    if (resolution.state === 'unsupported') {
+      return this.rejectUnsupportedRegistrationFacade(
         contextGraphs,
-        createDispatch.method,
-        createDispatch.args,
-        this.signer,
-        'create on-chain context graph',
+        resolution.registrationMode,
+        resolution.facadeVersion,
       );
+    }
+    const createDispatch = resolution.dispatch;
 
-    // OT-RFC-53: when the registration deposit is active, createContextGraph
-    // pulls it via transferFrom and reverts until the ContextGraphs facade is
-    // approved. Recover LAZILY (mirrors the publish/update #888 allowance
-    // recovery): on a first-attempt revert, if a deposit is actually configured,
-    // approve it to the facade and retry once. The common path (deposit dormant)
-    // is a single tx with NO extra eth_call, so it never perturbs timing-
-    // sensitive integration tests.
+    const submitCreate = () => this.sendContractTransaction(
+      contextGraphs,
+      createDispatch.method,
+      createDispatch.args,
+      signer,
+      'create on-chain context graph',
+    );
     const receipt = await (async () => {
       try {
         return await submitCreate();
       } catch (err) {
-        // Only the deposit-allowance revert is recoverable here. Mirror the
-        // publish/update allowance recovery (`isTooLowAllowanceError`): an
-        // unrelated first-attempt revert (invalid access/publish policy, PCA
-        // coherence failure, paused contract, insufficient balance, RPC error)
-        // must NOT trigger a state-changing TRAC approval before re-failing.
-        if (!isTooLowAllowanceError(err)) {
-          throw err;
-        }
-        // #1340: read the deposit through the RPC-failover facade (`readContract`),
-        // NOT a bare call on the signer's primary-bound `parametersStorage` handle.
-        // A broken primary otherwise throws here → is swallowed to 0n → the TRAC
-        // approve + retry below never run, defeating failover for a new CG's first
-        // publish. `readContract` fails over on transport errors (429/5xx/timeout)
-        // and rethrows a decoded revert unchanged; the catch → 0n now fires only
-        // when ALL endpoints fail or the deposit is genuinely dormant.
-        const ps = this.contracts.parametersStorage as Contract | undefined;
+        if (!isTooLowAllowanceError(err)) throw err;
+        const parametersStorage = this.contracts.parametersStorage as Contract | undefined;
         let deposit = 0n;
         try {
-          deposit = ps
-            ? await this.readContract<bigint>(
-                ps,
+          deposit = parametersStorage
+            ? BigInt(await this.readContract(
+                parametersStorage,
                 'parametersStorage.contextGraphRegistrationDeposit',
                 'contextGraphRegistrationDeposit',
-              )
+              ))
             : 0n;
-        } catch {
+        } catch (depositError) {
+          if (isHubStaleError(depositError)) throw depositError;
           deposit = 0n;
         }
         if (deposit === 0n) throw err;
         await this.ensureV10ApproveTrac(
-          this.signer,
+          signer,
           await contextGraphs.getAddress(),
           deposit,
           'cg registration deposit',
@@ -538,7 +1101,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     let contextGraphId: bigint | undefined;
     for (const log of receipt.logs) {
       try {
-        const parsed = this.contracts.contextGraphStorage!.interface.parseLog({
+        const parsed = contextGraphStorage.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
@@ -548,7 +1111,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         }
       } catch { /* not this contract */ }
     }
-
     if (contextGraphId === undefined) {
       return {
         hash: receipt.hash,
@@ -558,7 +1120,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         contextGraphId: 0n,
       };
     }
-
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,

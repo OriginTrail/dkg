@@ -18,6 +18,8 @@ import type {
   KAUpdateVerification,
   CreateOnChainContextGraphParams,
   CreateOnChainContextGraphResult,
+  PrepareContextGraphRegistrationOptions,
+  PreparedContextGraphRegistration,
   VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
@@ -43,6 +45,7 @@ import {
   MerkleRootMismatchError,
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
+import { ContextGraphRegistrationCoverageSignerUnavailableError } from './evm-adapter-errors.js';
 import { ethers } from 'ethers';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -1214,26 +1217,118 @@ export class MockChainAdapter implements ChainAdapter {
   }>();
   private nextContextGraphId = 1n;
 
-  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
-    if (params.accessPolicy === undefined || params.publishPolicy === undefined) {
+  async getSignerAddress(): Promise<string> {
+    return ethers.getAddress(this.signerAddress);
+  }
+
+  async prepareOnChainContextGraphRegistration(
+    options: PrepareContextGraphRegistrationOptions = {},
+  ): Promise<PreparedContextGraphRegistration> {
+    if (
+      options.registrationPcaAccountId !== undefined
+      && options.registrationPcaAccountId <= 0n
+    ) {
+      throw new RangeError('registrationPcaAccountId must be a positive PCA account id.');
+    }
+    let signerAddress: string;
+    try {
+      signerAddress = ethers.getAddress(await this.getSignerAddress());
+    } catch {
+      const signerList = (this as unknown as {
+        getSignerAddresses?: () => Promise<string[]>;
+      }).getSignerAddresses;
+      const candidates = typeof signerList === 'function'
+        ? await signerList.call(this)
+        : [];
+      const candidate = candidates.find((address) =>
+        ethers.isAddress(address) && ethers.getAddress(address) !== ethers.ZeroAddress);
+      if (!candidate) {
+        throw new Error('Mock adapter does not expose its registration-tx signer');
+      }
+      signerAddress = ethers.getAddress(candidate);
+    }
+    if (
+      options.registrationSignerAddress !== undefined
+      && ethers.getAddress(options.registrationSignerAddress) !== signerAddress
+    ) {
+      throw new Error(
+        `Mock: registration signer ${options.registrationSignerAddress} is unavailable`,
+      );
+    }
+
+    if (options.registrationPcaAccountId !== undefined) {
+      const account = this.convictionAccounts.get(options.registrationPcaAccountId);
+      const signerKey = signerAddress.toLowerCase();
+      const ownsAccount = account?.owner.toLowerCase() === signerKey;
+      const isExactAgent = this.agentToConvictionAccount.get(signerKey)
+        === options.registrationPcaAccountId;
+      if (!ownsAccount && !isExactAgent) {
+        throw new ContextGraphRegistrationCoverageSignerUnavailableError(
+          options.registrationPcaAccountId,
+        );
+      }
+    }
+
+    const coverage = Object.freeze(options.registrationPcaAccountId !== undefined
+      ? { source: 'explicit' as const, accountId: options.registrationPcaAccountId }
+      : { source: 'none' as const });
+    const submit = async (
+      params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
+    ): Promise<CreateOnChainContextGraphResult> => {
+      const registrationDepositPolicy = coverage.source === 'explicit'
+        ? { mode: 'pca' as const, accountId: coverage.accountId }
+        : { mode: 'legacy' as const };
+      return this.createOnChainContextGraphAs(
+        { ...params, registrationDepositPolicy },
+        signerAddress,
+      );
+    };
+    return Object.freeze({ signerAddress, coverage, submit });
+  }
+
+  async createOnChainContextGraph(
+    params: CreateOnChainContextGraphParams,
+    preparationOptions?: PrepareContextGraphRegistrationOptions,
+  ): Promise<CreateOnChainContextGraphResult> {
+    const { registrationDepositPolicy, ...createParams } = params;
+    if (preparationOptions !== undefined) {
+      if (registrationDepositPolicy && registrationDepositPolicy.mode !== 'legacy') {
+        throw new TypeError(
+          'Prepared context-graph registration seals its deposit policy; ' +
+          'do not also pass registrationDepositPolicy.',
+        );
+      }
+      const prepared = await this.prepareOnChainContextGraphRegistration(preparationOptions);
+      return prepared.submit(createParams);
+    }
+    return this.createOnChainContextGraphAs(params, this.signerAddress);
+  }
+
+  private async createOnChainContextGraphAs(
+    params: CreateOnChainContextGraphParams,
+    transactionSignerAddress: string,
+  ): Promise<CreateOnChainContextGraphResult> {
+    const normalizedTransactionSigner = ethers.getAddress(transactionSignerAddress);
+    const { registrationDepositPolicy, ...createParams } = params;
+    if (createParams.accessPolicy === undefined || createParams.publishPolicy === undefined) {
       throw new Error(
         'Mock createOnChainContextGraph: `accessPolicy` and `publishPolicy` are required (SPEC_CG_MEMORY_MODEL).',
       );
     }
-    const { accessPolicy, publishPolicy } = params;
+    const { accessPolicy, publishPolicy } = createParams;
     if (accessPolicy !== 0 && accessPolicy !== 1) {
       throw new Error('Mock: invalid accessPolicy');
     }
     if (publishPolicy !== 0 && publishPolicy !== 1) {
       throw new Error('Mock: invalid publishPolicy');
     }
-    const registrationDepositPolicy = params.registrationDepositPolicy ?? { mode: 'legacy' as const };
-    switch (registrationDepositPolicy.mode) {
+    const resolvedDepositPolicy = registrationDepositPolicy ?? { mode: 'legacy' as const };
+    switch (resolvedDepositPolicy.mode) {
       case 'legacy':
       case 'paid':
         break;
       case 'pca':
-        if (registrationDepositPolicy.accountId <= 0n) {
+        if (resolvedDepositPolicy.accountId <= 0n) {
           throw new Error('Mock: PCA registration-deposit policy requires a positive accountId');
         }
         break;
@@ -1248,7 +1343,7 @@ export class MockChainAdapter implements ChainAdapter {
     publishAuthority = ethers.getAddress(publishAuthority);
     if (publishPolicy === 0) {
       if (publishAuthority === ethers.ZeroAddress) {
-        publishAuthority = ethers.getAddress(this.signerAddress);
+        publishAuthority = normalizedTransactionSigner;
       }
       if (publishAuthorityAccountId !== 0n) {
         const pcaOwner = await this.getPublishingConvictionAccountOwner(publishAuthorityAccountId);
@@ -1302,7 +1397,7 @@ export class MockChainAdapter implements ChainAdapter {
 
     const contextGraphId = this.nextContextGraphId++;
     this.contextGraphs.set(contextGraphId, {
-      manager: this.signerAddress,
+      manager: normalizedTransactionSigner,
       participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       metadataBatchId: params.metadataBatchId ?? 0n,
       accessPolicy,
@@ -1316,9 +1411,9 @@ export class MockChainAdapter implements ChainAdapter {
 
     this.pushEvent('ContextGraphCreated', {
       contextGraphId: contextGraphId.toString(),
-      creator: this.signerAddress,
-      owner: this.signerAddress,
-      manager: this.signerAddress,
+      creator: normalizedTransactionSigner,
+      owner: normalizedTransactionSigner,
+      manager: normalizedTransactionSigner,
       participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       accessPolicy,
       publishPolicy,

@@ -36,6 +36,15 @@ export {
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   formatNoFundedPublisherWalletMessage,
+  PCA_COVERAGE_UNSUPPORTED_CODE,
+  CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN_CODE,
+  CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE_CODE,
+  CONTEXT_GRAPH_REGISTRATION_COVERAGE_SIGNER_UNAVAILABLE_CODE,
+  STALE_HUB_BINDING_CODE,
+  PcaCoverageUnsupportedError,
+  ContextGraphFacadeVersionUnknownError,
+  ContextGraphRegistrationSignerUnavailableError,
+  ContextGraphRegistrationCoverageSignerUnavailableError,
   type PublisherWalletBalance,
 } from './evm-adapter-errors.js';
 export {
@@ -49,7 +58,6 @@ export {
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
 } from './evm-adapter-allowance.js';
 export type { EVMAdapterConfig } from './evm-adapter-types.js';
-
 /**
  * EVM chain adapter implementing the V9 ChainAdapter interface.
  * Resolves contract addresses dynamically from the Hub.

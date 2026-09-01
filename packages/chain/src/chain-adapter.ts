@@ -607,7 +607,7 @@ export interface CreateOnChainContextGraphParams {
    * Registration-deposit behavior for this create attempt. `pca` uses an
    * account only for waiver coverage; `paid` explicitly disables coverage.
    * Omission preserves the legacy selector and its authority-coupled behavior.
-   */
+    */
   registrationDepositPolicy?: ContextGraphRegistrationDepositPolicy;
   /**
    * OT-RFC-38 / LU-6 Phase B — opt-in stable wire identifier the
@@ -631,6 +631,43 @@ export interface CreateOnChainContextGraphParams {
 
 export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'contextGraphId'> {
   contextGraphId: bigint;
+}
+
+export type ContextGraphRegistrationCoverageSource = 'explicit' | 'owned' | 'agent' | 'none';
+
+export type ContextGraphRegistrationCoverage =
+  | { source: 'none' }
+  | {
+      source: Exclude<ContextGraphRegistrationCoverageSource, 'none'>;
+      /** Positive PCA account id, validated when the capability is prepared. */
+      accountId: bigint;
+    };
+
+/**
+ * Inputs consumed while selecting a context-graph registration capability.
+ * `registrationSignerAddress` pins an operational signer when a publisher has
+ * already selected one. `preferPcaCoveredSigner` is for an unpinned publisher
+ * pool: fully verified owned coverage is preferred across the pool before
+ * consent-free agent bindings, with the primary signer as the deterministic
+ * fallback. An explicit PCA account always verifies the selected signer.
+ */
+export interface PrepareContextGraphRegistrationOptions {
+  registrationPcaAccountId?: bigint;
+  registrationSignerAddress?: string;
+  preferPcaCoveredSigner?: boolean;
+}
+
+/**
+ * Immutable, signer-pinned registration capability. The implementation seals
+ * both the signer and coverage decision; `submit` deliberately has no override
+ * fields so allowance approval and every retry use the same signer.
+ */
+export interface PreparedContextGraphRegistration {
+  signerAddress: string;
+  coverage: Readonly<ContextGraphRegistrationCoverage>;
+  submit(
+    params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
+  ): Promise<CreateOnChainContextGraphResult>;
 }
 
 export interface VerifyParams {
@@ -1565,7 +1602,19 @@ export interface ChainAdapter {
   ): Promise<boolean>;
 
   // On-Chain Context Graphs (ContextGraphs contract)
-  createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  prepareOnChainContextGraphRegistration?(
+    options?: PrepareContextGraphRegistrationOptions,
+  ): Promise<PreparedContextGraphRegistration>;
+  /**
+   * Compatibility wrapper around prepared registration. The first argument is
+   * always canonical context-graph data; optional attempt policy is kept in a
+   * separate preparation-options object. Omitting `preparationOptions`
+   * preserves the historical primary-signer/no-discovery path.
+   */
+  createOnChainContextGraph?(
+    params: CreateOnChainContextGraphParams,
+    preparationOptions?: PrepareContextGraphRegistrationOptions,
+  ): Promise<CreateOnChainContextGraphResult>;
   verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 

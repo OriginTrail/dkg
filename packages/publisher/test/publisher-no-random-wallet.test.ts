@@ -43,6 +43,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   MockChainAdapter,
+  NoChainAdapter,
   type ChainAdapter,
   type OnChainPublishResult,
   type PublisherPublishPlanRequest,
@@ -1477,6 +1478,146 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       .toBe(walletB.address.toLowerCase());
     expect(chain.submittedPublishers.at(-1)?.toLowerCase())
       .toBe(walletB.address.toLowerCase());
+  });
+
+  it('treats an explicitly advisory publisher resolver as unpinned for CG registration', async () => {
+    const walletA = new ethers.Wallet(TEST_KEY);
+    const chain = new MockChainAdapter();
+    const prepare = vi.spyOn(chain, 'prepareOnChainContextGraphRegistration');
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async () => ({
+        address: walletA.address,
+        registrationPin: 'advisory',
+        source: 'generic-adapter-inference',
+      }),
+    });
+
+    await publisher.prepareContextGraphRegistration();
+
+    expect(prepare).toHaveBeenCalledWith({
+      registrationPcaAccountId: undefined,
+      registrationSignerAddress: undefined,
+      preferPcaCoveredSigner: true,
+    });
+  });
+
+  it('reports missing adapter preparation support with a typed compatibility signal', async () => {
+    const chain = new NoChainAdapter();
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+
+    await expect(publisher.prepareContextGraphRegistration()).rejects.toMatchObject({
+      name: 'ContextGraphRegistrationPreparationUnsupportedError',
+      code: 'CONTEXT_GRAPH_REGISTRATION_PREPARATION_UNSUPPORTED',
+    });
+  });
+
+  it('seals legacy direct registration around the adapter signer, not an advisory author hint', async () => {
+    const advisoryWallet = new ethers.Wallet(TEST_KEY);
+    const directWallet = new ethers.Wallet(TEST_KEY_ALT);
+    const chain = new MockChainAdapter('mock:31337', directWallet.address);
+    const create = vi.spyOn(chain, 'createOnChainContextGraph');
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async () => ({
+        address: advisoryWallet.address,
+        registrationPin: 'advisory',
+        source: 'generic-adapter-inference',
+      }),
+    });
+
+    const legacy = await publisher.prepareLegacyContextGraphRegistration();
+    expect(legacy.signerAddress).toBe(directWallet.address);
+    await legacy.submit({
+      accessPolicy: 1,
+      publishPolicy: 1,
+      participantAgents: [],
+      nameHash: ethers.ZeroHash,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects legacy direct registration when a hard publisher pin differs from the adapter signer', async () => {
+    const pinnedWallet = new ethers.Wallet(TEST_KEY);
+    const directWallet = new ethers.Wallet(TEST_KEY_ALT);
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain: new MockChainAdapter('mock:31337', directWallet.address),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async () => ({
+        address: pinnedWallet.address,
+        registrationPin: 'hard',
+        source: 'configured-publisher',
+      }),
+    });
+
+    await expect(publisher.prepareLegacyContextGraphRegistration())
+      .rejects.toThrow(/does not match the legacy direct chain signer/);
+  });
+
+  it('keeps a legacy string resolver result as a hard registration pin', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const prepare = vi.spyOn(chain, 'prepareOnChainContextGraphRegistration');
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async () => wallet.address,
+    });
+
+    await publisher.prepareContextGraphRegistration();
+
+    expect(prepare).toHaveBeenCalledWith({
+      registrationPcaAccountId: undefined,
+      registrationSignerAddress: wallet.address,
+      preferPcaCoveredSigner: false,
+    });
+  });
+
+  it('passes a hard resolver registration pin through and rejects caller substitution', async () => {
+    const walletA = new ethers.Wallet(TEST_KEY);
+    const walletB = new ethers.Wallet(TEST_KEY_ALT);
+    const chain = new MockChainAdapter('mock:31337', walletA.address);
+    const prepare = vi.spyOn(chain, 'prepareOnChainContextGraphRegistration');
+    const { accountId } = await chain.createPublishingConvictionAccount(ethers.parseEther('10000'));
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async () => ({
+        address: walletA.address,
+        registrationPin: 'hard',
+        source: 'curated-authority',
+      }),
+    });
+
+    await publisher.prepareContextGraphRegistration({ registrationPcaAccountId: accountId });
+    expect(prepare).toHaveBeenCalledWith({
+      registrationPcaAccountId: accountId,
+      registrationSignerAddress: walletA.address,
+      preferPcaCoveredSigner: false,
+    });
+
+    await expect(publisher.prepareContextGraphRegistration({
+      registrationSignerAddress: walletB.address,
+    })).rejects.toThrow(/does not match curated-authority/);
+    expect(prepare).toHaveBeenCalledTimes(1);
   });
 
   it('invokes adapter-owned planning before signer discovery and binds the planned address', async () => {

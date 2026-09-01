@@ -28,7 +28,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, isHubStaleError, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
@@ -2803,6 +2803,16 @@ export class EVMChainAdapterBase {
     return address;
   }
 
+  /**
+   * Uncached coherence check for a capability decision made before a write.
+   * Most stale bindings self-heal when the retired contract reverts, but a
+   * local "unsupported" decision has no write to expose that marker.
+   */
+  protected async isCurrentHubContractAddress(name: string, boundAddress: string): Promise<boolean> {
+    const currentAddress = await this.readHubContractAddress(name);
+    return ethers.getAddress(currentAddress) === ethers.getAddress(boundAddress);
+  }
+
   protected async resolveAssetStorage(name: string, abiName?: string): Promise<Contract> {
     let address: string;
     try {
@@ -4098,8 +4108,7 @@ export class EVMChainAdapterBase {
       return await fn();
     } catch (err) {
       if (err instanceof Error) enrichEvmError(err);
-      const msg = err instanceof Error ? err.message : '';
-      if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
+      if (isHubStaleError(err)) {
         this.invalidateRandomSamplingPair();
         return await fn();
       }
@@ -4133,8 +4142,7 @@ export class EVMChainAdapterBase {
       return await fn();
     } catch (err) {
       if (err instanceof Error) enrichEvmError(err);
-      const msg = err instanceof Error ? err.message : '';
-      if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
+      if (isHubStaleError(err)) {
         this.invalidateAllBoundContracts();
         await this.init();
         return await fn();

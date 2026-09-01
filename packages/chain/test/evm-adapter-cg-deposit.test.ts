@@ -25,7 +25,7 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
   let hubAddress: string;
   let baseSnapshot: string;
   const DEPOSIT = ethers.parseEther('100');
-  const PCA_COMMITMENT = ethers.parseEther('50000');
+  const PCA_COMMITMENT = ethers.parseEther('500000');
 
   beforeAll(async () => {
     const ctx = getSharedContext();
@@ -92,28 +92,14 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
     return waiver.waivedCgCount(accountId);
   };
 
-  const createPca = async (owner: Wallet): Promise<bigint> => {
+  const getTokenBalance = async (owner: string): Promise<bigint> => {
     const tokenAddr = await hub().getContractAddress('Token');
-    const pcaAddr = await hub().getContractAddress('DKGPublishingConvictionNFT');
     const token = new Contract(
       tokenAddr,
-      ['function approve(address,uint256) returns (bool)'],
-      owner,
+      ['function balanceOf(address) view returns (uint256)'],
+      provider,
     );
-    const pca = new Contract(
-      pcaAddr,
-      [
-        'function createAccount(uint96,uint72) returns (uint256)',
-        'function balanceOf(address) view returns (uint256)',
-        'function tokenOfOwnerByIndex(address,uint256) view returns (uint256)',
-      ],
-      owner,
-    );
-    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, owner.address, PCA_COMMITMENT);
-    await (await token.approve(pcaAddr, PCA_COMMITMENT)).wait();
-    await (await pca.createAccount(PCA_COMMITMENT, 0)).wait();
-    const ownedCount = BigInt(await pca.balanceOf(owner.address));
-    return pca.tokenOfOwnerByIndex(owner.address, ownedCount - 1n);
+    return token.balanceOf(owner);
   };
 
   // Count CORE_OP→ContextGraphs TRAC approvals since `fromBlock` — proves whether the
@@ -183,26 +169,52 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
     expect(await approvalCount(coreOpAddress, fromBlock + 1)).toBe(0);
   });
 
-  it('uses independent PCA coverage for an open graph without approval or stored authority', async () => {
+  it('submits PCA-covered registration through the real additive facade selector', async () => {
     await setDeposit(DEPOSIT);
-    const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
-    const accountId = await createPca(coreOp);
-    const waivedBefore = await waivedCount(accountId);
-    const fromBlock = await provider.getBlockNumber();
+    const pcaOwner = new Wallet(HARDHAT_KEYS.EXTRA1, provider);
+    const existingBalance = await getTokenBalance(pcaOwner.address);
+    await mintTokens(
+      provider,
+      hubAddress,
+      HARDHAT_KEYS.DEPLOYER,
+      pcaOwner.address,
+      PCA_COMMITMENT,
+    );
+    const committedTrac = existingBalance + PCA_COMMITMENT;
+    expect(committedTrac).toBeLessThan(1n << 96n);
 
-    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const result = await adapter.createOnChainContextGraph({
+    const adapter = createEVMAdapter(HARDHAT_KEYS.EXTRA1);
+    const { accountId } = await adapter.createPublishingConvictionAccount(committedTrac);
+    expect(await getTokenBalance(pcaOwner.address)).toBe(0n);
+
+    const waivedBefore = await waivedCount(accountId);
+    const prepared = await adapter.prepareOnChainContextGraphRegistration({
+      preferPcaCoveredSigner: true,
+    });
+    expect(prepared.signerAddress).toBe(pcaOwner.address);
+    expect(prepared.coverage).toEqual({ source: 'owned', accountId });
+
+    const fromBlock = await provider.getBlockNumber();
+    const result = await prepared.submit({
       accessPolicy: 0,
       publishPolicy: 1,
-      registrationDepositPolicy: { mode: 'pca', accountId },
     });
 
     expect(result.success).toBe(true);
-    expect(result.contextGraphId > 0n).toBe(true);
-    expect(await waivedCount(accountId)).toBe(waivedBefore + 1n);
+    expect(result.contextGraphId).toBeGreaterThan(0n);
     expect(await getEscrow(result.contextGraphId)).toBe(0n);
+    expect(await waivedCount(accountId)).toBe(waivedBefore + 1n);
     expect(await getPublishAuthorityAccountId(result.contextGraphId)).toBe(0n);
-    expect(await approvalCount(coreOp.address, fromBlock + 1)).toBe(0);
+    expect(await approvalCount(pcaOwner.address, fromBlock + 1)).toBe(0);
+
+    const transaction = await provider.getTransaction(result.hash);
+    expect(transaction).not.toBeNull();
+    expect(transaction!.from).toBe(pcaOwner.address);
+    expect(transaction!.data.slice(0, 10)).toBe(
+      ethers.id(
+        'createContextGraphWithPcaCoverage(address[],uint256,uint8,uint8,address,uint256,bytes32,uint256)',
+      ).slice(0, 10),
+    );
   });
 
   it('explicitly pays despite an eligible PCA publish authority', async () => {
