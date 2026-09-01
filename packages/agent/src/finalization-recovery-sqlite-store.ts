@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { OwnedSqliteSerializedConnectionV1 } from './sqlite/owned-sqlite-bootstrap-v1.js';
 import { VerifiedGraphScopedFinalizationEvidenceCodec } from './finalization-graph-envelope.js';
 import {
   type FinalizationRecoveryEntry,
@@ -123,7 +124,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   #closed = false;
   #closing = false;
   #closePromise: Promise<void> | undefined;
-  #mutationTail: Promise<void> = Promise.resolve();
+  readonly #connection: OwnedSqliteSerializedConnectionV1;
   readonly #policy: FinalizationRecoveryRetentionPolicy;
 
   private constructor(
@@ -131,6 +132,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     private readonly database: DatabaseSync,
     options: SqliteFinalizationRecoveryStoreOptions,
   ) {
+    this.#connection = new OwnedSqliteSerializedConnectionV1(database, databasePath);
     this.#policy = resolveFinalizationRecoveryRetentionPolicy(options);
   }
 
@@ -152,7 +154,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
 
   async get(key: string): Promise<FinalizationRecoveryEntry | undefined> {
     if (this.#closed || this.#closing) return undefined;
-    await this.#mutationTail;
+    await this.#connection.settled;
     if (this.#closed) return undefined;
     const row = this.database.prepare(
       'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
@@ -678,7 +680,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       Math.max(0, Math.trunc(limit)),
     );
     if (boundedLimit === 0) return [];
-    await this.#mutationTail;
+    await this.#connection.settled;
     if (this.#closed) return [];
     const now = this.#policy.now();
     return this.database.prepare(`
@@ -696,7 +698,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     kaId: string;
   }): Promise<FinalizationRecoveryEntry[]> {
     if (this.#closed || this.#closing) return [];
-    await this.#mutationTail;
+    await this.#connection.settled;
     if (this.#closed) return [];
     // Future-due SETTLED rows must remain visible so reconciliation can keep
     // the current ordinal pending without issuing another receipt RPC early.
@@ -717,7 +719,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   /** Bounded diagnostic/test snapshot; raw bytes never cross the HTTP status surface. */
   async list(): Promise<FinalizationRecoveryEntry[]> {
     if (this.#closed || this.#closing) return [];
-    await this.#mutationTail;
+    await this.#connection.settled;
     if (this.#closed) return [];
     return this.database.prepare(
       'SELECT * FROM finalization_inbox_v1 ORDER BY created_at, key',
@@ -800,7 +802,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         dueEntries: 0,
       };
     }
-    await this.#mutationTail;
+    await this.#connection.settled;
     if (this.#closed) {
       return {
         available: false,
@@ -851,14 +853,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     if (this.#closed) return;
     this.#closing = true;
     this.#closePromise = (async () => {
-      await this.#mutationTail;
       try {
-        this.database.exec('PRAGMA busy_timeout = 0');
-        // Compaction is not a durability boundary: FULL commits make the WAL
-        // recoverable. A live prepared statement can make checkpointing return
-        // SQLITE_LOCKED, so connection close remains the mandatory boundary.
-        try { this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* retain WAL */ }
-        this.database.close();
+        await this.#connection.drainCheckpointAndClose();
         this.#closed = true;
         fsyncFinalizationRecoveryDatabase(this.databasePath);
       } finally {
@@ -869,25 +865,11 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   }
 
   private mutate<T>(operation: () => T): Promise<T> {
-    const run = this.#mutationTail.catch(() => undefined).then(operation);
-    this.#mutationTail = run.then(() => undefined, () => undefined);
-    return run;
+    return this.#connection.mutate(operation);
   }
 
   private transaction(operation: () => void): void {
-    let open = false;
-    try {
-      this.database.exec('BEGIN IMMEDIATE');
-      open = true;
-      operation();
-      this.database.exec('COMMIT');
-      open = false;
-    } catch (error) {
-      if (open) {
-        try { this.database.exec('ROLLBACK'); } catch { /* retain transaction failure */ }
-      }
-      throw error;
-    }
+    this.#connection.transaction(operation);
   }
 
   private prune(): void {

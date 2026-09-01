@@ -1,24 +1,11 @@
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-} from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import {
-  applyRfc64OwnerOnlyPermissionsSyncV1,
-  assertRfc64FilesystemOwnerSyncV1,
-  RFC64_SECURE_DIRECTORY_MODE_V1,
-  RFC64_SECURE_FILE_MODE_V1,
-} from './rfc64/secure-filesystem-policy-v1.js';
-import {
-  assertOwnedSqliteHeaderIdentityV1,
   fsyncOwnedSqliteFileAndDirectoryV1,
-  loadOwnedSqliteModuleV1,
-  readOwnedSqlitePragmaIntegerV1,
-  secureOwnedSqliteFileSetV1,
-  type OwnedSqliteModuleV1,
 } from './sqlite/owned-sqlite-v1.js';
+import {
+  openOwnedSqliteDatabaseV1,
+  type OwnedSqliteDatabaseDescriptorV1,
+} from './sqlite/owned-sqlite-bootstrap-v1.js';
 import {
   FINALIZATION_INBOX_DATABASE_FILENAME,
 } from './finalization-recovery-store.js';
@@ -139,160 +126,6 @@ export interface OpenedFinalizationRecoveryDatabase {
   database: DatabaseSync;
 }
 
-function normalizeSql(value: string): string {
-  return value.replace(/\s+/g, ' ').replace(/\s*([(),])\s*/g, '$1').trim().toLowerCase();
-}
-
-function readPragmaInteger(database: DatabaseSync, pragma: string): number {
-  return readOwnedSqlitePragmaIntegerV1(database, pragma, 'Finalization inbox');
-}
-
-function preparePath(dataDir: string): string {
-  const root = resolve(dataDir);
-  const path = resolve(root, FINALIZATION_INBOX_DATABASE_FILENAME);
-  const relativePath = relative(root, path);
-  if (
-    relativePath === '..'
-    || relativePath.startsWith(`..${sep}`)
-    || isAbsolute(relativePath)
-  ) {
-    throw new Error('Finalization inbox path escapes the DKG data directory');
-  }
-  if (!existsSync(root)) {
-    mkdirSync(root, { recursive: true, mode: RFC64_SECURE_DIRECTORY_MODE_V1 });
-  }
-  const rootStat = lstatSync(root);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-    throw new Error('Finalization inbox data directory must be a real directory');
-  }
-  assertRfc64FilesystemOwnerSyncV1(root);
-  if (process.platform !== 'win32') {
-    applyRfc64OwnerOnlyPermissionsSyncV1(
-      root,
-      RFC64_SECURE_DIRECTORY_MODE_V1,
-      { entryKind: 'directory' },
-    );
-  }
-  secureOwnedSqliteFileSetV1(path, 'Finalization inbox');
-  return path;
-}
-
-function schemaObjects(database: DatabaseSync): Map<string, string> {
-  const rows = database.prepare(
-    `SELECT name, sql FROM sqlite_schema
-     WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
-     ORDER BY name`,
-  ).all();
-  return new Map(rows.map((row) => [String(row.name), normalizeSql(String(row.sql))]));
-}
-
-function expectedSchema(
-  Database: OwnedSqliteModuleV1['DatabaseSync'],
-  ddl: string,
-): Map<string, string> {
-  const memory = new Database(':memory:');
-  try {
-    memory.exec(ddl);
-    return schemaObjects(memory);
-  } finally {
-    memory.close();
-  }
-}
-
-function verifySchema(
-  database: DatabaseSync,
-  expected: Map<string, string>,
-  userVersion = USER_VERSION,
-): void {
-  if (
-    readPragmaInteger(database, 'application_id') !== APPLICATION_ID
-    || readPragmaInteger(database, 'user_version') !== userVersion
-  ) {
-    throw new Error('Finalization inbox has a foreign or unsupported database identity');
-  }
-  const actual = schemaObjects(database);
-  if (
-    actual.size !== expected.size
-    || [...expected].some(([name, sql]) => actual.get(name) !== sql)
-  ) {
-    throw new Error('Finalization inbox exact schema verification failed');
-  }
-  if (database.prepare('PRAGMA foreign_key_check').all().length !== 0) {
-    throw new Error('Finalization inbox foreign-key verification failed');
-  }
-  const quickCheck = database.prepare('PRAGMA quick_check').all();
-  if (
-    quickCheck.length !== 1
-    || String(Object.values(quickCheck[0]!)[0]).toLowerCase() !== 'ok'
-  ) {
-    throw new Error('Finalization inbox SQLite integrity verification failed');
-  }
-  database.prepare('SELECT * FROM finalization_inbox_v1')
-    .all()
-    .forEach(finalizationRecoveryRowToEntry);
-}
-
-function applyRuntimePragmas(database: DatabaseSync): void {
-  database.exec(`
-    PRAGMA foreign_keys = ON;
-    PRAGMA trusted_schema = OFF;
-    PRAGMA synchronous = FULL;
-    PRAGMA busy_timeout = 5000;
-    PRAGMA journal_size_limit = 67108864;
-  `);
-  const mode = database.prepare('PRAGMA journal_mode = WAL').get();
-  if (String(mode?.journal_mode).toLowerCase() !== 'wal') {
-    throw new Error('Finalization inbox refused journal_mode=WAL');
-  }
-  const expected = new Map([
-    ['foreign_keys', 1],
-    ['trusted_schema', 0],
-    ['synchronous', 2],
-    ['busy_timeout', 5000],
-  ]);
-  for (const [pragma, value] of expected) {
-    if (readPragmaInteger(database, pragma) !== value) {
-      throw new Error(`Finalization inbox refused PRAGMA ${pragma}=${value}`);
-    }
-  }
-}
-
-function initializeFresh(database: DatabaseSync, path: string): void {
-  const mode = database.prepare('PRAGMA journal_mode = DELETE').get();
-  database.exec('PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000');
-  if (String(mode?.journal_mode).toLowerCase() !== 'delete') {
-    throw new Error('Finalization inbox refused durable bootstrap journal mode');
-  }
-  let transactionOpen = false;
-  try {
-    database.exec('BEGIN IMMEDIATE');
-    transactionOpen = true;
-    if (
-      readPragmaInteger(database, 'application_id') !== 0
-      || readPragmaInteger(database, 'user_version') !== 0
-      || schemaObjects(database).size !== 0
-    ) {
-      throw new Error('Finalization inbox lost its pristine identity before initialization');
-    }
-    database.exec(DDL_V2);
-    database.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
-    database.exec(`PRAGMA user_version = ${USER_VERSION}`);
-    database.exec('COMMIT');
-    transactionOpen = false;
-  } catch (error) {
-    if (transactionOpen) {
-      try { database.exec('ROLLBACK'); } catch { /* retain initialization failure */ }
-    }
-    throw error;
-  }
-  applyRfc64OwnerOnlyPermissionsSyncV1(
-    path,
-    RFC64_SECURE_FILE_MODE_V1,
-    { entryKind: 'file' },
-  );
-  fsyncOwnedSqliteFileAndDirectoryV1(path);
-}
-
 function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
   let transactionOpen = false;
   try {
@@ -318,54 +151,39 @@ function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
   fsyncOwnedSqliteFileAndDirectoryV1(databasePath);
 }
 
+/**
+ * The inbox contributes its identity, DDLs, one legacy migration and its
+ * domain validation (foreign keys + a full row sweep through the codec) to
+ * the CANONICAL owned-SQLite bootstrap (review r2); everything else — the
+ * secure path, header identity, bootstrap, exact-schema verification and
+ * runtime pragmas — is the one shared implementation.
+ */
+const FINALIZATION_INBOX_DESCRIPTOR: OwnedSqliteDatabaseDescriptorV1 = {
+  feature: 'Finalization inbox',
+  loadLabel: 'Durable finalization recovery',
+  filename: FINALIZATION_INBOX_DATABASE_FILENAME,
+  applicationId: APPLICATION_ID,
+  userVersion: USER_VERSION,
+  ddl: DDL_V2,
+  verifyDomain(database) {
+    if (database.prepare('PRAGMA foreign_key_check').all().length !== 0) {
+      throw new Error('Finalization inbox foreign-key verification failed');
+    }
+    database.prepare('SELECT * FROM finalization_inbox_v1')
+      .all()
+      .forEach(finalizationRecoveryRowToEntry);
+  },
+  legacyMigration: {
+    fromVersion: LEGACY_USER_VERSION,
+    fromDdl: DDL_V1,
+    migrate: migrateLegacyV1,
+  },
+};
+
 export async function openFinalizationRecoveryDatabase(
   dataDir: string,
 ): Promise<OpenedFinalizationRecoveryDatabase> {
-  const databasePath = preparePath(dataDir);
-  const fresh = !existsSync(databasePath);
-  const sqlite = await loadOwnedSqliteModuleV1('Durable finalization recovery');
-  if (!fresh) {
-    try {
-      assertOwnedSqliteHeaderIdentityV1(
-        databasePath,
-        APPLICATION_ID,
-        USER_VERSION,
-        'Finalization inbox',
-      );
-    } catch {
-      // The main-file header can legitimately lag a committed WAL. Accept
-      // exactly the owned v1 header here, then classify from SQLite's recovered
-      // PRAGMA below after the WAL has been replayed.
-      assertOwnedSqliteHeaderIdentityV1(
-        databasePath,
-        APPLICATION_ID,
-        LEGACY_USER_VERSION,
-        'Finalization inbox',
-      );
-    }
-  }
-  const database = new sqlite.DatabaseSync(databasePath);
-  try {
-    if (fresh) initializeFresh(database, databasePath);
-    const recoveredVersion = readPragmaInteger(database, 'user_version');
-    if (recoveredVersion === LEGACY_USER_VERSION) {
-      verifySchema(
-        database,
-        expectedSchema(sqlite.DatabaseSync, DDL_V1),
-        LEGACY_USER_VERSION,
-      );
-      migrateLegacyV1(database, databasePath);
-    } else if (recoveredVersion !== USER_VERSION) {
-      throw new Error('Finalization inbox has a foreign or unsupported recovered version');
-    }
-    verifySchema(database, expectedSchema(sqlite.DatabaseSync, DDL_V2));
-    applyRuntimePragmas(database);
-    secureOwnedSqliteFileSetV1(databasePath, 'Finalization inbox');
-    return { databasePath, database };
-  } catch (error) {
-    try { database.close(); } catch { /* retain open failure */ }
-    throw error;
-  }
+  return openOwnedSqliteDatabaseV1(dataDir, FINALIZATION_INBOX_DESCRIPTOR);
 }
 
 export function fsyncFinalizationRecoveryDatabase(databasePath: string): void {

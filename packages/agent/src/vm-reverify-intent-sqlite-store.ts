@@ -10,6 +10,7 @@
  * issues is refused if a newer event has redefined the row in the meantime.
  */
 import type { DatabaseSync } from 'node:sqlite';
+import { OwnedSqliteSerializedConnectionV1 } from './sqlite/owned-sqlite-bootstrap-v1.js';
 import {
   fsyncVmReverifyIntentDatabase,
   openVmReverifyIntentDatabase,
@@ -83,7 +84,7 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
   #closed = false;
   #closing = false;
   #closePromise: Promise<void> | undefined;
-  #mutationTail: Promise<void> = Promise.resolve();
+  readonly #connection: OwnedSqliteSerializedConnectionV1;
   readonly #now: () => number;
 
   private constructor(
@@ -91,6 +92,7 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
     private readonly database: DatabaseSync,
     options: SqliteVmReverifyIntentStoreOptions,
   ) {
+    this.#connection = new OwnedSqliteSerializedConnectionV1(database, databasePath);
     this.#now = options.now ?? (() => Date.now());
   }
 
@@ -191,7 +193,7 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
     if (!Number.isFinite(limit)) return [];
     const boundedLimit = Math.max(0, Math.trunc(limit));
     if (boundedLimit === 0) return [];
-    await this.#mutationTail;
+    await this.#connection.settled;
     if (this.#closed) return [];
     return this.database.prepare(`
       SELECT * FROM vm_reverify_intents_v1
@@ -273,7 +275,7 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
 
   async countPending(localCgId?: string): Promise<number> {
     if (this.#closed || this.#closing) return 0;
-    await this.#mutationTail;
+    await this.#connection.settled;
     if (this.#closed) return 0;
     const row = localCgId === undefined
       ? this.database.prepare(
@@ -287,7 +289,7 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
 
   async health(): Promise<VmReverifyIntentHealth> {
     if (this.#closed || this.#closing) return { pending: 0, abandoned: 0 };
-    await this.#mutationTail;
+    await this.#connection.settled;
     if (this.#closed) return { pending: 0, abandoned: 0 };
     const counts = this.database.prepare(
       'SELECT state, COUNT(*) AS count FROM vm_reverify_intents_v1 GROUP BY state',
@@ -324,11 +326,8 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
     if (this.#closed) return;
     this.#closing = true;
     this.#closePromise = (async () => {
-      await this.#mutationTail;
       try {
-        this.database.exec('PRAGMA busy_timeout = 0');
-        try { this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* retain WAL */ }
-        this.database.close();
+        await this.#connection.drainCheckpointAndClose();
         this.#closed = true;
         fsyncVmReverifyIntentDatabase(this.databasePath);
       } finally {
@@ -349,25 +348,11 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
   }
 
   private mutate<T>(operation: () => T): Promise<T> {
-    const run = this.#mutationTail.catch(() => undefined).then(operation);
-    this.#mutationTail = run.then(() => undefined, () => undefined);
-    return run;
+    return this.#connection.mutate(operation);
   }
 
   private transaction(operation: () => void): void {
-    let open = false;
-    try {
-      this.database.exec('BEGIN IMMEDIATE');
-      open = true;
-      operation();
-      this.database.exec('COMMIT');
-      open = false;
-    } catch (error) {
-      if (open) {
-        try { this.database.exec('ROLLBACK'); } catch { /* retain transaction failure */ }
-      }
-      throw error;
-    }
+    this.#connection.transaction(operation);
   }
 }
 
