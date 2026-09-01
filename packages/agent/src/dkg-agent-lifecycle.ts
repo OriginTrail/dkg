@@ -8083,11 +8083,45 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     localCgId: string,
     verifyRecovered: () => Promise<boolean>,
   ): Promise<void> {
+    let peerFailures = 0;
+    let lastFailure: unknown;
     for (const peerId of await this.resolveVmReverifySwmPeers(localCgId)) {
-      const r = await this.recoverContextGraphSwmFromPeer(peerId, localCgId);
+      let r;
+      try {
+        r = await this.recoverContextGraphSwmFromPeer(peerId, localCgId);
+      } catch (error) {
+        // Lifecycle closure aborts the traversal — shutdown is not a peer
+        // failure. A recoverable per-peer failure (timeout, transfer abort)
+        // must NOT stop the traversal (review r3): the next peer may hold
+        // the version this one could not serve.
+        if (
+          error instanceof VmReconcileQueueClosedError
+          || (error instanceof Error && error.name === 'AbortError')
+        ) {
+          throw error;
+        }
+        peerFailures += 1;
+        lastFailure = error;
+        this.log.warn(
+          createOperationContext('sync'),
+          `W2 SWM recovery from ${peerId.slice(-8)} failed; trying the next peer: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
       const wroteSomething = r.insertedDataQuads > 0 || r.insertedMetaQuads > 0
         || r.replacedGraphs > 0 || r.replacedRoots > 0;
       if (wroteSomething && await verifyRecovered()) return;
+    }
+    // Clean exhaustion — every peer answered and none served the target —
+    // returns normally: that IS the evidence the park countdown measures.
+    // A traversal with failed attempts and no success established nothing
+    // (review r3) and must surface as a FAILED recovery instead.
+    if (peerFailures > 0) {
+      throw new Error(
+        `W2 SWM recovery traversal incomplete: ${peerFailures} peer attempt(s) failed `
+        + `(${lastFailure instanceof Error ? lastFailure.message : String(lastFailure)})`,
+      );
     }
   }
 

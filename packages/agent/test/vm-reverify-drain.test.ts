@@ -475,7 +475,7 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     ).toBe('PENDING');
   });
 
-  it('survives a recovery that throws, and leaves the item retryable', async () => {
+  it('a THROWN recovery is an infrastructure failure: no park budget, still retryable (review r3)', async () => {
     const intents = new InMemoryVmReverifyIntentStore();
     const ual = await seed(intents, 63n, 100);
     const fetch = makeFetch({ snapshotFor: () => snapshot(200), localState: () => 'missing' });
@@ -486,7 +486,10 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
 
     const run = await worker.runOnce();
 
-    expect(run.items[0]).toMatchObject({ ual, action: 'retry', reason: 'unresolved' });
+    // NOT `unresolved` (review r3): the traversal never completed, so peer
+    // exhaustion was not established and the 24h countdown must not run.
+    expect(run.items[0]).toMatchObject({ ual, action: 'retry', reason: 'swm-recovery-failed' });
+    expect(intents.rows.get(ual)!.firstAttemptAt, 'the park budget must not start').toBeUndefined();
     expect(fetch.requested.length, 'a failed recovery must not trigger the re-fetch').toBe(1);
     expect(lines.some((line) => line.includes('swm-recovery') && line.includes('peer hung up')))
       .toBe(true);

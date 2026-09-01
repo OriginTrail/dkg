@@ -313,7 +313,7 @@ export class VmReverifyWorker {
       // are network I/O that can outlast the retry delay, and a `nextAttemptAt`
       // computed from the pre-I/O clock would already be overdue — an
       // immediate re-poll instead of a backoff.
-      await this.recordChunk(records, outcomes, summary, this.#now(), paired.swmRecoveryAvailable);
+      await this.recordChunk(records, outcomes, summary, this.#now(), paired.swmRecovery);
     }
     return summary;
   }
@@ -399,7 +399,7 @@ export class VmReverifyWorker {
     records: readonly VmReverifyIntentRecord[],
     outcomes: Map<string, CallOutcome>,
     summary: VmReverifyRunSummary,
-  ): Promise<{ outcomes: Map<string, CallOutcome>; swmRecoveryAvailable?: boolean }> {
+  ): Promise<{ outcomes: Map<string, CallOutcome>; swmRecovery?: 'completed' | 'unavailable' | 'failed' }> {
     const stranded = records.filter((record) => {
       const outcome = outcomes.get(record.ual);
       return outcome?.kind === 'item' && outcome.status === 'unresolved';
@@ -408,7 +408,7 @@ export class VmReverifyWorker {
     if (!this.deps.recoverContextGraphSwm) return { outcomes };
     // An operator who killed the durable plane must not have W2 resurrect it.
     if (this.deps.durableSyncEnabled && !this.deps.durableSyncEnabled()) {
-      return { outcomes, swmRecoveryAvailable: false };
+      return { outcomes, swmRecovery: 'unavailable' };
     }
 
     // Verification folds its re-fetch results in as it goes, so a later
@@ -432,12 +432,15 @@ export class VmReverifyWorker {
       await this.deps.recoverContextGraphSwm(localCgId, verifyRecovered);
       summary.swmRecoveries += 1;
     } catch (error) {
+      // The traversal did NOT complete (review r3): peer exhaustion was never
+      // established, so the planner must not run the park countdown on it.
       this.deps.log.warn(
         `vm-reverify swm-recovery for cg=${localCgId} failed: `
         + `${error instanceof Error ? error.message : String(error)}`,
       );
+      return { outcomes: merged, swmRecovery: 'failed' };
     }
-    return { outcomes: merged, swmRecoveryAvailable: true };
+    return { outcomes: merged, swmRecovery: 'completed' };
   }
 
   private async call(
@@ -465,7 +468,7 @@ export class VmReverifyWorker {
     outcomes: Map<string, CallOutcome>,
     summary: VmReverifyRunSummary,
     now: number,
-    swmRecoveryAvailable?: boolean,
+    swmRecovery?: 'completed' | 'unavailable' | 'failed',
   ): Promise<void> {
     for (const record of records) {
       const outcome = outcomes.get(record.ual);
@@ -482,9 +485,9 @@ export class VmReverifyWorker {
           : { firstAttemptAt: record.firstAttemptAt }),
         now,
         parkAfterMs: this.#settings.parkAfterMs,
-        ...(swmRecoveryAvailable === undefined
+        ...(swmRecovery === undefined
           ? {}
-          : { swmRecoveryAvailable }),
+          : { swmRecovery }),
       });
       const committed = await this.apply(record, transition, now);
       this.tally(summary, record, outcome, transition, committed);

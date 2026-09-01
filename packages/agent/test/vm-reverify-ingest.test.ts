@@ -304,6 +304,52 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     expect(verifications, 'one verification per PRODUCTIVE peer').toBe(2);
   }, 60_000);
 
+  it('the SWM peer loop FAILS OVER across a broken peer to one that serves the target (review r3)', async () => {
+    const { internals } = await boot();
+    internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];
+    const attempts: string[] = [];
+    internals.recoverContextGraphSwmFromPeer = async (peerId: string) => {
+      attempts.push(peerId);
+      if (peerId === 'peer-a') throw new Error('timeout contacting peer-a');
+      return { insertedDataQuads: 0, insertedMetaQuads: 1, replacedGraphs: 0, replacedRoots: 0 };
+    };
+
+    await internals.recoverContextGraphSwmForReverify(
+      'w2r-loop-cg',
+      async () => true,
+    );
+
+    expect(attempts, 'the broken peer must not end the traversal').toEqual(['peer-a', 'peer-b']);
+  }, 60_000);
+
+  it('a traversal where every attempt failed THROWS instead of posing as exhaustion (review r3)', async () => {
+    const { internals } = await boot();
+    internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];
+    internals.recoverContextGraphSwmFromPeer = async (peerId: string) => {
+      throw new Error(`transfer aborted by ${peerId}`);
+    };
+
+    await expect(internals.recoverContextGraphSwmForReverify(
+      'w2r-loop-cg',
+      async () => true,
+    )).rejects.toThrow(/traversal incomplete: 2 peer attempt/);
+  }, 60_000);
+
+  it('lifecycle closure ABORTS the SWM traversal instead of counting as a peer failure (review r3)', async () => {
+    const { internals } = await boot();
+    internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];
+    const attempts: string[] = [];
+    internals.recoverContextGraphSwmFromPeer = async (peerId: string) => {
+      attempts.push(peerId);
+      throw new VmReconcileQueueClosedError();
+    };
+
+    await expect(internals.recoverContextGraphSwmForReverify(
+      'w2r-loop-cg',
+      async () => true,
+    )).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+    expect(attempts, 'shutdown is not failover').toEqual(['peer-a']);
+  }, 60_000);
   it('the SWM peer loop skips verification for peers that wrote nothing (review r1)', async () => {
     const { internals } = await boot();
     internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];

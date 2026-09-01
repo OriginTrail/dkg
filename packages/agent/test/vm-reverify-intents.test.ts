@@ -59,7 +59,7 @@ function plan(input: {
   attemptNumber?: number;
   firstAttemptAt?: number;
   now?: number;
-  swmRecoveryAvailable?: boolean;
+  swmRecovery?: 'completed' | 'unavailable' | 'failed';
 }): VmReverifyTransition {
   return planTransition({
     kind: input.kind,
@@ -75,9 +75,9 @@ function plan(input: {
     observedBlock: OBSERVED_BLOCK,
     attemptNumber: input.attemptNumber ?? 1,
     ...(input.firstAttemptAt === undefined ? {} : { firstAttemptAt: input.firstAttemptAt }),
-    ...(input.swmRecoveryAvailable === undefined
+    ...(input.swmRecovery === undefined
       ? {}
-      : { swmRecoveryAvailable: input.swmRecoveryAvailable }),
+      : { swmRecovery: input.swmRecovery }),
     now: input.now ?? NOW,
   });
 }
@@ -402,7 +402,15 @@ describe('planTransition — the 24 h park', () => {
       now: firstAttemptAt + VM_REVERIFY_PARK_AFTER_MS * 10,
     };
 
-    expect(plan({ ...wayPastTheBudget, swmRecoveryAvailable: false })).toMatchObject({
+    // A FAILED recovery (review r3) is an infrastructure outcome: it retries
+    // on the evidence ladder and must never reach the park, however old the
+    // budget is — peer exhaustion was never established.
+    expect(plan({ ...wayPastTheBudget, swmRecovery: 'failed' })).toMatchObject({
+      action: 'retry',
+      reason: 'swm-recovery-failed',
+      outcomeClass: 'evidence-unavailable',
+    });
+    expect(plan({ ...wayPastTheBudget, swmRecovery: 'unavailable' })).toMatchObject({
       action: 'retry',
       reason: 'durable-sync-disabled',
       outcomeClass: 'evidence-unavailable',
@@ -411,7 +419,7 @@ describe('planTransition — the 24 h park', () => {
     // Same inputs, recovery AVAILABLE: the park is reached. Measuring both
     // polarities is what proves the new branch is the thing making the
     // difference rather than the park having quietly stopped working.
-    expect(plan({ ...wayPastTheBudget, swmRecoveryAvailable: true }))
+    expect(plan({ ...wayPastTheBudget, swmRecovery: 'completed' }))
       .toEqual({ action: 'abandon', reason: 'no-peer-has-version' });
   });
 

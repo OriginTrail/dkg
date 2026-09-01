@@ -112,6 +112,14 @@ export type VmReverifyRetryReason =
    * got to ask a peer.
    */
   | 'durable-sync-disabled'
+  /**
+   * The SWM recovery this repair depends on FAILED as infrastructure (review
+   * r3): a peer timed out, the transfer aborted — the traversal did not
+   * complete, so "no reachable peer has the version" was never established.
+   * Retried on the evidence ladder and, like the deferral above, it must not
+   * consume the peer-unresolved park budget.
+   */
+  | 'swm-recovery-failed'
   /** An error this table does not recognise. Treated as transient, loudly. */
   | 'unexpected-error';
 
@@ -144,11 +152,15 @@ export interface VmReverifyTransitionInput {
   /** 1-based index of the attempt that just completed. */
   attemptNumber: number;
   /**
-   * Whether the SWM recovery this repair depends on is available at all
-   * (ADR-W2R-10 gates it on `durableSyncEnabled`). False turns an `unresolved`
-   * item into an indefinite deferral instead of a countdown to a park.
+   * How the paired SWM recovery went (review r3), when an unresolved item
+   * triggered one. 'unavailable' — the durable plane is switched off
+   * (ADR-W2R-10): indefinite deferral. 'failed' — the recovery ran and did
+   * not complete (a peer-infrastructure failure): retried WITHOUT consuming
+   * the park budget, because peer exhaustion was never established. 'completed'
+   * — the traversal finished honestly; an item still unresolved after it is
+   * on the countdown to `no-peer-has-version`.
    */
-  swmRecoveryAvailable?: boolean;
+  swmRecovery?: 'completed' | 'unavailable' | 'failed';
   /** When this generation first attempted anything; absent before attempt 1. */
   firstAttemptAt?: number;
   now: number;
@@ -240,8 +252,15 @@ export function planTransition(input: VmReverifyTransitionInput): VmReverifyTran
     // `no-peer-has-version` would blame the network for a local switch and
     // would bury the work under a terminal state an operator has no reason to
     // go looking for.
-    if (input.swmRecoveryAvailable === false) {
+    if (input.swmRecovery === 'unavailable') {
       return retry('durable-sync-disabled', 'evidence-unavailable', attemptNumber);
+    }
+    // A recovery that FAILED never established peer exhaustion (review r3):
+    // abandonment after 24h of infrastructure failures would blame the
+    // network population for a transport problem, so the evidence ladder
+    // retries it and the park budget stays untouched.
+    if (input.swmRecovery === 'failed') {
+      return retry('swm-recovery-failed', 'evidence-unavailable', attemptNumber);
     }
     if (firstAttemptAt !== undefined && now - firstAttemptAt >= parkAfterMs) {
       return { action: 'abandon', reason: 'no-peer-has-version' };

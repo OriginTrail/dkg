@@ -70,7 +70,7 @@
  * also exits non-zero and would otherwise fabricate a passing mutant kill.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers, Wallet } from 'ethers';
@@ -719,12 +719,16 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
   // witness: with the flag off, the poller must not run the kaRootMutations
   // lane and no worker object may exist after the readiness boundary.
   it('SC-4: flag off wires neither the mutation lane nor the drain', async () => {
+    // The flag must be the ONLY failed activation condition (review r3): a
+    // REAL data directory of its own, so no-data-dir cannot mask a startup
+    // that stopped honoring the operator opt-out.
+    const disabledDataDir = mkdtempSync(join(tmpdir(), 'w2r-reverify-sc4-'));
     const disabled = await createHostCore({
       vmUpdateConvergenceEnabled: false,
       // Isolated from the durable stores the other scenarios share: this
       // boot exists to observe WIRING, and must neither advance the shared
       // lane cursors nor touch the shared subscription rows.
-      dataDir: undefined,
+      dataDir: disabledDataDir,
       chainEventCursorStore: undefined,
       contextGraphSubscriptionStore: {
         loadAll: async () => [],
@@ -734,14 +738,23 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
     });
     await disabled.start();
     try {
+      expect(
+        await (disabled as any).vmUpdateConvergenceState(),
+        'the flag — not a missing data directory — must be what disables it',
+      ).toEqual({ effective: false, reason: 'flag-off' });
       const lanes = (disabled as any).chainPoller.getLaneHealth()
         .map((entry: { lane: string }) => entry.lane);
       expect(lanes, 'the mutation lane must not be ACTIVE').not.toContain('kaRootMutations');
       expect((disabled as any).vmReverifyWorker, 'no drain either').toBeUndefined();
       expect((disabled as any).vmReverifyIntents).toBeUndefined();
+      expect(
+        existsSync(join(disabledDataDir, 'vm-reverify-intents-v1.sqlite3')),
+        'off means BYTE-IDENTICAL: no intent file may be created (ADR-W2R-6)',
+      ).toBe(false);
     } finally {
       await disabled.stop();
       liveAgents.delete(disabled);
+      rmSync(disabledDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 240_000);
 
