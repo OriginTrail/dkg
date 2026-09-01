@@ -236,7 +236,13 @@ export class ChainEventLaneRunner {
     await this.restoreLaneCursors(activeLanes, ctx);
 
     const now = this.clock();
-    const dueLanes = activeLanes.filter((lane) => this.laneDue(lane, now));
+    // A lane whose durable cursor could not be READ does not scan (review
+    // r27): scanning would seed from the live lookback and the forward-scan
+    // persistence would overwrite the cursor the store still holds. Fail
+    // closed until a restore attempt completes.
+    const dueLanes = activeLanes.filter((lane) =>
+      (!this.cursorStore || this.restoredLanes.has(lane.spec.name))
+      && this.laneDue(lane, now));
     if (dueLanes.length === 0) return;
 
     let head: number | undefined;
@@ -387,10 +393,20 @@ export class ChainEventLaneRunner {
       // the forward cursor is durable, so an in-memory-only retained window
       // would let a rejected replay discovery be lost across a restart.
       await this.restoreReplayRetryWindow(lane, ctx);
-    } catch (err) {
-      this.log.warn(ctx, `Failed to load persisted cursor: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
+      // Restored means the load COMPLETED (maintainer review r27). A missing
+      // row is a completed load — the lane legitimately seeds from the live
+      // lookback. A THROW is a store that could not answer, and marking the
+      // lane restored anyway would seal a head-derived seed over a durable
+      // cursor the very next persist — blocks below the lookback skipped
+      // forever. Left un-restored, the next poll retries the load, and the
+      // scan loop refuses to touch the lane until one succeeds.
       this.restoredLanes.add(lane.spec.name);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to load persisted cursor (lane held; retrying next poll): lane=${lane.spec.name} ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

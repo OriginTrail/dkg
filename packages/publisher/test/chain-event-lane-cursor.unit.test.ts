@@ -456,6 +456,44 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(sequence[2]).toBe('save:clear');
   });
 
+  it('a transient CURSOR read failure is not a successful restore (review r27)', async () => {
+    // The maintainer’s repro: head 20,000, durable cursor 1,000, one-shot
+    // SQLITE_BUSY on the load. Marking the lane restored anyway would seed
+    // at 11,001 and the next persist would seal the skip of blocks
+    // 1,001–11,000 forever. The lane must not scan AT ALL until a load
+    // completes; the next poll retries and starts from the durable cursor.
+    let loadAttempts = 0;
+    let now = 0;
+    const saves: number[] = [];
+    const seen: number[] = [];
+    const chain = makeChain(20_000, [rootMutation('KnowledgeAssetUpdated', 5_000)]);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() {
+          loadAttempts += 1;
+          if (loadAttempts === 1) throw new Error('SQLITE_BUSY');
+          return 1_000;
+        },
+        async saveLane(_lane, blockNumber) { saves.push(blockNumber); },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    await poll(poller);
+    expect(chain.filters, 'an unrestored lane must not scan').toHaveLength(0);
+    expect(saves, 'and must persist NOTHING head-derived').toHaveLength(0);
+
+    now += CADENCE_MS;
+    await poll(poller);
+
+    expect(loadAttempts).toBeGreaterThanOrEqual(2);
+    expect(chain.filters[0]!.fromBlock, 'the durable cursor won, rewound by 50').toBe(951);
+    expect(seen, 'the below-lookback range was scanned, not skipped').toContain(5_000);
+  });
   it('a transient replay-window load failure is retried on a LATER poll (reviews r24/r26)', async () => {
     // A locked store at restore time must not read as nothing-retained for
     // the lifetime of the runner — and the eligibility must survive a POLL
