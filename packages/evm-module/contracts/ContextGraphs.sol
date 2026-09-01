@@ -64,7 +64,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  */
 contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, ReentrancyGuard {
     string private constant _NAME = "ContextGraphs";
-    string private constant _VERSION = "10.0.4";
+    string private constant _VERSION = "10.0.5";
 
     ContextGraphStorage public contextGraphStorage;
 
@@ -84,10 +84,13 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         uint96 amount
     );
 
-    /// @notice OT-RFC-53: emitted when the registration deposit is WAIVED because
-    ///         the CG is backed by a PCA the creator owns or is a registered
-    ///         agent of. The PCA's locked commitment is the anti-spam stake;
-    ///         the CG carries no own escrow and its publishing is funded by the PCA.
+    /// @notice OT-RFC-53: emitted when the creator consumes one registration-waiver
+    ///         quota slot from a PCA they own or are an exact registered agent of.
+    ///         The account is registration coverage only: it is not stored as CG
+    ///         authority, grants no publishing rights, and no PCA TRAC is debited.
+    /// @param contextGraphId Newly created Context Graph whose deposit was waived.
+    /// @param accountId PCA account whose registration-waiver quota was consumed.
+    /// @param creator Context Graph creator authorized against that PCA account.
     event ContextGraphRegistrationDepositWaived(
         uint256 indexed contextGraphId,
         uint256 indexed accountId,
@@ -154,8 +157,8 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      * @param metadataBatchId           Batch ID describing the CG metadata (0 if none)
      * @param accessPolicy              0 = public/discoverable, 1 = private/curated
      * @param publishPolicy             0 = curated, 1 = open
-     * @param publishAuthority          Curator address (required when curated; ignored when open)
-     * @param publishAuthorityAccountId Non-zero -> PCA curator type. Requires curated. Ignored when open.
+     * @param publishAuthority          Curator address (required when curated; must be zero when open)
+     * @param publishAuthorityAccountId Non-zero -> PCA curator type. Requires curated. Must be zero when open.
      * @param nameHash                  OT-RFC-38 / LU-6 Phase B — opt-in stable wire
      *                                  identifier the curator commits to (intended to be
      *                                  `keccak256(bytes(cleartextId))` so hosting cores
@@ -165,7 +168,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *                                  that CG then runs through the beacon path only).
      * @return contextGraphId           Newly assigned context graph ID (= ERC-721 token ID)
      *
-     * @dev Hosts and ACK quorum are network-level concerns: the sharding table
+     * @dev For backward compatibility, `publishAuthorityAccountId` is also the
+     *      registration-waiver candidate. Hosts and ACK quorum are network-level
+     *      concerns: the sharding table
      *      supplies hosts at publish time and `parametersStorage.minimumRequiredSignatures()`
      *      sets the quorum. CGs do not declare a per-CG hosting committee.
      */
@@ -178,6 +183,70 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         uint256 publishAuthorityAccountId,
         bytes32 nameHash
     ) external nonReentrant returns (uint256 contextGraphId) {
+        return _createContextGraph(
+            participantAgents,
+            metadataBatchId,
+            accessPolicy,
+            publishPolicy,
+            publishAuthority,
+            publishAuthorityAccountId,
+            nameHash,
+            publishAuthorityAccountId
+        );
+    }
+
+    /**
+     * @notice Create a context graph while using an independent PCA as the
+     *         registration-waiver candidate.
+     * @param participantAgents         EOA allow-list (no zeros, no dups)
+     * @param metadataBatchId           Batch ID describing the CG metadata (0 if none)
+     * @param accessPolicy              0 = public/discoverable, 1 = private/curated
+     * @param publishPolicy             0 = curated, 1 = open
+     * @param publishAuthority          Curator address (required when curated; must be zero when open)
+     * @param publishAuthorityAccountId Non-zero -> PCA curator type. Requires curated. Must be zero when open.
+     * @param nameHash                  OT-RFC-38 / LU-6 Phase B stable wire identifier;
+     *                                  pass `bytes32(0)` to opt out.
+     * @param registrationPcaAccountId  Transaction-scoped PCA coverage candidate.
+     *                                  It is never stored as graph authority and
+     *                                  conveys no authority by itself. The caller
+     *                                  must own it or be its exact registered agent;
+     *                                  otherwise the normal deposit path applies.
+     * @return contextGraphId           Newly assigned context graph ID (= ERC-721 token ID)
+     */
+    function createContextGraphWithPcaCoverage(
+        address[] calldata participantAgents,
+        uint256 metadataBatchId,
+        uint8 accessPolicy,
+        uint8 publishPolicy,
+        address publishAuthority,
+        uint256 publishAuthorityAccountId,
+        bytes32 nameHash,
+        uint256 registrationPcaAccountId
+    ) external nonReentrant returns (uint256 contextGraphId) {
+        return _createContextGraph(
+            participantAgents,
+            metadataBatchId,
+            accessPolicy,
+            publishPolicy,
+            publishAuthority,
+            publishAuthorityAccountId,
+            nameHash,
+            registrationPcaAccountId
+        );
+    }
+
+    /// @dev Common creation path. Graph authorization fields and registration
+    ///      coverage are intentionally separate: only the former are persisted.
+    function _createContextGraph(
+        address[] calldata participantAgents,
+        uint256 metadataBatchId,
+        uint8 accessPolicy,
+        uint8 publishPolicy,
+        address publishAuthority,
+        uint256 publishAuthorityAccountId,
+        bytes32 nameHash,
+        uint256 registrationPcaAccountId
+    ) internal returns (uint256 contextGraphId) {
         // Storage validates sorting/dedup/zero-rejection, but a friendly
         // default for curated CGs: if caller passes zero authority and the
         // policy is curated, use msg.sender.
@@ -208,21 +277,18 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         // publishing escrow. Skipped when ParametersStorage is unresolved
         // (deposit feature off) or the param is 0 (dormant default).
         //
-        // WAIVER (quota-bounded): a CG backed by a PCA the creator owns or is a
-        // registered agent of can skip the deposit — but only up to the PCA's
-        // per-PCA quota (committedTRAC / deposit), enforced in
-        // ContextGraphWaiverStorage. So N deposit-free CGs still cost N×deposit
-        // of LOCKED PCA commitment (paid by the PCA instead of separate liquid
-        // TRAC), a sub-floor or dust PCA gets none, and a single PCA can no
-        // longer mint unlimited free CGs. A waived CG carries no escrow — the
-        // same state a dormant deposit produces — so the consume path is
-        // unchanged (it falls through to the PCA).
+        // WAIVER (quota-bounded): a creator that owns or is an exact registered
+        // agent of the supplied coverage PCA can consume one quota slot. The
+        // quota is derived from live locked commitment (`committedTRAC / deposit`)
+        // and is only anti-spam capacity: it does not debit PCA TRAC, fund future
+        // publishing, or grant authority over the CG. A sub-floor/dust PCA gets
+        // no quota, and a waived CG carries no registration escrow.
         if (address(parametersStorage) != address(0)) {
             uint96 deposit = parametersStorage.contextGraphRegistrationDeposit();
             if (deposit > 0) {
-                if (_tryWaiveRegistrationDeposit(publishAuthorityAccountId, deposit)) {
+                if (_tryWaiveRegistrationDeposit(registrationPcaAccountId, deposit)) {
                     emit ContextGraphRegistrationDepositWaived(
-                        contextGraphId, publishAuthorityAccountId, msg.sender
+                        contextGraphId, registrationPcaAccountId, msg.sender
                     );
                 } else {
                     _pullRegistrationDeposit(contextGraphId, deposit);
