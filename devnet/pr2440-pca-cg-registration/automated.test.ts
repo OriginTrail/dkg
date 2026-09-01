@@ -46,9 +46,6 @@ const TOKEN_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
-  'function mint(address to, uint256 amount)',
-  'function hasRole(bytes32 role, address account) view returns (bool)',
-  'function MINTER_ROLE() view returns (bytes32)',
   'event Approval(address indexed owner, address indexed spender, uint256 value)',
 ];
 
@@ -57,6 +54,7 @@ const PCA_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
   'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
   'function ownerOf(uint256 accountId) view returns (address)',
+  'function transferFrom(address from, address to, uint256 accountId)',
   'function agentToAccountId(address agent) view returns (uint256)',
   'function accounts(uint256 accountId) view returns (uint96 committedTRAC, uint40 createdAtEpoch, uint40 expiresAtEpoch, uint40 createdAtTimestamp, uint40 expiresAtTimestamp, uint72 primaryNode, uint96 cumulativeSpent, uint40 lastSettledWindow, bool fullySwept)',
 ];
@@ -181,6 +179,7 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
   let stakingVaultAddress: string;
   let knowledgeAssetsLifecycleAddress: string;
   let pcaAccountId = 0n;
+  const pcaCleanupAddress = ethers.Wallet.createRandom().address;
   let depositSnapshot: bigint | undefined;
   let walletSnapshots: WalletSnapshot[] = [];
   let allowanceSpenders: string[] = [];
@@ -280,16 +279,8 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
     const commitment = floor > COMMITMENT_BASELINE ? floor * 2n : COMMITMENT_BASELINE;
     expect(commitment).toBeLessThan(1n << 96n);
 
-    const minterRole: string = await token.MINTER_ROLE();
-    expect(
-      await token.hasRole(minterRole, ownerWallet.address),
-      'Hardhat account #0 must retain the token minter role for the live fixture',
-    ).toBe(true);
-
     const beforeBalance = BigInt(await token.balanceOf(walletB.address));
-    await (await (token.connect(ownerWallet) as ethers.Contract).mint(walletB.address, commitment, {
-      nonce: await nextNonce(state.provider, ownerWallet.address),
-    })).wait();
+    await setBalance(walletB.address, beforeBalance + commitment);
     expect(await token.balanceOf(walletB.address)).toBe(beforeBalance + commitment);
 
     const pcaAddress = await pca.getAddress();
@@ -302,7 +293,7 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
       { nonce: await nextNonce(state.provider, walletB.address) },
     )).wait();
 
-    expect(await token.balanceOf(walletB.address), 'PCA commitment must consume only freshly minted TRAC')
+    expect(await token.balanceOf(walletB.address), 'PCA commitment must consume only staged fixture TRAC')
       .toBe(beforeBalance);
     expect(await token.allowance(walletB.address, pcaAddress), 'exact PCA approval must be exhausted')
       .toBe(0n);
@@ -633,6 +624,23 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
 
   afterAll(async () => {
     const failures: string[] = [];
+    if (state && pcaAccountId > 0n && walletB) {
+      try {
+        const currentOwner = ethers.getAddress(await pca.ownerOf(pcaAccountId));
+        if (lower(currentOwner) === lower(walletB.address)) {
+          await (await (pca.connect(walletB) as ethers.Contract).transferFrom(
+            walletB.address,
+            pcaCleanupAddress,
+            pcaAccountId,
+            { nonce: await nextNonce(state.provider, walletB.address) },
+          )).wait();
+        }
+        expect(await pca.balanceOf(walletB.address), 'fixture PCA must be detached from real wallet B')
+          .toBe(0n);
+      } catch (error) {
+        failures.push(`fixture PCA ownership cleanup failed: ${(error as Error).message}`);
+      }
+    }
     if (state && depositChanged && depositSnapshot !== undefined) {
       try {
         await setRegistrationDeposit(depositSnapshot);
@@ -725,9 +733,7 @@ describe('issue #2440 — PCA-covered live CG registration', () => {
     expect(await pca.agentToAccountId(walletC.address)).toBe(0n);
     const waivedBefore = BigInt(await waiver.waivedCgCount(pcaAccountId));
 
-    await (await (token.connect(ownerWallet) as ethers.Contract).mint(walletC.address, DEPOSIT, {
-      nonce: await nextNonce(state.provider, ownerWallet.address),
-    })).wait();
+    await setBalance(walletC.address, DEPOSIT);
     await (await (token.connect(walletC) as ethers.Contract).approve(contextGraphsAddress, DEPOSIT, {
       nonce: await nextNonce(state.provider, walletC.address),
     })).wait();

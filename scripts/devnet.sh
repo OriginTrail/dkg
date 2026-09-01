@@ -32,6 +32,9 @@
 #                 (default: 4). Useful for 3-core/2-edge etc. layouts.
 #   DEVNET_ENABLE_PUBLISHER=1
 #                 Enable the async publisher runtime on each node
+#   DEVNET_PUBLISHER_WALLET_INDEX
+#                 Operational-wallet index used by the publisher runtime
+#                 (default: 0; test-only selector for signer-isolation suites)
 #   DEVNET_EPCIS_CONTEXT_GRAPH
 #                 Context graph used by /api/epcis/capture when publisher is enabled
 #   DEVNET_SWM_SYNC_ON_CONNECT=0
@@ -712,7 +715,18 @@ EOCONF
     }
     fs.writeFileSync('$node_dir/wallets.json', JSON.stringify({ adminWallet, wallets }, null, 2));
     if (process.env.DEVNET_ENABLE_PUBLISHER === '1') {
-      fs.writeFileSync('$node_dir/publisher-wallets.json', JSON.stringify({ wallets: wallets.slice(0, 1) }, null, 2));
+      const rawPublisherIndex = process.env.DEVNET_PUBLISHER_WALLET_INDEX ?? '0';
+      const publisherIndex = Number(rawPublisherIndex);
+      if (!Number.isSafeInteger(publisherIndex) || publisherIndex < 0 || publisherIndex >= wallets.length) {
+        throw new Error(
+          'DEVNET_PUBLISHER_WALLET_INDEX must select one of the generated operational wallets ' +
+          '(received ' + JSON.stringify(rawPublisherIndex) + ', wallet count ' + wallets.length + ')',
+        );
+      }
+      fs.writeFileSync(
+        '$node_dir/publisher-wallets.json',
+        JSON.stringify({ wallets: [wallets[publisherIndex]] }, null, 2),
+      );
     }
     wallets.forEach(w => console.log(w.address));
   ")
