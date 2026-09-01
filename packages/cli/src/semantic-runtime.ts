@@ -25,6 +25,7 @@ import {
 
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
 import { createDkgQueryAdapter } from './semantic-runtime-query-adapter.js';
+import { createRemoteExecuteAdapter } from './semantic-runtime-remote-execute-adapter.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const PROV = 'http://www.w3.org/ns/prov#';
@@ -398,6 +399,7 @@ export async function invokeStoredSemanticProgram(
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
+  executingAgentAddress?: string,
 ): Promise<SemanticInvocationResult> {
   validateSemanticMemoryLayer(programLayer, 'programLayer');
   validateSemanticMemoryLayer(executionLayer, 'executionLayer');
@@ -427,6 +429,7 @@ export async function invokeStoredSemanticProgram(
     config,
     llmConfig,
     callerAgentAddress,
+    executingAgentAddress,
   );
   runtime.inFlight.set(key, { programLayer, executionLayer, promise: invocation });
   try {
@@ -453,6 +456,8 @@ async function resolveInternal(
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
+  executingAgentAddress?: string,
+  executionLayer: SemanticMemoryLayer = 'vm',
 ): Promise<InternalResolution> {
   const program = await loadStoredSemanticProgram(
     agent,
@@ -473,7 +478,9 @@ async function resolveInternal(
       422,
     );
   }
-  const operatorAddress = program.authorAgentAddress;
+  const operatorAddress = executingAgentAddress
+    ? checksumAgentAddress(executingAgentAddress, 'INVALID_EXECUTING_WALLET')
+    : program.authorAgentAddress;
   const operatorIri = `did:dkg:agent:${operatorAddress}`;
   const policyIri = config?.operatorPolicyIri;
   if (!policyIri) {
@@ -535,6 +542,13 @@ async function resolveInternal(
   const registry = new RuntimeAdapterRegistry();
   registry.register(createInvestigatorAdapter(llmConfig));
   registry.register(createDkgQueryAdapter(agent, contextGraphId, callerAgentAddress));
+  registry.register(createRemoteExecuteAdapter(
+    agent,
+    contextGraphId,
+    callerAgentAddress,
+    programLayer,
+    executionLayer,
+  ));
   const tools = program.requiredTools.map((toolIri): SemanticToolResolution => {
     const rows = offerRows.filter((row) => iriValue(row.tool) === toolIri);
     const definitions = new Map<string, { operation: string; version: string; wit: string }>();
@@ -634,6 +648,7 @@ async function invokeResolved(
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
+  executingAgentAddress?: string,
 ): Promise<SemanticInvocationResult> {
   const resolved = await resolveInternal(
     agent,
@@ -643,17 +658,21 @@ async function invokeResolved(
     config,
     llmConfig,
     callerAgentAddress,
+    executingAgentAddress,
+    executionLayer,
   );
-  const localAuthor = agent.listLocalAgents().find(({ agentAddress }) =>
+  const localOperator = agent.listLocalAgents().find(({ agentAddress }) =>
     agentAddress.toLowerCase() === resolved.operatorAddress.toLowerCase());
-  if (!localAuthor || !agent.getCustodialAgentPrivateKey(localAuthor.agentAddress)) {
+  if (!localOperator || !agent.getCustodialAgentPrivateKey(localOperator.agentAddress)) {
     throw new SemanticProgramError(
-      'PROGRAM_AUTHOR_NOT_LOCAL',
-      'This node does not host the Program author wallet as a custodial agent',
+      executingAgentAddress ? 'TARGET_EXECUTOR_NOT_LOCAL' : 'PROGRAM_AUTHOR_NOT_LOCAL',
+      executingAgentAddress
+        ? 'This node does not host the selected executor wallet as a custodial agent'
+        : 'This node does not host the Program author wallet as a custodial agent',
       409,
     );
   }
-  resolved.operatorAddress = localAuthor.agentAddress;
+  resolved.operatorAddress = localOperator.agentAddress;
   const unavailable = resolved.public.requiredTools.find((tool) => !tool.effective);
   if (unavailable) {
     throw new SemanticProgramError(
@@ -826,13 +845,17 @@ async function invokeResolved(
         version: '1',
         normalizedInput: { prompt: call.prompt },
       }
-      : {
+      : call.kind === 'query-catalog' ? {
         operation: 'dkg/query',
         version: '1',
         normalizedInput: {
           selector: call.queryId,
           parameters: Object.fromEntries(call.parameters.map(({ name, value }) => [name, value])),
         },
+      } : {
+        operation: 'remote-execute',
+        version: '1',
+        normalizedInput: { nodeId: call.nodeId, programIri: call.programIri },
       };
     const tool = resolved.public.requiredTools.find((candidate) =>
       candidate.operation === binding.operation
@@ -890,9 +913,23 @@ async function invokeResolved(
       runtime.store.setExecutionStatus(executionIri, 'failed');
       throw new SemanticProgramError('TOOL_REQUEST_FAILED', 'WASI tool request failed', 502);
     }
-    return call.kind === 'investigator'
-      ? { kind: 'investigator', output: outcome.output }
-      : { kind: 'query-catalog', json: outcome.output };
+    if (call.kind === 'investigator') return { kind: 'investigator', output: outcome.output };
+    if (call.kind === 'query-catalog') return { kind: 'query-catalog', json: outcome.output };
+    let remote: { executionIri?: unknown; executionUal?: unknown };
+    try {
+      remote = JSON.parse(outcome.output) as typeof remote;
+    } catch {
+      throw new SemanticProgramError('REMOTE_INVOCATION_RESPONSE_INVALID', 'Remote Execution receipt is invalid', 502);
+    }
+    if (
+      typeof remote.executionIri !== 'string'
+      || (remote.executionUal !== undefined && typeof remote.executionUal !== 'string')
+    ) throw new SemanticProgramError('REMOTE_INVOCATION_RESPONSE_INVALID', 'Remote Execution receipt is invalid', 502);
+    return {
+      kind: 'remote-execute',
+      executionIri: remote.executionIri,
+      ...(remote.executionUal ? { executionUal: remote.executionUal } : {}),
+    };
   };
 
   const receipt = await runtime.host.startPlan(
@@ -1175,6 +1212,14 @@ function validateGraphAndProgram(contextGraphId: string, programIri: string): vo
     sparqlIri(programIri);
   } catch {
     throw new SemanticProgramError('INVALID_PROGRAM_IRI', 'programIri must be an absolute IRI', 400);
+  }
+}
+
+function checksumAgentAddress(value: string, code: string): string {
+  try {
+    return ethers.getAddress(value);
+  } catch {
+    throw new SemanticProgramError(code, 'Executing wallet is invalid', 400);
   }
 }
 

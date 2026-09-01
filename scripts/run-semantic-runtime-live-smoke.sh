@@ -15,6 +15,8 @@ FORK_PROGRAM_IRI="${SMOKE_FORK_PROGRAM_IRI:-urn:sr:program:codex-live-fork}"
 TOOL_IRI="${SMOKE_TOOL_IRI:-urn:sr:tool:investigator-v1}"
 QUERY_PROGRAM_IRI="${SMOKE_QUERY_PROGRAM_IRI:-urn:sr:program:query-live}"
 QUERY_TOOL_IRI="${SMOKE_QUERY_TOOL_IRI:-urn:sr:tool:dkg-query-v1}"
+COMPOSER_PROGRAM_IRI="${SMOKE_COMPOSER_PROGRAM_IRI:-urn:sr:program:remote-compose-live}"
+REMOTE_TOOL_IRI="${SMOKE_REMOTE_TOOL_IRI:-urn:sr:tool:remote-execute-v1}"
 POLICY_IRI="${SMOKE_POLICY_IRI:-urn:sr:policy:devnet-codex}"
 SMOKE_DEVNET_DIR="$OUTPUT_DIR/devnet"
 STATUS_PATH="$OUTPUT_DIR/dkg-status.json"
@@ -32,6 +34,14 @@ SOURCE_INVOKE_REQUEST_PATH="$OUTPUT_DIR/source-program-invoke-request.json"
 SOURCE_INVOKE_PATH="$OUTPUT_DIR/source-program-invoke.json"
 QUERY_INVOKE_REQUEST_PATH="$OUTPUT_DIR/query-program-invoke-request.json"
 QUERY_INVOKE_PATH="$OUTPUT_DIR/query-program-invoke.json"
+COMPOSER_PROGRAM_REQUEST_PATH="$OUTPUT_DIR/composer-program-request.json"
+COMPOSER_PROGRAM_PUBLISH_PATH="$OUTPUT_DIR/composer-program-publish.json"
+COMPOSER_INVOKE_REQUEST_PATH="$OUTPUT_DIR/composer-program-invoke-request.json"
+COMPOSER_INVOKE_PATH="$OUTPUT_DIR/composer-program-invoke.json"
+COMPOSER_CROSS_NODE_QUERY_REQUEST_PATH="$OUTPUT_DIR/composer-execution-vm-query-request.json"
+COMPOSER_CROSS_NODE_QUERY_PATH="$OUTPUT_DIR/composer-execution-vm-query-node-3.json"
+CHILD_CROSS_NODE_QUERY_REQUEST_PATH="$OUTPUT_DIR/child-execution-vm-query-request.json"
+CHILD_CROSS_NODE_QUERY_PATH="$OUTPUT_DIR/child-execution-vm-query-node-3.json"
 REMOTE_INVOKE_DENIAL_PATH="$OUTPUT_DIR/program-remote-invoke-denial.json"
 AUTHORITY_REQUEST_PATH="$OUTPUT_DIR/operator-authority-request.json"
 AUTHORITY_PUBLISH_PATH="$OUTPUT_DIR/operator-authority-publish.json"
@@ -59,6 +69,7 @@ API_PORT_BASE="${SMOKE_API_PORT:-29251}"
 LIBP2P_PORT_BASE="${SMOKE_LIBP2P_PORT:-30051}"
 OXIGRAPH_BASE="${SMOKE_OXIGRAPH_BASE:-37950}"
 BLAZEGRAPH_PORT="${SMOKE_BLAZEGRAPH_PORT:-39950}"
+DOCKER_NAME_PREFIX="${SMOKE_DOCKER_NAME_PREFIX:-semantic-runtime-smoke}"
 LLM_PROVIDER="${SMOKE_LLM_PROVIDER:-codex}"
 PRIVATE_REMOTE="${SMOKE_PRIVATE_REMOTE:-0}"
 PRIVATE_CONTEXT_SLUG="${SMOKE_PRIVATE_CONTEXT_SLUG:-semantic-runtime-private}"
@@ -74,7 +85,7 @@ stop_devnet() {
   LIBP2P_PORT_BASE="$LIBP2P_PORT_BASE" \
   DEVNET_OXIGRAPH_BASE="$OXIGRAPH_BASE" \
   DEVNET_BLAZEGRAPH_PORT="$BLAZEGRAPH_PORT" \
-  DEVNET_DOCKER_NAME_PREFIX="semantic-runtime-smoke" \
+  DEVNET_DOCKER_NAME_PREFIX="$DOCKER_NAME_PREFIX" \
     "$REPO_ROOT/scripts/devnet.sh" stop >/dev/null 2>&1 || true
 }
 trap stop_devnet EXIT INT TERM
@@ -89,7 +100,7 @@ API_PORT_BASE="$API_PORT_BASE" \
 LIBP2P_PORT_BASE="$LIBP2P_PORT_BASE" \
 DEVNET_OXIGRAPH_BASE="$OXIGRAPH_BASE" \
 DEVNET_BLAZEGRAPH_PORT="$BLAZEGRAPH_PORT" \
-DEVNET_DOCKER_NAME_PREFIX="semantic-runtime-smoke" \
+DEVNET_DOCKER_NAME_PREFIX="$DOCKER_NAME_PREFIX" \
 DEVNET_NO_AUTH=1 \
 NUM_CORE_NODES=4 \
 DEVNET_NODE_READY_TIMEOUT=180 \
@@ -188,6 +199,10 @@ SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" \
 SMOKE_TOOL_IRI="$TOOL_IRI" \
 SMOKE_QUERY_PROGRAM_IRI="$QUERY_PROGRAM_IRI" \
 SMOKE_QUERY_TOOL_IRI="$QUERY_TOOL_IRI" \
+SMOKE_COMPOSER_PROGRAM_IRI="$COMPOSER_PROGRAM_IRI" \
+SMOKE_REMOTE_TOOL_IRI="$REMOTE_TOOL_IRI" \
+SMOKE_PRIVATE_REMOTE="$PRIVATE_REMOTE" \
+SMOKE_INVOKING_NODE_IDENTITY_PATH="$INVOKING_NODE_IDENTITY_PATH" \
 SMOKE_STRATEGY_PATH="$STRATEGY_PATH" \
 SMOKE_PROGRAM_REQUEST_PATH="$PROGRAM_REQUEST_PATH" \
 SMOKE_QUERY_PROGRAM_REQUEST_PATH="$QUERY_PROGRAM_REQUEST_PATH" \
@@ -196,6 +211,8 @@ SMOKE_VM_QUERY_REQUEST_PATH="$VM_QUERY_REQUEST_PATH" \
 SMOKE_INVOKE_REQUEST_PATH="$INVOKE_REQUEST_PATH" \
 SMOKE_SOURCE_INVOKE_REQUEST_PATH="$SOURCE_INVOKE_REQUEST_PATH" \
 SMOKE_QUERY_INVOKE_REQUEST_PATH="$QUERY_INVOKE_REQUEST_PATH" \
+SMOKE_COMPOSER_PROGRAM_REQUEST_PATH="$COMPOSER_PROGRAM_REQUEST_PATH" \
+SMOKE_COMPOSER_INVOKE_REQUEST_PATH="$COMPOSER_INVOKE_REQUEST_PATH" \
 node --input-type=module -e '
   import crypto from "node:crypto";
   import fs from "node:fs";
@@ -282,6 +299,38 @@ node --input-type=module -e '
     programLayer: "vm",
     executionLayer: "vm",
   }));
+  if (process.env.SMOKE_PRIVATE_REMOTE === "1") {
+    const target = JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKING_NODE_IDENTITY_PATH, "utf8"));
+    const composerProgramIri = process.env.SMOKE_COMPOSER_PROGRAM_IRI;
+    const composerSource = `(strategy smoke/remote-compose
+      (version "1.0.0")
+      (scope network:devnet)
+      (goal execute-child-on-node-b)
+      (supervise one-for-one (max-restarts 1) (window-ms 60000)
+        (delegate composer
+          (grant program.remote-execute)
+          (call remote-execute@1 "${target.peerId}" "${process.env.SMOKE_FORK_PROGRAM_IRI}"))))`;
+    fs.writeFileSync(process.env.SMOKE_COMPOSER_PROGRAM_REQUEST_PATH, JSON.stringify({
+      contextGraphId,
+      name: "semantic-program-remote-compose",
+      quads: [
+        { subject: composerProgramIri, predicate: "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", object: `${sr}Program` },
+        { subject: composerProgramIri, predicate: `${sr}language`, object: JSON.stringify("sexpr-v1") },
+        { subject: composerProgramIri, predicate: `${sr}version`, object: JSON.stringify("1.0.0") },
+        { subject: composerProgramIri, predicate: `${sr}source`, object: JSON.stringify(composerSource) },
+        { subject: composerProgramIri, predicate: `${sr}requiresTool`, object: process.env.SMOKE_REMOTE_TOOL_IRI },
+      ],
+      alsoShareSwm: true,
+      alsoPublishVm: true,
+    }));
+    fs.writeFileSync(process.env.SMOKE_COMPOSER_INVOKE_REQUEST_PATH, JSON.stringify({
+      contextGraphId,
+      programIri: composerProgramIri,
+      invocationId: crypto.randomUUID(),
+      programLayer: "vm",
+      executionLayer: "vm",
+    }));
+  }
 '
 
 echo "semantic-runtime-live-smoke: publishing the Program and required Tool reference to VM"
@@ -296,6 +345,14 @@ curl --fail-with-body --silent --show-error \
   --data @"$QUERY_PROGRAM_REQUEST_PATH" \
   "$API_URL/api/knowledge-assets" \
   --output "$QUERY_PROGRAM_PUBLISH_PATH"
+
+if [ "$PRIVATE_REMOTE" = "1" ]; then
+  curl --fail-with-body --silent --show-error \
+    -H "Content-Type: application/json" \
+    --data @"$COMPOSER_PROGRAM_REQUEST_PATH" \
+    "$API_URL/api/knowledge-assets" \
+    --output "$COMPOSER_PROGRAM_PUBLISH_PATH"
+fi
 
 curl --fail-with-body --silent --show-error \
   -H "Content-Type: application/json" \
@@ -323,6 +380,8 @@ write_authority_request() {
   SMOKE_TOOL_IRI="$TOOL_IRI" \
   SMOKE_QUERY_TOOL_IRI="$QUERY_TOOL_IRI" \
   SMOKE_INCLUDE_QUERY_TOOL="${4:-0}" \
+  SMOKE_REMOTE_TOOL_IRI="$REMOTE_TOOL_IRI" \
+  SMOKE_INCLUDE_REMOTE_TOOL="${5:-0}" \
   SMOKE_POLICY_IRI="$POLICY_IRI" \
   SMOKE_NODE_IDENTITY_PATH="$1" \
   SMOKE_AUTHORITY_REQUEST_PATH="$2" \
@@ -334,6 +393,7 @@ write_authority_request() {
     const identity = JSON.parse(fs.readFileSync(process.env.SMOKE_NODE_IDENTITY_PATH, "utf8"));
     const tool = process.env.SMOKE_TOOL_IRI;
     const queryTool = process.env.SMOKE_QUERY_TOOL_IRI;
+    const remoteTool = process.env.SMOKE_REMOTE_TOOL_IRI;
     const policy = process.env.SMOKE_POLICY_IRI;
     const operator = identity.agentDid;
     const quads = [
@@ -355,6 +415,14 @@ write_authority_request() {
       { subject: queryTool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-runtime/query-catalog@0.1.0") },
       { subject: policy, predicate: `${sr}allowsTool`, object: queryTool },
     );
+    if (process.env.SMOKE_INCLUDE_REMOTE_TOOL === "1") quads.push(
+      { subject: operator, predicate: `${sr}offersTool`, object: remoteTool },
+      { subject: remoteTool, predicate: rdfType, object: `${sr}Tool` },
+      { subject: remoteTool, predicate: `${sr}operation`, object: JSON.stringify("remote-execute") },
+      { subject: remoteTool, predicate: `${sr}version`, object: JSON.stringify("1") },
+      { subject: remoteTool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-runtime/remote-execute@0.1.0") },
+      { subject: policy, predicate: `${sr}allowsTool`, object: remoteTool },
+    );
     fs.writeFileSync(process.env.SMOKE_AUTHORITY_REQUEST_PATH, JSON.stringify({
       contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
       name: process.env.SMOKE_AUTHORITY_NAME,
@@ -367,7 +435,7 @@ write_authority_request() {
 
 echo "semantic-runtime-live-smoke: publishing both Program owners' Tool offers and selected Policies"
 write_authority_request "$PROGRAM_AUTHOR_IDENTITY_PATH" "$AUTHORITY_REQUEST_PATH" \
-  "semantic-runtime-codex-authority" "1"
+  "semantic-runtime-codex-authority" "1" "$PRIVATE_REMOTE"
 curl --fail-with-body --silent --show-error \
   -H "Content-Type: application/json" \
   --data @"$AUTHORITY_REQUEST_PATH" \
@@ -570,6 +638,15 @@ node --input-type=module -e '
 wait "$source_invoke_pid"
 wait "$fork_invoke_pid"
 
+if [ "$PRIVATE_REMOTE" = "1" ]; then
+  echo "semantic-runtime-live-smoke: composing Programs through typed remote-execute"
+  curl --fail-with-body --silent --show-error \
+    -H "Content-Type: application/json" \
+    --data @"$COMPOSER_INVOKE_REQUEST_PATH" \
+    "$API_URL/api/semantic-runtime/invoke" \
+    --output "$COMPOSER_INVOKE_PATH"
+fi
+
 EXECUTION_IRI=$(SMOKE_INVOKE_PATH="$INVOKE_PATH" node --input-type=module -e '
   import fs from "node:fs";
   process.stdout.write(JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKE_PATH, "utf8")).executionIri);
@@ -719,6 +796,100 @@ if [ "$query_execution_ready" != "1" ]; then
   exit 1
 fi
 
+if [ "$PRIVATE_REMOTE" = "1" ]; then
+  COMPOSER_EXECUTION_IRI=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).executionIri)' "$COMPOSER_INVOKE_PATH")
+  SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
+  SMOKE_COMPOSER_EXECUTION_IRI="$COMPOSER_EXECUTION_IRI" \
+  SMOKE_COMPOSER_QUERY_REQUEST_PATH="$COMPOSER_CROSS_NODE_QUERY_REQUEST_PATH" \
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const sr = "https://origintrail.io/semantic-runtime/v1#";
+    fs.writeFileSync(process.env.SMOKE_COMPOSER_QUERY_REQUEST_PATH, JSON.stringify({
+      contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+      view: "verifiable-memory",
+      sparql: `SELECT ?output ?status ?executedBy WHERE {
+        GRAPH ?g {
+          <${process.env.SMOKE_COMPOSER_EXECUTION_IRI}>
+            a <${sr}Execution> ;
+            <${sr}output> ?output ;
+            <${sr}status> ?status ;
+            <${sr}executedBy> ?executedBy .
+        }
+      }`,
+    }));
+  '
+  composer_ready=0
+  for _ in $(seq 1 90); do
+    curl --fail-with-body --silent --show-error \
+      -H "Content-Type: application/json" \
+      --data @"$COMPOSER_CROSS_NODE_QUERY_REQUEST_PATH" \
+      "$API_URL_NODE_C/api/query" \
+      --output "$COMPOSER_CROSS_NODE_QUERY_PATH"
+    if SMOKE_QUERY_PATH="$COMPOSER_CROSS_NODE_QUERY_PATH" node --input-type=module -e '
+      import fs from "node:fs";
+      const body = JSON.parse(fs.readFileSync(process.env.SMOKE_QUERY_PATH, "utf8"));
+      process.exit(body.result?.bindings?.length === 1 ? 0 : 1);
+    '; then
+      composer_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$composer_ready" != "1" ]; then
+    echo "semantic-runtime-live-smoke: node C did not observe the composer Execution" >&2
+    cat "$COMPOSER_CROSS_NODE_QUERY_PATH" >&2
+    exit 1
+  fi
+  CHILD_EXECUTION_IRI=$(SMOKE_QUERY_PATH="$COMPOSER_CROSS_NODE_QUERY_PATH" node --input-type=module -e '
+    import fs from "node:fs";
+    const value = JSON.parse(fs.readFileSync(process.env.SMOKE_QUERY_PATH, "utf8")).result.bindings[0].output;
+    process.stdout.write(typeof value === "object" ? value.value : JSON.parse(value));
+  ')
+  SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
+  SMOKE_CHILD_EXECUTION_IRI="$CHILD_EXECUTION_IRI" \
+  SMOKE_CHILD_QUERY_REQUEST_PATH="$CHILD_CROSS_NODE_QUERY_REQUEST_PATH" \
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const sr = "https://origintrail.io/semantic-runtime/v1#";
+    fs.writeFileSync(process.env.SMOKE_CHILD_QUERY_REQUEST_PATH, JSON.stringify({
+      contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+      view: "verifiable-memory",
+      sparql: `SELECT ?output ?outputHash ?status ?executedBy WHERE {
+        GRAPH ?g {
+          <${process.env.SMOKE_CHILD_EXECUTION_IRI}>
+            a <${sr}Execution> ;
+            <${sr}output> ?output ;
+            <${sr}outputHash> ?outputHash ;
+            <${sr}status> ?status ;
+            <${sr}executedBy> ?executedBy .
+        }
+      }`,
+    }));
+  '
+  child_ready=0
+  for _ in $(seq 1 90); do
+    curl --fail-with-body --silent --show-error \
+      -H "Content-Type: application/json" \
+      --data @"$CHILD_CROSS_NODE_QUERY_REQUEST_PATH" \
+      "$API_URL_NODE_C/api/query" \
+      --output "$CHILD_CROSS_NODE_QUERY_PATH"
+    if SMOKE_QUERY_PATH="$CHILD_CROSS_NODE_QUERY_PATH" node --input-type=module -e '
+      import fs from "node:fs";
+      const body = JSON.parse(fs.readFileSync(process.env.SMOKE_QUERY_PATH, "utf8"));
+      process.exit(body.result?.bindings?.length === 1 ? 0 : 1);
+    '; then
+      child_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$child_ready" != "1" ]; then
+    echo "semantic-runtime-live-smoke: node C did not observe the child Execution" >&2
+    cat "$CHILD_CROSS_NODE_QUERY_PATH" >&2
+    exit 1
+  fi
+fi
+
 curl --fail-with-body --silent --show-error \
   -H "Content-Type: application/json" \
   --data @"$AUDIT_QUERY_REQUEST_PATH" \
@@ -732,6 +903,9 @@ SMOKE_FORK_QUERY_PATH="$FORK_VM_QUERY_PATH" \
 SMOKE_INVOKE_PATH="$INVOKE_PATH" \
 SMOKE_SOURCE_INVOKE_PATH="$SOURCE_INVOKE_PATH" \
 SMOKE_QUERY_INVOKE_PATH="$QUERY_INVOKE_PATH" \
+SMOKE_COMPOSER_INVOKE_PATH="$COMPOSER_INVOKE_PATH" \
+SMOKE_COMPOSER_CROSS_QUERY_PATH="$COMPOSER_CROSS_NODE_QUERY_PATH" \
+SMOKE_CHILD_CROSS_QUERY_PATH="$CHILD_CROSS_NODE_QUERY_PATH" \
 SMOKE_PROGRAM_PUBLISH_PATH="$PUBLISH_PATH" \
 SMOKE_QUERY_PROGRAM_PUBLISH_PATH="$QUERY_PROGRAM_PUBLISH_PATH" \
 SMOKE_REMOTE_DENIAL_PATH="$REMOTE_INVOKE_DENIAL_PATH" \
@@ -752,6 +926,7 @@ SMOKE_INVOKING_NODE_IDENTITY_PATH="$INVOKING_NODE_IDENTITY_PATH" \
 SMOKE_PROGRAM_IRI="$PROGRAM_IRI" \
 SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" \
 SMOKE_QUERY_PROGRAM_IRI="$QUERY_PROGRAM_IRI" \
+SMOKE_COMPOSER_PROGRAM_IRI="$COMPOSER_PROGRAM_IRI" \
 SMOKE_STRATEGY_PATH="$STRATEGY_PATH" \
 SMOKE_RECEIPT_PATH="$RECEIPT_PATH" \
 SMOKE_WASM_MANIFEST="$REPO_ROOT/packages/semantic-runtime/generated/integrity.json" \
@@ -768,6 +943,15 @@ node --input-type=module -e '
   const sourcePublish = JSON.parse(fs.readFileSync(process.env.SMOKE_PROGRAM_PUBLISH_PATH, "utf8"));
   const queryProgramPublish = JSON.parse(fs.readFileSync(process.env.SMOKE_QUERY_PROGRAM_PUBLISH_PATH, "utf8"));
   const privateRemote = process.env.SMOKE_PRIVATE_REMOTE === "1";
+  const composerInvocation = privateRemote
+    ? JSON.parse(fs.readFileSync(process.env.SMOKE_COMPOSER_INVOKE_PATH, "utf8"))
+    : null;
+  const composerQuery = privateRemote
+    ? JSON.parse(fs.readFileSync(process.env.SMOKE_COMPOSER_CROSS_QUERY_PATH, "utf8"))
+    : null;
+  const childQuery = privateRemote
+    ? JSON.parse(fs.readFileSync(process.env.SMOKE_CHILD_CROSS_QUERY_PATH, "utf8"))
+    : null;
   const remoteInvocationDenial = privateRemote
     ? null
     : JSON.parse(fs.readFileSync(process.env.SMOKE_REMOTE_DENIAL_PATH, "utf8"));
@@ -833,6 +1017,39 @@ node --input-type=module -e '
   if (!/^sha256:[0-9a-f]{64}$/.test(String(auditRow.adapterHash))) throw new Error(`invalid adapter hash: ${auditRow.adapterHash}`);
   if (auditRow.executedBy !== forkOwner.agentDid) {
     throw new Error(`Fork executed by ${auditRow.executedBy}, expected copier node ${forkOwner.agentDid}`);
+  }
+  let composition = null;
+  if (privateRemote) {
+    const composerRows = composerQuery.result?.bindings ?? [];
+    const childRows = childQuery.result?.bindings ?? [];
+    if (composerRows.length !== 1 || childRows.length !== 1) {
+      throw new Error(`remote composition evidence is incomplete: ${JSON.stringify({ composerRows, childRows })}`);
+    }
+    const composerRow = Object.fromEntries(Object.entries(composerRows[0]).map(([key, value]) => [key, term(value)]));
+    const childRow = Object.fromEntries(Object.entries(childRows[0]).map(([key, value]) => [key, term(value)]));
+    if (composerRow.status !== "https://origintrail.io/semantic-runtime/v1#Succeeded") {
+      throw new Error(`composer did not succeed: ${composerRow.status}`);
+    }
+    if (composerRow.executedBy !== sourceAuthor.agentDid) {
+      throw new Error(`composer executed by ${composerRow.executedBy}, expected ${sourceAuthor.agentDid}`);
+    }
+    if (!String(composerRow.output).startsWith("urn:sr:execution:")) {
+      throw new Error(`composer output is not a child Execution IRI: ${composerRow.output}`);
+    }
+    if (childRow.output !== "semantic-runtime-llm-ok") {
+      throw new Error(`unexpected child Codex output: ${JSON.stringify(childRow.output)}`);
+    }
+    const expectedChildHash = `sha256:${crypto.createHash("sha256").update(Buffer.from(childRow.output, "utf8")).digest("hex")}`;
+    if (childRow.outputHash !== expectedChildHash) {
+      throw new Error(`child output hash mismatch: ${childRow.outputHash} != ${expectedChildHash}`);
+    }
+    if (childRow.status !== "https://origintrail.io/semantic-runtime/v1#Succeeded") {
+      throw new Error(`child did not succeed: ${childRow.status}`);
+    }
+    if (childRow.executedBy !== forkOwner.agentDid) {
+      throw new Error(`child executed by ${childRow.executedBy}, expected target ${forkOwner.agentDid}`);
+    }
+    composition = { invocation: composerInvocation, parentVm: composerRows[0], childVm: childRows[0] };
   }
   if (sourceAuthor.agentAddress.toLowerCase() === forkOwner.agentAddress.toLowerCase()) {
     throw new Error("smoke requires distinct source-author and fork-owner wallets");
@@ -926,6 +1143,7 @@ node --input-type=module -e '
     invocation,
     sourceInvocation,
     queryInvocation,
+    ...(composition ? { composition } : {}),
     crossNodeVmResult: rows[0],
     sourceCrossNodeVmResult: sourceRows[0],
     queryCrossNodeVmResult: catalogRows[0],
