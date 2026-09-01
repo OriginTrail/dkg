@@ -45,6 +45,22 @@ describe('WasmStrategyAdmissionClient', () => {
     expect(result.diagnostics[0]?.primary.start.line).toBeGreaterThan(0);
   });
 
+  it('rejects an investigator call with more than one prompt argument', async () => {
+    const client = new WasmStrategyAdmissionClient({ workerUrl });
+    const result = await client.compileStrategy(`
+      (strategy invalid-llm-arguments
+        (version "1.0.0")
+        (scope network:testnet)
+        (goal reject-ignored-arguments)
+        (delegate investigator
+          (grant agent.invoke.investigator)
+          (call agent/investigate@1 "Say hi" "ignored")))
+    `);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.diagnostics[0]).toMatchObject({ code: 'IR_SCHEMA_MISMATCH' });
+  });
+
   it('rejects canonical bytes whose declared authority no longer matches the plan tree', async () => {
     const client = new WasmStrategyAdmissionClient({ workerUrl });
     const compiled = await client.compileStrategy(listenerBoy);

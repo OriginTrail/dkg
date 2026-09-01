@@ -1213,8 +1213,17 @@ function textArgument(value: string | undefined, code = 'INVALID_LLM_ARGUMENT'):
   throw new SemanticProgramError(code, 'Effect argument must be text', 422);
 }
 
-function normalizeEffectInput(operation: string, arguments_: string[]): unknown {
-  if (operation === 'agent/investigate') return { prompt: textArgument(arguments_[0]) };
+export function normalizeEffectInput(operation: string, arguments_: string[]): unknown {
+  if (operation === 'agent/investigate') {
+    if (arguments_.length !== 1) {
+      throw new SemanticProgramError(
+        'INVALID_LLM_ARGUMENT',
+        'agent/investigate@1 requires exactly one text prompt',
+        422,
+      );
+    }
+    return { prompt: textArgument(arguments_[0]) };
+  }
   if (operation === 'dkg/query') {
     if (arguments_.length !== 1) {
       throw new SemanticProgramError(
