@@ -37,6 +37,7 @@
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   PromoteJobLeaseError,
+  parsePromoteErrorTag,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteFailureClassification,
@@ -137,15 +138,6 @@ export type ClassifiedPromoteError = {
   message?: string;
 };
 
-const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
-const PROMOTE_DIAGNOSTIC_STAGES = new Set([
-  'ensureSubGraphRegistered',
-  'assertGraphScopedLifecycleWritable',
-  'knowledgeAssetPrivateQuads',
-  'assertionScopedQuads',
-  'assertTrustedCatalogTriplesAllowed',
-  'encodeWorkspaceGossipPayload',
-]);
 // Only producer-owned, source-defined identities are safe to retain verbatim.
 // Arbitrary upstream name/code strings can be credentials even when they are
 // syntactically simple, so everything outside these closed sets becomes unknown.
@@ -167,17 +159,6 @@ const SAFE_ERROR_CODES = new Set([
   'CURATOR_REJECTED',
   'ASSERTION_NOT_PERSISTED',
 ]);
-
-function untagPromoteMessage(message: string): string {
-  return message.replace(PROMOTE_STEP_TAG, '');
-}
-
-function diagnosticPromoteStage(message: string): string {
-  const candidate = PROMOTE_STEP_TAG.exec(message)?.[1];
-  return candidate !== undefined && PROMOTE_DIAGNOSTIC_STAGES.has(candidate)
-    ? candidate
-    : 'unknown';
-}
 
 function safeErrorIdentity(
   err: unknown,
@@ -226,7 +207,7 @@ function logPromoteAttemptFailure(input: {
         maxAttempts: input.job.attempt.maxRetries,
         promoteStartedMarkerPersisted: input.promoteStarted,
         swmCommitObserved: false,
-        stage: diagnosticPromoteStage(input.message),
+        stage: parsePromoteErrorTag(input.message).stage,
         classification: input.classified.classification,
         retryable: input.classified.retryable,
         errorName: safeErrorIdentity(input.err, 'name', SAFE_ERROR_NAMES) ?? 'unknown',
@@ -256,7 +237,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // classifier trigger token (e.g. the step "encodeWorkspaceGossipPayload" would otherwise make
   // every error from it match the "gossip" cap-check). We classify on the ORIGINAL error text;
   // the tag stays on the operator-facing message. The tag is single (idempotent, innermost wins).
-  const untagged = untagPromoteMessage(raw ?? '');
+  const untagged = parsePromoteErrorTag(raw ?? '').message;
   const message = untagged.toLowerCase();
   const code =
     err && typeof err === 'object' && 'code' in err
