@@ -1862,6 +1862,14 @@ export class DKGAgentBase {
    */
   protected async prepareVmReverifyIntentStore(): Promise<void> {
     if (this.vmReverifyIntents) return;
+    // No durable backing of either kind means the feature CANNOT arm, and the
+    // answer must not cost a capability probe: agents without a chain adapter
+    // (synthetic lifecycle tests, chainless tooling) reach this method too,
+    // and the reconcile gate inside the resolver reads the adapter directly.
+    if (!this.config.dataDir && !this.config.vmReverifyIntentStore) {
+      this.vmReverifyActivation = { effective: false, reason: 'no-data-dir' };
+      return;
+    }
     // The effective gate runs FIRST, before an injected store is accepted
     // (review r1): injection substitutes for the durable FILE, not for the
     // operator flag, the reconciler, or the adapter capability set — an

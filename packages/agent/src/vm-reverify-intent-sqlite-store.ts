@@ -15,7 +15,7 @@ import {
   openVmReverifyIntentDatabase,
 } from './vm-reverify-intent-sqlite-schema.js';
 import {
-  positionAdvancesIntent,
+  eventRedefinesIntent,
   type VmReverifyAbandonReason,
   VmReverifyIntentHealth,
   VmReverifyIntentPosition,
@@ -143,7 +143,7 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
           return;
         }
         const record = rowToRecord(existing);
-        if (!positionAdvancesIntent(input.position, record.observed)) return;
+        if (!eventRedefinesIntent(input.position, record.observed, record.state)) return;
         // A strictly-newer event redefines the work, so the ENTIRE retry budget
         // resets — including `first_attempt_at`. Carrying the old timestamp
         // forward would re-park a revived row against a 24 h window that
@@ -213,17 +213,25 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
     lastOutcome: string,
     retryDelayMs: number,
     now: number,
+    startsParkBudget: boolean,
   ): Promise<boolean> {
     return this.casMutation(() => this.database.prepare(`
       UPDATE vm_reverify_intents_v1
       SET attempt_count = attempt_count + 1,
-          first_attempt_at = COALESCE(first_attempt_at, ?),
+          first_attempt_at = CASE WHEN ? THEN COALESCE(first_attempt_at, ?) ELSE first_attempt_at END,
           next_attempt_at = ?,
           last_outcome = ?,
           updated_at = ?
       WHERE ual = ? AND generation = ? AND state = 'PENDING'
-    `).run(now, now + Math.max(0, Math.trunc(retryDelayMs)), lastOutcome, now, ual, generation)
-      .changes > 0);
+    `).run(
+      startsParkBudget ? 1 : 0,
+      now,
+      now + Math.max(0, Math.trunc(retryDelayMs)),
+      lastOutcome,
+      now,
+      ual,
+      generation,
+    ).changes > 0);
   }
 
   abandon(ual: string, generation: number, reason: VmReverifyAbandonReason): Promise<boolean> {

@@ -119,6 +119,9 @@ export interface VmReverifyRunSummary {
   retried: number;
   abandoned: number;
   left: number;
+  /** Planned transitions refused by the generation CAS — a newer event
+   *  redefined the row mid-run (review r2). The newer intent stays due. */
+  superseded: number;
   /** Whole-Context-Graph SWM recoveries paired with an unresolved item. */
   swmRecoveries: number;
   /** Aggregate peer contact across the run's calls. */
@@ -198,6 +201,7 @@ function emptySummary(): VmReverifyRunSummary {
     retried: 0,
     abandoned: 0,
     left: 0,
+    superseded: 0,
     swmRecoveries: 0,
     peerAttempts: 0,
     networkAttempted: false,
@@ -213,8 +217,6 @@ export class VmReverifyWorker {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #kickTimer: ReturnType<typeof setTimeout> | undefined;
   #inFlight: Promise<VmReverifyRunSummary> | undefined;
-  /** Set per chunk by `pairSwmRecovery`; consumed by the pure transition table. */
-  private swmRecoveryAvailable: boolean | undefined;
 
   constructor(private readonly deps: VmReverifyWorkerDependencies) {
     this.#settings = resolveVmReverifyWorkerSettings(deps.settings);
@@ -298,8 +300,12 @@ export class VmReverifyWorker {
     for (const [localCgId, records] of groups) {
       if (callsRemaining <= 0) break;
       callsRemaining -= 1;
-      let outcomes = await this.resolveChunkOutcomes(localCgId, records, summary);
-      outcomes = await this.pairSwmRecovery(localCgId, records, outcomes, summary);
+      const chunkOutcomes = await this.resolveChunkOutcomes(localCgId, records, summary);
+      // Recovery availability travels WITH the chunk result (review r2):
+      // worker-instance state would leak one chunk's availability decision
+      // into a later chunk that never made one.
+      const paired = await this.pairSwmRecovery(localCgId, records, chunkOutcomes, summary);
+      const outcomes = paired.outcomes;
       // Recorded only after the whole chunk — including any singleton fallback
       // and any SWM-recovery retry — has an outcome, so a poisoned sibling can
       // never cause a healthy row to be written against a result that was later
@@ -307,7 +313,7 @@ export class VmReverifyWorker {
       // are network I/O that can outlast the retry delay, and a `nextAttemptAt`
       // computed from the pre-I/O clock would already be overdue — an
       // immediate re-poll instead of a backoff.
-      await this.recordChunk(records, outcomes, summary, this.#now());
+      await this.recordChunk(records, outcomes, summary, this.#now(), paired.swmRecoveryAvailable);
     }
     return summary;
   }
@@ -393,19 +399,17 @@ export class VmReverifyWorker {
     records: readonly VmReverifyIntentRecord[],
     outcomes: Map<string, CallOutcome>,
     summary: VmReverifyRunSummary,
-  ): Promise<Map<string, CallOutcome>> {
+  ): Promise<{ outcomes: Map<string, CallOutcome>; swmRecoveryAvailable?: boolean }> {
     const stranded = records.filter((record) => {
       const outcome = outcomes.get(record.ual);
       return outcome?.kind === 'item' && outcome.status === 'unresolved';
     });
-    if (stranded.length === 0) return outcomes;
-    if (!this.deps.recoverContextGraphSwm) return outcomes;
+    if (stranded.length === 0) return { outcomes };
+    if (!this.deps.recoverContextGraphSwm) return { outcomes };
     // An operator who killed the durable plane must not have W2 resurrect it.
     if (this.deps.durableSyncEnabled && !this.deps.durableSyncEnabled()) {
-      this.swmRecoveryAvailable = false;
-      return outcomes;
+      return { outcomes, swmRecoveryAvailable: false };
     }
-    this.swmRecoveryAvailable = true;
 
     // Verification folds its re-fetch results in as it goes, so a later
     // verdict only re-fetches what the earlier peers left stranded.
@@ -433,7 +437,7 @@ export class VmReverifyWorker {
         + `${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    return merged;
+    return { outcomes: merged, swmRecoveryAvailable: true };
   }
 
   private async call(
@@ -461,6 +465,7 @@ export class VmReverifyWorker {
     outcomes: Map<string, CallOutcome>,
     summary: VmReverifyRunSummary,
     now: number,
+    swmRecoveryAvailable?: boolean,
   ): Promise<void> {
     for (const record of records) {
       const outcome = outcomes.get(record.ual);
@@ -477,38 +482,47 @@ export class VmReverifyWorker {
           : { firstAttemptAt: record.firstAttemptAt }),
         now,
         parkAfterMs: this.#settings.parkAfterMs,
-        ...(this.swmRecoveryAvailable === undefined
+        ...(swmRecoveryAvailable === undefined
           ? {}
-          : { swmRecoveryAvailable: this.swmRecoveryAvailable }),
+          : { swmRecoveryAvailable }),
       });
-      await this.apply(record, transition, now);
-      this.tally(summary, record, outcome, transition);
+      const committed = await this.apply(record, transition, now);
+      this.tally(summary, record, outcome, transition, committed);
     }
   }
 
+  /**
+   * Returns whether the compare-and-set COMMITTED (review r2): a stale
+   * generation — the lane advanced the row while this run was planning —
+   * correctly refuses the write, and the summary must say so rather than
+   * claim a transition that never happened. A 'leave' writes nothing and
+   * counts as committed.
+   */
   private async apply(
     record: VmReverifyIntentRecord,
     transition: VmReverifyTransition,
     now: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     switch (transition.action) {
       case 'resolve':
-        await this.deps.intents.resolve(record.ual, record.generation);
-        return;
+        return this.deps.intents.resolve(record.ual, record.generation);
       case 'retry':
-        await this.deps.intents.recordAttempt(
+        return this.deps.intents.recordAttempt(
           record.ual,
           record.generation,
           transition.reason,
           transition.delayMs,
           now,
+          // Only a genuine peer-unresolved attempt consumes the 24 h budget
+          // (review r2); deferrals behind configuration or evidence failures
+          // must leave the window unstarted.
+          transition.outcomeClass === 'unresolved',
         );
-        return;
       case 'abandon':
-        await this.deps.intents.abandon(record.ual, record.generation, transition.reason);
-        return;
+        return this.deps.intents.abandon(record.ual, record.generation, transition.reason);
       case 'leave':
       default:
+        return true;
     }
   }
 
@@ -517,7 +531,22 @@ export class VmReverifyWorker {
     record: VmReverifyIntentRecord,
     outcome: CallOutcome | undefined,
     transition: VmReverifyTransition,
+    committed: boolean,
   ): void {
+    if (!committed) {
+      // The CAS refused the write: a newer generation redefined the row while
+      // this run was planning (review r2). The newer intent is intact and due;
+      // claiming the planned transition would be a false operator signal.
+      const key = 'superseded:stale-generation';
+      summary.outcomes[key] = (summary.outcomes[key] ?? 0) + 1;
+      summary.superseded += 1;
+      this.deps.log.info(
+        `vm-reverify action=superseded cg=${record.localCgId} `
+        + `ka=${record.kaId} ual=${record.ual} block=${record.observed.blockNumber} `
+        + `planned=${transition.action}:${transition.reason} reason=stale-generation`,
+      );
+      return;
+    }
     const key = `${transition.action}:${transition.reason}`;
     summary.outcomes[key] = (summary.outcomes[key] ?? 0) + 1;
     if (transition.action === 'resolve') summary.resolved += 1;

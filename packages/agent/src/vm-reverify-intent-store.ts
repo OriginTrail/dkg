@@ -85,6 +85,30 @@ export function positionAdvancesIntent(
   return !sameEventIdentity(candidate, existing);
 }
 
+/**
+ * Does a delivered event redefine the row, GIVEN the row's state?
+ *
+ * For a PENDING row the answer is pure position ordering — the row is being
+ * worked and an older canonical log adds nothing. For an ABANDONED row the
+ * rule widens (review r2): a reorg is not obliged to put the replacement at
+ * the same — or even a later — numeric position, so ANY event whose chain
+ * identity differs from the stored one revives the row. The asymmetry of the
+ * failure modes decides this: a spurious revival (a stale rescan of a
+ * different, genuinely-canonical older log) costs one idempotent,
+ * chain-authoritative re-verification cycle that re-abandons loudly; a missed
+ * revival leaves the node governed by an orphaned mutation forever. A rescan
+ * re-delivering the SAME event that produced the abandonment is identical by
+ * chain identity and stays `unchanged`, so no revival loop is possible.
+ */
+export function eventRedefinesIntent(
+  candidate: VmReverifyIntentPosition,
+  existing: VmReverifyIntentPosition,
+  existingState: VmReverifyIntentState,
+): boolean {
+  if (positionAdvancesIntent(candidate, existing)) return true;
+  return existingState === 'ABANDONED' && !sameEventIdentity(candidate, existing);
+}
+
 export interface VmReverifyIntentUpsertInput {
   ual: string;
   localCgId: string;
@@ -110,7 +134,10 @@ export interface VmReverifyIntentRecord {
    */
   generation: number;
   attemptCount: number;
-  /** Start of the 24 h budget. Set once per generation, on the first attempt. */
+  /** Start of the 24 h peer-recovery budget. Set once per generation, on the
+   *  first PEER-UNRESOLVED attempt (review r2): time spent behind a disabled
+   *  durable plane or missing chain evidence is not the network failing to
+   *  serve the version, and must not consume the window that measures that. */
   firstAttemptAt?: number;
   nextAttemptAt?: number;
   lastOutcome?: string;
@@ -141,12 +168,18 @@ export interface VmReverifyIntentStore {
   listDue(now: number, limit: number): Promise<VmReverifyIntentRecord[]>;
   /** The asset is proven current: the work is done and the row is gone. */
   resolve(ual: string, generation: number): Promise<boolean>;
+  /**
+   * `startsParkBudget` (review r2): only a genuine peer-unresolved attempt
+   * may start the 24 h abandonment window — deferrals behind configuration
+   * or evidence failures record the attempt but leave the budget untouched.
+   */
   recordAttempt(
     ual: string,
     generation: number,
     lastOutcome: string,
     retryDelayMs: number,
     now: number,
+    startsParkBudget: boolean,
   ): Promise<boolean>;
   abandon(ual: string, generation: number, reason: VmReverifyAbandonReason): Promise<boolean>;
   /** (Re-)subscribing or (re-)hosting a CG is new evidence: retry its dead rows. */

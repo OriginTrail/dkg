@@ -148,13 +148,16 @@ class InMemoryVmReverifyIntentStore implements VmReverifyIntentStore {
     lastOutcome: string,
     retryDelayMs: number,
     now: number,
+    startsParkBudget: boolean,
   ): Promise<boolean> {
     const row = this.rows.get(ual);
     if (!row || row.generation !== generation || row.state !== 'PENDING') return false;
     this.rows.set(ual, {
       ...row,
       attemptCount: row.attemptCount + 1,
-      firstAttemptAt: row.firstAttemptAt ?? now,
+      ...(startsParkBudget
+        ? { firstAttemptAt: row.firstAttemptAt ?? now }
+        : row.firstAttemptAt === undefined ? {} : { firstAttemptAt: row.firstAttemptAt }),
       nextAttemptAt: now + retryDelayMs,
       lastOutcome,
       updatedAt: now,
@@ -889,6 +892,79 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     expect(await intents.countPending()).toBe(0);
   });
 
+  it('deferrals behind a disabled durable plane do not consume the 24h peer budget (review r2)', async () => {
+    // Two days behind the switch, then the plane returns: the first genuine
+    // peer-unresolved attempt must open a FRESH 24h window, not inherit one
+    // that expired while the deferral reason made peer recovery impossible.
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 66n, 100);
+    let clock = 10_000;
+    let durableOn = false;
+    const fetch = makeFetch({
+      snapshotFor: () => snapshot(200),
+      localState: () => 'missing',
+      peerIds: [],
+    });
+    const worker = new VmReverifyWorker({
+      intents,
+      fetchContextGraphAssets: fetch,
+      recoverContextGraphSwm: async () => undefined,
+      durableSyncEnabled: () => durableOn,
+      log: { info: () => undefined, warn: () => undefined },
+      now: () => clock,
+    });
+
+    const run1 = await worker.runOnce();
+    expect(run1.items[0]).toMatchObject({ ual, action: 'retry', reason: 'durable-sync-disabled' });
+    expect(intents.rows.get(ual)!.firstAttemptAt, 'a deferral must not start the budget').toBeUndefined();
+
+    // Two days later the operator re-enables the durable plane.
+    clock += 2 * 24 * 60 * 60 * 1_000;
+    durableOn = true;
+    const run2 = await worker.runOnce();
+    expect(
+      run2.items[0],
+      'the first real peer-unresolved attempt must RETRY on a fresh window, not park',
+    ).toMatchObject({ ual, action: 'retry', reason: 'unresolved' });
+    expect(intents.rows.get(ual)!.firstAttemptAt).toBe(clock);
+
+    // And the fresh window still ends: 24h of genuine unresolved later, park.
+    clock += VM_REVERIFY_PARK_AFTER_MS + 1;
+    const run3 = await worker.runOnce();
+    expect(run3.items[0]).toMatchObject({ ual, action: 'abandon', reason: 'no-peer-has-version' });
+  });
+
+  it('a stale generation is reported as SUPERSEDED, never as the planned transition (review r2)', async () => {
+    // The exact race the CAS exists for: the lane advances the row while the
+    // drain is planning against the old generation. The refused write must
+    // not be tallied as the transition that never happened.
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 67n, 100);
+    const fetch = makeFetch({
+      snapshotFor: () => snapshot(200),
+      localState: () => 'missing',
+      peerIds: ['peer-a'],
+      fetchFromPeer: async () => {
+        // Mid-drain: a strictly newer mutation redefines the row.
+        await intents.upsert({
+          ual,
+          localCgId: DRAIN_CG,
+          kaId: kaIdFor(67n).toString(),
+          kind: 'root-added',
+          position: position(200, 0, 1),
+        });
+      },
+    });
+    const { worker } = makeWorker(intents, fetch);
+
+    const run = await worker.runOnce();
+
+    expect(run.superseded).toBe(1);
+    expect(run.retried, 'the refused retry must not be claimed').toBe(0);
+    expect(run.outcomes['superseded:stale-generation']).toBe(1);
+    const row = intents.rows.get(ual)!;
+    expect(row).toMatchObject({ state: 'PENDING', generation: 1, attemptCount: 0, kind: 'root-added' });
+  });
   it('abandons a root REMOVAL it cannot repair, loudly and revivably', async () => {
     const intents = new InMemoryVmReverifyIntentStore();
     const ual = await seed(intents, 5n, 100, 'root-removed');

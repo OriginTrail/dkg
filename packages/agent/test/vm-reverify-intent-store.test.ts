@@ -216,6 +216,55 @@ describe('VM re-verify intent store — same-position reorg replacement (review 
     });
   });
 
+  it('REVIVES an abandoned row when the canonical replacement moved EARLIER (review r2)', async () => {
+    // A reorg is not obliged to keep the replacement at the same position.
+    // For a DEAD row, any differing chain identity revives; the spurious-
+    // revival cost is one idempotent re-verification, the missed-revival
+    // cost is an orphaned mutation governing the node forever.
+    await withStore(async (store) => {
+      await store.upsert(intent({ kind: 'root-removed', position: at(101, 0, 0) }));
+      const [before] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      await store.abandon(UAL, before!.generation, 'version-regression-unsupported');
+
+      const outcome = await store.upsert(intent({
+        kind: 'root-added',
+        position: at(100, 0, 0, { blockHash: `0x${'55'.repeat(32)}`, transactionHash: `0x${'56'.repeat(32)}` }),
+      }));
+
+      expect(outcome).toBe('advanced');
+      const [revived] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      expect(revived).toMatchObject({ ual: UAL, state: 'PENDING', kind: 'root-added' });
+      expect(revived!.generation).toBe(before!.generation + 1);
+    });
+  });
+
+  it('does NOT revive an abandoned row for a rescan of its OWN event (review r2)', async () => {
+    // The periodic wide rescan re-delivers the very log that produced the
+    // abandonment. Chain identity is identical, so this must stay unchanged
+    // — otherwise every rescan would flap the row alive into the same
+    // abandonment, forever.
+    await withStore(async (store) => {
+      await store.upsert(intent({ kind: 'root-removed', position: at(101, 0, 0) }));
+      const [before] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      await store.abandon(UAL, before!.generation, 'version-regression-unsupported');
+
+      expect(await store.upsert(intent({ kind: 'root-removed', position: at(101, 0, 0) })))
+        .toBe('unchanged');
+      const [row] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      expect(row, 'the row must still be dead').toBeUndefined();
+    });
+  });
+
+  it('keeps STRICT ordering for PENDING rows — an older different log changes nothing (review r2)', async () => {
+    await withStore(async (store) => {
+      await store.upsert(intent({ position: at(101, 0, 0) }));
+      expect(await store.upsert(intent({
+        position: at(100, 0, 0, { transactionHash: `0x${'57'.repeat(32)}` }),
+      }))).toBe('unchanged');
+      const [row] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      expect(row!.observed.blockNumber).toBe(101);
+    });
+  });
   it('still reports a re-scanned IDENTICAL log as unchanged', async () => {
     await withStore(async (store) => {
       await store.upsert(intent({ position: at(100, 0, 3) }));
@@ -267,7 +316,7 @@ describe('VM re-verify intent store — position ordering', () => {
     await withStore(async (store, _directory, setNow) => {
       setNow(1_000);
       await store.upsert(intent({ position: at(100) }));
-      await store.recordAttempt(UAL, 0, 'unresolved', 30_000, 1_000);
+      await store.recordAttempt(UAL, 0, 'unresolved', 30_000, 1_000, true);
       const [attempted] = await store.listDue(1_000_000, 10);
       expect(attempted?.attemptCount).toBe(1);
       expect(attempted?.firstAttemptAt).toBe(1_000);
@@ -301,7 +350,7 @@ describe('VM re-verify intent store — due selection', () => {
       ]);
 
       // Not due yet.
-      await store.recordAttempt(OTHER_UAL, 0, 'unresolved', 30_000, 1_000);
+      await store.recordAttempt(OTHER_UAL, 0, 'unresolved', 30_000, 1_000, true);
       expect((await store.listDue(1_000, 10)).map((row) => row.ual)).toEqual([UAL]);
       expect((await store.listDue(31_000, 10)).map((row) => row.ual)).toEqual([OTHER_UAL, UAL]);
 
@@ -325,11 +374,11 @@ describe('VM re-verify intent store — generation compare-and-set', () => {
       // A drain that planned against generation 0 must not be able to delete,
       // retry, or bury a row that a newer chain event has already redefined.
       await expect(store.resolve(UAL, 0)).resolves.toBe(false);
-      await expect(store.recordAttempt(UAL, 0, 'unresolved', 1_000, 1_000)).resolves.toBe(false);
+      await expect(store.recordAttempt(UAL, 0, 'unresolved', 1_000, 1_000, true)).resolves.toBe(false);
       await expect(store.abandon(UAL, 0, 'no-peer-has-version')).resolves.toBe(false);
       expect(await store.countPending()).toBe(1);
 
-      await expect(store.recordAttempt(UAL, 1, 'unresolved', 1_000, 1_000)).resolves.toBe(true);
+      await expect(store.recordAttempt(UAL, 1, 'unresolved', 1_000, 1_000, true)).resolves.toBe(true);
       await expect(store.resolve(UAL, 1)).resolves.toBe(true);
       expect(await store.countPending()).toBe(0);
       await expect(store.resolve(UAL, 1), 'a resolved row is gone, not re-resolvable')
@@ -340,8 +389,8 @@ describe('VM re-verify intent store — generation compare-and-set', () => {
   it('does not advance the generation on an attempt or an abandon', async () => {
     await withStore(async (store) => {
       await store.upsert(intent({ position: at(100) }));
-      await store.recordAttempt(UAL, 0, 'unresolved', 1_000, 1_000);
-      await store.recordAttempt(UAL, 0, 'unresolved', 1_000, 2_000);
+      await store.recordAttempt(UAL, 0, 'unresolved', 1_000, 1_000, true);
+      await store.recordAttempt(UAL, 0, 'unresolved', 1_000, 2_000, true);
       const [row] = await store.listDue(1_000_000, 10);
       expect(
         row?.generation,
@@ -363,7 +412,7 @@ describe('VM re-verify intent store — revival and garbage collection', () => {
     await withStore(async (store, _directory, setNow) => {
       setNow(1_000);
       await store.upsert(intent({ position: at(100) }));
-      await store.recordAttempt(UAL, 0, 'unresolved', 1_000, 1_000);
+      await store.recordAttempt(UAL, 0, 'unresolved', 1_000, 1_000, true);
       await store.abandon(UAL, 0, 'no-peer-has-version');
       expect(await store.countPending(CG)).toBe(0);
       expect((await store.health()).abandoned).toBe(1);
@@ -400,9 +449,12 @@ describe('VM re-verify intent store — revival and garbage collection', () => {
       expect(row?.state).toBe('PENDING');
       expect(row?.abandonReason).toBeUndefined();
 
-      // An older event must NOT resurrect it.
+      // Since review r2 an older event with a DIFFERENT chain identity DOES
+      // resurrect a dead row (a reorg may move the replacement earlier); what
+      // must never resurrect it is a rescan of an event it already absorbed —
+      // the row at (100,0,1) with identical hashes.
       await store.abandon(UAL, 1, 'version-regression-unsupported');
-      await expect(store.upsert(intent({ position: at(99) }))).resolves.toBe('unchanged');
+      await expect(store.upsert(intent({ position: at(100, 0, 1) }))).resolves.toBe('unchanged');
       expect(await store.countPending()).toBe(0);
     });
   });
@@ -430,8 +482,8 @@ describe('VM re-verify intent store — revival and garbage collection', () => {
       await expect(store.health()).resolves.toEqual({ pending: 0, abandoned: 0 });
       await store.upsert(intent({ ual: UAL, position: at(100) }));
       await store.upsert(intent({ ual: OTHER_UAL, position: at(101) }));
-      await store.recordAttempt(OTHER_UAL, 0, 'unresolved', 1_000, 7_777);
-      await store.recordAttempt(UAL, 0, 'unresolved', 1_000, 9_999);
+      await store.recordAttempt(OTHER_UAL, 0, 'unresolved', 1_000, 7_777, true);
+      await store.recordAttempt(UAL, 0, 'unresolved', 1_000, 9_999, true);
       await expect(store.health()).resolves.toEqual({
         pending: 2,
         abandoned: 0,
@@ -441,6 +493,25 @@ describe('VM re-verify intent store — revival and garbage collection', () => {
   });
 });
 
+describe('VM re-verify intent store — the park budget starts only on peer-unresolved attempts (review r2)', () => {
+  it('a non-budget attempt records everything EXCEPT first_attempt_at', async () => {
+    await withStore(async (store) => {
+      await store.upsert(intent({ position: at(100) }));
+      await store.recordAttempt(UAL, 0, 'durable-sync-disabled', 30_000, 5_000, false);
+
+      const [row] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      expect(row!.attemptCount).toBe(1);
+      expect(row!.nextAttemptAt).toBe(35_000);
+      expect(row!.firstAttemptAt, 'the 24h window must not have started').toBeUndefined();
+
+      // The first PEER-UNRESOLVED attempt starts it — from ITS clock, not
+      // from the deferral that preceded it.
+      await store.recordAttempt(UAL, 0, 'unresolved', 30_000, 200_000_000, true);
+      const [after] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      expect(after!.firstAttemptAt).toBe(200_000_000);
+    });
+  });
+});
 describe('VM re-verify intent store — durability across a reopen', () => {
   it('keeps pending work, generation and budget across close/open', async () => {
     const directory = await temporaryDirectory();
@@ -448,7 +519,7 @@ describe('VM re-verify intent store — durability across a reopen', () => {
       const first = await openSqliteVmReverifyIntentStore(directory, { now: () => 1_000 });
       await first.upsert(intent({ position: at(100) }));
       await first.upsert(intent({ position: at(101) }));
-      await first.recordAttempt(UAL, 1, 'unresolved', 5_000, 1_000);
+      await first.recordAttempt(UAL, 1, 'unresolved', 5_000, 1_000, true);
       await first.close();
 
       // The whole point of a durable intent: the node that went down during a
