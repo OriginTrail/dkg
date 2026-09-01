@@ -1,5 +1,5 @@
 {
-  "_comment": "Single source of truth for the devnet suite set and shared sweep topology. `prCoverage` = the 10.0.2 PR-coverage suites the coverage sweep runs; `all` = every devnet/<dir> that has a vitest.config.ts (excluding _bootstrap). scripts/devnet-1002-coverage-sweep.sh reads this manifest; devnet/_bootstrap/suite-manifest.test.ts guards it against package.json / pnpm-workspace.yaml / on-disk drift.",
+  "_comment": "Single source of truth for the devnet suite set and shared sweep topology. `prCoverage` = the 10.0.2 PR-coverage suites run once in the baseline; `baselineOnly` = economically consumptive canonical-state suites excluded from the default repeated stability loop; `all` = every devnet/<dir> that has a vitest.config.ts (excluding _bootstrap). scripts/devnet-1002-coverage-sweep.sh reads this manifest; devnet/_bootstrap/suite-manifest.test.ts guards it against package.json / pnpm-workspace.yaml / on-disk drift.",
   "sharedSweep": {
     "nodeCount": 6,
     "publisherWalletIndex": 1
@@ -10,10 +10,14 @@
     "pr1388-okf-integration",
     "ka-lifecycle-cli",
     "pr1366-pca-deposit-waiver",
+    "pr2440-pca-cg-registration",
     "pr1369-folded-private-ack",
     "pr1387-bulk-register-agents",
     "pr1384-preserve-agents-on-transfer",
     "pr1370-admin-op-wallet"
+  ],
+  "baselineOnly": [
+    "pr2440-pca-cg-registration"
   ],
   "all": [
     "ack-candidate-isolation",
@@ -31,6 +35,7 @@
     "pr1386-term-canon",
     "pr1387-bulk-register-agents",
     "pr1388-okf-integration",
+    "pr2440-pca-cg-registration",
     "ka-lifecycle-cli",
     "rfc51-publishing-allocation",
     "rich-scenario",

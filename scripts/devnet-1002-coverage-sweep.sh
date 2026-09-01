@@ -10,7 +10,7 @@
 #
 # Phases:
 #   1. ONE PASS of the manifest-listed PR-coverage suites + v10-end-to-end (baseline).
-#   2. STABILITY LOOP of those suites until (TARGET - ORCH reserve) elapses,
+#   2. STABILITY LOOP of repeatable suites until (TARGET - ORCH reserve) elapses,
 #      health-guarded, aggregating per-suite pass-rates → surfaces intermittents
 #      (RS timing, finalization dual-home race, SWM convergence).
 #   3. (opt-in, LAST) devnet-comprehensive.sh WITH soak — destructive; runs only
@@ -37,17 +37,32 @@ RUN_ORCHESTRATOR="${RUN_ORCHESTRATOR:-0}"
 SOAK_RS_SECONDS="${SOAK_RS_SECONDS:-1800}"
 if [ "$RUN_ORCHESTRATOR" = "1" ]; then ORCH_RESERVE_SECONDS="${ORCH_RESERVE_SECONDS:-5400}"; else ORCH_RESERVE_SECONDS=0; fi
 
-# Suite list is single-sourced in devnet/suites.json (guarded against drift by
-# devnet/_bootstrap/suite-manifest.test.ts). Read the PR-coverage set from there.
+# Suite classification is single-sourced in devnet/suites.json (guarded against
+# drift by devnet/_bootstrap/suite-manifest.test.ts). Baseline runs all PR
+# coverage; the default stability loop excludes economically consumptive suites
+# whose durable canonical state makes repetition unsafe without a clean devnet.
 SUITES_JSON="$REPO_ROOT/devnet/suites.json"
-NEW_SUITES=($(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).prCoverage.join(' '))" "$SUITES_JSON" 2>/dev/null))
-[ "${#NEW_SUITES[@]}" -gt 0 ] || { echo "FATAL: could not read prCoverage from $SUITES_JSON (need node in PATH)"; exit 2; }
-SWEEP_NODE_COUNT=$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).sharedSweep.nodeCount))" "$SUITES_JSON" 2>/dev/null)
-STABILITY_SUITES="${STABILITY_SUITES:-${NEW_SUITES[*]} v10-end-to-end}"
+SWEEP_SELECTOR="$REPO_ROOT/scripts/lib/sweep-suite-selector.mjs"
+source "$REPO_ROOT/scripts/lib/sweep-phase-schedule.sh"
+STABILITY_OVERRIDE="${STABILITY_SUITES:-}"
+if ! SWEEP_SELECTION=$(node "$SWEEP_SELECTOR" "$SUITES_JSON" selection 0 "$STABILITY_OVERRIDE"); then
+  echo "FATAL: could not select sweep suites from $SUITES_JSON (need node in PATH)"; exit 2
+fi
+IFS=$'\t' read -r BASELINE_SUITES STABILITY_SUITES SWEEP_NODE_COUNT PR_COVERAGE_COUNT <<< "$SWEEP_SELECTION"
+[ -n "$BASELINE_SUITES" ] && [ -n "$STABILITY_SUITES" ] && [ "$SWEEP_NODE_COUNT" -gt 0 ] || {
+  echo "FATAL: sweep selector returned an invalid schedule for $SUITES_JSON"; exit 2
+}
 
 log() { echo "[1002-sweep $(date -u +'%H:%M:%S')] $*" | tee -a "$SUMMARY"; }
 elapsed() { echo $(( $(date +%s) - START )); }
 loop_deadline() { echo $(( TARGET_SECONDS - ORCH_RESERVE_SECONDS )); }
+
+load_scheduled_phase() { # $1=baseline|stability $2=round
+  if ! capture_sweep_phase_schedule "$1" "$2"; then
+    log "FATAL: sweep selector failed or returned an empty $1 schedule (round $2)"
+    return 2
+  fi
+}
 
 # devnet health: all 6 node APIs + hardhat reachable. Returns 0 healthy / 1 not.
 # BLIP-TOLERANT: a single probe can transiently ECONNRESET / time out on a busy
@@ -107,7 +122,7 @@ log "10.0.2 sweep. target=${TARGET_SECONDS}s orch=${RUN_ORCHESTRATOR} loop_deadl
 if ! pnpm vitest run --config devnet/_bootstrap/vitest.manifest.config.ts > "$RESULTS/manifest-guard.log" 2>&1; then
   log "FATAL: suite manifest drift — see $RESULTS/manifest-guard.log (run 'pnpm test:devnet:manifest')"; exit 2
 fi
-log "suite manifest consistent ($( echo "${NEW_SUITES[*]}" | wc -w | tr -d ' ') PR-coverage suites)."
+log "suite manifest consistent ($PR_COVERAGE_COUNT PR-coverage suites)."
 if ! DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}" \
   node "$REPO_ROOT/scripts/devnet-shared-sweep-preflight.mjs" \
   > "$RESULTS/topology-preflight.log" 2>&1; then
@@ -120,8 +135,14 @@ if ! healthy; then log "FATAL: devnet not healthy at start — restart it first"
 log "devnet healthy ($SWEEP_NODE_COUNT nodes + hardhat)."
 
 # ── Phase 1: baseline one pass ────────────────────────────────────
-log "═══ PHASE 1: baseline one pass (${STABILITY_SUITES}) ═══"
-for s in $STABILITY_SUITES; do r=$(run_suite "$s" "P1-$s"); log "  $(printf '%-6s' "$r") $s"; tally "$s" "$r"; done
+log "═══ PHASE 1: baseline one pass (${BASELINE_SUITES}) ═══"
+load_scheduled_phase baseline 0 || exit $?
+while IFS=$'\t' read -r tag s; do
+  [ -n "$s" ] || continue
+  r=$(run_suite "$s" "$tag")
+  log "  $(printf '%-6s' "$r") $s"
+  tally "$s" "$r"
+done <<< "$SWEEP_PHASE_SCHEDULE"
 
 # ── Phase 2: health-guarded stability loop ────────────────────────
 log "═══ PHASE 2: stability loop until $(loop_deadline)s elapsed (health-guarded) ═══"
@@ -133,12 +154,14 @@ while [ "$(elapsed)" -lt "$(loop_deadline)" ]; do
   fi
   ROUND=$(( ROUND + 1 ))
   log "── round $ROUND (elapsed $(elapsed)s / $(loop_deadline)s) ──"
-  for s in $STABILITY_SUITES; do
+  load_scheduled_phase stability "$ROUND" || exit $?
+  while IFS=$'\t' read -r tag s; do
+    [ -n "$s" ] || continue
     [ "$(elapsed)" -lt "$(loop_deadline)" ] || break
-    r=$(run_suite "$s" "P2-r${ROUND}-$s")
+    r=$(run_suite "$s" "$tag")
     [ "$r" = "pass" ] || log "    $r $s (round $ROUND)"
     tally "$s" "$r"
-  done
+  done <<< "$SWEEP_PHASE_SCHEDULE"
 done
 [ "$ABORTED" = "0" ] && log "PHASE 2 done: $ROUND rounds."
 

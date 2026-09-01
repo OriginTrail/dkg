@@ -33,6 +33,7 @@ packages:
   - "devnet/pr1388-okf-integration"
   - "devnet/ka-lifecycle-cli"
   - "devnet/pr1366-pca-deposit-waiver"
+  - "devnet/pr2440-pca-cg-registration"
   - "devnet/pr1369-folded-private-ack"
   - "devnet/pr1387-bulk-register-agents"
   - "devnet/pr1384-preserve-agents-on-transfer"
