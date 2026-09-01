@@ -564,6 +564,117 @@ describe('graph-scoped finalization handler', () => {
     ).toBeGreaterThan(W2R_LOW_STAMP.blockNumber);
   });
 
+  /**
+   * Review r4 — the guard is central, but the FLAG must survive every
+   * forwarding site that reaches it. Each branch row lowers the stamp first,
+   * so a site that drops the flag produces a visible write, and each has an
+   * unsuppressed polarity twin proving the write happens from this staging.
+   */
+  async function stageVmOnlyThenLowerStamp(): Promise<{
+    message: FinalizationMessageMsg;
+    metaGraph: string;
+    repairHandler: FinalizationHandler;
+  }> {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await retainExactContentOnlyInVm(swmGraph, vmGraph);
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await writeMaterializedVersion(store, metaGraph, UAL, W2R_LOW_STAMP);
+    const repairHandler = makePublicReconcileHandler(message, {
+      getLatestMerkleRootAuthor: async () => AUTHOR,
+    });
+    return { message, metaGraph, repairHandler };
+  }
+
+  it('inspect-only suppression survives the ABSENT-workspace-head forwarding site (review r4)', async () => {
+    const { message, metaGraph, repairHandler } = await stageVmOnlyThenLowerStamp();
+
+    await expect(
+      reconcileGraphScoped(repairHandler, message, { suppressAlreadyCurrentStamp: true }),
+    ).resolves.toBe('already-confirmed');
+
+    expect(
+      await readMaterializedVersion(store, metaGraph, UAL),
+      'the no-head repair path must FORWARD the inspect-only flag — a site '
+      + 'that drops it advances the ordering stamp during an inspection',
+    ).toEqual(W2R_LOW_STAMP);
+  });
+
+  it('the same absent-head reconcile WITHOUT inspect-only does advance the stamp', async () => {
+    const { message, metaGraph, repairHandler } = await stageVmOnlyThenLowerStamp();
+
+    await expect(reconcileGraphScoped(repairHandler, message))
+      .resolves.toBe('already-confirmed');
+
+    const stamp = await readMaterializedVersion(store, metaGraph, UAL);
+    expect(stamp?.blockNumber ?? 0).toBeGreaterThan(W2R_LOW_STAMP.blockNumber);
+  });
+
+  async function stageCorruptHeadThenLowerStamp(): Promise<{
+    message: FinalizationMessageMsg;
+    metaGraph: string;
+  }> {
+    const { message } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    // A second shareOperationId makes the mutable head unresolvable — the
+    // same corruption shape the recognizes-corrupt-head row proves throws.
+    await store.insert([{
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-equivalent"',
+    }]);
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await writeMaterializedVersion(store, metaGraph, UAL, W2R_LOW_STAMP);
+    const internals = handler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    return { message, metaGraph };
+  }
+
+  function corruptHeadReconcileInput(
+    message: FinalizationMessageMsg,
+    overrides: Partial<GraphReconcileInput> = {},
+  ): GraphReconcileInput {
+    return {
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+      ...overrides,
+    };
+  }
+
+  it('inspect-only suppression survives the CORRUPT-workspace-head forwarding site (review r4)', async () => {
+    const { message, metaGraph } = await stageCorruptHeadThenLowerStamp();
+
+    await expect(handler.handleChainReconciledKC(
+      corruptHeadReconcileInput(message, { suppressAlreadyCurrentStamp: true }),
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+
+    expect(
+      await readMaterializedVersion(store, metaGraph, UAL),
+      'the corrupt-head fallback must FORWARD the inspect-only flag',
+    ).toEqual(W2R_LOW_STAMP);
+  });
+
+  it('the same corrupt-head reconcile WITHOUT inspect-only does advance the stamp', async () => {
+    const { message, metaGraph } = await stageCorruptHeadThenLowerStamp();
+
+    await expect(handler.handleChainReconciledKC(
+      corruptHeadReconcileInput(message),
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+
+    const stamp = await readMaterializedVersion(store, metaGraph, UAL);
+    expect(stamp?.blockNumber ?? 0).toBeGreaterThan(W2R_LOW_STAMP.blockNumber);
+  });
   it('atomically replaces the exact VM graph and emits constant-size rootless metadata', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
 

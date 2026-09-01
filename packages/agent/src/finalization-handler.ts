@@ -1832,6 +1832,7 @@ export class FinalizationHandler {
             verification: vmVerification,
           },
           unavailableReason: `trusted receipt provenance (${recovery.reason})`,
+          suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
           ctx,
         });
       }
@@ -1908,6 +1909,7 @@ export class FinalizationHandler {
           layer: MemoryLayer.SharedWorkingMemory,
           verification: swmVerification,
         },
+        suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
         ctx,
       });
     }
@@ -1967,6 +1969,7 @@ export class FinalizationHandler {
     verifiedLayer: VerifiedPublicFinalizedLayer;
     /** VM repair keeps the receipt recovery diagnostic in its defer log. */
     unavailableReason?: string;
+    suppressAlreadyCurrentStamp?: boolean;
     ctx: OperationContext;
   }): Promise<PublicFinalizedMaterializationOutcome> {
     const {
@@ -1981,6 +1984,7 @@ export class FinalizationHandler {
       subGraphName,
       verifiedLayer,
       unavailableReason,
+      suppressAlreadyCurrentStamp,
       ctx,
     } = input;
     const contentAlreadyMaterialized = verifiedLayer.layer === MemoryLayer.VerifiableMemory;
@@ -2053,6 +2057,7 @@ export class FinalizationHandler {
           contextGraphId,
           scope,
           materializedVersion: finalizedVersion,
+          suppressAlreadyCurrentStamp,
         });
         this.log.info(
           ctx,
@@ -2080,6 +2085,7 @@ export class FinalizationHandler {
       subGraphName,
       source: 'chain-reconcile',
       contentAlreadyMaterialized,
+      suppressAlreadyCurrentStamp,
       ctx,
     });
     if (outcome === 'stale') return 'stale-target';
@@ -2185,6 +2191,8 @@ export class FinalizationHandler {
     subGraphName?: string;
     source: 'finalization' | 'chain-reconcile';
     contentAlreadyMaterialized?: boolean;
+    /** ADR-W2R-8: an inspection must leave a FOUND ordering stamp untouched. */
+    suppressAlreadyCurrentStamp?: boolean;
     ctx: OperationContext;
   }): Promise<'applied' | 'stale' | 'preserved-metadata'> {
     const {
@@ -2202,6 +2210,7 @@ export class FinalizationHandler {
       subGraphName,
       source,
       contentAlreadyMaterialized = false,
+      suppressAlreadyCurrentStamp = false,
       ctx,
     } = input;
     const materializedVersion = confirmation.materializedVersion;
@@ -2281,7 +2290,17 @@ export class FinalizationHandler {
         return 'preserved-metadata' as const;
       }
 
-      const effectiveVersion = incomingVersionIsStale
+      // ADR-W2R-8 (review r4): an INSPECTION repairing metadata over content
+      // that is already materialized must leave the ordering stamp exactly
+      // as it found it — the sweep’s versionBlock is an observation point,
+      // not the publication, so raising the stamp to it would make a later,
+      // genuinely newer assertion at a lower block permanently unapplicable.
+      // A MISSING stamp is still written: envelope completeness is what the
+      // repair exists to restore, and there is no found ordering to protect.
+      const preserveFoundStamp = suppressAlreadyCurrentStamp
+        && contentAlreadyMaterialized
+        && currentMaterializedVersion !== null;
+      const effectiveVersion = incomingVersionIsStale || preserveFoundStamp
         ? currentMaterializedVersion
         : materializedVersion;
       let metadataConfirmation: Parameters<typeof generateGraphKnowledgeAssetMetadata>[1];
