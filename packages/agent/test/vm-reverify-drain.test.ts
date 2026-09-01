@@ -746,6 +746,32 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     }
   });
 
+  it('shutdown DURING paired SWM recovery leaves rows untouched — no attempt, no backoff (review r5)', async () => {
+    // The exact-fetch phase already treats lifecycle closure as closure;
+    // the paired recovery must not turn the same shutdown into a recorded
+    // infrastructure failure whose backoff delays due work after restart.
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 88n, 300);
+    const fetch = makeFetch({ snapshotFor: () => snapshot(300), localState: () => 'missing' });
+    const worker = new VmReverifyWorker({
+      intents,
+      fetchContextGraphAssets: fetch,
+      recoverContextGraphSwm: async () => {
+        throw new VmReconcileQueueClosedError();
+      },
+      log: { info: () => undefined, warn: () => undefined },
+      now: () => 10_000,
+    } as never);
+
+    const run = await worker.runOnce();
+
+    expect(run.outcomes['leave:lifecycle-closed'], 'closure, not swm-recovery-failed').toBeGreaterThanOrEqual(1);
+    expect(run.outcomes['retry:swm-recovery-failed'] ?? 0, 'no infrastructure retry recorded').toBe(0);
+    const record = intents.rows.get(ual)!;
+    expect(record.state, 'the row is exactly as it was').toBe('PENDING');
+    expect(record.attemptCount, 'no attempt recorded during shutdown').toBe(0);
+    expect(record.nextAttemptAt, 'no backoff recorded during shutdown').toBeUndefined();
+  });
   it('gc sweeps EXPIRED abandoned rows on its own cadence, not per pass (review r4)', async () => {
     vi.useFakeTimers();
     try {

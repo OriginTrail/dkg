@@ -458,7 +458,7 @@ export class VmReverifyWorker {
     records: readonly VmReverifyIntentRecord[],
     outcomes: Map<string, CallOutcome>,
     summary: VmReverifyRunSummary,
-  ): Promise<{ outcomes: Map<string, CallOutcome>; swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized' }> {
+  ): Promise<{ outcomes: Map<string, CallOutcome>; swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized' | 'lifecycle-closed' }> {
     const stranded = records.filter((record) => {
       const outcome = outcomes.get(record.ual);
       return outcome?.kind === 'item' && outcome.status === 'unresolved';
@@ -491,6 +491,14 @@ export class VmReverifyWorker {
       await this.deps.recoverContextGraphSwm(localCgId, verifyRecovered);
       summary.swmRecoveries += 1;
     } catch (error) {
+      // Shutdown is CLOSURE, not infrastructure failure (review r5): the
+      // exact-fetch phase already leaves rows untouched on lifecycle
+      // closure, and the paired recovery must not turn the same shutdown
+      // into a recorded attempt with backoff that delays otherwise-due
+      // work after restart.
+      if (isLifecycleClosure(error)) {
+        return { outcomes: merged, swmRecovery: 'lifecycle-closed' };
+      }
       // Catalog authority refusal is a DEFERRAL, not a failure (review r4).
       if (error instanceof VmSwmRecoveryNotAuthorizedError) {
         return { outcomes: merged, swmRecovery: 'not-authorized' };
@@ -531,7 +539,7 @@ export class VmReverifyWorker {
     outcomes: Map<string, CallOutcome>,
     summary: VmReverifyRunSummary,
     now: number,
-    swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized',
+    swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized' | 'lifecycle-closed',
   ): Promise<void> {
     for (const record of records) {
       const outcome = outcomes.get(record.ual);

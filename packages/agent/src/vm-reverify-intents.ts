@@ -139,7 +139,7 @@ export interface VmReverifyTransitionInput {
    * — the traversal finished honestly; an item still unresolved after it is
    * on the countdown to `no-peer-has-version`.
    */
-  swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized';
+  swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized' | 'lifecycle-closed';
   /** When this generation first attempted anything; absent before attempt 1. */
   firstAttemptAt?: number;
   now: number;
@@ -231,6 +231,12 @@ export function planTransition(input: VmReverifyTransitionInput): VmReverifyTran
     // `no-peer-has-version` would blame the network for a local switch and
     // would bury the work under a terminal state an operator has no reason to
     // go looking for.
+    // Shutdown DURING the paired recovery (review r5): the same contract as
+    // closure in the exact-fetch phase — the row is left exactly as it was,
+    // no attempt recorded, no backoff, due immediately after restart.
+    if (input.swmRecovery === 'lifecycle-closed') {
+      return { action: 'leave', reason: 'lifecycle-closed' };
+    }
     if (input.swmRecovery === 'unavailable') {
       return retry('durable-sync-disabled', 'evidence-unavailable', attemptNumber);
     }

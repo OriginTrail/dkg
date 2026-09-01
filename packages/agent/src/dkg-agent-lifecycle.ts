@@ -2059,15 +2059,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // the finalization inbox, but in its OWN file and only when the feature
       // is effectively on — see `prepareVmReverifyIntentStore`.
       await this.prepareVmReverifyIntentStore();
-      // The FIRST-ACTIVATION audit runs HERE (review r4) — before networking,
-      // before the poller exists, inside its own boundary: an I/O failure in
-      // this OPTIONAL feature must neither fail a startup the node has
-      // already half-performed nor leave the mutation lane armed to advance
-      // its cursor past an un-audited held set. On failure the feature is
-      // latched off for this process (the lane callback and worker key off
-      // store presence and never arm) and the cursor-less node retries the
-      // audit on its next boot.
-      await this.runVmReverifyBootstrapAudit(ctx);
       // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
       // so the local store is clean before this node serves or syncs anything.
       // Marker-gated (runs once per data dir), never throws, no-op on stores
@@ -2330,6 +2321,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphSubscriptions();
+
+    // The FIRST-ACTIVATION audit runs HERE (review r5 — moved from the
+    // pre-networking block): it walks the subscribed/core-hosted graph set,
+    // and on the primary first-activation case — a normal restart — that
+    // set is only authoritative AFTER rehydration; before it, the in-memory
+    // map is empty, the audit completes vacuously, and the mutation lane’s
+    // first cursor persist would suppress every future audit with a stale
+    // held asset never re-verified. Still BEFORE the chain poller is
+    // constructed or started, so no lane cursor can advance past an
+    // un-audited held set; the failure boundary is unchanged (an I/O error
+    // latches the feature off for this process, and the cursor-less node
+    // retries the audit on its next boot).
+    await this.runVmReverifyBootstrapAudit(createOperationContext('connect'));
 
     this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
 

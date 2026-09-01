@@ -34,6 +34,7 @@ import {
 } from '../src/sync/exact-asset-fetch.js';
 import {
   VM_REVERIFY_ADMISSION_PRIORITY,
+  VmReverifyWorker,
   VmSwmRecoveryNotAuthorizedError,
 } from '../src/vm-reverify-worker.js';
 
@@ -474,6 +475,167 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
       reason: 'bootstrap-audit-failed',
     });
   }, 60_000);
+  it('the bootstrap audit sees only the REHYDRATED subscription set (review r5)', async () => {
+    // The primary first-activation case is a normal restart: persisted
+    // subscriptions exist, the in-memory map starts EMPTY, and rehydration
+    // is what populates it. An audit ordered before rehydration completes
+    // vacuously — zero intents — after which the mutation lane’s first
+    // cursor persist suppresses every future audit. This pair pins the
+    // dependency the lifecycle ordering fix exists for.
+    const { internals, ualFor } = await boot();
+    await insertHeldMetadata(internals.store, await ualFor(120n));
+    (internals.config as Record<string, unknown>).chainEventCursorStore = {
+      loadLane: async () => undefined,
+      saveLane: async () => undefined,
+    };
+
+    // The pre-rehydration shape: an empty in-memory map.
+    internals.subscribedContextGraphs.clear();
+    await internals.runVmReverifyBootstrapAudit(ctx);
+    expect(
+      await internals.vmReverifyIntents.countPending(),
+      'an audit against the un-rehydrated map is vacuous — the bug shape',
+    ).toBe(0);
+
+    // Rehydration restores the subscription; the SAME audit now finds the
+    // held asset. (Real rehydration populates this map from the persisted
+    // store; the map is the surface the audit reads either way.)
+    internals.subscribedContextGraphs.set(CG, {
+      syncMode: 'always-on',
+      subscribed: true,
+      synced: true,
+      onChainId: '1',
+    });
+    await internals.runVmReverifyBootstrapAudit(ctx);
+    expect(
+      await internals.vmReverifyIntents.countPending(),
+      'after rehydration the held asset is audited at position zero',
+    ).toBe(1);
+  }, 60_000);
+
+  it('SWM recovery peers are the canonical resolver capped at FIVE (review r5)', async () => {
+    // The cap and ordering are load-bearing (one recovery must not traverse
+    // every connected peer) but every traversal row stubs the resolver;
+    // this row drives the REAL one.
+    const { internals } = await boot();
+    internals.resolveCuratorPeerIdsForCg = async () => ({ peerIds: [] });
+    internals.node.libp2p.getConnections = () => [1, 2, 3, 4, 5, 6].map((n) => ({
+      remotePeer: { toString: () => `12D3KooWConnectedPeer${n}` },
+    }));
+
+    const peers = await internals.resolveVmReverifySwmPeers(CG);
+
+    expect(
+      peers,
+      'six connected peers, no curators, no preferred: the FIRST FIVE, in order',
+    ).toEqual([1, 2, 3, 4, 5].map((n) => `12D3KooWConnectedPeer${n}`));
+  }, 60_000);
+
+  it('producer conflict codes drive the intended durable transitions END TO END (review r5)', async () => {
+    // The planner rows inject codes by hand; a producer emitting the WRONG
+    // code would pass them all while changing durable behavior. Each row
+    // here stages the chain condition, runs the REAL fetch through a REAL
+    // worker, and asserts the durable transition.
+    const { internals, ualFor } = await boot();
+    const ual = await ualFor(121n);
+    await insertHeldMetadata(internals.store, ual);
+    const chain = internals.chain;
+    // The KA must exist ON CHAIN: without registration every case would
+    // abandon as not-registered and the intended codes would never fire.
+    chain.__registerKC({
+      kaId: kaIdFor(121n),
+      contextGraphId: 1n,
+      merkleRootHex: '0x' + 'ab'.repeat(32),
+      knowledgeAssetStorageContract: await chain.getDKGKnowledgeAssetsAddress(),
+      chunks: [],
+    });
+    const realSnapshot = chain.readKnowledgeAssetVersionSnapshot.bind(chain);
+    const realGetKACg = chain.getKAContextGraphId.bind(chain);
+    const cases: Array<{
+      name: string;
+      stage: () => void;
+      state: 'PENDING' | 'ABANDONED' | 'NONE';
+      outcome: string;
+    }> = [
+      {
+        name: 'no committed version -> abandon (chain-identity-conflict)',
+        stage: () => {
+          chain.readKnowledgeAssetVersionSnapshot = async (kaId: bigint, options?: unknown) => ({
+            ...(await realSnapshot(kaId, options)),
+            rootCount: 0n,
+          });
+        },
+        state: 'ABANDONED',
+        outcome: 'abandon:chain-identity-conflict',
+      },
+      {
+        name: 'snapshot unavailable -> retry (never abandoned)',
+        stage: () => {
+          chain.readKnowledgeAssetVersionSnapshot = async () => null;
+        },
+        state: 'PENDING',
+        outcome: 'retry:snapshot-unavailable',
+      },
+      {
+        name: 'malformed chain root -> retry (invalid-evidence)',
+        stage: () => {
+          chain.readKnowledgeAssetVersionSnapshot = async (kaId: bigint, options?: unknown) => ({
+            ...(await realSnapshot(kaId, options)),
+            latestRoot: 'not-a-root',
+          });
+        },
+        state: 'PENDING',
+        outcome: 'retry:invalid-evidence',
+      },
+      {
+        name: 'foreign on-chain CG binding -> abandon (chain-identity-conflict)',
+        stage: () => {
+          chain.getKAContextGraphId = async () => 999n;
+        },
+        state: 'ABANDONED',
+        outcome: 'abandon:chain-identity-conflict',
+      },
+    ];
+    for (const row of cases) {
+      intents.rows.clear();
+      await internals.vmReverifyIntents.upsert({
+        ual,
+        localCgId: CG,
+        kaId: kaIdFor(121n).toString(),
+        kind: 'lifecycle-update',
+        position: {
+          blockNumber: 100,
+          blockHash: `0x${'ab'.repeat(32)}`,
+          transactionHash: `0x${'cd'.repeat(32)}`,
+          transactionIndex: 0,
+          logIndex: 0,
+        },
+      });
+      chain.readKnowledgeAssetVersionSnapshot = realSnapshot;
+      chain.getKAContextGraphId = realGetKACg;
+      row.stage();
+      const worker = new VmReverifyWorker({
+        intents: internals.vmReverifyIntents,
+        fetchContextGraphAssets: (cg: string, uals: readonly string[], options: never) =>
+          internals.fetchContextGraphAssets(cg, uals, options),
+        recoverContextGraphSwm: async () => undefined,
+        log: { info: () => undefined, warn: () => undefined },
+      } as never);
+
+      const run = await worker.runOnce();
+
+      expect(
+        Object.keys(run.outcomes).filter((key) => run.outcomes[key]! > 0),
+        `${row.name}: the producer code must arrive as the intended outcome`,
+      ).toContain(row.outcome);
+      const record = intents.rows.get(ual);
+      if (row.state === 'ABANDONED') {
+        expect(record?.state, row.name).toBe('ABANDONED');
+      } else {
+        expect(record?.state, row.name).toBe('PENDING');
+      }
+    }
+  }, 120_000);
   it('CLEAN exhaustion — every peer answered, none served — returns normally (review r3)', async () => {
     // The opposite polarity of the incomplete-traversal throw: peers that
     // all cleanly report nothing ARE the evidence the park countdown
