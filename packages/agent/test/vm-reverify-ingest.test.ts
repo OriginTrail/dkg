@@ -375,6 +375,24 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     expect(attempts, 'the broken peer must not end the traversal').toEqual(['peer-a', 'peer-b']);
   }, 60_000);
 
+  it('CLEAN exhaustion — every peer answered, none served — returns normally (review r3)', async () => {
+    // The opposite polarity of the incomplete-traversal throw: peers that
+    // all cleanly report nothing ARE the evidence the park countdown
+    // measures, and the traversal must not dress that up as a failure.
+    const { internals } = await boot();
+    internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];
+    internals.recoverContextGraphSwmFromPeer = async () => ({
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      replacedGraphs: 0,
+      replacedRoots: 0,
+    });
+
+    await expect(internals.recoverContextGraphSwmForReverify(
+      'w2r-loop-cg',
+      async () => true,
+    )).resolves.toBeUndefined();
+  }, 60_000);
   it('a traversal where every attempt failed THROWS instead of posing as exhaustion (review r3)', async () => {
     const { internals } = await boot();
     internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];
