@@ -18,9 +18,11 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import {
+  resolvePublishedKnowledgeAssetWorkspaceHead,
   SWM_CURRENT_ASSERTION_PRED,
   TripleStoreAsyncLiftPublisher,
 } from '@origintrail-official/dkg-publisher';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
 import {
@@ -1994,9 +1996,17 @@ describe('rootless graph-scoped KA lifecycle', () => {
     ]);
     await agent.assertion.finalize(cg, name);
 
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
     const promoted = await agent.assertion.promote(cg, name);
     expect(promoted.sealed).toBe(true);
     expect(promoted.publishReady).toBe(true);
+    expect(publisherPromote).toHaveBeenCalledWith(
+      cg,
+      name,
+      callerAgentAddress,
+      expect.objectContaining({ accessPolicy: 'ownerOnly' }),
+    );
+    publisherPromote.mockRestore();
 
     const cgDid = `did:dkg:context-graph:${cg}`;
     const swmGraph = `${cgDid}/_shared_memory`;
@@ -2012,6 +2022,43 @@ describe('rootless graph-scoped KA lifecycle', () => {
     );
     expect(swmCatalogOwner.type).toBe('bindings');
     expect(swmCatalogOwner.bindings).toHaveLength(0);
+  }, 30_000);
+
+  it('preserves an explicit allow-list envelope through promote and durable workspace state', async () => {
+    const agent = await createAgent('ExplicitAllowListPromoteBot');
+    const cg = `${CG_ID}-explicit-allow-list`;
+    await agent.createContextGraph({ id: cg, name: 'Explicit Allow List Promote E2E' });
+    const name = 'explicit-allow-list-promote';
+    await agent.assertion.create(cg, name);
+    await agent.assertion.write(cg, name, [
+      { subject: `${ENTITY_BASE}:ealp`, predicate: 'http://schema.org/name', object: '"Restricted"' },
+    ]);
+    await agent.assertion.finalize(cg, name);
+
+    const allowedPeers = ['reader-peer-a', 'reader-peer-b'];
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
+    await agent.assertion.promote(cg, name, {
+      accessPolicy: 'allowList',
+      allowedPeers,
+    });
+    expect(publisherPromote).toHaveBeenCalledWith(
+      cg,
+      name,
+      agent.defaultAgentAddress ?? agent.peerId,
+      expect.objectContaining({ accessPolicy: 'allowList', allowedPeers }),
+    );
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
+    const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
+      store: (agent as any).store,
+      graphManager: new GraphManager((agent as any).store),
+      contextGraphId: cg,
+      kaUal: intent.kaUal,
+    });
+    expect(head?.accessPolicy).toBe('allowList');
+    expect(head?.allowedPeers).toHaveLength(allowedPeers.length);
+    expect(new Set(head?.allowedPeers)).toEqual(new Set(allowedPeers));
+    publisherPromote.mockRestore();
   }, 30_000);
 
   // B3 (#1116 CORE REGRESSION GUARD): the seal is context-graph-INDEPENDENT, so

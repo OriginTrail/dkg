@@ -142,15 +142,24 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     const existing = this.#state;
     if (existing !== undefined) {
       if (existing.runner.closed || existing.finalizedPrivateRunner.closed) return;
+      let publicRepairRequested = false;
       for (const repair of repairs) {
         const current = existing.repairs.find((candidate) => (
           candidate.contextGraphId === repair.contextGraphId
           && candidate.authorAddress === repair.authorAddress
         ));
-        if (current === undefined) existing.repairs.push(repair);
-        else current.dirty = true;
+        if (current === undefined) {
+          existing.repairs.push(repair);
+          publicRepairRequested = true;
+        } else if (current.outcome === 'failed') {
+          // Re-entering start is an authorization/subscription transition, not
+          // a new inventory observation. Retry a failed repair, but do not turn
+          // a completed no-inventory or reconciled result into duplicate work.
+          current.dirty = true;
+          publicRepairRequested = true;
+        }
       }
-      if (repairs.length > 0) existing.runner.request();
+      if (publicRepairRequested) existing.runner.request();
       if (hasFinalizedPrivateRepairs) existing.finalizedPrivateRunner.request();
       return;
     }

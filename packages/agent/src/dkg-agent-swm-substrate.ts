@@ -238,6 +238,8 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { createRetireConfirmedGraphScopedSwmTwinIfOrphaned } from
+  './sync/requester/finalized-swm-twin-reconciliation.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -1035,6 +1037,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // every public/curated context graph.
         publicAccessPolicyOnChainOracle: (cgId: string) =>
           this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
+        // RFC-64 catalog authority already excludes selected CGs from legacy
+        // durable catch-up. Apply the same decision to live gossip/substrate
+        // delivery so a partial ambient generation cannot race ahead of an
+        // authenticated exact catalog head and make cold bootstrap fail closed.
+        legacyApplyAllowedOracle: (cgId: string) => (
+          this.rfc64LegacySwmGossipAllowedForContextGraph(cgId)
+        ),
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
@@ -1789,6 +1798,26 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           markContextGraphMetaDirtyFromQuads: (quads) => {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
+          retireConfirmedGraphScopedSwmTwinIfOrphaned:
+            createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+              store: this.store,
+              writeLocks: this.writeLocks,
+              retire: async (candidate, ctx) => {
+                await this.publisher.clearPublishedKnowledgeAssetSwm(
+                  candidate.contextGraphId,
+                  {
+                    kind: 'named-lifecycle',
+                    identity: {
+                      agentAddress: candidate.agentAddress,
+                      kaNumber: candidate.kaNumber,
+                    },
+                  },
+                  candidate.subGraphName,
+                  ctx,
+                  candidate.ual,
+                );
+              },
+            }),
           runtime: this.finalizationRuntime,
         },
       );

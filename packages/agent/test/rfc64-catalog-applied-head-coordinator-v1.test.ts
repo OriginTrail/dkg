@@ -249,11 +249,6 @@ describe('RFC-64 catalog applied-head coordinator', () => {
         receipts: valid,
       },
       {
-        name: 'count mismatch',
-        kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
-        receipts: [firstReceipt],
-      },
-      {
         name: 'duplicate UAL',
         kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
         receipts: [firstReceipt, Object.freeze({ ...secondReceipt, ual: firstReceipt.ual })],
@@ -326,6 +321,51 @@ describe('RFC-64 catalog applied-head coordinator', () => {
         bindings: [{ value: '"predecessor"' }],
       });
     }
+    await store.close();
+  });
+
+  it('commits a mixed catalog while reconciling only finalized VM twins', async () => {
+    const store = new OxigraphStore();
+    const finalized = await seedExactStaleTwin(store, {
+      kaNumber: 1n,
+      marker: 'mixed-finalized',
+    });
+    const swmOnly = await seedExactStaleTwin(store, {
+      kaNumber: 2n,
+      marker: 'mixed-swm-only',
+    });
+    const mixedPlan = Object.freeze({
+      ...finalized.plan,
+      rows: Object.freeze([...finalized.plan.rows, ...swmOnly.plan.rows]),
+    });
+    const complete = finalizedTransaction(mixedPlan);
+    const primary = Object.freeze({
+      ...complete,
+      materializationReceipts: Object.freeze([
+        complete.materializationReceipts[0]!,
+      ]),
+    });
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(),
+      finalizedVmPrecommit: vi.fn(async () => primary),
+      store,
+      writeLocks: new Map(),
+      retire: ({ swmGraph }) => store.dropGraph(swmGraph),
+    });
+
+    const lifecycle = await handler(mixedPlan, new AbortController().signal);
+    await lifecycle.transaction!.commit();
+    const evidence = await lifecycle.afterAppliedHead!(committedHeadToken(mixedPlan));
+
+    expect(evidence?.finalizedSwmRetirementLifecycleReceipts).toHaveLength(1);
+    expect(evidence?.finalizedSwmRetirementLifecycleReceipts[0]?.kaUal).toBe(
+      readVerifiedCatalogSealBindingV1(mixedPlan.rows[0]!.sealBinding).seal.kaUal,
+    );
+    await expect(store.hasGraph(finalized.swmGraph)).resolves.toBe(false);
+    await expect(store.hasGraph(swmOnly.swmGraph)).resolves.toBe(true);
     await store.close();
   });
 

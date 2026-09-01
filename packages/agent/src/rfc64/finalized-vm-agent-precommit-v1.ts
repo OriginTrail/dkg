@@ -21,7 +21,10 @@ import type {
   FinalizedVmTransactionalMaterializerV1,
 } from './finalized-vm-runtime-v1.js';
 import { FinalizedVmCompositionErrorV1 } from './finalized-vm-composer-v1.js';
-import { createFinalizedVmStoreMaterializerV1 } from './finalized-vm-store-materializer-v1.js';
+import {
+  createFinalizedVmStoreExistingMaterializationVerifierV1,
+  createFinalizedVmStoreMaterializerV1,
+} from './finalized-vm-store-materializer-v1.js';
 
 export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
@@ -138,6 +141,11 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
         owner: 'rfc64',
       }),
       materialize: materializer,
+      verifyExistingMaterialization:
+        createFinalizedVmStoreExistingMaterializationVerifierV1({
+          store: options.store,
+          isCurrent: currentAuthority,
+        }),
     });
     // Runtime materialization owns rollback for failures in its own execution.
     // Only a failure after a successful runtime reaches this layer's rollback,

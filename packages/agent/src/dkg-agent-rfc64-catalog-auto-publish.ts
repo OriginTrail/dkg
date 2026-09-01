@@ -10,18 +10,14 @@
 import {
   assertAssertionCoordinateV1,
   assertContextGraphIdV1,
-  assertSafeIri,
   assertSubGraphNameV1,
   assertSwmAuthorInventoryShareOperationIdV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaProjectionDigestV1,
   computeSwmAuthorInventoryScopeDigestV1,
-  contextGraphAssertionUri,
-  contextGraphMetaUri,
   createOperationContext,
   encodeCanonicalCgSharedPublicRootProjectionV1,
-  parseGraphScopedAssertionSealCandidate,
   type AssertionCoordinateV1,
   type AssertionSeal,
   type AuthorCatalogScopeV1,
@@ -60,6 +56,8 @@ import {
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
+import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
+  './durable-author-seal-resolver-v1.js';
 import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
@@ -177,10 +175,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * Background observer body; failures are contained and logged. A durable
-   * inventory mutation for a selected CG requests its scope-owned exact
-   * signed catalog target. Retrying an already-present row also re-requests a
-   * catalog reconciliation that may have failed after the prior inventory
-   * commit, without making the detached observer own projection lifetime.
+   * inventory mutation for a selected CG requests its scope-owned signed
+   * catalog target. Public lanes reconcile an exact SWM set; finalized private
+   * lanes monotonically merge the same tier-neutral rows so VM placement does
+   * not remove authored content. Retrying an already-present row also
+   * re-requests a catalog reconciliation that may have failed after the prior
+   * inventory commit, without making the detached observer own projection
+   * lifetime.
    */
   async observeRfc64DurableSwmPromotionV1(
     this: DKGAgent,
@@ -189,11 +190,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     try {
       const result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
       if (result.status === 'applied' || result.status === 'existing') {
-        const lane = this.resolveRfc64CatalogAuthoringLaneV1(
-          params.contextGraphId,
-          params.subGraphName,
-        );
-        if (lane?.projectionLifecycle === 'confirmation-gated-append') return;
         this.requestRfc64SwmCatalogProjectionV1({
           contextGraphId: params.contextGraphId as ContextGraphIdV1,
           authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
@@ -245,10 +241,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical post-confirmation observer. SWM-only lanes retract the pending
-   * row. A finalized private lane first appends the now-chain-backed placement
-   * to its durable recovery catalog, then removes only the pending inventory
-   * row. The irreversible publish response never waits for this observer.
+   * Canonical post-confirmation observer. Public SWM-only lanes retract the
+   * pending row. A finalized private lane appends the now-chain-backed
+   * placement to its durable recovery catalog while retaining its tier-neutral
+   * author-inventory row. The irreversible publish response never waits for
+   * this observer.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
@@ -285,7 +282,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     let finalizedPrivateInventoryScope: SwmAuthorInventoryScopeV1 | null = null;
     try {
       const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
-      if (lane?.projectionLifecycle === 'confirmation-gated-append') {
+      if (lane?.acceptsFinalizedVmRepair === true) {
         finalizedPrivateInventoryScope = Object.freeze({
           ...lane.scopeBase,
           authorAddress: confirmedSeal.authorAddress,
@@ -373,10 +370,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         outcome = 'already-complete';
         return;
       }
-      await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
-        scope: repair.inventoryScope,
-        expectedRow: repair,
-      });
       await persistence.finalizedPrivatePlacementRepairs.delete(repair);
       outcome = 'repaired';
     });
@@ -433,21 +426,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       const shareOperationId = params.shareOperationId;
       assertSwmAuthorInventoryShareOperationIdV1(shareOperationId);
-      const assertionUri = contextGraphAssertionUri(
-        params.contextGraphId,
-        params.lifecycleAgentAddress,
-        params.assertionCoordinate,
-        params.subGraphName ?? undefined,
-      );
-      const metaGraph = contextGraphMetaUri(params.contextGraphId);
-      const sealResult = await this.store.query(
-        `CONSTRUCT { <${assertSafeIri(assertionUri)}> ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(assertionUri)}> ?p ?o } }`,
-        { source: 'agent.rfc64.swmInventory.seal' },
-      );
-      const candidate = parseGraphScopedAssertionSealCandidate(
-        sealResult.type === 'quads' ? sealResult.quads : [],
-        assertionUri,
-      );
+      const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({
+        store: this.store,
+        contextGraphId: params.contextGraphId,
+        agentAddress: params.lifecycleAgentAddress,
+        assertionCoordinate: params.assertionCoordinate,
+        subGraphName: params.subGraphName ?? undefined,
+        source: 'agent.rfc64.swmInventory.seal',
+      });
       if (candidate === undefined) {
         throw new Error('durable SWM assertion has no strict graph-scoped author seal');
       }

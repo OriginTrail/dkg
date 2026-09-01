@@ -39,3 +39,21 @@ export function snapshotRfc64PublicCatalogAnnouncementPeersV1(
   }
   return Object.freeze(peers);
 }
+
+/**
+ * Snapshot an outbound fan-out list and remove the local node. A locally
+ * authored head is already durable before fan-out, while routing it back to
+ * the same libp2p identity can only wait for the transport deadline.
+ */
+export function snapshotRfc64RemoteCatalogAnnouncementPeersV1(
+  input: readonly string[],
+  localPeerId: string,
+): readonly string[] {
+  if (typeof localPeerId !== 'string' || localPeerId.length === 0) {
+    throw new TypeError('RFC-64 local catalog peer id is invalid');
+  }
+  return Object.freeze(
+    snapshotRfc64PublicCatalogAnnouncementPeersV1(input)
+      .filter((peerId) => peerId !== localPeerId),
+  );
+}

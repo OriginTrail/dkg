@@ -317,6 +317,15 @@ export class SharedMemoryHandler {
   private readonly publicAccessPolicyOnChainOracle?: (
     contextGraphId: string,
   ) => Promise<boolean>;
+  /**
+   * Authority gate for the legacy live SHARE materialization path. A caller
+   * that has handed one CG to an exact catalog must return false so ambient
+   * gossip/substrate delivery cannot race partial state ahead of that catalog.
+   * Omitted means legacy apply remains allowed for backward compatibility.
+   */
+  private readonly legacyApplyAllowedOracle?: (
+    contextGraphId: string,
+  ) => boolean | Promise<boolean>;
   private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
    * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
@@ -447,6 +456,13 @@ export class SharedMemoryHandler {
       publicAccessPolicyOnChainOracle?: (
         contextGraphId: string,
       ) => Promise<boolean>;
+      /**
+       * Return false when another authoritative synchronization rail owns this
+       * CG. The validated wire is declined permanently and is not materialized.
+       */
+      legacyApplyAllowedOracle?: (
+        contextGraphId: string,
+      ) => boolean | Promise<boolean>;
       markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
        * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
@@ -506,6 +522,7 @@ export class SharedMemoryHandler {
     this.localAgentAddresses = options?.localAgentAddresses;
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
     this.publicAccessPolicyOnChainOracle = options?.publicAccessPolicyOnChainOracle;
+    this.legacyApplyAllowedOracle = options?.legacyApplyAllowedOracle;
     this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
     this.chainAgentGateOracle = options?.chainAgentGateOracle;
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
@@ -988,6 +1005,15 @@ export class SharedMemoryHandler {
       if (!contextGraphId) {
         const reason = 'missing context graph id';
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
+        return { applied: false, reason, retryable: false };
+      }
+
+      if (
+        this.legacyApplyAllowedOracle !== undefined
+        && !await this.legacyApplyAllowedOracle(contextGraphId)
+      ) {
+        const reason = `legacy SWM apply is not authoritative for context graph "${contextGraphId}"`;
+        this.log.debug(ctx, `SWM write declined: ${reason}`);
         return { applied: false, reason, retryable: false };
       }
 

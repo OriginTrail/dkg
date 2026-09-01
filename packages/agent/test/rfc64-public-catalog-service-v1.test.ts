@@ -1162,6 +1162,29 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
+  it('removes the local peer at the canonical outbound fan-out boundary', async () => {
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      localPeerId: 'peer-self',
+    });
+    router.sendResponse = async () => Uint8Array.of(1);
+    const policy = acceptPolicy(service);
+    service.start();
+
+    await expect(service.announceCatalogHead({
+      announcement: announcement(policy.policyDigest),
+      peers: ['peer-a', 'peer-self', 'peer-b'],
+    })).resolves.toMatchObject({
+      announcedPeers: ['peer-a', 'peer-b'],
+      failedPeers: [],
+    });
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b']);
+    await service.close();
+  });
+
   it('propagates announcement cancellation and skips every later peer', async () => {
     const router = new RecordingRouter();
     const service = new Rfc64PublicCatalogServiceV1({

@@ -205,7 +205,8 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       },
     });
     vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({
-      projectionLifecycle: 'immediate-exact-set',
+      projectionTargetPolicy: 'exact-replacement',
+      acceptsFinalizedVmRepair: false,
     } as never);
     let active = 0;
     let maxActive = 0;
@@ -267,9 +268,10 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       '0x1111111111111111111111111111111111111111/blocked-repair' as ContextGraphIdV1;
     vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1')
       .mockImplementation((contextGraphId: string) => ({
-        projectionLifecycle: contextGraphId === privateContextGraphId
-          ? 'confirmation-gated-append'
-          : 'immediate-exact-set',
+        projectionTargetPolicy: contextGraphId === privateContextGraphId
+          ? 'monotonic-union'
+          : 'exact-replacement',
+        acceptsFinalizedVmRepair: contextGraphId === privateContextGraphId,
       } as never));
     let markOrdinaryEntered!: () => void;
     let releaseOrdinary!: () => void;
@@ -350,7 +352,8 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       .finalizedPrivatePlacementRepairs;
     await repairStore.put(repair);
     vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({
-      projectionLifecycle: 'confirmation-gated-append',
+      projectionTargetPolicy: 'monotonic-union',
+      acceptsFinalizedVmRepair: true,
       scopeBase: Object.freeze({
         networkId: NETWORK_ID,
         contextGraphId: privateContextGraphId,

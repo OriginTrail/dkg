@@ -737,6 +737,7 @@ function runtimeConfig(
     knowledgeAssetsLifecycleAddress: RFC64_VM_KAV10,
     snapshot,
     materialize,
+    verifyExistingMaterialization: async () => {},
   } as const;
 }
 

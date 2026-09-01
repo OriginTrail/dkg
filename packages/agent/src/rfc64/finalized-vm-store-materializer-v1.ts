@@ -24,11 +24,13 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
+import { resolveConfirmedGraphScopedVm } from '../confirmed-graph-scoped-vm-resolver.js';
 import {
   materializeVerifiedGraphScopedAsset,
   type VerifiedGraphScopedAsset,
 } from '../sync/requester/graph-scoped-materialization.js';
 import type {
+  FinalizedVmExistingMaterializationVerifierV1,
   FinalizedVmMaterializationReceiptV1,
   FinalizedVmMaterializerV1,
   FinalizedVmTransactionalMaterializerV1,
@@ -44,6 +46,44 @@ export interface FinalizedVmStoreMaterializerOptionsV1 {
   readonly store: TripleStore;
   /** Accepted-current guard checked at every atomic materialization boundary. */
   readonly isCurrent?: () => boolean;
+}
+
+/**
+ * Prove that a catalog-independent, chain-finalized VM assertion already
+ * exists durably. This is required when the catalog carries a newer SWM row
+ * and therefore cannot supply the older bytes finalized on chain.
+ */
+export function createFinalizedVmStoreExistingMaterializationVerifierV1(
+  options: FinalizedVmStoreMaterializerOptionsV1,
+): FinalizedVmExistingMaterializationVerifierV1 {
+  const { store, isCurrent } = options;
+  return Object.freeze(async (request): Promise<void> => {
+    request.signal.throwIfAborted();
+    if (isCurrent?.() === false) {
+      throw new Error('finalized VM accepted policy or roster is no longer current');
+    }
+    const resolution = await resolveConfirmedGraphScopedVm(store, {
+      contextGraphId: request.catalogLane.contextGraphId,
+      ual: request.candidate.ual,
+      assertionVersion: BigInt(request.candidate.assertionVersion),
+      merkleRoot: ethers.getBytes(request.candidate.assertionRoot),
+      kaId: BigInt(request.candidate.kaId),
+      batchId: BigInt(request.candidate.kaId),
+      ...(request.catalogLane.subGraphName === null
+        ? {}
+        : { subGraphName: request.catalogLane.subGraphName }),
+    });
+    request.signal.throwIfAborted();
+    if (isCurrent?.() === false) {
+      throw new Error('finalized VM accepted policy or roster is no longer current');
+    }
+    if (resolution.status !== 'verified') {
+      throw new Error(
+        `exact finalized VM ${request.candidate.ual} version `
+          + `${request.candidate.assertionVersion} is ${resolution.status}`,
+      );
+    }
+  });
 }
 
 interface FinalizedVmStoreStateV1 {

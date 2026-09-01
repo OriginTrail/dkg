@@ -342,6 +342,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.successor.head.objectDigest,
       fixture.catalogIssuerDelegation.objectDigest,
       fixture.successor.head.payload.directoryRootDigest,
+      fixture.genesis.head.objectDigest,
       fixture.successor.bucket?.objectDigest,
       fixture.successor.head.payload.directoryRootDigest,
       fixture.successor.bucket?.objectDigest,
@@ -482,6 +483,55 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       inventoryRowCount: '2',
     });
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+  }, 30_000);
+
+  it('proves a bounded signed lineage and converges after announcements coalesce', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+
+    const evidence = await fixture.synchronizeAny(fixture.threeAssetAnnouncement);
+
+    expect(evidence).toMatchObject({
+      catalogHeadDigest: fixture.threeAssetSuccessor.head.objectDigest,
+      inventoryRowCount: 3,
+      activatedTripleCount: 6,
+      appliedHeadStatus: 'applied',
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.threeAssetSuccessor.head.objectDigest,
+      catalogVersion: '3',
+      inventoryRowCount: '3',
+    });
+    await expect(fixture.receiverPersistence.controlObjects.getVerifiedObjectByDigest({
+      objectDigest: fixture.multiAssetSuccessor.head.objectDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).resolves.toMatchObject({
+      envelope: { objectDigest: fixture.multiAssetSuccessor.head.objectDigest },
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(48);
+  }, 30_000);
+
+  it('rejects a signed coalesced branch that does not descend from the durable head', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+
+    await expect(fixture.synchronizeAny(fixture.alternateThirdAnnouncement))
+      .rejects.toMatchObject({ code: 'catalog-native-receiver-history' });
+
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.successor.head.objectDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
   }, 30_000);
 
   it('replays a cold-bootstrapped current exact head without staging its predecessor', async () => {
@@ -2290,6 +2340,24 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     issuedAt: '1773900001001' as never,
     signer,
   });
+  const alternateSecondSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: competingSuccessor.head,
+    previousDirectoryPath: competingSuccessor.directoryPath,
+    previousBucket: competingSuccessor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row, secondRowBundle.row],
+    issuedAt: '1773900001006' as never,
+    signer,
+  });
+  const alternateThirdSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: alternateSecondSuccessor.head,
+    previousDirectoryPath: alternateSecondSuccessor.directoryPath,
+    previousBucket: alternateSecondSuccessor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row, secondRowBundle.row, thirdRowBundle.row],
+    issuedAt: '1773900001007' as never,
+    signer,
+  });
   const crossLaneHead = await rewriteCatalogHeadDelegation(
     successor.head,
     crossLaneDelegation.objectDigest,
@@ -2327,6 +2395,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ...replacementSuccessor.stagedObjects,
     ...governedSuccessor.stagedObjects,
     ...competingSuccessor.stagedObjects,
+    ...alternateSecondSuccessor.stagedObjects,
+    ...alternateThirdSuccessor.stagedObjects,
     crossLaneHead,
     expiredHead,
     missingDelegationHead,
@@ -2498,6 +2568,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const replacementAnnouncement = announcementFor(replacementSuccessor.head);
   const threeAssetAnnouncement = announcementFor(threeAssetSuccessor.head);
   const competingAnnouncement = announcementFor(competingSuccessor.head);
+  const alternateThirdAnnouncement = announcementFor(alternateThirdSuccessor.head);
   const governedGenesisAnnouncement = announcementFor(governedGenesis.head);
   const governedSuccessorAnnouncement = announcementFor(governedSuccessor.head);
   const crossLaneAnnouncement = announcementFor(crossLaneHead);
@@ -2603,6 +2674,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     authorBundleRead,
     authorObjectRead,
     authorObjects,
+    alternateThirdAnnouncement,
     catalogIssuerDelegation,
     competingAnnouncement,
     crossLaneAnnouncement,

@@ -591,6 +591,33 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
+    // A selected private RFC-64 graph may be joining a completely empty
+    // store. In that state the accepted, authority-checked roster is already
+    // available to the catalog service, while the legacy `_meta` projection
+    // below is intentionally absent until the first semantic commit. Sender
+    // Key setup arrives before that commit and must authenticate against the
+    // accepted roster; requiring the projection creates a circular cold-join
+    // dependency (no key without `_meta`, no encrypted SWM without the key).
+    //
+    // `null` means RFC-64 owns the graph but current roster authority is not
+    // available. Return an empty gate—not legacy `null`—so every caller keeps
+    // treating the graph as gated and fails closed until authority recovers.
+    const rfc64Roster = this.resolveRfc64PrivateReadRosterV1(contextGraphId);
+    if (rfc64Roster !== undefined) {
+      if (rfc64Roster === null) return [];
+      const seen = new Set<string>();
+      const accepted: string[] = [];
+      for (const value of rfc64Roster) {
+        if (!ethers.isAddress(value)) continue;
+        const checksum = ethers.getAddress(value);
+        const key = checksum.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        accepted.push(checksum);
+      }
+      return accepted;
+    }
+
     const seen = new Set<string>();
     const agents: string[] = [];
     let sawAgentGate = false;
