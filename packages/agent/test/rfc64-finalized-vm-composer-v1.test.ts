@@ -248,6 +248,9 @@ describe('RFC-64 finalized VM placement composition', () => {
 
     expect(composed.rows).toEqual([]);
     expect(composed.materializations).toEqual([]);
+    expect(composed.existingMaterializationChecks).toEqual([{
+      candidate: requestFor([newerSwm]).inventory.rows[0],
+    }]);
 
     const stalePlacement = await createPlacement(KA_2, ROOT_2, true, '1');
     expectCode(

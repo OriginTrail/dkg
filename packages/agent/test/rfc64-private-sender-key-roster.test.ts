@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 
 const CG = '0x1111111111111111111111111111111111111111/private-cg';
-const MEMBER_A = '0x1111111111111111111111111111111111111111';
+const MEMBER_A = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
+const MEMBER_A_LOWERCASE = '0x8ba1f109551bd432803012645ac136ddd64dba72';
 const MEMBER_B = '0x2222222222222222222222222222222222222222';
 
 describe('RFC-64 private Sender Key roster authority', () => {
@@ -11,7 +12,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       throw new Error('legacy metadata must not be required for an RFC-64 cold join');
     });
     const receiver = {
-      resolveRfc64PrivateReadRosterV1: () => [MEMBER_A, MEMBER_B, MEMBER_A.toUpperCase()],
+      resolveRfc64PrivateReadRosterV1: () => [MEMBER_A_LOWERCASE, MEMBER_B, MEMBER_A],
       getCgMeta,
       subscribedContextGraphs: new Map(),
     };

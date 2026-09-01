@@ -79,12 +79,24 @@ export interface FinalizedVmMaterializationPlanRowV1 {
   readonly row: Readonly<FinalizedVmSetRowV1>;
 }
 
+export interface FinalizedVmExistingMaterializationCheckV1 {
+  /**
+   * Exact chain-finalized assertion which a newer catalog row cannot
+   * materialize. The precommit must prove this version is already durable
+   * before the catalog head can advance.
+   */
+  readonly candidate: Readonly<FinalizedVmChainCandidateV1>;
+}
+
 export interface ComposedFinalizedVmSetV1 {
   readonly catalogLane: Readonly<FinalizedVmCatalogLaneV1>;
   readonly evidence: Readonly<FinalizedVmSetEvidenceV1>;
   readonly rows: readonly Readonly<FinalizedVmSetRowV1>[];
   /** Exact placement/inventory join in authoritative finalized ordinal order. */
   readonly materializations: readonly Readonly<FinalizedVmMaterializationPlanRowV1>[];
+  /** Older finalized VM versions which require a positive durable-store proof. */
+  readonly existingMaterializationChecks:
+    readonly Readonly<FinalizedVmExistingMaterializationCheckV1>[];
 }
 
 export type FinalizedVmCompositionErrorCodeV1 =
@@ -233,6 +245,8 @@ export function composeFinalizedVmSetV1(
   });
   const accumulator = new FinalizedVmSetAccumulatorV1(scope);
   const materializations: Readonly<FinalizedVmMaterializationPlanRowV1>[] = [];
+  const existingMaterializationChecks:
+    Readonly<FinalizedVmExistingMaterializationCheckV1>[] = [];
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
     if (placement === undefined) {
@@ -260,8 +274,11 @@ export function composeFinalizedVmSetV1(
       // One catalog bucket has one row per KA, while the chain can still
       // finalize an older assertion version. A newer author-sealed catalog
       // row is therefore SWM-only evidence, not placement evidence for the
-      // older finalized version. Leave the existing VM untouched; the chain
-      // inventory remains its authoritative catalog and recovery source.
+      // older finalized version. The catalog cannot materialize those older
+      // bytes, so the precommit must positively prove the exact chain version
+      // is already durable. A cold store therefore fails closed rather than
+      // applying a head which would hide a missing finalized VM.
+      existingMaterializationChecks.push(Object.freeze({ candidate }));
       continue;
     }
     placementsByKaId.delete(candidate.kaId);
@@ -293,12 +310,14 @@ export function composeFinalizedVmSetV1(
   // when any finalized asset authored in this lane is absent from the catalog.
 
   const frozenMaterializations = Object.freeze(materializations);
+  const frozenExistingMaterializationChecks = Object.freeze(existingMaterializationChecks);
   return Object.freeze({
     catalogLane,
     evidence: accumulator.finalize(),
     // Backward-compatible evidence view derived from the canonical ordered plan.
     rows: Object.freeze(frozenMaterializations.map(({ row }) => row)),
     materializations: frozenMaterializations,
+    existingMaterializationChecks: frozenExistingMaterializationChecks,
   });
 }
 

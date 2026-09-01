@@ -72,6 +72,20 @@ export interface FinalizedVmMaterializeRequestV1 {
   readonly signal: AbortSignal;
 }
 
+export interface FinalizedVmExistingMaterializationVerificationRequestV1 {
+  readonly acceptedPolicy: Readonly<ContextGraphPolicyV1>;
+  readonly acceptedPolicyDigest: Digest32V1;
+  readonly catalogLane: Readonly<FinalizedVmCatalogLaneV1>;
+  readonly finalizedContextGraph: Readonly<FinalizedContextGraphReadV1>;
+  readonly candidate: Readonly<FinalizedVmChainCandidateV1>;
+  readonly signal: AbortSignal;
+}
+
+/** Read-only positive proof that one exact chain-finalized VM is already durable. */
+export interface FinalizedVmExistingMaterializationVerifierV1 {
+  (request: FinalizedVmExistingMaterializationVerificationRequestV1): Promise<void>;
+}
+
 /** Idempotently materialize one already-authorized row and post-read the exact VM graph. */
 export interface FinalizedVmMaterializerV1 {
   (request: FinalizedVmMaterializeRequestV1):
@@ -96,6 +110,7 @@ export interface FinalizedVmRuntimeConfigV1 {
   readonly knowledgeAssetsLifecycleAddress: EvmAddressV1;
   readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
   readonly materialize: FinalizedVmMaterializerV1;
+  readonly verifyExistingMaterialization?: FinalizedVmExistingMaterializationVerifierV1;
 }
 
 export interface FinalizedVmRuntimeRequestV1 {
@@ -145,6 +160,7 @@ interface RuntimeConfigSnapshotV1 {
   readonly knowledgeAssetsLifecycleAddress: EvmAddressV1;
   readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
   readonly materialize: FinalizedVmMaterializerV1;
+  readonly verifyExistingMaterialization?: FinalizedVmExistingMaterializationVerifierV1;
 }
 
 interface RuntimeRequestSnapshotV1 {
@@ -213,6 +229,32 @@ export function createFinalizedVmRuntimeV1(
 
     const receipts: Readonly<FinalizedVmMaterializationReceiptV1>[] = [];
     try {
+      for (const prepared of verified.composed.existingMaterializationChecks) {
+        request.signal.throwIfAborted();
+        if (config.verifyExistingMaterialization === undefined) {
+          fail(
+            'finalized-vm-runtime-materialization',
+            `no durable verifier is configured for existing finalized ordinal ${prepared.candidate.ordinal}`,
+          );
+        }
+        try {
+          await config.verifyExistingMaterialization(Object.freeze({
+            acceptedPolicy: request.acceptedPolicy,
+            acceptedPolicyDigest: request.acceptedPolicyDigest,
+            catalogLane: verified.composed.catalogLane,
+            finalizedContextGraph: verified.finalizedContextGraph,
+            candidate: prepared.candidate,
+            signal: request.signal,
+          }));
+        } catch (cause) {
+          if (request.signal.aborted) request.signal.throwIfAborted();
+          fail(
+            'finalized-vm-runtime-materialization',
+            `exact existing finalized VM proof failed at ordinal ${prepared.candidate.ordinal}`,
+            cause,
+          );
+        }
+      }
       for (const prepared of verified.composed.materializations) {
         request.signal.throwIfAborted();
         let untrustedReceipt: FinalizedVmMaterializationReceiptV1;
@@ -279,6 +321,12 @@ function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapsho
     assertNonzeroAddress(input.knowledgeAssetsLifecycleAddress, 'knowledgeAssetsLifecycleAddress');
     if (typeof input.snapshot !== 'function') throw new TypeError('snapshot is not callable');
     if (typeof input.materialize !== 'function') throw new TypeError('materialize is not callable');
+    if (
+      input.verifyExistingMaterialization !== undefined
+      && typeof input.verifyExistingMaterialization !== 'function'
+    ) {
+      throw new TypeError('verifyExistingMaterialization is not callable');
+    }
   } catch (cause) {
     fail('finalized-vm-runtime-config', 'runtime config is not canonical', cause);
   }
@@ -290,6 +338,9 @@ function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapsho
     knowledgeAssetsLifecycleAddress: input.knowledgeAssetsLifecycleAddress,
     snapshot: input.snapshot,
     materialize: input.materialize,
+    ...(input.verifyExistingMaterialization === undefined
+      ? {}
+      : { verifyExistingMaterialization: input.verifyExistingMaterialization }),
   });
 }
 
