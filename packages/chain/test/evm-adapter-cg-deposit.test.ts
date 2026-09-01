@@ -130,6 +130,17 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
     return logs.length;
   };
 
+  const registrationAllowance = async (owner: string): Promise<bigint> => {
+    const tokenAddr = await hub().getContractAddress('Token');
+    const cgAddr = await hub().getContractAddress('ContextGraphs');
+    const token = new Contract(
+      tokenAddr,
+      ['function allowance(address,address) view returns (uint256)'],
+      provider,
+    );
+    return token.allowance(owner, cgAddr);
+  };
+
   it('approves + pays the deposit when active, recording the CG escrow', async () => {
     await setDeposit(DEPOSIT);
     const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
@@ -183,7 +194,7 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
     const result = await adapter.createOnChainContextGraph({
       accessPolicy: 0,
       publishPolicy: 1,
-      registrationPcaAccountId: accountId,
+      registrationDepositPolicy: { mode: 'pca', accountId },
     });
 
     expect(result.success).toBe(true);
@@ -192,5 +203,61 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
     expect(await getEscrow(result.contextGraphId)).toBe(0n);
     expect(await getPublishAuthorityAccountId(result.contextGraphId)).toBe(0n);
     expect(await approvalCount(coreOp.address, fromBlock + 1)).toBe(0);
+  });
+
+  it('retries the additive selector with lazy approval when PCA coverage is ineligible', async () => {
+    await setDeposit(DEPOSIT);
+    const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
+    const ineligibleAccountId = 999_999n;
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, DEPOSIT);
+    expect(await registrationAllowance(coreOp.address)).toBe(0n);
+    const waivedBefore = await waivedCount(ineligibleAccountId);
+    const fromBlock = await provider.getBlockNumber();
+
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const adapterInternals = adapter as unknown as {
+      sendContractTransaction: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalSend = adapterInternals.sendContractTransaction.bind(adapter);
+    const attempts: Array<{ method: string; args: unknown[]; error?: string }> = [];
+    adapterInternals.sendContractTransaction = async (...args: unknown[]) => {
+      const attempt = {
+        method: String(args[1]),
+        args: [...(args[2] as unknown[])],
+      } as { method: string; args: unknown[]; error?: string };
+      attempts.push(attempt);
+      try {
+        return await originalSend(...args);
+      } catch (error) {
+        attempt.error = error instanceof Error ? error.message : String(error);
+        throw error;
+      }
+    };
+
+    const result = await adapter.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      registrationDepositPolicy: { mode: 'pca', accountId: ineligibleAccountId },
+    });
+
+    const createAttempts = attempts.filter((attempt) =>
+      attempt.method === 'createContextGraphWithPcaCoverage');
+    expect(createAttempts).toHaveLength(2);
+    expect(createAttempts.map((attempt) => attempt.method)).toEqual([
+      'createContextGraphWithPcaCoverage',
+      'createContextGraphWithPcaCoverage',
+    ]);
+    expect(createAttempts.map((attempt) => attempt.args.at(-1))).toEqual([
+      ineligibleAccountId,
+      ineligibleAccountId,
+    ]);
+    expect(createAttempts[0].error).toMatch(/TooLowAllowance/);
+    expect(createAttempts[1].error).toBeUndefined();
+    expect(result.success).toBe(true);
+    expect(await getEscrow(result.contextGraphId)).toBe(DEPOSIT);
+    expect(await waivedCount(ineligibleAccountId)).toBe(waivedBefore);
+    expect(await getPublishAuthorityAccountId(result.contextGraphId)).toBe(0n);
+    expect(await approvalCount(coreOp.address, fromBlock + 1)).toBe(1);
+    expect(await registrationAllowance(coreOp.address)).toBe(0n);
   });
 });

@@ -20,6 +20,7 @@ import {
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import { resolveContextGraphCreateDispatch } from './context-graph-registration-dispatch.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -467,18 +468,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       // chain-event-driven host-mode auto-subscribe path.
       params.nameHash ?? ethers.ZeroHash,
     ];
-    const hasRegistrationPcaCoverage = params.registrationPcaAccountId !== undefined;
-    const createMethod = hasRegistrationPcaCoverage
-      ? 'createContextGraphWithPcaCoverage'
-      : 'createContextGraph';
-    const createArgs = hasRegistrationPcaCoverage
-      ? [...legacyCreateArgs, params.registrationPcaAccountId]
-      : legacyCreateArgs;
+    const createDispatch = resolveContextGraphCreateDispatch(
+      legacyCreateArgs,
+      params.registrationDepositPolicy,
+    );
     const submitCreate = () =>
       this.sendContractTransaction(
         contextGraphs,
-        createMethod,
-        createArgs,
+        createDispatch.method,
+        createDispatch.args,
         this.signer,
         'create on-chain context graph',
       );

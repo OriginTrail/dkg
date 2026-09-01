@@ -576,6 +576,11 @@ export interface ContextGraphRegistryScanCursorStore {
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
+export type ContextGraphRegistrationDepositPolicy =
+  | { mode: 'legacy' }
+  | { mode: 'pca'; accountId: bigint }
+  | { mode: 'paid' };
+
 /**
  * Per SPEC_CG_MEMORY_MODEL: every CG is hosted by the network's sharding
  * table at publish time and the ACK quorum is the system parameter
@@ -599,11 +604,11 @@ export interface CreateOnChainContextGraphParams {
   publishAuthority?: string;
   publishAuthorityAccountId?: bigint;
   /**
-   * Attempt-scoped PCA account used only to cover the registration deposit.
-   * This does not become the Context Graph's publishing authority.
-   * When omitted, the adapter preserves the legacy create selector.
+   * Registration-deposit behavior for this create attempt. `pca` uses an
+   * account only for waiver coverage; `paid` explicitly disables coverage.
+   * Omission preserves the legacy selector and its authority-coupled behavior.
    */
-  registrationPcaAccountId?: bigint;
+  registrationDepositPolicy?: ContextGraphRegistrationDepositPolicy;
   /**
    * OT-RFC-38 / LU-6 Phase B — opt-in stable wire identifier the
    * curator commits to at create time. Intended to be
