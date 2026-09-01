@@ -61,6 +61,19 @@ export class Rfc64ReceiverTaskLifecycleV1<
     this.#queue.push(task);
   }
 
+  /**
+   * Queue trusted recovery work immediately before older queued work for the
+   * same semantic scope, without jumping unrelated scopes that were already
+   * waiting. The caller owns the trust boundary; ordinary peer hints must use
+   * {@link schedule}.
+   */
+  scheduleBeforeScope(task: TTask): void {
+    this.#pendingByKey.set(task.key, task);
+    const scopeIndex = this.#queue.findIndex((queued) => queued.scopeKey === task.scopeKey);
+    if (scopeIndex < 0) this.#queue.push(task);
+    else this.#queue.splice(scopeIndex, 0, task);
+  }
+
   requeue(task: TTask): boolean {
     if (task.settled === true || task.cancellation.signal.aborted) return false;
     this.#deferred.delete(task);
@@ -148,6 +161,20 @@ export class Rfc64ReceiverTaskLifecycleV1<
       if (task.running === true) continue;
       this.finalize(task, completion(task), beforeSettle, notify);
     }
+  }
+
+  finalizeNonRunningWhere(
+    predicate: (task: TTask) => boolean,
+    completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
+    beforeSettle: (task: TTask) => void,
+    notify: (waiter: () => void) => void,
+  ): number {
+    let finalized = 0;
+    for (const task of new Set(this.#pendingByKey.values())) {
+      if (task.running === true || !predicate(task)) continue;
+      if (this.finalize(task, completion(task), beforeSettle, notify)) finalized += 1;
+    }
+    return finalized;
   }
 
   finalize(

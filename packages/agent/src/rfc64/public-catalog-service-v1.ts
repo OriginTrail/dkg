@@ -803,7 +803,7 @@ export class Rfc64PublicCatalogServiceV1 {
     });
     if (discovered === null) return null;
     if (signal?.aborted) throw signal.reason;
-    const completion = await this.#receiver.scheduleManyAndWait([{
+    const completion = await this.#receiver.scheduleVerifiedCurrentHeadAndWait([{
       announcement: discovered.announcement,
       remotePeerId,
     }]);
@@ -881,7 +881,7 @@ export class Rfc64PublicCatalogServiceV1 {
       exactHeadIdentityV1(discovered.announcement) === selectedIdentity
     ));
     if (signal?.aborted) throw signal.reason;
-    const completion = await this.#receiver.scheduleManyAndWait(selected.map(({
+    const completion = await this.#receiver.scheduleVerifiedCurrentHeadAndWait(selected.map(({
       remotePeerId,
       discovered,
     }) => ({
