@@ -26,6 +26,7 @@ import {
   VM_REVERIFY_INTENTS_DATABASE_FILENAME,
   type VmReverifyIntentStore,
 } from './vm-reverify-intent-store.js';
+import { VmReverifyRuntime } from './vm-reverify-runtime.js';
 import type { VmReverifyWorker } from './vm-reverify-worker.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
@@ -1168,32 +1169,55 @@ export class DKGAgentBase {
    */
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
   /**
-   * W2 (#2435) durable re-verification intents. `undefined` unless the feature
-   * is effectively on — its absence IS the kill switch, so every consumer must
-   * read it optionally rather than assume a store exists.
+   * W2 (#2435) has ONE runtime owner (review r2): activation, store
+   * ownership, worker lifecycle and ordered teardown are transitions on
+   * {@link VmReverifyRuntime}. The accessors below delegate, so the agent
+   * surface every consumer and wiring test proves through is unchanged —
+   * absence of the store IS still the kill switch. Lazily constructed
+   * because synthetic lifecycle tests build agents via Object.create.
    */
-  vmReverifyIntents?: VmReverifyIntentStore;
-  /**
-   * W2 (#2435) drain. Like the store above, its absence is the kill switch —
-   * the ingest kicks it optionally and never assumes it exists.
-   */
-  vmReverifyWorker?: VmReverifyWorker;
-  /**
-   * Why the intent store could not be opened, when the feature was enabled and
-   * the open failed. Read by the effective-state resolver so the operator-facing
-   * answer to "why is this node not converging?" stays in ONE place instead of
-   * being reconstructed from logs.
-   */
-  vmReverifyIntentStoreFailure?: string;
-  /**
-   * The activation outcome this process actually ARMED (review r1): set by
-   * `prepareVmReverifyIntentStore` on every path, consulted FIRST by the
-   * effective-state resolver. Without it the resolver re-runs the capability
-   * probe on every call, and a Hub that recovers after boot would report an
-   * unwired feature as effective until the next restart. Cleared on store
-   * teardown so a same-object restart re-probes.
-   */
-  vmReverifyActivation?: { effective: boolean; reason?: string };
+  private _vmReverifyRuntime?: VmReverifyRuntime;
+
+  protected get vmReverifyRuntime(): VmReverifyRuntime {
+    if (!this._vmReverifyRuntime) this._vmReverifyRuntime = new VmReverifyRuntime();
+    return this._vmReverifyRuntime;
+  }
+
+  /** Durable re-verification intents; `undefined` IS the kill switch. */
+  get vmReverifyIntents(): VmReverifyIntentStore | undefined {
+    return this.vmReverifyRuntime.store;
+  }
+
+  set vmReverifyIntents(store: VmReverifyIntentStore | undefined) {
+    this.vmReverifyRuntime.store = store;
+  }
+
+  /** The drain; like the store, its absence is the kill switch. */
+  get vmReverifyWorker(): VmReverifyWorker | undefined {
+    return this.vmReverifyRuntime.worker;
+  }
+
+  set vmReverifyWorker(worker: VmReverifyWorker | undefined) {
+    this.vmReverifyRuntime.worker = worker;
+  }
+
+  /** Why the intent store could not be opened, for the status resolver. */
+  get vmReverifyIntentStoreFailure(): string | undefined {
+    return this.vmReverifyRuntime.openFailure;
+  }
+
+  set vmReverifyIntentStoreFailure(failure: string | undefined) {
+    this.vmReverifyRuntime.openFailure = failure;
+  }
+
+  /** The activation outcome this process actually ARMED (review r1). */
+  get vmReverifyActivation(): { effective: boolean; reason?: string } | undefined {
+    return this.vmReverifyRuntime.activation;
+  }
+
+  set vmReverifyActivation(activation: { effective: boolean; reason?: string } | undefined) {
+    this.vmReverifyRuntime.activation = activation;
+  }
   /** Explicit owner for finalization persistence and network identity lifetimes. */
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /**
@@ -1861,56 +1885,15 @@ export class DKGAgentBase {
    * armed, which is a documented bypass wearing a guard's clothes.
    */
   protected async prepareVmReverifyIntentStore(): Promise<void> {
-    if (this.vmReverifyIntents) return;
-    // No durable backing of either kind means the feature CANNOT arm, and the
-    // answer must not cost a capability probe: agents without a chain adapter
-    // (synthetic lifecycle tests, chainless tooling) reach this method too,
-    // and the reconcile gate inside the resolver reads the adapter directly.
-    if (!this.config.dataDir && !this.config.vmReverifyIntentStore) {
-      this.vmReverifyActivation = { effective: false, reason: 'no-data-dir' };
-      return;
-    }
-    // The effective gate runs FIRST, before an injected store is accepted
-    // (review r1): injection substitutes for the durable FILE, not for the
-    // operator flag, the reconciler, or the adapter capability set — an
-    // injected store with the switch off must wire neither lane nor worker.
-    const state = await (this as unknown as DKGAgent).vmUpdateConvergenceState();
-    if (!state.effective) {
-      this.vmReverifyActivation = state;
-      return;
-    }
-    const injected = this.config.vmReverifyIntentStore;
-    if (injected) {
-      this.vmReverifyIntents = injected;
-      this.vmReverifyActivation = { effective: true };
-      return;
-    }
-    // Unreachable at RUNTIME — the effective gate above already returned
-    // without a dataDir or an injected substitute — kept because it narrows
-    // the type for the open call.
-    if (!this.config.dataDir) return;
-    const databasePath = join(this.config.dataDir, VM_REVERIFY_INTENTS_DATABASE_FILENAME);
-    // SCOPE: this catch covers the intent-store open and NOTHING else. It sits
-    // inside this method, so it cannot soften the startup block that calls it —
-    // `prepareFinalizationRecoveryStore()` and every sibling there keep their
-    // boot-fatal contract, which is right for core durability. Widening it to
-    // the caller would trade one real bug for a worse one.
-    try {
-      this.vmReverifyIntents = await openSqliteVmReverifyIntentStore(this.config.dataDir);
-      this.vmReverifyIntentStoreFailure = undefined;
-      this.vmReverifyActivation = { effective: true };
-    } catch (error) {
-      this.vmReverifyIntentStoreFailure =
-        error instanceof Error ? error.message : String(error);
-      this.vmReverifyActivation = { effective: false, reason: 'store-open-failed' };
-      this.log.error(
-        createOperationContext('system'),
-        'DKG_VM_UPDATE_CONVERGENCE_ENABLED is on but the re-verification intent '
-        + `store could not be opened at ${databasePath}: `
-        + `${this.vmReverifyIntentStoreFailure}. Chain-triggered re-verification `
-        + 'is DISABLED for this process; the node continues without it.',
-      );
-    }
+    await this.vmReverifyRuntime.prepare({
+      ...(this.config.dataDir === undefined ? {} : { dataDir: this.config.dataDir }),
+      ...(this.config.vmReverifyIntentStore === undefined
+        ? {}
+        : { injected: this.config.vmReverifyIntentStore }),
+      resolveState: () => (this as unknown as DKGAgent).vmUpdateConvergenceState(),
+      logError: (message) =>
+        this.log.error(createOperationContext('system'), message),
+    });
   }
 
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
@@ -1944,19 +1927,9 @@ export class DKGAgentBase {
    * asserting on it across a restart), so it is only detached, never closed.
    */
   protected async closeVmReverifyIntentStore(): Promise<void> {
-    // Stop the drain FIRST, and here rather than at the call site: the worker
-    // is the store's only writer, so making the teardown order a property of
-    // this method means no future caller can get it wrong, and no comment has
-    // to be trusted to keep it right.
-    const worker = this.vmReverifyWorker;
-    this.vmReverifyWorker = undefined;
-    await worker?.stop();
-    const store = this.vmReverifyIntents;
-    this.vmReverifyIntents = undefined;
-    // A same-object restart must re-run the activation probe (review r1).
-    this.vmReverifyActivation = undefined;
-    if (!store || store === this.config.vmReverifyIntentStore) return;
-    await store.close();
+    // Worker-before-store ordering, borrowed-store detachment and the latch
+    // clear are properties of the runtime (review r2), not of this caller.
+    await this.vmReverifyRuntime.close(this.config.vmReverifyIntentStore);
   }
 
   async getFinalizationRecoveryHealth(): Promise<FinalizationRecoveryHealth> {

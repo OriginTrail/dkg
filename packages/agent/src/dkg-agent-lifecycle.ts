@@ -292,7 +292,6 @@ import {
   EXACT_ASSET_FETCH_ADMISSION_PRIORITY,
   MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
 } from './sync/exact-asset-fetch.js';
-import { VmReverifyWorker } from './vm-reverify-worker.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
@@ -3203,7 +3202,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // closing the file it writes to.
       if (this.vmReverifyIntents && !this.vmReverifyWorker) {
         const reverifyIntents = this.vmReverifyIntents;
-        this.vmReverifyWorker = new VmReverifyWorker({
+        this.vmReverifyRuntime.constructWorker({
           intents: reverifyIntents,
           fetchContextGraphAssets: (localCgId, uals, options) =>
             this.fetchContextGraphAssets(localCgId, uals, options),
@@ -4186,8 +4185,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // consumer (review r1): `start()`’s immediate first run preserves the
     // guarantee that durable intents recorded before readiness — or during
     // the startup scan — are drained promptly after it.
-    if (this.vmReverifyWorker && !this.vmReverifyWorker.running) {
-      this.vmReverifyWorker.start();
+    if (this.vmReverifyRuntime.startWorkerAtReadiness()) {
       this.log.info(ctx, 'VM re-verify drain started (#2435)');
     }
     if (this.vmReconcileEnabled()) {
