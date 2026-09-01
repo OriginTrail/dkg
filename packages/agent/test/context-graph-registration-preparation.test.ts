@@ -168,6 +168,7 @@ describe('context-graph registration preparation boundary', () => {
     const signer = ethers.Wallet.createRandom();
     const chain = new LegacyDirectContextGraphAdapter(signer.address);
     const agent = await createAgent('LegacyDirectRegistration', chain);
+    const prepareLegacy = vi.spyOn(agent.publisher, 'prepareLegacyContextGraphRegistration');
 
     await agent.createContextGraph({
       id: 'legacy-direct-registration',
@@ -190,6 +191,7 @@ describe('context-graph registration preparation boundary', () => {
       publisher: agent.publisher,
     })).resolves.toMatchObject({ onChainId: '2' });
     expect(chain.createCalls).toHaveLength(2);
+    expect(prepareLegacy).toHaveBeenCalledTimes(1);
 
     await agent.createContextGraph({
       id: 'legacy-explicit-coverage',
@@ -204,15 +206,15 @@ describe('context-graph registration preparation boundary', () => {
     expect(chain.createCalls).toHaveLength(2);
 
     const selectedPreparer = {
-      publisherFallbackAuthorAddress: vi.fn(async () => signer.address),
       prepareContextGraphRegistration: vi.fn(),
+      prepareLegacyContextGraphRegistration: vi.fn(),
     };
     await expect(agent.registerContextGraph('legacy-direct-registration', {
       callerAgentAddress: signer.address,
       publisher: selectedPreparer as never,
     })).rejects.toThrow(/already registered on-chain/i);
-    expect(selectedPreparer.publisherFallbackAuthorAddress).not.toHaveBeenCalled();
     expect(selectedPreparer.prepareContextGraphRegistration).not.toHaveBeenCalled();
+    expect(selectedPreparer.prepareLegacyContextGraphRegistration).not.toHaveBeenCalled();
     expect(chain.createCalls).toHaveLength(2);
 
     await agent.createContextGraph({
@@ -270,21 +272,23 @@ describe('context-graph registration preparation boundary', () => {
     });
   });
 
-  it('pins EOA-curated registration to the supplied publisher execution context', async () => {
+  it('derives EOA-curated authority from the sealed registration signer', async () => {
     const localCurator = ethers.Wallet.createRandom();
-    const selectedPublisher = ethers.Wallet.createRandom();
+    const advisoryAuthorHint = ethers.Wallet.createRandom();
+    const selectedRegistrationSigner = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', localCurator.address);
     const submit = vi.fn(async (_params: CreateOnChainContextGraphParams) => ({
       contextGraphId: 1n,
       txHash: `0x${'22'.repeat(32)}`,
     }));
     const selectedPreparer = {
-      publisherFallbackAuthorAddress: vi.fn(async () => selectedPublisher.address),
+      publisherFallbackAuthorAddress: vi.fn(async () => advisoryAuthorHint.address),
       prepareContextGraphRegistration: vi.fn(async (_options: PrepareContextGraphRegistrationOptions) => ({
-        signerAddress: selectedPublisher.address,
+        signerAddress: selectedRegistrationSigner.address,
         coverage: { source: 'none' as const },
         submit,
       })),
+      prepareLegacyContextGraphRegistration: vi.fn(),
     };
     const agent = await createAgent('EoaCuratedSelectedRegistration', chain);
 
@@ -301,12 +305,14 @@ describe('context-graph registration preparation boundary', () => {
       publisher: selectedPreparer as never,
     })).resolves.toMatchObject({ onChainId: '1' });
 
-    expect(selectedPreparer.prepareContextGraphRegistration).toHaveBeenCalledWith({
-      registrationSignerAddress: ethers.getAddress(selectedPublisher.address),
-    });
+    expect(selectedPreparer.prepareContextGraphRegistration).toHaveBeenCalledWith({});
     expect(submit).toHaveBeenCalledWith(expect.objectContaining({
       publishPolicy: 0,
-      publishAuthority: ethers.getAddress(selectedPublisher.address),
+      publishAuthority: ethers.getAddress(selectedRegistrationSigner.address),
     }));
+    expect(submit).not.toHaveBeenCalledWith(expect.objectContaining({
+      publishAuthority: ethers.getAddress(advisoryAuthorHint.address),
+    }));
+    expect(selectedPreparer.publisherFallbackAuthorAddress).not.toHaveBeenCalled();
   });
 });

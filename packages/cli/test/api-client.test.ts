@@ -639,6 +639,21 @@ describe('ApiClient', () => {
       });
     });
 
+    it.each([
+      ['pcaAccountId', { pcaAccountId: Number.MAX_SAFE_INTEGER + 1 }],
+      ['registrationPcaAccountId', { registrationPcaAccountId: Number.MAX_SAFE_INTEGER + 1 }],
+    ] as const)(
+      'registerContextGraph() rejects an unsafe numeric %s before fetch',
+      async (field, options) => {
+        const fetch = mockFetchOk({ registered: 'research', onChainId: '42' });
+        globalThis.fetch = fetch;
+
+        await expect(client.registerContextGraph('research', options))
+          .rejects.toThrow(`${field} must be a positive safe integer`);
+        expect(fetch._calls).toHaveLength(0);
+      },
+    );
+
     it('createSubGraph() posts context graph id and sub-graph name', async () => {
       const { fetch, calls } = createTrackingFetch({
         ok: true,

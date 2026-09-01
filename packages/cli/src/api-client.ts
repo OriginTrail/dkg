@@ -34,6 +34,18 @@ import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
+type PcaAccountIdInput = string | number | bigint;
+
+function serializePcaAccountId(value: PcaAccountIdInput, field: string): string {
+  if (
+    typeof value === 'number'
+    && (!Number.isSafeInteger(value) || value <= 0)
+  ) {
+    throw new TypeError(`${field} must be a positive safe integer when supplied as a number.`);
+  }
+  return value.toString();
+}
+
 export interface PublisherJobResponse {
   job: PersistedLiftJob;
   retryState: LiftJobRetryProjection;
@@ -1816,7 +1828,9 @@ export class ApiClient {
       ...(options?.private ? { private: true } : {}),
       ...(options?.register === true ? { register: true } : {}),
       ...(options?.publishPolicy != null ? { publishPolicy: options.publishPolicy } : {}),
-      ...(options?.pcaAccountId != null ? { pcaAccountId: options.pcaAccountId.toString() } : {}),
+      ...(options?.pcaAccountId != null
+        ? { pcaAccountId: serializePcaAccountId(options.pcaAccountId, 'pcaAccountId') }
+        : {}),
     });
   }
 
@@ -1844,9 +1858,16 @@ export class ApiClient {
       id,
       ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
       ...(opts?.publishPolicy != null ? { publishPolicy: opts.publishPolicy } : {}),
-      ...(opts?.pcaAccountId != null ? { pcaAccountId: opts.pcaAccountId.toString() } : {}),
+      ...(opts?.pcaAccountId != null
+        ? { pcaAccountId: serializePcaAccountId(opts.pcaAccountId, 'pcaAccountId') }
+        : {}),
       ...(opts?.registrationPcaAccountId != null
-        ? { registrationPcaAccountId: opts.registrationPcaAccountId.toString() }
+        ? {
+            registrationPcaAccountId: serializePcaAccountId(
+              opts.registrationPcaAccountId,
+              'registrationPcaAccountId',
+            ),
+          }
         : {}),
     });
   }

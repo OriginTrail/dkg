@@ -398,18 +398,24 @@ export type PreparedContextGraphAgentInviteMutation =
   PreparedContextGraphMembershipMutation<ContextGraphAgentInviteMutationPlan>;
 
 interface ContextGraphRegistrationPreparer {
-  /** Resolve the exact signer represented by this selected execution context. */
-  publisherFallbackAuthorAddress(): Promise<string | undefined>;
   prepareContextGraphRegistration(
-    options?: PrepareContextGraphRegistrationOptions,
+    options?: Pick<
+      PrepareContextGraphRegistrationOptions,
+      'registrationPcaAccountId' | 'registrationSignerAddress'
+    >,
   ): Promise<PreparedContextGraphRegistration>;
+  prepareLegacyContextGraphRegistration(): Promise<{
+    readonly signerAddress?: string;
+    submit(
+      params: CreateOnChainContextGraphParams,
+    ): Promise<CreateOnChainContextGraphResult>;
+  }>;
 }
 
 interface ContextGraphRegistrationSignerPolicy {
   publishPolicy: number;
   publishAuthorityAccountId?: bigint;
   curatorAddress: string;
-  eoaAuthorityAddress?: string;
 }
 
 /**
@@ -422,7 +428,7 @@ function requiredContextGraphRegistrationSigner(
   if (policy.publishPolicy !== EVM_PUBLISH_CURATED) return undefined;
   return policy.publishAuthorityAccountId !== undefined
     ? policy.curatorAddress
-    : policy.eoaAuthorityAddress;
+    : undefined;
 }
 
 export class ContextGraphMethods extends DKGAgentBase {
@@ -1263,38 +1269,10 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     const adapterPreparer = this.chain.prepareOnChainContextGraphRegistration;
     const adapterCanPrepare = typeof adapterPreparer === 'function';
-    let eoaAuthorityAddress: string | undefined;
-    if (publishPolicy === EVM_PUBLISH_CURATED && !isPcaCurated) {
-      if (opts?.publisher) {
-        const selectedAddress = await opts.publisher.publisherFallbackAuthorAddress();
-        eoaAuthorityAddress = selectedAddress ? ethers.getAddress(selectedAddress) : undefined;
-        if (!eoaAuthorityAddress) {
-          throw new Error(
-            'Selected publisher does not expose an EOA for curated context-graph registration.',
-          );
-        }
-      } else if (adapterCanPrepare) {
-        const adapterAuthority = await this.getChainPublishAuthorityAddress(id)
-          ?? await this.getRegistrationTxSignerAddress();
-        eoaAuthorityAddress = adapterAuthority ? ethers.getAddress(adapterAuthority) : undefined;
-        if (!eoaAuthorityAddress) {
-          throw new Error(
-            'Chain adapter does not expose an EOA for curated context-graph registration.',
-          );
-        }
-      } else {
-        // Legacy direct registration must describe the adapter that will submit
-        // the transaction, never an unrelated agent/default publisher context.
-        const adapterSigner = await this.getRegistrationTxSignerAddress();
-        eoaAuthorityAddress = adapterSigner ? ethers.getAddress(adapterSigner) : undefined;
-      }
-    }
-
     const requiredRegistrationSigner = requiredContextGraphRegistrationSigner({
       publishPolicy,
       publishAuthorityAccountId,
       curatorAddress: ownerAddress,
-      eoaAuthorityAddress,
     });
     const preparationOptions: PrepareContextGraphRegistrationOptions = {
       ...(registrationPcaAccountId !== undefined ? { registrationPcaAccountId } : {}),
@@ -1303,6 +1281,9 @@ export class ContextGraphMethods extends DKGAgentBase {
         : {}),
     };
     let preparedRegistration: PreparedContextGraphRegistration | undefined;
+    let legacyRegistration: Awaited<
+      ReturnType<ContextGraphRegistrationPreparer['prepareLegacyContextGraphRegistration']>
+    > | undefined;
     if (opts?.publisher) {
       // A supplied preparer carries a selected publisher binding (not merely an
       // optimization), so failure must not silently fall back to another signer.
@@ -1316,29 +1297,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           throw error;
         }
 
-        // Old adapters predate sealed registration preparation. Preserve their
-        // ordinary paid path only when direct submission cannot switch away
-        // from the selected publisher. Unknown-on-both-sides retains the exact
-        // legacy behavior; a mismatch or one-sided unknown fails closed.
-        const [selectedPublisherAddress, directSignerAddress] = await Promise.all([
-          opts.publisher.publisherFallbackAuthorAddress(),
-          this.getRegistrationTxSignerAddress(),
-        ]);
-        const normalizedSelected = selectedPublisherAddress
-          ? ethers.getAddress(selectedPublisherAddress)
-          : undefined;
-        const normalizedDirect = directSignerAddress
-          ? ethers.getAddress(directSignerAddress)
-          : undefined;
-        const preservesSelectedPublisher = normalizedSelected && normalizedDirect
-          ? normalizedSelected.toLowerCase() === normalizedDirect.toLowerCase()
-          : normalizedSelected === undefined && normalizedDirect === undefined;
-        if (!preservesSelectedPublisher) {
-          throw new Error(
-            'Selected publisher cannot prepare context-graph registration and cannot be proven to match ' +
-            'the legacy direct chain signer.',
-          );
-        }
+        legacyRegistration = await opts.publisher.prepareLegacyContextGraphRegistration();
       }
     } else if (adapterPreparer) {
       preparedRegistration = await adapterPreparer.call(this.chain, preparationOptions);
@@ -1351,24 +1310,32 @@ export class ContextGraphMethods extends DKGAgentBase {
     const preparedSignerAddress = preparedRegistration
       ? ethers.getAddress(preparedRegistration.signerAddress)
       : undefined;
+    const legacySignerAddress = legacyRegistration?.signerAddress
+      ? ethers.getAddress(legacyRegistration.signerAddress)
+      : undefined;
+    const selectedRegistrationSigner = preparedSignerAddress ?? legacySignerAddress;
     if (
       requiredRegistrationSigner
-      && preparedSignerAddress
-      && preparedSignerAddress.toLowerCase() !== requiredRegistrationSigner.toLowerCase()
+      && selectedRegistrationSigner
+      && selectedRegistrationSigner.toLowerCase() !== requiredRegistrationSigner.toLowerCase()
     ) {
       throw new Error(
-        `Prepared context-graph registration signer ${preparedSignerAddress} does not match required curator signer ${requiredRegistrationSigner}.`,
+        `Prepared context-graph registration signer ${selectedRegistrationSigner} does not match required curator signer ${requiredRegistrationSigner}.`,
       );
     }
 
     // EOA-curated registration advertises the tx signer as publish authority.
-    // Prepared flows use the sealed signer; legacy direct adapters retain the
-    // pre-existing resolver path.
+    // Prepared flows use the sealed signer; legacy direct adapters use only
+    // their explicit compatibility executor or the adapter signer itself.
     if (publishPolicy === EVM_PUBLISH_CURATED && !isPcaCurated) {
-      publishAuthority = eoaAuthorityAddress;
+      const directSignerAddress = selectedRegistrationSigner
+        ?? await this.getRegistrationTxSignerAddress();
+      publishAuthority = directSignerAddress
+        ? ethers.getAddress(directSignerAddress)
+        : undefined;
     }
 
-    let registrationSignerAddress = preparedSignerAddress;
+    let registrationSignerAddress = selectedRegistrationSigner;
     if (isPcaCurated && !registrationSignerAddress) {
       registrationSignerAddress = await this.getRegistrationTxSignerAddress();
     }
@@ -1549,7 +1516,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       ...(isPcaCurated ? { publishAuthorityAccountId } : {}),
       participantAgents,
       nameHash,
-    }, preparedRegistration);
+    }, preparedRegistration ?? legacyRegistration);
     const onChainId = result.contextGraphId.toString();
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);

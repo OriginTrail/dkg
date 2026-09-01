@@ -6907,14 +6907,14 @@ export class PublishMethods extends DKGAgentBase {
   async registerContextGraphOnChain(
     this: DKGAgent,
     params: CreateOnChainContextGraphParams,
-    preparedRegistration?: PreparedContextGraphRegistration,
+    registration?: Pick<PreparedContextGraphRegistration, 'submit'>,
   ): Promise<CreateOnChainContextGraphResult> {
     const ctx = createOperationContext('system');
-    if (!preparedRegistration && typeof this.chain.createOnChainContextGraph !== 'function') {
+    if (!registration && typeof this.chain.createOnChainContextGraph !== 'function') {
       throw new Error('createOnChainContextGraph not available on chain adapter');
     }
-    const result = preparedRegistration
-      ? await preparedRegistration.submit(params)
+    const result = registration
+      ? await registration.submit(params)
       : await this.chain.createOnChainContextGraph!(params);
     const contextGraphId = result.contextGraphId.toString();
     // LU-2: per SPEC_CG_MEMORY_MODEL the on-chain CG no longer carries a
