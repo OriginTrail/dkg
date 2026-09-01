@@ -34,225 +34,41 @@
  *    dynamic-array decode on an untrusted payload). Adding a `parseLog` call
  *    for it reds `never decodes the dynamic root array`.
  */
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { ethers, Interface } from 'ethers';
+import {
+  describe,
+  it,
+  expect,
+} from 'vitest';
+
+import {
+  ethers,
+  Interface,
+} from 'ethers';
 import {
   EVMChainAdapter,
-  type EVMAdapterConfig,
 } from '../src/evm-adapter.js';
 import {
   KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
-  SERVED_EVENT_TYPES,
-  type KnowledgeAssetRootMutationEventType,
 } from '../src/evm-adapter-events.js';
-import { InvalidRpcLogResponseError, RpcFailoverClient, type RpcEndpoint } from '../src/rpc-failover-client.js';
-import type { ChainEvent } from '../src/chain-adapter.js';
+import {
+  InvalidRpcLogResponseError,
+  RpcFailoverClient,
+  type RpcEndpoint,
+} from '../src/rpc-failover-client.js';
+import {
+  KA_ABI,
+  KA_ID,
+  ROOT,
+  AUTHOR,
+  BLOCK_HASH,
+  TX_HASH,
+  FakeLog,
+  encodeLog,
+  sampleLog,
+  makeAdapter,
+  drain,
+} from './_helpers/root-mutation-scan-harness.js';
 
-const ABI_DIR = join(import.meta.dirname, '..', 'abi');
-const KA_ABI = JSON.parse(readFileSync(join(ABI_DIR, 'DKGKnowledgeAssets.json'), 'utf8'));
-
-// A hardhat-account key; never used to sign here (no provider is reachable).
-const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
-
-const KA_ID = 123_456_789n;
-const ROOT = '0x' + 'ab'.repeat(32);
-const AUTHOR = '0x' + '11'.repeat(20);
-const BLOCK_HASH = '0x' + 'cd'.repeat(32);
-const TX_HASH = '0x' + 'ef'.repeat(32);
-
-/** Minimal off-chain adapter config — nothing here is dialled. */
-function minimalConfig(): EVMAdapterConfig {
-  return {
-    rpcUrl: 'http://127.0.0.1:59998',
-    privateKey: DEPLOYER_PK,
-    hubAddress: '0x0000000000000000000000000000000000000001',
-    chainId: 'evm:31337',
-    staticNetwork: false,
-  };
-}
-
-interface FakeLog {
-  address?: string;
-  topics: string[];
-  data: string;
-  blockNumber: number;
-  blockHash: string;
-  transactionHash: string;
-  transactionIndex: number;
-  index: number;
-}
-
-interface ScanRecord {
-  label: string;
-  policy?: string;
-  skipPreferred?: boolean;
-  fromBlock: unknown;
-  toBlock: unknown;
-  /** The COMPLETE `eth_getLogs` request the production callback issued (review r7). */
-  request?: { address?: unknown; topics?: unknown; fromBlock?: unknown; toBlock?: unknown };
-}
-
-/**
- * Encode a genuinely decodable log for `eventName` using the shipped ABI.
- * `overrides` lets a test corrupt exactly one field.
- */
-function encodeLog(
-  iface: Interface,
-  eventName: string,
-  values: unknown[],
-  overrides: Partial<FakeLog> = {},
-): FakeLog {
-  const fragment = iface.getEvent(eventName);
-  if (!fragment) throw new Error(`event ${eventName} not in ABI`);
-  const { data, topics } = iface.encodeEventLog(fragment, values);
-  return {
-    // The bound storage contract's address — the r16 escape guard rejects a
-    // response log from any other contract as endpoint corruption.
-    address: '0x' + '22'.repeat(20),
-    topics: [...topics],
-    data,
-    blockNumber: 4_242,
-    blockHash: BLOCK_HASH,
-    transactionHash: TX_HASH,
-    transactionIndex: 7,
-    index: 3,
-    ...overrides,
-  };
-}
-
-function sampleLog(iface: Interface, eventName: KnowledgeAssetRootMutationEventType): FakeLog {
-  switch (eventName) {
-    case 'KnowledgeAssetUpdated':
-      return encodeLog(iface, eventName, [KA_ID, AUTHOR, 'op-1', ROOT, 4_096n, 10n]);
-    case 'KnowledgeAssetMerkleRootAdded':
-    case 'KnowledgeAssetMerkleRootRemoved':
-      return encodeLog(iface, eventName, [KA_ID, ROOT]);
-    case 'KnowledgeAssetMerkleRootsUpdated':
-      return encodeLog(iface, eventName, [KA_ID, [[AUTHOR, ROOT, 1_700_000_000n]]]);
-  }
-}
-
-/**
- * An adapter with its RPC seams replaced: `init()` is a no-op, the bound
- * `knowledgeAssetStorage` is an offline `Contract`, and `readContractWith`
- * records the call and returns canned logs WITHOUT invoking the reader.
- *
- * Because the reader is never invoked, any code path that reaches the chain by
- * some OTHER route (a direct `contract.queryFilter`) would have to dial
- * 127.0.0.1:59998 and fail — it cannot silently pass.
- */
-function makeAdapter(options: {
-  abi?: unknown;
-  bindStorage?: boolean;
-  logsByEvent?: Partial<Record<string, FakeLog[]>>;
-}): {
-  adapter: EVMChainAdapter;
-  scans: ScanRecord[];
-  parseLogCalls: string[];
-  iface: Interface;
-} {
-  const abi = options.abi ?? KA_ABI;
-  const iface = new Interface(abi as never);
-  const contract = new ethers.Contract('0x' + '22'.repeat(20), abi as never);
-  const scans: ScanRecord[] = [];
-  const parseLogCalls: string[] = [];
-
-  // Record which topic0 the production code asks the interface to decode.
-  const realParseLog = contract.interface.parseLog.bind(contract.interface);
-  (contract.interface as unknown as { parseLog: unknown }).parseLog = (log: {
-    topics: ReadonlyArray<string>;
-    data: string;
-  }) => {
-    parseLogCalls.push(log.topics[0] ?? '(no-topic0)');
-    return realParseLog(log);
-  };
-
-  const adapter = new EVMChainAdapter(minimalConfig());
-  const priv = adapter as unknown as {
-    init: () => Promise<void>;
-    contracts: Record<string, unknown>;
-    readContractWith: (
-      c: unknown,
-      label: string,
-      fn: unknown,
-      opts?: { policy?: string; skipPreferred?: boolean },
-    ) => Promise<unknown>;
-    readProvider: (
-      label: string,
-      fn: unknown,
-      opts?: { policy?: string; skipPreferred?: boolean },
-    ) => Promise<unknown>;
-  };
-  priv.init = async () => { /* offline */ };
-  priv.contracts = options.bindStorage === false ? {} : { knowledgeAssetStorage: contract };
-  const recordScan = (
-    label: string,
-    opts: { policy?: string; skipPreferred?: boolean } | undefined,
-  ): FakeLog[] => {
-    // The label carries the event name (`kas.getLogs(<event>)`), which is what
-    // the assertions key on; from/to close over inside the never-invoked `fn`.
-    scans.push({
-      label,
-      policy: opts?.policy,
-      skipPreferred: opts?.skipPreferred,
-      fromBlock: undefined,
-      toBlock: undefined,
-    });
-    const match = /\(([^)]+)\)$/.exec(label);
-    const eventName = match?.[1] ?? '';
-    if (eventName === 'KnowledgeAssetRootMutations') {
-      // The combined topic-OR scan (review r6): the fake plays the provider,
-      // returning every recorded log in insertion order; production
-      // classification by topic0 narrows to the requested-and-declared set.
-      return Object.values(options.logsByEvent ?? {}).flat() as FakeLog[];
-    }
-    return options.logsByEvent?.[eventName] ?? [];
-  };
-  // The root-mutation scan fetches RAW logs (`eth_getLogs` via `readProvider`)
-  // so ethers never eagerly decodes an untrusted payload (review r2): a
-  // `queryFilter` route would wrap each log in an `EventLog`, whose
-  // construction decodes the non-indexed tail before topics[1] is ever read.
-  //
-  // The seam EXECUTES the real callback against a fake provider (review r7): a
-  // stub that returned canned logs without running `fn` left the owning
-  // address, the topic OR-set and the block range unasserted — dropping
-  // `fromBlock` from the production request would have stayed green.
-  priv.readProvider = async (label, fn, opts) => {
-    const canned = recordScan(label, opts);
-    const record = scans[scans.length - 1];
-    const fakeProvider = {
-      getLogs: async (req: NonNullable<ScanRecord['request']>) => {
-        record.request = { ...req };
-        record.fromBlock = req.fromBlock;
-        record.toBlock = req.toBlock;
-        return canned;
-      },
-    };
-    return (fn as (p: typeof fakeProvider) => Promise<unknown>)(fakeProvider);
-  };
-  priv.readContractWith = async (_c, label, _fn, opts) => {
-    // The group scan must use the RAW provider route. A revival of the
-    // contract-read route (say, `queryFilterWithFailover` under the same
-    // label) FAILS here rather than silently receiving the same canned logs
-    // (review r7); legacy single-event branches still stub as before.
-    if (label.includes('KnowledgeAssetRootMutations')) {
-      throw new Error(`root-mutation scan took the contract-read route: ${label}`);
-    }
-    return recordScan(label, opts);
-  };
-
-  return { adapter, scans, parseLogCalls, iface };
-}
-
-async function drain(adapter: EVMChainAdapter, eventTypes: string[]): Promise<ChainEvent[]> {
-  const out: ChainEvent[] = [];
-  for await (const ev of adapter.listenForEvents({ eventTypes, fromBlock: 1, toBlock: 9_000 })) {
-    out.push(ev);
-  }
-  return out;
-}
 
 describe('KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES', () => {
   it('enumerates exactly the four root-mutating emitters', () => {
@@ -525,126 +341,7 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(topics[0], 'the three declared kinds are the whole OR-set').toHaveLength(3);
   });
 
-  describe('alias families: EVERY public name agrees with the listener under EITHER ABI spelling (review r7-bot)', () => {
-    const families: Array<{
-      publicNames: readonly [string, string];
-      abiBase: string;
-      abiAlias: string;
-      scanLabelContract: string;
-    }> = [
-      {
-        publicNames: ['KCCreated', 'KnowledgeAssetCreated'],
-        abiBase: 'KnowledgeAssetCreated',
-        abiAlias: 'KCCreated',
-        scanLabelContract: 'kas',
-      },
-    ];
-    for (const family of families) {
-      for (const publicName of family.publicNames) {
-        for (const abiSpelling of [family.abiBase, family.abiAlias]) {
-          it(`${publicName} over an ABI declaring only ${abiSpelling}`, async () => {
-            const abi = (KA_ABI as Array<Record<string, unknown>>).map((entry) =>
-              entry.type === 'event' && entry.name === family.abiBase && abiSpelling !== family.abiBase
-                ? { ...entry, name: abiSpelling }
-                : entry,
-            );
-            const { adapter, scans } = makeAdapter({ abi });
 
-            await expect(
-              adapter.supportsEventTypes([publicName]),
-              `the probe must accept ${publicName}`,
-            ).resolves.toEqual([]);
-            await expect(
-              drain(adapter, [publicName]),
-              `and listening for ${publicName} must not throw`,
-            ).resolves.toEqual([]);
-            expect(
-              scans.map((scan) => scan.label),
-              `the scan asked for the DECLARED spelling`,
-            ).toContain(`${family.scanLabelContract}.queryFilter(${abiSpelling})`);
-          });
-        }
-      }
-    }
-
-    for (const publicName of ['ContextGraphNameClaimed', 'NameClaimed']) {
-      for (const abiSpelling of ['NameClaimed', 'ContextGraphNameClaimed']) {
-        it(`${publicName} over a registry ABI declaring only ${abiSpelling}`, async () => {
-          const registryAbi = [{
-            type: 'event',
-            name: abiSpelling,
-            anonymous: false,
-            inputs: [
-              { name: 'nameHash', type: 'uint256', indexed: true },
-              { name: 'creator', type: 'address', indexed: true },
-              { name: 'accessPolicy', type: 'uint8', indexed: false },
-            ],
-          }];
-          const { adapter, scans } = makeAdapter({});
-          const priv = adapter as unknown as { contracts: Record<string, unknown> };
-          priv.contracts.contextGraphNameRegistry = new ethers.Contract('0x' + '33'.repeat(20), registryAbi as never);
-
-          await expect(
-            adapter.supportsEventTypes([publicName]),
-            `the probe must accept ${publicName}`,
-          ).resolves.toEqual([]);
-          await expect(
-            drain(adapter, [publicName]),
-            `and listening for ${publicName} must not throw`,
-          ).resolves.toEqual([]);
-          expect(
-            scans.map((scan) => scan.label),
-            `the scan asked for the DECLARED spelling`,
-          ).toContain(`cgNameRegistry.queryFilter(${abiSpelling})`);
-        });
-      }
-    }
-  });
-  it('probe-plus-listen agree on a fallback-only KCCreated ABI (review r5-bot)', async () => {
-    // The probe accepts EITHER alias spelling; the scan branch must build
-    // its filter from the SAME resolution. Before the fix this passed the
-    // capability gate and then threw on the hard-coded primary fragment,
-    // aborting every scan at runtime.
-    const kcOnlyAbi = (KA_ABI as Array<Record<string, unknown>>).map((entry) =>
-      entry.type === 'event' && entry.name === 'KnowledgeAssetCreated'
-        ? { ...entry, name: 'KCCreated' }
-        : entry,
-    );
-    const { adapter, scans } = makeAdapter({ abi: kcOnlyAbi });
-
-    await expect(adapter.supportsEventTypes(['KCCreated']), 'the fallback spelling IS served').resolves.toEqual([]);
-    await expect(drain(adapter, ['KCCreated']), 'and listening must not throw').resolves.toEqual([]);
-    expect(
-      scans.map((scan) => scan.label),
-      'the scan asked for the spelling the ABI declares',
-    ).toContain('kas.queryFilter(KCCreated)');
-  });
-
-  it('probe-plus-listen agree on a fallback-only ContextGraphNameClaimed ABI (review r5-bot)', async () => {
-    const claimOnlyAbi = [{
-      type: 'event',
-      name: 'ContextGraphNameClaimed',
-      anonymous: false,
-      inputs: [
-        { name: 'nameHash', type: 'uint256', indexed: true },
-        { name: 'creator', type: 'address', indexed: true },
-        { name: 'accessPolicy', type: 'uint8', indexed: false },
-      ],
-    }];
-    const { adapter, scans } = makeAdapter({});
-    const priv = adapter as unknown as { contracts: Record<string, unknown> };
-    priv.contracts.contextGraphNameRegistry = new ethers.Contract('0x' + '33'.repeat(20), claimOnlyAbi as never);
-
-    await expect(
-      adapter.supportsEventTypes(['ContextGraphNameClaimed']),
-      'the fallback spelling IS served',
-    ).resolves.toEqual([]);
-    await expect(drain(adapter, ['ContextGraphNameClaimed']), 'and listening must not throw').resolves.toEqual([]);
-    expect(
-      scans.map((scan) => scan.label),
-      'the scan asked for the spelling the ABI declares',
-    ).toContain('cgNameRegistry.queryFilter(ContextGraphNameClaimed)');
-  });
   it('a corrupt endpoint FAILS OVER instead of yielding a successful empty scan (review r14)', async () => {
     // A wrong-sized indexed-id topic on a log matching our filter cannot
     // originate on-chain — it is endpoint corruption. Silently skipping it
@@ -859,144 +556,5 @@ describe('validated raw-log scan — typed corruption classification (review r3-
       .listenForEvents({ eventTypes: ['KnowledgeAssetMerkleRootAdded'], fromBlock: 1, toBlock: 9_000 })
       [Symbol.asyncIterator]();
     await expect(iterator.next()).rejects.toBeInstanceOf(InvalidRpcLogResponseError);
-  });
-});
-describe('EVMChainAdapter.supportsEventTypes', () => {
-  it('accepts EACH alias spelling independently, not only the primary (review r3-bot)', async () => {
-    // Both fixtures previously carried the FIRST spelling only, so dropping
-    // or mis-probing the fallback would stay green. One minimal ABI per
-    // SPELLING, bound to the owning contract, each probed alone.
-    const cases = [
-      {
-        name: 'KCCreated',
-        owner: 'knowledgeAssetStorage',
-        spellings: [
-          { fragment: 'KnowledgeAssetCreated' },
-          { fragment: 'KCCreated' },
-        ],
-      },
-      {
-        name: 'ContextGraphNameClaimed',
-        owner: 'contextGraphNameRegistry',
-        spellings: [
-          { fragment: 'NameClaimed' },
-          { fragment: 'ContextGraphNameClaimed' },
-        ],
-      },
-    ] as const;
-    for (const { name, owner, spellings } of cases) {
-      for (const spelling of spellings) {
-        const abi = [{
-          type: 'event', name: spelling.fragment, anonymous: false,
-          inputs: [{ indexed: true, internalType: 'uint256', name: 'id', type: 'uint256' }],
-        }];
-        const contract = new ethers.Contract('0x' + '44'.repeat(20), abi as never);
-        const { adapter } = makeAdapter({});
-        (adapter as unknown as { contracts: Record<string, unknown> }).contracts[owner] = contract;
-
-        await expect(
-          adapter.supportsEventTypes([name]),
-          `${name} must be supported by a ${spelling.fragment}-ONLY ABI`,
-        ).resolves.toEqual([]);
-      }
-      // And an owning ABI with NEITHER spelling refuses the name — the
-      // aliases widen acceptance, they do not disable the probe.
-      const emptyAbi = [{
-        type: 'event', name: 'SomethingUnrelated', anonymous: false,
-        inputs: [{ indexed: true, internalType: 'uint256', name: 'id', type: 'uint256' }],
-      }];
-      const bare = new ethers.Contract('0x' + '45'.repeat(20), emptyAbi as never);
-      const { adapter } = makeAdapter({});
-      (adapter as unknown as { contracts: Record<string, unknown> }).contracts[owner] = bare;
-      await expect(adapter.supportsEventTypes([name])).resolves.toEqual([name]);
-    }
-  });
-
-  it('the served roster equals an INDEPENDENTLY written vocabulary (review r3-bot)', () => {
-    // SERVED_EVENT_TYPES is the implementation output; using it as the test
-    // input let an omitted ownership row hide (the probe would refuse an
-    // event listenForEvents still serves, while every parity assertion
-    // stayed green). This roster is written BY HAND — update it only when
-    // the public event vocabulary genuinely changes.
-    const EXPECTED_ROSTER = [
-      'KnowledgeBatchCreated',
-      'ContextGraphExpanded',
-      'KnowledgeAssetRegisteredToContextGraph',
-      'KCCreated',
-      'KnowledgeAssetCreated',
-      'NameClaimed',
-      'ContextGraphNameClaimed',
-      'ContextGraphCreated',
-      'RelayCapabilityUpdated',
-      'KnowledgeAssetUpdated',
-      'KnowledgeAssetMerkleRootAdded',
-      'KnowledgeAssetMerkleRootsUpdated',
-      'KnowledgeAssetMerkleRootRemoved',
-    ];
-    expect([...SERVED_EVENT_TYPES].sort()).toEqual([...EXPECTED_ROSTER].sort());
-  });
-  it('reports nothing missing when the bound ABI declares every name', async () => {
-    const { adapter } = makeAdapter({});
-    await expect(
-      adapter.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]),
-    ).resolves.toEqual([]);
-  });
-
-  it('names the specific events a legacy ABI cannot produce', async () => {
-    const legacyAbi = (KA_ABI as unknown[]).filter(
-      (entry) => (entry as { name?: string }).name !== 'KnowledgeAssetMerkleRootRemoved',
-    );
-    const { adapter } = makeAdapter({ abi: legacyAbi });
-
-    await expect(
-      adapter.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]),
-    ).resolves.toEqual(['KnowledgeAssetMerkleRootRemoved']);
-  });
-
-  it('reports every name missing when no storage contract is bound', async () => {
-    const { adapter } = makeAdapter({ bindStorage: false });
-    await expect(
-      adapter.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]),
-    ).resolves.toEqual([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
-  });
-
-  it('answers each name from the contract that OWNS it, not from one hard-coded binding (review r2)', async () => {
-    // The first implementation asked `knowledgeAssetStorage` about every name,
-    // so `ContextGraphCreated` — an event this adapter genuinely serves from
-    // `contextGraphStorage` — was reported missing. The registry keys the
-    // answer per event.
-    const cgAbi = [{
-      type: 'event', name: 'ContextGraphCreated', anonymous: false,
-      inputs: [{ indexed: true, internalType: 'uint256', name: 'contextGraphId', type: 'uint256' }],
-    }];
-    const cgContract = new ethers.Contract('0x' + '33'.repeat(20), cgAbi as never);
-    const { adapter } = makeAdapter({});
-    (adapter as unknown as { contracts: Record<string, unknown> }).contracts['contextGraphStorage'] = cgContract;
-
-    // Owned by contextGraphStorage and declared there → supported.
-    await expect(adapter.supportsEventTypes(['ContextGraphCreated'])).resolves.toEqual([]);
-    // Served by this adapter but its owning contract lacks the fragment → missing.
-    await expect(adapter.supportsEventTypes(['ContextGraphExpanded'])).resolves.toEqual(['ContextGraphExpanded']);
-    // No scan branch serves this name at all → missing, whatever any ABI says.
-    await expect(adapter.supportsEventTypes(['NoSuchEventAnywhere'])).resolves.toEqual(['NoSuchEventAnywhere']);
-    // Mixed probe: each name judged independently.
-    await expect(
-      adapter.supportsEventTypes(['ContextGraphCreated', 'KnowledgeAssetUpdated', 'NoSuchEventAnywhere']),
-    ).resolves.toEqual(['NoSuchEventAnywhere']);
-    // r6 divergence row: both public spellings of the name-claim event are
-    // served from ContextGraphNameRegistry, whose ABI spells the fragment
-    // `NameClaimed` — the probe must answer BOTH spellings as supported.
-    const nameAbi = [{
-      type: 'event', name: 'NameClaimed', anonymous: false,
-      inputs: [{ indexed: true, internalType: 'bytes32', name: 'nameHash', type: 'bytes32' }],
-    }];
-    const registry = new ethers.Contract('0x' + '44'.repeat(20), nameAbi as never);
-    (adapter as unknown as { contracts: Record<string, unknown> }).contracts['contextGraphNameRegistry'] = registry;
-    await expect(adapter.supportsEventTypes(['NameClaimed', 'ContextGraphNameClaimed'])).resolves.toEqual([]);
-    // Served name whose ABI FRAGMENT is spelled differently (review r3):
-    // `listenForEvents` serves the public name `KCCreated` by scanning the
-    // greenfield `KnowledgeAssetCreated` fragment, so the probe must accept
-    // the alias — a literal-fragment probe reports a served event missing.
-    await expect(adapter.supportsEventTypes(['KCCreated'])).resolves.toEqual([]);
   });
 });
