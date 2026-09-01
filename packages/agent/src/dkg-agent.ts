@@ -866,14 +866,7 @@ export class DKGAgent extends DKGAgentBase {
           this.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId)
         ),
         invalidateRecoveryAdmission: (contextGraphId) => {
-          for (const providerPeerId of this.resolveRfc64CompleteSwmProviderPeerIdsV1(
-            contextGraphId,
-          )) {
-            this.selectedSwmBootstrapAdmission.invalidateContextGraph(
-              providerPeerId,
-              contextGraphId,
-            );
-          }
+          this.invalidateRfc64SwmRecoverySelectionStateV1(contextGraphId);
         },
         acceptTrack2Policies: (policies) => {
           if (policies.length === 0) return;
@@ -896,13 +889,12 @@ export class DKGAgent extends DKGAgentBase {
             plan,
             this.config.syncReconcilerTiming.stalenessThresholdMs,
           );
-          if (authorizedPlan !== null) {
-            this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+          return authorizedPlan === null
+            || this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
               authorizedPlan,
               onError,
               delayMs,
             );
-          }
         },
         synchronizeTarget: (params) => (
           this.synchronizeRfc64CatalogRolloutFromProvidersV1(params)
@@ -962,7 +954,7 @@ export class DKGAgent extends DKGAgentBase {
           ),
         selectedPublicAdmissionSnapshot: (peerId) =>
           this.selectedSwmBootstrapAdmission.snapshot(peerId),
-        configuredRecoveryPlan: (peerId) => (
+        activeRecoveryPlan: (peerId) => (
           this.resolveActiveRfc64SwmRecoveryPlanV1(peerId)
         ),
         isCatalogReady: (peerId) =>

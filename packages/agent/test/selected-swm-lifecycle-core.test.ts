@@ -383,6 +383,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         selectedContextGraphs: [publicCg, privateCg],
       }),
       resolveActiveRfc64SwmRecoveryPlanV1: (providerPeerId) => ({
+        kind: 'rfc64-active-swm-recovery-plan-v1' as const,
         providerPeerId,
         targets: [
           { contextGraphId: publicCg, lane: 'selected-public' },
@@ -491,6 +492,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         selectedContextGraphs: [publicCg],
       }),
       resolveActiveRfc64SwmRecoveryPlanV1: (providerPeerId) => ({
+        kind: 'rfc64-active-swm-recovery-plan-v1' as const,
         providerPeerId,
         targets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
       }),

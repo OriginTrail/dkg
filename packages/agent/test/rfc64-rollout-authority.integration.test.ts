@@ -468,6 +468,7 @@ describe('RFC-64 rollout authority integration', () => {
       { requireCompleteProviderMatch: true },
     )).resolves.toEqual({ targets: [] });
     expect(catalog.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId)).toEqual({
+      kind: 'rfc64-active-swm-recovery-plan-v1',
       providerPeerId,
       targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
     });

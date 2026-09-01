@@ -1393,18 +1393,20 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(announce!).toHaveBeenCalledWith(expect.objectContaining({
       peers: [providerPeerId],
     }));
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
-    expect(provider.readRfc64AppliedCatalogHeadV1({
-      catalogScopeDigest: catalogScopeDigest(),
-      authorAddress: AUTHOR,
-    })).toMatchObject({
-      currentCatalogHeadDigest: restarted.readRfc64AppliedCatalogHeadV1({
+    await vi.waitFor(async () => {
+      await provider.whenRfc64PublicCatalogReceiverIdleV1();
+      expect(provider.readRfc64AppliedCatalogHeadV1({
         catalogScopeDigest: catalogScopeDigest(),
         authorAddress: AUTHOR,
-      })?.currentCatalogHeadDigest,
-      catalogVersion: '1',
-      inventoryRowCount: '1',
-    });
+      })).toMatchObject({
+        currentCatalogHeadDigest: restarted.readRfc64AppliedCatalogHeadV1({
+          catalogScopeDigest: catalogScopeDigest(),
+          authorAddress: AUTHOR,
+        })?.currentCatalogHeadDigest,
+        catalogVersion: '1',
+        inventoryRowCount: '1',
+      });
+    }, { timeout: 5_000, interval: 25 });
   }, 60_000);
 
   it('excludes restricted shares, restarts the public SWM-only inventory, then removes VM-confirmed rows', async () => {

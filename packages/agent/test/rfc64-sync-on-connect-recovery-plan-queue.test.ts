@@ -13,8 +13,48 @@ import {
 } from './_helpers/sync-on-connect-test-fixture.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const PEER_B = '12D3KooWRfc64SecondCompleteProvider';
 
 describe('RFC-64 recovery-plan queue authorization', () => {
+  it('bypasses the exact cooldown after graph-wide selection invalidation', async () => {
+    const agent = await createUnstartedAgent('Rfc64SelectionInvalidatesExactCooldown');
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const selectedRun = vi.fn(async () => undefined);
+    installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
+    agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    agent.selectedSwmBootstrapAdmission.request(PEER_B, ['selected-cg', 'other-cg']);
+    agent.rfc64ExactCatchupOnConnectAt.set(PEER_A, Date.now());
+    agent.rfc64ExactCatchupOnConnectAt.set(PEER_B, Date.now());
+
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      vi.fn(),
+      0,
+    )).toBe(false);
+    expect(agent.invalidateRfc64SwmRecoverySelectionStateV1('selected-cg'))
+      .toEqual([PEER_A, PEER_B]);
+    expect(agent.rfc64ExactCatchupOnConnectAt.has(PEER_A)).toBe(false);
+    expect(agent.rfc64ExactCatchupOnConnectAt.has(PEER_B)).toBe(false);
+    expect(agent.selectedSwmBootstrapAdmission.snapshot(PEER_B)).toEqual({
+      contextGraphIds: ['other-cg'],
+      phase: 'retry-required',
+    });
+    agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      vi.fn(),
+      0,
+    )).toBe(true);
+    await vi.waitFor(() => expect(selectedRun).toHaveBeenCalledWith(PEER_A, authorized));
+  });
+
   it('rejects a network-denied provider at the authorized queue boundary', async () => {
     const agent = await createUnstartedAgent('Rfc64AuthorizedPlanNetworkDenial');
     agent.networkAdmissionCoordinator.isAcceptedPeer = () => false;

@@ -4637,12 +4637,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Rfc64SelectedSwmGraphSyncStatus {
-    const selected = this.readRfc64CatalogRuntimeSelectionV1()
-      .selectedContextGraphs.includes(contextGraphId)
-      && resolveRfc64SwmRecoveryLaneV1(
-        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-        contextGraphId,
-      ) === 'selected-public';
+    const recoveryAuthority = this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId);
+    const selected = recoveryAuthority.lane === 'selected-public'
+      && recoveryAuthority.active;
     const configuredProviderPeerIds = [
       ...new Set(this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)),
     ];
@@ -9503,15 +9500,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const wasReceiverActive = eligible && (manifestWide || previousSubscribed);
     const isReceiverActive = eligible && (manifestWide || nextSubscribed);
     const receiverSelectionChanged = wasReceiverActive !== isReceiverActive;
-    // Standalone public compatibility policies are deliberately not catalog-
-    // eligible, but their selected-public recovery lane is still driven by the
-    // live edge subscription. Ensure that lane gets the same fresh-pass fence.
-    const recoverySelectionChanged = !manifestWide
-      && previousSubscribed !== nextSubscribed
-      && resolveRfc64SwmRecoveryLaneV1(
-        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-        contextGraphId,
-      ) === 'selected-public';
+    const recoverySelectionChanged = (
+      this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId, {
+        subscribed: previousSubscribed,
+      }).active
+      !== this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId, {
+        subscribed: nextSubscribed,
+      }).active
+    );
     if (!receiverSelectionChanged && !recoverySelectionChanged) return;
     if (receiverSelectionChanged && !isReceiverActive) {
       this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);

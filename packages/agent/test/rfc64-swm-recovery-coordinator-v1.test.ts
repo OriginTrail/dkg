@@ -13,6 +13,7 @@ const PRIVATE = '0x1111111111111111111111111111111111111111/rfc64-private';
 
 function mixedPlan() {
   return {
+    kind: 'rfc64-active-swm-recovery-plan-v1' as const,
     providerPeerId: PROVIDER,
     targets: [
       { contextGraphId: PUBLIC, lane: 'selected-public' as const },
@@ -32,9 +33,9 @@ function dependencies(
         contextGraphIds: [PUBLIC],
         phase: 'retry-required',
       }),
-      configuredRecoveryPlan: (providerPeerId) => providerPeerId === PROVIDER
+      activeRecoveryPlan: (providerPeerId) => providerPeerId === PROVIDER
         ? mixedPlan()
-        : { providerPeerId, targets: [] },
+        : { kind: 'rfc64-active-swm-recovery-plan-v1', providerPeerId, targets: [] },
       isCatalogReady: () => true,
       isPeerAccepted: () => true,
       isStarted: () => true,
@@ -175,7 +176,8 @@ describe('RFC-64 SWM recovery authorization', () => {
     const refreshSelectedPublicAdmission = vi.fn(() => true);
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
       refreshSelectedPublicAdmission,
-      configuredRecoveryPlan: (providerPeerId) => ({
+      activeRecoveryPlan: (providerPeerId) => ({
+        kind: 'rfc64-active-swm-recovery-plan-v1',
         providerPeerId,
         targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
       }),
@@ -192,7 +194,9 @@ describe('RFC-64 SWM recovery authorization', () => {
     const refreshSelectedPublicAdmission = vi.fn(() => true);
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
       refreshSelectedPublicAdmission,
-      configuredRecoveryPlan: (providerPeerId) => ({ providerPeerId, targets: [] }),
+      activeRecoveryPlan: (providerPeerId) => ({
+        kind: 'rfc64-active-swm-recovery-plan-v1', providerPeerId, targets: [],
+      }),
     }));
 
     expect(coordinator.authorizeForCatalogPass({
@@ -229,7 +233,8 @@ describe('RFC-64 SWM recovery authorization', () => {
         contextGraphIds: [upper, lower],
         phase: 'retry-required',
       }),
-      configuredRecoveryPlan: (providerPeerId) => ({
+      activeRecoveryPlan: (providerPeerId) => ({
+        kind: 'rfc64-active-swm-recovery-plan-v1',
         providerPeerId,
         targets: publicTargets,
       }),

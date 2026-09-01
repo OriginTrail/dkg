@@ -190,18 +190,19 @@ export class SelectedSwmBootstrapAdmission {
    * provider's remaining scope. Any older in-flight owner is invalidated by
    * deletion or by the replacement generation.
    */
-  invalidateContextGraph(remotePeer: string, contextGraphId: string): boolean {
-    const current = this.#byPeer.get(remotePeer);
-    if (current === undefined || !current.contextGraphIds.includes(contextGraphId)) {
-      return false;
+  invalidateContextGraph(contextGraphId: string): readonly string[] {
+    const invalidatedPeers: string[] = [];
+    for (const [remotePeer, current] of this.#byPeer) {
+      if (!current.contextGraphIds.includes(contextGraphId)) continue;
+      const remaining = current.contextGraphIds.filter((id) => id !== contextGraphId);
+      if (remaining.length === 0) {
+        this.#byPeer.delete(remotePeer);
+      } else {
+        this.#replace(remotePeer, remaining, current.phase, current.terminalAtMs);
+      }
+      invalidatedPeers.push(remotePeer);
     }
-    const remaining = current.contextGraphIds.filter((id) => id !== contextGraphId);
-    if (remaining.length === 0) {
-      this.#byPeer.delete(remotePeer);
-    } else {
-      this.#replace(remotePeer, remaining, current.phase, current.terminalAtMs);
-    }
-    return true;
+    return Object.freeze(invalidatedPeers);
   }
 
   clear(remotePeer: string): void {

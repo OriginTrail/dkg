@@ -71,7 +71,7 @@ describe('SelectedSwmBootstrapAdmission', () => {
     const staleOwner = admission.beginTransfer(PEER, ['cg-a', 'cg-b']);
     expect(admission.markTransferTerminal(staleOwner, 1_000)).toBe(true);
 
-    expect(admission.invalidateContextGraph(PEER, 'cg-a')).toBe(true);
+    expect(admission.invalidateContextGraph('cg-a')).toEqual([PEER]);
     expect(admission.snapshot(PEER)).toEqual({
       contextGraphIds: ['cg-b'],
       phase: 'terminal',
@@ -88,9 +88,25 @@ describe('SelectedSwmBootstrapAdmission', () => {
     const admission = new SelectedSwmBootstrapAdmission();
     completeScope(admission, ['cg-a']);
 
-    expect(admission.invalidateContextGraph(PEER, 'cg-a')).toBe(true);
+    expect(admission.invalidateContextGraph('cg-a')).toEqual([PEER]);
     expect(admission.snapshot(PEER)).toBeNull();
     expect(admission.requestRefresh(PEER, ['cg-a'], 60_000)).toBe(true);
+  });
+
+  it('fences every stale provider owner for a graph in one operation', () => {
+    const admission = new SelectedSwmBootstrapAdmission();
+    const otherPeer = `${PEER}-other`;
+    const first = admission.beginTransfer(PEER, ['cg-a', 'cg-b']);
+    const second = admission.beginTransfer(otherPeer, ['cg-a']);
+
+    expect(admission.invalidateContextGraph('cg-a')).toEqual([PEER, otherPeer]);
+    expect(admission.snapshot(PEER)).toEqual({
+      contextGraphIds: ['cg-b'],
+      phase: 'retry-required',
+    });
+    expect(admission.snapshot(otherPeer)).toBeNull();
+    expect(admission.markTransferTerminal(first)).toBe(false);
+    expect(admission.markTransferTerminal(second)).toBe(false);
   });
 
   it('lets only the newest queued transfer mark one unchanged scope terminal', () => {

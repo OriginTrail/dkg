@@ -293,6 +293,7 @@ export interface SelectedProviderSelectionAgent {
     readonly selectedContextGraphs: readonly string[];
   };
   resolveActiveRfc64SwmRecoveryPlanV1: (providerPeerId: string) => {
+    readonly kind: 'rfc64-active-swm-recovery-plan-v1';
     readonly providerPeerId: string;
     readonly targets: readonly Rfc64SwmRecoveryTargetV1[];
   };

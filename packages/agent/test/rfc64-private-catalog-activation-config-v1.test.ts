@@ -39,6 +39,7 @@ import {
   resolveRfc64PeerSwmRecoveryPlanV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
+  resolveRfc64SwmRecoveryRuntimeAuthorityV1,
 } from '../src/rfc64/swm-recovery-plan-v1.js';
 import { DKGAgent, mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
 
@@ -178,6 +179,34 @@ function publicBootstrapPolicy(index: number, targetCount = 0) {
 const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK);
 
 describe('RFC-64 private catalog activation', () => {
+  it.each([
+    ['compatibility legacy selected', 'selected-public', true, false, false, true, true],
+    ['compatibility legacy unselected', 'selected-public', true, false, false, false, false],
+    ['shadow selected', 'selected-public', true, true, false, true, true],
+    ['catalog selected', 'selected-public', false, true, false, true, true],
+    ['kill switch selected', 'selected-public', true, true, true, true, false],
+    ['legacy private', 'ordinary-private', true, false, false, false, true],
+    ['catalog private', 'ordinary-private', false, true, false, false, true],
+    ['kill switch private', 'ordinary-private', true, true, true, false, false],
+  ] as const)(
+    'projects canonical %s recovery authority',
+    (_name, lane, legacySyncAllowed, track2Enabled, killSwitchActive, runtimeSelected, active) => {
+      const authority = { legacySyncAllowed, track2Enabled, killSwitchActive };
+      expect(resolveRfc64SwmRecoveryRuntimeAuthorityV1({
+        contextGraphId: PRIVATE_CG,
+        lane,
+        configuredAuthority: authority,
+        receiverAuthority: authority,
+        runtimeSelected,
+      })).toEqual({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId: PRIVATE_CG,
+        lane,
+        active,
+      });
+    },
+  );
+
   it('reserves the exact graph-complete provider for selected private SWM recovery', () => {
     const bootstrap = snapshotRfc64CatalogBootstrapConfigV1(
       privateActivation().bootstrap,
@@ -245,21 +274,27 @@ describe('RFC-64 private catalog activation', () => {
       bootstrap,
       PROVIDER_PEER,
       (contextGraphId) => ({
-        ordinaryPrivateRecoveryAllowed: contextGraphId === PUBLIC_CG,
-        selectedPublicRecoveryAllowed: contextGraphId === PUBLIC_CG,
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        lane: contextGraphId === PRIVATE_CG ? 'ordinary-private' : 'selected-public',
+        active: contextGraphId === PUBLIC_CG,
       }),
     )).toEqual({
+      kind: 'rfc64-active-swm-recovery-plan-v1',
       providerPeerId: PROVIDER_PEER,
       targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
     });
     expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
       bootstrap,
       PROVIDER_PEER,
-      () => ({
-        ordinaryPrivateRecoveryAllowed: true,
-        selectedPublicRecoveryAllowed: true,
+      (contextGraphId) => ({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        lane: contextGraphId === PRIVATE_CG ? 'ordinary-private' : 'selected-public',
+        active: true,
       }),
     )).toEqual({
+      kind: 'rfc64-active-swm-recovery-plan-v1',
       providerPeerId: PROVIDER_PEER,
       targets: [
         { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },
@@ -282,10 +317,13 @@ describe('RFC-64 private catalog activation', () => {
       bootstrap,
       PROVIDER_PEER,
       (contextGraphId) => ({
-        ordinaryPrivateRecoveryAllowed: true,
-        selectedPublicRecoveryAllowed: contextGraphId === PUBLIC_CG,
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        lane: 'selected-public',
+        active: contextGraphId === PUBLIC_CG,
       }),
     )).toEqual({
+      kind: 'rfc64-active-swm-recovery-plan-v1',
       providerPeerId: PROVIDER_PEER,
       targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
     });

@@ -22,9 +22,13 @@ import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
 import { Rfc64CoalescingSupervisorV1 } from
   './rfc64/coalescing-supervisor-v1.js';
-import { resolveRfc64ActivePeerSwmRecoveryPlanV1 } from
-  './rfc64/swm-recovery-plan-v1.js';
 import {
+  resolveRfc64ActivePeerSwmRecoveryPlanV1,
+  resolveRfc64SwmRecoveryLaneV1,
+  resolveRfc64SwmRecoveryRuntimeAuthorityV1 as projectRfc64SwmRecoveryRuntimeAuthorityV1,
+} from './rfc64/swm-recovery-plan-v1.js';
+import {
+  projectRfc64CatalogReceiverAuthorityV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogExecutionPlanV1,
@@ -182,7 +186,7 @@ interface BootstrapOwnerDependenciesV1 {
     plan: ReturnType<typeof resolveRfc64ActivePeerSwmRecoveryPlanV1>,
     onError: (peerId: string, error: unknown) => void,
     delayMs: number,
-  ) => void;
+  ) => boolean;
   readonly synchronizeTarget: (params: Readonly<{
     readonly remotePeerIds: readonly string[];
     readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
@@ -323,7 +327,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
       for (const providerPeerId of connectedCompleteSwmProviders) {
         const recoveryPlan = recoveryPlans.get(providerPeerId);
         if (recoveryPlan === undefined) continue;
-        this.#dependencies.queueRecoveryPlan(
+        const queued = this.#dependencies.queueRecoveryPlan(
           recoveryPlan,
           (_peerId, error) => {
             this.#dependencies.warn(
@@ -333,6 +337,12 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
           },
           0,
         );
+        if (!queued) {
+          this.#dependencies.warn(
+            ctx,
+            `RFC-64 complete SWM provider ${providerPeerId.slice(-8)} was not queued after catalog recovery`,
+          );
+        }
       }
     } finally {
       state.lastPassCompletedAtMs = Date.now();
@@ -468,32 +478,61 @@ function newPendingTargetV1(
 }
 
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
+  /** Canonical graph-level recovery authority for current or proposed selection. */
+  resolveRfc64SwmRecoveryRuntimeAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: Readonly<{ subscribed?: boolean }> = {},
+  ): ReturnType<typeof projectRfc64SwmRecoveryRuntimeAuthorityV1> {
+    const selection = this.readRfc64CatalogRuntimeSelectionV1();
+    const configuredAuthority = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId);
+    const eligibleForRuntimeSelection = selection.eligibleContextGraphs.includes(contextGraphId);
+    const runtimeSelected = eligibleForRuntimeSelection && (
+      !selection.subscriptionDriven
+      || (options.subscribed ?? selection.selectedContextGraphs.includes(contextGraphId))
+    );
+    const receiverAuthority = options.subscribed === undefined
+      ? this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)
+      : projectRfc64CatalogReceiverAuthorityV1(configuredAuthority, {
+        active: configuredAuthority.eligible && (
+          !selection.subscriptionDriven || options.subscribed
+        ),
+      });
+    return projectRfc64SwmRecoveryRuntimeAuthorityV1({
+      contextGraphId,
+      lane: resolveRfc64SwmRecoveryLaneV1(
+        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+        contextGraphId,
+      ),
+      configuredAuthority,
+      receiverAuthority,
+      runtimeSelected,
+    });
+  }
+
   /** One provider's configured recovery proof projected through live selection. */
   resolveActiveRfc64SwmRecoveryPlanV1(
     this: DKGAgent,
     providerPeerId: string,
   ): ReturnType<typeof resolveRfc64ActivePeerSwmRecoveryPlanV1> {
-    const selected = new Set(
-      this.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs,
-    );
     return resolveRfc64ActivePeerSwmRecoveryPlanV1(
       this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
       providerPeerId,
-      (contextGraphId) => {
-        const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-        const configuredAuthority = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId);
-        return Object.freeze({
-          ordinaryPrivateRecoveryAllowed:
-            receiverAuthority.legacySyncAllowed || receiverAuthority.track2Enabled,
-          // Selected-public is the reserved automatic lane. Even standalone
-          // compatibility policies must be live-selected before it can run.
-          selectedPublicRecoveryAllowed:
-            !configuredAuthority.killSwitchActive
-            && (configuredAuthority.legacySyncAllowed || configuredAuthority.track2Enabled)
-            && selected.has(contextGraphId),
-        });
-      },
+      (contextGraphId) => this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId),
     );
+  }
+
+  /** Fence every stale graph owner and its peer-level exact-plan cooldown. */
+  invalidateRfc64SwmRecoverySelectionStateV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): readonly string[] {
+    const invalidatedPeers = this.selectedSwmBootstrapAdmission
+      .invalidateContextGraph(contextGraphId);
+    for (const providerPeerId of invalidatedPeers) {
+      this.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
+    }
+    return invalidatedPeers;
   }
 
   /**

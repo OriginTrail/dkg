@@ -18,6 +18,11 @@ export interface Rfc64PeerSwmRecoveryPlanV1 {
   readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
 }
 
+/** A configured provider plan after canonical live recovery authority is applied. */
+export interface Rfc64ActivePeerSwmRecoveryPlanV1 extends Rfc64PeerSwmRecoveryPlanV1 {
+  readonly kind: 'rfc64-active-swm-recovery-plan-v1';
+}
+
 export interface Rfc64AuthorizedSwmRecoveryPlanV1 {
   readonly kind: 'rfc64-authorized-swm-recovery-v1';
   readonly providerPeerId: string;
@@ -29,8 +34,46 @@ type Rfc64RecoveryConfigV1 = Readonly<
 >;
 
 export interface Rfc64SwmRecoveryRuntimeAuthorityV1 {
-  readonly ordinaryPrivateRecoveryAllowed: boolean;
-  readonly selectedPublicRecoveryAllowed: boolean;
+  readonly kind: 'rfc64-swm-recovery-runtime-authority-v1';
+  readonly contextGraphId: string;
+  readonly lane: Rfc64SwmRecoveryLaneV1 | null;
+  readonly active: boolean;
+}
+
+interface Rfc64CatalogRecoveryAuthorityV1 {
+  readonly killSwitchActive: boolean;
+  readonly legacySyncAllowed: boolean;
+  readonly track2Enabled: boolean;
+}
+
+/**
+ * One graph-level answer shared by active plans, status and selection-change
+ * fencing. Public recovery is live-selection owned; private recovery follows
+ * receiver authority. Neither lane can execute through the kill switch.
+ */
+export function resolveRfc64SwmRecoveryRuntimeAuthorityV1(input: Readonly<{
+  contextGraphId: string;
+  lane: Rfc64SwmRecoveryLaneV1 | undefined;
+  configuredAuthority: Readonly<Rfc64CatalogRecoveryAuthorityV1>;
+  receiverAuthority: Readonly<Rfc64CatalogRecoveryAuthorityV1>;
+  runtimeSelected: boolean;
+}>): Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1> {
+  const lane = input.lane ?? null;
+  const active = lane === 'selected-public'
+    ? !input.configuredAuthority.killSwitchActive
+      && (input.configuredAuthority.legacySyncAllowed
+        || input.configuredAuthority.track2Enabled)
+      && input.runtimeSelected
+    : lane === 'ordinary-private'
+      && !input.receiverAuthority.killSwitchActive
+      && (input.receiverAuthority.legacySyncAllowed
+        || input.receiverAuthority.track2Enabled);
+  return Object.freeze({
+    kind: 'rfc64-swm-recovery-runtime-authority-v1',
+    contextGraphId: input.contextGraphId,
+    lane,
+    active,
+  });
 }
 
 /** Locale-independent ordering shared by recovery plans and admission state. */
@@ -114,15 +157,16 @@ export function resolveRfc64ActivePeerSwmRecoveryPlanV1(
   resolveRuntimeAuthority: (
     contextGraphId: string,
   ) => Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1>,
-): Readonly<Rfc64PeerSwmRecoveryPlanV1> {
+): Readonly<Rfc64ActivePeerSwmRecoveryPlanV1> {
   const configured = resolveRfc64PeerSwmRecoveryPlanV1(config, providerPeerId);
   return Object.freeze({
+    kind: 'rfc64-active-swm-recovery-plan-v1',
     ...configured,
     targets: Object.freeze(configured.targets.filter(({ contextGraphId, lane }) => {
       const authority = resolveRuntimeAuthority(contextGraphId);
-      return lane === 'selected-public'
-        ? authority.selectedPublicRecoveryAllowed
-        : authority.ordinaryPrivateRecoveryAllowed;
+      return authority.contextGraphId === contextGraphId
+        && authority.lane === lane
+        && authority.active;
     })),
   });
 }

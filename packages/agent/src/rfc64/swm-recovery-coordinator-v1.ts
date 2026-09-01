@@ -4,6 +4,7 @@ import {
   canonicalizeRfc64SwmRecoveryTargetsV1,
   sameRfc64SwmRecoveryTargetsV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
+  type Rfc64ActivePeerSwmRecoveryPlanV1,
   type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './swm-recovery-plan-v1.js';
@@ -22,8 +23,8 @@ export interface Rfc64SwmRecoveryAdmissionPortV1 {
     contextGraphIds: readonly string[];
     phase: 'retry-required' | 'terminal';
   }> | null;
-  readonly configuredRecoveryPlan:
-    (providerPeerId: string) => Readonly<Rfc64PeerSwmRecoveryPlanV1>;
+  readonly activeRecoveryPlan:
+    (providerPeerId: string) => Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>;
   readonly isCatalogReady: (providerPeerId: string) => boolean;
   readonly isPeerAccepted: (providerPeerId: string) => boolean;
   readonly isStarted: () => boolean;
@@ -109,7 +110,7 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     const canonicalTargets = canonicalizeRfc64SwmRecoveryTargetsV1(recoveryPlan.targets);
     if (canonicalTargets === null) return null;
     const configuredTargets = canonicalizeRfc64SwmRecoveryTargetsV1(
-      this.deps.admission.configuredRecoveryPlan(recoveryPlan.providerPeerId).targets,
+      this.deps.admission.activeRecoveryPlan(recoveryPlan.providerPeerId).targets,
     );
     if (configuredTargets === null) return null;
     const configuredTargetKeys = new Set(configuredTargets.map(recoveryTargetKey));
@@ -145,7 +146,7 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     ) {
       throw new Error('RFC-64 SWM recovery provider is not admitted or catalog-ready');
     }
-    const configured = this.deps.admission.configuredRecoveryPlan(
+    const configured = this.deps.admission.activeRecoveryPlan(
       authorized.providerPeerId,
     );
     const configuredPublicTargets = configured.targets.filter(
