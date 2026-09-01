@@ -102,6 +102,34 @@ describe('kaRootMutations — cursor restore and failure recovery', () => {
     expect(saves.some((s2) => s2.lane === 'kaRootMutations' && s2.block === 1_000)).toBe(true);
     expect(filters[0].fromBlock).toBe(951);
   });
+  it('an existing kaRootMutations cursor WINS over the retired key (review r23)', async () => {
+    // Precedence matters: always-adopting would move the lane to the
+    // retired cursor (18,000) and skip root-added/replaced/removed events
+    // in 12,001..17,950 — blocks the retired lane never subscribed to.
+    const saves: Array<{ lane: string; block: number }> = [];
+    const { adapter, filters } = makeChain(20_000);
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => 0,
+      cursorPersistence: {
+        async loadLane(lane) {
+          if ((lane as string) === 'kaRootMutations') return 12_000;
+          if ((lane as string) === 'collectionUpdates') return 18_000;
+          return undefined;
+        },
+        async saveLane(lane, block) { saves.push({ lane, block }); },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async () => { /* sink */ },
+    });
+
+    await poll(poller);
+
+    // The current cursor is retained (rewound), no migration save occurs.
+    expect(filters[0].fromBlock).toBe(11_951);
+    expect(saves.some((s2) => s2.block === 18_000)).toBe(false);
+  });
   it('a cursor rewound to the ZERO floor scans from block 1, never live-seeds (review r14)', async () => {
     // Zero is also the uninitialized sentinel: without restored-state
     // tracking, a persisted cursor of 25 rewound by 50 reads as "no cursor"

@@ -29,6 +29,7 @@ import {
 } from './ka-ual-identity.js';
 import {
   assertCanonicalDigest,
+  assertNonNegativeSafeInteger,
   assertCanonicalEvmAddress,
   assertCanonicalHexBytes,
   parseCanonicalDecimalU256,
@@ -71,12 +72,12 @@ export function canonicalDigest32(value: unknown, label = 'digest'): Digest32V1 
   });
 }
 
-/** A non-negative safe integer; block numbers and log indices are numbers on this wire. */
+/** The ONE non-negative-safe-integer rule (r23), adapted into W2's typed code. */
 export function canonicalBlockNumber(value: unknown, label = 'blockNumber'): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    fail('noncanonical-scalar', `${label} must be a non-negative safe integer`);
-  }
-  return value;
+  return adapt(label, () => {
+    assertNonNegativeSafeInteger(value, label);
+    return value;
+  });
 }
 
 /**

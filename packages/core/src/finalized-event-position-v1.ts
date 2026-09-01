@@ -8,7 +8,7 @@
  * typed `VmUpdateConvergenceError` at its boundary, exactly as it already
  * does for the shipped scalar assertions.
  */
-import { assertCanonicalDigest, type Digest32V1 } from './sync-wire-scalars.js';
+import { assertCanonicalDigest, assertNonNegativeSafeInteger, type Digest32V1 } from './sync-wire-scalars.js';
 
 export interface FinalizedEventPositionV1 {
   blockNumber: number;
@@ -50,9 +50,7 @@ function positionDigest(value: unknown, label: string): Digest32V1 {
 }
 
 function positionIndex(value: unknown, label: string): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${label} must be a non-negative safe integer`);
-  }
+  assertNonNegativeSafeInteger(value, label);
   return value;
 }
 
