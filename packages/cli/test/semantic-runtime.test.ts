@@ -6,11 +6,13 @@ import { SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  forkStoredSemanticProgram,
   invokeStoredSemanticProgram,
   loadStoredSemanticProgram,
   startConfiguredSemanticRuntime,
   validateSemanticRuntimeConfig,
 } from '../src/semantic-runtime.js';
+import { createDkgQueryAdapter } from '../src/semantic-runtime-query-adapter.js';
 
 const ORIGINAL_PROVIDER = process.env.SEMANTIC_RUNTIME_LLM_PROVIDER;
 const ORIGINAL_CODEX_BIN = process.env.SEMANTIC_RUNTIME_CODEX_BIN;
@@ -26,6 +28,138 @@ afterEach(() => {
 });
 
 describe('semantic runtime daemon configuration', () => {
+  it.each(['wm', 'swm', 'vm'] as const)(
+    'forks a VM Program into a %s KA authored by the copying wallet',
+    async (targetLayer) => {
+    const author = '0x1111111111111111111111111111111111111111';
+    const copier = '0x2222222222222222222222222222222222222222';
+    const contextGraphId = `${copier}/private-programs`;
+    const sourceProgramIri = 'urn:sr:program:original';
+    const newProgramIri = 'urn:sr:program:my-copy';
+    const source = '(strategy fork-me)';
+    const tool = 'urn:sr:tool:investigator-v1';
+    const written: Array<{ subject: string; predicate: string; object: string }> = [];
+    let finalized = false;
+    const agent = {
+      getContextGraphOwner: vi.fn(async () => `did:dkg:agent:${copier}`),
+      curatorDidMatchesChecksumAgent: vi.fn((owner: string, caller: string) =>
+        owner.toLowerCase() === `did:dkg:agent:${caller}`.toLowerCase()),
+      callerIsAllowlistedAgentParticipant: vi.fn(async () => false),
+      refreshMetaFromCurator: vi.fn(async () => false),
+      listLocalAgents: () => [{ agentAddress: copier }],
+      getCustodialAgentPrivateKey: () => '0x02',
+      query: vi.fn(async (sparql: string) => sparql.includes('?language') ? {
+        type: 'bindings',
+        bindings: [{
+          g: `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/${author}/7`,
+          language: '"sexpr-v1"',
+          version: '"1.0.0"',
+          source: JSON.stringify(source),
+          tool: `<${tool}>`,
+        }],
+      } : { type: 'bindings', bindings: [] }),
+      assertion: {
+        history: vi.fn(async () => finalized ? {
+          wmCurrentAssertion: '11'.repeat(32),
+          state: 'finalized',
+        } : null),
+        create: vi.fn(async () => 'urn:test:fork-assertion'),
+        write: vi.fn(async (_cg: string, _name: string, quads: typeof written) => {
+          written.push(...quads);
+        }),
+        finalize: vi.fn(async () => {
+          finalized = true;
+          return { merkleRoot: new Uint8Array(32), authorAddress: copier };
+        }),
+        promote: vi.fn(async () => ({
+          promotedCount: written.length,
+          sealed: true,
+          publishReady: true,
+        })),
+      },
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        status: 'confirmed',
+        ual: 'did:dkg:31337/0x2222222222222222222222222222222222222222/9',
+      })),
+    } as any;
+
+    await expect(forkStoredSemanticProgram(
+      agent,
+      contextGraphId,
+      sourceProgramIri,
+      newProgramIri,
+      'vm',
+      targetLayer,
+      copier,
+    )).resolves.toEqual({
+      programIri: newProgramIri,
+      programLayer: targetLayer,
+      ...(targetLayer === 'vm' ? {
+        programUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/9',
+      } : {}),
+      authorAgentAddress: copier,
+      derivedFrom: sourceProgramIri,
+      persisted: true,
+    });
+    expect(written).toEqual(expect.arrayContaining([
+      { subject: newProgramIri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://origintrail.io/semantic-runtime/v1#Program' },
+      { subject: newProgramIri, predicate: 'https://origintrail.io/semantic-runtime/v1#source', object: JSON.stringify(source) },
+      { subject: newProgramIri, predicate: 'https://origintrail.io/semantic-runtime/v1#requiresTool', object: tool },
+      { subject: newProgramIri, predicate: 'http://www.w3.org/ns/prov#wasDerivedFrom', object: sourceProgramIri },
+    ]));
+    expect(agent.assertion.create).toHaveBeenCalledWith(
+      contextGraphId,
+      expect.stringMatching(/^semantic-program-fork-[0-9a-f]{24}$/),
+      { agentAddress: copier },
+    );
+    expect(agent.assertion.promote).toHaveBeenCalledTimes(targetLayer === 'wm' ? 0 : 1);
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledTimes(targetLayer === 'vm' ? 1 : 0);
+  });
+
+  it('resolves and executes a saved query only inside the invocation Context Graph', async () => {
+    const savedSparql = 'SELECT ?value WHERE { VALUES ?value { "query-ok" } }';
+    const query = vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+      if (options.source === 'semantic-runtime-query-catalog') {
+        return options.view === 'verifiable-memory' ? {
+          type: 'bindings',
+          bindings: [{
+            q: 'urn:dkg:profile:devnet-test:query:configuration-trace',
+            scopeGraph: 'did:dkg:context-graph:devnet-test/network',
+            catalog: 'urn:dkg:profile:devnet-test:catalog:operations',
+            name: 'Configuration trace',
+            sparql: savedSparql,
+            executionView: 'verifiable-memory',
+            catalogName: 'Operations',
+          }],
+        } : { type: 'bindings', bindings: [] };
+      }
+      return { type: 'bindings', bindings: [{ value: '"query-ok"' }] };
+    });
+    const agent = {
+      canReadContextGraph: vi.fn(async () => true),
+      query,
+      store: { query: vi.fn(async () => ({ type: 'bindings', bindings: [] })) },
+    } as any;
+    const adapter = createDkgQueryAdapter(agent, 'devnet-test', '0xreader');
+    const result = await adapter.dispatch({} as any, {
+      selector: 'configuration-trace',
+    });
+    expect(result.output).toBe(
+      '{"queryIri":"urn:dkg:profile:devnet-test:query:configuration-trace",'
+      + '"result":{"bindings":[{"value":"\\"query-ok\\""}],"type":"bindings"}}',
+    );
+    expect(agent.canReadContextGraph).toHaveBeenCalledWith('devnet-test', {
+      callerAgentAddress: '0xreader',
+    });
+    expect(query).toHaveBeenCalledWith(savedSparql, {
+      contextGraphId: 'devnet-test',
+      source: 'semantic-runtime-dkg-query',
+      subGraphName: 'network',
+      view: 'verifiable-memory',
+      callerAgentAddress: '0xreader',
+    });
+  });
+
   it('is default-off with no artifact or Worker side effects', async () => {
     const start = vi.fn();
     await expect(
@@ -60,11 +194,21 @@ describe('semantic runtime daemon configuration', () => {
     expect(() => validateSemanticRuntimeConfig({ maxAccumulator: '-1' })).toThrow(/maxAccumulator/);
   });
 
-  it('loads an S-expression program only from the requested VM graph', async () => {
+  it.each([
+    ['wm', '_working_memory', 'working-memory'],
+    ['swm', '_shared_memory', 'shared-working-memory'],
+    ['vm', '_verifiable_memory', 'verifiable-memory'],
+  ] as const)('loads an S-expression program only from the requested %s graph', async (
+    layer,
+    directory,
+    view,
+  ) => {
     const source = '(strategy demo)';
+    const author = '0x1111111111111111111111111111111111111111';
     const query = vi.fn().mockResolvedValue({
       type: 'bindings',
       bindings: [{
+        g: `did:dkg:context-graph:devnet-test/${directory}/${author}/7`,
         language: '"sexpr-v1"',
         version: '"1.0.0"',
         source: JSON.stringify(source),
@@ -75,9 +219,12 @@ describe('semantic runtime daemon configuration', () => {
       { query } as any,
       'devnet-test',
       'urn:sr:program:demo',
+      layer,
     )).resolves.toEqual({
       contextGraphId: 'devnet-test',
       programIri: 'urn:sr:program:demo',
+      layer,
+      authorAgentAddress: author,
       language: 'sexpr-v1',
       version: '1.0.0',
       source,
@@ -85,7 +232,7 @@ describe('semantic runtime daemon configuration', () => {
     });
     expect(query).toHaveBeenCalledWith(expect.stringContaining('<urn:sr:program:demo>'), {
       contextGraphId: 'devnet-test',
-      view: 'verifiable-memory',
+      view,
       source: 'semantic-runtime-program-load',
     });
   });
@@ -107,10 +254,12 @@ describe('semantic runtime daemon configuration', () => {
         (delegate attacker
           (grant shell.exec)
           (call shell.exec@1 "whoami"))))`;
+    const author = '0x1111111111111111111111111111111111111111';
     const agent = {
       query: vi.fn(async () => ({
         type: 'bindings',
         bindings: [{
+          g: `did:dkg:context-graph:devnet-test/_verifiable_memory/${author}/7`,
           language: '"sexpr-v1"',
           version: '"1.0.0"',
           source: JSON.stringify(source),
@@ -125,6 +274,8 @@ describe('semantic runtime daemon configuration', () => {
         'devnet-test',
         'urn:sr:program:external-shell',
         '123e4567-e89b-42d3-a456-426614174001',
+        'vm',
+        'vm',
         { enabled: true, operatorPolicyIri: 'urn:sr:policy:operator' },
       )).rejects.toMatchObject({ code: 'PROGRAM_REJECTED', status: 422 });
       expect(startPlan).not.toHaveBeenCalled();
@@ -133,7 +284,9 @@ describe('semantic runtime daemon configuration', () => {
     }
   });
 
-  it('persists the exact Wasm-resumed Codex output and SHA-256 before succeeding', async () => {
+  it.each(['wm', 'swm', 'vm'] as const)(
+    'persists the exact Wasm-resumed Codex output and SHA-256 in %s before succeeding',
+    async (executionLayer) => {
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'semantic-runtime-cli-'));
     const codex = path.join(temporary, 'codex-test');
     const codexCount = path.join(temporary, 'codex-count');
@@ -157,11 +310,14 @@ describe('semantic runtime daemon configuration', () => {
     );
     const written: Array<{ subject: string; predicate: string; object: string }> = [];
     let finalized = false;
+    let promoted = false;
     let published = false;
     const history = vi.fn(async () => finalized ? {
       wmCurrentAssertion: '11'.repeat(32),
-      ...(published ? {
+      ...((promoted || published) ? {
         swmCurrentAssertion: '11'.repeat(32),
+      } : {}),
+      ...(published ? {
         vmCurrentAssertion: '11'.repeat(32),
         publishedUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/1',
       } : {}),
@@ -170,16 +326,19 @@ describe('semantic runtime daemon configuration', () => {
       contextGraphId: 'devnet-test',
       agentAddress: operator,
       name: 'semantic-execution',
-      memoryLayer: null,
+      memoryLayer: published ? 'VM' : promoted ? 'SWM' : 'WM',
       assertionGraph: graph,
       status: 'wm-ahead',
     } : null);
     const agent = {
       getDefaultAgentAddress: () => operator,
+      listLocalAgents: () => [{ agentAddress: operator }],
+      getCustodialAgentPrivateKey: () => '0x01',
       query: vi.fn(async (sparql: string) => {
         if (sparql.includes('?language')) return {
           type: 'bindings',
           bindings: [{
+            g: graph,
             language: '"sexpr-v1"',
             version: '"1.0.0"',
             source: JSON.stringify(source),
@@ -212,12 +371,15 @@ describe('semantic runtime daemon configuration', () => {
           finalized = true;
           return { merkleRoot: new Uint8Array(32), authorAddress: operator };
         }),
-        promote: vi.fn(async () => ({
-          promotedCount: written.length,
-          sealed: true,
-          publishReady: true,
-          shareOperationId: 'share-1',
-        })),
+        promote: vi.fn(async () => {
+          promoted = true;
+          return {
+            promotedCount: written.length,
+            sealed: true,
+            publishReady: true,
+            shareOperationId: 'share-1',
+          };
+        }),
       },
       publishFromFinalizedAssertion: vi.fn(async () => {
         published = true;
@@ -248,20 +410,38 @@ describe('semantic runtime daemon configuration', () => {
         'devnet-test',
         programIri,
         '123e4567-e89b-42d3-a456-426614174000',
+        'vm',
+        executionLayer,
         config,
       );
       await expect(invoke()).resolves.toEqual({
         invocationId: '123e4567-e89b-42d3-a456-426614174000',
         executionIri: 'urn:sr:execution:123e4567-e89b-42d3-a456-426614174000',
-        executionUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/1',
+        executionLayer,
+        ...(executionLayer === 'vm' ? {
+          executionUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/1',
+        } : {}),
         persisted: true,
       });
       await expect(invoke()).resolves.toEqual({
         invocationId: '123e4567-e89b-42d3-a456-426614174000',
         executionIri: 'urn:sr:execution:123e4567-e89b-42d3-a456-426614174000',
-        executionUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/1',
+        executionLayer,
+        ...(executionLayer === 'vm' ? {
+          executionUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/1',
+        } : {}),
         persisted: true,
       });
+      await expect(invokeStoredSemanticProgram(
+        agent,
+        runtime!,
+        'devnet-test',
+        programIri,
+        '123e4567-e89b-42d3-a456-426614174000',
+        'vm',
+        executionLayer === 'wm' ? 'vm' : 'wm',
+        config,
+      )).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT', status: 409 });
       expect(fs.readFileSync(codexCount, 'utf8')).toBe('x');
     } finally {
       await runtime?.stop();
@@ -275,6 +455,7 @@ describe('semantic runtime daemon configuration', () => {
       '"sha256:04491f14f4f9a71e2a38f2ebdcbfa9b1d89c7d3661e5cb2cc0e803cf59a245d1"',
     );
     expect(status?.object).toBe('https://origintrail.io/semantic-runtime/v1#Succeeded');
-    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
+    expect(agent.assertion.promote).toHaveBeenCalledTimes(executionLayer === 'wm' ? 0 : 1);
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledTimes(executionLayer === 'vm' ? 1 : 0);
   }, 60_000);
 });

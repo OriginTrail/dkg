@@ -14,20 +14,20 @@
       "bytes": 20
     },
     "cjs/runtime_bg.wasm": {
-      "sha256": "a1904811b73fe0d62ec8c106951e0cece22e6d2177a545125ad52d385e8010f9",
-      "bytes": 345990
+      "sha256": "b94435a2c8775e10bc62563eb1d39126292db39c72532ae53ce3e258d3c8372e",
+      "bytes": 346764
     },
     "cjs/runtime_bg.wasm.d.ts": {
       "sha256": "1ea97327c037a421573529d627750929a72c6145ecfa08371c53536792ad9e1f",
       "bytes": 1537
     },
     "cjs/runtime.d.ts": {
-      "sha256": "ff8742b4411ba14e12178a85c1ba9750b2eb669d441e4c8a44e4a24b1fd9dfb0",
-      "bytes": 3016
+      "sha256": "14dd385be73967c59afefb514f52e4e47e04e0438fc8ae7ec2eac3e3d6a5dd34",
+      "bytes": 3013
     },
     "cjs/runtime.js": {
-      "sha256": "ca5501940a362aa91d423f87fb45250626a026b2bbb6dbbf5aed56bd95b77cb2",
-      "bytes": 13328
+      "sha256": "1a50309f80d812db0334c917c5e3343092e4cb9438f968236a46a93be85274aa",
+      "bytes": 13325
     }
   }
 }

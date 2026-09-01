@@ -474,5 +474,5 @@ export {
 } from './node-timer.js';
 export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
-
 export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
+export { canonicalizeJson, type CanonicalJsonValue } from './canonical-json.js';
