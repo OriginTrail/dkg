@@ -48,8 +48,9 @@ handshake, or restore mismatch fails closed.
 Programs are stored in the DKG as `sr:Program` resources with `sr:language`,
 `sr:version`, and `sr:source` triples. The authenticated
 `POST /api/semantic-runtime/invoke` route loads a program by IRI from the
-requested context graph's verifiable-memory view, admits its S-expression in
-Wasm, and executes its logical agents there. The first narrow execution slice
+explicitly selected WM, SWM, or VM view of the requested context graph, admits
+its S-expression in Wasm, and executes its logical agents there. The caller
+also explicitly selects the Execution KA's target layer. The first narrow execution slice
 supports ordered `emit` forms and one exact `agent/investigate@1` model request
 per delegate. The TypeScript host performs only that requested external call
 and returns its result to the waiting Wasm process.

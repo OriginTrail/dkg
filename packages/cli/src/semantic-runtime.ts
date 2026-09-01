@@ -2,12 +2,11 @@ import { createHash } from 'node:crypto';
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
-  MemoryLayer,
-  parseContextGraphLayerUri,
   sparqlIri,
   validateContextGraphId,
 } from '@origintrail-official/dkg-core';
 import type { LlmConfig } from '@origintrail-official/dkg-node-ui';
+import { ethers } from 'ethers';
 import {
   RuntimeAdapterRegistry,
   RuntimeEffectBroker,
@@ -23,6 +22,7 @@ import {
 } from '@origintrail-official/dkg-semantic-runtime';
 
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
+import { createDkgQueryAdapter } from './semantic-runtime-query-adapter.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const PROV = 'http://www.w3.org/ns/prov#';
@@ -32,11 +32,15 @@ const SR = 'https://origintrail.io/semantic-runtime/v1#';
 export interface StoredSemanticProgram {
   contextGraphId: string;
   programIri: string;
+  layer: SemanticMemoryLayer;
+  authorAgentAddress: string;
   language: string;
   version: string;
   source: string;
   requiredTools: string[];
 }
+
+export type SemanticMemoryLayer = 'wm' | 'swm' | 'vm';
 
 export interface SemanticToolResolution {
   toolIri: string;
@@ -57,6 +61,7 @@ export interface SemanticToolResolution {
 export interface SemanticProgramResolution {
   contextGraphId: string;
   programIri: string;
+  programLayer: SemanticMemoryLayer;
   executingNode: string;
   selectedPolicy: { iri: string; version: string; hash: string };
   requiredTools: SemanticToolResolution[];
@@ -67,7 +72,17 @@ export interface SemanticProgramResolution {
 export interface SemanticInvocationResult {
   invocationId: string;
   executionIri: string;
-  executionUal: string;
+  executionLayer: SemanticMemoryLayer;
+  executionUal?: string;
+  persisted: true;
+}
+
+export interface SemanticProgramForkResult {
+  programIri: string;
+  programLayer: SemanticMemoryLayer;
+  programUal?: string;
+  authorAgentAddress: string;
+  derivedFrom: string;
   persisted: true;
 }
 
@@ -84,7 +99,11 @@ export class SemanticProgramError extends Error {
 export interface ConfiguredSemanticRuntimeService {
   host: SemanticRuntimeHost;
   store: SemanticRuntimeStore;
-  inFlight: Map<string, Promise<SemanticInvocationResult>>;
+  inFlight: Map<string, {
+    programLayer: SemanticMemoryLayer;
+    executionLayer: SemanticMemoryLayer;
+    promise: Promise<SemanticInvocationResult>;
+  }>;
   stop(): Promise<void>;
 }
 
@@ -134,12 +153,14 @@ export async function loadStoredSemanticProgram(
   agent: DKGAgent,
   contextGraphId: string,
   programIri: string,
+  programLayer: SemanticMemoryLayer,
   callerAgentAddress?: string,
 ): Promise<StoredSemanticProgram> {
   validateGraphAndProgram(contextGraphId, programIri);
+  validateSemanticMemoryLayer(programLayer, 'programLayer');
   const safeProgramIri = sparqlIri(programIri);
   const result = await agent.query(`
-    SELECT DISTINCT ?language ?version ?source ?tool WHERE {
+    SELECT DISTINCT ?g ?language ?version ?source ?tool WHERE {
       GRAPH ?g {
         ${safeProgramIri} <${RDF_TYPE}> <${SR}Program> ;
           <${SR}language> ?language ;
@@ -148,24 +169,42 @@ export async function loadStoredSemanticProgram(
         OPTIONAL { ${safeProgramIri} <${SR}requiresTool> ?tool }
       }
     }
-  `, queryOptions(contextGraphId, 'semantic-runtime-program-load', callerAgentAddress));
-  const rows = resultRows(result);
+  `, queryOptions(
+    contextGraphId,
+    programLayer,
+    'semantic-runtime-program-load',
+    callerAgentAddress,
+  ));
+  const rows = resultRows(result).flatMap((row) => {
+    const authorAgentAddress = programGraphAuthor(row.g, contextGraphId, programLayer);
+    return authorAgentAddress ? [{ row, authorAgentAddress }] : [];
+  });
   if (rows.length === 0) {
-    throw new SemanticProgramError('PROGRAM_NOT_FOUND', 'Program not found in verifiable memory', 404);
+    throw new SemanticProgramError(
+      'PROGRAM_NOT_FOUND',
+      `Program not found in ${semanticLayerLabel(programLayer)}`,
+      404,
+    );
   }
   const definitions = new Map<string, { language: string; version: string; source: string }>();
+  const authors = new Set<string>();
   const requiredTools = new Set<string>();
-  for (const row of rows) {
+  for (const { row, authorAgentAddress } of rows) {
     const definition = {
       language: literalValue(row.language),
       version: literalValue(row.version),
       source: literalValue(row.source),
     };
     definitions.set(JSON.stringify(definition), definition);
+    authors.add(authorAgentAddress);
     if (row.tool !== undefined) requiredTools.add(iriValue(row.tool));
   }
-  if (definitions.size !== 1) {
-    throw new SemanticProgramError('PROGRAM_AMBIGUOUS', 'Program has multiple definitions', 409);
+  if (definitions.size !== 1 || authors.size !== 1) {
+    throw new SemanticProgramError(
+      'PROGRAM_AMBIGUOUS',
+      'Program has multiple definitions or authors',
+      409,
+    );
   }
   const [definition] = definitions.values();
   if (definition.language !== 'sexpr-v1') {
@@ -178,8 +217,151 @@ export async function loadStoredSemanticProgram(
   return {
     contextGraphId,
     programIri,
+    layer: programLayer,
+    authorAgentAddress: [...authors][0],
     ...definition,
     requiredTools: [...requiredTools].sort(),
+  };
+}
+
+export async function assertSemanticContextGraphMember(
+  agent: DKGAgent,
+  contextGraphId: string,
+  callerAgentAddress: string,
+): Promise<void> {
+  const owner = await agent.getContextGraphOwner(contextGraphId);
+  const isOwner = agent.curatorDidMatchesChecksumAgent(owner ?? undefined, callerAgentAddress);
+  let canRead = await agent.canReadContextGraph(contextGraphId, {
+    callerAgentAddress,
+    allowSubscriptionFallback: false,
+  });
+  if (!isOwner && !canRead) {
+    const refreshed = await agent.refreshMetaFromCurator(contextGraphId).catch(() => false);
+    if (refreshed) {
+      canRead = await agent.canReadContextGraph(contextGraphId, {
+        callerAgentAddress,
+        allowSubscriptionFallback: false,
+      });
+    }
+  }
+  if (!isOwner && !canRead) {
+    throw new SemanticProgramError(
+      'PROGRAM_CONTEXT_GRAPH_FORBIDDEN',
+      `Wallet ${callerAgentAddress} cannot access Context Graph ${contextGraphId}`,
+      403,
+    );
+  }
+}
+
+export async function forkStoredSemanticProgram(
+  agent: DKGAgent,
+  contextGraphId: string,
+  sourceProgramIri: string,
+  newProgramIri: string,
+  sourceLayer: SemanticMemoryLayer,
+  targetLayer: SemanticMemoryLayer,
+  callerAgentAddress: string,
+): Promise<SemanticProgramForkResult> {
+  validateGraphAndProgram(contextGraphId, sourceProgramIri);
+  validateGraphAndProgram(contextGraphId, newProgramIri);
+  validateSemanticMemoryLayer(sourceLayer, 'sourceLayer');
+  validateSemanticMemoryLayer(targetLayer, 'targetLayer');
+  if (sourceProgramIri === newProgramIri) {
+    throw new SemanticProgramError(
+      'PROGRAM_FORK_IRI_CONFLICT',
+      'The fork must use a new Program IRI',
+      409,
+    );
+  }
+  let authorAgentAddress: string;
+  try {
+    authorAgentAddress = ethers.getAddress(callerAgentAddress);
+  } catch {
+    throw new SemanticProgramError('INVALID_CALLER_WALLET', 'Caller wallet is invalid', 400);
+  }
+  // Forking is a normal DKG write. The assertion share/publish pipeline below
+  // enforces the Context Graph's actual publish policy; a node-local participant
+  // projection is not authoritative for open graphs and may lag the curator.
+  const source = await loadStoredSemanticProgram(
+    agent,
+    contextGraphId,
+    sourceProgramIri,
+    sourceLayer,
+    authorAgentAddress,
+  );
+  const localAuthor = agent.listLocalAgents().find(({ agentAddress }) =>
+    agentAddress.toLowerCase() === authorAgentAddress.toLowerCase());
+  if (!localAuthor || !agent.getCustodialAgentPrivateKey(localAuthor.agentAddress)) {
+    throw new SemanticProgramError(
+      'PROGRAM_FORK_AUTHOR_NOT_CUSTODIAL',
+      'The copying wallet must be a custodial agent on this node',
+      409,
+    );
+  }
+
+  const name = `semantic-program-fork-${hashParts([sourceProgramIri, newProgramIri]).slice(0, 24)}`;
+  const lane = { agentAddress: authorAgentAddress };
+  const existingHistory = await agent.assertion.history(contextGraphId, name, lane);
+  if (existingHistory && historyIsAtLayer(existingHistory, targetLayer)) {
+    return {
+      programIri: newProgramIri,
+      programLayer: targetLayer,
+      ...(targetLayer === 'vm' ? { programUal: existingHistory.publishedUal } : {}),
+      authorAgentAddress,
+      derivedFrom: sourceProgramIri,
+      persisted: true,
+    };
+  }
+  if (existingHistory) {
+    throw new SemanticProgramError(
+      'PROGRAM_FORK_LAYER_CONFLICT',
+      `The fork already exists in ${historyLayerLabel(existingHistory)}; use the normal DKG promotion controls to move it`,
+      409,
+    );
+  }
+  const existing = await agent.query(`
+    SELECT DISTINCT ?g WHERE {
+      GRAPH ?g { ${sparqlIri(newProgramIri)} ?predicate ?object }
+    }
+  `, queryOptions(
+    contextGraphId,
+    targetLayer,
+    'semantic-runtime-program-fork-target',
+    authorAgentAddress,
+  ));
+  if (resultRows(existing).length > 0) {
+    throw new SemanticProgramError(
+      'PROGRAM_FORK_IRI_CONFLICT',
+      `Program IRI ${newProgramIri} already exists in ${semanticLayerLabel(targetLayer)}`,
+      409,
+    );
+  }
+
+  const quads = [
+    iriQuad(newProgramIri, RDF_TYPE, `${SR}Program`),
+    literalQuad(newProgramIri, `${SR}language`, source.language),
+    literalQuad(newProgramIri, `${SR}version`, source.version),
+    literalQuad(newProgramIri, `${SR}source`, source.source),
+    iriQuad(newProgramIri, `${PROV}wasDerivedFrom`, sourceProgramIri),
+    ...source.requiredTools.map((toolIri) =>
+      iriQuad(newProgramIri, `${SR}requiresTool`, toolIri)),
+  ];
+  const persistence = await persistProgramKnowledgeAsset(
+    agent,
+    contextGraphId,
+    name,
+    authorAgentAddress,
+    quads,
+    existingHistory,
+    targetLayer,
+  );
+  return {
+    programIri: newProgramIri,
+    programLayer: targetLayer,
+    ...(persistence.ual ? { programUal: persistence.ual } : {}),
+    authorAgentAddress,
+    derivedFrom: sourceProgramIri,
+    persisted: true,
   };
 }
 
@@ -187,6 +369,7 @@ export async function resolveStoredSemanticProgram(
   agent: DKGAgent,
   contextGraphId: string,
   programIri: string,
+  programLayer: SemanticMemoryLayer,
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
@@ -195,6 +378,7 @@ export async function resolveStoredSemanticProgram(
     agent,
     contextGraphId,
     programIri,
+    programLayer,
     config,
     llmConfig,
     callerAgentAddress,
@@ -207,27 +391,42 @@ export async function invokeStoredSemanticProgram(
   contextGraphId: string,
   programIri: string,
   invocationId: string,
+  programLayer: SemanticMemoryLayer,
+  executionLayer: SemanticMemoryLayer,
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
 ): Promise<SemanticInvocationResult> {
+  validateSemanticMemoryLayer(programLayer, 'programLayer');
+  validateSemanticMemoryLayer(executionLayer, 'executionLayer');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(invocationId)) {
     throw new SemanticProgramError('INVALID_INVOCATION_ID', 'invocationId must be a UUID', 400);
   }
   const key = `${contextGraphId}\0${invocationId}`;
   const existing = runtime.inFlight.get(key);
-  if (existing) return existing;
+  if (existing) {
+    if (existing.programLayer !== programLayer || existing.executionLayer !== executionLayer) {
+      throw new SemanticProgramError(
+        'INVOCATION_LAYER_CONFLICT',
+        'invocationId is already running with different Program or Execution layers',
+        409,
+      );
+    }
+    return existing.promise;
+  }
   const invocation = invokeResolved(
     agent,
     runtime,
     contextGraphId,
     programIri,
     invocationId.toLowerCase(),
+    programLayer,
+    executionLayer,
     config,
     llmConfig,
     callerAgentAddress,
   );
-  runtime.inFlight.set(key, invocation);
+  runtime.inFlight.set(key, { programLayer, executionLayer, promise: invocation });
   try {
     return await invocation;
   } finally {
@@ -248,11 +447,18 @@ async function resolveInternal(
   agent: DKGAgent,
   contextGraphId: string,
   programIri: string,
+  programLayer: SemanticMemoryLayer,
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
 ): Promise<InternalResolution> {
-  const program = await loadStoredSemanticProgram(agent, contextGraphId, programIri, callerAgentAddress);
+  const program = await loadStoredSemanticProgram(
+    agent,
+    contextGraphId,
+    programIri,
+    programLayer,
+    callerAgentAddress,
+  );
   const compilation = await new WasmStrategyAdmissionClient({ startupTimeoutMs: config?.startupTimeoutMs })
     .compileAndAdmit(program.source);
   if (!compilation.ok) {
@@ -265,10 +471,7 @@ async function resolveInternal(
       422,
     );
   }
-  const operatorAddress = agent.getDefaultAgentAddress();
-  if (!operatorAddress) {
-    throw new SemanticProgramError('OPERATOR_IDENTITY_UNAVAILABLE', 'Node has no default operator agent', 409);
-  }
+  const operatorAddress = program.authorAgentAddress;
   const operatorIri = `did:dkg:agent:${operatorAddress}`;
   const policyIri = config?.operatorPolicyIri;
   if (!policyIri) {
@@ -292,7 +495,7 @@ async function resolveInternal(
           <${SR}allowsTool> ?tool .
       }
     }
-  `, queryOptions(contextGraphId, 'semantic-runtime-policy-load', callerAgentAddress));
+  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-policy-load', callerAgentAddress));
   const policyRows = resultRows(policyResult).filter((row) =>
     isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
   const policyGraphs = new Set(policyRows.map((row) => iriValue(row.g)));
@@ -323,12 +526,13 @@ async function resolveInternal(
           <${SR}witInterface> ?witInterface .
       }
     }
-  `, queryOptions(contextGraphId, 'semantic-runtime-tool-offers', callerAgentAddress));
+  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-tool-offers', callerAgentAddress));
   const offerRows = resultRows(offerResult).filter((row) =>
     isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
 
   const registry = new RuntimeAdapterRegistry();
   registry.register(createInvestigatorAdapter(llmConfig));
+  registry.register(createDkgQueryAdapter(agent, contextGraphId, callerAgentAddress));
   const tools = program.requiredTools.map((toolIri): SemanticToolResolution => {
     const rows = offerRows.filter((row) => iriValue(row.tool) === toolIri);
     const definitions = new Map<string, { operation: string; version: string; wit: string }>();
@@ -390,7 +594,7 @@ async function resolveInternal(
           <${SR}usedProgram> ${sparqlIri(programIri)} .
       }
     }
-  `, queryOptions(contextGraphId, 'semantic-runtime-previous-executions', callerAgentAddress));
+  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-previous-executions', callerAgentAddress));
   const previousExecutions = resultRows(previousResult)
     .map((row) => iriValue(row.execution))
     .sort();
@@ -398,6 +602,7 @@ async function resolveInternal(
     public: {
       contextGraphId,
       programIri,
+      programLayer,
       executingNode: operatorIri,
       selectedPolicy: {
         iri: policyIri,
@@ -422,6 +627,8 @@ async function invokeResolved(
   contextGraphId: string,
   programIri: string,
   invocationId: string,
+  programLayer: SemanticMemoryLayer,
+  executionLayer: SemanticMemoryLayer,
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
@@ -430,10 +637,21 @@ async function invokeResolved(
     agent,
     contextGraphId,
     programIri,
+    programLayer,
     config,
     llmConfig,
     callerAgentAddress,
   );
+  const localAuthor = agent.listLocalAgents().find(({ agentAddress }) =>
+    agentAddress.toLowerCase() === resolved.operatorAddress.toLowerCase());
+  if (!localAuthor || !agent.getCustodialAgentPrivateKey(localAuthor.agentAddress)) {
+    throw new SemanticProgramError(
+      'PROGRAM_AUTHOR_NOT_LOCAL',
+      'This node does not host the Program author wallet as a custodial agent',
+      409,
+    );
+  }
+  resolved.operatorAddress = localAuthor.agentAddress;
   const unavailable = resolved.public.requiredTools.find((tool) => !tool.effective);
   if (unavailable) {
     throw new SemanticProgramError(
@@ -448,20 +666,42 @@ async function invokeResolved(
     agentAddress: resolved.operatorAddress,
   });
   const existingExecution = runtime.store.execution(executionIri);
+  const executionGraphRevision = hashParts([
+    resolved.policyHashHex,
+    contextGraphId,
+    programIri,
+    programLayer,
+    executionLayer,
+  ]);
   if (existingExecution?.status === 'completed') {
-    if (!priorHistory?.vmCurrentAssertion || !priorHistory.publishedUal) {
+    if (existingExecution.graphRevision !== executionGraphRevision) {
+      throw new SemanticProgramError(
+        'INVOCATION_LAYER_CONFLICT',
+        'invocationId was already completed with different Program or Execution layers',
+        409,
+      );
+    }
+    if (!priorHistory || !historyIsAtLayer(priorHistory, executionLayer)) {
       throw new SemanticProgramError(
         'EXECUTION_PERSISTENCE_INCONSISTENT',
-        'Invocation journal says completed but its Execution KA is not in Verifiable Memory',
+        `Invocation journal says completed but its Execution KA is not in ${semanticLayerLabel(executionLayer)}`,
         500,
       );
     }
     return {
       invocationId,
       executionIri,
-      executionUal: priorHistory.publishedUal,
+      executionLayer,
+      ...(executionLayer === 'vm' ? { executionUal: priorHistory.publishedUal } : {}),
       persisted: true,
     };
+  }
+  if (existingExecution && existingExecution.graphRevision !== executionGraphRevision) {
+    throw new SemanticProgramError(
+      'INVOCATION_LAYER_CONFLICT',
+      'invocationId already belongs to different Program or Execution layers',
+      409,
+    );
   }
   if (existingExecution && existingExecution.status !== 'active') {
     throw new SemanticProgramError(
@@ -488,7 +728,7 @@ async function invokeResolved(
         planId: artifactHash,
         partitionId: hashParts([contextGraphId]),
         status: 'active',
-        graphRevision: resolved.policyHashHex,
+        graphRevision: executionGraphRevision,
         policyEpoch: 1n,
         rootProcessId: executionIri,
         leaseEpoch: 0n,
@@ -521,6 +761,12 @@ async function invokeResolved(
   const capabilityId = `urn:sr:capability:${invocationId}`;
   if (!runtime.store.capability(capabilityId)) {
     const now = Date.now();
+    const capabilityVerbs = [...new Set(resolved.public.requiredTools.flatMap((tool) => {
+      if (!tool.operation || !tool.semanticVersion) return [];
+      const descriptor = resolved.registry.describe(tool.operation, tool.semanticVersion);
+      return descriptor ? [descriptor.verb] : [];
+    }))];
+    const readOnly = resolved.plan.effectUpperBound.every((effectClass) => effectClass === 'read');
     runtime.store.putCapability({
       capabilityId,
       executionId: executionIri,
@@ -528,17 +774,17 @@ async function invokeResolved(
         subject: resolved.public.executingNode,
         audience: 'dkg-semantic-runtime',
         executionId: executionIri,
-        verbs: ['investigate'],
+        verbs: capabilityVerbs,
         resources: resolved.program.requiredTools,
         delegationDepth: 0,
-        oneShot: true,
+        oneShot: !readOnly,
         budgetMicros: 0n,
       }),
       hostBindingKey: resolved.public.requiredTools[0]?.adapterHash ?? 'no-adapter',
       policyEpoch: 1n,
       notBefore: now - 1_000,
       expiresAt: now + 30 * 24 * 60 * 60 * 1_000,
-      oneShot: true,
+      oneShot: !readOnly,
       consumedAt: null,
       revokedAt: null,
     });
@@ -553,8 +799,12 @@ async function invokeResolved(
     if (!tool) {
       throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
     }
+    const descriptor = resolved.registry.describe(effect.operation, String(effect.version));
+    if (!descriptor) {
+      throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
+    }
     const effectId = `urn:sr:effect:${invocationId}:${effect.effectId}`;
-    await broker.prepareEffect({
+    const proposal = {
       effectId,
       executionId: executionIri,
       processId: toHex(effect.processId),
@@ -563,18 +813,33 @@ async function invokeResolved(
       principal: resolved.public.executingNode,
       adapterId: effect.operation,
       adapterVersion: String(effect.version),
-      verb: 'investigate',
+      verb: descriptor.verb,
       resource: tool.toolIri,
-      normalizedInput: { prompt: textArgument(effect.arguments[0]) },
+      normalizedInput: normalizeEffectInput(effect.operation, effect.arguments),
       capabilityId,
       idempotencyKey: `${executionIri}:${effect.effectId}`,
       budgetReservation: 0n,
       now: Date.now(),
-    });
-    let outcome = broker.readOutcome(effectId);
-    if (outcome?.state === 'prepared') {
-      await broker.dispatchPrepared(effectId, Date.now());
+    };
+    let outcome;
+    if (descriptor.effectClass === 'read') {
+      try {
+        outcome = await broker.dispatchRead(proposal);
+      } catch (error) {
+        runtime.store.setExecutionStatus(executionIri, 'failed');
+        throw new SemanticProgramError(
+          'QUERY_REQUEST_FAILED',
+          `DKG query failed: ${safeMessage(error)}`,
+          502,
+        );
+      }
+    } else {
+      await broker.prepareEffect(proposal);
       outcome = broker.readOutcome(effectId);
+      if (outcome?.state === 'prepared') {
+        await broker.dispatchPrepared(effectId, Date.now());
+        outcome = broker.readOutcome(effectId);
+      }
     }
     if (outcome?.state !== 'succeeded' || typeof outcome.output !== 'string') {
       if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling') {
@@ -609,14 +874,16 @@ async function invokeResolved(
     startedAt,
     finishedAt,
   });
-  let executionUal: string;
+  let persistence: PersistenceEvidence;
   try {
-    executionUal = await persistExecutionKnowledgeAsset(
+    persistence = await persistExecutionKnowledgeAsset(
       agent,
       contextGraphId,
       assertionName,
       resolved.operatorAddress,
       quads,
+      priorHistory,
+      executionLayer,
     );
   } catch (error) {
     if (error instanceof SemanticProgramError) throw error;
@@ -627,7 +894,13 @@ async function invokeResolved(
     );
   }
   runtime.store.setExecutionStatus(executionIri, 'completed');
-  return { invocationId, executionIri, executionUal, persisted: true };
+  return {
+    invocationId,
+    executionIri,
+    executionLayer,
+    ...(persistence.ual ? { executionUal: persistence.ual } : {}),
+    persisted: true,
+  };
 }
 
 function buildExecutionQuads(input: {
@@ -694,10 +967,69 @@ async function persistExecutionKnowledgeAsset(
   name: string,
   operatorAddress: string,
   quads: Array<{ subject: string; predicate: string; object: string }>,
-): Promise<string> {
-  const lane = { agentAddress: operatorAddress };
-  let history = await agent.assertion.history(contextGraphId, name, lane);
-  if (history?.vmCurrentAssertion && history.publishedUal) return history.publishedUal;
+  initialHistory: Awaited<ReturnType<DKGAgent['assertion']['history']>>,
+  targetLayer: SemanticMemoryLayer,
+): Promise<PersistenceEvidence> {
+  return persistKnowledgeAsset(agent, contextGraphId, name, operatorAddress, quads, initialHistory, targetLayer, {
+    layerConflict: 'EXECUTION_LAYER_CONFLICT',
+    shareFailed: 'EXECUTION_SHARE_FAILED',
+    publishFailed: 'EXECUTION_PUBLISH_FAILED',
+    subject: 'Execution Knowledge Asset',
+  });
+}
+
+async function persistProgramKnowledgeAsset(
+  agent: DKGAgent,
+  contextGraphId: string,
+  name: string,
+  authorAgentAddress: string,
+  quads: Array<{ subject: string; predicate: string; object: string }>,
+  initialHistory: Awaited<ReturnType<DKGAgent['assertion']['history']>>,
+  targetLayer: SemanticMemoryLayer,
+): Promise<PersistenceEvidence> {
+  return persistKnowledgeAsset(agent, contextGraphId, name, authorAgentAddress, quads, initialHistory, targetLayer, {
+    layerConflict: 'PROGRAM_FORK_LAYER_CONFLICT',
+    shareFailed: 'PROGRAM_FORK_SHARE_FAILED',
+    publishFailed: 'PROGRAM_FORK_PUBLISH_FAILED',
+    subject: 'Forked Program',
+  });
+}
+
+interface PersistenceEvidence {
+  layer: SemanticMemoryLayer;
+  ual?: string;
+}
+
+async function persistKnowledgeAsset(
+  agent: DKGAgent,
+  contextGraphId: string,
+  name: string,
+  agentAddress: string,
+  quads: Array<{ subject: string; predicate: string; object: string }>,
+  initialHistory: Awaited<ReturnType<DKGAgent['assertion']['history']>>,
+  targetLayer: SemanticMemoryLayer,
+  errors: {
+    layerConflict: string;
+    shareFailed: string;
+    publishFailed: string;
+    subject: string;
+  },
+): Promise<PersistenceEvidence> {
+  const lane = { agentAddress };
+  let history = initialHistory;
+  if (history && historyIsAtLayer(history, targetLayer)) {
+    return {
+      layer: targetLayer,
+      ...(targetLayer === 'vm' && history.publishedUal ? { ual: history.publishedUal } : {}),
+    };
+  }
+  if (history?.memoryLayer) {
+    throw new SemanticProgramError(
+      errors.layerConflict,
+      `${errors.subject} already exists in ${historyLayerLabel(history)}`,
+      409,
+    );
+  }
   if (!history) {
     await agent.assertion.create(contextGraphId, name, lane);
     await agent.assertion.write(contextGraphId, name, quads, lane);
@@ -708,26 +1040,35 @@ async function persistExecutionKnowledgeAsset(
     await agent.assertion.finalize(contextGraphId, name, lane);
     history = await agent.assertion.history(contextGraphId, name, lane);
   }
+  if (!history?.wmCurrentAssertion) {
+    throw new SemanticProgramError(
+      errors.layerConflict,
+      `${errors.subject} was not finalized in Working Memory`,
+      502,
+    );
+  }
+  if (targetLayer === 'wm') return { layer: targetLayer };
   if (!history?.swmCurrentAssertion) {
     const share = await agent.assertion.promote(contextGraphId, name, lane);
     if (!share.publishReady) {
       throw new SemanticProgramError(
-        'EXECUTION_SHARE_FAILED',
-        'Execution Knowledge Asset was not made publish-ready in Shared Working Memory',
+        errors.shareFailed,
+        `${errors.subject} was not made publish-ready in Shared Working Memory`,
         502,
       );
     }
   }
+  if (targetLayer === 'swm') return { layer: targetLayer };
   const publication = await agent.publishFromFinalizedAssertion(contextGraphId, name, lane);
   if (publication.status !== 'confirmed' || publication.contextGraphError || !publication.ual) {
     throw new SemanticProgramError(
-      'EXECUTION_PUBLISH_FAILED',
+      errors.publishFailed,
       publication.contextGraphError
-        ?? `Execution Knowledge Asset publish did not confirm (${publication.status})`,
+        ?? `${errors.subject} publish did not confirm (${publication.status})`,
       502,
     );
   }
-  return publication.ual;
+  return { layer: targetLayer, ual: publication.ual };
 }
 
 export function validateSemanticRuntimeConfig(config: SemanticRuntimeConfig): void {
@@ -774,23 +1115,91 @@ function validateGraphAndProgram(contextGraphId: string, programIri: string): vo
 }
 
 function isOperatorVmGraph(value: unknown, contextGraphId: string, operatorAddress: string): boolean {
+  return programGraphAuthor(value, contextGraphId, 'vm')?.toLowerCase() === operatorAddress.toLowerCase();
+}
+
+function programGraphAuthor(
+  value: unknown,
+  contextGraphId: string,
+  layer: SemanticMemoryLayer,
+): string | null {
   try {
-    const identity = parseContextGraphLayerUri(iriValue(value));
-    return identity?.contextGraphId === contextGraphId
-      && identity.layer === MemoryLayer.VerifiableMemory
-      && identity.agentAddress.toLowerCase() === operatorAddress.toLowerCase();
+    const directory = {
+      wm: '_working_memory',
+      swm: '_shared_memory',
+      vm: '_verifiable_memory',
+    }[layer];
+    const prefix = `did:dkg:context-graph:${contextGraphId}/${directory}/`;
+    const graphIri = iriValue(value);
+    if (!graphIri.startsWith(prefix)) return null;
+    const suffix = graphIri.slice(prefix.length);
+    const separator = suffix.indexOf('/');
+    if (separator <= 0 || suffix.indexOf('/', separator + 1) !== -1) return null;
+    const agentAddress = suffix.slice(0, separator);
+    const kaNumber = suffix.slice(separator + 1);
+    return ethers.isAddress(agentAddress) && /^\d+$/.test(kaNumber)
+      ? ethers.getAddress(agentAddress)
+      : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function queryOptions(contextGraphId: string, source: string, callerAgentAddress?: string) {
+function queryOptions(
+  contextGraphId: string,
+  layer: SemanticMemoryLayer,
+  source: string,
+  callerAgentAddress?: string,
+) {
+  const view = {
+    wm: 'working-memory',
+    swm: 'shared-working-memory',
+    vm: 'verifiable-memory',
+  } as const;
   return {
     contextGraphId,
-    view: 'verifiable-memory' as const,
+    view: view[layer],
     source,
+    ...(layer === 'wm' && callerAgentAddress ? { agentAddress: callerAgentAddress } : {}),
     ...(callerAgentAddress ? { callerAgentAddress } : {}),
   };
+}
+
+export function isSemanticMemoryLayer(value: unknown): value is SemanticMemoryLayer {
+  return value === 'wm' || value === 'swm' || value === 'vm';
+}
+
+function validateSemanticMemoryLayer(value: unknown, field: string): asserts value is SemanticMemoryLayer {
+  if (!isSemanticMemoryLayer(value)) {
+    throw new SemanticProgramError(
+      'INVALID_MEMORY_LAYER',
+      `${field} must be one of wm, swm, or vm`,
+      400,
+    );
+  }
+}
+
+function semanticLayerLabel(layer: SemanticMemoryLayer): string {
+  if (layer === 'wm') return 'Working Memory';
+  if (layer === 'swm') return 'Shared Working Memory';
+  return 'Verifiable Memory';
+}
+
+function historyLayerLabel(
+  history: NonNullable<Awaited<ReturnType<DKGAgent['assertion']['history']>>>,
+): string {
+  if (history.memoryLayer === 'WM') return 'Working Memory';
+  if (history.memoryLayer === 'SWM') return 'Shared Working Memory';
+  if (history.memoryLayer === 'VM') return 'Verifiable Memory';
+  return 'an unfinished lifecycle state';
+}
+
+function historyIsAtLayer(
+  history: NonNullable<Awaited<ReturnType<DKGAgent['assertion']['history']>>>,
+  layer: SemanticMemoryLayer,
+): boolean {
+  return history.memoryLayer === ({ wm: 'WM', swm: 'SWM', vm: 'VM' } as const)[layer]
+    && (layer !== 'vm' || Boolean(history.publishedUal));
 }
 
 function resultRows(result: unknown): Array<Record<string, unknown>> {
@@ -799,9 +1208,24 @@ function resultRows(result: unknown): Array<Record<string, unknown>> {
   return Array.isArray(rows) ? rows as Array<Record<string, unknown>> : [];
 }
 
-function textArgument(value: string | undefined): string {
+function textArgument(value: string | undefined, code = 'INVALID_LLM_ARGUMENT'): string {
   if (value?.startsWith('t:') || value?.startsWith('s:')) return value.slice(2);
-  throw new SemanticProgramError('INVALID_LLM_ARGUMENT', 'LLM prompt must be text', 422);
+  throw new SemanticProgramError(code, 'Effect argument must be text', 422);
+}
+
+function normalizeEffectInput(operation: string, arguments_: string[]): unknown {
+  if (operation === 'agent/investigate') return { prompt: textArgument(arguments_[0]) };
+  if (operation === 'dkg/query') {
+    if (arguments_.length !== 1) {
+      throw new SemanticProgramError(
+        'INVALID_QUERY_ARGUMENT',
+        'dkg/query@1 requires exactly one saved-query selector',
+        422,
+      );
+    }
+    return { selector: textArgument(arguments_[0], 'INVALID_QUERY_ARGUMENT') };
+  }
+  throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

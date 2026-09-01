@@ -108,6 +108,7 @@ export interface SemanticToolResolution {
 export interface SemanticProgramResolution {
   contextGraphId: string;
   programIri: string;
+  programLayer: SemanticMemoryLayer;
   executingNode: string;
   selectedPolicy: { iri: string; version: string; hash: string };
   requiredTools: SemanticToolResolution[];
@@ -115,15 +116,31 @@ export interface SemanticProgramResolution {
   executable: boolean;
 }
 
+export type SemanticMemoryLayer = 'wm' | 'swm' | 'vm';
+
 export interface SemanticInvocationResult {
   invocationId: string;
   executionIri: string;
-  executionUal: string;
+  executionLayer: SemanticMemoryLayer;
+  executionUal?: string;
   persisted: true;
 }
 
-export const resolveSemanticProgram = (contextGraphId: string, programIri: string) => {
-  const query = new URLSearchParams({ contextGraphId, programIri });
+export interface SemanticProgramForkResult {
+  programIri: string;
+  programLayer: SemanticMemoryLayer;
+  programUal?: string;
+  authorAgentAddress: string;
+  derivedFrom: string;
+  persisted: true;
+}
+
+export const resolveSemanticProgram = (
+  contextGraphId: string,
+  programIri: string,
+  programLayer: SemanticMemoryLayer,
+) => {
+  const query = new URLSearchParams({ contextGraphId, programIri, programLayer });
   return get<SemanticProgramResolution>(`/api/semantic-runtime/resolve?${query}`);
 };
 
@@ -131,10 +148,28 @@ export const invokeSemanticProgram = (
   contextGraphId: string,
   programIri: string,
   invocationId: string,
+  programLayer: SemanticMemoryLayer,
+  executionLayer: SemanticMemoryLayer,
 ) => post<SemanticInvocationResult>('/api/semantic-runtime/invoke', {
   contextGraphId,
   programIri,
   invocationId,
+  programLayer,
+  executionLayer,
+});
+
+export const forkSemanticProgram = (
+  contextGraphId: string,
+  sourceProgramIri: string,
+  newProgramIri: string,
+  sourceLayer: SemanticMemoryLayer,
+  targetLayer: SemanticMemoryLayer,
+) => post<SemanticProgramForkResult>('/api/semantic-runtime/programs/fork', {
+  contextGraphId,
+  sourceProgramIri,
+  newProgramIri,
+  sourceLayer,
+  targetLayer,
 });
 
 // --- LLM Settings ---

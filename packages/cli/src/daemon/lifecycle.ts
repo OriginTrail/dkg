@@ -158,6 +158,10 @@ import {
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
 import { startConfiguredSemanticRuntime } from '../semantic-runtime.js';
+import {
+  registerSemanticRuntimeInboxSkill,
+  SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
+} from '../semantic-runtime-inbox.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
   exitAfterFatalLogDrain,
@@ -2128,7 +2132,14 @@ async function runDaemonInnerWithStartupOwnership(
   {
     const openSkills = config.messaging?.openSkills === true;
     const allowedSkillPeers = new Set(config.messaging?.skillAllowedPeers ?? []);
-    agent.setSkillAcl((senderPeerId: string) => {
+    agent.setSkillAcl((senderPeerId: string, skillUri: string) => {
+      // The semantic handler performs wallet-signature and live Context Graph
+      // membership authorization itself. Let only that handler reach its
+      // stronger application-level gate without opening unrelated skills.
+      if (
+        config.semanticRuntime?.enabled === true
+        && skillUri === SEMANTIC_RUNTIME_INBOX_SKILL_IRI
+      ) return { accept: true };
       if (openSkills) return { accept: true };
       if (allowedSkillPeers.has(senderPeerId)) return { accept: true };
       return {
@@ -2214,7 +2225,19 @@ async function runDaemonInnerWithStartupOwnership(
       log,
       dataDirectory: dkgDir(),
     });
+    if (semanticRuntimeHost) {
+      registerSemanticRuntimeInboxSkill(
+        agent,
+        semanticRuntimeHost,
+        config.semanticRuntime,
+        config.llm,
+      );
+    }
   } catch (err) {
+    await semanticRuntimeHost?.stop().catch((stopErr: any) =>
+      log(`Semantic runtime startup rollback could not stop runtime: ${stopErr?.message ?? String(stopErr)}`),
+    );
+    semanticRuntimeHost = null;
     await agent.stop().catch((stopErr: any) =>
       log(`Semantic runtime startup rollback could not stop agent: ${stopErr?.message ?? String(stopErr)}`),
     );

@@ -93,4 +93,45 @@ describe('real Wasm supervised-plan materialization', () => {
       await host.stop();
     }
   });
+
+  it('lets Wasm request and resume one catalog-backed DKG query', async () => {
+    const source = `(strategy smoke/query
+      (version "1.0.0")
+      (scope network:devnet)
+      (goal prove-dkg-query-resume)
+      (supervise one-for-one (max-restarts 2) (window-ms 60000)
+        (delegate reader
+          (grant dkg.query)
+          (call dkg/query@1 "configuration-trace"))))`;
+    const admission = new WasmStrategyAdmissionClient({ workerUrl });
+    const compilation = await admission.compileAndAdmit(source);
+    expect(compilation.ok).toBe(true);
+    if (!compilation.ok) return;
+
+    const host = new SemanticRuntimeHost({ workerUrl, config: { watchdogMs: 1_000 } });
+    await host.start();
+    try {
+      const started = await host.startPlan(compilation.plan.canonicalPlan);
+      const requested = await host.applyPlan(started.handle);
+      expect(requested).toMatchObject({
+        kind: 'effect-requested',
+        operation: 'dkg/query',
+        version: 1,
+        arguments: ['t:configuration-trace'],
+      });
+      if (requested.kind !== 'effect-requested') return;
+      const output = '{"queryIri":"urn:query:configuration-trace","result":{"bindings":[],"type":"bindings"}}';
+      const completed = await host.applyPlan(started.handle, {
+        effectId: requested.effectId,
+        ok: true,
+        value: output,
+      });
+      expect(completed).toMatchObject({
+        kind: 'completed',
+        outputs: [{ role: 'reader', value: output }],
+      });
+    } finally {
+      await host.stop();
+    }
+  });
 });
