@@ -9,6 +9,7 @@ import {
   forkStoredSemanticProgram,
   invokeStoredSemanticProgram,
   loadStoredSemanticProgram,
+  normalizeEffectInput,
   startConfiguredSemanticRuntime,
   validateSemanticRuntimeConfig,
 } from '../src/semantic-runtime.js';
@@ -192,6 +193,17 @@ describe('semantic runtime daemon configuration', () => {
     expect(() => validateSemanticRuntimeConfig({ maxEvents: 100_001 })).toThrow(/maxEvents/);
     expect(() => validateSemanticRuntimeConfig({ partitionId: 'not-a-hash' })).toThrow(/partitionId/);
     expect(() => validateSemanticRuntimeConfig({ maxAccumulator: '-1' })).toThrow(/maxAccumulator/);
+  });
+
+  it('requires exactly one LLM prompt at the host boundary', () => {
+    expect(normalizeEffectInput('agent/investigate', ['t:Say hi'])).toEqual({
+      prompt: 'Say hi',
+    });
+    for (const arguments_ of [[], ['t:Say hi', 't:ignored']]) {
+      expect(() => normalizeEffectInput('agent/investigate', arguments_)).toThrow(
+        'agent/investigate@1 requires exactly one text prompt',
+      );
+    }
   });
 
   it.each([

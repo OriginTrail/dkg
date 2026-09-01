@@ -14,7 +14,7 @@
       "bytes": 20
     },
     "cjs/runtime_bg.wasm": {
-      "sha256": "b94435a2c8775e10bc62563eb1d39126292db39c72532ae53ce3e258d3c8372e",
+      "sha256": "88d1386affddd121d473553ecc51ce693114217a617f436e290b491819822840",
       "bytes": 346764
     },
     "cjs/runtime_bg.wasm.d.ts": {
