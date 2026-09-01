@@ -298,16 +298,18 @@ async function vmNames(agent: DKGAgent, kaUal: string): Promise<string[]> {
 }
 
 /**
- * Drive one lane scan.
- *
- * `pollNow` is PR-A's test seam: the plain `poll()` re-arms `nextRunAtMs` after
- * a caught-up scan, so a manual poll inside that cadence window scans nothing.
- * Optional-chained on purpose — on a head WITHOUT the seam this degrades to
- * `undefined` instead of throwing, so the fail-before red lands on the intent /
- * drain oracle (the actual missing behaviour) rather than on a TypeError.
+ * Drive one lane scan — the force-scan seam that replaced the deleted public
+ * `pollNow()` (PR #2436 review r17: zero production callers). The plain
+ * `poll()` re-arms `nextRunAtMs` after a caught-up scan, so the lane schedules
+ * are cleared first to force a scan regardless of cadence. Optional-chained on
+ * purpose — on a head WITHOUT the poller this degrades to `undefined` instead
+ * of throwing, so the fail-before red lands on the intent / drain oracle (the
+ * actual missing behaviour) rather than on a TypeError.
  */
 async function drivePoll(agent: DKGAgent): Promise<void> {
-  await (agent as any).chainPoller?.pollNow?.();
+  const poller = (agent as any).chainPoller;
+  poller?.laneRunner?.clearActiveLaneSchedules?.();
+  await poller?.poll?.();
 }
 
 /** Run exactly one drain pass. Undefined on a head without the worker. */
