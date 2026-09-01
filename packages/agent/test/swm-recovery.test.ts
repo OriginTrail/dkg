@@ -523,6 +523,50 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(await statusValues(store)).toEqual(['"v2"']); // ONLY v2 — the bug would leave {v1,v2}
   });
 
+  it('does not replace private SWM after its live recovery authority is revoked', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([{ subject: SUBJ, predicate: STATUS, object: '"v1"', graph: WS }]);
+    let markMetaFetchEntered!: () => void;
+    let releaseMetaFetch!: () => void;
+    const metaFetchEntered = new Promise<void>((resolve) => { markMetaFetchEntered = resolve; });
+    const metaFetchRelease = new Promise<void>((resolve) => { releaseMetaFetch = resolve; });
+    let current = true;
+    const dataFetch = vi.fn();
+    const deps = makeDeps(store, [
+      { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS },
+    ]);
+    const recovery = recoverContextGraphSwm({
+      ...deps,
+      assertCurrent: () => {
+        if (!current) throw new Error('recovery authority revoked');
+      },
+      fetchSyncPages: async (
+        _c: OperationContext,
+        _p: string,
+        _cg: string,
+        _inc: boolean,
+        phase: 'data' | 'meta',
+      ): Promise<SyncPageResult> => {
+        if (phase === 'meta') {
+          markMetaFetchEntered();
+          await metaFetchRelease;
+          return page([]);
+        }
+        dataFetch();
+        return page([{ subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS }]);
+      },
+    });
+
+    await metaFetchEntered;
+    current = false;
+    releaseMetaFetch();
+
+    await expect(recovery).rejects.toThrow('recovery authority revoked');
+    expect(dataFetch).not.toHaveBeenCalled();
+    expect(await statusValues(store)).toEqual(['"v1"']);
+  });
+
   it('is a clean recovery into an empty store (cold-start parity)', async () => {
     const store = new OxigraphStore();
     stores.push(store);

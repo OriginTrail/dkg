@@ -135,6 +135,8 @@ export interface RecoverContextGraphSwmDeps {
    * mis-arbitrates its NEXT contended write — so production callers MUST pass it.
    */
   readonly ensureOwnedMap?: (ownershipKey: string) => Map<string, string>;
+  /** Live graph-level recovery fence; absent for explicit legacy recovery. */
+  readonly assertCurrent?: () => void;
   readonly logInfo?: (ctx: OperationContext, message: string) => void;
   readonly logWarn?: (ctx: OperationContext, message: string) => void;
   /** Backstop against a misbehaving responder that never reports `completed`. */
@@ -231,9 +233,11 @@ async function fetchPhaseFully(
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
+    deps.assertCurrent?.();
     const page = await deps.fetchSyncPages(
       deps.ctx, deps.remotePeerId, deps.contextGraphId, true, phase, graphUri, deps.deadline,
     );
+    deps.assertCurrent?.();
     appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
     if (page.completed) {
@@ -276,6 +280,8 @@ export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): str
 async function recoverContextGraphSwmUnlocked(
   deps: RecoverContextGraphSwmDeps,
 ): Promise<RecoverContextGraphSwmResult> {
+  const assertCurrent = deps.assertCurrent ?? (() => {});
+  assertCurrent();
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
   const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(deps.contextGraphId);
 
@@ -283,6 +289,7 @@ async function recoverContextGraphSwmUnlocked(
   // graph-scoped assets. Fetch it before deciding whether an aggregate SWM data
   // scan is necessary.
   const meta = await fetchPhaseFully(deps, 'meta', wsMetaGraph);
+  assertCurrent();
   if (!meta.completed) {
     deps.logInfo?.(
       deps.ctx,
@@ -304,9 +311,11 @@ async function recoverContextGraphSwmUnlocked(
   const registered = deps.getRegisteredSubGraphNames
     ? await deps.getRegisteredSubGraphNames(deps.contextGraphId)
     : undefined;
+  assertCurrent();
   const excluded = deps.getExcludedSubGraphNames
     ? await deps.getExcludedSubGraphNames(deps.contextGraphId)
     : undefined;
+  assertCurrent();
   const recoveryRegistered = [
     ...new Set([
       ...(registered ?? []),
@@ -333,6 +342,7 @@ async function recoverContextGraphSwmUnlocked(
   const metadataOnlyProcessed = await deps.processSharedMemoryBatch(
     [], meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
   );
+  assertCurrent();
   const hasLegacyRoots = metadataOnlyProcessed.entityCreators.length > 0;
   const hasGraphBackedSnapshots = graphScopedDescriptors.some(
     (descriptor) => descriptor.publicSnapshotGraph !== undefined,
@@ -362,9 +372,11 @@ async function recoverContextGraphSwmUnlocked(
       const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
       if (incrementallyReadyGraphs.has(graphKey)) continue;
       if (await deps.snapshotMaterializer?.isGraphAssetMaterialized(descriptor)) {
+        assertCurrent();
         incrementallyReadyGraphs.add(graphKey);
         continue;
       }
+      assertCurrent();
 
       const verifiedAssetMeta = descriptor.metadataQuads.filter((quad) => verifiedMetaKeys.has(quadKey(quad)));
       if (verifiedAssetMeta.length !== descriptor.metadataQuads.length) {
@@ -375,14 +387,17 @@ async function recoverContextGraphSwmUnlocked(
         fetchedDataQuads: [],
         publicSnapshotStore: deps.publicSnapshotStore,
       });
+      assertCurrent();
       if (!contextGraphEnsured) {
         await deps.ensureContextGraph(deps.contextGraphId);
+        assertCurrent();
         contextGraphEnsured = true;
       }
       // The graph replacement completes before its metadata marker is written.
       // A crash between the two therefore retries idempotently; it can never
       // advertise a head whose graph was only partially transferred.
       await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
+      assertCurrent();
       // #2079: a REPLACE, so the public lane's count gate cannot see it. This
       // lane is lane-disjoint from the public one in automatic operation
       // (`planSharedMemorySyncContextGraphs` partitions on
@@ -390,8 +405,10 @@ async function recoverContextGraphSwmUnlocked(
       // reaches it for any graph — and it exists to repair a corrupt local copy,
       // which is the worst possible moment to leave a stale memo standing.
       await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph, { source: 'agent.swmRecovery.witnessInvalidate' }).catch(() => {});
+      assertCurrent();
       await deps.replaceMetaForGraphAssets?.([descriptor]);
       if (verifiedAssetMeta.length > 0) {
+        assertCurrent();
         await deps.store.insert([...verifiedAssetMeta]);
       }
       incrementallyReadyGraphs.add(graphKey);
@@ -445,6 +462,7 @@ async function recoverContextGraphSwmUnlocked(
       setCheckpoint: deps.setCheckpoint,
       onSnapshotReady: (snapshot) => materializeReadySnapshot(snapshot.ref),
     });
+    assertCurrent();
     snapshotProgress = {
       readySnapshots: snapshotSync.readySnapshots,
       totalSnapshots: snapshotSync.totalSnapshots,
@@ -474,6 +492,7 @@ async function recoverContextGraphSwmUnlocked(
   const data = needsAggregateData
     ? await fetchPhaseFully(deps, 'data', wsGraph)
     : { quads: [] as Quad[], completed: true };
+  assertCurrent();
 
   // Legacy row pagination can cut a root (or a graph-backed snapshot) in the
   // middle. Preserve the existing all-or-nothing gate for that compatibility
@@ -514,8 +533,10 @@ async function recoverContextGraphSwmUnlocked(
       legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
     )
     : metadataOnlyProcessed;
+  assertCurrent();
 
   await deps.ensureContextGraph(deps.contextGraphId);
+  assertCurrent();
 
   // REPLACE per root (the recovery fix), applied over the COMPLETE fetched state.
   const applied = await applySwmRecovery({
@@ -523,6 +544,7 @@ async function recoverContextGraphSwmUnlocked(
     verifiedData: processed.verifiedData,
     roots: processed.entityCreators,
   });
+  assertCurrent();
   let replacedGraphs = 0;
   let insertedGraphQuads = 0;
   for (const descriptor of graphScopedDescriptors) {
@@ -537,7 +559,9 @@ async function recoverContextGraphSwmUnlocked(
       fetchedDataQuads: data.quads,
       publicSnapshotStore: deps.publicSnapshotStore,
     });
+    assertCurrent();
     await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
+    assertCurrent();
     await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph, { source: 'agent.swmRecovery.witnessInvalidate' }).catch(() => {}); // #2079: REPLACE, invisible to the count gate
     rewrittenGraphKeys.add(graphKey);
     replacedGraphs += 1;
@@ -550,6 +574,7 @@ async function recoverContextGraphSwmUnlocked(
   // populates (+ the caller's base fallback when empty). Runs BEFORE the insert.
   if (processed.entityCreators.length > 0) {
     const metaGraphs = [...new Set(processed.verifiedMeta.map((q) => q.graph))];
+    assertCurrent();
     await deps.replaceMetaForRoots?.(processed.entityCreators, metaGraphs);
   }
   // GH#2273 — the meta replacement is DECISION-DRIVEN, no longer the full
@@ -577,6 +602,7 @@ async function recoverContextGraphSwmUnlocked(
     // from the raw insert. See preserveStoredIdentityForSkippedAsset.
     const preservation = await deps.snapshotMaterializer
       .preserveStoredIdentityForSkippedAsset(deps.contextGraphId, descriptor);
+    assertCurrent();
     if (preservation.outcome === 'preserved') {
       preservedWithholdRows.push(...preservation.withholdRows);
     } else {
@@ -584,6 +610,7 @@ async function recoverContextGraphSwmUnlocked(
     }
   }
   if (metaReplaceTargets.length > 0) {
+    assertCurrent();
     await deps.replaceMetaForGraphAssets?.(metaReplaceTargets);
   }
   let insertedMetaQuads = 0;
@@ -604,6 +631,7 @@ async function recoverContextGraphSwmUnlocked(
       ? canonicalMeta
       : canonicalMeta.filter((quad) => !preservedHeadIdRowKeys.has(quadKey(quad)));
     if (insertableMeta.length > 0) {
+      assertCurrent();
       await deps.store.insert([...insertableMeta]);
     }
     // Canonicalization and withholding intentionally DROP rows; the reported
@@ -615,6 +643,7 @@ async function recoverContextGraphSwmUnlocked(
   // runSharedMemorySync); otherwise the member's next contended write to a
   // recovered root is mis-arbitrated against an empty ownership map.
   if (deps.ensureOwnedMap) {
+    assertCurrent();
     for (const { dataGraph, entity, creator } of processed.entityCreators) {
       const ownershipKey = sharedMemoryOwnershipKeyFromGraph(deps.contextGraphId, dataGraph);
       if (!ownershipKey) continue;

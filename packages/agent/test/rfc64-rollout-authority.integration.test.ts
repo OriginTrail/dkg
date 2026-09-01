@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,18 +8,12 @@ import { multiaddr } from '@multiformats/multiaddr';
 import {
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
-  createOperationContext,
   computeAuthorCatalogScopeDigestV1,
-  computeNetworkId,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
   type AssertionSeal,
   type CanonicalGraphScopedAuthorSealV1,
-  type CatalogSealDeploymentProfileV1,
-  type ContextGraphIdV1,
   type Digest32V1,
-  type EvmAddressV1,
-  type NetworkIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -28,33 +22,26 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/index.js';
-import {
-  buildOpenOwnerContextGraphPolicyV1,
-  unsignedOpenContextGraphPolicyEnvelopeV1,
-} from '../src/rfc64/open-catalog-policy-v1.js';
 import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
-import type { Rfc64PublicCatalogActivationInputV1 } from
-  '../src/rfc64/public-catalog-activation-config-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
   '../src/rfc64/catalog-semantic-authority-transition-v1.js';
 import {
   commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1,
   prepareRfc64AppliedCatalogAuthorityDeactivationV1,
 } from '../src/rfc64/applied-catalog-authority-transition-v1.js';
+import {
+  createRfc64RolloutAgentHarness,
+  RFC64_ROLLOUT_AUTHOR as AUTHOR,
+  RFC64_ROLLOUT_AUTHOR_WALLET as AUTHOR_WALLET,
+  RFC64_ROLLOUT_CONTEXT_GRAPH_ID as CONTEXT_GRAPH_ID,
+  RFC64_ROLLOUT_DEPLOYMENT as DEPLOYMENT,
+  RFC64_ROLLOUT_KAV10 as KAV10,
+  RFC64_ROLLOUT_NETWORK_ID as NETWORK_ID,
+  rfc64RolloutActivation as activation,
+  rfc64RolloutPolicyEnvelope as policyEnvelope,
+} from './_helpers/rfc64-rollout-agent-harness.js';
 
-const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
-const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
-const NETWORK_ID = 'otp:20430' as NetworkIdV1;
-const CONTEXT_GRAPH_ID = (
-  '0x1111111111111111111111111111111111111111/rollout-authority'
-) as ContextGraphIdV1;
-const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
-const DEPLOYMENT = Object.freeze({
-  networkId: NETWORK_ID,
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: KAV10,
-}) as CatalogSealDeploymentProfileV1;
 const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
   Object.freeze({
     subject: 'https://example.org/alice',
@@ -69,16 +56,15 @@ const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
     graph: '',
   }),
 ]);
-const agents: DKGAgent[] = [];
-const tempDirs: string[] = [];
+const {
+  agents,
+  tempDirs,
+  startAgent,
+  cleanup,
+} = createRfc64RolloutAgentHarness();
 
 afterEach(async () => {
-  for (const agent of agents.splice(0)) {
-    try { await agent.stop(); } catch { /* best effort */ }
-  }
-  await Promise.all(tempDirs.splice(0).map(
-    (path) => rm(path, { recursive: true, force: true }),
-  ));
+  await cleanup();
   vi.restoreAllMocks();
 });
 
@@ -417,152 +403,6 @@ describe('RFC-64 rollout authority integration', () => {
     expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
     expect(queue).toHaveBeenCalledWith(
       expect.objectContaining({ providerPeerId }),
-      expect.any(Function),
-      0,
-    );
-  });
-
-  it('keeps selected complete-provider recovery live under catalog authority', async () => {
-    const providerPeerId = '12D3KooWCatalogCompleteProvider';
-    let connect!: ReturnType<typeof vi.spyOn>;
-    let queue!: ReturnType<typeof vi.spyOn>;
-    const catalog = await startAgent('catalog-complete-provider', {
-      ...activation('catalog'),
-      bootstrap: {
-        retryIntervalMs: 0,
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(),
-          targets: [],
-          completeSwmProviders: [providerPeerId],
-        }],
-      },
-    }, undefined, undefined, (agent) => {
-      connect = vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
-        .mockReturnValue(true);
-    });
-    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
-
-    expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs)
-      .toEqual([CONTEXT_GRAPH_ID]);
-    expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
-    expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
-    expect(queue).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: 'rfc64-authorized-swm-recovery-v1',
-        providerPeerId,
-        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
-      }),
-      expect.any(Function),
-      0,
-    );
-    await expect(catalog.planSharedMemorySyncContextGraphs(
-      providerPeerId,
-      [CONTEXT_GRAPH_ID],
-      createOperationContext('sync'),
-    )).resolves.toEqual({ targets: [] });
-    await expect(catalog.planSharedMemorySyncContextGraphs(
-      providerPeerId,
-      [CONTEXT_GRAPH_ID],
-      createOperationContext('sync'),
-      { requireCompleteProviderMatch: true },
-    )).resolves.toEqual({ targets: [] });
-    vi.spyOn(catalog, 'resolveRfc64CompleteSwmProviderPeerIdsV1')
-      .mockReturnValue([providerPeerId, providerPeerId]);
-    expect(catalog.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId)).toEqual({
-      kind: 'rfc64-active-swm-recovery-plan-v1',
-      providerPeerId,
-      targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
-    });
-    expect(catalog.getRfc64SelectedSwmGraphSyncStatus(CONTEXT_GRAPH_ID)).toEqual({
-      mechanism: 'rfc64-selected-on-connect',
-      state: 'continuing',
-      configuredProviderCount: 1,
-      retryRequiredProviderCount: 1,
-      terminalProviderCount: 0,
-    });
-
-    const admission = (catalog as any).selectedSwmBootstrapAdmission;
-    const terminalOwner = admission.beginTransfer(providerPeerId, [CONTEXT_GRAPH_ID]);
-    expect(admission.markTransferTerminal(terminalOwner)).toBe(true);
-    queue.mockClear();
-    catalog.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
-    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
-    expect(admission.snapshot(providerPeerId)).toBeNull();
-    expect(catalog.getRfc64SelectedSwmGraphSyncStatus(CONTEXT_GRAPH_ID)).toEqual({
-      mechanism: 'rfc64-selected-on-connect',
-      state: 'inactive',
-      configuredProviderCount: 0,
-      retryRequiredProviderCount: 0,
-      terminalProviderCount: 0,
-    });
-
-    catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
-    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
-    expect(queue).toHaveBeenCalledOnce();
-    expect(queue).toHaveBeenCalledWith(
-      expect.objectContaining({
-        providerPeerId,
-        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
-      }),
-      expect.any(Function),
-      0,
-    );
-    expect(catalog.getRfc64SelectedSwmGraphSyncStatus(CONTEXT_GRAPH_ID)).toMatchObject({
-      state: 'continuing',
-      configuredProviderCount: 1,
-      retryRequiredProviderCount: 1,
-    });
-  });
-
-  it('closes recovery readiness until a subscription-triggered catalog pass settles', async () => {
-    const providerPeerId = '12D3KooWCatalogStalledCompleteProvider';
-    let markCatalogEntered!: () => void;
-    let releaseCatalog!: () => void;
-    const catalogEntered = new Promise<void>((resolve) => { markCatalogEntered = resolve; });
-    const stalledCatalog = new Promise<null>((resolve) => {
-      releaseCatalog = () => resolve(null);
-    });
-    let queue!: ReturnType<typeof vi.spyOn>;
-    const catalog = await startAgent('catalog-readiness-invalidation', {
-      ...activation('catalog'),
-      bootstrap: {
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(),
-          targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
-          completeSwmProviders: [providerPeerId],
-        }],
-      },
-    }, undefined, undefined, (agent) => {
-      vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
-      vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
-        .mockImplementation(async () => {
-          markCatalogEntered();
-          return stalledCatalog;
-        });
-      queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
-        .mockReturnValue(true);
-    }, { syncContextGraphs: [] });
-
-    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
-    expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs).toEqual([]);
-    expect(catalog.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
-
-    catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
-    await catalogEntered;
-    expect(catalog.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs)
-      .toEqual([CONTEXT_GRAPH_ID]);
-    expect(catalog.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
-    expect(queue).not.toHaveBeenCalled();
-
-    releaseCatalog();
-    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
-    expect(catalog.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
-    expect(queue).toHaveBeenCalledWith(
-      expect.objectContaining({
-        providerPeerId,
-        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
-      }),
       expect.any(Function),
       0,
     );
@@ -983,74 +823,6 @@ describe('RFC-64 rollout authority integration', () => {
     })).toBeNull();
   }, 30_000);
 });
-
-function activation(
-  mode: 'legacy' | 'shadow' | 'catalog',
-  killSwitch = false,
-): Rfc64PublicCatalogActivationInputV1 {
-  return {
-    deploymentProfile: DEPLOYMENT,
-    rollout: { killSwitch, contextGraphModes: { [CONTEXT_GRAPH_ID]: mode } },
-    bootstrap: {
-      acceptedPublicPolicies: [{ policyEnvelope: policyEnvelope(), targets: [] }],
-      retryIntervalMs: 1_000,
-    },
-  };
-}
-
-function policyEnvelope() {
-  return unsignedOpenContextGraphPolicyEnvelopeV1(buildOpenOwnerContextGraphPolicyV1({
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    ownerAddress: AUTHOR,
-  }));
-}
-
-async function startAgent(
-  name: string,
-  activationInput: Rfc64PublicCatalogActivationInputV1 | undefined,
-  existingDataDir?: string,
-  persistentStorePath?: string,
-  beforeStart?: (agent: DKGAgent) => void | Promise<void>,
-  extraConfig: Partial<Parameters<typeof DKGAgent.create>[0]> = {},
-): Promise<DKGAgent> {
-  const dataDir = existingDataDir ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-${name}-`));
-  if (existingDataDir === undefined) tempDirs.push(dataDir);
-  const agent = await DKGAgent.create({
-    name,
-    dataDir,
-    listenHost: '127.0.0.1',
-    listenPort: 0,
-    bootstrapPeers: [],
-    nodeRole: 'edge',
-    store: new OxigraphStore(persistentStorePath),
-    syncSharedMemoryOnConnect: false,
-    syncReconcilerEnabled: false,
-    syncOnConnectEnabled: false,
-    durableSyncEnabled: false,
-    agentProfileHeartbeatMs: 0,
-    syncContextGraphs: activationInput?.bootstrap?.acceptedPublicPolicies.map(
-      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
-    ) ?? [],
-    networkIdentity: {
-      networkId: await computeNetworkId(),
-      chainId: NETWORK_ID,
-    },
-    rfc64PublicCatalogActivation: activationInput,
-    ...extraConfig,
-  });
-  agents.push(agent);
-  await beforeStart?.(agent);
-  await agent.start();
-  for (const contextGraphId of extraConfig.syncContextGraphs
-    ?? activationInput?.bootstrap?.acceptedPublicPolicies.map(
-      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
-    )
-    ?? []) {
-    agent.subscribeToContextGraph(contextGraphId);
-  }
-  return agent;
-}
 
 async function connectBothWays(a: DKGAgent, b: DKGAgent): Promise<void> {
   const address = (agent: DKGAgent) => {

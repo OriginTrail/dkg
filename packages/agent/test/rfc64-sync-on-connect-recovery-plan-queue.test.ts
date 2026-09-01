@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { computeNetworkId, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
 import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import {
@@ -11,12 +17,47 @@ import {
   flushTimers,
   installSyncOnConnectPeerJobStub,
 } from './_helpers/sync-on-connect-test-fixture.js';
+import {
+  RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+  RFC64_ROLLOUT_NETWORK_ID,
+  rfc64RolloutActivation,
+  rfc64RolloutPolicyEnvelope,
+} from './_helpers/rfc64-rollout-agent-harness.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map(
+    (path) => rm(path, { recursive: true, force: true }),
+  ));
+});
 
 describe('RFC-64 recovery-plan queue authorization', () => {
   it('queues a widened plan when a newly selected graph had no admission owner', async () => {
-    const agent = await createUnstartedAgent('Rfc64SelectionInvalidatesExactCooldown');
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-recovery-queue-'));
+    tempDirs.push(dataDir);
+    const agent = await createUnstartedAgent('Rfc64SelectionInvalidatesExactCooldown', {
+      dataDir,
+      store: new OxigraphStore(),
+      rfc64PublicCatalogActivation: {
+        ...rfc64RolloutActivation('catalog'),
+        bootstrap: {
+          retryIntervalMs: 0,
+          acceptedPublicPolicies: [{
+            policyEnvelope: rfc64RolloutPolicyEnvelope(),
+            targets: [],
+            completeSwmProviders: [PEER_A],
+          }],
+        },
+      },
+      syncContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+      chainAdapter: new MockChainAdapter(RFC64_ROLLOUT_NETWORK_ID),
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: RFC64_ROLLOUT_NETWORK_ID,
+      },
+    });
     allowAllNetworkAdmission(agent);
     agent.started = true;
     const authorized = {
@@ -24,24 +65,29 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       providerPeerId: PEER_A,
       targets: [
         { contextGraphId: 'existing-cg', lane: 'selected-public' as const },
-        { contextGraphId: 'new-selected-cg', lane: 'selected-public' as const },
+        {
+          contextGraphId: RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+          lane: 'selected-public' as const,
+        },
       ],
     };
     const selectedRun = vi.fn(async () => undefined);
     installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
     agent.selectedSwmBootstrapAdmission.request(PEER_A, ['existing-cg']);
     agent.rfc64ExactCatchupOnConnectAt.set(PEER_A, Date.now());
-    vi.spyOn(agent, 'resolveRfc64CompleteSwmProviderPeerIdsV1')
-      .mockImplementation((contextGraphId) => (
-        contextGraphId === 'new-selected-cg' ? [PEER_A] : []
-      ));
+
+    expect(agent.resolveRfc64CompleteSwmProviderPeerIdsV1(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([PEER_A]);
 
     expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       vi.fn(),
       0,
     )).toBe(false);
-    expect(agent.invalidateRfc64SwmRecoverySelectionStateV1('new-selected-cg'))
+    expect(agent.invalidateRfc64SwmRecoverySelectionStateV1(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    ))
       .toEqual([PEER_A]);
     expect(agent.rfc64ExactCatchupOnConnectAt.has(PEER_A)).toBe(false);
     expect(agent.selectedSwmBootstrapAdmission.snapshot(PEER_A)).toEqual({
@@ -50,7 +96,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     });
     agent.selectedSwmBootstrapAdmission.request(
       PEER_A,
-      ['existing-cg', 'new-selected-cg'],
+      ['existing-cg', RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
     );
 
     expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
@@ -59,6 +105,33 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       0,
     )).toBe(true);
     await vi.waitFor(() => expect(selectedRun).toHaveBeenCalledWith(PEER_A, authorized));
+  });
+
+  it('revokes only the changed graph in a mixed in-flight recovery plan', async () => {
+    const agent = await createUnstartedAgent('Rfc64GraphScopedRecoveryRevocation');
+    vi.spyOn(agent, 'resolveRfc64SwmRecoveryRuntimeAuthorityV1')
+      .mockImplementation((contextGraphId) => ({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        lane: contextGraphId === 'private-cg' ? 'ordinary-private' : 'selected-public',
+        active: true,
+      }));
+    const publicFence = agent.captureRfc64SwmRecoveryTargetFenceV1({
+      contextGraphId: 'public-cg',
+      lane: 'selected-public',
+    });
+    const privateFence = agent.captureRfc64SwmRecoveryTargetFenceV1({
+      contextGraphId: 'private-cg',
+      lane: 'ordinary-private',
+    });
+
+    agent.invalidateRfc64SwmRecoverySelectionStateV1('public-cg');
+
+    expect(publicFence.signal.aborted).toBe(true);
+    expect(publicFence.isCurrent()).toBe(false);
+    expect(privateFence.signal.aborted).toBe(false);
+    expect(privateFence.isCurrent()).toBe(true);
+    expect(() => privateFence.assertCurrent()).not.toThrow();
   });
 
   it('reports a catalog recovery plan that is not authorized', async () => {

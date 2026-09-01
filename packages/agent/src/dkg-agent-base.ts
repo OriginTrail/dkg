@@ -1660,6 +1660,11 @@ export class DKGAgentBase {
     | null = null;
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
+  /** Per-CG cancellation owner for already-running live RFC-64 SWM recovery. */
+  protected readonly rfc64SwmRecoverySelectionControllers = new Map<
+    string,
+    AbortController
+  >();
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a

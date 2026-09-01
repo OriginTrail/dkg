@@ -20,6 +20,8 @@ import type {
   SelectedSharedMemorySyncResult,
 } from '../src/sync/shared-memory-freshness.js';
 import type { Rfc64SwmRecoveryTargetV1 } from '../src/rfc64/swm-recovery-plan-v1.js';
+import type { Rfc64SwmRecoveryTargetFenceV1 } from
+  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   type SelectedSwmMetaContinuation,
@@ -306,6 +308,9 @@ export interface SelectedProviderSelectionAgent {
     targets: readonly Rfc64SwmRecoveryTargetV1[];
   }>;
   resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => string[];
+  captureRfc64SwmRecoveryTargetFenceV1: (
+    target: Readonly<Rfc64SwmRecoveryTargetV1>,
+  ) => Rfc64SwmRecoveryTargetFenceV1;
   syncFromPeerDetailed: () => Promise<number>;
   refreshMetaSyncedFlags: () => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
@@ -648,6 +653,7 @@ export function createSelectedSwmLifecycleHarness(
   const processedMetaBatches: Quad[][] = [];
   const dateNow = vi.spyOn(Date, 'now').mockImplementation(options.clock.now);
   let selectedSwmMetaTransfers: SelectedSwmMetaTransferCoordinator | undefined;
+  const recoverySelectionControllers = new Map<string, AbortController>();
 
   const agent: SelectedSwmLifecycleAgentFixture = {
     config: {
@@ -843,6 +849,24 @@ export function createSelectedSwmLifecycleHarness(
         ? [...(options.completeSwmProviders ?? [PEER])]
         : []
     ),
+    captureRfc64SwmRecoveryTargetFenceV1: (target) => {
+      let controller = recoverySelectionControllers.get(target.contextGraphId);
+      if (controller === undefined) {
+        controller = new AbortController();
+        recoverySelectionControllers.set(target.contextGraphId, controller);
+      }
+      const isCurrent = () => (
+        !controller.signal.aborted
+        && recoverySelectionControllers.get(target.contextGraphId) === controller
+      );
+      return {
+        signal: controller.signal,
+        isCurrent,
+        assertCurrent: () => {
+          if (!isCurrent()) throw new Error('test recovery selection revoked');
+        },
+      };
+    },
     syncSharedMemoryFromPeerDetailedExecution:
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     getSelectedSwmMetaTransfers: () => {

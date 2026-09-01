@@ -433,6 +433,8 @@ interface SharedMemorySyncContext {
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   stopOnBackoffWorthyFailure?: boolean;
+  /** Selected recovery fence; absent for ordinary synchronization. */
+  assertCurrent?: () => void;
   /** Optional lane-owned policy for deciding whether snapshot evidence is sufficient. */
   snapshotEvidencePolicy?: {
     accepts: (evidence: {
@@ -487,6 +489,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
     stopOnBackoffWorthyFailure = false,
+    assertCurrent = () => {},
     snapshotEvidencePolicy,
     metadataFetcher,
     snapshotRecoveryOrder = 'manifest',
@@ -626,6 +629,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     let descriptorsAuthoritativeForCg = true;
     const unresolvedRefSampleForCg: string[] = [];
     try {
+      assertCurrent();
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
@@ -654,6 +658,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           continuationYielded: false,
         };
       const wsMetaResult = metadataOutcome.result;
+      assertCurrent();
       manifestComplete = wsMetaResult.completed;
       peerRespondedForContextGraph = true;
       if (metadataOutcome.continuationYielded) {
@@ -670,6 +675,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         break;
       }
       const wsDataResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
+      assertCurrent();
       peerRespondedForContextGraph = true;
       const fetchDurationMs = Date.now() - fetchStartedAt;
 
@@ -687,6 +693,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         registeredSubGraphNames,
         excludedSubGraphNames,
       );
+      assertCurrent();
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
@@ -741,6 +748,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const validWsQuads = processed.verifiedData;
       const dropped = processed.droppedDataTriples;
       const hydrateOwnership = () => {
+        assertCurrent();
         for (const { dataGraph, entity, creator } of processed.entityCreators) {
           const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
           if (!ownershipKey) {
@@ -858,6 +866,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
+        assertCurrent();
         await ensureContextGraph(pid);
         contextGraphEnsured = true;
       };
@@ -892,7 +901,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       ): Promise<void> => {
         const rows = snapshotCommit.unwrittenVerifiedRows(descriptor);
         if (rows.length === 0) return;
+        assertCurrent();
         await ensureContextGraphOnce();
+        assertCurrent();
         await storeInsert([...rows]);
         snapshotCommit.recordWritten(rows);
         summary.insertedTriples += rows.length;
@@ -933,6 +944,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         how: string,
       ): Promise<string | null> => {
         const preserved = await snapshotMaterializer!.selectRepairIdentity(pid, descriptor);
+        assertCurrent();
         if (!preserved) return null;
         // The materializer returns the complete plan: winner + the exact rows
         // to withhold. Suppression consumes that plan, not a re-derivation.
@@ -946,6 +958,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         descriptor: GraphScopedSwmRecoveryDescriptor,
       ): Promise<void> => {
         const winner = await decideAndWithholdStoredIdentity(descriptor, 'repaired head');
+        assertCurrent();
         if (winner !== null) {
           await snapshotMaterializer!.repairHeadPreservingIdentity(pid, descriptor, winner);
         } else {
@@ -998,6 +1011,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
               descriptor.subGraphName,
               descriptor.kaUal,
               async () => {
+                assertCurrent();
                 // ALL decisions live INSIDE the lock. Between our pre-lock view
                 // of the world and acquisition, live gossip may have committed
                 // this KA — the lock stops the interleaving, and the two
@@ -1013,6 +1027,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // head rows here — gossip owns a newer head and its
                 // delete-then-insert already wrote it unambiguously.
                 const storedHead = await snapshotMaterializer.readStoredHead(descriptor);
+                assertCurrent();
                 if (
                   storedHead.version !== null
                   && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
@@ -1037,6 +1052,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // digest is an OLDER version of the same size and must be
                 // replaced, not skipped.
                 if (await snapshotMaterializer.isGraphAssetMaterialized(descriptor)) {
+                  assertCurrent();
                   // Content is already this descriptor's. Two states still need
                   // the head rewritten, and BOTH are invisible to a reader that
                   // only looks at content:
@@ -1100,7 +1116,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                   fetchedDataQuads: [],
                   publicSnapshotStore,
                 });
+                assertCurrent();
                 await ensureContextGraphOnce();
+                assertCurrent();
                 await snapshotMaterializer.replaceGraph(asset.assertionGraph, [...asset.quads]);
                 // Graph first, THEN the head swap — a crash between the two
                 // leaves content newer than the head, which the next round
@@ -1146,6 +1164,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // arrives. Reconcile only after releasing the materialization
             // lock; the production callback reacquires the same per-KA lock
             // and re-verifies current head + both graph digests before delete.
+            assertCurrent();
             await snapshotCommit.reconcileAfterMaterialization({
               contextGraphId: pid,
               descriptor,
@@ -1252,6 +1271,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           }
         },
       });
+      assertCurrent();
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
         // write lock, so they survive a snapshot-phase throw. Adding them again
@@ -1350,7 +1370,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // up with dangling/missing public snapshot state.
         summary.failedPhases += 1;
         if (validWsQuads.length > 0) {
+          assertCurrent();
           await ensureContextGraph(pid);
+          assertCurrent();
           await storeInsert(validWsQuads);
           summary.insertedTriples += validWsQuads.length;
           summary.insertedDataTriples += validWsQuads.length;
@@ -1364,9 +1386,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
 
       const storeStartedAt = Date.now();
+      assertCurrent();
       await ensureContextGraph(pid);
 
       if (validWsQuads.length > 0) {
+        assertCurrent();
         await storeInsert(validWsQuads);
         summary.insertedTriples += validWsQuads.length;
         summary.insertedDataTriples += validWsQuads.length;
@@ -1397,6 +1421,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // verified input and is subtracted solely when its row survives.
         const metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
         if (metaForBulkInsert.length > 0) {
+          assertCurrent();
           await storeInsert(metaForBulkInsert);
         }
         const retainedAlreadyCounted = snapshotCommit.alreadyCountedRetainedRows();

@@ -14,6 +14,7 @@ import {
   resolveRfc64SwmRecoveryLaneV1,
   resolveRfc64SwmRecoveryRuntimeAuthorityV1,
   type Rfc64ActivePeerSwmRecoveryPlanV1,
+  type Rfc64SwmRecoveryTargetV1,
   type Rfc64SwmRecoveryRuntimeAuthorityV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 
@@ -27,6 +28,21 @@ export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
   | { kind: 'queued' }
   | { kind: 'rejected' }
 >;
+
+export interface Rfc64SwmRecoveryTargetFenceV1 {
+  readonly signal: AbortSignal;
+  isCurrent(): boolean;
+  assertCurrent(): void;
+}
+
+export class Rfc64SwmRecoveryTargetRevokedErrorV1 extends Error {
+  readonly code = 'RFC64_SWM_RECOVERY_TARGET_REVOKED' as const;
+
+  constructor(readonly contextGraphId: string) {
+    super(`RFC-64 SWM recovery authority was revoked for "${contextGraphId}"`);
+    this.name = 'Rfc64SwmRecoveryTargetRevokedErrorV1';
+  }
+}
 
 /** Pure selection projection shared by current-state and transition resolution. */
 export function projectRfc64SwmRecoveryAuthorityForSelectionV1(input: Readonly<{
@@ -121,6 +137,33 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     );
   }
 
+  /** Capture one target's graph-scoped cancellation and live-authority fence. */
+  captureRfc64SwmRecoveryTargetFenceV1(
+    this: DKGAgent,
+    target: Readonly<Rfc64SwmRecoveryTargetV1>,
+  ): Rfc64SwmRecoveryTargetFenceV1 {
+    let controller = this.rfc64SwmRecoverySelectionControllers.get(target.contextGraphId);
+    if (controller === undefined) {
+      controller = new AbortController();
+      this.rfc64SwmRecoverySelectionControllers.set(target.contextGraphId, controller);
+    }
+    const isCurrent = () => {
+      if (
+        controller.signal.aborted
+        || this.rfc64SwmRecoverySelectionControllers.get(target.contextGraphId) !== controller
+      ) return false;
+      const authority = this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(target.contextGraphId);
+      return authority.active && authority.lane === target.lane;
+    };
+    const assertCurrent = () => {
+      if (isCurrent()) return;
+      const reason = controller.signal.reason;
+      if (reason instanceof Error) throw reason;
+      throw new Rfc64SwmRecoveryTargetRevokedErrorV1(target.contextGraphId);
+    };
+    return Object.freeze({ signal: controller.signal, isCurrent, assertCurrent });
+  }
+
   /** Exact operator-pinned graph-complete SWM providers for one accepted policy. */
   resolveRfc64CompleteSwmProviderPeerIdsV1(
     this: DKGAgent,
@@ -142,6 +185,9 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
+    const currentController = this.rfc64SwmRecoverySelectionControllers.get(contextGraphId);
+    currentController?.abort(new Rfc64SwmRecoveryTargetRevokedErrorV1(contextGraphId));
+    this.rfc64SwmRecoverySelectionControllers.set(contextGraphId, new AbortController());
     const affectedProviders = new Set([
       ...this.selectedSwmBootstrapAdmission.invalidateContextGraph(contextGraphId),
       ...this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId),
