@@ -1268,7 +1268,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
 
     const adapterPreparer = this.chain.prepareOnChainContextGraphRegistration;
-    const adapterCanPrepare = typeof adapterPreparer === 'function';
     const requiredRegistrationSigner = requiredContextGraphRegistrationSigner({
       publishPolicy,
       publishAuthorityAccountId,
