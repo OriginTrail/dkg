@@ -16,7 +16,11 @@
  * only when the feature is effectively on, and the base release simply never
  * looks at the file. (ADR-W2R-6.)
  */
-import type { KnowledgeAssetRootMutationKindV1 } from '@origintrail-official/dkg-core';
+import {
+  compareEventPosition,
+  sameEventIdentity,
+  type KnowledgeAssetRootMutationKindV1,
+} from '@origintrail-official/dkg-core';
 
 export const VM_REVERIFY_INTENTS_DATABASE_FILENAME = 'vm-reverify-intents-v1.sqlite3';
 
@@ -40,19 +44,45 @@ export type VmReverifyAbandonReason =
   | 'no-peer-has-version';
 
 /**
- * Chain position of the observed mutation, reduced to the three fields that
- * ORDER events. Structurally a subset of core's `FinalizedEventPositionV1`, so
- * a lane payload's `position` is assignable here as-is.
+ * Chain position of the observed mutation. Structurally core's
+ * `FinalizedEventPositionV1`, so a lane payload's `position` is assignable
+ * here as-is.
  *
- * `blockHash`/`transactionHash` are deliberately NOT persisted: they would be
- * the only columns in this table that a reorg can invalidate, and nothing in
- * the drain consults them — the repair re-reads the committed root from chain,
- * so a reorged event costs at most one wasted, idempotent inspection.
+ * `blockHash`/`transactionHash` ARE persisted (review r1), for exactly one
+ * decision: a reorg can REPLACE the log at an unchanged numeric position with
+ * a different event. Numeric ordering alone reads that replacement as a
+ * duplicate, and an ABANDONED row would then never be drained again — the
+ * hashes are the only observable that tells the two chain histories apart.
+ * Nothing else consults them; the repair still re-reads the committed root
+ * from chain.
  */
 export interface VmReverifyIntentPosition {
   blockNumber: number;
+  blockHash: string;
+  transactionHash: string;
   transactionIndex: number;
   logIndex: number;
+}
+
+/**
+ * Does a newly observed event redefine the row `existing` describes?
+ *
+ * Strictly-later positions do (delegating to core's `compareEventPosition`,
+ * the same ordering the finalized update records use — two mutations of one
+ * asset can share a block, and a bare `blockNumber >` would silently drop the
+ * second). An EQUAL numeric position advances the row only when the event
+ * identity (block/tx hash) differs: that is a reorg replacement, a different
+ * chain history occupying the same indices, and treating it as a duplicate
+ * would leave an abandoned row dead forever (review r1). Same position, same
+ * identity is a re-scanned log and changes nothing.
+ */
+export function positionAdvancesIntent(
+  candidate: VmReverifyIntentPosition,
+  existing: VmReverifyIntentPosition,
+): boolean {
+  const ordering = compareEventPosition(candidate, existing);
+  if (ordering !== 0) return ordering > 0;
+  return !sameEventIdentity(candidate, existing);
 }
 
 export interface VmReverifyIntentUpsertInput {
@@ -100,10 +130,11 @@ export interface VmReverifyIntentStore {
   /**
    * Record an observed root mutation for a held asset.
    *
-   * Idempotent by UAL. A strictly-later position revives an ABANDONED row and
-   * resets its attempt budget; an equal or earlier position changes nothing and
-   * reports `unchanged`, so a re-scanned window costs no log line, no metric and
-   * no drain slot.
+   * Idempotent by UAL. A strictly-later position — or an equal position whose
+   * event identity differs (a reorg replacement, review r1) — revives an
+   * ABANDONED row and resets its attempt budget; an equal-and-identical or
+   * earlier position changes nothing and reports `unchanged`, so a re-scanned
+   * window costs no log line, no metric and no drain slot.
    */
   upsert(input: VmReverifyIntentUpsertInput): Promise<VmReverifyIntentUpsertResult>;
   /** PENDING rows whose backoff has elapsed, oldest observed event first. */

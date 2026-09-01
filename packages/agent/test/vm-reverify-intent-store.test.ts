@@ -24,11 +24,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  isNewerPosition,
   openSqliteVmReverifyIntentStore,
 } from '../src/vm-reverify-intent-sqlite-store.js';
 import {
   VM_REVERIFY_INTENTS_DATABASE_FILENAME,
+  positionAdvancesIntent,
   type VmReverifyIntentPosition,
   type VmReverifyIntentUpsertInput,
 } from '../src/vm-reverify-intent-store.js';
@@ -45,8 +45,15 @@ function at(
   blockNumber: number,
   transactionIndex = 0,
   logIndex = 0,
+  identity: { blockHash?: string; transactionHash?: string } = {},
 ): VmReverifyIntentPosition {
-  return { blockNumber, transactionIndex, logIndex };
+  return {
+    blockNumber,
+    blockHash: identity.blockHash ?? `0x${'ab'.repeat(32)}`,
+    transactionHash: identity.transactionHash ?? `0x${'cd'.repeat(32)}`,
+    transactionIndex,
+    logIndex,
+  };
 }
 
 function intent(
@@ -183,13 +190,57 @@ describe('VM re-verify intent store — owned file identity', () => {
   });
 });
 
+describe('VM re-verify intent store — same-position reorg replacement (review r1)', () => {
+  it('REVIVES an abandoned row when a reorg replaces the log at the same indices', async () => {
+    await withStore(async (store) => {
+      // (100,0,3): a root-removed intent that ran out of road.
+      await store.upsert(intent({ kind: 'root-removed', position: at(100, 0, 3) }));
+      const [before] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      await store.abandon(UAL, before!.generation, 'version-regression-unsupported');
+      expect(await store.countPending(CG)).toBe(0);
+
+      // A reorg replaces that log: SAME numeric position, different tx hash,
+      // and the replacement is a forward mutation. Numeric ordering alone
+      // would report `unchanged` and the row would stay dead forever.
+      const outcome = await store.upsert(intent({
+        kind: 'root-added',
+        position: at(100, 0, 3, { transactionHash: `0x${'77'.repeat(32)}` }),
+      }));
+
+      expect(outcome).toBe('advanced');
+      const [revived] = await store.listDue(Number.MAX_SAFE_INTEGER, 1);
+      expect(revived).toMatchObject({ ual: UAL, state: 'PENDING', kind: 'root-added' });
+      expect(revived!.generation).toBe(before!.generation + 1);
+      expect(revived!.attemptCount).toBe(0);
+      expect(revived!.firstAttemptAt, 'the 24h budget must restart').toBeUndefined();
+    });
+  });
+
+  it('still reports a re-scanned IDENTICAL log as unchanged', async () => {
+    await withStore(async (store) => {
+      await store.upsert(intent({ position: at(100, 0, 3) }));
+      expect(await store.upsert(intent({ position: at(100, 0, 3) })))
+        .toBe('unchanged');
+    });
+  });
+});
 describe('VM re-verify intent store — position ordering', () => {
   it('orders on (block, txIndex, logIndex), not on block alone', () => {
-    expect(isNewerPosition(at(100, 0, 1), at(100, 0, 0))).toBe(true);
-    expect(isNewerPosition(at(100, 1, 0), at(100, 0, 9))).toBe(true);
-    expect(isNewerPosition(at(101, 0, 0), at(100, 9, 9))).toBe(true);
-    expect(isNewerPosition(at(100, 0, 0), at(100, 0, 0))).toBe(false);
-    expect(isNewerPosition(at(99, 9, 9), at(100, 0, 0))).toBe(false);
+    expect(positionAdvancesIntent(at(100, 0, 1), at(100, 0, 0))).toBe(true);
+    expect(positionAdvancesIntent(at(100, 1, 0), at(100, 0, 9))).toBe(true);
+    expect(positionAdvancesIntent(at(101, 0, 0), at(100, 9, 9))).toBe(true);
+    expect(positionAdvancesIntent(at(100, 0, 0), at(100, 0, 0))).toBe(false);
+    // An equal numeric position with a DIFFERENT chain identity is a reorg
+    // replacement, not a duplicate (review r1).
+    expect(positionAdvancesIntent(
+      at(100, 0, 0, { transactionHash: `0x${'ef'.repeat(32)}` }),
+      at(100, 0, 0),
+    )).toBe(true);
+    expect(positionAdvancesIntent(
+      at(100, 0, 0, { blockHash: `0x${'12'.repeat(32)}` }),
+      at(100, 0, 0),
+    )).toBe(true);
+    expect(positionAdvancesIntent(at(99, 9, 9), at(100, 0, 0))).toBe(false);
   });
 
   it('advances on a LATER LOG INDEX IN THE SAME BLOCK and ignores an earlier one', async () => {

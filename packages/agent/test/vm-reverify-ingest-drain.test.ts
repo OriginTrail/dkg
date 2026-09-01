@@ -44,15 +44,16 @@ import {
   VmReverifyWorker,
 } from '../src/vm-reverify-worker.js';
 import { VM_REVERIFY_FLAT_BACKOFF_MS, VM_REVERIFY_PARK_AFTER_MS } from '../src/vm-reverify-intents.js';
-import type {
-  VmReverifyIntentHealth,
+import {
+  positionAdvancesIntent,
+  type VmReverifyIntentHealth,
   VmReverifyIntentPosition,
   VmReverifyIntentRecord,
   VmReverifyIntentStore,
   VmReverifyIntentUpsertInput,
   VmReverifyIntentUpsertResult,
 } from '../src/vm-reverify-intent-store.js';
-import { isNewerPosition } from '../src/vm-reverify-intent-sqlite-store.js';
+
 
 // Hand-rolled call recorder, matching `core-fills-gap.test.ts`: wraps an
 // implementation, records every argument tuple, returns the result.
@@ -110,7 +111,7 @@ class InMemoryVmReverifyIntentStore implements VmReverifyIntentStore {
       });
       return 'inserted';
     }
-    if (!isNewerPosition(input.position, existing.observed)) return 'unchanged';
+    if (!positionAdvancesIntent(input.position, existing.observed)) return 'unchanged';
     this.rows.set(input.ual, {
       ...existing,
       kind: input.kind,

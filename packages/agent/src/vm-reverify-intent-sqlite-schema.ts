@@ -49,6 +49,8 @@ CREATE TABLE vm_reverify_intents_v1 (
   ka_id TEXT NOT NULL CHECK (length(ka_id) > 0),
   kind TEXT NOT NULL CHECK (kind IN ('lifecycle-update','root-added','roots-replaced','root-removed')),
   observed_block INTEGER NOT NULL CHECK (observed_block >= 0),
+  observed_block_hash TEXT NOT NULL CHECK (length(observed_block_hash) > 0),
+  observed_tx_hash TEXT NOT NULL CHECK (length(observed_tx_hash) > 0),
   observed_tx_index INTEGER NOT NULL CHECK (observed_tx_index >= 0),
   observed_log_index INTEGER NOT NULL CHECK (observed_log_index >= 0),
   state TEXT NOT NULL CHECK (state IN ('PENDING','ABANDONED')),

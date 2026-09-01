@@ -10,13 +10,13 @@
  * issues is refused if a newer event has redefined the row in the meantime.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import { compareEventPosition } from '@origintrail-official/dkg-core';
 import {
   fsyncVmReverifyIntentDatabase,
   openVmReverifyIntentDatabase,
 } from './vm-reverify-intent-sqlite-schema.js';
-import type {
-  VmReverifyAbandonReason,
+import {
+  positionAdvancesIntent,
+  type VmReverifyAbandonReason,
   VmReverifyIntentHealth,
   VmReverifyIntentPosition,
   VmReverifyIntentRecord,
@@ -36,6 +36,8 @@ interface VmReverifyIntentRow {
   ka_id: string;
   kind: string;
   observed_block: number;
+  observed_block_hash: string;
+  observed_tx_hash: string;
   observed_tx_index: number;
   observed_log_index: number;
   state: string;
@@ -58,6 +60,8 @@ function rowToRecord(raw: unknown): VmReverifyIntentRecord {
     kind: row.kind as VmReverifyIntentRecord['kind'],
     observed: {
       blockNumber: Number(row.observed_block),
+      blockHash: String(row.observed_block_hash),
+      transactionHash: String(row.observed_tx_hash),
       transactionIndex: Number(row.observed_tx_index),
       logIndex: Number(row.observed_log_index),
     },
@@ -73,27 +77,6 @@ function rowToRecord(raw: unknown): VmReverifyIntentRecord {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
-}
-
-/**
- * Strictly-later chain position.
- *
- * Delegates to core's `compareEventPosition` — the same ordering the finalized
- * update records use — instead of comparing block numbers. Two root mutations
- * of one asset can share a block, and a bare `blockNumber >` would drop the
- * second one silently: the node would record the FIRST update of a block and
- * then treat the second as already seen.
- */
-export function isNewerPosition(
-  candidate: VmReverifyIntentPosition,
-  existing: VmReverifyIntentPosition,
-): boolean {
-  const asFull = (position: VmReverifyIntentPosition) => ({
-    ...position,
-    blockHash: '',
-    transactionHash: '',
-  });
-  return compareEventPosition(asFull(candidate), asFull(existing)) > 0;
 }
 
 export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
@@ -139,15 +122,18 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
           this.database.prepare(`
             INSERT INTO vm_reverify_intents_v1 (
               ual, local_cg_id, ka_id, kind,
-              observed_block, observed_tx_index, observed_log_index,
+              observed_block, observed_block_hash, observed_tx_hash,
+              observed_tx_index, observed_log_index,
               state, generation, attempt_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 0, ?, ?)
           `).run(
             input.ual,
             input.localCgId,
             input.kaId,
             input.kind,
             input.position.blockNumber,
+            input.position.blockHash,
+            input.position.transactionHash,
             input.position.transactionIndex,
             input.position.logIndex,
             now,
@@ -157,7 +143,7 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
           return;
         }
         const record = rowToRecord(existing);
-        if (!isNewerPosition(input.position, record.observed)) return;
+        if (!positionAdvancesIntent(input.position, record.observed)) return;
         // A strictly-newer event redefines the work, so the ENTIRE retry budget
         // resets — including `first_attempt_at`. Carrying the old timestamp
         // forward would re-park a revived row against a 24 h window that
@@ -169,6 +155,8 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
               ka_id = ?,
               kind = ?,
               observed_block = ?,
+              observed_block_hash = ?,
+              observed_tx_hash = ?,
               observed_tx_index = ?,
               observed_log_index = ?,
               state = 'PENDING',
@@ -185,6 +173,8 @@ export class SqliteVmReverifyIntentStore implements VmReverifyIntentStore {
           input.kaId,
           input.kind,
           input.position.blockNumber,
+          input.position.blockHash,
+          input.position.transactionHash,
           input.position.transactionIndex,
           input.position.logIndex,
           now,
