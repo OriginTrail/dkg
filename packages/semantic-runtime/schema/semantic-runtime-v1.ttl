@@ -60,6 +60,7 @@ sr:witInterface a rdf:Property .
 sr:invocationId a rdf:Property .
 sr:usedProgram a rdf:Property .
 sr:executedBy a rdf:Property .
+sr:invokedBy a rdf:Property .
 sr:appliedPolicy a rdf:Property .
 sr:policyHash a rdf:Property .
 sr:programHash a rdf:Property .
