@@ -52,11 +52,34 @@ export interface ComponentStartResult extends StartedPlanInspection {
   instanceId: string;
 }
 
+export type ComponentExecutionResult = Extract<PlanApplyResult, { kind: 'completed' }>;
+
+export type ComponentToolCall =
+  | {
+    kind: 'investigator';
+    effectId: bigint;
+    prompt: string;
+  }
+  | {
+    kind: 'query-catalog';
+    effectId: bigint;
+    queryId: string;
+    parameters: Array<{ name: string; value: string }>;
+  };
+
+export type ComponentToolResult =
+  | { kind: 'investigator'; output: string }
+  | { kind: 'query-catalog'; json: string };
+
+export type ComponentToolDispatcher = (
+  call: ComponentToolCall,
+) => Promise<ComponentToolResult>;
+
 export type ComponentOperationResult =
   | ComponentCompileOutcome
   | AdmittedPlanSummary
   | ComponentStartResult
-  | PlanApplyResult
+  | ComponentExecutionResult
   | StartedPlanInspection
   | { dropped: true };
 

@@ -14,7 +14,6 @@ import {
   type Phase0Inspection,
   type Phase0RuntimeEvent,
   type Phase0StepOutput,
-  type PlanApplyResult,
   type StartedPlanInspection,
   type StartedPlanReceipt,
 } from './codec.js';
@@ -22,7 +21,11 @@ import {
   ComponentExecutionPool,
   type ComponentExecutionPoolOptions,
 } from './component-supervisor.js';
-import type { ExecutionCapabilityDescriptor } from './component-types.js';
+import type {
+  ComponentExecutionResult,
+  ComponentToolDispatcher,
+  ExecutionCapabilityDescriptor,
+} from './component-types.js';
 import {
   WorkerRequestTimeoutError,
   WorkerSupervisor,
@@ -141,17 +144,15 @@ export class SemanticRuntimeHost {
     canonicalPlan: Uint8Array,
     logicalTime = 0n,
     capability?: ExecutionCapabilityDescriptor,
+    toolDispatcher?: ComponentToolDispatcher,
   ): Promise<StartedPlanReceipt> {
     this.requireHandle();
-    return this.componentPool.startPlan(canonicalPlan, logicalTime, capability);
+    return this.componentPool.startPlan(canonicalPlan, logicalTime, capability, toolDispatcher);
   }
 
-  async applyPlan(
-    handle: number,
-    result?: { effectId: bigint; ok: boolean; value: string },
-  ): Promise<PlanApplyResult> {
+  async applyPlan(handle: number): Promise<ComponentExecutionResult> {
     this.requireHandle();
-    return this.componentPool.applyPlan(handle, result);
+    return this.componentPool.applyPlan(handle);
   }
 
   async inspectPlan(handle: number): Promise<StartedPlanInspection> {

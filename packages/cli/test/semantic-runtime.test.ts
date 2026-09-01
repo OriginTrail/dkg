@@ -9,7 +9,6 @@ import {
   forkStoredSemanticProgram,
   invokeStoredSemanticProgram,
   loadStoredSemanticProgram,
-  normalizeEffectInput,
   startConfiguredSemanticRuntime,
   validateSemanticRuntimeConfig,
 } from '../src/semantic-runtime.js';
@@ -230,17 +229,6 @@ describe('semantic runtime daemon configuration', () => {
     expect(() => validateSemanticRuntimeConfig({ maxAccumulator: '-1' })).toThrow(/maxAccumulator/);
   });
 
-  it('requires exactly one LLM prompt at the host boundary', () => {
-    expect(normalizeEffectInput('agent/investigate', ['t:Say hi'])).toEqual({
-      prompt: 'Say hi',
-    });
-    for (const arguments_ of [[], ['t:Say hi', 't:ignored']]) {
-      expect(() => normalizeEffectInput('agent/investigate', arguments_)).toThrow(
-        'agent/investigate@1 requires exactly one text prompt',
-      );
-    }
-  });
-
   it.each([
     ['wm', '_working_memory', 'working-memory'],
     ['swm', '_shared_memory', 'shared-working-memory'],
@@ -403,7 +391,7 @@ describe('semantic runtime daemon configuration', () => {
             tool: `<${tool}>`,
             operation: '"agent/investigate"',
             toolVersion: '"1"',
-            witInterface: '"origintrail:semantic-tools/investigator@1"',
+            witInterface: '"origintrail:semantic-runtime/investigator@0.1.0"',
           }],
         };
         return { type: 'bindings', bindings: [] };

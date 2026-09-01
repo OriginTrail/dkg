@@ -341,7 +341,7 @@ write_authority_request() {
       { subject: tool, predicate: rdfType, object: `${sr}Tool` },
       { subject: tool, predicate: `${sr}operation`, object: JSON.stringify("agent/investigate") },
       { subject: tool, predicate: `${sr}version`, object: JSON.stringify("1") },
-      { subject: tool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-tools/investigator@1") },
+      { subject: tool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-runtime/investigator@0.1.0") },
       { subject: operator, predicate: `${sr}usesExecutionPolicy`, object: policy },
       { subject: policy, predicate: rdfType, object: `${sr}ExecutionPolicy` },
       { subject: policy, predicate: `${sr}version`, object: JSON.stringify("1") },
@@ -352,7 +352,7 @@ write_authority_request() {
       { subject: queryTool, predicate: rdfType, object: `${sr}Tool` },
       { subject: queryTool, predicate: `${sr}operation`, object: JSON.stringify("dkg/query") },
       { subject: queryTool, predicate: `${sr}version`, object: JSON.stringify("1") },
-      { subject: queryTool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-tools/dkg-query@1") },
+      { subject: queryTool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-runtime/query-catalog@0.1.0") },
       { subject: policy, predicate: `${sr}allowsTool`, object: queryTool },
     );
     fs.writeFileSync(process.env.SMOKE_AUTHORITY_REQUEST_PATH, JSON.stringify({
