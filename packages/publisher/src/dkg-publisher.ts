@@ -1,5 +1,5 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal, PrepareContextGraphRegistrationOptions, PreparedContextGraphRegistration } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
@@ -1466,6 +1466,50 @@ export class DKGPublisher implements Publisher {
   /** RFC-001 §9 fallback author when no agent override is supplied. Returns undefined if no signer configured. */
   async publisherFallbackAuthorAddress(): Promise<string | undefined> {
     return this.resolvePublisherAddress();
+  }
+
+  /**
+   * Prepare context-graph registration in this publisher's execution context.
+   * A configured/resolved publisher is pinned exactly; an unpinned signer pool
+   * asks the adapter for its deterministic PCA-aware registration selection.
+   * The private adapter and wallet never escape this boundary.
+   */
+  async prepareContextGraphRegistration(
+    options: PrepareContextGraphRegistrationOptions = {},
+  ): Promise<PreparedContextGraphRegistration> {
+    const prepare = this.chain.prepareOnChainContextGraphRegistration;
+    if (!prepare) {
+      throw new Error(
+        'prepareContextGraphRegistration: chain adapter does not support prepared context-graph registration.',
+      );
+    }
+
+    const selection = await this.resolvePublisherAddressSelection();
+    const requestedPin = options.registrationSignerAddress
+      ? normalizePublisherAddress(options.registrationSignerAddress)
+      : undefined;
+    if (options.registrationSignerAddress && !requestedPin) {
+      throw new Error(
+        `prepareContextGraphRegistration: invalid registration signer address ${options.registrationSignerAddress}.`,
+      );
+    }
+    if (
+      selection.planningPin
+      && requestedPin
+      && selection.planningPin.toLowerCase() !== requestedPin.toLowerCase()
+    ) {
+      throw new Error(
+        `prepareContextGraphRegistration: requested signer ${requestedPin} does not match ` +
+        `${selection.planningPinLabel ?? 'the configured publisher'} ${selection.planningPin}.`,
+      );
+    }
+
+    const registrationSignerAddress = selection.planningPin ?? requestedPin;
+    return prepare.call(this.chain, {
+      registrationPcaAccountId: options.registrationPcaAccountId,
+      registrationSignerAddress,
+      preferPcaCoveredSigner: registrationSignerAddress === undefined,
+    });
   }
 
   /** Sign EIP-712 typed data with the publisher's own wallet. Returns KAv10's compact (r, vs). */

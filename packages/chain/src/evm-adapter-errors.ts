@@ -17,6 +17,59 @@ import {
 } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 
+export const PCA_COVERAGE_UNSUPPORTED_CODE = 'PCA_COVERAGE_UNSUPPORTED' as const;
+export const CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN_CODE =
+  'CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN' as const;
+export const CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE' as const;
+
+/**
+ * An explicit, decoupled PCA coverage request cannot be represented by the
+ * deployed ContextGraphs facade. Explicit intent must never silently become a
+ * paid legacy registration.
+ */
+export class PcaCoverageUnsupportedError extends Error {
+  readonly code = PCA_COVERAGE_UNSUPPORTED_CODE;
+  readonly facadeVersion: string;
+
+  constructor(facadeVersion: string) {
+    super(
+      `Explicit PCA registration coverage requires ContextGraphs 10.0.5 or newer; ` +
+      `the deployed facade reports ${facadeVersion}.`,
+    );
+    this.name = 'PcaCoverageUnsupportedError';
+    this.facadeVersion = facadeVersion;
+  }
+}
+
+/** A facade version could not be classified safely; retry after deployment/RPC recovery. */
+export class ContextGraphFacadeVersionUnknownError extends Error {
+  readonly code = CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN_CODE;
+  readonly retryable = true;
+
+  constructor(options?: { cause?: unknown }) {
+    super(
+      'Unable to determine the deployed ContextGraphs facade capability; retry after the RPC or deployment state stabilizes.',
+      options,
+    );
+    this.name = 'ContextGraphFacadeVersionUnknownError';
+  }
+}
+
+/** The signer sealed into a prepared capability is no longer in the adapter pool. */
+export class ContextGraphRegistrationSignerUnavailableError extends Error {
+  readonly code = CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE_CODE;
+  readonly signerAddress: string;
+
+  constructor(signerAddress: string) {
+    super(
+      `Prepared context-graph registration signer ${signerAddress} is no longer available in the EVM signer pool.`,
+    );
+    this.name = 'ContextGraphRegistrationSignerUnavailableError';
+    this.signerAddress = signerAddress;
+  }
+}
+
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   try { return JSON.stringify(err); } catch { return String(err); }

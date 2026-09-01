@@ -36,6 +36,12 @@ export {
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   formatNoFundedPublisherWalletMessage,
+  PCA_COVERAGE_UNSUPPORTED_CODE,
+  CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN_CODE,
+  CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE_CODE,
+  PcaCoverageUnsupportedError,
+  ContextGraphFacadeVersionUnknownError,
+  ContextGraphRegistrationSignerUnavailableError,
   type PublisherWalletBalance,
 } from './evm-adapter-errors.js';
 export {

@@ -607,8 +607,15 @@ export interface CreateOnChainContextGraphParams {
    * Registration-deposit behavior for this create attempt. `pca` uses an
    * account only for waiver coverage; `paid` explicitly disables coverage.
    * Omission preserves the legacy selector and its authority-coupled behavior.
-   */
+    */
   registrationDepositPolicy?: ContextGraphRegistrationDepositPolicy;
+  /**
+   * Attempt-scoped operational signer pin. This is primarily used by publisher
+   * execution contexts; callers should prefer
+   * `prepareOnChainContextGraphRegistration` so the selected signer cannot
+   * drift between preflight, allowance recovery, and submission.
+   */
+  registrationSignerAddress?: string;
   /**
    * OT-RFC-38 / LU-6 Phase B — opt-in stable wire identifier the
    * curator commits to at create time. Intended to be
@@ -631,6 +638,44 @@ export interface CreateOnChainContextGraphParams {
 
 export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'contextGraphId'> {
   contextGraphId: bigint;
+}
+
+export type ContextGraphRegistrationCoverageSource = 'explicit' | 'owned' | 'agent' | 'none';
+
+export interface ContextGraphRegistrationCoverage {
+  source: ContextGraphRegistrationCoverageSource;
+  accountId?: bigint;
+}
+
+/**
+ * Inputs consumed while selecting a context-graph registration capability.
+ * `registrationSignerAddress` pins an operational signer when a publisher has
+ * already selected one. `preferPcaCoveredSigner` is for an unpinned publisher
+ * pool: the first configured signer with fully verified coverage is selected,
+ * with the primary signer as the deterministic fallback.
+ */
+export interface PrepareContextGraphRegistrationOptions {
+  registrationPcaAccountId?: bigint;
+  registrationSignerAddress?: string;
+  preferPcaCoveredSigner?: boolean;
+}
+
+export type PreparedCreateOnChainContextGraphParams = Omit<
+  CreateOnChainContextGraphParams,
+  'registrationPcaAccountId' | 'registrationSignerAddress'
+>;
+
+/**
+ * Immutable, signer-pinned registration capability. The implementation seals
+ * both the signer and coverage decision; `submit` deliberately has no override
+ * fields so allowance approval and every retry use the same signer.
+ */
+export interface PreparedContextGraphRegistration {
+  signerAddress: string;
+  coverage: Readonly<ContextGraphRegistrationCoverage>;
+  submit(
+    params: PreparedCreateOnChainContextGraphParams,
+  ): Promise<CreateOnChainContextGraphResult>;
 }
 
 export interface VerifyParams {
@@ -1565,6 +1610,9 @@ export interface ChainAdapter {
   ): Promise<boolean>;
 
   // On-Chain Context Graphs (ContextGraphs contract)
+  prepareOnChainContextGraphRegistration?(
+    options?: PrepareContextGraphRegistrationOptions,
+  ): Promise<PreparedContextGraphRegistration>;
   createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
   verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
