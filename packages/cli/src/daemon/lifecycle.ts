@@ -1835,6 +1835,7 @@ async function runDaemonInnerWithStartupOwnership(
     syncOnConnectEnabled: config.syncOnConnectEnabled,
     syncSystemContextGraphsOnConnect: config.syncSystemContextGraphsOnConnect,
     durableSyncEnabled: config.durableSyncEnabled,
+    vmUpdateConvergenceEnabled: config.vmUpdateConvergenceEnabled,
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,
     syncGlobalQueueLimit: config.syncGlobalQueueLimit,

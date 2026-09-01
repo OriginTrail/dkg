@@ -710,6 +710,15 @@ export interface DkgConfig {
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
+   * Kill switch for W2 (#2435): chain-triggered re-verification of already-held
+   * Knowledge Assets whose on-chain Merkle root changed. Env
+   * `DKG_VM_UPDATE_CONVERGENCE_ENABLED` wins. Off means the chain lane is never
+   * subscribed, the drain never starts, and the intent file is never created —
+   * so a node that has run this feature can be rolled back to the base release
+   * without touching its data directory.
+   */
+  vmUpdateConvergenceEnabled?: boolean;
+  /**
    * Global cap for concurrent sync jobs. Defaults to 10; set 0 to disable.
    * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
    */

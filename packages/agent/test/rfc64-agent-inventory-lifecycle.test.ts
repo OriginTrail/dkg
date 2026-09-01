@@ -495,6 +495,51 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     expect(agent.started).toBe(false);
   });
 
+  it('a failing re-verify store close joins the startup aggregation and never blocks sibling teardown (review r2)', async () => {
+    const startupFailure = new Error('node start failed');
+    const reverifyCloseFailure = new Error('reverify close failed');
+    const recoveryCleanupFailure = new Error('finalization cleanup failed');
+    const inventoryCleanupFailure = new Error('RFC-64 cleanup failed');
+    const workerStop = vi.fn(async () => undefined);
+    const reverifyClose = vi.fn(async () => { throw reverifyCloseFailure; });
+    const recoveryClose = vi.fn(async () => { throw recoveryCleanupFailure; });
+    const inventoryClose = vi.fn(async () => { throw inventoryCleanupFailure; });
+    const agent = syntheticAgent();
+    Object.assign(agent, {
+      started: false,
+      coreHostRecordingGeneration: 0,
+      // Directly attached (NOT via config injection): an injected store is
+      // borrowed and deliberately never closed, so the close-failure path
+      // under test only exists for an owned one.
+      vmReverifyIntents: { close: reverifyClose },
+      vmReverifyWorker: { stop: workerStop },
+      prepareRfc64PersistenceV1: vi.fn(async () => {
+        agent.rfc64PersistenceV1 = { close: inventoryClose };
+      }),
+      prepareFinalizationRecoveryStore: vi.fn(async () => {
+        agent.finalizationRuntime.attachRecoveryStore({ close: recoveryClose } as any);
+      }),
+      node: { start: vi.fn(async () => { throw startupFailure; }) },
+      log: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    const rejection = await agent.start().catch((cause: unknown) => cause);
+
+    expect(rejection).toBeInstanceOf(AggregateError);
+    expect((rejection as AggregateError).errors).toEqual([
+      startupFailure,
+      reverifyCloseFailure,
+      recoveryCleanupFailure,
+      inventoryCleanupFailure,
+    ]);
+    expect(workerStop, 'the drain stops before its store closes').toHaveBeenCalledOnce();
+    expect(reverifyClose).toHaveBeenCalledOnce();
+    expect(agent.vmReverifyIntents, 'detached even though close failed').toBeUndefined();
+    expect(agent.vmReverifyWorker).toBeUndefined();
+    expect(agent.finalizationRuntime.getRecoveryStore()).toBeUndefined();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(agent.started).toBe(false);
+  });
   it('closes after network consumers and before the triple store, with idempotent stop', async () => {
     const order: string[] = [];
     const inventoryClose = vi.fn(() => { order.push('inventory'); });
@@ -648,6 +693,51 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await expect(agent.stop()).resolves.toBeUndefined();
   });
 
+  it('a failing re-verify close on a normal stop is aggregated with the other durable owners (review r2)', async () => {
+    const order: string[] = [];
+    const recoveryFailure = new Error('finalization recovery close failed');
+    const inventoryFailure = new Error('inventory close failed');
+    const reverifyFailure = new Error('reverify close failed');
+    const agent = minimalStartedAgent(
+      order,
+      async () => {
+        order.push('inventory');
+        throw inventoryFailure;
+      },
+      async () => {
+        order.push('recovery');
+        throw recoveryFailure;
+      },
+    );
+    Object.assign(agent, {
+      vmReverifyWorker: { stop: vi.fn(async () => { order.push('reverify-worker-stop'); }) },
+      vmReverifyIntents: { close: vi.fn(async () => { order.push('reverify'); throw reverifyFailure; }) },
+    });
+
+    const rejection = await agent.stop().catch((error: unknown) => error);
+
+    expect(rejection).toBeInstanceOf(AggregateError);
+    expect((rejection as AggregateError).message).toBe('Durable agent stores failed to close');
+    expect((rejection as AggregateError).errors).toEqual([
+      recoveryFailure,
+      inventoryFailure,
+      reverifyFailure,
+    ]);
+    expect(order).toEqual([
+      'node',
+      'sync-worker',
+      'reverify-worker-stop',
+      'reverify',
+      'recovery',
+      'control-store',
+      'inventory',
+      'store',
+    ]);
+    expect(agent.vmReverifyIntents, 'detached even though close failed').toBeUndefined();
+    expect(agent.vmReverifyWorker).toBeUndefined();
+    expect(agent.started).toBe(false);
+    await expect(agent.stop()).resolves.toBeUndefined();
+  });
   it.runIf(process.platform !== 'win32')(
     'restarts after graceful SIGTERM inventory release',
     async () => {

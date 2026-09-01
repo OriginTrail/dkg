@@ -35,7 +35,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, getMetrics, sparqlString, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, getMetrics, sparqlString, isSafeIri, assertSafeIri, parseDeterministicKnowledgeAssetUal,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   LEGACY_TRUST_LEVEL_PREDICATE,
@@ -96,8 +96,8 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, lookupGraphScopedOrLegacyMetadata, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { EVMChainAdapter, NoChainAdapter, probeVmReverifyCapability, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -125,6 +125,7 @@ import {
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   readMaterializedVersion, shouldApplyMaterialization, withMaterializationLock,
   type MaterializedVersion,
+  type KnowledgeAssetRootMutationEventV1,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -151,7 +152,7 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
-  buildReconciledKnowledgeAssetUal,
+  buildReconciledKnowledgeAssetUal, packKnowledgeAssetIdFromIdentity,
 } from './ka-identity.js';
 import {
   createCGMemberEnumerator,
@@ -510,9 +511,13 @@ import type { DKGAgent } from './dkg-agent.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
-import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+import {
+  resolveSyncReconcilerEnabled,
+  resolveVmUpdateConvergenceEnabled,
+} from './sync/backpressure.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
+
 
 type VmReconcileEngineResult = Awaited<ReturnType<typeof reconcileContextGraph>>;
 type VmReconcileTargetBase = {
@@ -2782,6 +2787,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       };
     }
     this.setContextGraphSubscription(localCgId, next);
+    // Taking a graph back into custody is new evidence about reachability, so
+    // W2 intents this graph previously gave up on become live work again
+    // (#2435, ADR-W2R-4).
+    this.reviveVmReverifyIntentsForContextGraph(localCgId);
     this.log.info(
       createOperationContext('system'),
       `Phase D: marked public cg=${numericStr} as core-hosted (will chain-reconcile to VM across restarts)`,
@@ -2883,14 +2892,93 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * coalescer so non-V10 / no-chain nodes pay nothing.
    */
   vmReconcileEnabled(this: DKGAgent): boolean {
+    // `this.chain` may be absent on synthetic/chainless agents (review r4):
+    // for them the honest answer is simply "not reconcilable".
     return (
       resolveSyncReconcilerEnabled(this.config.syncReconcilerEnabled)
-      &&
-      this.chain.chainId !== 'none' &&
-      typeof this.chain.getContextGraphKCCount === 'function' &&
-      typeof this.chain.getContextGraphKCAt === 'function' &&
-      typeof this.chain.getLatestMerkleRoot === 'function'
+      && this.chain != null
+      && this.chain.chainId !== 'none'
+      && typeof this.chain.getContextGraphKCCount === 'function'
+      && typeof this.chain.getContextGraphKCAt === 'function'
+      && typeof this.chain.getLatestMerkleRoot === 'function'
     );
+  }
+
+  /**
+   * Effective activation of W2 (#2435) — chain-triggered re-verification of an
+   * already-held KA whose on-chain root changed — together with the REASON it
+   * is off.
+   *
+   * One resolver, four conditions. The order is not cosmetic: when more than
+   * one holds, the FIRST is reported, and it has to be the one an operator can
+   * act on. A node with both switches off that answered `flag-off` would send
+   * them to flip the W2 flag, which would change nothing.
+   *
+   *  - the background reconciler is the thing this rides on. With it off, W2
+   *    off is the intended reading, not an accident, and it outranks every
+   *    other reason because nothing else can help until it is back;
+   *  - the operator switch (config, `DKG_VM_UPDATE_CONVERGENCE_ENABLED` wins);
+   *  - a `dataDir`, because an intent that does not survive a restart is not an
+   *    intent — the whole point is convergence across the downtime that caused
+   *    the divergence;
+   *  - a chain adapter that can actually yield all four root-mutation events.
+   *    An adapter that cannot is not partially useful here: subscribing to a
+   *    subset means silently missing every mutation of the other kinds, which
+   *    is precisely the failure this feature exists to end. Missing the method
+   *    entirely (an adapter that predates the branch) counts as missing all
+   *    four — fail closed, and say which one.
+   *
+   * The `reason` is what makes a disabled node diagnosable instead of merely
+   * quiet, so it is produced HERE rather than reconstructed by the status route.
+   */
+  async vmUpdateConvergenceState(
+    this: DKGAgent,
+    options: {
+      /**
+       * Stop before the adapter capability probe (review r4): store
+       * preparation uses this on the no-durable-backing path so the latched
+       * reason preserves the resolver's documented precedence — reconcile,
+       * flag, THEN no-data-dir — without a probe no arming could use.
+       */
+      skipAdapterProbe?: boolean;
+    } = {},
+  ): Promise<{ effective: boolean; reason?: string }> {
+    // What this process actually ARMED wins over a live re-probe (review r1):
+    // once startup has decided, a capability that recovers later — the Hub
+    // reachable again after a failed boot-time probe — must not report a
+    // feature as effective that has no store, no lane and no worker until the
+    // next restart. Pre-start calls (and the gate inside store preparation
+    // itself) still see the live probe.
+    if (this.vmReverifyActivation) return { ...this.vmReverifyActivation };
+    if (!this.vmReconcileEnabled()) return { effective: false, reason: 'reconcile-disabled' };
+    if (!resolveVmUpdateConvergenceEnabled(this.config.vmUpdateConvergenceEnabled)) {
+      return { effective: false, reason: 'flag-off' };
+    }
+    // An INJECTED store is a deliberate persistence substitute (review r1):
+    // it satisfies the durability condition the dataDir file otherwise
+    // provides, and nothing else — every other gate still applies to it.
+    if (!this.config.dataDir && !this.config.vmReverifyIntentStore) {
+      return { effective: false, reason: 'no-data-dir' };
+    }
+    if (options.skipAdapterProbe) return { effective: true };
+    // The capability itself is probed at the CHAIN boundary (review r4):
+    // `probeVmReverifyCapability` is typed against the adapter interface, so
+    // an operation rename breaks the chain package at compile time instead
+    // of letting this gate drift. The discriminated reasons are the same
+    // diagnostics this resolver always reported.
+    const capability = await probeVmReverifyCapability(this.chain);
+    if (!capability.supported) {
+      return { effective: false, reason: capability.reason };
+    }
+    // A failed store open reaches callers through the LATCH above — store
+    // preparation records `store-open-failed` on the same path that logs it,
+    // so no separate re-derivation from `vmReverifyIntentStoreFailure` exists
+    // here to drift from it.
+    return { effective: true };
+  }
+
+  async vmUpdateConvergenceEnabled(this: DKGAgent): Promise<boolean> {
+    return (await this.vmUpdateConvergenceState()).effective;
   }
 
   /**
@@ -3196,6 +3284,268 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * FIRST-ACTIVATION bootstrap audit (#2435, review r3; the plan’s recorded
+   * approach-C fallback, now decided).
+   *
+   * A durable lane cursor cannot exist before the feature is first enabled,
+   * so the lane’s bounded live seed leaves every mutation older than the
+   * activation lookback permanently invisible — and the ordinal sweep skips
+   * already-registered assets, so nothing else revisits them. The audit
+   * closes that window WITHOUT historical chain scans: every HELD
+   * graph-scoped asset gets one durable intent at position ZERO. Block 0
+   * satisfies the resolve rule (`versionBlock >= observedBlock`) on any
+   * coherent chain view, so the drain verifies each asset against the
+   * CURRENT chain root and repairs exactly the stale ones — riding the same
+   * bounded budgets and backoff ladder as live work.
+   *
+   * Crash-safe by ORDERING, not by a marker: the caller runs this BEFORE the
+   * poller’s first scan can persist a cursor, so a crash mid-audit leaves
+   * the node cursor-less and the next boot re-runs the audit; re-running is
+   * idempotent (an existing zero-position row reports `unchanged`). Without
+   * durable cursor persistence there is no first-activation signal, and the
+   * audit is skipped — an embedder without a cursor store re-seeds every
+   * boot and would re-audit every boot too.
+   */
+  /**
+   * The audit’s LIFECYCLE BOUNDARY (review r4): a cursor-store, triple-store
+   * or intent-store rejection from the one-time audit must not escape into a
+   * startup the node has already half-performed. The feature latches OFF for
+   * this process instead — the lane callback and the worker key off store
+   * presence, so neither arms and the mutation cursor cannot advance past an
+   * un-audited held set — and the still-cursor-less node retries the audit
+   * on its next boot.
+   */
+  async runVmReverifyBootstrapAudit(this: DKGAgent, ctx: OperationContext): Promise<void> {
+    try {
+      await this.bootstrapVmReverifyAuditIfFirstActivation(ctx);
+    } catch (error) {
+      this.log.error(
+        ctx,
+        `W2 first-activation audit failed; chain-triggered re-verification is DISABLED `
+        + `for this process and the audit retries on the next boot: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      await this.vmReverifyRuntime
+        .close(this.config.vmReverifyIntentStore)
+        .catch(() => undefined);
+      this.vmReverifyActivation = { effective: false, reason: 'bootstrap-audit-failed' };
+    }
+  }
+
+  async bootstrapVmReverifyAuditIfFirstActivation(
+    this: DKGAgent,
+    ctx: OperationContext,
+  ): Promise<void> {
+    const intents = this.vmReverifyIntents;
+    if (!intents) return;
+    const cursorStore = this.config.chainEventCursorStore as
+      | { loadLane?: (lane: string) => Promise<number | undefined> }
+      | undefined;
+    if (typeof cursorStore?.loadLane !== 'function') return;
+    const own = await cursorStore.loadLane('kaRootMutations');
+    // Only the lane’s OWN cursor suppresses the audit (review r4): it exists
+    // exactly when a prior W2 activation completed this audit and scanned
+    // all four mutation types forward from it. A RETIRED collectionUpdates
+    // cursor is deliberately NOT audit evidence — that lane covered
+    // lifecycle updates only, so an upgrade-with-migration still runs the
+    // one-time audit; the adopted cursor keeps its polling role unchanged.
+    if ((own ?? 0) > 0) return;
+
+    let audited = 0;
+    for (const [localCgId, subscription] of this.subscribedContextGraphs) {
+      if (!subscription.subscribed && !subscription.coreHosted) continue;
+      const metaGraph = contextGraphMetaGraphUri(localCgId);
+      const result = await this.store.query(
+        `SELECT DISTINCT ?ka WHERE {
+        GRAPH <${metaGraph}> {
+          ?ka <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
+          ?ka <http://dkg.io/ontology/kaUal> ?kaUal .
+        }
+      }`,
+        { source: 'agent.vmReverify.bootstrapAudit' },
+      );
+      if (result.type !== 'bindings') continue;
+      for (const row of result.bindings) {
+        const ual = String((row as Record<string, unknown>)['ka'] ?? '');
+        let kaId: string;
+        try {
+          const identity = parseDeterministicKnowledgeAssetUal(ual);
+          kaId = packKnowledgeAssetIdFromIdentity({
+            agentAddress: identity.agentAddress,
+            kaNumber: identity.kaNumber,
+          }).toString();
+        } catch {
+          // A marker subject that is not a deterministic KA UAL is not a held
+          // asset this feature can address; the exact fetch could not act on
+          // it either.
+          continue;
+        }
+        const outcome = await intents.upsert({
+          ual,
+          localCgId,
+          kaId,
+          kind: 'lifecycle-update',
+          position: {
+            blockNumber: 0,
+            blockHash: `0x${'0'.repeat(64)}`,
+            transactionHash: `0x${'0'.repeat(64)}`,
+            transactionIndex: 0,
+            logIndex: 0,
+          },
+        });
+        if (outcome !== 'unchanged') audited += 1;
+      }
+    }
+    if (audited > 0) {
+      this.log.info(
+        ctx,
+        `vm-reverify FIRST-ACTIVATION audit: ${audited} held asset(s) queued for verification against the current chain root`,
+      );
+      this.vmReverifyWorker?.kick();
+    }
+  }
+
+  /**
+   * Ingest one on-chain Knowledge-Asset root mutation (#2435).
+   *
+   * The chain event lane calls this for every `KnowledgeAssetUpdated`,
+   * `…MerkleRootAdded`, `…MerkleRootsUpdated` and `…MerkleRootRemoved` log it
+   * scans. The job is small and deliberately CHEAP — map the on-chain KA id to
+   * a UAL, ask the local store whether we hold it, and record a durable intent
+   * — because it runs once per event on every node, with no per-CG topic to
+   * narrow the stream. No chain reads happen here: the storage address comes
+   * from an already-resolved contract binding, and everything else the repair
+   * needs is re-read later by the drain.
+   *
+   * THE FAILURE CLASSIFICATION IS THE POINT.
+   *
+   * The lane does not swallow this callback's rejections: a rejection holds the
+   * lane cursor and re-scans the same window on the next poll. That is exactly
+   * right for a TRANSIENT failure and catastrophic for a DETERMINISTIC one — a
+   * single KA with malformed local metadata would re-throw on every poll, and
+   * the lane would stop advancing forever, silently, for every CG on the node.
+   *
+   * So: transient conditions (shutdown, a store query that rejected, an intent
+   * write that failed) propagate; deterministic ones (an unparseable event, a
+   * KA we do not hold, malformed local metadata, a legacy pre-V2 holding) are
+   * counted and dropped so the cursor moves past them. Dropping is safe here in
+   * a way it is not elsewhere: the repair is idempotent and chain-authoritative,
+   * so any later mutation of the same asset raises the intent again.
+   */
+  async handleKaRootMutationEvent(
+    this: DKGAgent,
+    event: KnowledgeAssetRootMutationEventV1,
+    ctx: OperationContext,
+  ): Promise<void> {
+    // Shutdown, or a store rotation in progress. Transient by construction:
+    // holding the cursor here re-delivers the event after the restart, which is
+    // precisely the downtime case this feature exists to cover.
+    if (this.graphScopedStoreClosed || !this.vmReconcileRuntimeReady) {
+      throw new VmReconcileQueueClosedError();
+    }
+    const intents = this.vmReverifyIntents;
+    if (!intents) {
+      // The lane is only wired when the store is open, so the sole realistic
+      // path here is teardown ordering — transient, same as above.
+      throw new VmReconcileQueueClosedError();
+    }
+
+    // Activation verified the METHOD exists (review r1); an address that does
+    // not RESOLVE yet is a transient contract-binding state, and the lane
+    // callback contract says a normal return means durable responsibility was
+    // taken. Dropping here would advance the cursor past a mutation that
+    // never became an intent — so the rejection holds the cursor instead.
+    const storageAddress = await this.chain.getDKGKnowledgeAssetsAddress?.();
+    if (!storageAddress) {
+      throw new Error(
+        `vm-reverify ingest: Knowledge Asset storage address is not resolved yet (ka=${event.kaId})`,
+      );
+    }
+
+    let ual: string;
+    try {
+      ual = buildReconciledKnowledgeAssetUal(
+        this.chain.chainId,
+        storageAddress,
+        BigInt(event.kaId),
+      );
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `vm-reverify ingest dropped an unparseable event ka=${event.kaId}: `
+        + `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+
+    // Do we hold it? The TAGGED metadata lookup (review r1) carries failure
+    // provenance as data: a store-query rejection is transient and must hold
+    // the lane cursor, malformed V2 metadata is deterministic and must let it
+    // advance — opposite handling, decided by an explicit result union
+    // instead of a local store shim. The third argument returning `null`
+    // means "no legacy fallback for this caller".
+    const lookup = await lookupGraphScopedOrLegacyMetadata<null>(
+      this.store,
+      ual,
+      async () => null,
+      { source: 'agent.vmReverify.ingest' },
+    );
+    if (lookup.kind === 'query-failed') throw lookup.cause;
+    if (lookup.kind === 'malformed') {
+      this.log.warn(
+        ctx,
+        `vm-reverify ingest dropped ual=${ual}: malformed local Knowledge Asset metadata `
+        + `(${lookup.cause instanceof Error ? lookup.cause.message : String(lookup.cause)})`,
+      );
+      return;
+    }
+    // The remaining variants ARE the resolution (review r4: flat union).
+    const resolved = lookup;
+
+    if (resolved.kind !== 'graph') {
+      // Not held here — which deliberately also covers a pre-V2 LEGACY holding.
+      // Legacy rows are a stated non-goal (no graph-scoped identity for the
+      // exact fetch to address; durable sync and the ordinal sweep still cover
+      // them), so this caller passes no legacy reader and a legacy marker
+      // resolves as `absent` rather than as its own case. Reporting a separate
+      // "legacy" outcome here would be a branch that can never be taken.
+      this.log.info(ctx, `vm-reverify ingest skipped ual=${ual}: not held here`);
+      return;
+    }
+
+    const localCgId = resolved.metadata.contextGraphId;
+    const subscription = this.subscribedContextGraphs.get(localCgId);
+    if (!subscription?.subscribed && !subscription?.coreHosted) {
+      this.log.info(
+        ctx,
+        `vm-reverify ingest skipped ual=${ual}: context graph "${localCgId}" is neither subscribed nor hosted`,
+      );
+      return;
+    }
+
+    // An intent-write failure is I/O and propagates: losing the record is the
+    // one outcome that would silently restore the original defect.
+    const outcome = await intents.upsert({
+      ual,
+      localCgId,
+      kaId: event.kaId,
+      kind: event.kind,
+      position: event.position,
+    });
+    // Nothing changed means a duplicate or re-scanned log. It must cost no log
+    // line and no drain slot, or the periodic wide re-scan would manufacture
+    // work proportional to the rescan window rather than to real mutations.
+    if (outcome === 'unchanged') return;
+
+    this.log.info(
+      ctx,
+      `vm-reverify ingest ${outcome} cg=${localCgId} ka=${event.kaId} ual=${ual} `
+      + `kind=${event.kind} block=${event.position.blockNumber}`,
+    );
+    this.vmReverifyWorker?.kick();
+  }
+
+  /**
    * Canonical evidence-gated VM reconciliation operation for one CG.
    *
    * All callers enter the same dispatcher; the admitted domain operation is
@@ -3226,7 +3576,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     localCgId: string,
     requestedUals: readonly string[],
-    options: { peerIds?: readonly string[] } = {},
+    options: {
+      peerIds?: readonly string[];
+      /**
+       * Suppress ONLY the `materializedVersion` ordering stamp on an asset
+       * found already-current (#2435, ADR-W2R-8; named for exactly that
+       * contract, review r3): a missing asset is still fetched, promoted and
+       * stamped — this is a stamp policy, not a read-only mode. Defaults off,
+       * so the operator route keeps its existing behaviour exactly.
+       */
+      suppressAlreadyCurrentStamp?: boolean;
+      /**
+       * Admission priority for the peer fetches this call issues. Defaults to
+       * the operator route's `vm-recovery` priority; the automatic re-verify
+       * drain lowers it so background convergence can never displace work an
+       * operator asked for (ADR-W2R-9).
+       */
+      admissionPriority?: number;
+    } = {},
   ): Promise<ContextGraphAssetFetchResult> {
     if (this.started && (!this.vmReconcileRuntimeReady || this.graphScopedStoreClosed)) {
       throw new VmReconcileQueueClosedError();
@@ -3294,26 +3661,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
           batchId: item.batchId,
           versionBlock: item.versionBlock,
           authorAddress: item.authorAddress,
+          ...(options.suppressAlreadyCurrentStamp ? { suppressAlreadyCurrentStamp: true } : {}),
         }, ctx);
         if (outcome === 'promoted') return 'materialized';
         if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';
         return 'missing';
       },
-      resolvePeerIds: async () => {
-        const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId, {
-          maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
-          signal,
-          isCurrent,
-        }).catch(() => ({ peerIds: [] as string[] }));
-        if (!isCurrent()) throw new VmReconcileQueueClosedError();
-        const connectedPeerIds = this.node?.libp2p?.getConnections?.()
-          ?.map((connection) => connection.remotePeer.toString()) ?? [];
-        return [...new Set([
-          ...curatorResolution.peerIds,
-          this.preferredSyncPeers.get(localCgId),
-          ...connectedPeerIds,
-        ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))];
-      },
+      // The canonical recovery-peer ordering, shared with the paired W2 SWM
+      // recovery (review r1): two hand-mirrored orderings would eventually
+      // disagree, and the pairing only works while both chase the same peers.
+      resolvePeerIds: () => this.resolveContextGraphRecoveryPeerIds(localCgId, {
+        ...(signal ? { signal } : {}),
+        isCurrent,
+      }),
       preparePeer: async (peerId) => {
         await this.ensurePeerConnected(peerId, { signal });
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
@@ -3333,7 +3693,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           peerId,
           localCgId,
           [...uals],
-          { signal, isCurrent },
+          {
+            signal,
+            isCurrent,
+            ...(options.admissionPriority === undefined
+              ? {}
+              : { admissionPriority: options.admissionPriority }),
+          },
         );
       },
       flush: async () => {

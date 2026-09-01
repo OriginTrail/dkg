@@ -156,6 +156,14 @@ export {
   SERVED_EVENT_TYPES,
   type KnowledgeAssetRootMutationEventType,
 } from './evm-adapter-events.js';
+// The typed capability probe activation consumes instead of reconstructing
+// adapter coherence through runtime reflection (review r4).
+export {
+  VM_REVERIFY_REQUIRED_OPERATIONS,
+  probeVmReverifyCapability,
+  type VmReverifyCapabilityResult,
+  type VmReverifyRequiredOperation,
+} from './vm-reverify-capability.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
   ChainRpcTransportError,

@@ -12,6 +12,19 @@ export type GraphScopedOrLegacyMetadata<TLegacy> =
   | { readonly kind: 'absent' };
 
 /**
+ * The same resolution with failure PROVENANCE as data (W2 review r1): a
+ * store-query rejection (transient I/O — the caller's cursor/retry problem)
+ * and malformed V2 metadata (deterministic — a data problem) surface as
+ * distinct variants instead of indistinguishable bare `Error`s. A rejection
+ * from the caller-supplied legacy reader is not classified here — it belongs
+ * to that caller — and propagates as-is.
+ */
+export type GraphScopedMetadataLookup<TLegacy> =
+  | GraphScopedOrLegacyMetadata<TLegacy>
+  | { readonly kind: 'query-failed'; readonly cause: unknown }
+  | { readonly kind: 'malformed'; readonly cause: unknown };
+
+/**
  * Resolve graph-scoped control metadata before attempting a legacy lookup.
  *
  * This is the canonical fail-closed ordering shared by query and private
@@ -24,6 +37,25 @@ export async function resolveGraphScopedOrLegacyMetadata<TLegacy>(
   loadLegacyMetadata: () => Promise<TLegacy | null>,
   queryOptions?: QueryOptions,
 ): Promise<GraphScopedOrLegacyMetadata<TLegacy>> {
+  const lookup = await lookupGraphScopedOrLegacyMetadata(
+    store,
+    ual,
+    loadLegacyMetadata,
+    queryOptions,
+  );
+  // The throwing contract predates the tagged lookup: existing callers see
+  // the ORIGINAL error object, exactly as before the classification existed.
+  if (lookup.kind === 'query-failed' || lookup.kind === 'malformed') throw lookup.cause;
+  return lookup;
+}
+
+/** The tagged variant — see {@link GraphScopedMetadataLookup}. */
+export async function lookupGraphScopedOrLegacyMetadata<TLegacy>(
+  store: Pick<TripleStore, 'query'>,
+  ual: string,
+  loadLegacyMetadata: () => Promise<TLegacy | null>,
+  queryOptions?: QueryOptions,
+): Promise<GraphScopedMetadataLookup<TLegacy>> {
   // Canonicalize a bare deterministic UAL before the V2 marker lookup. V2
   // markers are stored under the canonical form (lowercase author address,
   // BigInt-normalized KA number), so a checksum-cased or leading-zero variant
@@ -37,14 +69,24 @@ export async function resolveGraphScopedOrLegacyMetadata<TLegacy>(
   } catch {
     // Non-deterministic identifiers remain eligible for legacy read-both.
   }
-  const result = await store.query(
-    buildGraphKnowledgeAssetMetadataQuery(graphScopedUal),
-    queryOptions,
-  );
-  const parsed = parseGraphKnowledgeAssetMetadataBindings(
-    graphScopedUal,
-    result.type === 'bindings' ? result.bindings : [],
-  );
+  let result;
+  try {
+    result = await store.query(
+      buildGraphKnowledgeAssetMetadataQuery(graphScopedUal),
+      queryOptions,
+    );
+  } catch (cause) {
+    return { kind: 'query-failed', cause };
+  }
+  let parsed;
+  try {
+    parsed = parseGraphKnowledgeAssetMetadataBindings(
+      graphScopedUal,
+      result.type === 'bindings' ? result.bindings : [],
+    );
+  } catch (cause) {
+    return { kind: 'malformed', cause };
+  }
   if (parsed.kind === 'graph') return parsed;
 
   const legacyMetadata = await loadLegacyMetadata();

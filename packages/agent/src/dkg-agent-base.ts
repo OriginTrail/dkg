@@ -19,6 +19,15 @@ import {
   openSqliteFinalizationRecoveryStore,
 } from './finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
+import {
+  openSqliteVmReverifyIntentStore,
+} from './vm-reverify-intent-sqlite-store.js';
+import {
+  VM_REVERIFY_INTENTS_DATABASE_FILENAME,
+  type VmReverifyIntentStore,
+} from './vm-reverify-intent-store.js';
+import { VmReverifyRuntime } from './vm-reverify-runtime.js';
+import type { VmReverifyWorker } from './vm-reverify-worker.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64CatalogSynchronizationEvidenceV1 } from
@@ -1198,6 +1207,56 @@ export class DKGAgentBase {
    * protected by it. Agents without dataDir remain deliberately dormant.
    */
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
+  /**
+   * W2 (#2435) has ONE runtime owner (review r2): activation, store
+   * ownership, worker lifecycle and ordered teardown are transitions on
+   * {@link VmReverifyRuntime}. The accessors below delegate, so the agent
+   * surface every consumer and wiring test proves through is unchanged —
+   * absence of the store IS still the kill switch. Lazily constructed
+   * because synthetic lifecycle tests build agents via Object.create.
+   */
+  private _vmReverifyRuntime?: VmReverifyRuntime;
+
+  protected get vmReverifyRuntime(): VmReverifyRuntime {
+    if (!this._vmReverifyRuntime) this._vmReverifyRuntime = new VmReverifyRuntime();
+    return this._vmReverifyRuntime;
+  }
+
+  /** Durable re-verification intents; `undefined` IS the kill switch. */
+  get vmReverifyIntents(): VmReverifyIntentStore | undefined {
+    return this.vmReverifyRuntime.store;
+  }
+
+  set vmReverifyIntents(store: VmReverifyIntentStore | undefined) {
+    this.vmReverifyRuntime.store = store;
+  }
+
+  /** The drain; like the store, its absence is the kill switch. */
+  get vmReverifyWorker(): VmReverifyWorker | undefined {
+    return this.vmReverifyRuntime.worker;
+  }
+
+  set vmReverifyWorker(worker: VmReverifyWorker | undefined) {
+    this.vmReverifyRuntime.worker = worker;
+  }
+
+  /** Why the intent store could not be opened, for the status resolver. */
+  get vmReverifyIntentStoreFailure(): string | undefined {
+    return this.vmReverifyRuntime.openFailure;
+  }
+
+  set vmReverifyIntentStoreFailure(failure: string | undefined) {
+    this.vmReverifyRuntime.openFailure = failure;
+  }
+
+  /** The activation outcome this process actually ARMED (review r1). */
+  get vmReverifyActivation(): { effective: boolean; reason?: string } | undefined {
+    return this.vmReverifyRuntime.activation;
+  }
+
+  set vmReverifyActivation(activation: { effective: boolean; reason?: string } | undefined) {
+    this.vmReverifyRuntime.activation = activation;
+  }
   /** Explicit owner for finalization persistence and network identity lifetimes. */
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /**
@@ -1846,6 +1905,39 @@ export class DKGAgentBase {
     this.finalizationRuntime.attachRecoveryStore(store);
   }
 
+  /**
+   * Open the W2 re-verification intent file — but ONLY when the feature is
+   * effectively on (#2435, ADR-W2R-6).
+   *
+   * The gate is on the OPEN, not merely on the writes, and that is the whole
+   * point: with the switch off this release must leave a `dataDir` byte-for-byte
+   * as the base release left it, so a rollback is a non-event. An injected store
+   * (tests) is used as-is and no file is touched.
+   *
+   * A FAILED open must not take the node down. This runs inside the startup
+   * `try` whose contract is "fail the boot", which is right for the finalization
+   * inbox — core durability — and wrong for an optional, kill-switchable
+   * background convergence feature: a disk error or a stray permission on this
+   * scratch file would make the node unbootable, and the operator's remedy
+   * (turn the switch off) requires a boot to discover the cause. That is the
+   * exact property ADR-W2R-6 gave this feature its own file to avoid, so the
+   * failure is caught here, reported LOUDLY with the flag and the path, and the
+   * feature stays off while the node starts. Silence would be the other error:
+   * an operator who enabled convergence would have no way to see it never
+   * armed, which is a documented bypass wearing a guard's clothes.
+   */
+  protected async prepareVmReverifyIntentStore(): Promise<void> {
+    await this.vmReverifyRuntime.prepare({
+      ...(this.config.dataDir === undefined ? {} : { dataDir: this.config.dataDir }),
+      ...(this.config.vmReverifyIntentStore === undefined
+        ? {}
+        : { injected: this.config.vmReverifyIntentStore }),
+      resolveState: (options) => (this as unknown as DKGAgent).vmUpdateConvergenceState(options),
+      logError: (message) =>
+        this.log.error(createOperationContext('system'), message),
+    });
+  }
+
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
   protected async yieldRfc64InventoryV1StartupBatch(): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1866,6 +1958,20 @@ export class DKGAgentBase {
     await this.finalizationHandler?.stopRecoveryWorker();
     const store = this.finalizationRuntime.detachRecoveryStore();
     await store?.close();
+  }
+
+  /**
+   * Release the intent file. Detached before closing so a failed close cannot
+   * be retried against a half-closed handle, and so a restart in the same
+   * process opens a fresh one.
+   *
+   * An INJECTED store belongs to whoever injected it (a test that keeps
+   * asserting on it across a restart), so it is only detached, never closed.
+   */
+  protected async closeVmReverifyIntentStore(): Promise<void> {
+    // Worker-before-store ordering, borrowed-store detachment and the latch
+    // clear are properties of the runtime (review r2), not of this caller.
+    await this.vmReverifyRuntime.close(this.config.vmReverifyIntentStore);
   }
 
   async getFinalizationRecoveryHealth(): Promise<FinalizationRecoveryHealth> {

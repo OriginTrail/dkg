@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   ContextGraphAssetFetchConflictError,
@@ -84,6 +85,10 @@ function createFetchHost(options: {
     requireLocalCgMatchesOnChainSlot: async () => true,
     getOrCreateFinalizationHandler: () => ({ handleExactChainReconciledKC: inspect }),
     resolveCuratorPeerIdsForCg: async () => ({ peerIds: options.noPeers ? [] : [PEER] }),
+    // The REAL canonical recovery-peer ordering (review r1), driven against
+    // this fake host's curator/preferred/connected inputs.
+    resolveContextGraphRecoveryPeerIds:
+      LifecycleSyncMethods.prototype.resolveContextGraphRecoveryPeerIds,
     preferredSyncPeers: new Map<string, string>(),
     peerId: '12D3KooWExactFetchLocal',
     node: {

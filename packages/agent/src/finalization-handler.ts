@@ -358,6 +358,19 @@ export interface ChainReconciledKCInput {
   authorAddress?: string;
   subGraphName?: string;
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
+  /**
+   * Inspect WITHOUT stamping (#2435, ADR-W2R-8).
+   *
+   * The already-current path normally records `materializedVersion` at the
+   * pinned chain head. That is right for a caller reconciling the graph, and
+   * wrong for a caller that is merely CHECKING one asset because a chain event
+   * mentioned it: gossip ordering (`shouldApplyMaterialization`) rejects a
+   * write whose block stamp is below the stored one, so a check that stamps the
+   * head can make a genuinely newer assertion — delivered a moment later at a
+   * lower block — permanently unapplicable. An inspection must be able to
+   * observe state without changing what the node will later accept.
+   */
+  suppressAlreadyCurrentStamp?: boolean;
 }
 
 export type ChainReconciledKCOutcome =
@@ -1415,6 +1428,7 @@ export class FinalizationHandler {
     batchId: bigint;
     versionBlock: number;
     subGraphName?: string;
+    suppressAlreadyCurrentStamp?: boolean;
   }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
     const resolution = await resolveConfirmedGraphScopedVm(this.store, {
       contextGraphId: input.contextGraphId,
@@ -1441,6 +1455,7 @@ export class FinalizationHandler {
       contextGraphId: input.contextGraphId,
       scope: resolution.scope,
       materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
+      suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
     });
     this.log.info(
       ctx,
@@ -1540,6 +1555,7 @@ export class FinalizationHandler {
     authorAddress?: string;
     subGraphName?: string;
     trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
+    suppressAlreadyCurrentStamp?: boolean;
   }, ctx: OperationContext): Promise<
     | 'promoted'
     | 'already-confirmed'
@@ -1604,6 +1620,7 @@ export class FinalizationHandler {
           batchId,
           versionBlock,
           ...(subGraphName ? { subGraphName } : {}),
+          ...(input.suppressAlreadyCurrentStamp ? { suppressAlreadyCurrentStamp: true } : {}),
         }, ctx)) ?? 'no-swm';
       }
       // Named recovery carries receipt/seal-validated immutable evidence. A
@@ -1619,6 +1636,7 @@ export class FinalizationHandler {
         batchId,
         versionBlock,
         ...(subGraphName ? { subGraphName } : {}),
+        ...(input.suppressAlreadyCurrentStamp ? { suppressAlreadyCurrentStamp: true } : {}),
       }, ctx);
     }
 
@@ -1722,6 +1740,7 @@ export class FinalizationHandler {
           contextGraphId,
           scope,
           materializedVersion,
+          suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
         });
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
@@ -1744,6 +1763,7 @@ export class FinalizationHandler {
             contextGraphId,
             scope,
             materializedVersion,
+            suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
           });
           this.log.info(
             ctx,
@@ -1812,6 +1832,7 @@ export class FinalizationHandler {
             verification: vmVerification,
           },
           unavailableReason: `trusted receipt provenance (${recovery.reason})`,
+          suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
           ctx,
         });
       }
@@ -1888,6 +1909,7 @@ export class FinalizationHandler {
           layer: MemoryLayer.SharedWorkingMemory,
           verification: swmVerification,
         },
+        suppressAlreadyCurrentStamp: input.suppressAlreadyCurrentStamp,
         ctx,
       });
     }
@@ -1947,6 +1969,7 @@ export class FinalizationHandler {
     verifiedLayer: VerifiedPublicFinalizedLayer;
     /** VM repair keeps the receipt recovery diagnostic in its defer log. */
     unavailableReason?: string;
+    suppressAlreadyCurrentStamp?: boolean;
     ctx: OperationContext;
   }): Promise<PublicFinalizedMaterializationOutcome> {
     const {
@@ -1961,6 +1984,7 @@ export class FinalizationHandler {
       subGraphName,
       verifiedLayer,
       unavailableReason,
+      suppressAlreadyCurrentStamp,
       ctx,
     } = input;
     const contentAlreadyMaterialized = verifiedLayer.layer === MemoryLayer.VerifiableMemory;
@@ -2033,6 +2057,7 @@ export class FinalizationHandler {
           contextGraphId,
           scope,
           materializedVersion: finalizedVersion,
+          suppressAlreadyCurrentStamp,
         });
         this.log.info(
           ctx,
@@ -2060,6 +2085,7 @@ export class FinalizationHandler {
       subGraphName,
       source: 'chain-reconcile',
       contentAlreadyMaterialized,
+      suppressAlreadyCurrentStamp,
       ctx,
     });
     if (outcome === 'stale') return 'stale-target';
@@ -2165,6 +2191,8 @@ export class FinalizationHandler {
     subGraphName?: string;
     source: 'finalization' | 'chain-reconcile';
     contentAlreadyMaterialized?: boolean;
+    /** ADR-W2R-8: an inspection must leave a FOUND ordering stamp untouched. */
+    suppressAlreadyCurrentStamp?: boolean;
     ctx: OperationContext;
   }): Promise<'applied' | 'stale' | 'preserved-metadata'> {
     const {
@@ -2182,6 +2210,7 @@ export class FinalizationHandler {
       subGraphName,
       source,
       contentAlreadyMaterialized = false,
+      suppressAlreadyCurrentStamp = false,
       ctx,
     } = input;
     const materializedVersion = confirmation.materializedVersion;
@@ -2261,7 +2290,17 @@ export class FinalizationHandler {
         return 'preserved-metadata' as const;
       }
 
-      const effectiveVersion = incomingVersionIsStale
+      // ADR-W2R-8 (review r4): an INSPECTION repairing metadata over content
+      // that is already materialized must leave the ordering stamp exactly
+      // as it found it — the sweep’s versionBlock is an observation point,
+      // not the publication, so raising the stamp to it would make a later,
+      // genuinely newer assertion at a lower block permanently unapplicable.
+      // A MISSING stamp is still written: envelope completeness is what the
+      // repair exists to restore, and there is no found ordering to protect.
+      const preserveFoundStamp = suppressAlreadyCurrentStamp
+        && contentAlreadyMaterialized
+        && currentMaterializedVersion !== null;
+      const effectiveVersion = incomingVersionIsStale || preserveFoundStamp
         ? currentMaterializedVersion
         : materializedVersion;
       let metadataConfirmation: Parameters<typeof generateGraphKnowledgeAssetMetadata>[1];
@@ -2552,11 +2591,27 @@ export class FinalizationHandler {
   }
 
   /** Advance only the O(1) ordering stamp after exact VM and metadata verification. */
+  /**
+   * Advance the graph-scoped materialization stamp — unless the caller is only
+   * INSPECTING (#2435, ADR-W2R-8).
+   *
+   * The check lives HERE, at the writer, rather than being repeated at each
+   * already-current call site. Three copies of a guard are three chances to
+   * forget one, and a regression that re-stamped through only one door would
+   * have survived a mutant that forced the other two. One writer, one decision,
+   * one site to mutate.
+   *
+   * `suppressAlreadyCurrentStamp` is optional and defaults to advancing, so the PROMOTION path
+   * — which must always record the version it just materialized — is untouched
+   * by construction rather than by remembering not to pass the flag.
+   */
   private async advanceExactGraphScopedVersion(input: {
     contextGraphId: string;
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     materializedVersion: MaterializedVersion;
+    suppressAlreadyCurrentStamp?: boolean;
   }): Promise<void> {
+    if (input.suppressAlreadyCurrentStamp) return;
     const metaGraph = contextGraphMetaUri(input.contextGraphId);
     await withMaterializationLock(metaGraph, input.scope.ual, async () => {
       const current = await readMaterializedVersion(
@@ -3167,6 +3222,7 @@ export class FinalizationHandler {
       authorAddress,
       subGraphName,
       trustedAssertionEvidence,
+      ...(input.suppressAlreadyCurrentStamp ? { suppressAlreadyCurrentStamp: true } : {}),
     }, ctx);
     if (graphScopedOutcome !== undefined) {
       return { outcome: graphScopedOutcome, legacyEligible: false, input };

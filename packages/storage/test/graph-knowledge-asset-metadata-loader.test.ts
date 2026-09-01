@@ -4,6 +4,7 @@ import {
   parseDeterministicKnowledgeAssetUal,
 } from '@origintrail-official/dkg-core';
 import {
+  lookupGraphScopedOrLegacyMetadata,
   resolveGraphScopedOrLegacyMetadata,
   type QueryResult,
   type TripleStore,
@@ -12,6 +13,60 @@ import {
 const UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
 const META = 'did:dkg:context-graph:test/_meta';
 
+describe('tagged metadata lookup — failure provenance as data (W2 r1)', () => {
+  it('reports a store-query rejection as query-failed with the ORIGINAL cause', async () => {
+    const boom = new Error('scheduler busy');
+    const store = {
+      query: vi.fn(async (): Promise<QueryResult> => { throw boom; }),
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    const lookup = await lookupGraphScopedOrLegacyMetadata(store, UAL, async () => null);
+
+    expect(lookup).toEqual({ kind: 'query-failed', cause: boom });
+
+    // And the throwing variant surfaces the SAME original object — existing
+    // callers must be able to keep matching on the store error class.
+    await expect(resolveGraphScopedOrLegacyMetadata(store, UAL, async () => null))
+      .rejects.toBe(boom);
+  });
+
+  it('reports malformed V2 metadata as malformed, with the parser error as cause (review r2)', async () => {
+    // A NON-EMPTY marker binding set with no contentScopeVersion: the parser
+    // deterministically THROWS on it. The exact discriminant matters — a
+    // catch that classified this as resolved/absent would silently turn data
+    // corruption into “not held here” and the ingest would drop the event.
+    const store = {
+      query: vi.fn(async (): Promise<QueryResult> => ({
+        type: 'bindings',
+        bindings: [{ g: META } as never],
+      })),
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    const lookup = await lookupGraphScopedOrLegacyMetadata(store, UAL, async () => null);
+
+    expect(lookup.kind).toBe('malformed');
+    const cause = (lookup as { cause: unknown }).cause;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as Error).message).toMatch(/contentScopeVersion/);
+
+    // And the throwing variant surfaces the parser error (a fresh lookup, so
+    // message equality is the honest assertion — object identity is pinned by
+    // the query-failed row, whose cause is a caller-held singleton).
+    await expect(resolveGraphScopedOrLegacyMetadata(store, UAL, async () => null))
+      .rejects.toThrow(/contentScopeVersion/);
+  });
+
+  it('does not classify a legacy-reader rejection — it belongs to the caller', async () => {
+    const legacyBoom = new Error('legacy reader exploded');
+    const store = {
+      query: vi.fn(async (): Promise<QueryResult> => ({ type: 'bindings', bindings: [] })),
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    await expect(
+      lookupGraphScopedOrLegacyMetadata(store, UAL, async () => { throw legacyBoom; }),
+    ).rejects.toBe(legacyBoom);
+  });
+});
 describe('graph-scoped-first metadata resolution', () => {
   it('loads graph-scoped metadata before invoking the legacy fallback', async () => {
     const order: string[] = [];

@@ -221,7 +221,9 @@ export {
   type Rfc64SharedProjectionStreamResultV1,
 } from './rfc64-shared-projection-stream-gateway.js';
 export {
+  lookupGraphScopedOrLegacyMetadata,
   resolveGraphScopedOrLegacyMetadata,
+  type GraphScopedMetadataLookup,
   type GraphScopedOrLegacyMetadata,
 } from './graph-knowledge-asset-metadata-loader.js';
 

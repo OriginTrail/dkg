@@ -54,6 +54,7 @@ import type {
 import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
+import type { VmReverifyIntentStore } from './vm-reverify-intent-store.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
 import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
 import type { JsonLdContent } from './dkg-agent-utils.js';
@@ -1564,6 +1565,19 @@ export interface DKGAgentConfig {
   syncSystemContextGraphsOnConnect?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
+  /**
+   * Kill switch for W2 (#2435): chain-triggered re-verification of already-held
+   * Knowledge Assets whose on-chain Merkle root changed. Env
+   * `DKG_VM_UPDATE_CONVERGENCE_ENABLED` wins. Off means the lane is never
+   * subscribed, the worker never starts, and the intent file is never created.
+   */
+  vmUpdateConvergenceEnabled?: boolean;
+  /**
+   * Durable store for W2 re-verification intents. Production leaves this unset
+   * and gets an agent-owned SQLite file under `dataDir`; tests inject an
+   * in-memory implementation.
+   */
+  vmReverifyIntentStore?: VmReverifyIntentStore;
   /**
    * Global cap for concurrent sync jobs. Defaults to 10; set 0 to disable.
    * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.

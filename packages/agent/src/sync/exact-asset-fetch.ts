@@ -8,6 +8,15 @@ import { runBoundedPreparedPeerTraversal } from './prepared-peer-traversal.js';
 
 export const MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS = 5;
 
+/**
+ * Sync-admission priority of an exact asset fetch an OPERATOR asked for.
+ *
+ * Named rather than repeated as a literal because a second, automatic caller
+ * now exists and the whole point of ADR-W2R-9 is that it sits BELOW this one:
+ * two bare `1_000`s in different files would make that ordering invisible.
+ */
+export const EXACT_ASSET_FETCH_ADMISSION_PRIORITY = 1_000;
+
 export type ContextGraphAssetFetchItemStatus =
   | 'already-present'
   | 'materialized'
@@ -18,6 +27,17 @@ export interface ContextGraphAssetFetchItemResult {
   ual: string;
   kaId: string;
   status: ContextGraphAssetFetchItemStatus;
+  /**
+   * Block at which the on-chain version this item was judged against was read.
+   *
+   * The evidence has always carried it (`ExactAssetFetchEvidence.versionBlock`);
+   * it was simply not reported. A caller acting on a chain EVENT needs it: the
+   * pinned chain view resolves through a failover sequence that can land on an
+   * endpoint lagging behind the event, and `already-present` from such a view
+   * means "current as of a block before your event" — not "current". Without
+   * this field that distinction is unobservable to the caller.
+   */
+  versionBlock: number;
 }
 
 export interface ContextGraphAssetFetchResult {
@@ -43,12 +63,40 @@ export class ContextGraphAssetFetchValidationError extends Error {
   }
 }
 
-export class ContextGraphAssetFetchConflictError extends Error {
-  readonly code = 'ContextGraphAssetFetchConflict';
+/**
+ * Why an exact fetch refused to act, as a stable machine-readable value.
+ *
+ * An automatic caller has to tell "one endpoint was behind" (try again shortly)
+ * apart from "the chain says this UAL is not that asset" (stop and be loud).
+ * Both arrive as the same exception class with only a human-readable message,
+ * so classifying by message text would be the only alternative — and would
+ * break the first time a message is reworded.
+ */
+export type ContextGraphAssetFetchConflictCode =
+  /** The UAL belongs to a different network than this node's chain. */
+  | 'wrong-network'
+  /** The KA is not registered to any on-chain Context Graph. */
+  | 'not-registered'
+  /** Not every configured endpoint answered the pinned version view. */
+  | 'snapshot-unavailable'
+  /** Registered, but with no committed Merkle root (`rootCount <= 0`). */
+  | 'no-committed-version'
+  /** The chain answered with a root/block/address this code cannot use. */
+  | 'invalid-evidence'
+  /** The assets' on-chain CG does not match the CG the caller named. */
+  | 'binding-mismatch';
 
-  constructor(message: string) {
+export class ContextGraphAssetFetchConflictError extends Error {
+  /**
+   * The classification, NOT the class name — `name` already carries that, and
+   * a second copy of it was information-free. Nothing read the previous value.
+   */
+  readonly code: ContextGraphAssetFetchConflictCode;
+
+  constructor(code: ContextGraphAssetFetchConflictCode, message: string) {
     super(message);
     this.name = 'ContextGraphAssetFetchConflictError';
+    this.code = code;
   }
 }
 
@@ -115,6 +163,7 @@ function bytes32FromHex(value: string, ual: string): Uint8Array {
   const hex = value.replace(/^0x/i, '');
   if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
     throw new ContextGraphAssetFetchConflictError(
+      'invalid-evidence',
       `Knowledge Asset ${ual} has an invalid latest Merkle root`,
     );
   }
@@ -177,6 +226,7 @@ function requireOrderedAssetRequests(
     }
     if (identity.chainId !== chainId) {
       throw new ContextGraphAssetFetchConflictError(
+        'wrong-network',
         `Knowledge Asset ${identity.ual} belongs to network ${identity.chainId}, not ${chainId}`,
       );
     }
@@ -209,31 +259,37 @@ async function resolveEvidence(
   const onChainCgId = rawOnChainCgId.toString();
   if (onChainCgId === '0') {
     throw new ContextGraphAssetFetchConflictError(
+      'not-registered',
       `Knowledge Asset ${ual} is not registered to a Context Graph`,
     );
   }
   if (!snapshot) {
     throw new ContextGraphAssetFetchConflictError(
+      'snapshot-unavailable',
       `Knowledge Asset ${ual} has no coherent on-chain version snapshot`,
     );
   }
   if (snapshot.rootCount <= 0n) {
     throw new ContextGraphAssetFetchConflictError(
+      'no-committed-version',
       `Knowledge Asset ${ual} has no committed on-chain version`,
     );
   }
   if (!Number.isSafeInteger(snapshot.blockNumber) || snapshot.blockNumber < 0) {
     throw new ContextGraphAssetFetchConflictError(
+      'invalid-evidence',
       `Knowledge Asset ${ual} has an invalid version block`,
     );
   }
   if (typeof snapshot.latestPublisher !== 'string' || snapshot.latestPublisher.length === 0) {
     throw new ContextGraphAssetFetchConflictError(
+      'invalid-evidence',
       `Knowledge Asset ${ual} has no latest publisher on-chain`,
     );
   }
   if (typeof snapshot.latestAuthor !== 'string' || snapshot.latestAuthor.length === 0) {
     throw new ContextGraphAssetFetchConflictError(
+      'invalid-evidence',
       `Knowledge Asset ${ual} has no latest author on-chain`,
     );
   }
@@ -278,11 +334,13 @@ export async function runExactAssetFetch(
   const onChainId = evidence[0]!.onChainCgId;
   if (evidence.some((item) => item.onChainCgId !== onChainId)) {
     throw new ContextGraphAssetFetchConflictError(
+      'binding-mismatch',
       'All requested Knowledge Assets must belong to the same on-chain Context Graph',
     );
   }
   if (input.expectedOnChainId && input.expectedOnChainId !== onChainId) {
     throw new ContextGraphAssetFetchConflictError(
+      'binding-mismatch',
       `Requested assets belong to on-chain Context Graph ${onChainId}, `
         + `not the node's bound Context Graph ${input.expectedOnChainId}`,
     );
@@ -290,6 +348,7 @@ export async function runExactAssetFetch(
   // All items share one chain CG, so prove the local binding once.
   if (!(await deps.verifyLocalContextGraph(onChainId))) {
     throw new ContextGraphAssetFetchConflictError(
+      'binding-mismatch',
       `Local Context Graph "${input.contextGraphId}" does not match on-chain Context Graph ${onChainId}`,
     );
   }
@@ -305,12 +364,14 @@ export async function runExactAssetFetch(
         ual: item.ual,
         kaId: item.kaId.toString(),
         status: 'already-present',
+        versionBlock: item.versionBlock,
       });
     } else if (state === 'materialized') {
       itemResults.set(item.ual, {
         ual: item.ual,
         kaId: item.kaId.toString(),
         status: 'materialized',
+        versionBlock: item.versionBlock,
       });
     } else {
       remaining.set(item.ual, item);
@@ -349,6 +410,7 @@ export async function runExactAssetFetch(
             ual: item.ual,
             kaId: item.kaId.toString(),
             status: 'fetched',
+            versionBlock: item.versionBlock,
           });
         } else {
           nextRemaining.set(item.ual, item);
@@ -373,6 +435,7 @@ export async function runExactAssetFetch(
       ual: item.ual,
       kaId: item.kaId.toString(),
       status: 'unresolved',
+      versionBlock: item.versionBlock,
     });
   }
   const items = uals.map((ual) => itemResults.get(ual)!);

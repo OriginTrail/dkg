@@ -306,7 +306,7 @@ describe('context graph targeted reconcile route', () => {
     }, {
       path: '/api/context-graph/fetch-assets',
       fetchAssets: async () => {
-        throw new ContextGraphAssetFetchConflictError('wrong graph');
+        throw new ContextGraphAssetFetchConflictError('binding-mismatch', 'wrong graph');
       },
     });
     expect(conflict.status).toBe(409);

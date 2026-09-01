@@ -289,6 +289,10 @@ import {
   type ExactAssetCommitment,
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
+import {
+  EXACT_ASSET_FETCH_ADMISSION_PRIORITY,
+  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+} from './sync/exact-asset-fetch.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
@@ -668,7 +672,9 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
+import { VmSwmRecoveryNotAuthorizedError } from './vm-reverify-worker.js';
+import {
+  VmReconcileQueueClosedError, VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
 
@@ -2049,6 +2055,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       }
       await this.prepareFinalizationRecoveryStore();
+      // W2 (#2435). Opened in the same window and under the same ownership as
+      // the finalization inbox, but in its OWN file and only when the feature
+      // is effectively on — see `prepareVmReverifyIntentStore`.
+      await this.prepareVmReverifyIntentStore();
       // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
       // so the local store is clean before this node serves or syncs anything.
       // Marker-gated (runs once per data dir), never throws, no-op on stores
@@ -2064,6 +2074,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       await this.node.start();
     } catch (cause) {
       const failures: unknown[] = [cause];
+      try {
+        await this.closeVmReverifyIntentStore();
+      } catch (closeCause) {
+        failures.push(closeCause);
+      }
       try {
         await this.closeFinalizationRecoveryStore();
       } catch (closeCause) {
@@ -2306,6 +2321,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphSubscriptions();
+
+    // The FIRST-ACTIVATION audit runs HERE (review r5 — moved from the
+    // pre-networking block): it walks the subscribed/core-hosted graph set,
+    // and on the primary first-activation case — a normal restart — that
+    // set is only authoritative AFTER rehydration; before it, the in-memory
+    // map is empty, the audit completes vacuously, and the mutation lane’s
+    // first cursor persist would suppress every future audit with a stale
+    // held asset never re-verified. Still BEFORE the chain poller is
+    // constructed or started, so no lane cursor can advance past an
+    // un-audited held set; the failure boundary is unchanged (an I/O error
+    // latches the feature off for this process, and the cursor-less node
+    // retries the audit on its next boot).
+    await this.runVmReverifyBootstrapAudit(createOperationContext('connect'));
 
     this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
 
@@ -3183,8 +3211,59 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               await this.handleKARegisteredNudge(onChainId, kaId, ctx);
             }
           : undefined,
+        // W2 (#2435). Gated on the STORE's existence rather than on a second
+        // evaluation of the effective flag: the store is opened only when the
+        // feature is effectively on, so binding the callback to it makes
+        // "lane subscribed but nowhere to record the event" unrepresentable
+        // instead of merely unlikely.
+        //
+        // Unlike every sibling callback here, this one's rejections are NOT
+        // swallowed by the lane — a rejection holds the cursor and re-scans the
+        // window. That is the contract `handleKaRootMutationEvent` is written
+        // against, and why it classifies transient from deterministic failure
+        // rather than throwing on everything.
+        onKnowledgeAssetRootMutated: this.vmReverifyIntents
+          ? async (event) => {
+              await this.handleKaRootMutationEvent(event, ctx);
+            }
+          : undefined,
       });
       await this.chainPoller.start();
+
+      // The drain. Started after the lane so an event ingested during startup
+      // finds a worker to kick; `closeVmReverifyIntentStore` stops it before
+      // closing the file it writes to.
+      if (this.vmReverifyIntents && !this.vmReverifyWorker) {
+        const reverifyIntents = this.vmReverifyIntents;
+        this.vmReverifyRuntime.constructWorker({
+          intents: reverifyIntents,
+          fetchContextGraphAssets: (localCgId, uals, options) =>
+            this.fetchContextGraphAssets(localCgId, uals, options),
+          // ADR-W2R-10. The exact fetch carries no SWM, and chain-promotion
+          // will not materialize without the local version-scoped projection —
+          // so for a host-only core the drain would detect forever and repair
+          // never. Peers are resolved the same way the exact fetch resolves
+          // them; each productive peer is judged by the TARGET-specific
+          // verdict (review r1).
+          recoverContextGraphSwm: (localCgId, verifyRecovered) =>
+            this.recoverContextGraphSwmForReverify(localCgId, verifyRecovered),
+          // Read the switch rather than infer it from an empty recovery result:
+          // `recoverContextGraphSwmFromPeer` warn-skips internally when the
+          // durable plane is off and returns empty, which is indistinguishable
+          // from "ran and found nothing".
+          durableSyncEnabled: () => durableSyncEnabled(this.config),
+          log: {
+            info: (message) => this.log.info(ctx, message),
+            warn: (message) => this.log.warn(ctx, message),
+          },
+        });
+        // Constructed here so the lane’s ingest kicks have a worker object to
+        // land on, but NOT started (review r1): `fetchContextGraphAssets`
+        // rejects every call until `vmReconcileRuntimeReady`, so an early
+        // start with a full persisted batch spins a zero-delay retry loop
+        // against the closed lifecycle for the rest of startup. The start
+        // happens at the readiness boundary below.
+      }
       this.log.info(ctx, `Chain event poller started`);
     }
 
@@ -4135,6 +4214,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // and both initial start and same-object restart retain the cold-start
     // jitter instead of launching an eager sweep against the old runtime.
     this.vmReconcileRuntimeReady = true;
+    // The drain starts HERE, at the same boundary that arms every other VM
+    // consumer (review r1): `start()`’s immediate first run preserves the
+    // guarantee that durable intents recorded before readiness — or during
+    // the startup scan — are drained promptly after it.
+    if (this.vmReverifyRuntime.startWorkerAtReadiness()) {
+      this.log.info(ctx, 'VM re-verify drain started (#2435)');
+    }
     if (this.vmReconcileEnabled()) {
       this.ensureVmReconcileDispatcher();
       const runSweep = (): void => {
@@ -6136,6 +6222,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      /**
+       * Sync-admission priority for this fetch. Defaults to the operator
+       * route's `vm-recovery` priority; the automatic re-verify drain passes a
+       * lower one so background convergence cannot displace operator work.
+       */
+      admissionPriority?: number;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -6145,6 +6237,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      admissionPriority?: number;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
@@ -6161,7 +6254,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         exactAssetSelection: selection,
         stopOnBackoffWorthyFailure: true,
-        priority: 1_000,
+        priority: options.admissionPriority ?? EXACT_ASSET_FETCH_ADMISSION_PRIORITY,
         source: 'vm-recovery',
         signal: options.signal,
         isCurrent: options.isCurrent,
@@ -7946,6 +8039,118 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * detects a full / cross-epoch gap; isolated from `runSharedMemorySync` so the
    * incremental path is untouched.
    */
+  /**
+   * Peers to try for a W2 SWM recovery (ADR-W2R-10), in the same order the
+   * exact-asset fetch resolves them: the Context Graph's curators first, then
+   * the preferred sync peer, then whoever is connected. Bounded by the same
+   * peer cap, and self is excluded.
+   *
+   * Deliberately mirrors `fetchContextGraphAssets`'s `resolvePeerIds` instead of
+   * inventing a second policy — a peer good enough to serve the exact fetch is
+   * the peer whose SWM we want, and two orderings would eventually disagree.
+   */
+  async resolveVmReverifySwmPeers(this: DKGAgent, localCgId: string): Promise<string[]> {
+    return (await this.resolveContextGraphRecoveryPeerIds(localCgId))
+      .slice(0, MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS);
+  }
+
+  /**
+   * Canonical recovery-peer ordering for ONE Context Graph (review r1): the
+   * CG's curators first, then the preferred sync peer, then whoever is
+   * connected — deduplicated, self excluded. Both the exact-asset fetch and
+   * the paired W2 SWM recovery resolve through THIS method: the pairing
+   * exists precisely because the two operations must chase the same peers,
+   * and two hand-mirrored orderings would eventually disagree.
+   */
+  async resolveContextGraphRecoveryPeerIds(
+    this: DKGAgent,
+    localCgId: string,
+    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
+  ): Promise<string[]> {
+    const curators = await this.resolveCuratorPeerIdsForCg(localCgId, {
+      maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.isCurrent ? { isCurrent: options.isCurrent } : {}),
+    }).catch(() => ({ peerIds: [] as string[] }));
+    if (options.isCurrent && !options.isCurrent()) {
+      throw new VmReconcileQueueClosedError();
+    }
+    const connected = this.node?.libp2p?.getConnections?.()
+      ?.map((connection) => connection.remotePeer.toString()) ?? [];
+    return [...new Set([
+      ...curators.peerIds,
+      this.preferredSyncPeers.get(localCgId),
+      ...connected,
+    ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))];
+  }
+
+  /**
+   * The W2 SWM-recovery peer loop (review r1): try each recovery peer in the
+   * canonical order; a peer that WROTE something is a hint, and the verdict
+   * is the target-specific `verifyRecovered` — a partially useful peer that
+   * keeps writing unrelated assets must not hide a later peer that holds the
+   * version the stranded intent needs. Bounded by the recovery peer cap; a
+   * peer that wrote nothing is skipped without a verification fetch.
+   */
+  async recoverContextGraphSwmForReverify(
+    this: DKGAgent,
+    localCgId: string,
+    verifyRecovered: () => Promise<boolean>,
+  ): Promise<void> {
+    // RFC-64 authority (review r4): the SAME filter automatic durable sync
+    // applies. For a catalog-authoritative CG the catalog lane is the sole
+    // SWM plane; legacy whole-graph recovery would overwrite it from peers
+    // the execution plan never authorized. The typed refusal defers the
+    // intent instead.
+    if (!this.resolveRfc64CatalogReceiverAuthorityV1(localCgId).legacySyncAllowed) {
+      throw new VmSwmRecoveryNotAuthorizedError(localCgId);
+    }
+    let peerFailures = 0;
+    let lastFailure: unknown;
+    for (const peerId of await this.resolveVmReverifySwmPeers(localCgId)) {
+      let r;
+      try {
+        r = await this.recoverContextGraphSwmFromPeer(peerId, localCgId);
+      } catch (error) {
+        // Lifecycle closure aborts the traversal — shutdown is not a peer
+        // failure. But `AbortError` is OVERLOADED in this stack (review r4):
+        // per-peer protocol deadlines abort with the same name, and treating
+        // those as shutdown defeats the failover this loop exists for. The
+        // classification is CAUSAL: only the lifecycle signal actually being
+        // aborted makes an AbortError mean shutdown; a deadline-shaped abort
+        // is a peer failure and the traversal continues.
+        if (
+          error instanceof VmReconcileQueueClosedError
+          || (error instanceof Error && error.name === 'AbortError'
+            && this.vmReconcileLifecycleController?.signal.aborted === true)
+        ) {
+          throw error;
+        }
+        peerFailures += 1;
+        lastFailure = error;
+        this.log.warn(
+          createOperationContext('sync'),
+          `W2 SWM recovery from ${peerId.slice(-8)} failed; trying the next peer: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
+      const wroteSomething = r.insertedDataQuads > 0 || r.insertedMetaQuads > 0
+        || r.replacedGraphs > 0 || r.replacedRoots > 0;
+      if (wroteSomething && await verifyRecovered()) return;
+    }
+    // Clean exhaustion — every peer answered and none served the target —
+    // returns normally: that IS the evidence the park countdown measures.
+    // A traversal with failed attempts and no success established nothing
+    // (review r3) and must surface as a FAILED recovery instead.
+    if (peerFailures > 0) {
+      throw new Error(
+        `W2 SWM recovery traversal incomplete: ${peerFailures} peer attempt(s) failed `
+        + `(${lastFailure instanceof Error ? lastFailure.message : String(lastFailure)})`,
+      );
+    }
+  }
+
   async recoverContextGraphSwmFromPeer(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
