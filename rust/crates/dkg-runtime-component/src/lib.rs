@@ -16,7 +16,7 @@ mod bindings {
     export!(Component);
 }
 
-use bindings::exports::origintrail::semantic_runtime::runtime::{
+use bindings::exports::origintrail::semantic_runtime::executor::{
     AdapterVersion, AdmissionDiagnostic, AdmittedPlan, Completion, Diagnostic, Execution,
     ExecutionReceipt, Guest, GuestExecution, LogicalAgent, PlanValue, ResourceBounds,
     SourcePosition, SourceSpan, Step,
@@ -125,14 +125,6 @@ impl Guest for Component {
             Execution::new(ExecutionState { handle, capability }),
             receipt,
         ))
-    }
-
-    fn test_hang() {
-        dkg_runtime_wasm::runtime_phase0_test_hang();
-    }
-
-    fn test_trap() {
-        dkg_runtime_wasm::runtime_phase0_test_trap();
     }
 }
 

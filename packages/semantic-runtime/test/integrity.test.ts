@@ -27,7 +27,7 @@ describe('semantic runtime artifact integrity', () => {
       targetCarrier: 'wasm32-wasip2',
       witPackage: 'origintrail:semantic-runtime@0.1.0',
       asyncMode: 'jspi',
-      exports: ['origintrail:semantic-runtime/runtime@0.1.0'],
+      exports: ['origintrail:semantic-runtime/executor@0.1.0'],
       limits: {
         maxActiveExecutions: 8,
         maxOperationsPerExecution: 10_000,

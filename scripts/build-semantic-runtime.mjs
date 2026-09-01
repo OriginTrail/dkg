@@ -214,7 +214,7 @@ function buildInto(outputRoot) {
     '--name', 'runtime',
     '--async-mode', 'jspi',
     '--async-exports',
-    'origintrail:semantic-runtime/runtime@0.1.0#[method]execution.advance',
+    'origintrail:semantic-runtime/executor@0.1.0#[method]execution.advance',
     '--async-imports',
     'origintrail:semantic-runtime/investigator@0.1.0#investigate',
     'origintrail:semantic-runtime/query-catalog@0.1.0#query',
@@ -299,7 +299,7 @@ function inspectComponentWorld(componentPath) {
   if (
     imports.length === 0
     || exports.length === 0
-    || !exports.includes('origintrail:semantic-runtime/runtime@0.1.0')
+    || !exports.includes('origintrail:semantic-runtime/executor@0.1.0')
   ) {
     throw new Error('semantic-runtime: component WIT world is missing required imports or exports');
   }

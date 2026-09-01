@@ -65,7 +65,7 @@ const REQUIRED_FILES = [
   'component/interfaces/origintrail-semantic-runtime-capability.d.ts',
   'component/interfaces/origintrail-semantic-runtime-investigator.d.ts',
   'component/interfaces/origintrail-semantic-runtime-query-catalog.d.ts',
-  'component/interfaces/origintrail-semantic-runtime-runtime.d.ts',
+  'component/interfaces/origintrail-semantic-runtime-executor.d.ts',
   'component/interfaces/wasi-cli-environment.d.ts',
   'component/interfaces/wasi-cli-exit.d.ts',
   'component/interfaces/wasi-cli-stderr.d.ts',
@@ -108,7 +108,7 @@ const EXPECTED_COMPONENT_IMPORTS = [
   'wasi:io/poll@0.2.12',
   'wasi:io/streams@0.2.12',
 ].sort();
-const EXPECTED_COMPONENT_EXPORTS = ['origintrail:semantic-runtime/runtime@0.1.0'];
+const EXPECTED_COMPONENT_EXPORTS = ['origintrail:semantic-runtime/executor@0.1.0'];
 
 export function defaultArtifactRoot(): string {
   return fileURLToPath(new URL('../generated/', import.meta.url));

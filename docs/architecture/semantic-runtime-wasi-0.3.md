@@ -20,7 +20,8 @@ References:
 
 ## Boundary
 
-`rust/crates/dkg-runtime-component/wit/semantic-runtime.wit` exports typed
+`rust/crates/dkg-runtime-component/wit/semantic-runtime.wit` exports an
+`executor` interface with typed
 `compile`, `admit`, and `start` functions plus an opaque `execution` resource.
 The resource exposes typed `advance` and `inspect` methods. `advance` is an
 asynchronous component export and returns terminal output or a diagnostic.
@@ -54,6 +55,10 @@ The component cannot construct or alter this resource. A plan-hash mismatch,
 expired or revoked capability, exhausted budget, unknown import, disabled tool,
 or WIT mismatch fails closed. Program declarations request authority but never
 grant it.
+
+The production WIT has no trap or hang test functions. Watchdog and partition
+isolation tests inject faults through the test-gated Worker harness outside the
+component ABI.
 
 The Rust carrier currently declares a small set of preview-2 imports inserted
 by the Rust standard library. The Node linker supplies deny-only proxies for

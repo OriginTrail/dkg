@@ -54,7 +54,7 @@ interface query-catalog {
   ) -> result<query-result, tool-error>;
 }
 
-interface runtime {
+interface executor {
   use capability.{execution-capability};
 
   record diagnostic {
@@ -148,13 +148,11 @@ interface runtime {
     plan: list<u8>,
     logical-time: u64,
   ) -> result<tuple<execution, execution-receipt>, diagnostic>;
-  test-hang: func();
-  test-trap: func();
 }
 
 world semantic-runtime {
   import capability;
   import investigator;
   import query-catalog;
-  export runtime;
+  export executor;
 }

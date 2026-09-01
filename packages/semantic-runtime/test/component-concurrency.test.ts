@@ -82,7 +82,7 @@ describe('WASI 0.3 component execution isolation', () => {
     }
   });
 
-  it('destroys only the trapped execution partition', async () => {
+  it('destroys only the execution partition with an injected Worker trap', async () => {
     const canonicalPlan = await plan();
     const host = new SemanticRuntimeHost({
       workerUrl,
@@ -104,7 +104,7 @@ describe('WASI 0.3 component execution isolation', () => {
     }
   });
 
-  it('interrupts a hung component without stopping another execution', async () => {
+  it('interrupts an execution partition with an injected Worker hang without stopping another execution', async () => {
     const canonicalPlan = await plan();
     const host = new SemanticRuntimeHost({
       workerUrl,
