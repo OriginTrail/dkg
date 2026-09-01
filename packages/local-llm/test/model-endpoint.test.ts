@@ -64,6 +64,34 @@ describe('local model endpoint probing', () => {
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
+  it('preserves loaded llama.cpp metadata under the legacy auto strategy', async () => {
+    const fetcher = vi.fn(async () => Response.json({
+      object: 'list',
+      data: [{ id: 'local-model', meta: { n_ctx_train: 32_768 } }],
+    }));
+
+    await expect(probeLocalModelEndpoint({
+      ...DEFAULT_OPTIONS,
+      fetch: fetcher as typeof fetch,
+    })).resolves.toEqual({ status: 'ready', reachable: true });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the llama.cpp health fallback under the legacy auto strategy', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
+      return Response.json({ status: 'ok' });
+    });
+
+    await expect(probeLocalModelEndpoint({
+      ...DEFAULT_OPTIONS,
+      fetch: fetcher as typeof fetch,
+    })).resolves.toEqual({ status: 'ready', reachable: true });
+    expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
+      .toEqual(['/v1/models', '/health']);
+  });
+
   it('rejects a non-empty model list that omits the configured model', async () => {
     const fetcher = vi.fn(async () => Response.json({
       object: 'list',

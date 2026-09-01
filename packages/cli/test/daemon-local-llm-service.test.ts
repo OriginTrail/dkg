@@ -208,6 +208,40 @@ describe('daemon local LLM service', () => {
       .toEqual(['/v1/models', '/health']);
   });
 
+  it('keeps both llama.cpp readiness shapes compatible with the default auto backend', async () => {
+    const loadedFetch = vi.fn(async () => Response.json({
+      object: 'list',
+      data: [{ id: 'local-model', meta: { n_ctx_train: 32_768 } }],
+    }));
+    const loaded = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg',
+      fetch: loadedFetch as typeof fetch,
+      createSession: vi.fn(),
+    });
+
+    expect(await loaded.health()).toEqual(expect.objectContaining({
+      ok: true, ready: true, reachable: true, offline: false,
+    }));
+    expect(loadedFetch).toHaveBeenCalledOnce();
+
+    const fallbackFetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
+      return Response.json({ status: 'ok' });
+    });
+    const fallback = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg',
+      fetch: fallbackFetch as typeof fetch,
+      createSession: vi.fn(),
+    });
+
+    expect(await fallback.health()).toEqual(expect.objectContaining({
+      ok: true, ready: true, reachable: true, offline: false,
+    }));
+    expect(fallbackFetch.mock.calls.map(([input]) => new URL(String(input)).pathname))
+      .toEqual(['/v1/models', '/health']);
+  });
+
   it('keeps llama.cpp chat unavailable until a loading model becomes healthy', async () => {
     let healthy = false;
     const fetcher = vi.fn(async (input: string | URL | Request) => {
