@@ -26,7 +26,6 @@ function dependencies(
 ): Rfc64SwmRecoveryCoordinatorDependenciesV1 {
   return {
     admission: {
-      selectedPublicContextGraphIds: () => [PUBLIC],
       requestSelectedPublicAdmission: vi.fn(() => true),
       refreshSelectedPublicAdmission: vi.fn(() => true),
       selectedPublicAdmissionSnapshot: () => ({
@@ -172,11 +171,14 @@ describe('RFC-64 SWM recovery authorization', () => {
     expect(refreshSelectedPublicAdmission).not.toHaveBeenCalled();
   });
 
-  it('rejects an unselected public plan without mutating public admission', () => {
+  it('rejects an inactive public plan without mutating public admission', () => {
     const refreshSelectedPublicAdmission = vi.fn(() => true);
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
       refreshSelectedPublicAdmission,
-      selectedPublicContextGraphIds: () => [],
+      configuredRecoveryPlan: (providerPeerId) => ({
+        providerPeerId,
+        targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+      }),
     }));
 
     expect(coordinator.authorizeForCatalogPass({
@@ -223,7 +225,6 @@ describe('RFC-64 SWM recovery authorization', () => {
       lane: 'selected-public' as const,
     }));
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
-      selectedPublicContextGraphIds: () => [upper, lower],
       selectedPublicAdmissionSnapshot: () => ({
         contextGraphIds: [upper, lower],
         phase: 'retry-required',

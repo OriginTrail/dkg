@@ -453,8 +453,6 @@ import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { Rfc64SwmRecoveryCoordinatorV1 } from
   './rfc64/swm-recovery-coordinator-v1.js';
-import { resolveRfc64SwmRecoveryLaneV1 } from
-  './rfc64/swm-recovery-plan-v1.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
 import { QueryMethods } from './dkg-agent-query.js';
@@ -867,6 +865,16 @@ export class DKGAgent extends DKGAgentBase {
         resolveRecoveryPlan: (providerPeerId) => (
           this.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId)
         ),
+        invalidateRecoveryAdmission: (contextGraphId) => {
+          for (const providerPeerId of this.resolveRfc64CompleteSwmProviderPeerIdsV1(
+            contextGraphId,
+          )) {
+            this.selectedSwmBootstrapAdmission.invalidateContextGraph(
+              providerPeerId,
+              contextGraphId,
+            );
+          }
+        },
         acceptTrack2Policies: (policies) => {
           if (policies.length === 0) return;
           const service = this.rfc64PublicCatalogServiceV1;
@@ -944,14 +952,6 @@ export class DKGAgent extends DKGAgentBase {
     });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
       admission: {
-        selectedPublicContextGraphIds: () => (
-          this.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs.filter(
-            (contextGraphId) => resolveRfc64SwmRecoveryLaneV1(
-              this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-              contextGraphId,
-            ) === 'selected-public',
-          )
-        ),
         requestSelectedPublicAdmission: (peerId, contextGraphIds) =>
           this.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds),
         refreshSelectedPublicAdmission: (peerId, contextGraphIds, minimumTerminalAgeMs) =>

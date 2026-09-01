@@ -9502,12 +9502,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // unsubscribe must not fence a core's in-flight catalog reconciliation.
     const wasReceiverActive = eligible && (manifestWide || previousSubscribed);
     const isReceiverActive = eligible && (manifestWide || nextSubscribed);
-    if (wasReceiverActive === isReceiverActive) return;
-    if (!isReceiverActive) {
+    const receiverSelectionChanged = wasReceiverActive !== isReceiverActive;
+    // Standalone public compatibility policies are deliberately not catalog-
+    // eligible, but their selected-public recovery lane is still driven by the
+    // live edge subscription. Ensure that lane gets the same fresh-pass fence.
+    const recoverySelectionChanged = !manifestWide
+      && previousSubscribed !== nextSubscribed
+      && resolveRfc64SwmRecoveryLaneV1(
+        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+        contextGraphId,
+      ) === 'selected-public';
+    if (!receiverSelectionChanged && !recoverySelectionChanged) return;
+    if (receiverSelectionChanged && !isReceiverActive) {
       this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
     }
     this.invalidateRfc64PublicCatalogBootstrapPassV1(contextGraphId);
-    if (isReceiverActive && this.rfc64PublicCatalogServiceV1 !== undefined) {
+    if (receiverSelectionChanged && isReceiverActive
+      && this.rfc64PublicCatalogServiceV1 !== undefined) {
       // Re-entering the idempotent start boundary also dirties an existing
       // failed repair for this newly active CG, including retryIntervalMs=0.
       this.startRfc64SwmCatalogProjectionSupervisorV1(

@@ -145,15 +145,12 @@ export interface Rfc64CatalogBootstrapPartitionV1 {
   readonly retryIntervalMs?: number;
   readonly track2Policies: readonly Rfc64CatalogBootstrapPolicyV1[];
   readonly track2Targets: readonly Rfc64CatalogBootstrapTargetPlanV1[];
-  readonly recoveryConfig: Readonly<{
-    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
-    readonly retryIntervalMs?: number;
-  }>;
+  readonly recoveryProviderPeerIds: readonly string[];
 }
 
 interface BootstrapStateV1 {
   readonly retryIntervalMs?: number;
-  readonly recoveryConfig: Rfc64CatalogBootstrapPartitionV1['recoveryConfig'];
+  readonly recoveryProviderPeerIds: readonly string[];
   readonly targets: MutableTargetStatusV1[];
   readonly runner: Rfc64CoalescingSupervisorV1;
   pass: number;
@@ -174,6 +171,7 @@ interface BootstrapOwnerDependenciesV1 {
   readonly resolveRecoveryPlan: (
     providerPeerId: string,
   ) => ReturnType<typeof resolveRfc64ActivePeerSwmRecoveryPlanV1>;
+  readonly invalidateRecoveryAdmission: (contextGraphId: string) => void;
   readonly acceptTrack2Policies: (
     policies: readonly Rfc64CatalogBootstrapPolicyV1[],
   ) => void;
@@ -209,16 +207,10 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     const partition = this.#dependencies.resolvePartition();
     if (partition === undefined) return;
     this.#dependencies.acceptTrack2Policies(partition.track2Policies);
-    const hasRecoveryProviders = partition.recoveryConfig.acceptedPolicies.some(
-      ({ completeSwmProviders = [] }) => completeSwmProviders.length > 0,
-    );
+    const hasRecoveryProviders = partition.recoveryProviderPeerIds.length > 0;
     if (partition.track2Policies.length === 0 && !hasRecoveryProviders) return;
     this.#catalogPhaseReady = false;
-    this.#configuredRecoveryProviders = new Set(
-      partition.recoveryConfig.acceptedPolicies.flatMap(
-        ({ completeSwmProviders = [] }) => completeSwmProviders,
-      ),
-    );
+    this.#configuredRecoveryProviders = new Set(partition.recoveryProviderPeerIds);
     let state!: BootstrapStateV1;
     const runner = new Rfc64CoalescingSupervisorV1({
       retryIntervalMs: partition.retryIntervalMs,
@@ -233,7 +225,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     });
     state = {
       retryIntervalMs: partition.retryIntervalMs,
-      recoveryConfig: partition.recoveryConfig,
+      recoveryProviderPeerIds: partition.recoveryProviderPeerIds,
       targets: partition.track2Targets.map(newPendingTargetV1),
       runner,
       pass: 0,
@@ -270,6 +262,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     // scope. Close readiness synchronously before aborting/coalescing work so
     // peer-connect scheduling cannot slip through ahead of the fresh catalog.
     this.#catalogPhaseReady = false;
+    this.#dependencies.invalidateRecoveryAdmission(contextGraphId);
     this.#state?.runner.invalidateAndRequest(
       `RFC-64 receiver selection changed for ${contextGraphId}`,
     );
@@ -297,10 +290,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     state.pass += 1;
     state.lastPassStartedAtMs = Date.now();
     try {
-      const configuredProviders = [...new Set(state.recoveryConfig.acceptedPolicies.flatMap(
-        ({ completeSwmProviders = [] }) => completeSwmProviders,
-      ))];
-      const recoveryPlans = new Map(configuredProviders
+      const recoveryPlans = new Map(state.recoveryProviderPeerIds
         .map((providerPeerId) => (
           [providerPeerId, this.#dependencies.resolveRecoveryPlan(providerPeerId)] as const
         ))
@@ -483,11 +473,26 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     providerPeerId: string,
   ): ReturnType<typeof resolveRfc64ActivePeerSwmRecoveryPlanV1> {
+    const selected = new Set(
+      this.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs,
+    );
     return resolveRfc64ActivePeerSwmRecoveryPlanV1(
       this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
       providerPeerId,
-      this.readRfc64CatalogRuntimeSelectionV1().selectedContextGraphs,
-      (contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+      (contextGraphId) => {
+        const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+        const configuredAuthority = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId);
+        return Object.freeze({
+          ordinaryPrivateRecoveryAllowed:
+            receiverAuthority.legacySyncAllowed || receiverAuthority.track2Enabled,
+          // Selected-public is the reserved automatic lane. Even standalone
+          // compatibility policies must be live-selected before it can run.
+          selectedPublicRecoveryAllowed:
+            !configuredAuthority.killSwitchActive
+            && (configuredAuthority.legacySyncAllowed || configuredAuthority.track2Enabled)
+            && selected.has(contextGraphId),
+        });
+      },
     );
   }
 
@@ -566,7 +571,7 @@ export function partitionRfc64CatalogBootstrapV1(
 ): Rfc64CatalogBootstrapPartitionV1 {
   const track2Policies: Rfc64CatalogBootstrapPolicyV1[] = [];
   const track2Targets: Rfc64CatalogBootstrapTargetPlanV1[] = [];
-  const recoveryPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
+  const recoveryProviderPeerIds = new Set<string>();
   for (const accepted of config.acceptedPolicies) {
     const { policyEnvelope, targets, completeSwmProviders = [] } = accepted;
     const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
@@ -574,10 +579,17 @@ export function partitionRfc64CatalogBootstrapV1(
       policyEnvelope.payload.contextGraphId,
     );
     const mode = authority.mode;
-    // Complete-provider recovery is an explicit RFC-64 lane in catalog mode,
-    // not legacy gossip authority. Preserve every policy here and apply live
-    // receiver authority in each bootstrap pass.
-    recoveryPolicies.push(accepted);
+    // Complete-provider recovery is active only when the configured rollout
+    // retains a legacy or Track-2 lane. The kill switch therefore leaves no
+    // bootstrap workload while preserving the immutable manifest.
+    if (
+      !authority.killSwitchActive
+      && (authority.legacySyncAllowed || authority.track2Enabled)
+    ) {
+      for (const providerPeerId of completeSwmProviders) {
+        recoveryProviderPeerIds.add(providerPeerId);
+      }
+    }
     if (!authority.track2Enabled) continue;
     track2Policies.push(accepted);
     for (const target of targets) {
@@ -608,10 +620,7 @@ export function partitionRfc64CatalogBootstrapV1(
     ...retry,
     track2Policies: Object.freeze(track2Policies),
     track2Targets: Object.freeze(track2Targets),
-    recoveryConfig: Object.freeze({
-      acceptedPolicies: Object.freeze(recoveryPolicies),
-      ...retry,
-    }),
+    recoveryProviderPeerIds: Object.freeze([...recoveryProviderPeerIds]),
   });
 }
 

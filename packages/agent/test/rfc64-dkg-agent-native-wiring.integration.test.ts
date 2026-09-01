@@ -2442,7 +2442,16 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       0,
     );
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
-    expect(ordering).toEqual(['connect', 'catalog-start', 'catalog-complete', 'swm']);
+    // The first catalog-only pass begins before the edge selects this graph.
+    // Selection fences that pass, then runs a fresh provider-authorized pass.
+    expect(ordering).toEqual([
+      'catalog-start',
+      'catalog-complete',
+      'connect',
+      'catalog-start',
+      'catalog-complete',
+      'swm',
+    ]);
     await receiver.stop();
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
   });
@@ -2860,8 +2869,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(true);
 
+    const admittedPass = receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass ?? 0;
     await vi.waitFor(() => {
-      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass).toBeGreaterThanOrEqual(2);
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass)
+        .toBeGreaterThan(admittedPass);
     }, { timeout: 2_500, interval: 25 });
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 

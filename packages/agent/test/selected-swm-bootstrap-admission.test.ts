@@ -66,6 +66,33 @@ describe('SelectedSwmBootstrapAdmission', () => {
     });
   });
 
+  it('invalidates one graph while preserving the provider remaining scope', () => {
+    const admission = new SelectedSwmBootstrapAdmission();
+    const staleOwner = admission.beginTransfer(PEER, ['cg-a', 'cg-b']);
+    expect(admission.markTransferTerminal(staleOwner, 1_000)).toBe(true);
+
+    expect(admission.invalidateContextGraph(PEER, 'cg-a')).toBe(true);
+    expect(admission.snapshot(PEER)).toEqual({
+      contextGraphIds: ['cg-b'],
+      phase: 'terminal',
+    });
+    expect(admission.markTransferTerminal(staleOwner, 2_000)).toBe(false);
+    expect(admission.requestRefresh(PEER, ['cg-a', 'cg-b'], 10_000, 2_001)).toBe(true);
+    expect(admission.snapshot(PEER)).toEqual({
+      contextGraphIds: ['cg-a', 'cg-b'],
+      phase: 'retry-required',
+    });
+  });
+
+  it('removes a sole selected graph so an immediate re-selection is admitted', () => {
+    const admission = new SelectedSwmBootstrapAdmission();
+    completeScope(admission, ['cg-a']);
+
+    expect(admission.invalidateContextGraph(PEER, 'cg-a')).toBe(true);
+    expect(admission.snapshot(PEER)).toBeNull();
+    expect(admission.requestRefresh(PEER, ['cg-a'], 60_000)).toBe(true);
+  });
+
   it('lets only the newest queued transfer mark one unchanged scope terminal', () => {
     const admission = new SelectedSwmBootstrapAdmission();
     const first = admission.beginTransfer(PEER, ['cg-a']);

@@ -185,6 +185,25 @@ export class SelectedSwmBootstrapAdmission {
     return Object.freeze({ retryRequiredProviders, terminalProviders });
   }
 
+  /**
+   * Fence one graph after live selection changes without disturbing the
+   * provider's remaining scope. Any older in-flight owner is invalidated by
+   * deletion or by the replacement generation.
+   */
+  invalidateContextGraph(remotePeer: string, contextGraphId: string): boolean {
+    const current = this.#byPeer.get(remotePeer);
+    if (current === undefined || !current.contextGraphIds.includes(contextGraphId)) {
+      return false;
+    }
+    const remaining = current.contextGraphIds.filter((id) => id !== contextGraphId);
+    if (remaining.length === 0) {
+      this.#byPeer.delete(remotePeer);
+    } else {
+      this.#replace(remotePeer, remaining, current.phase, current.terminalAtMs);
+    }
+    return true;
+  }
+
   clear(remotePeer: string): void {
     this.#byPeer.delete(remotePeer);
   }

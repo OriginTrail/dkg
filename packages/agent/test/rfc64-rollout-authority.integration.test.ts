@@ -287,9 +287,19 @@ describe('RFC-64 rollout authority integration', () => {
     expect(catalog.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect((catalog as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
 
-    const stopped = await startAgent('kill-switch', activation('catalog', true));
+    const stopped = await startAgent('kill-switch', {
+      ...activation('catalog', true),
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: policyEnvelope(),
+          targets: [],
+          completeSwmProviders: ['12D3KooWKilledCompleteProvider'],
+        }],
+      },
+    });
     expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
+    expect(stopped.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();
   });
 
   it('keeps authorized catalog-mode metadata refresh off member and host SWM gossip', async () => {
@@ -419,6 +429,7 @@ describe('RFC-64 rollout authority integration', () => {
     const catalog = await startAgent('catalog-complete-provider', {
       ...activation('catalog'),
       bootstrap: {
+        retryIntervalMs: 0,
         acceptedPublicPolicies: [{
           policyEnvelope: policyEnvelope(),
           targets: [],
@@ -459,6 +470,45 @@ describe('RFC-64 rollout authority integration', () => {
     expect(catalog.resolveActiveRfc64SwmRecoveryPlanV1(providerPeerId)).toEqual({
       providerPeerId,
       targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+    });
+    expect(catalog.getRfc64SelectedSwmGraphSyncStatus(CONTEXT_GRAPH_ID)).toEqual({
+      mechanism: 'rfc64-selected-on-connect',
+      state: 'continuing',
+      configuredProviderCount: 1,
+      retryRequiredProviderCount: 1,
+      terminalProviderCount: 0,
+    });
+
+    const admission = (catalog as any).selectedSwmBootstrapAdmission;
+    const terminalOwner = admission.beginTransfer(providerPeerId, [CONTEXT_GRAPH_ID]);
+    expect(admission.markTransferTerminal(terminalOwner)).toBe(true);
+    queue.mockClear();
+    catalog.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(admission.snapshot(providerPeerId)).toBeNull();
+    expect(catalog.getRfc64SelectedSwmGraphSyncStatus(CONTEXT_GRAPH_ID)).toEqual({
+      mechanism: 'rfc64-selected-on-connect',
+      state: 'inactive',
+      configuredProviderCount: 0,
+      retryRequiredProviderCount: 0,
+      terminalProviderCount: 0,
+    });
+
+    catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await catalog.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(queue).toHaveBeenCalledOnce();
+    expect(queue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerPeerId,
+        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+      }),
+      expect.any(Function),
+      0,
+    );
+    expect(catalog.getRfc64SelectedSwmGraphSyncStatus(CONTEXT_GRAPH_ID)).toMatchObject({
+      state: 'continuing',
+      configuredProviderCount: 1,
+      retryRequiredProviderCount: 1,
     });
   });
 

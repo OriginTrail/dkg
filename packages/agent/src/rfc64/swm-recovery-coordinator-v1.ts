@@ -11,7 +11,6 @@ import {
 export type { Rfc64AuthorizedSwmRecoveryPlanV1 } from './swm-recovery-plan-v1.js';
 
 export interface Rfc64SwmRecoveryAdmissionPortV1 {
-  readonly selectedPublicContextGraphIds: () => readonly string[];
   readonly requestSelectedPublicAdmission:
     (providerPeerId: string, contextGraphIds: readonly string[]) => boolean;
   readonly refreshSelectedPublicAdmission: (
@@ -107,7 +106,6 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
   private eligibleTargets(
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
   ): readonly Rfc64SwmRecoveryTargetV1[] | null {
-    const selectedPublic = new Set(this.deps.admission.selectedPublicContextGraphIds());
     const canonicalTargets = canonicalizeRfc64SwmRecoveryTargetsV1(recoveryPlan.targets);
     if (canonicalTargets === null) return null;
     const configuredTargets = canonicalizeRfc64SwmRecoveryTargetsV1(
@@ -115,13 +113,9 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     );
     if (configuredTargets === null) return null;
     const configuredTargetKeys = new Set(configuredTargets.map(recoveryTargetKey));
-    const eligible = canonicalTargets.filter((target) => (
-      configuredTargetKeys.has(recoveryTargetKey(target))
-      && (
-        target.lane === 'ordinary-private'
-        || selectedPublic.has(target.contextGraphId)
-      )
-    ));
+    const eligible = canonicalTargets.filter(
+      (target) => configuredTargetKeys.has(recoveryTargetKey(target)),
+    );
     return eligible.length === 0 ? null : eligible;
   }
 
@@ -154,12 +148,8 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     const configured = this.deps.admission.configuredRecoveryPlan(
       authorized.providerPeerId,
     );
-    const selectedPublic = new Set(
-      this.deps.admission.selectedPublicContextGraphIds(),
-    );
     const configuredPublicTargets = configured.targets.filter(
-      ({ contextGraphId, lane }) => lane === 'selected-public'
-        && selectedPublic.has(contextGraphId),
+      ({ lane }) => lane === 'selected-public',
     );
     const configuredPublicIds = configuredPublicTargets.map(
       ({ contextGraphId }) => contextGraphId,

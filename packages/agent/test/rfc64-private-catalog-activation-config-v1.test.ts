@@ -244,8 +244,10 @@ describe('RFC-64 private catalog activation', () => {
     expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
       bootstrap,
       PROVIDER_PEER,
-      [PUBLIC_CG],
-      () => ({ legacySyncAllowed: false, track2Enabled: true }),
+      (contextGraphId) => ({
+        ordinaryPrivateRecoveryAllowed: contextGraphId === PUBLIC_CG,
+        selectedPublicRecoveryAllowed: contextGraphId === PUBLIC_CG,
+      }),
     )).toEqual({
       providerPeerId: PROVIDER_PEER,
       targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
@@ -253,14 +255,39 @@ describe('RFC-64 private catalog activation', () => {
     expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
       bootstrap,
       PROVIDER_PEER,
-      [PRIVATE_CG, PUBLIC_CG],
-      () => ({ legacySyncAllowed: false, track2Enabled: true }),
+      () => ({
+        ordinaryPrivateRecoveryAllowed: true,
+        selectedPublicRecoveryAllowed: true,
+      }),
     )).toEqual({
       providerPeerId: PROVIDER_PEER,
       targets: [
         { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },
         { contextGraphId: PUBLIC_CG, lane: 'selected-public' },
       ],
+    });
+  });
+
+  it('keeps unselected standalone public policies out of active recovery', () => {
+    const otherPublic = `${PUBLIC_CG}-other` as ContextGraphIdV1;
+    const bootstrap = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: [PUBLIC_CG, otherPublic].map((contextGraphId) => ({
+        policyEnvelope: policyEnvelope(policy(contextGraphId, 0)),
+        targets: [],
+        completeSwmProviders: [PROVIDER_PEER],
+      })),
+    })!;
+
+    expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
+      bootstrap,
+      PROVIDER_PEER,
+      (contextGraphId) => ({
+        ordinaryPrivateRecoveryAllowed: true,
+        selectedPublicRecoveryAllowed: contextGraphId === PUBLIC_CG,
+      }),
+    )).toEqual({
+      providerPeerId: PROVIDER_PEER,
+      targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
     });
   });
 

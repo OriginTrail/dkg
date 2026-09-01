@@ -29,8 +29,8 @@ type Rfc64RecoveryConfigV1 = Readonly<
 >;
 
 export interface Rfc64SwmRecoveryRuntimeAuthorityV1 {
-  readonly legacySyncAllowed: boolean;
-  readonly track2Enabled: boolean;
+  readonly ordinaryPrivateRecoveryAllowed: boolean;
+  readonly selectedPublicRecoveryAllowed: boolean;
 }
 
 /** Locale-independent ordering shared by recovery plans and admission state. */
@@ -111,19 +111,18 @@ export function resolveRfc64PeerSwmRecoveryPlanV1(
 export function resolveRfc64ActivePeerSwmRecoveryPlanV1(
   config: Rfc64RecoveryConfigV1 | undefined,
   providerPeerId: string,
-  selectedContextGraphIds: readonly string[],
-  resolveReceiverAuthority: (
+  resolveRuntimeAuthority: (
     contextGraphId: string,
   ) => Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1>,
 ): Readonly<Rfc64PeerSwmRecoveryPlanV1> {
-  const selected = new Set(selectedContextGraphIds);
   const configured = resolveRfc64PeerSwmRecoveryPlanV1(config, providerPeerId);
   return Object.freeze({
     ...configured,
-    targets: Object.freeze(configured.targets.filter(({ contextGraphId }) => {
-      const authority = resolveReceiverAuthority(contextGraphId);
-      return authority.legacySyncAllowed
-        || (authority.track2Enabled && selected.has(contextGraphId));
+    targets: Object.freeze(configured.targets.filter(({ contextGraphId, lane }) => {
+      const authority = resolveRuntimeAuthority(contextGraphId);
+      return lane === 'selected-public'
+        ? authority.selectedPublicRecoveryAllowed
+        : authority.ordinaryPrivateRecoveryAllowed;
     })),
   });
 }
