@@ -1273,7 +1273,7 @@ export class MockChainAdapter implements ChainAdapter {
       ? { source: 'explicit' as const, accountId: options.registrationPcaAccountId }
       : { source: 'none' as const });
     const submit = async (
-      params: CreateOnChainContextGraphParams,
+      params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
     ): Promise<CreateOnChainContextGraphResult> => {
       return this.createOnChainContextGraph(params);
     };
@@ -1284,29 +1284,36 @@ export class MockChainAdapter implements ChainAdapter {
     params: CreateOnChainContextGraphParams,
     preparationOptions?: PrepareContextGraphRegistrationOptions,
   ): Promise<CreateOnChainContextGraphResult> {
+    const { registrationDepositPolicy, ...createParams } = params;
     if (preparationOptions !== undefined) {
+      if (registrationDepositPolicy && registrationDepositPolicy.mode !== 'legacy') {
+        throw new TypeError(
+          'Prepared context-graph registration seals its deposit policy; ' +
+          'do not also pass registrationDepositPolicy.',
+        );
+      }
       const prepared = await this.prepareOnChainContextGraphRegistration(preparationOptions);
-      return prepared.submit(params);
+      return prepared.submit(createParams);
     }
-    if (params.accessPolicy === undefined || params.publishPolicy === undefined) {
+    if (createParams.accessPolicy === undefined || createParams.publishPolicy === undefined) {
       throw new Error(
         'Mock createOnChainContextGraph: `accessPolicy` and `publishPolicy` are required (SPEC_CG_MEMORY_MODEL).',
       );
     }
-    const { accessPolicy, publishPolicy } = params;
+    const { accessPolicy, publishPolicy } = createParams;
     if (accessPolicy !== 0 && accessPolicy !== 1) {
       throw new Error('Mock: invalid accessPolicy');
     }
     if (publishPolicy !== 0 && publishPolicy !== 1) {
       throw new Error('Mock: invalid publishPolicy');
     }
-    const registrationDepositPolicy = params.registrationDepositPolicy ?? { mode: 'legacy' as const };
-    switch (registrationDepositPolicy.mode) {
+    const resolvedDepositPolicy = registrationDepositPolicy ?? { mode: 'legacy' as const };
+    switch (resolvedDepositPolicy.mode) {
       case 'legacy':
       case 'paid':
         break;
       case 'pca':
-        if (registrationDepositPolicy.accountId <= 0n) {
+        if (resolvedDepositPolicy.accountId <= 0n) {
           throw new Error('Mock: PCA registration-deposit policy requires a positive accountId');
         }
         break;

@@ -665,6 +665,60 @@ describe('facade capability and allowance/stale-Hub behavior', () => {
     expect(send.calls[0][3]).toBe(adapter.signerPool[0]);
   });
 
+  it('dispatches a direct PCA policy without off-chain signer verification', async () => {
+    const adapter = makeAdapter();
+    configureSubmission(adapter, '10.0.5');
+    const send = recorder(async (..._args: unknown[]) => successfulReceipt());
+    adapter.sendContractTransaction = send;
+    const prepare = recorder(async () => {
+      throw new Error('direct PCA policy must leave eligibility to the contract');
+    });
+    adapter.prepareOnChainContextGraphRegistration = prepare;
+
+    await adapter.createOnChainContextGraph({
+      ...CREATE_PARAMS,
+      publishAuthorityAccountId: 5n,
+      registrationDepositPolicy: { mode: 'pca', accountId: 5n },
+    });
+
+    expect(prepare.calls).toEqual([]);
+    expect(send.calls[0][1]).toBe('createContextGraphWithPcaCoverage');
+    expect(send.calls[0][2]).toEqual([
+      [], 0n, 0, 1, expect.any(String), 5n, expect.any(String), 5n,
+    ]);
+  });
+
+  it('maps an explicit paid policy to the additive selector with account zero', async () => {
+    const adapter = makeAdapter();
+    configureSubmission(adapter, '10.0.5');
+    const send = recorder(async (..._args: unknown[]) => successfulReceipt());
+    adapter.sendContractTransaction = send;
+
+    await adapter.createOnChainContextGraph({
+      ...CREATE_PARAMS,
+      registrationDepositPolicy: { mode: 'paid' },
+    });
+
+    expect(send.calls[0][1]).toBe('createContextGraphWithPcaCoverage');
+    expect(send.calls[0][2].at(-1)).toBe(0n);
+  });
+
+  it('rejects a policy override when registration preparation seals the policy', async () => {
+    const adapter = makeAdapter();
+    const prepare = recorder(async () => {
+      throw new Error('conflicting inputs must fail before preparation');
+    });
+    adapter.prepareOnChainContextGraphRegistration = prepare;
+
+    await expect(adapter.createOnChainContextGraph({
+      ...CREATE_PARAMS,
+      registrationDepositPolicy: { mode: 'paid' },
+    }, {
+      registrationPcaAccountId: 5n,
+    })).rejects.toThrow(/seals its deposit policy/);
+    expect(prepare.calls).toEqual([]);
+  });
+
   it.each([
     '10.0.5',
     '10.0.5+build.1',

@@ -647,12 +647,42 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     params: CreateOnChainContextGraphParams,
     preparationOptions?: PrepareContextGraphRegistrationOptions,
   ): Promise<CreateOnChainContextGraphResult> {
-    const prepared = preparationOptions !== undefined
-      ? await this.prepareOnChainContextGraphRegistration(preparationOptions)
-      // Preserve the legacy direct-call path: callers that did not ask for a
-      // registration execution context do not incur PCA discovery reads.
-      : this.sealContextGraphRegistration(this.signer, { source: 'none' });
-    return prepared.submit(params);
+    const { registrationDepositPolicy, ...createParams } = params;
+    if (preparationOptions !== undefined) {
+      if (registrationDepositPolicy && registrationDepositPolicy.mode !== 'legacy') {
+        throw new TypeError(
+          'Prepared context-graph registration seals its deposit policy; ' +
+          'do not also pass registrationDepositPolicy.',
+        );
+      }
+      const prepared = await this.prepareOnChainContextGraphRegistration(preparationOptions);
+      return prepared.submit(createParams);
+    }
+
+    if (registrationDepositPolicy?.mode === 'pca') {
+      if (registrationDepositPolicy.accountId <= 0n) {
+        throw new RangeError('PCA registration-deposit policy requires a positive accountId.');
+      }
+      return this.withHubStaleRetryAny(() => this.submitPreparedContextGraphRegistration(
+        createParams,
+        this.signer,
+        { source: 'explicit', accountId: registrationDepositPolicy.accountId },
+        registrationDepositPolicy,
+      ));
+    }
+    if (registrationDepositPolicy?.mode === 'paid') {
+      return this.withHubStaleRetryAny(() => this.submitPreparedContextGraphRegistration(
+        createParams,
+        this.signer,
+        { source: 'none' },
+        registrationDepositPolicy,
+      ));
+    }
+
+    // Preserve the legacy direct-call path: callers that did not ask for a
+    // registration execution context do not incur PCA discovery reads.
+    return this.sealContextGraphRegistration(this.signer, { source: 'none' })
+      .submit(createParams);
   }
 
   private registrationSignerByAddress(address: string): Wallet {
@@ -733,7 +763,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const signerAddress = ethers.getAddress(signer.address);
     const sealedCoverage = Object.freeze({ ...coverage });
     const submit = async (
-      params: CreateOnChainContextGraphParams,
+      params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
     ): Promise<CreateOnChainContextGraphResult> => {
       if (params == null) throw new TypeError('Prepared context-graph registration requires create parameters.');
       // A prepared capability may outlive adapter reconfiguration. Fail rather
@@ -744,7 +774,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         throw new ContextGraphRegistrationSignerUnavailableError(signerAddress);
       }
       return this.withHubStaleRetryAny(() =>
-        this.submitPreparedContextGraphRegistration(params, signer, sealedCoverage));
+        this.submitPreparedContextGraphRegistration(
+          params,
+          signer,
+          sealedCoverage,
+        ));
     };
     return Object.freeze({ signerAddress, coverage: sealedCoverage, submit });
   }
@@ -961,9 +995,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   }
 
   private async submitPreparedContextGraphRegistration(
-    params: CreateOnChainContextGraphParams,
+    params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
     signer: Wallet,
     coverage: Readonly<ContextGraphRegistrationCoverage>,
+    explicitPolicy?: Exclude<NonNullable<CreateOnChainContextGraphParams['registrationDepositPolicy']>, { mode: 'legacy' }>,
   ): Promise<CreateOnChainContextGraphResult> {
     await this.init();
     const contextGraphs = this.contracts.contextGraphs;
@@ -991,7 +1026,34 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const legacyCoverageAccountId = params.publishAuthorityAccountId ?? 0n;
     let createDispatch = resolveContextGraphCreateDispatch(legacyCreateArgs);
 
-    if (registrationAccountId > 0n && registrationAccountId !== legacyCoverageAccountId) {
+    if (explicitPolicy) {
+      const facade = await this.readContextGraphsFacadeCapability(contextGraphs);
+      if (facade.state !== 'supported') {
+        if (explicitPolicy.mode === 'pca') {
+          let currentBinding: boolean;
+          try {
+            currentBinding = await this.isCurrentHubContractAddress(
+              'ContextGraphs',
+              await contextGraphs.getAddress(),
+            );
+          } catch (err) {
+            if (isHubStaleError(err)) throw err;
+            throw new ContextGraphFacadeVersionUnknownError({ cause: err });
+          }
+          if (!currentBinding) {
+            throw new StaleHubBindingError(
+              'ContextGraphs',
+              await contextGraphs.getAddress(),
+            );
+          }
+          throw new PcaCoverageUnsupportedError(facade.version);
+        }
+        throw new Error(
+          `ContextGraphs facade ${facade.version} does not support explicit paid registration.`,
+        );
+      }
+      createDispatch = resolveContextGraphCreateDispatch(createArgs, explicitPolicy);
+    } else if (registrationAccountId > 0n && registrationAccountId !== legacyCoverageAccountId) {
       const facade = await this.readContextGraphsFacadeCapability(contextGraphs);
       if (facade.state === 'supported') {
         createDispatch = resolveContextGraphCreateDispatch(legacyCreateArgs, {

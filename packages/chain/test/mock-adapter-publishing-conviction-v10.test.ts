@@ -55,6 +55,16 @@ describe('MockChainAdapter — explicit context-graph registration coverage pari
       registrationPcaAccountId: accountId,
     })).rejects.toBeInstanceOf(ContextGraphRegistrationCoverageSignerUnavailableError);
   });
+
+  it('leaves direct PCA-policy eligibility to contract semantics', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+
+    await expect(mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      registrationDepositPolicy: { mode: 'pca', accountId: 999n },
+    })).resolves.toMatchObject({ success: true });
+  });
 });
 
 describe('MockChainAdapter — V10 conviction account create/read', () => {
