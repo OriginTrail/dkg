@@ -221,3 +221,32 @@ describe('kaRootMutations — cursor restore and failure recovery', () => {
     expect(saveCalls).toEqual([{ lane: 'kaRootMutations', block: 40_951 + MAX_RANGE - 1 }]);
   });
 });
+
+describe('kaRootMutations — activation contract', () => {
+  it('start() fails LOUDLY when the root-mutation callback is wired on an adapter without getBlockNumber (review r14-bot)', async () => {
+    // The lane scans only to the finalized head; without a readable head it
+    // would hold on every tick and the callback would never fire — an API
+    // break disguised as idleness. Activation must reject instead.
+    const chain = makeChain(50_000);
+    delete (chain.adapter as { getBlockNumber?: unknown }).getBlockNumber;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    await expect(poller.start()).rejects.toThrow(/requires a ChainAdapter with getBlockNumber/);
+  });
+
+  it('an adapter without getBlockNumber still starts when the root-mutation callback is not wired', async () => {
+    const chain = makeChain(50_000);
+    delete (chain.adapter as { getBlockNumber?: unknown }).getBlockNumber;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+    });
+    await expect(poller.start()).resolves.toBeUndefined();
+    await poller.stop();
+  });
+});

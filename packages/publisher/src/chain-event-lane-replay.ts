@@ -31,6 +31,13 @@ import type { ChainEventPollerLane } from './chain-event-lane-runner.js';
 export interface LaneReplayCoordinatorDeps {
   lane: ChainEventPollerLane;
   periodicRescan?: { everyPolls: number; windowBlocks: number } | undefined;
+  /**
+   * The largest block range one dispatch may request (review r14-bot): a
+   * merged obligation can exceed what providers accept, so dispatch runs in
+   * chunks of at most this many blocks, persisting the undispatched tail
+   * after each clean chunk.
+   */
+  maxRangeBlocks?: number | undefined;
   persistence?: LaneReplayRetryPersistence | undefined;
   logInfo(message: string): void;
   logWarn(message: string): void;
@@ -148,18 +155,44 @@ export class LaneReplayCoordinator {
     }
     this.#pendingRetry = { fromBlock: original.fromBlock, toBlock: original.toBlock };
     await this.persist(this.#pendingRetry);
-    try {
-      await dispatchWindow(window);
-    } catch (err) {
-      this.deps.logWarn(
-        `Periodic re-scan failed (forward scan unaffected; window retained for retry): ` +
-        `lane=${this.deps.lane} [${window.fromBlock}, ${window.toBlock}] ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-      );
-      return { window, dispatched: false };
+    // BOUNDED requests (review r14-bot): a merged obligation may be wider
+    // than a provider accepts, so the dispatch runs in chunks of at most
+    // `maxRangeBlocks`. Each clean chunk narrows the durable obligation to
+    // what is still owed (the rest of this window, then the unfinalized
+    // tail); a failing chunk leaves exactly the undispatched remainder
+    // retained, so neither obligation is ever wedged behind one oversized
+    // request.
+    const chunkBlocks = this.deps.maxRangeBlocks !== undefined
+      && Number.isFinite(this.deps.maxRangeBlocks) && this.deps.maxRangeBlocks >= 1
+      ? Math.floor(this.deps.maxRangeBlocks)
+      : Number.POSITIVE_INFINITY;
+    let from = window.fromBlock;
+    while (from <= window.toBlock) {
+      const chunk = { fromBlock: from, toBlock: Math.min(window.toBlock, from + chunkBlocks - 1) };
+      try {
+        await dispatchWindow(chunk);
+      } catch (err) {
+        const remaining = { fromBlock: chunk.fromBlock, toBlock: original.toBlock };
+        // The write-ahead mark already covers the whole window; only a
+        // NARROWED remainder (an earlier chunk succeeded) needs re-persisting.
+        if (remaining.fromBlock !== this.#pendingRetry?.fromBlock || remaining.toBlock !== this.#pendingRetry.toBlock) {
+          this.#pendingRetry = remaining;
+          await this.persist(remaining);
+        }
+        this.deps.logWarn(
+          `Periodic re-scan failed (forward scan unaffected; window retained for retry): ` +
+          `lane=${this.deps.lane} [${chunk.fromBlock}, ${chunk.toBlock}] ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { window, dispatched: false };
+      }
+      from = chunk.toBlock + 1;
+      const owed = from <= window.toBlock
+        ? { fromBlock: from, toBlock: original.toBlock }
+        : tail;
+      this.#pendingRetry = owed;
+      await this.persist(owed);
     }
-    this.#pendingRetry = tail;
-    await this.persist(tail);
     return { window, dispatched: true };
   }
 

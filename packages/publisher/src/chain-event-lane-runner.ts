@@ -295,6 +295,7 @@ export class ChainEventLaneRunner {
       coordinator = new LaneReplayCoordinator({
         lane: spec.name,
         periodicRescan: spec.periodicRescan,
+        maxRangeBlocks: this.maxRange,
         persistence:
           this.cursorStore?.kind === 'lane' ? this.cursorStore.replayRetry : undefined,
         logInfo: (message) => this.log.info(createOperationContext('publish'), message),

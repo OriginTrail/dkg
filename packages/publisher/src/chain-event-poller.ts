@@ -231,6 +231,16 @@ export class ChainEventPoller {
   }
 
   async start(): Promise<void> {
+    // Fail FAST, not silent (review r14-bot): the root-mutation lane bounds
+    // its scans at the finalized head, which needs a readable head. Without
+    // `getBlockNumber` the lane would hold on every tick and the callback
+    // would simply never fire — an API break disguised as idleness.
+    if (this.onKnowledgeAssetRootMutated && typeof this.chain.getBlockNumber !== 'function') {
+      throw new Error(
+        'onKnowledgeAssetRootMutated requires a ChainAdapter with getBlockNumber: the '
+        + 'kaRootMutations lane scans only to the finalized head and cannot run without one',
+      );
+    }
     if (this.running) return;
     // Serialize a restart behind an unfinished stop() (review r10): without
     // this await, a start() issued mid-drain re-arms the interval and

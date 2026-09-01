@@ -556,6 +556,101 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect([...new Set(seen)].sort(), 'both the old and the newly omitted event replay').toEqual([45_000, 52_000]);
     expect(saves[saves.length - 1], 'and the obligation clears').toBeUndefined();
   });
+  it('a merged obligation replays in MAX_RANGE chunks against a provider that rejects wide ranges (review r14-bot)', async () => {
+    // The r13 merge can widen a retained window past what providers accept.
+    // Every request must stay within MAX_RANGE, with the undispatched tail
+    // retained durably after each clean chunk, so both obligations recover.
+    let now = 0;
+    let outage = true;
+    const seen: number[] = [];
+    const requested: Array<[number, number]> = [];
+    const saves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    const events = [rootMutation('KnowledgeAssetUpdated', 45_000)];
+    const chain = makeChain(50_000, events);
+    const realListen = chain.adapter.listenForEvents.bind(chain.adapter);
+    chain.adapter.listenForEvents = (filter) => {
+      const from = filter.fromBlock ?? 0;
+      const to = typeof filter.toBlock === 'number' ? filter.toBlock : from;
+      requested.push([from, to]);
+      if (to - from + 1 > MAX_RANGE) throw new Error(`provider rejects ranges over ${MAX_RANGE} blocks`);
+      return realListen(filter);
+    };
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() { return undefined; },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            saves.push(w ? { ...w } : undefined);
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => {
+        if (outage) throw new Error('consumer down');
+        seen.push(e.position.blockNumber);
+      },
+    });
+
+    for (let tick = 1; tick <= 25; tick += 1) { await poll(poller); now += CADENCE_MS; }
+    chain.setHead(53_000);
+    await poll(poller); now += CADENCE_MS;
+    events.push(rootMutation('KnowledgeAssetUpdated', 52_000));
+    for (let tick = 27; tick <= 50; tick += 1) { await poll(poller); now += CADENCE_MS; }
+    expect(saves[saves.length - 1], 'merged to 12,000 blocks').toEqual({ fromBlock: 41_001, toBlock: 53_000 });
+
+    outage = false;
+    await poll(poller);
+    expect(
+      requested.every(([from, to]) => to - from + 1 <= MAX_RANGE),
+      'no request may exceed MAX_RANGE',
+    ).toBe(true);
+    expect([...new Set(seen)].sort(), 'both obligations recover through bounded chunks').toEqual([45_000, 52_000]);
+    expect(saves[saves.length - 1], 'the obligation clears after the last chunk').toBeUndefined();
+  });
+
+  it('a failing chunk retains exactly the undispatched remainder (review r14-bot)', async () => {
+    // The first chunk of a merged obligation succeeds, the second rejects:
+    // what stays durable is the remainder from the failed chunk onward —
+    // not the whole window, not nothing.
+    let now = 0;
+    let rejectAbove = Number.POSITIVE_INFINITY;
+    const saves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000), rootMutation('KnowledgeAssetUpdated', 52_000)]);
+    const realListen = chain.adapter.listenForEvents.bind(chain.adapter);
+    chain.adapter.listenForEvents = (filter) => {
+      const from = filter.fromBlock ?? 0;
+      if (from > rejectAbove) throw new Error('provider outage on the second chunk');
+      return realListen(filter);
+    };
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 53_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() { return { fromBlock: 41_001, toBlock: 53_000 }; },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            saves.push(w ? { ...w } : undefined);
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    chain.setHead(53_000);
+    rejectAbove = 45_000; // chunk 1 = 41,001–50,000 passes; chunk 2 from 50,001 rejects
+
+    await poll(poller);
+
+    expect(saves[saves.length - 1], 'the remainder from the failed chunk is what stays owed').toEqual({ fromBlock: 50_001, toBlock: 53_000 });
+  });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
     // window, not the retry itself. A regression that lets the save
