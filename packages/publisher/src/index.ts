@@ -94,6 +94,7 @@ export {
   MultiRootPublishNotAtomicError,
   CuratorUnconfirmedError,
   CuratorRejectedError,
+  ContextGraphRegistrationPreparationUnsupportedError,
   assertValidPrecomputedUpdateAttestation,
   type DKGPublisherConfig,
   type PublisherAddressResolverResult,

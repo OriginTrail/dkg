@@ -43,6 +43,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   MockChainAdapter,
+  NoChainAdapter,
   type ChainAdapter,
   type OnChainPublishResult,
   type PublisherPublishPlanRequest,
@@ -1501,6 +1502,21 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       registrationPcaAccountId: undefined,
       registrationSignerAddress: undefined,
       preferPcaCoveredSigner: true,
+    });
+  });
+
+  it('reports missing adapter preparation support with a typed compatibility signal', async () => {
+    const chain = new NoChainAdapter();
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+
+    await expect(publisher.prepareContextGraphRegistration()).rejects.toMatchObject({
+      name: 'ContextGraphRegistrationPreparationUnsupportedError',
+      code: 'CONTEXT_GRAPH_REGISTRATION_PREPARATION_UNSUPPORTED',
     });
   });
 

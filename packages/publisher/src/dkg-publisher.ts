@@ -454,6 +454,21 @@ export type PublisherAddressResolverResult =
   | PublisherAddressResolverSelection
   | undefined;
 
+/**
+ * The selected publisher cannot prepare a sealed context-graph registration
+ * because its chain adapter predates the optional preparation capability.
+ * Callers may use this typed signal to preserve the legacy direct, paid path;
+ * all other preparation failures remain fatal.
+ */
+export class ContextGraphRegistrationPreparationUnsupportedError extends Error {
+  readonly code = 'CONTEXT_GRAPH_REGISTRATION_PREPARATION_UNSUPPORTED' as const;
+
+  constructor() {
+    super('Chain adapter does not support prepared context-graph registration.');
+    this.name = 'ContextGraphRegistrationPreparationUnsupportedError';
+  }
+}
+
 export interface DKGPublisherConfig {
   store: TripleStore;
   chain: ChainAdapter;
@@ -1531,9 +1546,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<PreparedContextGraphRegistration> {
     const prepare = this.chain.prepareOnChainContextGraphRegistration;
     if (!prepare) {
-      throw new Error(
-        'prepareContextGraphRegistration: chain adapter does not support prepared context-graph registration.',
-      );
+      throw new ContextGraphRegistrationPreparationUnsupportedError();
     }
 
     const selection = await this.resolvePublisherAddressSelection();
