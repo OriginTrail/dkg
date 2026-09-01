@@ -209,7 +209,7 @@ impl AdapterRegistry {
                 EffectClass::ModelInvocation,
                 IdempotencyClass::ReconcileBeforeRetry,
                 1,
-                3,
+                1,
                 None,
                 false,
             ),
@@ -1947,6 +1947,30 @@ mod tests {
             "(delegate investigator (grant agent.invoke.investigator) (call agent/investigate@1 incident))",
         );
         assert!(compile(&good).is_ok());
+    }
+
+    #[test]
+    fn investigator_requires_exactly_one_prompt_argument() {
+        let no_prompt = envelope(
+            "(delegate investigator (grant agent.invoke.investigator) (call agent/investigate@1))",
+        );
+        assert_eq!(
+            compile(&no_prompt).unwrap_err()[0].code,
+            DiagnosticCode::SchemaMismatch,
+        );
+
+        let one_prompt = envelope(
+            "(delegate investigator (grant agent.invoke.investigator) (call agent/investigate@1 \"Say hi\"))",
+        );
+        assert!(compile(&one_prompt).is_ok());
+
+        let extra_prompt = envelope(
+            "(delegate investigator (grant agent.invoke.investigator) (call agent/investigate@1 \"Say hi\" \"ignored\"))",
+        );
+        assert_eq!(
+            compile(&extra_prompt).unwrap_err()[0].code,
+            DiagnosticCode::SchemaMismatch,
+        );
     }
 
     #[test]
