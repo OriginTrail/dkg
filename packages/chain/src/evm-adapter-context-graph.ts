@@ -27,8 +27,12 @@ import { ethers, Contract, type JsonRpcProvider, type Wallet } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult, type ContextGraphRegistrationCoverage, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
+  executionPolicyFromCoverage,
+  executionPolicyFromDepositPolicy,
   resolveContextGraphCreateDispatch,
+  type ContextGraphFacadeCapability,
   type ContextGraphLegacyCreateArgs,
+  type ContextGraphRegistrationExecutionPolicy,
 } from './context-graph-registration-dispatch.js';
 import { parsePcaRegistrationCoverageAccount } from './evm-adapter-conviction.js';
 
@@ -55,10 +59,6 @@ type OwnedCoverageDiscovery = {
   coverage: ContextGraphRegistrationCoverage;
   allowAgentFallback: boolean;
 };
-
-type FacadeCapability =
-  | { state: 'supported'; version: string }
-  | { state: 'unsupported'; version: string };
 
 class CoverageDiscoveryDeadlineError extends Error {
   constructor() {
@@ -137,7 +137,7 @@ class CoverageReadLimiter {
   }
 }
 
-function parsedFacadeVersion(version: unknown): FacadeCapability | undefined {
+function parsedFacadeVersion(version: unknown): ContextGraphFacadeCapability | undefined {
   if (typeof version !== 'string') return undefined;
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/.exec(
     version.trim(),
@@ -659,30 +659,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       return prepared.submit(createParams);
     }
 
-    if (registrationDepositPolicy?.mode === 'pca') {
-      if (registrationDepositPolicy.accountId <= 0n) {
-        throw new RangeError('PCA registration-deposit policy requires a positive accountId.');
-      }
-      return this.withHubStaleRetryAny(() => this.submitPreparedContextGraphRegistration(
-        createParams,
-        this.signer,
-        { source: 'explicit', accountId: registrationDepositPolicy.accountId },
-        registrationDepositPolicy,
-      ));
-    }
-    if (registrationDepositPolicy?.mode === 'paid') {
-      return this.withHubStaleRetryAny(() => this.submitPreparedContextGraphRegistration(
-        createParams,
-        this.signer,
-        { source: 'none' },
-        registrationDepositPolicy,
-      ));
-    }
-
     // Preserve the legacy direct-call path: callers that did not ask for a
     // registration execution context do not incur PCA discovery reads.
-    return this.sealContextGraphRegistration(this.signer, { source: 'none' })
-      .submit(createParams);
+    const executionPolicy = executionPolicyFromDepositPolicy(registrationDepositPolicy);
+    return this.withHubStaleRetryAny(() => this.submitPreparedContextGraphRegistration(
+      createParams,
+      this.signer,
+      executionPolicy,
+    ));
   }
 
   private registrationSignerByAddress(address: string): Wallet {
@@ -762,6 +746,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     }
     const signerAddress = ethers.getAddress(signer.address);
     const sealedCoverage = Object.freeze({ ...coverage });
+    const executionPolicy = executionPolicyFromCoverage(sealedCoverage);
     const submit = async (
       params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
     ): Promise<CreateOnChainContextGraphResult> => {
@@ -777,7 +762,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         this.submitPreparedContextGraphRegistration(
           params,
           signer,
-          sealedCoverage,
+          executionPolicy,
         ));
     };
     return Object.freeze({ signerAddress, coverage: sealedCoverage, submit });
@@ -977,7 +962,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   private async readContextGraphsFacadeCapability(
     contextGraphs: Contract,
-  ): Promise<FacadeCapability> {
+  ): Promise<ContextGraphFacadeCapability> {
     let rawVersion: unknown;
     try {
       rawVersion = await this.readContract(
@@ -994,11 +979,40 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     return capability;
   }
 
+  private async rejectUnsupportedRegistrationFacade(
+    contextGraphs: Contract,
+    registrationMode: 'paid' | 'pca',
+    facadeVersion: string,
+  ): Promise<never> {
+    const boundAddress = await contextGraphs.getAddress();
+    let currentBinding: boolean;
+    try {
+      currentBinding = await this.isCurrentHubContractAddress(
+        'ContextGraphs',
+        boundAddress,
+      );
+    } catch (err) {
+      if (isHubStaleError(err)) throw err;
+      throw new ContextGraphFacadeVersionUnknownError({ cause: err });
+    }
+    if (!currentBinding) {
+      throw new StaleHubBindingError(
+        'ContextGraphs',
+        boundAddress,
+      );
+    }
+    if (registrationMode === 'pca') {
+      throw new PcaCoverageUnsupportedError(facadeVersion);
+    }
+    throw new Error(
+      `ContextGraphs facade ${facadeVersion} does not support explicit paid registration.`,
+    );
+  }
+
   private async submitPreparedContextGraphRegistration(
     params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
     signer: Wallet,
-    coverage: Readonly<ContextGraphRegistrationCoverage>,
-    explicitPolicy?: Exclude<NonNullable<CreateOnChainContextGraphParams['registrationDepositPolicy']>, { mode: 'legacy' }>,
+    executionPolicy: Readonly<ContextGraphRegistrationExecutionPolicy>,
   ): Promise<CreateOnChainContextGraphResult> {
     await this.init();
     const contextGraphs = this.contracts.contextGraphs;
@@ -1022,66 +1036,21 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       params.publishAuthorityAccountId ?? 0n,
       params.nameHash ?? ethers.ZeroHash,
     ];
-    const registrationAccountId = coverage.source === 'none' ? 0n : coverage.accountId;
     const legacyCoverageAccountId = params.publishAuthorityAccountId ?? 0n;
-    let createDispatch = resolveContextGraphCreateDispatch(legacyCreateArgs);
-
-    if (explicitPolicy) {
-      const facade = await this.readContextGraphsFacadeCapability(contextGraphs);
-      if (facade.state !== 'supported') {
-        if (explicitPolicy.mode === 'pca') {
-          let currentBinding: boolean;
-          try {
-            currentBinding = await this.isCurrentHubContractAddress(
-              'ContextGraphs',
-              await contextGraphs.getAddress(),
-            );
-          } catch (err) {
-            if (isHubStaleError(err)) throw err;
-            throw new ContextGraphFacadeVersionUnknownError({ cause: err });
-          }
-          if (!currentBinding) {
-            throw new StaleHubBindingError(
-              'ContextGraphs',
-              await contextGraphs.getAddress(),
-            );
-          }
-          throw new PcaCoverageUnsupportedError(facade.version);
-        }
-        throw new Error(
-          `ContextGraphs facade ${facade.version} does not support explicit paid registration.`,
-        );
-      }
-      createDispatch = resolveContextGraphCreateDispatch(createArgs, explicitPolicy);
-    } else if (registrationAccountId > 0n && registrationAccountId !== legacyCoverageAccountId) {
-      const facade = await this.readContextGraphsFacadeCapability(contextGraphs);
-      if (facade.state === 'supported') {
-        createDispatch = resolveContextGraphCreateDispatch(legacyCreateArgs, {
-          mode: 'pca',
-          accountId: registrationAccountId,
-        });
-      } else if (coverage.source === 'explicit') {
-        let currentBinding: boolean;
-        try {
-          currentBinding = await this.isCurrentHubContractAddress(
-            'ContextGraphs',
-            await contextGraphs.getAddress(),
-          );
-        } catch (err) {
-          if (isHubStaleError(err)) throw err;
-          throw new ContextGraphFacadeVersionUnknownError({ cause: err });
-        }
-        if (!currentBinding) {
-          throw new StaleHubBindingError(
-            'ContextGraphs',
-            await contextGraphs.getAddress(),
-          );
-        }
-        throw new PcaCoverageUnsupportedError(facade.version);
-      }
-      // Automatic coverage on a confirmed old facade deliberately falls back
-      // to the legacy paid path during rolling deployment.
+    const resolution = await resolveContextGraphCreateDispatch(
+      legacyCreateArgs,
+      legacyCoverageAccountId,
+      executionPolicy,
+      () => this.readContextGraphsFacadeCapability(contextGraphs),
+    );
+    if (resolution.state === 'unsupported') {
+      return this.rejectUnsupportedRegistrationFacade(
+        contextGraphs,
+        resolution.registrationMode,
+        resolution.facadeVersion,
+      );
     }
+    const createDispatch = resolution.dispatch;
 
     const submitCreate = () => this.sendContractTransaction(
       contextGraphs,

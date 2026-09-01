@@ -703,6 +703,20 @@ describe('facade capability and allowance/stale-Hub behavior', () => {
     expect(send.calls[0][2].at(-1)).toBe(0n);
   });
 
+  it('rejects direct PCA coverage on an unsupported current facade', async () => {
+    const adapter = makeAdapter();
+    configureSubmission(adapter, '10.0.4');
+    const send = recorder(async (..._args: unknown[]) => successfulReceipt());
+    adapter.sendContractTransaction = send;
+
+    await expect(adapter.createOnChainContextGraph({
+      ...CREATE_PARAMS,
+      registrationDepositPolicy: { mode: 'pca', accountId: 5n },
+    })).rejects.toBeInstanceOf(PcaCoverageUnsupportedError);
+
+    expect(send.calls).toEqual([]);
+  });
+
   it('rejects a policy override when registration preparation seals the policy', async () => {
     const adapter = makeAdapter();
     const prepare = recorder(async () => {
