@@ -537,7 +537,12 @@ export class ChainEventLaneRunner {
     // The trailing replay — scheduling, retained-retry priority, the
     // unread-window guard and durable bookkeeping — is the coordinator’s
     // (review r3-bot); this scheduler only dispatches what it hands over.
-    await lane.replay.dispatchDue(state.lastBlock, (window) =>
+    // After a restore rewind (or a confirmation-depth increase) the cursor
+    // itself can sit above the finalized head; the replay bound must be the
+    // FINALIZED view, not the raw cursor (review r7-bot). `head` here is
+    // already the finalized head for a scanOnlyFinalizedHead lane.
+    const replayBound = head != null ? Math.min(state.lastBlock, head) : state.lastBlock;
+    await lane.replay.dispatchDue(replayBound, (window) =>
       this.dispatchWindow(lane, window.fromBlock, window.toBlock, ctx));
     if (fromBlock > upperBound) {
       this.applyLaneSchedule(lane, { kind: 'noWork', now });

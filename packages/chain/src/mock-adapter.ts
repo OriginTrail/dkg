@@ -799,6 +799,15 @@ export class MockChainAdapter implements ChainAdapter {
    * and is deliberately name-agnostic; this probe is about the DECLARED
    * vocabulary, not about which events a given scenario recorded.
    */
+  /**
+   * CH-8 parity with `EVMChainAdapter.finalizedEventScanConfirmations` (review
+   * r6): the mock chain has no reorgs, so confirmation 1 — the current head —
+   * is the honest policy, and lanes bounded by it scan exactly to the head.
+   */
+  finalizedEventScanConfirmations(): number {
+    return 1;
+  }
+
   async supportsEventTypes(names: readonly string[]): Promise<string[]> {
     return names.filter((name) => !MOCK_DECLARED_EVENT_TYPES.has(name));
   }

@@ -492,6 +492,46 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     await poll(poller);
     expect(seen, 'the SAME event dispatches once its depth is reached').toEqual([49_998]);
   });
+  it('replay never passes the finalized head, even when a restored cursor sits above it (review r7-bot)', async () => {
+    // Restore 50,000 with a 50-block rewind -> lastBlock 49,950; depth 60
+    // finalizes 49,941. The forward scan is bounded — but replay windows
+    // derive from the CURSOR, which here is 9 blocks above the finalized
+    // head, and the periodic rescan at tick 25 would otherwise deliver the
+    // unfinalized event at 49,945.
+    let now = 0;
+    const seen: number[] = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_945)]);
+    (chain.adapter as { finalizedEventScanConfirmations?: () => number })
+      .finalizedEventScanConfirmations = () => 60;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    // Through the rescan tick: neither the forward scan nor the replay may
+    // deliver a block past the finalized head.
+    for (let tick = 1; tick <= 26; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    expect(seen, 'the unfinalized event stays withheld through the rescan').toEqual([]);
+
+    // Once the head advances enough to finalize 49,945, a rescan delivers
+    // it — the row cannot pass vacuously.
+    chain.setHead(50_010);
+    for (let tick = 1; tick <= 25; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    expect(seen, 'finalization releases the SAME event').toEqual([49_945]);
+  });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
     // window, not the retry itself. A regression that lets the save

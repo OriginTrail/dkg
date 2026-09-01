@@ -525,6 +525,81 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(topics[0], 'the three declared kinds are the whole OR-set').toHaveLength(3);
   });
 
+  describe('alias families: EVERY public name agrees with the listener under EITHER ABI spelling (review r7-bot)', () => {
+    const families: Array<{
+      publicNames: readonly [string, string];
+      abiBase: string;
+      abiAlias: string;
+      scanLabelContract: string;
+    }> = [
+      {
+        publicNames: ['KCCreated', 'KnowledgeAssetCreated'],
+        abiBase: 'KnowledgeAssetCreated',
+        abiAlias: 'KCCreated',
+        scanLabelContract: 'kas',
+      },
+    ];
+    for (const family of families) {
+      for (const publicName of family.publicNames) {
+        for (const abiSpelling of [family.abiBase, family.abiAlias]) {
+          it(`${publicName} over an ABI declaring only ${abiSpelling}`, async () => {
+            const abi = (KA_ABI as Array<Record<string, unknown>>).map((entry) =>
+              entry.type === 'event' && entry.name === family.abiBase && abiSpelling !== family.abiBase
+                ? { ...entry, name: abiSpelling }
+                : entry,
+            );
+            const { adapter, scans } = makeAdapter({ abi });
+
+            await expect(
+              adapter.supportsEventTypes([publicName]),
+              `the probe must accept ${publicName}`,
+            ).resolves.toEqual([]);
+            await expect(
+              drain(adapter, [publicName]),
+              `and listening for ${publicName} must not throw`,
+            ).resolves.toEqual([]);
+            expect(
+              scans.map((scan) => scan.label),
+              `the scan asked for the DECLARED spelling`,
+            ).toContain(`${family.scanLabelContract}.queryFilter(${abiSpelling})`);
+          });
+        }
+      }
+    }
+
+    for (const publicName of ['ContextGraphNameClaimed', 'NameClaimed']) {
+      for (const abiSpelling of ['NameClaimed', 'ContextGraphNameClaimed']) {
+        it(`${publicName} over a registry ABI declaring only ${abiSpelling}`, async () => {
+          const registryAbi = [{
+            type: 'event',
+            name: abiSpelling,
+            anonymous: false,
+            inputs: [
+              { name: 'nameHash', type: 'uint256', indexed: true },
+              { name: 'creator', type: 'address', indexed: true },
+              { name: 'accessPolicy', type: 'uint8', indexed: false },
+            ],
+          }];
+          const { adapter, scans } = makeAdapter({});
+          const priv = adapter as unknown as { contracts: Record<string, unknown> };
+          priv.contracts.contextGraphNameRegistry = new ethers.Contract('0x' + '33'.repeat(20), registryAbi as never);
+
+          await expect(
+            adapter.supportsEventTypes([publicName]),
+            `the probe must accept ${publicName}`,
+          ).resolves.toEqual([]);
+          await expect(
+            drain(adapter, [publicName]),
+            `and listening for ${publicName} must not throw`,
+          ).resolves.toEqual([]);
+          expect(
+            scans.map((scan) => scan.label),
+            `the scan asked for the DECLARED spelling`,
+          ).toContain(`cgNameRegistry.queryFilter(${abiSpelling})`);
+        });
+      }
+    }
+  });
   it('probe-plus-listen agree on a fallback-only KCCreated ABI (review r5-bot)', async () => {
     // The probe accepts EITHER alias spelling; the scan branch must build
     // its filter from the SAME resolution. Before the fix this passed the

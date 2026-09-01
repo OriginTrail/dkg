@@ -110,8 +110,20 @@ export class LaneReplayCoordinator {
     lastBlock: number,
     dispatchWindow: (window: LaneReplayRetryWindow) => Promise<void>,
   ): Promise<{ window: LaneReplayRetryWindow; dispatched: boolean } | undefined> {
-    const window = await this.takeWindow(lastBlock);
+    let window = await this.takeWindow(lastBlock);
     if (!window) return undefined;
+    // The lane’s scan bound applies to REPLAY too (review r7-bot): scheduled
+    // windows derive from `lastBlock`, but a restored cursor — or a raised
+    // confirmation depth — can leave `lastBlock`, and with it a retained or
+    // durable window, ABOVE the finalized head. A replay must not deliver a
+    // block the forward scan is not yet allowed to touch, so the dispatched
+    // window is clamped to the same bound; the RETAINED mark keeps the
+    // exact original window, and the tail above the bound is replayed once
+    // the bound reaches it.
+    if (window.toBlock > lastBlock) {
+      if (window.fromBlock > lastBlock) return undefined;
+      window = { fromBlock: window.fromBlock, toBlock: lastBlock };
+    }
     this.#pendingRetry = { fromBlock: window.fromBlock, toBlock: window.toBlock };
     await this.persist(this.#pendingRetry);
     try {

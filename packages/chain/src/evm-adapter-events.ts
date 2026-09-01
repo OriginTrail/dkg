@@ -65,11 +65,17 @@ export type KnowledgeAssetRootMutationEventType =
  * (review r3).
  */
 const EVENT_ABI_ALIASES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  // BOTH public names of each family map to BOTH ABI spellings (review
+  // r7-bot): the listener branch serves either public name from whichever
+  // fragment the contract declares, so a probe that answered the two
+  // public names differently would disagree with the scan it gates.
   KCCreated: ['KnowledgeAssetCreated', 'KCCreated'],
+  KnowledgeAssetCreated: ['KnowledgeAssetCreated', 'KCCreated'],
   // Served from ContextGraphNameRegistry, whose ABI spells the fragment
   // `NameClaimed` (review r6 — the probe answered the two public spellings
   // differently across the EVM and mock adapters until this row).
   ContextGraphNameClaimed: ['NameClaimed', 'ContextGraphNameClaimed'],
+  NameClaimed: ['NameClaimed', 'ContextGraphNameClaimed'],
 });
 
 /**
