@@ -20,7 +20,6 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
-import { W1MetricsHarness } from './_helpers/w1-metrics.js';
 import {
   AUTHOR,
   InMemoryVmReverifyIntentStore,

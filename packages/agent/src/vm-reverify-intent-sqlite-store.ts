@@ -19,7 +19,6 @@ import {
   eventRedefinesIntent,
   type VmReverifyAbandonReason,
   VmReverifyIntentHealth,
-  VmReverifyIntentPosition,
   VmReverifyIntentRecord,
   VmReverifyIntentStore,
   VmReverifyIntentUpsertInput,

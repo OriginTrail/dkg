@@ -11,14 +11,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { resolveGraphScopedOrLegacyMetadata, type Quad } from '@origintrail-official/dkg-storage';
 import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { lookupGraphScopedOrLegacyMetadata, resolveGraphScopedOrLegacyMetadata, type Quad } from '@origintrail-official/dkg-storage';
 
-import { W1MetricsHarness } from './_helpers/w1-metrics.js';
 import {
   AUTHOR,
   CG,
