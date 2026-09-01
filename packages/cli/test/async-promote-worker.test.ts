@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
+  ASYNC_PROMOTE_STAGES,
   type AsyncPromoteQueue,
   type PromoteJob,
   type PromoteRequest,
@@ -486,6 +487,28 @@ describe('runPromoteJob', () => {
     expect(logs.join('\n')).not.toContain('secret-sentinel');
     expect(logs.join('\n')).not.toContain(alphanumericSecretToken);
     expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+  });
+
+  it('reports every publisher-owned canonical stage without a CLI-owned stage list', async () => {
+    for (const stage of ASYNC_PROMOTE_STAGES) {
+      const job = await enqueueAndClaim(makeRequest({ assertionName: `stage-${stage}` }));
+      await runPromoteJob({
+        job,
+        queue,
+        workerId: 'worker-test',
+        runPromote: async (_request, markPromoteStarted) => {
+          await markPromoteStarted();
+          throw new Error(`[promote:${stage}] deterministic failure`);
+        },
+        now: () => now,
+        heartbeatIntervalMs: 0,
+        log: (message) => logs.push(message),
+      });
+    }
+
+    expect(promoteFailureDiagnostics(logs).map((entry) => entry['stage'])).toEqual([
+      ...ASYNC_PROMOTE_STAGES,
+    ]);
   });
 
   it('keeps fail-closed queue bookkeeping intact when the diagnostic logger throws', async () => {

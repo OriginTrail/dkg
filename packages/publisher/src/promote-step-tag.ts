@@ -25,6 +25,43 @@
  */
 
 const PROMOTE_STEP_TAG_PREFIX = '[promote:';
+const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
+
+export const ASYNC_PROMOTE_STAGES = [
+  'ensureSubGraphRegistered',
+  'assertGraphScopedLifecycleWritable',
+  'knowledgeAssetPrivateQuads',
+  'assertionScopedQuads',
+  'assertTrustedCatalogTriplesAllowed',
+  'encodeWorkspaceGossipPayload',
+] as const;
+
+export type AsyncPromoteStage = (typeof ASYNC_PROMOTE_STAGES)[number];
+
+export interface ParsedPromoteErrorTag {
+  stage: AsyncPromoteStage | 'unknown';
+  message: string;
+}
+
+const ASYNC_PROMOTE_STAGE_SET: ReadonlySet<string> = new Set(ASYNC_PROMOTE_STAGES);
+
+/**
+ * Parse the publisher-owned diagnostic prefix without retaining caller-owned
+ * tag contents. Unknown and malformed stages normalize to `unknown`; a
+ * syntactically valid tag is still removed from the message so classification
+ * continues to operate only on the original error text.
+ */
+export function parsePromoteErrorTag(message: string): ParsedPromoteErrorTag {
+  const match = PROMOTE_STEP_TAG.exec(message);
+  const candidate = match?.[1];
+  return {
+    stage:
+      candidate !== undefined && ASYNC_PROMOTE_STAGE_SET.has(candidate)
+        ? (candidate as AsyncPromoteStage)
+        : 'unknown',
+    message: match === null ? message : message.slice(match[0].length),
+  };
+}
 
 /**
  * Return `err` re-labelled with the promote step that produced it. Idempotent:
@@ -32,7 +69,7 @@ const PROMOTE_STEP_TAG_PREFIX = '[promote:';
  * step) is returned untouched, so nesting a tagged op inside another tagged op
  * keeps the deepest label rather than stacking prefixes.
  */
-export function tagPromoteError(step: string, err: unknown): unknown {
+export function tagPromoteError(step: AsyncPromoteStage, err: unknown): unknown {
   const prefix = `[promote:${step}]`;
   if (err !== null && typeof err === 'object') {
     const e = err as { message?: unknown; name?: unknown; code?: unknown };
@@ -64,7 +101,7 @@ export function tagPromoteError(step: string, err: unknown): unknown {
  * {@link tagPromoteError}. Resolved values pass through unchanged. The `op` is
  * a thunk so it is invoked inside the try — a synchronous throw is tagged too.
  */
-export async function tagPromoteStep<T>(step: string, op: () => Promise<T>): Promise<T> {
+export async function tagPromoteStep<T>(step: AsyncPromoteStage, op: () => Promise<T>): Promise<T> {
   try {
     return await op();
   } catch (err) {

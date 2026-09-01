@@ -18,12 +18,17 @@ import { describe, it, expect } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { tagPromoteError, tagPromoteStep } from '../src/promote-step-tag.js';
+import {
+  ASYNC_PROMOTE_STAGES,
+  parsePromoteErrorTag,
+  tagPromoteError,
+  tagPromoteStep,
+} from '../src/promote-step-tag.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 
 describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () => {
   it('passes a resolved value through unchanged', async () => {
-    await expect(tagPromoteStep('resolveKaNumber', async () => 42)).resolves.toBe(42);
+    await expect(tagPromoteStep('ensureSubGraphRegistered', async () => 42)).resolves.toBe(42);
   });
 
   it('tags a rejected plain Error IN PLACE, preserving object identity, code, and stack', async () => {
@@ -32,7 +37,7 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
     const originalStack = original.stack; // materialise before tagging
 
     let caught: unknown;
-    await tagPromoteStep('resolveKaNumber', async () => {
+    await tagPromoteStep('ensureSubGraphRegistered', async () => {
       throw original;
     }).catch((e) => {
       caught = e;
@@ -40,7 +45,7 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
 
     expect(caught).toBe(original); // same object — instanceof / typed class preserved
     expect((caught as Error).message).toBe(
-      '[promote:resolveKaNumber] SPARQL HTTP query failed (500): boom',
+      '[promote:ensureSubGraphRegistered] SPARQL HTTP query failed (500): boom',
     );
     expect((caught as { code?: unknown }).code).toBe('RPC_503'); // PR2 classification signal survives
     expect((caught as Error).stack).toBe(originalStack); // stack untouched
@@ -48,7 +53,7 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
 
   it('never double-prefixes — the innermost promote step wins', () => {
     const already = new Error('[promote:assertionScopedQuads] deep failure');
-    const tagged = tagPromoteError('wmGraphUri', already);
+    const tagged = tagPromoteError('assertGraphScopedLifecycleWritable', already);
     expect(tagged).toBe(already);
     expect((tagged as Error).message).toBe('[promote:assertionScopedQuads] deep failure');
   });
@@ -67,9 +72,33 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
   });
 
   it('wraps a non-object throwable (string) in a tagged Error', () => {
-    const tagged = tagPromoteError('wmGraphUri', 'raw string failure') as Error;
+    const tagged = tagPromoteError('knowledgeAssetPrivateQuads', 'raw string failure') as Error;
     expect(tagged).toBeInstanceOf(Error);
-    expect(tagged.message).toBe('[promote:wmGraphUri] raw string failure');
+    expect(tagged.message).toBe('[promote:knowledgeAssetPrivateQuads] raw string failure');
+  });
+
+  it('recognizes every canonical async-promote stage from the publisher-owned tuple', () => {
+    for (const stage of ASYNC_PROMOTE_STAGES) {
+      expect(parsePromoteErrorTag(`[promote:${stage}] failure`)).toEqual({
+        stage,
+        message: 'failure',
+      });
+    }
+  });
+
+  it('normalizes unknown and malformed tags without exposing their contents', () => {
+    expect(parsePromoteErrorTag('[promote:caller-secret] failure')).toEqual({
+      stage: 'unknown',
+      message: 'failure',
+    });
+    expect(parsePromoteErrorTag('[promote:unterminated failure')).toEqual({
+      stage: 'unknown',
+      message: '[promote:unterminated failure',
+    });
+    expect(parsePromoteErrorTag('[promote:] failure')).toEqual({
+      stage: 'unknown',
+      message: 'failure',
+    });
   });
 });
 
