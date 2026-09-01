@@ -17,7 +17,7 @@ import {
   canonicalDigest32,
   canonicalEventPositionV1,
   canonicalNullableAuthorAddress,
-  canonicalUnsignedDecimal,
+  assertCanonicalKaId,
   type FinalizedEventPositionV1,
   type KnowledgeAssetRootMutationKindV1,
 } from '@origintrail-official/dkg-core';
@@ -194,14 +194,17 @@ export function decodeKnowledgeAssetRootMutationEvent(
   const { data } = event;
 
   let kaId: KaIdV1;
-  try {
-    // Core's canonical unsigned decimal: rejects leading zeros, signs,
-    // non-digits and anything above u256 — the payload contract's exact
-    // words. Canonical BY CONSTRUCTION (BigInt#toString has no leading-zero
-    // or sign alias for a validated u256), which is what licenses the brand.
-    kaId = canonicalUnsignedDecimal(data['kaId'], 'kaId').toString() as KaIdV1;
-  } catch {
-    return { ok: false, reason: 'noncanonical-ka-id' };
+  {
+    const raw: unknown = data['kaId'];
+    try {
+      // The NEUTRAL canonical KA-id boundary MINTS the brand (review r20) —
+      // no cast: the assertion narrows `raw` itself. Same acceptance family
+      // as before (canonical unsigned decimal, no leading-zero alias, u256).
+      assertCanonicalKaId(raw, 'kaId');
+    } catch {
+      return { ok: false, reason: 'noncanonical-ka-id' };
+    }
+    kaId = raw;
   }
 
   let position;
@@ -246,17 +249,11 @@ export function decodeKnowledgeAssetRootMutationEvent(
   return { ok: true, mutation };
 }
 
-// Type-level proof (review r19; kept in SRC because package test directories
-// are not typechecked): an arbitrary string cannot populate the branded
-// payload fields — only the decoder canonical judgements mint them.
-const _plainStringsCannotForgePayloads: KnowledgeAssetLifecycleUpdateEventV1 = {
-  kind: 'lifecycle-update',
-  // @ts-expect-error -- a plain string is not KaIdV1
-  kaId: '42',
-  position: undefined as never, // the position module carries its own proof
-  // @ts-expect-error -- a plain string is not Digest32V1
-  merkleRoot: 'not-a-digest',
-  // @ts-expect-error -- a plain string is not EvmAddressV1
-  author: 'not-an-address',
-};
-void _plainStringsCannotForgePayloads;
+// Zero-emit type-level proofs (reviews r19/r20): type aliases only, so the
+// built package carries NO fixture objects, while relaxing any brand fails
+// compilation. Kept in SRC because package test dirs are not typechecked.
+type Expect<T extends true> = T;
+type NotAssignable<A, B> = A extends B ? false : true;
+type _plainStringIsNotKaId = Expect<NotAssignable<'42', KnowledgeAssetLifecycleUpdateEventV1['kaId']>>;
+type _plainStringIsNotMerkleRoot = Expect<NotAssignable<'not-a-digest', NonNullable<KnowledgeAssetLifecycleUpdateEventV1['merkleRoot']>>>;
+type _plainStringIsNotAuthor = Expect<NotAssignable<'not-an-address', NonNullable<KnowledgeAssetLifecycleUpdateEventV1['author']>>>;

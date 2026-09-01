@@ -338,6 +338,71 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(seen).toEqual([45_000, 45_000, 45_000, 45_000]);
   });
 
+  it('a rejected replay window SURVIVES a process restart via the optional store methods (review r20)', async () => {
+    // The forward cursor is durable; an in-memory-only retained window
+    // would let a replay-discovered mutation be lost across a restart while
+    // the cursor stays ahead of it. The window is persisted on rejection,
+    // reloaded on restore, retried, and cleared on success.
+    const saves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    let persisted: { fromBlock: number; toBlock: number } | undefined;
+    let cursor: number | undefined;
+    const store = {
+      async loadLane() { return cursor; },
+      async saveLane(_lane: ChainEventPollerLane, block: number) { cursor = block; },
+      async loadLaneReplayRetry() { return persisted; },
+      async saveLaneReplayRetry(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+        saves.push(w ? { ...w } : undefined);
+        persisted = w ? { ...w } : undefined;
+      },
+    } satisfies LaneCursorPersistence;
+
+    let now = 0;
+    const chain1 = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
+    const seen1: number[] = [];
+    let rejectReplay = true;
+    const poller1 = new ChainEventPoller({
+      chain: chain1.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: store,
+      onKnowledgeAssetRootMutated: async (e) => {
+        seen1.push(e.position.blockNumber);
+        if (seen1.length > 1 && rejectReplay) {
+          throw new Error('consumer down during replay');
+        }
+      },
+    });
+    for (let tick = 1; tick <= 25; tick += 1) {
+      await poll(poller1);
+      now += CADENCE_MS;
+    }
+    // Tick 25 replayed, the handler rejected, the window was PERSISTED.
+    expect(saves).toHaveLength(1);
+    expect(saves[0]).toEqual({ fromBlock: 41_001, toBlock: 50_000 });
+
+    // "Restart": a NEW poller over the same durable store. The mutation is
+    // still on chain but far behind the cursor — only the restored window
+    // can reach it.
+    const chain2 = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
+    const seen2: number[] = [];
+    rejectReplay = false;
+    const poller2 = new ChainEventPoller({
+      chain: chain2.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: store,
+      onKnowledgeAssetRootMutated: async (e) => { seen2.push(e.position.blockNumber); },
+    });
+    await poll(poller2);
+
+    // The restored window was retried on the FIRST poll and cleared on success.
+    expect(seen2).toContain(45_000);
+    expect(saves[saves.length - 1]).toBeUndefined();
+    expect(persisted).toBeUndefined();
+  });
+
   it('leaves the idle cost and cadence of the other lanes untouched', async () => {
     let now = 0;
     const chain = makeChain(50_000);

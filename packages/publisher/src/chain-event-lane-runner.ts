@@ -279,6 +279,29 @@ export class ChainEventLaneRunner {
     }
   }
 
+  /**
+   * Best-effort persistence of the retained replay window (review r20): a
+   * store failure must not disturb the in-memory retry — the window is
+   * simply process-lifetime again, exactly the pre-durability behavior.
+   */
+  private async persistReplayRetry(
+    lane: ChainEventPollerLaneRuntime,
+    window: { fromBlock: number; toBlock: number } | undefined,
+    ctx: OperationContext,
+  ): Promise<void> {
+    try {
+      if (this.cursorStore?.kind === 'lane') {
+        await this.cursorStore.saveLaneReplayRetry?.(lane.spec.name, window);
+      }
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to persist replay-retry window (in-memory retry unaffected): lane=${lane.spec.name} ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   private async restoreLaneCursor(lane: ChainEventPollerLaneRuntime, ctx: OperationContext): Promise<void> {
     if (!this.cursorStore) return;
     try {
@@ -293,6 +316,20 @@ export class ChainEventLaneRunner {
             ? `Restored poller cursor from persistence: lane=${lane.spec.name} block ${saved}`
             : `Restored poller cursor from persistence: lane=${lane.spec.name} block ${saved} rewound to ${rewound}`,
         );
+      }
+      // A persisted replay-retry window outlives the process (review r20):
+      // the forward cursor is durable, so an in-memory-only retained window
+      // would let a rejected replay discovery be lost across a restart.
+      if (this.cursorStore.kind === 'lane') {
+        const retainedReplay = await this.cursorStore.loadLaneReplayRetry?.(lane.spec.name);
+        if (retainedReplay) {
+          lane.state.pendingRescanRetry = { ...retainedReplay };
+          this.log.info(
+            ctx,
+            `Restored replay-retry window from persistence: lane=${lane.spec.name} ` +
+            `[${retainedReplay.fromBlock}, ${retainedReplay.toBlock}]`,
+          );
+        }
       }
     } catch (err) {
       this.log.warn(ctx, `Failed to load persisted cursor: ${err instanceof Error ? err.message : String(err)}`);
@@ -422,9 +459,13 @@ export class ChainEventLaneRunner {
     if (replay) {
       try {
         await this.dispatchWindow(lane, replay.fromBlock, replay.toBlock, ctx);
-        lane.state.pendingRescanRetry = undefined;
+        if (lane.state.pendingRescanRetry) {
+          lane.state.pendingRescanRetry = undefined;
+          await this.persistReplayRetry(lane, undefined, ctx);
+        }
       } catch (err) {
         lane.state.pendingRescanRetry = { fromBlock: replay.fromBlock, toBlock: replay.toBlock };
+        await this.persistReplayRetry(lane, lane.state.pendingRescanRetry, ctx);
         this.log.warn(
           ctx,
           `Periodic re-scan failed (forward scan unaffected; window retained for retry): lane=${lane.spec.name} ` +

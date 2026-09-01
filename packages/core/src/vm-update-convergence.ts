@@ -88,6 +88,7 @@ function vmEventPosition(input: LooseEventPositionInputV1, label: string): Final
   return adapt(label, () => canonicalEventPositionV1(input, label));
 }
 export type {
+  CanonicalEventPositionV1,
   FinalizedEventPositionV1,
   LooseEventPositionInputV1,
 } from './finalized-event-position-v1.js';

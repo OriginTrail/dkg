@@ -12,12 +12,22 @@ import { assertCanonicalDigest, type Digest32V1 } from './sync-wire-scalars.js';
 
 export interface FinalizedEventPositionV1 {
   blockNumber: number;
-  /** Branded (review r18): only the validator can mint these, so a validated
-   *  position is distinguishable from an arbitrary object literal. */
-  blockHash: Digest32V1;
-  transactionHash: Digest32V1;
+  blockHash: string;
+  transactionHash: string;
   transactionIndex: number;
   logIndex: number;
+}
+
+/**
+ * A position whose digests were PROVEN by the validator (reviews r18/r20):
+ * assignable wherever the base type is accepted, but only the validator (or
+ * core's canonical producers) can mint it. The base interface deliberately
+ * keeps plain-string digests — it is a long-shipped public type, and
+ * narrowing it would break every external constructor in a patch release.
+ */
+export interface CanonicalEventPositionV1 extends FinalizedEventPositionV1 {
+  blockHash: Digest32V1;
+  transactionHash: Digest32V1;
 }
 
 /**
@@ -57,7 +67,7 @@ function positionIndex(value: unknown, label: string): number {
 export function canonicalEventPositionV1(
   input: LooseEventPositionInputV1,
   label = 'position',
-): FinalizedEventPositionV1 {
+): CanonicalEventPositionV1 {
   return {
     blockNumber: positionIndex(input.blockNumber, `${label}.blockNumber`),
     blockHash: positionDigest(input.blockHash, `${label}.blockHash`),
@@ -89,17 +99,13 @@ export function sameEventIdentity(a: FinalizedEventPositionV1, b: FinalizedEvent
   );
 }
 
-// Type-level proof (review r18; kept in SRC because package test directories
-// are not typechecked): a plain string cannot populate a validated position's
-// digest fields — only the validator (or core's canonical producers) mint the
-// brand.
-const _plainStringsCannotForgePositions: FinalizedEventPositionV1 = {
-  blockNumber: 1,
-  // @ts-expect-error -- a plain string is not Digest32V1
-  blockHash: 'not-a-digest',
-  // @ts-expect-error -- a plain string is not Digest32V1
-  transactionHash: 'also-not-a-digest',
-  transactionIndex: 0,
-  logIndex: 0,
-};
-void _plainStringsCannotForgePositions;
+// Zero-emit type-level proofs (reviews r18/r20): expressed as type aliases,
+// so the built package contains NO fixture objects, yet relaxing a brand or
+// breaking the subtype relation fails compilation. Kept in SRC because
+// package test directories are not typechecked.
+type Expect<T extends true> = T;
+type Assignable<A, B> = A extends B ? true : false;
+type NotAssignable<A, B> = A extends B ? false : true;
+type _plainStringCannotForgeDigests = Expect<NotAssignable<'not-a-digest', Digest32V1>>;
+type _canonicalIsAssignableToBase = Expect<Assignable<CanonicalEventPositionV1, FinalizedEventPositionV1>>;
+type _baseIsNotCanonical = Expect<NotAssignable<FinalizedEventPositionV1, CanonicalEventPositionV1>>;
