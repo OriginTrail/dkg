@@ -600,20 +600,31 @@ impl PlanRuntime {
     }
 }
 
-fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntime, &'static str> {
-    if !plan.approval_requirements.is_empty()
-        || plan
-            .required_capabilities
-            .iter()
-            .any(|value| !matches!(value.as_str(), "agent.invoke.investigator" | "dkg.query"))
-        || plan
-            .effect_upper_bound
-            .iter()
-            .any(|value| !matches!(value, EffectClass::ModelInvocation | EffectClass::Read))
-        || plan.adapter_versions.iter().any(|(operation, version)| {
-            *version != 1 || !matches!(operation.as_str(), "agent/investigate" | "dkg/query")
+fn supports_plan_effects(plan: &AdmittedPlan) -> bool {
+    plan.approval_requirements.is_empty()
+        && !plan.required_capabilities.iter().any(|value| {
+            !matches!(
+                value.as_str(),
+                "agent.invoke.investigator" | "dkg.query" | "program.remote-execute"
+            )
         })
-    {
+        && !plan.effect_upper_bound.iter().any(|value| {
+            !matches!(
+                value,
+                EffectClass::ModelInvocation | EffectClass::Read | EffectClass::RemoteExecution
+            )
+        })
+        && !plan.adapter_versions.iter().any(|(operation, version)| {
+            *version != 1
+                || !matches!(
+                    operation.as_str(),
+                    "agent/investigate" | "dkg/query" | "remote-execute"
+                )
+        })
+}
+
+fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntime, &'static str> {
+    if !supports_plan_effects(plan) {
         return Err("PLAN_MATERIALIZATION_UNSUPPORTED_EFFECT");
     }
     let PlanExpr::Sequence(root_children) = &plan.root.value else {
@@ -656,6 +667,7 @@ fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntim
         let index = u32::try_from(index).map_err(|_| "PLAN_MATERIALIZATION_AGENT_COUNT")?;
         let model_call = has_call(&instructions, "agent/investigate");
         let dkg_query = has_call(&instructions, "dkg/query");
+        let remote_execute = has_call(&instructions, "remote-execute");
         let (process_id, child) = materialize_agent(
             &plan.canonical_hash,
             &role,
@@ -663,6 +675,7 @@ fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntim
             *max_restarts,
             model_call,
             dkg_query,
+            remote_execute,
         );
         children.push((process_id, child));
         agents.push(PlanAgent {
@@ -705,6 +718,7 @@ fn materialize_agent(
     max_restarts: u16,
     model_call: bool,
     dkg_query: bool,
+    remote_execute: bool,
 ) -> (ProcessId, ChildSpec) {
     let process_id = ProcessId::new(derive_id(
         b"DKG-SEMANTIC-PROCESS-V1\0",
@@ -742,7 +756,7 @@ fn materialize_agent(
             budget_limits: BTreeMap::from([
                 (BudgetKind::Steps, 10_000),
                 (BudgetKind::ModelTokens, if model_call { 512 } else { 0 }),
-                (BudgetKind::ToolCalls, 0),
+                (BudgetKind::ToolCalls, u64::from(remote_execute)),
                 (BudgetKind::DkgQueries, u64::from(dkg_query)),
                 (BudgetKind::Restarts, u64::from(max_restarts)),
             ]),
@@ -762,10 +776,12 @@ fn collect_plan_agents(
             Ok(())
         }
         PlanExpr::Delegate { role, grants, body } => {
-            if grants
-                .iter()
-                .any(|value| !matches!(value.as_str(), "agent.invoke.investigator" | "dkg.query"))
-            {
+            if grants.iter().any(|value| {
+                !matches!(
+                    value.as_str(),
+                    "agent.invoke.investigator" | "dkg.query" | "program.remote-execute"
+                )
+            }) {
                 return Err("PLAN_MATERIALIZATION_AGENT_GRANT");
             }
             let mut instructions = Vec::new();
@@ -794,7 +810,10 @@ fn collect_instructions(
         PlanExpr::Emit(value) => instructions.push(PlanInstruction::Emit(value.clone())),
         PlanExpr::Call(call)
             if call.version == 1
-                && matches!(call.operation.as_str(), "agent/investigate" | "dkg/query") =>
+                && matches!(
+                    call.operation.as_str(),
+                    "agent/investigate" | "dkg/query" | "remote-execute"
+                ) =>
         {
             instructions.push(PlanInstruction::Call(call.clone()));
         }
@@ -812,6 +831,7 @@ fn call_budget(call: &RegisteredCall) -> Option<(BudgetKind, u64)> {
     match (call.operation.as_str(), call.version) {
         ("agent/investigate", 1) => Some((BudgetKind::ModelTokens, 512)),
         ("dkg/query", 1) => Some((BudgetKind::DkgQueries, 1)),
+        ("remote-execute", 1) => Some((BudgetKind::ToolCalls, 1)),
         _ => None,
     }
 }

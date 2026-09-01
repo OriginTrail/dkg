@@ -218,6 +218,7 @@ function buildInto(outputRoot) {
     '--async-imports',
     'origintrail:semantic-runtime/investigator@0.1.0#investigate',
     'origintrail:semantic-runtime/query-catalog@0.1.0#query',
+    'origintrail:semantic-runtime/remote-execute@0.1.0#execute',
     '--instantiation', 'async',
     '--no-wasi-shim',
     '--strict',

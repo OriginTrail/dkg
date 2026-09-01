@@ -327,6 +327,54 @@ function componentImports(): object {
           },
         };
       }
+      if (
+        name === 'origintrail:semantic-runtime/remote-execute'
+        || name === 'origintrail:semantic-runtime/remote-execute@0.1.0'
+      ) {
+        return {
+          execute: async (
+            resource: ExecutionCapability,
+            request: { effectId: bigint; nodeId: string; programIri: string },
+          ): Promise<{ executionIri: string; executionUal?: string }> => {
+            assertImportedTool(
+              resource,
+              'remote-execute',
+              'origintrail:semantic-runtime/remote-execute@0.1.0',
+            );
+            if (typeof request?.effectId !== 'bigint' || request.effectId <= 0n) {
+              throw componentResultFailure('INVALID_REMOTE_EXECUTE_EFFECT_ID');
+            }
+            if (
+              typeof request.nodeId !== 'string'
+              || request.nodeId.length === 0
+              || Buffer.byteLength(request.nodeId, 'utf8') > 512
+              || typeof request.programIri !== 'string'
+              || request.programIri.length === 0
+              || Buffer.byteLength(request.programIri, 'utf8') > 2_048
+            ) {
+              throw componentResultFailure('INVALID_REMOTE_EXECUTE_ARGUMENT');
+            }
+            const result = await invokeHostTool({
+              kind: 'remote-execute',
+              effectId: request.effectId,
+              nodeId: request.nodeId,
+              programIri: request.programIri,
+            });
+            if (
+              result.kind !== 'remote-execute'
+              || typeof result.executionIri !== 'string'
+              || result.executionIri.length === 0
+              || (result.executionUal !== undefined && typeof result.executionUal !== 'string')
+            ) {
+              throw componentResultFailure('COMPONENT_TOOL_RESULT_MISMATCH');
+            }
+            return {
+              executionIri: result.executionIri,
+              ...(result.executionUal ? { executionUal: result.executionUal } : {}),
+            };
+          },
+        };
+      }
       if (allowedCarrierImports.some((entry) => name.startsWith(entry))) {
         return deniedInterface;
       }

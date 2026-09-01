@@ -58,18 +58,36 @@ When enabled, a missing or modified local artifact, build-lock mismatch,
 unexpected component import/export, incompatible ABI, failed Worker handshake,
 or restore mismatch fails closed. Carrier WASI imports receive deny-only stubs:
 the component receives no filesystem, network, environment, stdio, random, or
-clock authority. Its sole repository-owned import is an opaque, host-created
-execution capability.
+clock authority. Its repository-owned imports are an opaque, host-created
+execution capability and the three explicit typed tool interfaces below.
 
 Programs are stored in the DKG as `sr:Program` resources with `sr:language`,
 `sr:version`, and `sr:source` triples. The authenticated
 `POST /api/semantic-runtime/invoke` route loads a program by IRI from the
 explicitly selected WM, SWM, or VM view of the requested context graph, admits
 its S-expression in Wasm, and executes its logical agents there. The caller
-also explicitly selects the Execution KA's target layer. The first narrow execution slice
-supports ordered `emit` forms and one exact `agent/investigate@1` model request
-per delegate. The TypeScript host performs only that requested external call
-and returns its result to the waiting Wasm process.
+also explicitly selects the Execution KA's target layer. The narrow execution
+slice supports ordered `emit` forms and one typed tool request per delegate:
+`agent/investigate@1`, `dkg/query@1`, or `remote-execute@1`. The host performs
+only the requested operation and returns its result to the waiting Wasm
+process.
+
+`remote-execute@1` composes Programs without exposing a network socket to the
+component:
+
+```lisp
+(delegate composer
+  (grant program.remote-execute)
+  (call remote-execute@1 "12D3KooWTargetPeer" "urn:sr:program:child"))
+```
+
+The child inherits the parent Context Graph and selected Program/Execution
+layers. The invoking wallet never comes from the S-expression. The host takes
+it from the authenticated execution capability, signs a target-bound DKG inbox
+delegation, and the target independently requires a private Context Graph and
+current membership for that wallet before executing the replicated Program as
+its own node operator. Nested forwarding is fail-closed when the current node
+does not custody the original invoker wallet.
 
 Admission can be exercised without activating the daemon integration:
 
