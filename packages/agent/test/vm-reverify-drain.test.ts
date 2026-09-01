@@ -144,6 +144,41 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     return ual;
   }
 
+  it('a FIRST-ACTIVATION audit intent repairs a stale holding of any age (review r3)', async () => {
+    // The reviewer’s scenario: the staleness-causing mutation predates the
+    // activation lookback entirely. The audit’s zero-position intent ignores
+    // event history — the drain verifies against the CURRENT chain root
+    // (observedBlock 0 passes the resolve rule on any coherent view) and the
+    // stale local copy is fetched and repaired.
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = ualOf(94n);
+    await intents.upsert({
+      ual,
+      localCgId: DRAIN_CG,
+      kaId: kaIdFor(94n).toString(),
+      kind: 'lifecycle-update',
+      position: {
+        blockNumber: 0,
+        blockHash: `0x${'0'.repeat(64)}`,
+        transactionHash: `0x${'0'.repeat(64)}`,
+        transactionIndex: 0,
+        logIndex: 0,
+      },
+    });
+    let repaired = false;
+    const fetch = makeFetch({
+      snapshotFor: () => snapshot(200),
+      localState: () => (repaired ? 'present' : 'missing'),
+      peerIds: ['peer-a'],
+      fetchFromPeer: async () => { repaired = true; },
+    });
+    const { worker } = makeWorker(intents, fetch);
+
+    const run = await worker.runOnce();
+
+    expect(run.items[0]).toMatchObject({ ual, action: 'resolve', reason: 'fetched' });
+    expect(await intents.countPending()).toBe(0);
+  });
   it('resolves an already-current asset with ZERO peer contact', async () => {
     const intents = new InMemoryVmReverifyIntentStore();
     const ual = await seed(intents, 1n, 150);

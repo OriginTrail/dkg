@@ -3214,6 +3214,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           : undefined,
       });
+      // FIRST-ACTIVATION audit (review r3): must complete BEFORE the poller
+      // can persist its first cursor — that ordering is what makes a crash
+      // mid-audit re-run it on the next boot instead of half-covering the
+      // held set forever.
+      await this.bootstrapVmReverifyAuditIfFirstActivation(ctx);
       await this.chainPoller.start();
 
       // The drain. Started after the lane so an event ingested during startup

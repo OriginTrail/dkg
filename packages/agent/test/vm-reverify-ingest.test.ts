@@ -304,6 +304,59 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     expect(verifications, 'one verification per PRODUCTIVE peer').toBe(2);
   }, 60_000);
 
+  it('FIRST activation audits every held asset at position zero (review r3)', async () => {
+    // No cursor can exist before the feature is first enabled, so mutations
+    // older than the bounded live seed are invisible to the lane. The audit
+    // gives every HELD graph-scoped asset one durable intent at block 0 —
+    // which the resolve rule verifies against the CURRENT chain root, so
+    // stale holdings from arbitrarily old mutations are repaired.
+    const { internals, ualFor } = await boot();
+    const ual = await ualFor(95n);
+    await insertHeldMetadata(internals.store, ual);
+    (internals.config as Record<string, unknown>).chainEventCursorStore = {
+      loadLane: async () => undefined,
+      saveLane: async () => undefined,
+    };
+
+    await internals.bootstrapVmReverifyAuditIfFirstActivation(ctx);
+
+    expect(await intents.countPending(CG)).toBe(1);
+    const row = [...intents.rows.values()][0]!;
+    expect(row).toMatchObject({
+      ual,
+      kind: 'lifecycle-update',
+      state: 'PENDING',
+      observed: { blockNumber: 0 },
+    });
+
+    // Idempotent: a re-run (the crash-recovery path) changes nothing.
+    await internals.bootstrapVmReverifyAuditIfFirstActivation(ctx);
+    expect(await intents.countPending(CG)).toBe(1);
+    expect(row.generation).toBe(0);
+  }, 60_000);
+
+  it('an EXISTING cursor under either key means not-first-activation: no audit (review r3)', async () => {
+    const { internals, ualFor } = await boot();
+    await insertHeldMetadata(internals.store, await ualFor(96n));
+    for (const key of ['kaRootMutations', 'collectionUpdates']) {
+      (internals.config as Record<string, unknown>).chainEventCursorStore = {
+        loadLane: async (lane: string) => (lane === key ? 12_345 : undefined),
+        saveLane: async () => undefined,
+      };
+      await internals.bootstrapVmReverifyAuditIfFirstActivation(ctx);
+    }
+    expect(await intents.countPending(CG), `a cursor is proof of prior coverage`).toBe(0);
+  }, 60_000);
+
+  it('without durable cursor persistence there is no first-activation signal: no audit (review r3)', async () => {
+    const { internals, ualFor } = await boot();
+    await insertHeldMetadata(internals.store, await ualFor(97n));
+    (internals.config as Record<string, unknown>).chainEventCursorStore = undefined;
+
+    await internals.bootstrapVmReverifyAuditIfFirstActivation(ctx);
+
+    expect(await intents.countPending(CG)).toBe(0);
+  }, 60_000);
   it('the SWM peer loop FAILS OVER across a broken peer to one that serves the target (review r3)', async () => {
     const { internals } = await boot();
     internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];

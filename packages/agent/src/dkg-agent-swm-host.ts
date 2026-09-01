@@ -35,7 +35,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, getMetrics, sparqlString, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, getMetrics, sparqlString, isSafeIri, assertSafeIri, parseDeterministicKnowledgeAssetUal,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   LEGACY_TRUST_LEVEL_PREDICATE,
@@ -152,7 +152,7 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
-  buildReconciledKnowledgeAssetUal,
+  buildReconciledKnowledgeAssetUal, packKnowledgeAssetIdFromIdentity,
 } from './ka-identity.js';
 import {
   createCGMemberEnumerator,
@@ -3312,6 +3312,102 @@ export class SwmHostModeMethods extends DKGAgentBase {
       void this.vmReconcileDispatcher.triggerLive(localCgId);
     }
     return localCgId;
+  }
+
+  /**
+   * FIRST-ACTIVATION bootstrap audit (#2435, review r3; the plan’s recorded
+   * approach-C fallback, now decided).
+   *
+   * A durable lane cursor cannot exist before the feature is first enabled,
+   * so the lane’s bounded live seed leaves every mutation older than the
+   * activation lookback permanently invisible — and the ordinal sweep skips
+   * already-registered assets, so nothing else revisits them. The audit
+   * closes that window WITHOUT historical chain scans: every HELD
+   * graph-scoped asset gets one durable intent at position ZERO. Block 0
+   * satisfies the resolve rule (`versionBlock >= observedBlock`) on any
+   * coherent chain view, so the drain verifies each asset against the
+   * CURRENT chain root and repairs exactly the stale ones — riding the same
+   * bounded budgets and backoff ladder as live work.
+   *
+   * Crash-safe by ORDERING, not by a marker: the caller runs this BEFORE the
+   * poller’s first scan can persist a cursor, so a crash mid-audit leaves
+   * the node cursor-less and the next boot re-runs the audit; re-running is
+   * idempotent (an existing zero-position row reports `unchanged`). Without
+   * durable cursor persistence there is no first-activation signal, and the
+   * audit is skipped — an embedder without a cursor store re-seeds every
+   * boot and would re-audit every boot too.
+   */
+  async bootstrapVmReverifyAuditIfFirstActivation(
+    this: DKGAgent,
+    ctx: OperationContext,
+  ): Promise<void> {
+    const intents = this.vmReverifyIntents;
+    if (!intents) return;
+    const cursorStore = this.config.chainEventCursorStore as
+      | { loadLane?: (lane: string) => Promise<number | undefined> }
+      | undefined;
+    if (typeof cursorStore?.loadLane !== 'function') return;
+    const [own, retired] = await Promise.all([
+      cursorStore.loadLane('kaRootMutations'),
+      cursorStore.loadLane('collectionUpdates'),
+    ]);
+    // A cursor under EITHER key means this is not first activation: the own
+    // key is real coverage, and the retired key is the migration case whose
+    // pre-rename lane had already been auditing lifecycle updates.
+    if ((own ?? 0) > 0 || (retired ?? 0) > 0) return;
+
+    let audited = 0;
+    for (const [localCgId, subscription] of this.subscribedContextGraphs) {
+      if (!subscription.subscribed && !subscription.coreHosted) continue;
+      const metaGraph = contextGraphMetaGraphUri(localCgId);
+      const result = await this.store.query(
+        `SELECT DISTINCT ?ka WHERE {
+        GRAPH <${metaGraph}> {
+          ?ka <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
+          ?ka <http://dkg.io/ontology/kaUal> ?kaUal .
+        }
+      }`,
+        { source: 'agent.vmReverify.bootstrapAudit' },
+      );
+      if (result.type !== 'bindings') continue;
+      for (const row of result.bindings) {
+        const ual = String((row as Record<string, unknown>)['ka'] ?? '');
+        let kaId: string;
+        try {
+          const identity = parseDeterministicKnowledgeAssetUal(ual);
+          kaId = packKnowledgeAssetIdFromIdentity({
+            agentAddress: identity.agentAddress,
+            kaNumber: identity.kaNumber,
+          }).toString();
+        } catch {
+          // A marker subject that is not a deterministic KA UAL is not a held
+          // asset this feature can address; the exact fetch could not act on
+          // it either.
+          continue;
+        }
+        const outcome = await intents.upsert({
+          ual,
+          localCgId,
+          kaId,
+          kind: 'lifecycle-update',
+          position: {
+            blockNumber: 0,
+            blockHash: `0x${'0'.repeat(64)}`,
+            transactionHash: `0x${'0'.repeat(64)}`,
+            transactionIndex: 0,
+            logIndex: 0,
+          },
+        });
+        if (outcome !== 'unchanged') audited += 1;
+      }
+    }
+    if (audited > 0) {
+      this.log.info(
+        ctx,
+        `vm-reverify FIRST-ACTIVATION audit: ${audited} held asset(s) queued for verification against the current chain root`,
+      );
+      this.vmReverifyWorker?.kick();
+    }
   }
 
   /**
