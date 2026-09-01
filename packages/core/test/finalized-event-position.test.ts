@@ -10,17 +10,12 @@ import {
   canonicalEventPositionV1,
   canonicalFinalizedUpdate,
   compareEventPosition,
-  deriveVmUpdateScopeId,
   isDiscardedByResume,
   sameEventIdentity,
   type FinalizedEventPositionV1,
-  type FinalizedUpdatePageProofV1,
-  type VmUpdateScopeV1
 } from '../src/vm-update-convergence.js';
 
 
-const KA_STORAGE = `0x${'a1'.repeat(20)}`;
-const CG_STORAGE = `0x${'b2'.repeat(20)}`;
 const OTHER_ADDRESS = `0x${'c3'.repeat(20)}`;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 const HASH_A = `0x${'11'.repeat(32)}`;
