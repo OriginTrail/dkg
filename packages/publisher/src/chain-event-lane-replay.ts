@@ -109,22 +109,26 @@ export class LaneReplayCoordinator {
   async dispatchDue(
     lastBlock: number,
     dispatchWindow: (window: LaneReplayRetryWindow) => Promise<void>,
+    finalizedBound?: number,
   ): Promise<{ window: LaneReplayRetryWindow; dispatched: boolean } | undefined> {
     let window = await this.takeWindow(lastBlock);
     if (!window) return undefined;
     // The lane’s scan bound applies to REPLAY too (review r7-bot): scheduled
     // windows derive from `lastBlock`, but a restored cursor — or a raised
-    // confirmation depth — can leave `lastBlock`, and with it a retained or
-    // durable window, ABOVE the finalized head. A replay must not deliver a
-    // block the forward scan is not yet allowed to touch, so the dispatched
-    // window is clamped to the same bound; the RETAINED mark keeps the
-    // exact original window, and the tail above the bound is replayed once
-    // the bound reaches it.
-    if (window.toBlock > lastBlock) {
-      if (window.fromBlock > lastBlock) return undefined;
-      window = { fromBlock: window.fromBlock, toBlock: lastBlock };
+    // confirmation depth — can leave a retained or durable window ABOVE the
+    // finalized head. A replay must not deliver a block the forward scan is
+    // not yet allowed to touch, so the DISPATCHED window is clamped to the
+    // bound — while the write-ahead mark keeps the FULL obligation, and a
+    // clean clamped dispatch retains the unfinalized TAIL for the poll on
+    // which the bound reaches it. Nothing above the bound is ever lost.
+    const original = window;
+    let tail: LaneReplayRetryWindow | undefined;
+    if (finalizedBound !== undefined && window.toBlock > finalizedBound) {
+      if (window.fromBlock > finalizedBound) return undefined;
+      window = { fromBlock: window.fromBlock, toBlock: finalizedBound };
+      tail = { fromBlock: finalizedBound + 1, toBlock: original.toBlock };
     }
-    this.#pendingRetry = { fromBlock: window.fromBlock, toBlock: window.toBlock };
+    this.#pendingRetry = { fromBlock: original.fromBlock, toBlock: original.toBlock };
     await this.persist(this.#pendingRetry);
     try {
       await dispatchWindow(window);
@@ -136,8 +140,8 @@ export class LaneReplayCoordinator {
       );
       return { window, dispatched: false };
     }
-    this.#pendingRetry = undefined;
-    await this.persist(undefined);
+    this.#pendingRetry = tail;
+    await this.persist(tail);
     return { window, dispatched: true };
   }
 

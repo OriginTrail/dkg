@@ -541,9 +541,16 @@ export class ChainEventLaneRunner {
     // itself can sit above the finalized head; the replay bound must be the
     // FINALIZED view, not the raw cursor (review r7-bot). `head` here is
     // already the finalized head for a scanOnlyFinalizedHead lane.
-    const replayBound = head != null ? Math.min(state.lastBlock, head) : state.lastBlock;
-    await lane.replay.dispatchDue(replayBound, (window) =>
-      this.dispatchWindow(lane, window.fromBlock, window.toBlock, ctx));
+    // `head` is already the finalized head for a scanOnlyFinalizedHead lane;
+    // only such lanes carry a bound — other lanes keep the pre-existing
+    // contract of dispatching a restored window in full (idempotent overlap
+    // with the forward scan) and clearing it.
+    const finalizedBound = lane.spec.scanOnlyFinalizedHead && head != null ? head : undefined;
+    await lane.replay.dispatchDue(
+      state.lastBlock,
+      (window) => this.dispatchWindow(lane, window.fromBlock, window.toBlock, ctx),
+      finalizedBound,
+    );
     if (fromBlock > upperBound) {
       this.applyLaneSchedule(lane, { kind: 'noWork', now });
       return { lane, blockNumber: state.lastBlock, advanced: false };

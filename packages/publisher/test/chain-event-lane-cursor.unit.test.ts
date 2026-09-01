@@ -530,7 +530,50 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
       await poll(poller);
       now += CADENCE_MS;
     }
-    expect(seen, 'finalization releases the SAME event').toEqual([49_945]);
+    // Replay redelivers idempotently by contract, so the tail and a later
+    // rescan may both carry it — what matters is that NOTHING else does.
+    expect([...new Set(seen)], 'finalization releases the SAME event, and only it').toEqual([49_945]);
+  });
+  it('a RESTORED durable replay window above the finalized head is clamped, not dispatched past it (review r7-bot)', async () => {
+    // The scheduled rescan derives from the bounded cursor, but a durable
+    // window persisted BEFORE a confirmation-depth increase (or restored
+    // alongside a rewound cursor) carries its own toBlock — the clamp in
+    // the coordinator is what keeps that window from delivering blocks the
+    // forward scan is not yet allowed to touch.
+    let now = 0;
+    const seen: number[] = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_945)]);
+    (chain.adapter as { finalizedEventScanConfirmations?: () => number })
+      .finalizedEventScanConfirmations = () => 60;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          // Persisted before the depth increase: the window reaches PAST
+          // the now-finalized head (49,941).
+          async load() { return { fromBlock: 49_930, toBlock: 49_950 }; },
+          async save() { /* not under test */ },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    await poll(poller);
+    await poll(poller);
+    expect(
+      seen,
+      'the restored window must be CLAMPED at 49,941 — 49,945 is not finalized',
+    ).toEqual([]);
+
+    chain.setHead(50_010);
+    now += CADENCE_MS;
+    await poll(poller);
+    expect([...new Set(seen)], 'the same event delivers once finalized').toEqual([49_945]);
   });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
