@@ -672,6 +672,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { VmSwmRecoveryNotAuthorizedError } from './vm-reverify-worker.js';
 import {
   VmReconcileQueueClosedError, VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
@@ -8092,6 +8093,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     localCgId: string,
     verifyRecovered: () => Promise<boolean>,
   ): Promise<void> {
+    // RFC-64 authority (review r4): the SAME filter automatic durable sync
+    // applies. For a catalog-authoritative CG the catalog lane is the sole
+    // SWM plane; legacy whole-graph recovery would overwrite it from peers
+    // the execution plan never authorized. The typed refusal defers the
+    // intent instead.
+    if (!this.resolveRfc64CatalogReceiverAuthorityV1(localCgId).legacySyncAllowed) {
+      throw new VmSwmRecoveryNotAuthorizedError(localCgId);
+    }
     let peerFailures = 0;
     let lastFailure: unknown;
     for (const peerId of await this.resolveVmReverifySwmPeers(localCgId)) {

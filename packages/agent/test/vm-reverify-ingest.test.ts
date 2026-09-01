@@ -34,6 +34,7 @@ import {
 } from '../src/sync/exact-asset-fetch.js';
 import {
   VM_REVERIFY_ADMISSION_PRIORITY,
+  VmSwmRecoveryNotAuthorizedError,
 } from '../src/vm-reverify-worker.js';
 
 function stubNode(agent: DKGAgent): void {
@@ -390,6 +391,25 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     expect(attempts, 'the broken peer must not end the traversal').toEqual(['peer-a', 'peer-b']);
   }, 60_000);
 
+  it('a catalog-authoritative CG never invokes legacy SWM recovery (review r4)', async () => {
+    // RFC-64: the catalog lane is the SOLE SWM authority for this graph.
+    // Legacy whole-graph recovery from unauthorized peers must not run at
+    // all — the refusal is typed, so the worker defers the intent to the
+    // plane that actually owes it.
+    const { internals } = await boot();
+    internals.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: false });
+    let attempts = 0;
+    internals.recoverContextGraphSwmFromPeer = async () => {
+      attempts += 1;
+      return { insertedDataQuads: 1, insertedMetaQuads: 0, replacedGraphs: 0, replacedRoots: 0 };
+    };
+
+    await expect(internals.recoverContextGraphSwmForReverify(
+      'w2r-catalog-cg',
+      async () => true,
+    )).rejects.toBeInstanceOf(VmSwmRecoveryNotAuthorizedError);
+    expect(attempts, 'no peer may be contacted for catalog-owned SWM').toBe(0);
+  }, 60_000);
   it('a per-peer DEADLINE abort is a peer failure, not shutdown (review r4)', async () => {
     // AbortError is overloaded: protocol deadlines abort with the same name
     // as lifecycle cancellation. Classification is CAUSAL — the lifecycle

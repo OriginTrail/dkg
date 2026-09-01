@@ -139,7 +139,7 @@ export interface VmReverifyTransitionInput {
    * — the traversal finished honestly; an item still unresolved after it is
    * on the countdown to `no-peer-has-version`.
    */
-  swmRecovery?: 'completed' | 'unavailable' | 'failed';
+  swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized';
   /** When this generation first attempted anything; absent before attempt 1. */
   firstAttemptAt?: number;
   now: number;
@@ -240,6 +240,12 @@ export function planTransition(input: VmReverifyTransitionInput): VmReverifyTran
     // retries it and the park budget stays untouched.
     if (input.swmRecovery === 'failed') {
       return retry('swm-recovery-failed', 'evidence-unavailable', attemptNumber);
+    }
+    // Catalog-authoritative SWM (review r4): same deferral shape as the
+    // durable-plane switch — the catalog lane is what will serve this, and
+    // blaming the peer population would park work that plane still owes.
+    if (input.swmRecovery === 'not-authorized') {
+      return retry('swm-recovery-not-authorized', 'evidence-unavailable', attemptNumber);
     }
     if (firstAttemptAt !== undefined && now - firstAttemptAt >= parkAfterMs) {
       return { action: 'abandon', reason: 'no-peer-has-version' };

@@ -36,6 +36,13 @@ export type VmReverifyRetryReason =
    * budget.
    */
   | 'swm-recovery-failed'
+  /**
+   * The SWM this repair depends on is CATALOG-authoritative (RFC-64, review
+   * r4): legacy recovery is not authorized for this Context Graph, and the
+   * catalog lane is the plane that will serve it. Deferred like the
+   * durable-plane switch — never a park-budget consumer.
+   */
+  | 'swm-recovery-not-authorized'
   /** An error this table does not recognise. Treated as transient, loudly. */
   | 'unexpected-error';
 

@@ -52,6 +52,21 @@ export const VM_REVERIFY_DEFAULT_KICK_DEBOUNCE_MS = 250;
  */
 export const VM_REVERIFY_ADMISSION_PRIORITY = 200;
 
+/**
+ * The SWM recovery was refused by RFC-64 catalog authority (review r4): for
+ * a catalog-authoritative Context Graph the catalog lane is the SOLE SWM
+ * plane, and legacy whole-graph recovery must not overwrite it. The intent
+ * DEFERS — the catalog lane is what will eventually serve the projection —
+ * exactly like the durable-plane deferral, and never consumes the park
+ * budget.
+ */
+export class VmSwmRecoveryNotAuthorizedError extends Error {
+  constructor(localCgId: string) {
+    super(`W2 SWM recovery is catalog-authoritative for "${localCgId}"; legacy recovery not authorized`);
+    this.name = 'VmSwmRecoveryNotAuthorizedError';
+  }
+}
+
 function positiveEnvInteger(name: string): number | undefined {
   const raw = process.env[name]?.trim();
   if (!raw) return undefined;
@@ -437,7 +452,7 @@ export class VmReverifyWorker {
     records: readonly VmReverifyIntentRecord[],
     outcomes: Map<string, CallOutcome>,
     summary: VmReverifyRunSummary,
-  ): Promise<{ outcomes: Map<string, CallOutcome>; swmRecovery?: 'completed' | 'unavailable' | 'failed' }> {
+  ): Promise<{ outcomes: Map<string, CallOutcome>; swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized' }> {
     const stranded = records.filter((record) => {
       const outcome = outcomes.get(record.ual);
       return outcome?.kind === 'item' && outcome.status === 'unresolved';
@@ -470,6 +485,10 @@ export class VmReverifyWorker {
       await this.deps.recoverContextGraphSwm(localCgId, verifyRecovered);
       summary.swmRecoveries += 1;
     } catch (error) {
+      // Catalog authority refusal is a DEFERRAL, not a failure (review r4).
+      if (error instanceof VmSwmRecoveryNotAuthorizedError) {
+        return { outcomes: merged, swmRecovery: 'not-authorized' };
+      }
       // The traversal did NOT complete (review r3): peer exhaustion was never
       // established, so the planner must not run the park countdown on it.
       this.deps.log.warn(
@@ -506,7 +525,7 @@ export class VmReverifyWorker {
     outcomes: Map<string, CallOutcome>,
     summary: VmReverifyRunSummary,
     now: number,
-    swmRecovery?: 'completed' | 'unavailable' | 'failed',
+    swmRecovery?: 'completed' | 'unavailable' | 'failed' | 'not-authorized',
   ): Promise<void> {
     for (const record of records) {
       const outcome = outcomes.get(record.ual);

@@ -38,6 +38,7 @@ import {
 import {
   VM_REVERIFY_ADMISSION_PRIORITY,
   VmReverifyWorker,
+  VmSwmRecoveryNotAuthorizedError,
 } from '../src/vm-reverify-worker.js';
 import { EXACT_ASSET_FETCH_ADMISSION_PRIORITY } from '../src/sync/exact-asset-fetch.js';
 import type { VmReverifyIntentUpsertInput } from '../src/vm-reverify-intent-store.js';
@@ -527,6 +528,21 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     ).toBe('PENDING');
   });
 
+  it('catalog-refused recovery DEFERS the intent without touching the park budget (review r4)', async () => {
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 83n, 100);
+    const fetch = makeFetch({ snapshotFor: () => snapshot(200), localState: () => 'missing' });
+    const { worker } = makeWorker(intents, fetch, {}, 10_000, {
+      recover: async () => { throw new VmSwmRecoveryNotAuthorizedError(DRAIN_CG); },
+      durableSyncEnabled: () => true,
+    });
+
+    const run = await worker.runOnce();
+
+    expect(run.items[0]).toMatchObject({ ual, action: 'retry', reason: 'swm-recovery-not-authorized' });
+    expect(intents.rows.get(ual)!.firstAttemptAt, 'the park budget must not start').toBeUndefined();
+    expect(await intents.countPending()).toBe(1);
+  });
   it('a THROWN recovery is an infrastructure failure: no park budget, still retryable (review r3)', async () => {
     const intents = new InMemoryVmReverifyIntentStore();
     const ual = await seed(intents, 63n, 100);
