@@ -194,7 +194,6 @@ impl RuntimeState {
     }
 
     /// Stable ordered event identities needed for replay deduplication.
-    #[must_use]
     pub fn seen_event_ids(&self) -> impl ExactSizeIterator<Item = RuntimeEventId> + '_ {
         self.seen_event_ids.iter().copied()
     }

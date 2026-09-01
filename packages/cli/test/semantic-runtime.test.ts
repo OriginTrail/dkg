@@ -161,6 +161,39 @@ describe('semantic runtime daemon configuration', () => {
     });
   });
 
+  it('accepts the live DKG binding result shape without a type discriminator', async () => {
+    const query = vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+      if (options.source === 'semantic-runtime-query-catalog') {
+        return options.view === 'verifiable-memory' ? {
+          type: 'bindings',
+          bindings: [{
+            q: 'urn:dkg:profile:devnet-test:query:live-shape',
+            scopeGraph: 'did:dkg:context-graph:devnet-test/network',
+            catalog: 'urn:dkg:profile:devnet-test:catalog:operations',
+            name: 'Live shape',
+            sparql: 'SELECT ?value WHERE { VALUES ?value { "query-ok" } }',
+            executionView: 'verifiable-memory',
+            catalogName: 'Operations',
+          }],
+        } : { type: 'bindings', bindings: [] };
+      }
+      return { bindings: [{ value: '"query-ok"' }] };
+    });
+    const adapter = createDkgQueryAdapter({
+      canReadContextGraph: vi.fn(async () => true),
+      query,
+      store: { query: vi.fn(async () => ({ type: 'bindings', bindings: [] })) },
+    } as any, 'devnet-test');
+
+    await expect(adapter.dispatch({} as any, { selector: 'Live shape' })).resolves.toEqual(
+      expect.objectContaining({
+        status: 'succeeded',
+        output: '{"queryIri":"urn:dkg:profile:devnet-test:query:live-shape",'
+          + '"result":{"bindings":[{"value":"\\"query-ok\\""}]}}',
+      }),
+    );
+  });
+
   it('is default-off with no artifact or Worker side effects', async () => {
     const start = vi.fn();
     await expect(
@@ -191,6 +224,8 @@ describe('semantic runtime daemon configuration', () => {
   it('rejects unsafe bounds before a Worker is started', () => {
     expect(() => validateSemanticRuntimeConfig({ watchdogMs: 0 })).toThrow(/watchdogMs/);
     expect(() => validateSemanticRuntimeConfig({ maxEvents: 100_001 })).toThrow(/maxEvents/);
+    expect(() => validateSemanticRuntimeConfig({ maxActiveExecutions: 0 })).toThrow(/maxActiveExecutions/);
+    expect(() => validateSemanticRuntimeConfig({ maxOperationsPerExecution: 0 })).toThrow(/maxOperationsPerExecution/);
     expect(() => validateSemanticRuntimeConfig({ partitionId: 'not-a-hash' })).toThrow(/partitionId/);
     expect(() => validateSemanticRuntimeConfig({ maxAccumulator: '-1' })).toThrow(/maxAccumulator/);
   });

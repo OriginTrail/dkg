@@ -11,8 +11,18 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..');
 const RUST_ROOT = path.join(REPO_ROOT, 'rust');
 const GENERATED_ROOT = path.join(REPO_ROOT, 'packages', 'semantic-runtime', 'generated');
-const EXPECTED_RUST = '1.98.0';
+const ARTIFACT_LOCK_PATH = path.join(
+  REPO_ROOT,
+  'packages',
+  'semantic-runtime',
+  'artifact-lock.json',
+);
+const EXPECTED_RUST_TOOLCHAIN = 'nightly-2026-08-18';
+const EXPECTED_RUST_VERSION = '1.100.0-nightly';
 const EXPECTED_WASM_BINDGEN = '0.2.127';
+const EXPECTED_JCO = '1.32.1';
+const COMPONENT_WIT_PACKAGE = 'origintrail:semantic-runtime@0.1.0';
+const COMPONENT_WASI_VERSION = '0.3.0';
 const INITIAL_MEMORY_PAGES = 256;
 const MAXIMUM_MEMORY_PAGES = 4096;
 
@@ -98,15 +108,25 @@ function run(command, args, options = {}) {
 }
 
 function verifyToolchain() {
-  const rustc = run('rustc', [`+${EXPECTED_RUST}`, '--version'], { capture: true });
-  if (!rustc.startsWith(`rustc ${EXPECTED_RUST} `)) {
-    throw new Error(`semantic-runtime: expected Rust ${EXPECTED_RUST}, got ${rustc}`);
+  const rustc = run('rustc', [`+${EXPECTED_RUST_TOOLCHAIN}`, '--version'], { capture: true });
+  if (!rustc.startsWith(`rustc ${EXPECTED_RUST_VERSION} `)) {
+    throw new Error(
+      `semantic-runtime: expected Rust ${EXPECTED_RUST_TOOLCHAIN} (${EXPECTED_RUST_VERSION}), got ${rustc}`,
+    );
   }
   const wasmBindgen = run('wasm-bindgen', ['--version'], { capture: true });
   if (wasmBindgen !== `wasm-bindgen ${EXPECTED_WASM_BINDGEN}`) {
     throw new Error(
       `semantic-runtime: expected wasm-bindgen ${EXPECTED_WASM_BINDGEN}, got ${wasmBindgen || 'missing'}`,
     );
+  }
+  const jco = run(
+    'pnpm',
+    ['--filter', '@origintrail-official/dkg-semantic-runtime', 'exec', 'jco', '--version'],
+    { capture: true },
+  );
+  if (jco !== EXPECTED_JCO) {
+    throw new Error(`semantic-runtime: expected jco ${EXPECTED_JCO}, got ${jco || 'missing'}`);
   }
 }
 
@@ -120,7 +140,7 @@ function buildInto(outputRoot) {
   run(
     'cargo',
     [
-      `+${EXPECTED_RUST}`,
+      `+${EXPECTED_RUST_TOOLCHAIN}`,
       'build',
       '--manifest-path', path.join(RUST_ROOT, 'Cargo.toml'),
       '--package', 'dkg-runtime-wasm',
@@ -153,6 +173,53 @@ function buildInto(outputRoot) {
     '--no-demangle',
   ]);
   fs.writeFileSync(path.join(cjsDir, 'package.json'), '{"type":"commonjs"}\n');
+
+  const componentDir = path.join(outputRoot, 'component');
+  fs.mkdirSync(path.join(componentDir, 'wit'), { recursive: true });
+  run(
+    'cargo',
+    [
+      `+${EXPECTED_RUST_TOOLCHAIN}`,
+      'build',
+      '--manifest-path', path.join(RUST_ROOT, 'Cargo.toml'),
+      '--package', 'dkg-runtime-component',
+      '--target', 'wasm32-wasip2',
+      '--release',
+      '--locked',
+    ],
+    {
+      env: {
+        ...process.env,
+        CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS: rustFlags,
+      },
+    },
+  );
+  const componentWasm = path.join(
+    RUST_ROOT,
+    'target',
+    'wasm32-wasip2',
+    'release',
+    'dkg_runtime_component.wasm',
+  );
+  fs.copyFileSync(componentWasm, path.join(componentDir, 'runtime.component.wasm'));
+  fs.copyFileSync(
+    path.join(RUST_ROOT, 'crates', 'dkg-runtime-component', 'wit', 'semantic-runtime.wit'),
+    path.join(componentDir, 'wit', 'semantic-runtime.wit'),
+  );
+  run('pnpm', [
+    '--filter', '@origintrail-official/dkg-semantic-runtime',
+    'exec', 'jco', 'transpile',
+    path.join(componentDir, 'runtime.component.wasm'),
+    '--out-dir', componentDir,
+    '--name', 'runtime',
+    '--async-mode', 'jspi',
+    '--async-exports',
+    'origintrail:semantic-runtime/runtime@0.1.0#[method]execution.advance',
+    '--instantiation', 'async',
+    '--no-wasi-shim',
+    '--strict',
+    '--quiet',
+  ]);
   writeIntegrityManifest(outputRoot);
   verifyGenerated(outputRoot);
 }
@@ -174,13 +241,33 @@ function writeIntegrityManifest(root) {
   const artifactFiles = generatedFiles(root).filter((file) => file !== 'integrity.json');
   const wasmPath = path.join(root, 'cjs', 'runtime_bg.wasm');
   const limits = readWasmMemoryLimits(fs.readFileSync(wasmPath));
+  const componentCorePath = path.join(root, 'component', 'runtime.core.wasm');
+  const componentLimits = readWasmMemoryLimits(fs.readFileSync(componentCorePath));
+  const componentWorld = inspectComponentWorld(
+    path.join(root, 'component', 'runtime.component.wasm'),
+  );
   const manifest = {
-    manifestVersion: 1,
+    manifestVersion: 2,
     packageVersion: '10.0.14',
     rustCrateVersion: '0.1.0',
     abiVersion: 1,
     schemaVersion: 1,
     memory: limits,
+    component: {
+      wasiVersion: COMPONENT_WASI_VERSION,
+      targetCarrier: 'wasm32-wasip2',
+      witPackage: COMPONENT_WIT_PACKAGE,
+      asyncMode: 'jspi',
+      imports: componentWorld.imports,
+      exports: componentWorld.exports,
+      memory: componentLimits,
+      limits: {
+        maxActiveExecutions: 8,
+        maxOperationsPerExecution: 10000,
+        watchdogMs: 10000,
+        maxOldGenerationSizeMb: 256,
+      },
+    },
     files: Object.fromEntries(
       artifactFiles.map((relative) => {
         const absolute = path.join(root, relative);
@@ -191,6 +278,31 @@ function writeIntegrityManifest(root) {
   fs.writeFileSync(path.join(root, 'integrity.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
+function inspectComponentWorld(componentPath) {
+  const output = run(
+    'pnpm',
+    [
+      '--filter', '@origintrail-official/dkg-semantic-runtime',
+      'exec', 'jco', 'wit', componentPath,
+    ],
+    { capture: true },
+  );
+  const imports = [...output.matchAll(/^\s*import\s+([^;]+);$/gm)]
+    .map((match) => match[1])
+    .sort();
+  const exports = [...output.matchAll(/^\s*export\s+([^;]+);$/gm)]
+    .map((match) => match[1])
+    .sort();
+  if (
+    imports.length === 0
+    || exports.length === 0
+    || !exports.includes('origintrail:semantic-runtime/runtime@0.1.0')
+  ) {
+    throw new Error('semantic-runtime: component WIT world is missing required imports or exports');
+  }
+  return { imports, exports };
+}
+
 export function verifyGenerated(root = GENERATED_ROOT) {
   const manifestPath = path.join(root, 'integrity.json');
   if (!fs.existsSync(manifestPath)) {
@@ -198,7 +310,7 @@ export function verifyGenerated(root = GENERATED_ROOT) {
   }
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   if (
-    manifest.manifestVersion !== 1
+    manifest.manifestVersion !== 2
     || manifest.abiVersion !== 1
     || manifest.schemaVersion !== 1
   ) {
@@ -238,7 +350,58 @@ export function verifyGenerated(root = GENERATED_ROOT) {
   if (abiOutput !== String((1 << 16) | 1)) {
     throw new Error(`semantic-runtime: generated module reported incompatible ABI ${abiOutput}`);
   }
+  if (
+    manifest.component?.wasiVersion !== COMPONENT_WASI_VERSION
+    || manifest.component?.targetCarrier !== 'wasm32-wasip2'
+    || manifest.component?.witPackage !== COMPONENT_WIT_PACKAGE
+    || manifest.component?.asyncMode !== 'jspi'
+  ) {
+    throw new Error('semantic-runtime: incompatible WASI 0.3 component manifest');
+  }
+  const componentWorld = inspectComponentWorld(
+    path.join(root, 'component', 'runtime.component.wasm'),
+  );
+  if (
+    JSON.stringify(componentWorld.imports) !== JSON.stringify(manifest.component.imports)
+    || JSON.stringify(componentWorld.exports) !== JSON.stringify(manifest.component.exports)
+  ) {
+    throw new Error('semantic-runtime: component import/export manifest mismatch');
+  }
+  const componentLimits = readWasmMemoryLimits(
+    fs.readFileSync(path.join(root, 'component', 'runtime.core.wasm')),
+  );
+  if (
+    componentLimits.initialPages !== INITIAL_MEMORY_PAGES
+    || componentLimits.maximumPages !== MAXIMUM_MEMORY_PAGES
+    || manifest.component.memory?.initialPages !== componentLimits.initialPages
+    || manifest.component.memory?.maximumPages !== componentLimits.maximumPages
+  ) {
+    throw new Error('semantic-runtime: unexpected component core memory limits');
+  }
+  if (path.resolve(root) === path.resolve(GENERATED_ROOT)) verifyArtifactLock(root, manifest);
   return manifest;
+}
+
+function verifyArtifactLock(root, manifest) {
+  if (!fs.existsSync(ARTIFACT_LOCK_PATH)) {
+    throw new Error(`semantic-runtime: checked-in artifact lock missing at ${ARTIFACT_LOCK_PATH}`);
+  }
+  const lock = JSON.parse(fs.readFileSync(ARTIFACT_LOCK_PATH, 'utf8'));
+  const integritySha256 = sha256File(path.join(root, 'integrity.json'));
+  if (
+    lock.lockVersion !== 1
+    || lock.rustToolchain !== EXPECTED_RUST_TOOLCHAIN
+    || lock.rustVersion !== EXPECTED_RUST_VERSION
+    || lock.jcoVersion !== EXPECTED_JCO
+    || lock.wasiVersion !== COMPONENT_WASI_VERSION
+    || lock.targetCarrier !== 'wasm32-wasip2'
+    || lock.witPackage !== COMPONENT_WIT_PACKAGE
+    || lock.integritySha256 !== integritySha256
+    || lock.componentSha256 !== manifest.files?.['component/runtime.component.wasm']?.sha256
+    || lock.witSha256 !== manifest.files?.['component/wit/semantic-runtime.wit']?.sha256
+  ) {
+    throw new Error('semantic-runtime: generated artifacts differ from the checked-in artifact lock');
+  }
 }
 
 function main() {

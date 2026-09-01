@@ -31,6 +31,7 @@
     "cborg": "6.1.1"
   },
   "devDependencies": {
+    "@bytecodealliance/jco": "1.32.1",
     "@types/better-sqlite3": "^7",
     "@types/node": "^22",
     "vitest": "^4.0.18"
@@ -38,6 +39,7 @@
   "files": [
     "dist",
     "generated",
+    "artifact-lock.json",
     "schema",
     "smoke",
     "README.md"

@@ -92,6 +92,30 @@ pub struct AbiSuccess {
     pub payload: Vec<u8>,
 }
 
+/// Stable error returned by the Rust/Wasm ABI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AbiFailure {
+    /// Request identifier copied from the request envelope.
+    pub request_id: u64,
+    /// Operation identifier copied from the request envelope.
+    pub message_type: u16,
+    /// Stable machine-readable failure code.
+    pub code: String,
+    /// Stable failure category.
+    pub category: String,
+    /// Whether retrying the same operation can be safe.
+    pub retryable: bool,
+}
+
+/// Decoded Rust/Wasm response envelope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AbiResponse {
+    /// Successful response payload.
+    Success(AbiSuccess),
+    /// Structured runtime failure.
+    Failure(AbiFailure),
+}
+
 /// Codec-level failures with stable codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodecError {
@@ -218,6 +242,33 @@ pub fn decode_start_plan_request(input: &[u8]) -> Result<(u64, Vec<u8>, u64), Co
     let logical_time = decoder.u64()?;
     require_finished(&decoder, envelope.payload.len())?;
     Ok((envelope.request_id, plan, logical_time))
+}
+
+/// Encodes an optional host effect result while advancing a materialized plan.
+#[must_use]
+pub fn encode_apply_plan_request(request_id: u64, input: &PlanApplyInput) -> Vec<u8> {
+    let mut payload = Encoder::new(Vec::new());
+    match input {
+        PlanApplyInput::Continue => {
+            payload.array(1).expect("Vec writer is infallible");
+            payload.u8(0).expect("Vec writer is infallible");
+        }
+        PlanApplyInput::EffectResult { effect_id, result } => {
+            payload.array(4).expect("Vec writer is infallible");
+            payload.u8(1).expect("Vec writer is infallible");
+            payload.u64(*effect_id).expect("Vec writer is infallible");
+            payload
+                .bool(result.is_ok())
+                .expect("Vec writer is infallible");
+            payload
+                .str(match result {
+                    Ok(value) | Err(value) => value,
+                })
+                .expect("Vec writer is infallible");
+        }
+    }
+    encode_request(request_id, message_type::APPLY_PLAN, &payload.into_writer())
+        .expect("Vec writer is infallible")
 }
 
 /// Decodes either a plain drive request or one external-effect result.
@@ -605,22 +656,41 @@ pub fn encode_runtime_error(request_id: u64, operation: u16, error: RuntimeError
 
 /// Decodes a successful envelope for native conformance tests.
 pub fn decode_success(input: &[u8], expected_message_type: u16) -> Result<AbiSuccess, CodecError> {
+    match decode_response(input, expected_message_type)? {
+        AbiResponse::Success(success) => Ok(success),
+        AbiResponse::Failure(_) => Err(CodecError::Malformed),
+    }
+}
+
+/// Decodes either a successful or structured-failure response envelope.
+pub fn decode_response(
+    input: &[u8],
+    expected_message_type: u16,
+) -> Result<AbiResponse, CodecError> {
     let envelope = decode_envelope(input, MAX_SNAPSHOT_BYTES)?;
     if envelope.message_type != expected_message_type {
         return Err(CodecError::MessageTypeMismatch);
     }
     let mut decoder = Decoder::new(&envelope.payload);
-    require_array(&mut decoder, 2)?;
-    if decoder.u8()? != 0 {
-        return Err(CodecError::Malformed);
-    }
-    let payload = decoder.bytes()?.to_vec();
+    let length = decoder.array()?.ok_or(CodecError::Malformed)?;
+    let tag = decoder.u8()?;
+    let response = match (tag, length) {
+        (0, 2) => AbiResponse::Success(AbiSuccess {
+            request_id: envelope.request_id,
+            message_type: envelope.message_type,
+            payload: decoder.bytes()?.to_vec(),
+        }),
+        (1, 4) => AbiResponse::Failure(AbiFailure {
+            request_id: envelope.request_id,
+            message_type: envelope.message_type,
+            code: decoder.str()?.to_owned(),
+            category: decoder.str()?.to_owned(),
+            retryable: decoder.bool()?,
+        }),
+        _ => return Err(CodecError::Malformed),
+    };
     require_finished(&decoder, envelope.payload.len())?;
-    Ok(AbiSuccess {
-        request_id: envelope.request_id,
-        message_type: envelope.message_type,
-        payload,
-    })
+    Ok(response)
 }
 
 struct Envelope {

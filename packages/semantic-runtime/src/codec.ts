@@ -113,6 +113,7 @@ export interface StartedPlanInspection {
 
 export interface StartedPlanReceipt extends StartedPlanInspection {
   handle: number;
+  componentInstanceId?: string;
 }
 
 export interface PlanValue {

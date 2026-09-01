@@ -7,17 +7,18 @@ import { WasmStrategyAdmissionClient } from '../src/admission.js';
 import { SemanticRuntimeHost } from '../src/host.js';
 
 const workerUrl = new URL('../dist/worker.js', import.meta.url);
+const componentWorkerUrl = new URL('../dist/component-worker.js', import.meta.url);
 const sourcePath = fileURLToPath(new URL('../smoke/two-agents.scm', import.meta.url));
 
 describe('real Wasm supervised-plan materialization', () => {
   it('compiles, re-admits, starts, and inspects two logical agents without mocks', async () => {
     const source = fs.readFileSync(sourcePath, 'utf8');
-    const admission = new WasmStrategyAdmissionClient({ workerUrl });
+    const admission = new WasmStrategyAdmissionClient({ workerUrl: componentWorkerUrl });
     const compilation = await admission.compileAndAdmit(source);
     expect(compilation.ok).toBe(true);
     if (!compilation.ok) return;
 
-    const host = new SemanticRuntimeHost({ workerUrl, config: { watchdogMs: 1_000 } });
+    const host = new SemanticRuntimeHost({ workerUrl, componentWorkerUrl, config: { watchdogMs: 1_000 } });
     await host.start();
     try {
       const started = await host.startPlan(compilation.plan.canonicalPlan, 0n);
@@ -59,12 +60,12 @@ describe('real Wasm supervised-plan materialization', () => {
           (emit llm-started)
           (call agent/investigate@1 "Say hello")
           (emit llm-finished))))`;
-    const admission = new WasmStrategyAdmissionClient({ workerUrl });
+    const admission = new WasmStrategyAdmissionClient({ workerUrl: componentWorkerUrl });
     const compilation = await admission.compileAndAdmit(source);
     expect(compilation.ok).toBe(true);
     if (!compilation.ok) return;
 
-    const host = new SemanticRuntimeHost({ workerUrl, config: { watchdogMs: 1_000 } });
+    const host = new SemanticRuntimeHost({ workerUrl, componentWorkerUrl, config: { watchdogMs: 1_000 } });
     await host.start();
     try {
       const started = await host.startPlan(compilation.plan.canonicalPlan);
@@ -103,12 +104,12 @@ describe('real Wasm supervised-plan materialization', () => {
         (delegate reader
           (grant dkg.query)
           (call dkg/query@1 "configuration-trace"))))`;
-    const admission = new WasmStrategyAdmissionClient({ workerUrl });
+    const admission = new WasmStrategyAdmissionClient({ workerUrl: componentWorkerUrl });
     const compilation = await admission.compileAndAdmit(source);
     expect(compilation.ok).toBe(true);
     if (!compilation.ok) return;
 
-    const host = new SemanticRuntimeHost({ workerUrl, config: { watchdogMs: 1_000 } });
+    const host = new SemanticRuntimeHost({ workerUrl, componentWorkerUrl, config: { watchdogMs: 1_000 } });
     await host.start();
     try {
       const started = await host.startPlan(compilation.plan.canonicalPlan);

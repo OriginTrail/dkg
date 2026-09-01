@@ -13,15 +13,25 @@ CONTEXT_GRAPH_ID="${SMOKE_CONTEXT_GRAPH_ID:-devnet-test}"
 PROGRAM_IRI="${SMOKE_PROGRAM_IRI:-urn:sr:program:codex-live}"
 FORK_PROGRAM_IRI="${SMOKE_FORK_PROGRAM_IRI:-urn:sr:program:codex-live-fork}"
 TOOL_IRI="${SMOKE_TOOL_IRI:-urn:sr:tool:investigator-v1}"
+QUERY_PROGRAM_IRI="${SMOKE_QUERY_PROGRAM_IRI:-urn:sr:program:query-live}"
+QUERY_TOOL_IRI="${SMOKE_QUERY_TOOL_IRI:-urn:sr:tool:dkg-query-v1}"
 POLICY_IRI="${SMOKE_POLICY_IRI:-urn:sr:policy:devnet-codex}"
 SMOKE_DEVNET_DIR="$OUTPUT_DIR/devnet"
 STATUS_PATH="$OUTPUT_DIR/dkg-status.json"
 PROGRAM_REQUEST_PATH="$OUTPUT_DIR/program-request.json"
 PUBLISH_PATH="$OUTPUT_DIR/program-publish.json"
+QUERY_PROGRAM_REQUEST_PATH="$OUTPUT_DIR/query-program-request.json"
+QUERY_PROGRAM_PUBLISH_PATH="$OUTPUT_DIR/query-program-publish.json"
+QUERY_CATALOG_REQUEST_PATH="$OUTPUT_DIR/query-catalog-request.json"
+QUERY_CATALOG_WRITE_PATH="$OUTPUT_DIR/query-catalog-write.json"
 VM_QUERY_REQUEST_PATH="$OUTPUT_DIR/program-vm-query-request.json"
 VM_QUERY_PATH="$OUTPUT_DIR/program-vm-query.json"
 INVOKE_REQUEST_PATH="$OUTPUT_DIR/program-invoke-request.json"
 INVOKE_PATH="$OUTPUT_DIR/program-invoke.json"
+SOURCE_INVOKE_REQUEST_PATH="$OUTPUT_DIR/source-program-invoke-request.json"
+SOURCE_INVOKE_PATH="$OUTPUT_DIR/source-program-invoke.json"
+QUERY_INVOKE_REQUEST_PATH="$OUTPUT_DIR/query-program-invoke-request.json"
+QUERY_INVOKE_PATH="$OUTPUT_DIR/query-program-invoke.json"
 REMOTE_INVOKE_DENIAL_PATH="$OUTPUT_DIR/program-remote-invoke-denial.json"
 AUTHORITY_REQUEST_PATH="$OUTPUT_DIR/operator-authority-request.json"
 AUTHORITY_PUBLISH_PATH="$OUTPUT_DIR/operator-authority-publish.json"
@@ -36,6 +46,11 @@ INVOKING_NODE_IDENTITY_PATH="$OUTPUT_DIR/invoking-node-identity.json"
 PARTICIPANT_ADD_PATH="$OUTPUT_DIR/invoking-wallet-membership.json"
 CROSS_NODE_QUERY_REQUEST_PATH="$OUTPUT_DIR/execution-vm-query-request.json"
 CROSS_NODE_QUERY_PATH="$OUTPUT_DIR/execution-vm-query-node-3.json"
+SOURCE_CROSS_NODE_QUERY_REQUEST_PATH="$OUTPUT_DIR/source-execution-vm-query-request.json"
+SOURCE_CROSS_NODE_QUERY_PATH="$OUTPUT_DIR/source-execution-vm-query-node-3.json"
+QUERY_CROSS_NODE_QUERY_REQUEST_PATH="$OUTPUT_DIR/query-execution-vm-query-request.json"
+QUERY_CROSS_NODE_QUERY_PATH="$OUTPUT_DIR/query-execution-vm-query-node-3.json"
+QUERY_TIMING_PATH="$OUTPUT_DIR/query-invocation-timing.json"
 AUDIT_QUERY_REQUEST_PATH="$OUTPUT_DIR/execution-audit-vm-query-request.json"
 AUDIT_QUERY_PATH="$OUTPUT_DIR/execution-audit-vm-query-node-3.json"
 RECEIPT_PATH="$OUTPUT_DIR/receipt.json"
@@ -81,6 +96,7 @@ DEVNET_NODE_READY_TIMEOUT=180 \
 HARDHAT_BLOCK_INTERVAL_MS=0 \
 DEVNET_ENABLE_SEMANTIC_RUNTIME=1 \
 SEMANTIC_RUNTIME_LLM_PROVIDER="$LLM_PROVIDER" \
+SEMANTIC_RUNTIME_TRACE_ADAPTER_TIMING=1 \
   "$REPO_ROOT/scripts/devnet.sh" start 4
 
 API_URL="http://127.0.0.1:${API_PORT_BASE}"
@@ -170,13 +186,20 @@ SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
 SMOKE_PROGRAM_IRI="$PROGRAM_IRI" \
 SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" \
 SMOKE_TOOL_IRI="$TOOL_IRI" \
+SMOKE_QUERY_PROGRAM_IRI="$QUERY_PROGRAM_IRI" \
+SMOKE_QUERY_TOOL_IRI="$QUERY_TOOL_IRI" \
 SMOKE_STRATEGY_PATH="$STRATEGY_PATH" \
 SMOKE_PROGRAM_REQUEST_PATH="$PROGRAM_REQUEST_PATH" \
+SMOKE_QUERY_PROGRAM_REQUEST_PATH="$QUERY_PROGRAM_REQUEST_PATH" \
+SMOKE_QUERY_CATALOG_REQUEST_PATH="$QUERY_CATALOG_REQUEST_PATH" \
 SMOKE_VM_QUERY_REQUEST_PATH="$VM_QUERY_REQUEST_PATH" \
 SMOKE_INVOKE_REQUEST_PATH="$INVOKE_REQUEST_PATH" \
+SMOKE_SOURCE_INVOKE_REQUEST_PATH="$SOURCE_INVOKE_REQUEST_PATH" \
+SMOKE_QUERY_INVOKE_REQUEST_PATH="$QUERY_INVOKE_REQUEST_PATH" \
 node --input-type=module -e '
   import crypto from "node:crypto";
   import fs from "node:fs";
+  import { buildQueryCatalogWrite } from "@origintrail-official/dkg-core/query-catalog";
   const source = fs.readFileSync(process.env.SMOKE_STRATEGY_PATH, "utf8");
   const sr = "https://origintrail.io/semantic-runtime/v1#";
   const programIri = process.env.SMOKE_PROGRAM_IRI;
@@ -208,6 +231,57 @@ node --input-type=module -e '
     programLayer: "vm",
     executionLayer: "vm",
   }));
+  fs.writeFileSync(process.env.SMOKE_SOURCE_INVOKE_REQUEST_PATH, JSON.stringify({
+    contextGraphId,
+    programIri,
+    invocationId: crypto.randomUUID(),
+    programLayer: "vm",
+    executionLayer: "vm",
+  }));
+  const queryProgramIri = process.env.SMOKE_QUERY_PROGRAM_IRI;
+  const queryToolIri = process.env.SMOKE_QUERY_TOOL_IRI;
+  const querySource = `(strategy smoke/query
+    (version "1.0.0")
+    (scope network:devnet)
+    (goal prove-concurrent-catalog-query)
+    (supervise one-for-one (max-restarts 2) (window-ms 60000)
+      (delegate reader
+        (grant dkg.query)
+        (call dkg/query@1 "Configuration trace"))))`;
+  fs.writeFileSync(process.env.SMOKE_QUERY_PROGRAM_REQUEST_PATH, JSON.stringify({
+    contextGraphId,
+    name: "semantic-program-query",
+    quads: [
+      { subject: queryProgramIri, predicate: "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", object: `${sr}Program` },
+      { subject: queryProgramIri, predicate: `${sr}language`, object: JSON.stringify("sexpr-v1") },
+      { subject: queryProgramIri, predicate: `${sr}version`, object: JSON.stringify("1.0.0") },
+      { subject: queryProgramIri, predicate: `${sr}source`, object: JSON.stringify(querySource) },
+      { subject: queryProgramIri, predicate: `${sr}requiresTool`, object: queryToolIri },
+    ],
+    alsoShareSwm: true,
+    alsoPublishVm: true,
+  }));
+  fs.writeFileSync(process.env.SMOKE_QUERY_CATALOG_REQUEST_PATH, JSON.stringify({
+    contextGraphId,
+    quads: buildQueryCatalogWrite({
+      contextGraphId,
+      name: "Configuration trace",
+      sparql: "SELECT ?value WHERE { VALUES ?value { \"query-ok\" } }",
+      subGraph: "__context_graph",
+      catalogSlug: "runtime",
+      catalogName: "Runtime",
+      rank: 1,
+      catalogRank: 1,
+      view: "verifiable-memory",
+    }).quads,
+  }));
+  fs.writeFileSync(process.env.SMOKE_QUERY_INVOKE_REQUEST_PATH, JSON.stringify({
+    contextGraphId,
+    programIri: queryProgramIri,
+    invocationId: crypto.randomUUID(),
+    programLayer: "vm",
+    executionLayer: "vm",
+  }));
 '
 
 echo "semantic-runtime-live-smoke: publishing the Program and required Tool reference to VM"
@@ -216,6 +290,18 @@ curl --fail-with-body --silent --show-error \
   --data @"$PROGRAM_REQUEST_PATH" \
   "$API_URL/api/knowledge-assets" \
   --output "$PUBLISH_PATH"
+
+curl --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  --data @"$QUERY_PROGRAM_REQUEST_PATH" \
+  "$API_URL/api/knowledge-assets" \
+  --output "$QUERY_PROGRAM_PUBLISH_PATH"
+
+curl --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  --data @"$QUERY_CATALOG_REQUEST_PATH" \
+  "$API_URL/api/profile/query-catalog/write" \
+  --output "$QUERY_CATALOG_WRITE_PATH"
 
 echo "semantic-runtime-live-smoke: adding node B's wallet to the Program Context Graph"
 if [ "$PRIVATE_REMOTE" != "1" ]; then
@@ -235,6 +321,8 @@ fi
 write_authority_request() {
   SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
   SMOKE_TOOL_IRI="$TOOL_IRI" \
+  SMOKE_QUERY_TOOL_IRI="$QUERY_TOOL_IRI" \
+  SMOKE_INCLUDE_QUERY_TOOL="${4:-0}" \
   SMOKE_POLICY_IRI="$POLICY_IRI" \
   SMOKE_NODE_IDENTITY_PATH="$1" \
   SMOKE_AUTHORITY_REQUEST_PATH="$2" \
@@ -245,22 +333,32 @@ write_authority_request() {
     const rdfType = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
     const identity = JSON.parse(fs.readFileSync(process.env.SMOKE_NODE_IDENTITY_PATH, "utf8"));
     const tool = process.env.SMOKE_TOOL_IRI;
+    const queryTool = process.env.SMOKE_QUERY_TOOL_IRI;
     const policy = process.env.SMOKE_POLICY_IRI;
     const operator = identity.agentDid;
+    const quads = [
+      { subject: operator, predicate: `${sr}offersTool`, object: tool },
+      { subject: tool, predicate: rdfType, object: `${sr}Tool` },
+      { subject: tool, predicate: `${sr}operation`, object: JSON.stringify("agent/investigate") },
+      { subject: tool, predicate: `${sr}version`, object: JSON.stringify("1") },
+      { subject: tool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-tools/investigator@1") },
+      { subject: operator, predicate: `${sr}usesExecutionPolicy`, object: policy },
+      { subject: policy, predicate: rdfType, object: `${sr}ExecutionPolicy` },
+      { subject: policy, predicate: `${sr}version`, object: JSON.stringify("1") },
+      { subject: policy, predicate: `${sr}allowsTool`, object: tool },
+    ];
+    if (process.env.SMOKE_INCLUDE_QUERY_TOOL === "1") quads.push(
+      { subject: operator, predicate: `${sr}offersTool`, object: queryTool },
+      { subject: queryTool, predicate: rdfType, object: `${sr}Tool` },
+      { subject: queryTool, predicate: `${sr}operation`, object: JSON.stringify("dkg/query") },
+      { subject: queryTool, predicate: `${sr}version`, object: JSON.stringify("1") },
+      { subject: queryTool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-tools/dkg-query@1") },
+      { subject: policy, predicate: `${sr}allowsTool`, object: queryTool },
+    );
     fs.writeFileSync(process.env.SMOKE_AUTHORITY_REQUEST_PATH, JSON.stringify({
       contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
       name: process.env.SMOKE_AUTHORITY_NAME,
-      quads: [
-        { subject: operator, predicate: `${sr}offersTool`, object: tool },
-        { subject: tool, predicate: rdfType, object: `${sr}Tool` },
-        { subject: tool, predicate: `${sr}operation`, object: JSON.stringify("agent/investigate") },
-        { subject: tool, predicate: `${sr}version`, object: JSON.stringify("1") },
-        { subject: tool, predicate: `${sr}witInterface`, object: JSON.stringify("origintrail:semantic-tools/investigator@1") },
-        { subject: operator, predicate: `${sr}usesExecutionPolicy`, object: policy },
-        { subject: policy, predicate: rdfType, object: `${sr}ExecutionPolicy` },
-        { subject: policy, predicate: `${sr}version`, object: JSON.stringify("1") },
-        { subject: policy, predicate: `${sr}allowsTool`, object: tool },
-      ],
+      quads,
       alsoShareSwm: true,
       alsoPublishVm: true,
     }));
@@ -269,7 +367,7 @@ write_authority_request() {
 
 echo "semantic-runtime-live-smoke: publishing both Program owners' Tool offers and selected Policies"
 write_authority_request "$PROGRAM_AUTHOR_IDENTITY_PATH" "$AUTHORITY_REQUEST_PATH" \
-  "semantic-runtime-codex-authority"
+  "semantic-runtime-codex-authority" "1"
 curl --fail-with-body --silent --show-error \
   -H "Content-Type: application/json" \
   --data @"$AUTHORITY_REQUEST_PATH" \
@@ -401,12 +499,7 @@ if [ "$fork_executable" != "1" ]; then
 fi
 
 if [ "$PRIVATE_REMOTE" = "1" ]; then
-  echo "semantic-runtime-live-smoke: invoking node B's private-CG fork remotely through node A"
-  curl --fail-with-body --silent --show-error \
-    -H "Content-Type: application/json" \
-    --data @"$INVOKE_REQUEST_PATH" \
-    "$API_URL/api/semantic-runtime/invoke" \
-    --output "$INVOKE_PATH"
+  FORK_INVOKE_URL="$API_URL/api/semantic-runtime/invoke"
 else
   echo "semantic-runtime-live-smoke: proving the public CG cannot invoke node B's fork remotely"
   remote_invoke_status=$(curl --silent --show-error \
@@ -427,22 +520,75 @@ else
       throw new Error(`unexpected public remote-invocation denial: ${JSON.stringify(denial)}`);
     }
   '
-
-  echo "semantic-runtime-live-smoke: invoking node B's fork locally on its author node"
-  curl --fail-with-body --silent --show-error \
-    -H "Content-Type: application/json" \
-    --data @"$INVOKE_REQUEST_PATH" \
-    "$API_URL_NODE_B/api/semantic-runtime/invoke" \
-    --output "$INVOKE_PATH"
+  FORK_INVOKE_URL="$API_URL_NODE_B/api/semantic-runtime/invoke"
 fi
+
+echo "semantic-runtime-live-smoke: invoking two Program KAs concurrently through DKG routes"
+curl --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  --data @"$SOURCE_INVOKE_REQUEST_PATH" \
+  "$API_URL/api/semantic-runtime/invoke" \
+  --output "$SOURCE_INVOKE_PATH" &
+source_invoke_pid=$!
+curl --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  --data @"$INVOKE_REQUEST_PATH" \
+  "$FORK_INVOKE_URL" \
+  --output "$INVOKE_PATH" &
+fork_invoke_pid=$!
+SOURCE_INVOCATION_ID=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).invocationId)' "$SOURCE_INVOKE_REQUEST_PATH")
+llm_started=0
+for _ in $(seq 1 100); do
+  if grep -q "semantic-runtime-tool-timing.*urn:sr:effect:${SOURCE_INVOCATION_ID}:" \
+    "$SMOKE_DEVNET_DIR/node1/daemon.log" 2>/dev/null; then
+    llm_started=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$llm_started" != "1" ]; then
+  echo "semantic-runtime-live-smoke: source Codex call did not emit a start timestamp" >&2
+  exit 1
+fi
+query_started_ns=$(node -e 'process.stdout.write(process.hrtime.bigint().toString())')
+curl --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  --data @"$QUERY_INVOKE_REQUEST_PATH" \
+  "$API_URL/api/semantic-runtime/invoke" \
+  --output "$QUERY_INVOKE_PATH"
+query_finished_ns=$(node -e 'process.stdout.write(process.hrtime.bigint().toString())')
+SMOKE_QUERY_TIMING_PATH="$QUERY_TIMING_PATH" \
+SMOKE_QUERY_STARTED_NS="$query_started_ns" \
+SMOKE_QUERY_FINISHED_NS="$query_finished_ns" \
+node --input-type=module -e '
+  import fs from "node:fs";
+  fs.writeFileSync(process.env.SMOKE_QUERY_TIMING_PATH, JSON.stringify({
+    startNs: process.env.SMOKE_QUERY_STARTED_NS,
+    finishNs: process.env.SMOKE_QUERY_FINISHED_NS,
+  }));
+'
+wait "$source_invoke_pid"
+wait "$fork_invoke_pid"
 
 EXECUTION_IRI=$(SMOKE_INVOKE_PATH="$INVOKE_PATH" node --input-type=module -e '
   import fs from "node:fs";
   process.stdout.write(JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKE_PATH, "utf8")).executionIri);
 ')
+SOURCE_EXECUTION_IRI=$(SMOKE_INVOKE_PATH="$SOURCE_INVOKE_PATH" node --input-type=module -e '
+  import fs from "node:fs";
+  process.stdout.write(JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKE_PATH, "utf8")).executionIri);
+')
+QUERY_EXECUTION_IRI=$(SMOKE_INVOKE_PATH="$QUERY_INVOKE_PATH" node --input-type=module -e '
+  import fs from "node:fs";
+  process.stdout.write(JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKE_PATH, "utf8")).executionIri);
+')
 SMOKE_EXECUTION_IRI="$EXECUTION_IRI" \
+SMOKE_SOURCE_EXECUTION_IRI="$SOURCE_EXECUTION_IRI" \
+SMOKE_QUERY_EXECUTION_IRI="$QUERY_EXECUTION_IRI" \
 SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
 SMOKE_QUERY_REQUEST_PATH="$CROSS_NODE_QUERY_REQUEST_PATH" \
+SMOKE_SOURCE_QUERY_REQUEST_PATH="$SOURCE_CROSS_NODE_QUERY_REQUEST_PATH" \
+SMOKE_CATALOG_QUERY_REQUEST_PATH="$QUERY_CROSS_NODE_QUERY_REQUEST_PATH" \
 SMOKE_AUDIT_QUERY_REQUEST_PATH="$AUDIT_QUERY_REQUEST_PATH" \
 node --input-type=module -e '
   import fs from "node:fs";
@@ -453,6 +599,32 @@ node --input-type=module -e '
     sparql: `SELECT ?output ?outputHash ?status WHERE {
       GRAPH ?g {
         <${process.env.SMOKE_EXECUTION_IRI}>
+          a <${sr}Execution> ;
+          <${sr}output> ?output ;
+          <${sr}outputHash> ?outputHash ;
+          <${sr}status> ?status .
+      }
+    }`,
+  }));
+  fs.writeFileSync(process.env.SMOKE_SOURCE_QUERY_REQUEST_PATH, JSON.stringify({
+    contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+    view: "verifiable-memory",
+    sparql: `SELECT ?output ?outputHash ?status WHERE {
+      GRAPH ?g {
+        <${process.env.SMOKE_SOURCE_EXECUTION_IRI}>
+          a <${sr}Execution> ;
+          <${sr}output> ?output ;
+          <${sr}outputHash> ?outputHash ;
+          <${sr}status> ?status .
+      }
+    }`,
+  }));
+  fs.writeFileSync(process.env.SMOKE_CATALOG_QUERY_REQUEST_PATH, JSON.stringify({
+    contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+    view: "verifiable-memory",
+    sparql: `SELECT ?output ?outputHash ?status WHERE {
+      GRAPH ?g {
+        <${process.env.SMOKE_QUERY_EXECUTION_IRI}>
           a <${sr}Execution> ;
           <${sr}output> ?output ;
           <${sr}outputHash> ?outputHash ;
@@ -501,6 +673,52 @@ if [ "$execution_ready" != "1" ]; then
   exit 1
 fi
 
+source_execution_ready=0
+for _ in $(seq 1 90); do
+  curl --fail-with-body --silent --show-error \
+    -H "Content-Type: application/json" \
+    --data @"$SOURCE_CROSS_NODE_QUERY_REQUEST_PATH" \
+    "$API_URL_NODE_C/api/query" \
+    --output "$SOURCE_CROSS_NODE_QUERY_PATH"
+  if SMOKE_QUERY_PATH="$SOURCE_CROSS_NODE_QUERY_PATH" node --input-type=module -e '
+    import fs from "node:fs";
+    const body = JSON.parse(fs.readFileSync(process.env.SMOKE_QUERY_PATH, "utf8"));
+    process.exit(body.result?.bindings?.length === 1 ? 0 : 1);
+  '; then
+    source_execution_ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "$source_execution_ready" != "1" ]; then
+  echo "semantic-runtime-live-smoke: node C did not observe the source Program Execution" >&2
+  cat "$SOURCE_CROSS_NODE_QUERY_PATH" >&2
+  exit 1
+fi
+
+query_execution_ready=0
+for _ in $(seq 1 90); do
+  curl --fail-with-body --silent --show-error \
+    -H "Content-Type: application/json" \
+    --data @"$QUERY_CROSS_NODE_QUERY_REQUEST_PATH" \
+    "$API_URL_NODE_C/api/query" \
+    --output "$QUERY_CROSS_NODE_QUERY_PATH"
+  if SMOKE_QUERY_PATH="$QUERY_CROSS_NODE_QUERY_PATH" node --input-type=module -e '
+    import fs from "node:fs";
+    const body = JSON.parse(fs.readFileSync(process.env.SMOKE_QUERY_PATH, "utf8"));
+    process.exit(body.result?.bindings?.length === 1 ? 0 : 1);
+  '; then
+    query_execution_ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "$query_execution_ready" != "1" ]; then
+  echo "semantic-runtime-live-smoke: node C did not observe the Query Program Execution" >&2
+  cat "$QUERY_CROSS_NODE_QUERY_PATH" >&2
+  exit 1
+fi
+
 curl --fail-with-body --silent --show-error \
   -H "Content-Type: application/json" \
   --data @"$AUDIT_QUERY_REQUEST_PATH" \
@@ -512,14 +730,28 @@ SMOKE_PUBLISH_PATH="$PUBLISH_PATH" \
 SMOKE_FORK_PATH="$FORK_PATH" \
 SMOKE_FORK_QUERY_PATH="$FORK_VM_QUERY_PATH" \
 SMOKE_INVOKE_PATH="$INVOKE_PATH" \
+SMOKE_SOURCE_INVOKE_PATH="$SOURCE_INVOKE_PATH" \
+SMOKE_QUERY_INVOKE_PATH="$QUERY_INVOKE_PATH" \
+SMOKE_PROGRAM_PUBLISH_PATH="$PUBLISH_PATH" \
+SMOKE_QUERY_PROGRAM_PUBLISH_PATH="$QUERY_PROGRAM_PUBLISH_PATH" \
 SMOKE_REMOTE_DENIAL_PATH="$REMOTE_INVOKE_DENIAL_PATH" \
 SMOKE_PRIVATE_REMOTE="$PRIVATE_REMOTE" \
 SMOKE_CROSS_QUERY_PATH="$CROSS_NODE_QUERY_PATH" \
+SMOKE_SOURCE_CROSS_QUERY_PATH="$SOURCE_CROSS_NODE_QUERY_PATH" \
+SMOKE_CATALOG_CROSS_QUERY_PATH="$QUERY_CROSS_NODE_QUERY_PATH" \
+SMOKE_QUERY_TIMING_PATH="$QUERY_TIMING_PATH" \
 SMOKE_AUDIT_QUERY_PATH="$AUDIT_QUERY_PATH" \
+SMOKE_NODE_A_LOG="$SMOKE_DEVNET_DIR/node1/daemon.log" \
+SMOKE_NODE_B_LOG="$SMOKE_DEVNET_DIR/node2/daemon.log" \
+SMOKE_API_URL="$API_URL" \
+SMOKE_API_URL_NODE_B="$API_URL_NODE_B" \
+SMOKE_API_URL_NODE_C="$API_URL_NODE_C" \
+SMOKE_CONTEXT_GRAPH_ID="$CONTEXT_GRAPH_ID" \
 SMOKE_PROGRAM_AUTHOR_IDENTITY_PATH="$PROGRAM_AUTHOR_IDENTITY_PATH" \
 SMOKE_INVOKING_NODE_IDENTITY_PATH="$INVOKING_NODE_IDENTITY_PATH" \
 SMOKE_PROGRAM_IRI="$PROGRAM_IRI" \
 SMOKE_FORK_PROGRAM_IRI="$FORK_PROGRAM_IRI" \
+SMOKE_QUERY_PROGRAM_IRI="$QUERY_PROGRAM_IRI" \
 SMOKE_STRATEGY_PATH="$STRATEGY_PATH" \
 SMOKE_RECEIPT_PATH="$RECEIPT_PATH" \
 SMOKE_WASM_MANIFEST="$REPO_ROOT/packages/semantic-runtime/generated/integrity.json" \
@@ -531,6 +763,10 @@ node --input-type=module -e '
   const fork = JSON.parse(fs.readFileSync(process.env.SMOKE_FORK_PATH, "utf8"));
   const forkQuery = JSON.parse(fs.readFileSync(process.env.SMOKE_FORK_QUERY_PATH, "utf8"));
   const invocation = JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKE_PATH, "utf8"));
+  const sourceInvocation = JSON.parse(fs.readFileSync(process.env.SMOKE_SOURCE_INVOKE_PATH, "utf8"));
+  const queryInvocation = JSON.parse(fs.readFileSync(process.env.SMOKE_QUERY_INVOKE_PATH, "utf8"));
+  const sourcePublish = JSON.parse(fs.readFileSync(process.env.SMOKE_PROGRAM_PUBLISH_PATH, "utf8"));
+  const queryProgramPublish = JSON.parse(fs.readFileSync(process.env.SMOKE_QUERY_PROGRAM_PUBLISH_PATH, "utf8"));
   const privateRemote = process.env.SMOKE_PRIVATE_REMOTE === "1";
   const remoteInvocationDenial = privateRemote
     ? null
@@ -538,6 +774,8 @@ node --input-type=module -e '
   const sourceAuthor = JSON.parse(fs.readFileSync(process.env.SMOKE_PROGRAM_AUTHOR_IDENTITY_PATH, "utf8"));
   const forkOwner = JSON.parse(fs.readFileSync(process.env.SMOKE_INVOKING_NODE_IDENTITY_PATH, "utf8"));
   const query = JSON.parse(fs.readFileSync(process.env.SMOKE_CROSS_QUERY_PATH, "utf8"));
+  const sourceQuery = JSON.parse(fs.readFileSync(process.env.SMOKE_SOURCE_CROSS_QUERY_PATH, "utf8"));
+  const catalogQuery = JSON.parse(fs.readFileSync(process.env.SMOKE_CATALOG_CROSS_QUERY_PATH, "utf8"));
   const audit = JSON.parse(fs.readFileSync(process.env.SMOKE_AUDIT_QUERY_PATH, "utf8"));
   const forkRows = forkQuery.result?.bindings ?? [];
   if (forkRows.length !== 1) throw new Error(`expected exactly one forked Program, got ${forkRows.length}`);
@@ -568,6 +806,23 @@ node --input-type=module -e '
   const expectedHash = `sha256:${crypto.createHash("sha256").update(Buffer.from(output, "utf8")).digest("hex")}`;
   if (outputHash !== expectedHash) throw new Error(`output hash mismatch: ${outputHash} != ${expectedHash}`);
   if (status !== "https://origintrail.io/semantic-runtime/v1#Succeeded") throw new Error(`unexpected status: ${status}`);
+  const sourceRows = sourceQuery.result?.bindings ?? [];
+  if (sourceRows.length !== 1) throw new Error(`expected exactly one source Execution, got ${sourceRows.length}`);
+  const sourceOutput = term(sourceRows[0].output);
+  const sourceOutputHash = term(sourceRows[0].outputHash);
+  const sourceStatus = term(sourceRows[0].status);
+  if (sourceOutput !== "semantic-runtime-llm-ok") throw new Error(`unexpected source Codex output: ${JSON.stringify(sourceOutput)}`);
+  const expectedSourceHash = `sha256:${crypto.createHash("sha256").update(Buffer.from(sourceOutput, "utf8")).digest("hex")}`;
+  if (sourceOutputHash !== expectedSourceHash) throw new Error(`source output hash mismatch: ${sourceOutputHash} != ${expectedSourceHash}`);
+  if (sourceStatus !== "https://origintrail.io/semantic-runtime/v1#Succeeded") throw new Error(`unexpected source status: ${sourceStatus}`);
+  const catalogRows = catalogQuery.result?.bindings ?? [];
+  if (catalogRows.length !== 1) throw new Error(`expected exactly one Query Program Execution, got ${catalogRows.length}`);
+  const catalogOutput = term(catalogRows[0].output);
+  const catalogOutputHash = term(catalogRows[0].outputHash);
+  const catalogStatus = term(catalogRows[0].status);
+  const expectedCatalogHash = `sha256:${crypto.createHash("sha256").update(Buffer.from(catalogOutput, "utf8")).digest("hex")}`;
+  if (catalogOutputHash !== expectedCatalogHash) throw new Error(`query output hash mismatch: ${catalogOutputHash} != ${expectedCatalogHash}`);
+  if (catalogStatus !== "https://origintrail.io/semantic-runtime/v1#Succeeded") throw new Error(`unexpected query status: ${catalogStatus}`);
   const auditRows = audit.result?.bindings ?? [];
   if (auditRows.length !== 1) throw new Error(`expected exactly one Execution audit row, got ${auditRows.length}`);
   const auditRow = Object.fromEntries(Object.entries(auditRows[0]).map(([key, value]) => [key, term(value)]));
@@ -582,6 +837,61 @@ node --input-type=module -e '
   if (sourceAuthor.agentAddress.toLowerCase() === forkOwner.agentAddress.toLowerCase()) {
     throw new Error("smoke requires distinct source-author and fork-owner wallets");
   }
+  const toolTimings = (logPath, invocationId) => {
+    const text = fs.readFileSync(logPath, "utf8");
+    return text.split("\n").flatMap((line) => {
+      const marker = "semantic-runtime-tool-timing ";
+      const at = line.indexOf(marker);
+      if (at < 0) return [];
+      const tail = line.slice(at + marker.length);
+      const end = tail.indexOf("}");
+      if (end < 0) return [];
+      try {
+        const record = JSON.parse(tail.slice(0, end + 1));
+        return record.effectId?.includes(`:${invocationId}:`) ? [record] : [];
+      } catch {
+        return [];
+      }
+    });
+  };
+  const timingWindow = (records, label) => {
+    const start = records.find((record) => record.phase === "start");
+    const finish = records.find((record) => record.phase === "finish");
+    if (!start || !finish) throw new Error(`missing ${label} adapter timing records`);
+    return { startNs: start.monotonicNs, finishNs: finish.monotonicNs, effectId: start.effectId };
+  };
+  const sourceTiming = timingWindow(
+    toolTimings(process.env.SMOKE_NODE_A_LOG, sourceInvocation.invocationId),
+    "source",
+  );
+  const forkTiming = timingWindow(
+    toolTimings(process.env.SMOKE_NODE_B_LOG, invocation.invocationId),
+    "fork",
+  );
+  const queryTiming = timingWindow(
+    toolTimings(process.env.SMOKE_NODE_A_LOG, queryInvocation.invocationId),
+    "query",
+  );
+  const overlaps = BigInt(sourceTiming.startNs) < BigInt(forkTiming.finishNs)
+    && BigInt(forkTiming.startNs) < BigInt(sourceTiming.finishNs);
+  if (!overlaps) throw new Error(`real Codex calls did not overlap: ${JSON.stringify({ sourceTiming, forkTiming })}`);
+  const llmAndQueryOverlap = BigInt(sourceTiming.startNs) < BigInt(queryTiming.finishNs)
+    && BigInt(queryTiming.startNs) < BigInt(sourceTiming.finishNs);
+  if (!llmAndQueryOverlap) throw new Error(`Codex and Query Catalog calls did not overlap: ${JSON.stringify({ sourceTiming, queryTiming })}`);
+  const componentInstance = (logPath, executionIri) => {
+    const text = fs.readFileSync(logPath, "utf8");
+    const escaped = executionIri.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = text.match(new RegExp(`semantic-component-execution-started handle=\\d+ instance=([^ ]+) execution=${escaped}`));
+    if (!match) throw new Error(`missing component instance evidence for ${executionIri}`);
+    return match[1];
+  };
+  const sourceComponentInstance = componentInstance(process.env.SMOKE_NODE_A_LOG, sourceInvocation.executionIri);
+  const forkComponentInstance = componentInstance(process.env.SMOKE_NODE_B_LOG, invocation.executionIri);
+  const queryComponentInstance = componentInstance(process.env.SMOKE_NODE_A_LOG, queryInvocation.executionIri);
+  if (new Set([sourceComponentInstance, forkComponentInstance, queryComponentInstance]).size !== 3) {
+    throw new Error("concurrent executions shared a component instance");
+  }
+  const manifest = JSON.parse(fs.readFileSync(process.env.SMOKE_WASM_MANIFEST, "utf8"));
   const evidence = {
     recordedAt: new Date().toISOString(),
     mode: privateRemote
@@ -597,12 +907,45 @@ node --input-type=module -e '
       : { node: "node-b", agentDid: forkOwner.agentDid, agentAddress: forkOwner.agentAddress },
     executedOn: { node: "node-b", agentDid: forkOwner.agentDid, agentAddress: forkOwner.agentAddress },
     queriedNode: "node-c",
+    nodeUrls: {
+      sourceAuthor: process.env.SMOKE_API_URL,
+      forkAuthor: process.env.SMOKE_API_URL_NODE_B,
+      secondNodeVerification: process.env.SMOKE_API_URL_NODE_C,
+    },
+    contextGraphId: process.env.SMOKE_CONTEXT_GRAPH_ID,
+    sourceProgram: {
+      programIri: process.env.SMOKE_PROGRAM_IRI,
+      programUal: sourcePublish.ual,
+    },
+    queryProgram: {
+      programIri: process.env.SMOKE_QUERY_PROGRAM_IRI,
+      programUal: queryProgramPublish.ual,
+    },
     fork,
     crossNodeForkVmResult: forkRows[0],
     invocation,
+    sourceInvocation,
+    queryInvocation,
     crossNodeVmResult: rows[0],
+    sourceCrossNodeVmResult: sourceRows[0],
+    queryCrossNodeVmResult: catalogRows[0],
     crossNodeVmAudit: auditRow,
-    wasmSha256: JSON.parse(fs.readFileSync(process.env.SMOKE_WASM_MANIFEST, "utf8")).files["cjs/runtime_bg.wasm"].sha256,
+    concurrency: {
+      realCodexCallsOverlap: overlaps,
+      llmAndQueryCatalogOverlap: llmAndQueryOverlap,
+      sourceTiming,
+      forkTiming,
+      queryTiming,
+      sourceComponentInstance,
+      forkComponentInstance,
+      queryComponentInstance,
+    },
+    artifactHashes: {
+      legacyWasmSha256: manifest.files["cjs/runtime_bg.wasm"].sha256,
+      componentSha256: manifest.files["component/runtime.component.wasm"].sha256,
+      witSha256: manifest.files["component/wit/semantic-runtime.wit"].sha256,
+      integritySha256: crypto.createHash("sha256").update(fs.readFileSync(process.env.SMOKE_WASM_MANIFEST)).digest("hex"),
+    },
   };
   fs.writeFileSync(process.env.SMOKE_RECEIPT_PATH, `${JSON.stringify(evidence, null, 2)}\n`);
   console.log(JSON.stringify(evidence, null, 2));
