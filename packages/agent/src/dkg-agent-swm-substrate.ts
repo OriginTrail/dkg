@@ -1035,6 +1035,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // every public/curated context graph.
         publicAccessPolicyOnChainOracle: (cgId: string) =>
           this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
+        // RFC-64 catalog authority already excludes selected CGs from legacy
+        // durable catch-up. Apply the same decision to live gossip/substrate
+        // delivery so a partial ambient generation cannot race ahead of an
+        // authenticated exact catalog head and make cold bootstrap fail closed.
+        legacyApplyAllowedOracle: (cgId: string) => (
+          this.resolveRfc64CatalogReceiverAuthorityV1(cgId).legacySyncAllowed
+        ),
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
