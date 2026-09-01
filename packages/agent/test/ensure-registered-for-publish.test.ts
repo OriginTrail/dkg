@@ -12,6 +12,8 @@ import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 type Stub = Record<string, any>;
+const DEFAULT_PUBLISHER = { id: 'default-publisher' };
+const SELECTED_PUBLISHER = { id: 'selected-publisher' };
 
 /** Minimal stub: only the dependencies ensureRegisteredForPublish actually calls.
  * #1085 (R7) — the publish auto-register path reads the create-time policy + PCA
@@ -23,11 +25,12 @@ function makeStub(overrides: Stub = {}): Stub {
     getContextGraphOnChainId: async () => null,
     getStoredContextGraphRegistrationOptions: async () => ({}),
     registerContextGraph: async () => undefined,
+    publisher: DEFAULT_PUBLISHER,
     ...overrides,
   };
 }
 
-function callEnsure(stub: Stub, cgId: string, opts?: { callerAgentAddress?: string }) {
+function callEnsure(stub: Stub, cgId: string, opts?: { callerAgentAddress?: string; publisher?: unknown }) {
   return (DKGAgent.prototype as any).ensureRegisteredForPublish.call(stub, cgId, opts);
 }
 
@@ -69,6 +72,7 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
     expect(regOpts.publishPolicy).toBe(1);
     expect(regOpts.publishAuthorityAccountId).toBe('0x00000000000000000000000000000000000000ab');
     expect(regOpts.callerAgentAddress).toBe('0x00000000000000000000000000000000000000c1');
+    expect(regOpts.publisher).toBe(DEFAULT_PUBLISHER);
   });
 
   it('(a) omits stored fields that are undefined (does not forward absent options)', async () => {
@@ -101,19 +105,22 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
 
   it('(b) race-confirm: registerContextGraph throws "already registered on-chain" AND an id now exists ⇒ RETURNS (swallows)', async () => {
     let onChainIdCalls = 0;
+    let registrationPublisher: unknown;
     const stub = makeStub({
       // First call (the pre-check) → null; second call (the race confirm) → truthy.
       getContextGraphOnChainId: async () => {
         onChainIdCalls += 1;
         return onChainIdCalls >= 2 ? 7n : null;
       },
-      registerContextGraph: async () => {
+      registerContextGraph: async (_cgId: string, opts: Record<string, unknown>) => {
+        registrationPublisher = opts.publisher;
         throw new Error('Context graph "cg-race" is already registered on-chain.');
       },
     });
 
     // Must NOT throw — the concurrent publisher won the race; the CG IS registered.
-    await expect(callEnsure(stub, 'cg-race')).resolves.toBeUndefined();
+    await expect(callEnsure(stub, 'cg-race', { publisher: SELECTED_PUBLISHER })).resolves.toBeUndefined();
+    expect(registrationPublisher).toBe(SELECTED_PUBLISHER);
     expect(onChainIdCalls).toBeGreaterThanOrEqual(2); // it re-checked after the throw
   });
 
@@ -135,5 +142,42 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
       },
     });
     await expect(callEnsure(stub, 'cg-fail')).rejects.toThrow(/insufficient TRAC/i);
+  });
+
+  it('rejects unauthorized local registration before expensive preparation', async () => {
+    const order: string[] = [];
+    const signerAddress = '0x00000000000000000000000000000000000000b2';
+    const capability = {
+      signerAddress,
+      coverage: { source: 'explicit', accountId: 17n },
+      submit: async () => ({ contextGraphId: 1n }),
+    };
+    const stub = {
+      store: {},
+      chain: {
+        chainId: 'hardhat',
+        async prepareOnChainContextGraphRegistration(options: unknown) {
+          order.push('prepare');
+          expect(options).toEqual({ registrationPcaAccountId: 17n });
+          return capability;
+        },
+      },
+      peerId: 'peer-test',
+      defaultAgentAddress: signerAddress,
+      log: { warn() {}, info() {} },
+      contextGraphExists: async () => true,
+      getContextGraphCurator: async () => {
+        order.push('curator-preflight');
+        return 'did:dkg:agent:0x00000000000000000000000000000000000000c3';
+      },
+      isCallerOrNodeAddressOwner: () => false,
+    };
+
+    await expect(
+      (DKGAgent.prototype as any).registerContextGraph.call(stub, 'cg-prepared-first', {
+        registrationPcaAccountId: 17n,
+      }),
+    ).rejects.toThrow(/Only the context graph curator/);
+    expect(order).toEqual(['curator-preflight']);
   });
 });

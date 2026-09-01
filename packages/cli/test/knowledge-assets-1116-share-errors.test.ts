@@ -2295,6 +2295,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     it('on CG_NOT_REGISTERED: registers ONCE between TWO publish calls and returns the retry result', async () => {
       const calls: string[] = [];
       let publishCount = 0;
+      const defaultPublisher = { id: 'default-sync-publisher' };
+      let registrationOptions: any;
 
       await startWith(
         {}, // no `assertion` methods needed for vm/publish
@@ -2312,8 +2314,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
             // Retry (after register): confirmed publish.
             return { status: 'confirmed', ual: 'did:dkg:test/1/42', kaId: '42', seal: { authorAddress: '0x00000000000000000000000000000000000000a1' } };
           },
-          async ensureRegisteredForPublish(_cg: string, _opts: unknown) {
+          publisher: defaultPublisher,
+          async ensureRegisteredForPublish(_cg: string, opts: unknown) {
             calls.push('register');
+            registrationOptions = opts;
             // success — the CG is now registered.
           },
         },
@@ -2325,6 +2329,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(calls).toEqual(['publish#1', 'register', 'publish#2']);
       expect(publishCount).toBe(2);
       expect(calls.filter((c) => c === 'register').length).toBe(1);
+      expect(registrationOptions.publisher).toBe(defaultPublisher);
 
       // The response reflects the SECOND (success) call, NOT the first 409.
       expect(res.status).toBe(200);

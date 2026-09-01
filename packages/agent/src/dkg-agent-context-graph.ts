@@ -94,9 +94,10 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, normalizePositiveUint256, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type PositiveUint256Input, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
-  DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
+  ContextGraphRegistrationPreparationUnsupportedError,
+  PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
@@ -395,6 +396,40 @@ interface ContextGraphAgentInviteMutationPlan {
 export type PreparedContextGraphAgentInviteMutation =
   PreparedContextGraphMembershipMutation<ContextGraphAgentInviteMutationPlan>;
 
+interface ContextGraphRegistrationPreparer {
+  prepareContextGraphRegistration(
+    options?: Pick<
+      PrepareContextGraphRegistrationOptions,
+      'registrationPcaAccountId' | 'registrationSignerAddress'
+    >,
+  ): Promise<PreparedContextGraphRegistration>;
+  prepareLegacyContextGraphRegistration(): Promise<{
+    readonly signerAddress?: string;
+    submit(
+      params: CreateOnChainContextGraphParams,
+    ): Promise<CreateOnChainContextGraphResult>;
+  }>;
+}
+
+interface ContextGraphRegistrationSignerPolicy {
+  publishPolicy: number;
+  publishAuthorityAccountId?: bigint;
+  curatorAddress: string;
+}
+
+/**
+ * Keep app authorization policy separate from the chain preparation API. If
+ * that API evolves, only this policy-to-option mapping needs to change.
+ */
+function requiredContextGraphRegistrationSigner(
+  policy: ContextGraphRegistrationSignerPolicy,
+): string | undefined {
+  if (policy.publishPolicy !== EVM_PUBLISH_CURATED) return undefined;
+  return policy.publishAuthorityAccountId !== undefined
+    ? policy.curatorAddress
+    : undefined;
+}
+
 export class ContextGraphMethods extends DKGAgentBase {
   async createContextGraph(this: DKGAgent, opts: {
     id: string;
@@ -424,7 +459,7 @@ export class ContextGraphMethods extends DKGAgentBase {
      * the same deferred-registration reason — without persistence,
      * auto-register would silently drop PCA-curated configs.
      */
-    publishAuthorityAccountId?: bigint | string | number;
+    publishAuthorityAccountId?: PositiveUint256Input;
     /** When true, skips gossip subscription and broadcast. Data stays local-only. */
     private?: boolean;
     /** Caller's agent address (resolved from token). Used for curator/creator triples. */
@@ -488,16 +523,10 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
     let normalisedPublishAuthorityAccountId: bigint | undefined;
     if (opts.publishAuthorityAccountId !== undefined) {
-      const raw = opts.publishAuthorityAccountId;
-      try {
-        normalisedPublishAuthorityAccountId =
-          typeof raw === 'bigint' ? raw : BigInt(raw as never);
-      } catch {
-        throw new Error('`publishAuthorityAccountId` must be a positive integer.');
-      }
-      if (normalisedPublishAuthorityAccountId <= 0n) {
-        throw new Error('`publishAuthorityAccountId` must be a positive integer.');
-      }
+      normalisedPublishAuthorityAccountId = normalizePositiveUint256(
+        opts.publishAuthorityAccountId,
+        '`publishAuthorityAccountId`',
+      );
       // PCA is only meaningful on curated-contribution registrations.
       // Mirror the daemon-route guard so direct agent callers can't
       // accidentally smuggle a PCA id onto an open-publish CG.
@@ -866,7 +895,11 @@ export class ContextGraphMethods extends DKGAgentBase {
     accessPolicy?: number;
     publishPolicy?: number;
     callerAgentAddress?: string;
-    publishAuthorityAccountId?: bigint;
+    publishAuthorityAccountId?: PositiveUint256Input;
+    /** Attempt-scoped PCA economic coverage; never persisted as graph policy. */
+    registrationPcaAccountId?: PositiveUint256Input;
+    /** Narrow registration capability selected by the publish path. */
+    publisher?: ContextGraphRegistrationPreparer;
     /**
      * When `true`, refuse curated EOA-mode registration if the
      * calling agent's address differs from the configured chain
@@ -898,6 +931,10 @@ export class ContextGraphMethods extends DKGAgentBase {
     if (this.chain.chainId === 'none') {
       throw new Error('On-chain registration requires a configured chain adapter');
     }
+
+    const registrationPcaAccountId = opts?.registrationPcaAccountId == null
+      ? undefined
+      : normalizePositiveUint256(opts.registrationPcaAccountId, 'Registration PCA account id');
 
     // Only the address-scoped curator can register a CG on-chain.
     // Peer IDs are transport contact handles for sync/meta refresh, not EVM
@@ -1078,39 +1115,9 @@ export class ContextGraphMethods extends DKGAgentBase {
     // on every register retry that omits the param. With explicit-only
     // resolution, `undefined` unambiguously means "no PCA".
     //
-    // The option type advertises `bigint`, but untyped / JS callers can
-    // pass `1` or `'1'` — comparing a non-bigint to `0n` would throw a
-    // raw `TypeError: Cannot mix BigInt and other types` instead of the
-    // actionable validation error this API is supposed to provide
-    // (Codex PR #502 round-8). Coerce safely before the `<= 0n` check.
-    const rawPublishAuthorityAccountId = opts?.publishAuthorityAccountId as unknown;
-    let requestedPublishAuthorityAccountId: bigint | undefined;
-    if (rawPublishAuthorityAccountId !== undefined && rawPublishAuthorityAccountId !== null) {
-      if (typeof rawPublishAuthorityAccountId === 'bigint') {
-        requestedPublishAuthorityAccountId = rawPublishAuthorityAccountId;
-      } else if (typeof rawPublishAuthorityAccountId === 'number') {
-        // Codex PR #502 round-9: reject unsafe JS integers. Anything
-        // above `Number.MAX_SAFE_INTEGER` (2^53-1) is silently
-        // rounded BEFORE `BigInt(...)` sees it, which would let an
-        // untyped caller register against an entirely different PCA
-        // account id than they intended. Mirrors
-        // `parseOptionalPcaAccountId` in the daemon route.
-        if (!Number.isSafeInteger(rawPublishAuthorityAccountId) || rawPublishAuthorityAccountId <= 0) {
-          throw new Error('PCA account id must be a positive integer.');
-        }
-        requestedPublishAuthorityAccountId = BigInt(rawPublishAuthorityAccountId);
-      } else if (typeof rawPublishAuthorityAccountId === 'string' && /^[1-9]\d*$/.test(rawPublishAuthorityAccountId)) {
-        // Decimal strings can carry arbitrary-precision values
-        // safely (BigInt preserves them), so no safe-integer ceiling
-        // applies — that's the recommended path for ids above 2^53.
-        requestedPublishAuthorityAccountId = BigInt(rawPublishAuthorityAccountId);
-      } else {
-        throw new Error('PCA account id must be a positive integer.');
-      }
-      if (requestedPublishAuthorityAccountId <= 0n) {
-        throw new Error('PCA account id must be a positive integer.');
-      }
-    }
+    const requestedPublishAuthorityAccountId = opts?.publishAuthorityAccountId == null
+      ? undefined
+      : normalizePositiveUint256(opts.publishAuthorityAccountId, 'PCA account id');
     const publishAuthorityAccountId = requestedPublishAuthorityAccountId;
     // PCA account ids are only invalid when the publish policy is
     // open (`publishPolicy === EVM_PUBLISH_OPEN`) — that combination
@@ -1203,57 +1210,128 @@ export class ContextGraphMethods extends DKGAgentBase {
       );
     }
     let publishAuthority: string | undefined;
-    if (publishPolicy === EVM_PUBLISH_CURATED) {
-      if (isPcaCurated) {
-        if (typeof this.chain.getPublishingConvictionAccountOwner !== 'function') {
-          throw new Error('PCA curated context graph registration requires chain adapter PCA owner lookup support.');
-        }
-        // Translate KNOWN nonexistent-token reverts on the PCA NFT into
-        // a stable, caller-input-shaped error so the daemon route can
-        // map it cleanly to 404. Anything else (RPC outage, network
-        // glitch, adapter-internal failure) is rethrown with its
-        // original class/message so the daemon's catch surfaces it as a
-        // retriable 500/503 rather than a misleading 404 (Codex review
-        // #502-3 follow-up: don't blanket-translate every adapter
-        // failure as "does not exist").
-        try {
-          publishAuthority = ethers.getAddress(
-            await this.chain.getPublishingConvictionAccountOwner(publishAuthorityAccountId),
-          );
-        } catch (lookupErr: any) {
-          const lookupMsg = String(lookupErr?.message ?? lookupErr ?? '');
-          const errCode = String(lookupErr?.code ?? '');
-          // Patterns we recognise as "this PCA token doesn't exist":
-          //   - OZ ERC721 custom error (modern: `ERC721NonexistentToken`,
-          //     legacy: `ERC721: invalid token ID` / `nonexistent token`).
-          //   - The built-in `MockChainAdapter.getPublishingConvictionAccountOwner`
-          //     throws `Mock: PCA account <id> does not exist` (production
-          //     mock used by SDK callers). Recognized via the broader
-          //     `/PCA account \d+ does not exist/` pattern (Codex PR #502
-          //     round-6: this matcher used to recognize only the test
-          //     double's wording, so the built-in mock path bypassed
-          //     normalization).
-          //   - The agent-test test double's `No mock PCA owner for
-          //     account ...` parity throw.
-          //   - ethers v6 surfaces these as `BAD_DATA` / `CALL_EXCEPTION`
-          //     with the OZ error name in the message.
-          const isNonexistentToken =
-            /ERC721NonexistentToken/.test(lookupMsg)
-            || /invalid token ID/i.test(lookupMsg)
-            || /nonexistent token/i.test(lookupMsg)
-            || /PCA account \d+ does not exist/.test(lookupMsg)
-            || /No mock PCA owner for account/.test(lookupMsg)
-            || (errCode === 'CALL_EXCEPTION' && /ERC721/.test(lookupMsg));
-          if (isNonexistentToken) {
-            throw new Error(
-              `PCA account ${publishAuthorityAccountId} does not exist or cannot be looked up: ${lookupMsg}`,
-            );
-          }
-          throw lookupErr;
-        }
-      } else {
-        publishAuthority = await this.getChainPublishAuthorityAddress(id);
+    if (isPcaCurated) {
+      if (typeof this.chain.getPublishingConvictionAccountOwner !== 'function') {
+        throw new Error('PCA curated context graph registration requires chain adapter PCA owner lookup support.');
       }
+      // Translate KNOWN nonexistent-token reverts on the PCA NFT into
+      // a stable, caller-input-shaped error so the daemon route can
+      // map it cleanly to 404. Anything else (RPC outage, network
+      // glitch, adapter-internal failure) is rethrown with its
+      // original class/message so the daemon's catch surfaces it as a
+      // retriable 500/503 rather than a misleading 404 (Codex review
+      // #502-3 follow-up: don't blanket-translate every adapter
+      // failure as "does not exist").
+      try {
+        publishAuthority = ethers.getAddress(
+          await this.chain.getPublishingConvictionAccountOwner(publishAuthorityAccountId),
+        );
+      } catch (lookupErr: any) {
+        const lookupMsg = String(lookupErr?.message ?? lookupErr ?? '');
+        const errCode = String(lookupErr?.code ?? '');
+        // Patterns we recognise as "this PCA token doesn't exist":
+        //   - OZ ERC721 custom error (modern: `ERC721NonexistentToken`,
+        //     legacy: `ERC721: invalid token ID` / `nonexistent token`).
+        //   - The built-in `MockChainAdapter.getPublishingConvictionAccountOwner`
+        //     throws `Mock: PCA account <id> does not exist` (production
+        //     mock used by SDK callers). Recognized via the broader
+        //     `/PCA account \d+ does not exist/` pattern (Codex PR #502
+        //     round-6: this matcher used to recognize only the test
+        //     double's wording, so the built-in mock path bypassed
+        //     normalization).
+        //   - The agent-test test double's `No mock PCA owner for
+        //     account ...` parity throw.
+        //   - ethers v6 surfaces these as `BAD_DATA` / `CALL_EXCEPTION`
+        //     with the OZ error name in the message.
+        const isNonexistentToken =
+          /ERC721NonexistentToken/.test(lookupMsg)
+          || /invalid token ID/i.test(lookupMsg)
+          || /nonexistent token/i.test(lookupMsg)
+          || /PCA account \d+ does not exist/.test(lookupMsg)
+          || /No mock PCA owner for account/.test(lookupMsg)
+          || (errCode === 'CALL_EXCEPTION' && /ERC721/.test(lookupMsg));
+        if (isNonexistentToken) {
+          throw new Error(
+            `PCA account ${publishAuthorityAccountId} does not exist or cannot be looked up: ${lookupMsg}`,
+          );
+        }
+        throw lookupErr;
+      }
+    }
+
+    const adapterPreparer = this.chain.prepareOnChainContextGraphRegistration;
+    const requiredRegistrationSigner = requiredContextGraphRegistrationSigner({
+      publishPolicy,
+      publishAuthorityAccountId,
+      curatorAddress: ownerAddress,
+    });
+    const preparationOptions: PrepareContextGraphRegistrationOptions = {
+      ...(registrationPcaAccountId !== undefined ? { registrationPcaAccountId } : {}),
+      ...(requiredRegistrationSigner !== undefined
+        ? { registrationSignerAddress: requiredRegistrationSigner }
+        : {}),
+    };
+    let preparedRegistration: PreparedContextGraphRegistration | undefined;
+    let legacyRegistration: Awaited<
+      ReturnType<ContextGraphRegistrationPreparer['prepareLegacyContextGraphRegistration']>
+    > | undefined;
+    if (opts?.publisher) {
+      // A supplied preparer carries a selected publisher binding (not merely an
+      // optimization), so failure must not silently fall back to another signer.
+      try {
+        preparedRegistration = await opts.publisher.prepareContextGraphRegistration(preparationOptions);
+      } catch (error) {
+        if (
+          !(error instanceof ContextGraphRegistrationPreparationUnsupportedError)
+          || registrationPcaAccountId !== undefined
+        ) {
+          throw error;
+        }
+
+        legacyRegistration = await opts.publisher.prepareLegacyContextGraphRegistration();
+      }
+    } else if (adapterPreparer) {
+      preparedRegistration = await adapterPreparer.call(this.chain, preparationOptions);
+    } else if (registrationPcaAccountId !== undefined) {
+      throw new Error(
+        'Registration PCA coverage requires chain adapter prepared context-graph registration support.',
+      );
+    }
+
+    const preparedSignerAddress = preparedRegistration
+      ? ethers.getAddress(preparedRegistration.signerAddress)
+      : undefined;
+    const legacySignerAddress = legacyRegistration?.signerAddress
+      ? ethers.getAddress(legacyRegistration.signerAddress)
+      : undefined;
+    const selectedRegistrationSigner = preparedSignerAddress ?? legacySignerAddress;
+    if (
+      requiredRegistrationSigner
+      && selectedRegistrationSigner
+      && selectedRegistrationSigner.toLowerCase() !== requiredRegistrationSigner.toLowerCase()
+    ) {
+      throw new Error(
+        `Prepared context-graph registration signer ${selectedRegistrationSigner} does not match required curator signer ${requiredRegistrationSigner}.`,
+      );
+    }
+
+    // EOA-curated registration advertises the tx signer as publish authority.
+    // Prepared flows use the sealed signer; legacy direct adapters use only
+    // their explicit compatibility executor or the adapter signer itself.
+    if (publishPolicy === EVM_PUBLISH_CURATED && !isPcaCurated) {
+      const directSignerAddress = selectedRegistrationSigner
+        ?? await this.getRegistrationTxSignerAddress();
+      publishAuthority = directSignerAddress
+        ? ethers.getAddress(directSignerAddress)
+        : undefined;
+    }
+
+    let registrationSignerAddress = selectedRegistrationSigner;
+    if (isPcaCurated && !registrationSignerAddress) {
+      registrationSignerAddress = await this.getRegistrationTxSignerAddress();
+    }
+
+    if (publishPolicy === EVM_PUBLISH_CURATED) {
       // PCA registration mirrors the post-#1366 on-chain authorization:
       // either the PCA owner OR a wallet registered to this exact PCA may
       // create the CG. Keep the local curator and registration-tx signer
@@ -1268,14 +1346,12 @@ export class ContextGraphMethods extends DKGAgentBase {
       // mode the registered agent owns the newly minted CG NFT while the PCA
       // owner and every registered PCA agent remain authorized publishers.
       if (isPcaCurated && publishAuthority) {
-        const chainSigner = await this.getRegistrationTxSignerAddress();
-        if (!chainSigner) {
+        if (!registrationSignerAddress) {
           throw new Error(
             `Context graph "${id}" cannot be PCA-registered: the chain adapter does not expose its registration-tx signer, so PCA owner/agent authorization cannot be verified. PCA mode requires a chain adapter that surfaces its signer (e.g. via \`signerAddress\` / \`getSignerAddress()\` / \`getOperationalPrivateKey()\`).`,
           );
         }
-
-        const normalizedChainSigner = ethers.getAddress(chainSigner);
+        const normalizedChainSigner = ethers.getAddress(registrationSignerAddress);
         const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
         if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase()) {
           throw new Error(
@@ -1431,7 +1507,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       ...(isPcaCurated ? { publishAuthorityAccountId } : {}),
       participantAgents,
       nameHash,
-    });
+    }, preparedRegistration ?? legacyRegistration);
     const onChainId = result.contextGraphId.toString();
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);

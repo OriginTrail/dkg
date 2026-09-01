@@ -1,5 +1,10 @@
 export * from './chain-adapter.js';
 export {
+  normalizePositiveUint256,
+  serializePositiveUint256,
+  type PositiveUint256Input,
+} from './positive-uint256.js';
+export {
   resolvePublicFinalizedMaterializationAuthority,
   type PublicFinalizedMaterializationAuthorityRequest,
   type PublicFinalizedMaterializationAuthorityResult,

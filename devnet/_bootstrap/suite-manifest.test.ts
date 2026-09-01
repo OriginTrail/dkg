@@ -3,16 +3,24 @@
 // catching the classic failure mode where a new suite is added under devnet/ but
 // forgotten in the sweep list / pnpm-workspace / package.json (otReviewAgent #1397).
 import { describe, it, expect } from 'vitest';
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import {
+  readdirSync,
+  readFileSync,
+  existsSync,
+  statSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
 
 const DEVNET = resolve(import.meta.dirname, '..');
 const ROOT = resolve(DEVNET, '..');
 const manifest = JSON.parse(readFileSync(resolve(DEVNET, 'suites.json'), 'utf8')) as {
+  sharedSweep: {
+    nodeCount: number;
+    publisherWalletIndex: number;
+  };
   prCoverage: string[];
   all: string[];
 };
-
 // Suite dirs actually present on disk: devnet/<x>/ with a vitest.config.ts, minus
 // the underscore-prefixed infra dirs (_bootstrap).
 const onDisk = readdirSync(DEVNET, { withFileTypes: true })
@@ -22,6 +30,13 @@ const onDisk = readdirSync(DEVNET, { withFileTypes: true })
   .sort();
 
 describe('devnet suite manifest (suites.json) — drift guard', () => {
+  it('declares the shared-sweep topology explicitly', () => {
+    expect(manifest.sharedSweep).toEqual({
+      nodeCount: 6,
+      publisherWalletIndex: 1,
+    });
+  });
+
   it('prCoverage ⊆ all', () => {
     const missing = manifest.prCoverage.filter((s) => !manifest.all.includes(s));
     expect(missing, `prCoverage entries not in all: ${missing.join(', ')}`).toEqual([]);

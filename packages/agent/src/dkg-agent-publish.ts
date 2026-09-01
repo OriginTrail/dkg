@@ -121,7 +121,7 @@ import {
   type Quad,
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type PreparedContextGraphRegistration, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -4196,7 +4196,7 @@ export class PublishMethods extends DKGAgentBase {
   async ensureRegisteredForPublish(
     this: DKGAgent,
     contextGraphId: string,
-    opts?: { callerAgentAddress?: string },
+    opts?: { callerAgentAddress?: string; publisher?: DKGPublisher },
   ): Promise<void> {
     const existingOnChainId = await this.getContextGraphOnChainId(contextGraphId);
     if (existingOnChainId) return;
@@ -4212,6 +4212,7 @@ export class PublishMethods extends DKGAgentBase {
     try {
       await this.registerContextGraph(contextGraphId, {
         ...(opts?.callerAgentAddress != null ? { callerAgentAddress: opts.callerAgentAddress } : {}),
+        publisher: opts?.publisher ?? this.publisher,
         ...(publishPolicy !== undefined ? { publishPolicy } : {}),
         ...(publishAuthorityAccountId !== undefined
           ? { publishAuthorityAccountId }
@@ -6903,12 +6904,18 @@ export class PublishMethods extends DKGAgentBase {
   /**
    * Register a new M/N signature-gated context graph on-chain.
    */
-  async registerContextGraphOnChain(this: DKGAgent, params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
+  async registerContextGraphOnChain(
+    this: DKGAgent,
+    params: CreateOnChainContextGraphParams,
+    registration?: Pick<PreparedContextGraphRegistration, 'submit'>,
+  ): Promise<CreateOnChainContextGraphResult> {
     const ctx = createOperationContext('system');
-    if (typeof this.chain.createOnChainContextGraph !== 'function') {
+    if (!registration && typeof this.chain.createOnChainContextGraph !== 'function') {
       throw new Error('createOnChainContextGraph not available on chain adapter');
     }
-    const result = await this.chain.createOnChainContextGraph(params);
+    const result = registration
+      ? await registration.submit(params)
+      : await this.chain.createOnChainContextGraph!(params);
     const contextGraphId = result.contextGraphId.toString();
     // LU-2: per SPEC_CG_MEMORY_MODEL the on-chain CG no longer carries a
     // hosting committee — hosts are picked from the network sharding table

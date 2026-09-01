@@ -31,6 +31,10 @@ import type {
 } from './catchup-status.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
+import {
+  serializePositiveUint256,
+  type PositiveUint256Input,
+} from '@origintrail-official/dkg-chain';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -1794,7 +1798,7 @@ export class ApiClient {
      * (Codex PR #502 round-5). For a two-step flow, use
      * {@link registerContextGraph} instead.
      */
-    pcaAccountId?: string | number | bigint;
+    pcaAccountId?: PositiveUint256Input;
   }, allowedPeers?: string[]): Promise<{
     created: string;
     uri: string;
@@ -1816,7 +1820,9 @@ export class ApiClient {
       ...(options?.private ? { private: true } : {}),
       ...(options?.register === true ? { register: true } : {}),
       ...(options?.publishPolicy != null ? { publishPolicy: options.publishPolicy } : {}),
-      ...(options?.pcaAccountId != null ? { pcaAccountId: options.pcaAccountId.toString() } : {}),
+      ...(options?.pcaAccountId != null
+        ? { pcaAccountId: serializePositiveUint256(options.pcaAccountId, 'pcaAccountId') }
+        : {}),
     });
   }
 
@@ -1832,7 +1838,9 @@ export class ApiClient {
     revealOnChain?: boolean;
     accessPolicy?: number;
     publishPolicy?: number;
-    pcaAccountId?: string | number | bigint;
+    pcaAccountId?: PositiveUint256Input;
+    /** Attempt-scoped PCA coverage; independent of publish authority. */
+    registrationPcaAccountId?: PositiveUint256Input;
   }): Promise<{
     registered: string;
     onChainId: string;
@@ -1842,7 +1850,17 @@ export class ApiClient {
       id,
       ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
       ...(opts?.publishPolicy != null ? { publishPolicy: opts.publishPolicy } : {}),
-      ...(opts?.pcaAccountId != null ? { pcaAccountId: opts.pcaAccountId.toString() } : {}),
+      ...(opts?.pcaAccountId != null
+        ? { pcaAccountId: serializePositiveUint256(opts.pcaAccountId, 'pcaAccountId') }
+        : {}),
+      ...(opts?.registrationPcaAccountId != null
+        ? {
+            registrationPcaAccountId: serializePositiveUint256(
+              opts.registrationPcaAccountId,
+              'registrationPcaAccountId',
+            ),
+          }
+        : {}),
     });
   }
 

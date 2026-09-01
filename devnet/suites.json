@@ -1,5 +1,9 @@
 {
-  "_comment": "Single source of truth for the devnet suite set. `prCoverage` = the 10.0.2 PR-coverage suites the coverage sweep runs; `all` = every devnet/<dir> that has a vitest.config.ts (excluding _bootstrap). scripts/devnet-1002-coverage-sweep.sh reads prCoverage; devnet/_bootstrap/suite-manifest.test.ts guards this file against package.json / pnpm-workspace.yaml / on-disk drift.",
+  "_comment": "Single source of truth for the devnet suite set and shared sweep topology. `prCoverage` = the 10.0.2 PR-coverage suites the coverage sweep runs; `all` = every devnet/<dir> that has a vitest.config.ts (excluding _bootstrap). scripts/devnet-1002-coverage-sweep.sh reads this manifest; devnet/_bootstrap/suite-manifest.test.ts guards it against package.json / pnpm-workspace.yaml / on-disk drift.",
+  "sharedSweep": {
+    "nodeCount": 6,
+    "publisherWalletIndex": 1
+  },
   "prCoverage": [
     "pr1386-term-canon",
     "pr1385-subgraph-rs",

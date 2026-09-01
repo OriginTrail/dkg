@@ -1743,7 +1743,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           // re-wrapped errors that lost the code).
           if (firstErr?.code !== "CG_NOT_REGISTERED" && !/not registered on-chain/i.test(firstErr?.message ?? String(firstErr))) throw firstErr;
           try {
-            await agent.ensureRegisteredForPublish(contextGraphId, { callerAgentAddress: requestAgentAddress });
+            await agent.ensureRegisteredForPublish(contextGraphId, {
+              callerAgentAddress: requestAgentAddress,
+              publisher: agent.publisher,
+            });
           } catch (regErr: any) {
             // A transient RPC outage during the pre-publish auto-registration
             // is retryable (503/504), NOT a permanent client error (400) — a

@@ -9,7 +9,7 @@
 # ABORTS immediately instead of hammering a dead devnet.
 #
 # Phases:
-#   1. ONE PASS of the 7 new PR-coverage suites + v10-end-to-end (baseline).
+#   1. ONE PASS of the manifest-listed PR-coverage suites + v10-end-to-end (baseline).
 #   2. STABILITY LOOP of those suites until (TARGET - ORCH reserve) elapses,
 #      health-guarded, aggregating per-suite pass-rates → surfaces intermittents
 #      (RS timing, finalization dual-home race, SWM convergence).
@@ -17,6 +17,10 @@
 #      if RUN_ORCHESTRATOR=1, time-boxed, and nothing runs after it.
 #
 # Sequential, native-oxigraph only (no emulated blazegraph node) → bounded load.
+#
+# Shared-topology precondition (declared in devnet/suites.json):
+#   ./scripts/devnet.sh clean
+#   DEVNET_ENABLE_PUBLISHER=1 DEVNET_PUBLISHER_WALLET_INDEX=1 ./scripts/devnet.sh start 6
 #
 # Env: TARGET_SECONDS (default 14400=4h) · RUN_ORCHESTRATOR (default 0) ·
 #      ORCH_RESERVE_SECONDS (default 5400=1.5h if orchestrator on, else 0) ·
@@ -38,6 +42,7 @@ if [ "$RUN_ORCHESTRATOR" = "1" ]; then ORCH_RESERVE_SECONDS="${ORCH_RESERVE_SECO
 SUITES_JSON="$REPO_ROOT/devnet/suites.json"
 NEW_SUITES=($(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).prCoverage.join(' '))" "$SUITES_JSON" 2>/dev/null))
 [ "${#NEW_SUITES[@]}" -gt 0 ] || { echo "FATAL: could not read prCoverage from $SUITES_JSON (need node in PATH)"; exit 2; }
+SWEEP_NODE_COUNT=$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).sharedSweep.nodeCount))" "$SUITES_JSON" 2>/dev/null)
 STABILITY_SUITES="${STABILITY_SUITES:-${NEW_SUITES[*]} v10-end-to-end}"
 
 log() { echo "[1002-sweep $(date -u +'%H:%M:%S')] $*" | tee -a "$SUMMARY"; }
@@ -52,10 +57,11 @@ loop_deadline() { echo $(( TARGET_SECONDS - ORCH_RESERVE_SECONDS )); }
 _probe_once() {
   curl -sf --max-time 5 http://127.0.0.1:8545 -X POST -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' >/dev/null 2>&1 || return 1
-  local n code
-  for n in 1 2 3 4 5 6; do
+  local n=1 code
+  while [ "$n" -le "$SWEEP_NODE_COUNT" ]; do
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:920$n/api/status" 2>/dev/null || echo 000)
     [ "$code" = "200" ] || return 1
+    n=$(( n + 1 ))
   done
   return 0
 }
@@ -102,8 +108,16 @@ if ! pnpm vitest run --config devnet/_bootstrap/vitest.manifest.config.ts > "$RE
   log "FATAL: suite manifest drift — see $RESULTS/manifest-guard.log (run 'pnpm test:devnet:manifest')"; exit 2
 fi
 log "suite manifest consistent ($( echo "${NEW_SUITES[*]}" | wc -w | tr -d ' ') PR-coverage suites)."
+if ! DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}" \
+  node "$REPO_ROOT/scripts/devnet-shared-sweep-preflight.mjs" \
+  > "$RESULTS/topology-preflight.log" 2>&1; then
+  log "FATAL: shared devnet topology is incompatible with the advertised sweep:"
+  while IFS= read -r line; do log "  $line"; done < "$RESULTS/topology-preflight.log"
+  exit 2
+fi
+log "$(cat "$RESULTS/topology-preflight.log")"
 if ! healthy; then log "FATAL: devnet not healthy at start — restart it first"; exit 2; fi
-log "devnet healthy (6 nodes + hardhat)."
+log "devnet healthy ($SWEEP_NODE_COUNT nodes + hardhat)."
 
 # ── Phase 1: baseline one pass ────────────────────────────────────
 log "═══ PHASE 1: baseline one pass (${STABILITY_SUITES}) ═══"

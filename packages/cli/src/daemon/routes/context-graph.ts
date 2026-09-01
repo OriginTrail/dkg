@@ -55,7 +55,7 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, isPcaUnavailableError, MockChainAdapter, normalizePositiveUint256 } from '@origintrail-official/dkg-chain';
 import {
   ContextGraphAssetFetchConflictError,
   ContextGraphAssetFetchValidationError,
@@ -410,22 +410,17 @@ function classifyRegisterContextGraphError(err: unknown): { status: number; body
   return undefined;
 }
 
-function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: bigint; error?: string } {
-  const raw = body.pcaAccountId;
+function parseOptionalPcaAccountId(
+  body: Record<string, unknown>,
+  field = 'pcaAccountId',
+): { value?: bigint; error?: string } {
+  const raw = body[field];
   if (raw === undefined || raw === null || raw === '') return {};
-  if (typeof raw === 'number') {
-    if (!Number.isSafeInteger(raw) || raw <= 0) {
-      return { error: 'pcaAccountId must be a positive safe integer' };
-    }
-    return { value: BigInt(raw) };
+  try {
+    return { value: normalizePositiveUint256(raw, field) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
   }
-  if (typeof raw === 'string') {
-    if (!/^[1-9]\d*$/.test(raw)) {
-      return { error: 'pcaAccountId must be a positive decimal integer string' };
-    }
-    return { value: BigInt(raw) };
-  }
-  return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
 function respondReconcileError(res: ServerResponse, err: unknown): void {
@@ -863,6 +858,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (parsedPcaAccountId.error) {
       return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
     }
+    const parsedRegistrationPcaAccountId = parseOptionalPcaAccountId(parsed, 'registrationPcaAccountId');
+    if (parsedRegistrationPcaAccountId.error) {
+      return jsonResponse(res, 400, { error: parsedRegistrationPcaAccountId.error });
+    }
     try {
       // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 round-2):
       // expose `strictEoaCuratorMatch` opt-in on the public registration
@@ -905,6 +904,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         publishPolicy: effectivePublishPolicy,
         callerAgentAddress: requestAgentAddress,
         publishAuthorityAccountId: parsedPcaAccountId.value,
+        registrationPcaAccountId: parsedRegistrationPcaAccountId.value,
         ...(strictEoaCuratorMatch === true ? { strictEoaCuratorMatch: true } : {}),
       });
       return jsonResponse(res, 200, {

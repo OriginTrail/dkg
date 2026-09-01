@@ -621,6 +621,68 @@ describe('ApiClient', () => {
       });
     });
 
+    it('registerContextGraph() serializes attempt-only PCA coverage separately', async () => {
+      globalThis.fetch = mockFetchOk({ registered: 'research', onChainId: '42' });
+      await client.registerContextGraph('research', {
+        publishPolicy: 0,
+        pcaAccountId: 8n,
+        registrationPcaAccountId: 17n,
+      });
+
+      const [url, opts] = (globalThis.fetch as any)._calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/register`);
+      expect(JSON.parse(opts.body)).toEqual({
+        id: 'research',
+        publishPolicy: 0,
+        pcaAccountId: '8',
+        registrationPcaAccountId: '17',
+      });
+    });
+
+    it('registerContextGraph() accepts safe-number and decimal-string PCA inputs', async () => {
+      globalThis.fetch = mockFetchOk({ registered: 'research', onChainId: '42' });
+      await client.registerContextGraph('research', {
+        pcaAccountId: 8,
+        registrationPcaAccountId: '17',
+      });
+
+      const [, opts] = (globalThis.fetch as any)._calls[0];
+      expect(JSON.parse(opts.body)).toMatchObject({
+        pcaAccountId: '8',
+        registrationPcaAccountId: '17',
+      });
+    });
+
+    it.each([
+      ['pcaAccountId', { pcaAccountId: Number.MAX_SAFE_INTEGER + 1 }],
+      ['registrationPcaAccountId', { registrationPcaAccountId: Number.MAX_SAFE_INTEGER + 1 }],
+    ] as const)(
+      'registerContextGraph() rejects an unsafe numeric %s before fetch',
+      async (field, options) => {
+        const fetch = mockFetchOk({ registered: 'research', onChainId: '42' });
+        globalThis.fetch = fetch;
+
+        await expect(client.registerContextGraph('research', options))
+          .rejects.toThrow(`${field} must be a positive integer within uint256 range.`);
+        expect(fetch._calls).toHaveLength(0);
+      },
+    );
+
+    it.each([
+      ['pcaAccountId', { pcaAccountId: (1n << 256n).toString() }],
+      ['registrationPcaAccountId', { registrationPcaAccountId: 1n << 256n }],
+    ] as const)(
+      'registerContextGraph() rejects an out-of-range %s before fetch',
+      async (field, options) => {
+        const fetch = mockFetchOk({ registered: 'research', onChainId: '42' });
+        globalThis.fetch = fetch;
+
+        await expect(client.registerContextGraph('research', options))
+          .rejects.toThrow(`${field} must be a positive integer within uint256 range.`);
+        expect(fetch._calls).toHaveLength(0);
+      },
+    );
+
     it('createSubGraph() posts context graph id and sub-graph name', async () => {
       const { fetch, calls } = createTrackingFetch({
         ok: true,

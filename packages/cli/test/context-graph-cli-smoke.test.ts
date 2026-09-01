@@ -28,7 +28,10 @@ describe.sequential('context-graph CLI smoke', () => {
     }
 
     server = createServer(async (req, res) => {
-      if (req.method !== 'POST' || req.url !== '/api/sub-graph/create') {
+      if (
+        req.method !== 'POST'
+        || (req.url !== '/api/sub-graph/create' && req.url !== '/api/context-graph/register')
+      ) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
         return;
@@ -40,6 +43,12 @@ describe.sequential('context-graph CLI smoke', () => {
       }
       const body = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
       requests.push({ url: req.url, body });
+
+      if (req.url === '/api/context-graph/register') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ registered: body.id, onChainId: '42' }));
+        return;
+      }
 
       if (body.subGraphName === 'duplicate') {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -95,6 +104,35 @@ describe.sequential('context-graph CLI smoke', () => {
     expect(requests).toEqual([{
       url: '/api/sub-graph/create',
       body: { contextGraphId: 'research', subGraphName: 'lab' },
+    }]);
+  });
+
+  it('passes registration PCA coverage separately from publish authority', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: apiPort };
+
+    const result = await execFileAsync('node', [
+      CLI_ENTRY,
+      'context-graph',
+      'register',
+      'research',
+      '--publish-policy',
+      '0',
+      '--pca-account-id',
+      '8',
+      '--registration-pca-account-id',
+      '17',
+    ], { env });
+
+    expect(result.stdout).toContain('PCA account id: 8');
+    expect(result.stdout).toContain('Registration PCA account id: 17');
+    expect(requests).toEqual([{
+      url: '/api/context-graph/register',
+      body: {
+        id: 'research',
+        publishPolicy: 0,
+        pcaAccountId: '8',
+        registrationPcaAccountId: '17',
+      },
     }]);
   });
 
