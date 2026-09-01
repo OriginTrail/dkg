@@ -534,46 +534,63 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     // rescan may both carry it — what matters is that NOTHING else does.
     expect([...new Set(seen)], 'finalization releases the SAME event, and only it').toEqual([49_945]);
   });
-  it('a RESTORED durable replay window above the finalized head is clamped, not dispatched past it (review r7-bot)', async () => {
-    // The scheduled rescan derives from the bounded cursor, but a durable
-    // window persisted BEFORE a confirmation-depth increase (or restored
-    // alongside a rewound cursor) carries its own toBlock — the clamp in
-    // the coordinator is what keeps that window from delivering blocks the
-    // forward scan is not yet allowed to touch.
+  it('a clamped replay durably retains ONLY the unfinalized tail, and a restarted poller delivers it (review r7/r8-bot)', async () => {
+    // A durable window persisted before a confirmation-depth increase
+    // reaches past the finalized head. The clamp must dispatch the
+    // finalized part, persist the TAIL (not clear, not the full window),
+    // and a fresh process over the same store must deliver that tail once
+    // the head finalizes it — then clear it.
+    let persisted: { fromBlock: number; toBlock: number } | undefined = { fromBlock: 49_930, toBlock: 49_950 };
+    const saves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    const store = {
+      async loadLane() { return 50_000; },
+      async saveLane() { /* not under test */ },
+      replayRetry: {
+        async load() { return persisted; },
+        async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+          saves.push(w ? { ...w } : undefined);
+          persisted = w ? { ...w } : undefined;
+        },
+      },
+    } satisfies LaneCursorPersistence;
+    const withDepth = (head: number) => {
+      const chain = makeChain(head, [rootMutation('KnowledgeAssetUpdated', 49_945)]);
+      (chain.adapter as { finalizedEventScanConfirmations?: () => number })
+        .finalizedEventScanConfirmations = () => 60;
+      return chain;
+    };
+
     let now = 0;
-    const seen: number[] = [];
-    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_945)]);
-    (chain.adapter as { finalizedEventScanConfirmations?: () => number })
-      .finalizedEventScanConfirmations = () => 60;
-    const poller = new ChainEventPoller({
-      chain: chain.adapter,
+    const seen1: number[] = [];
+    const poller1 = new ChainEventPoller({
+      chain: withDepth(50_000).adapter,
       publishHandler: makeHandler(),
       intervalMs: CADENCE_MS,
       clock: () => now,
-      cursorPersistence: {
-        async loadLane() { return 50_000; },
-        async saveLane() { /* not under test */ },
-        replayRetry: {
-          // Persisted before the depth increase: the window reaches PAST
-          // the now-finalized head (49,941).
-          async load() { return { fromBlock: 49_930, toBlock: 49_950 }; },
-          async save() { /* not under test */ },
-        },
-      } satisfies LaneCursorPersistence,
-      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+      cursorPersistence: store,
+      onKnowledgeAssetRootMutated: async (e) => { seen1.push(e.position.blockNumber); },
     });
-
-    await poll(poller);
-    await poll(poller);
+    await poll(poller1);
+    expect(seen1, 'nothing past the finalized head (49,941) is delivered').toEqual([]);
     expect(
-      seen,
-      'the restored window must be CLAMPED at 49,941 — 49,945 is not finalized',
-    ).toEqual([]);
+      persisted,
+      'only the UNFINALIZED tail survives durably after the clamped dispatch',
+    ).toEqual({ fromBlock: 49_942, toBlock: 49_950 });
 
-    chain.setHead(50_010);
-    now += CADENCE_MS;
-    await poll(poller);
-    expect([...new Set(seen)], 'the same event delivers once finalized').toEqual([49_945]);
+    // Restart over the same store with the head advanced: the tail restores
+    // and delivers, then clears.
+    const seen2: number[] = [];
+    const poller2 = new ChainEventPoller({
+      chain: withDepth(50_010).adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: store,
+      onKnowledgeAssetRootMutated: async (e) => { seen2.push(e.position.blockNumber); },
+    });
+    await poll(poller2);
+    expect([...new Set(seen2)], 'the restored tail delivers its event once finalized').toEqual([49_945]);
+    expect(persisted, 'and the tail is released durably').toBeUndefined();
   });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
