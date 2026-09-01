@@ -152,6 +152,18 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     expect(createArg.syncAgentsMeta).toBe(true);
   });
 
+  it('forwards the W2 kill switch UNCHANGED — a configured false must stay false (review r2)', async () => {
+    // The one-line boundary the whole kill-switch test pyramid rests on: the
+    // agent defaults the flag ON, so dropping this forwarding would hand it
+    // `undefined` and arm convergence against an explicit operator opt-out.
+    const createArg = await captureCreateArg({ vmUpdateConvergenceEnabled: false });
+    expect(createArg.vmUpdateConvergenceEnabled).toBe(false);
+  });
+
+  it('forwards an explicit W2 opt-in unchanged (review r2)', async () => {
+    const createArg = await captureCreateArg({ vmUpdateConvergenceEnabled: true });
+    expect(createArg.vmUpdateConvergenceEnabled).toBe(true);
+  });
   it('passes syncGlobalLimit and syncGlobalQueueLimit through unchanged', async () => {
     const createArg = await captureCreateArg({
       syncGlobalLimit: 1,

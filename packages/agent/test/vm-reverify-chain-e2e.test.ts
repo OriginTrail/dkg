@@ -356,7 +356,7 @@ let ual: string;
 let kav10Address: string;
 let updateBlock: number;
 
-async function createHostCore(): Promise<DKGAgent> {
+async function createHostCore(overrides: Record<string, unknown> = {}): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     kaNumberAllocator: makeTestKaNumberAllocator(),
     name: 'W2RHostCore',
@@ -386,6 +386,7 @@ async function createHostCore(): Promise<DKGAgent> {
     syncContextGraphs: [],
     syncReconcilerIntervalMs: 3_600_000,
     syncStalenessThresholdMs: 3_600_000,
+    ...overrides,
   } as any);
   liveAgents.add(agent);
   return agent;
@@ -713,6 +714,37 @@ describe('W2 #2435 — a held KA converges to its new on-chain root via the chai
   }, 300_000);
 
   // ─────────────────────────────────────────────────────────────────────────
+  // SC-4 (review r2) — the kill switch at the LIFECYCLE WIRING boundary.
+  // Store-absence tests infer this; here the started process itself is the
+  // witness: with the flag off, the poller must not run the kaRootMutations
+  // lane and no worker object may exist after the readiness boundary.
+  it('SC-4: flag off wires neither the mutation lane nor the drain', async () => {
+    const disabled = await createHostCore({
+      vmUpdateConvergenceEnabled: false,
+      // Isolated from the durable stores the other scenarios share: this
+      // boot exists to observe WIRING, and must neither advance the shared
+      // lane cursors nor touch the shared subscription rows.
+      dataDir: undefined,
+      chainEventCursorStore: undefined,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [],
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+    });
+    await disabled.start();
+    try {
+      const lanes = (disabled as any).chainPoller.getLaneHealth()
+        .map((entry: { lane: string }) => entry.lane);
+      expect(lanes, 'the mutation lane must not be ACTIVE').not.toContain('kaRootMutations');
+      expect((disabled as any).vmReverifyWorker, 'no drain either').toBeUndefined();
+      expect((disabled as any).vmReverifyIntents).toBeUndefined();
+    } finally {
+      await disabled.stop();
+      liveAgents.delete(disabled);
+    }
+  }, 240_000);
+
   // SC-2 — restart backfill from the persisted lane cursor.
   // ─────────────────────────────────────────────────────────────────────────
   it('SC-2: an update the node never observed is backfilled from the persisted cursor', async () => {
