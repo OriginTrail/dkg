@@ -454,7 +454,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     }
 
     const contextGraphs = this.contracts.contextGraphs;
-    const createArgs = [
+    const legacyCreateArgs = [
       params.participantAgents ?? [],
       params.metadataBatchId ?? 0n,
       params.accessPolicy,
@@ -467,10 +467,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       // chain-event-driven host-mode auto-subscribe path.
       params.nameHash ?? ethers.ZeroHash,
     ];
+    const hasRegistrationPcaCoverage = params.registrationPcaAccountId !== undefined;
+    const createMethod = hasRegistrationPcaCoverage
+      ? 'createContextGraphWithPcaCoverage'
+      : 'createContextGraph';
+    const createArgs = hasRegistrationPcaCoverage
+      ? [...legacyCreateArgs, params.registrationPcaAccountId]
+      : legacyCreateArgs;
     const submitCreate = () =>
       this.sendContractTransaction(
         contextGraphs,
-        'createContextGraph',
+        createMethod,
         createArgs,
         this.signer,
         'create on-chain context graph',

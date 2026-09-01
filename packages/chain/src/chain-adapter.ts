@@ -599,6 +599,12 @@ export interface CreateOnChainContextGraphParams {
   publishAuthority?: string;
   publishAuthorityAccountId?: bigint;
   /**
+   * Attempt-scoped PCA account used only to cover the registration deposit.
+   * This does not become the Context Graph's publishing authority.
+   * When omitted, the adapter preserves the legacy create selector.
+   */
+  registrationPcaAccountId?: bigint;
+  /**
    * OT-RFC-38 / LU-6 Phase B — opt-in stable wire identifier the
    * curator commits to at create time. Intended to be
    * `keccak256(bytes(cleartextId))` so the SWM gossip topic, envelope

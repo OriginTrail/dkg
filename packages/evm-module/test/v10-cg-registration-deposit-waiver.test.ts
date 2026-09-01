@@ -438,6 +438,43 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     await assertPaidRegistration(caller, accountId);
   });
 
+  it('waives a coverage PCA exactly at the configured commitment floor', async () => {
+    const caller = accounts[1];
+    const accountId = await createPca(caller, ethers.parseEther('25000'));
+    await assertWaivedRegistration({
+      caller,
+      coverageAccountId: accountId,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: ethers.ZeroAddress,
+      publishAuthorityAccountId: 0n,
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes('coverage-at-floor')),
+    });
+  });
+
+  it('reads the commitment floor live for each coverage attempt', async () => {
+    const caller = accounts[1];
+    const accountId = await createPca(caller, ethers.parseEther('10000'));
+
+    await assertPaidRegistration(caller, accountId);
+    await Params.connect(accounts[0]).setMinPcaCommitmentForCgWaiver(
+      ethers.parseEther('5000'),
+    );
+    await assertWaivedRegistration({
+      caller,
+      coverageAccountId: accountId,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: ethers.ZeroAddress,
+      publishAuthorityAccountId: 0n,
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes('coverage-live-floor-waived')),
+    });
+    await Params.connect(accounts[0]).setMinPcaCommitmentForCgWaiver(
+      ethers.parseEther('50000'),
+    );
+    await assertPaidRegistration(caller, accountId);
+  });
+
   it('charges for an expired coverage PCA', async () => {
     const caller = accounts[1];
     const accountId = await createPca(caller);
@@ -478,10 +515,48 @@ describe('@integration OT-RFC-53 — independent PCA registration coverage', () 
     await assertPaidRegistration(caller, accountId);
   });
 
+  it('recomputes the coverage quota from the live registration deposit', async () => {
+    await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(
+      ethers.parseEther('25000'),
+    );
+    const caller = accounts[1];
+    const accountId = await createPca(caller);
+    await assertWaivedRegistration({
+      caller,
+      coverageAccountId: accountId,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: ethers.ZeroAddress,
+      publishAuthorityAccountId: 0n,
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes('coverage-live-quota-waived')),
+    });
+
+    await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(
+      ethers.parseEther('50000'),
+    );
+    await assertPaidRegistration(caller, accountId);
+    expect(await Waiver.waivedCgCount(accountId)).to.equal(1n);
+  });
+
+  it('rejects direct waiver-counter consumption outside ContextGraphs', async () => {
+    const owner = accounts[1];
+    const accountId = await createPca(owner);
+    await expect(
+      Waiver.connect(accounts[2]).tryConsumeWaiver(accountId, owner.address, DEPOSIT),
+    ).to.be.revertedWithCustomError(Waiver, 'OnlyContextGraphs');
+  });
+
   it('fails closed to a paid registration when waiver storage is unavailable', async () => {
     const caller = accounts[1];
     const accountId = await createPca(caller);
     await HubContract.connect(accounts[0]).removeContractByName('ContextGraphWaiverStorage');
+    await assertPaidRegistration(caller, accountId);
+  });
+
+  it('fails closed when registered waiver storage reverts internally', async () => {
+    const caller = accounts[1];
+    const accountId = await createPca(caller);
+    await HubContract.connect(accounts[0]).removeContractByName('ParametersStorage');
     await assertPaidRegistration(caller, accountId);
   });
 

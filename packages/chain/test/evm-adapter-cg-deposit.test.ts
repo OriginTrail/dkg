@@ -25,6 +25,7 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
   let hubAddress: string;
   let baseSnapshot: string;
   const DEPOSIT = ethers.parseEther('100');
+  const PCA_COMMITMENT = ethers.parseEther('50000');
 
   beforeAll(async () => {
     const ctx = getSharedContext();
@@ -69,6 +70,50 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
       provider,
     );
     return cgs.getRegistrationEscrow(cgId);
+  };
+
+  const getPublishAuthorityAccountId = async (cgId: bigint): Promise<bigint> => {
+    const cgsAddr = await hub().getAssetStorageAddress('ContextGraphStorage');
+    const cgs = new Contract(
+      cgsAddr,
+      ['function getPublishAuthorityAccountId(uint256) view returns (uint256)'],
+      provider,
+    );
+    return cgs.getPublishAuthorityAccountId(cgId);
+  };
+
+  const waivedCount = async (accountId: bigint): Promise<bigint> => {
+    const waiverAddr = await hub().getContractAddress('ContextGraphWaiverStorage');
+    const waiver = new Contract(
+      waiverAddr,
+      ['function waivedCgCount(uint256) view returns (uint256)'],
+      provider,
+    );
+    return waiver.waivedCgCount(accountId);
+  };
+
+  const createPca = async (owner: Wallet): Promise<bigint> => {
+    const tokenAddr = await hub().getContractAddress('Token');
+    const pcaAddr = await hub().getContractAddress('DKGPublishingConvictionNFT');
+    const token = new Contract(
+      tokenAddr,
+      ['function approve(address,uint256) returns (bool)'],
+      owner,
+    );
+    const pca = new Contract(
+      pcaAddr,
+      [
+        'function createAccount(uint96,uint72) returns (uint256)',
+        'function balanceOf(address) view returns (uint256)',
+        'function tokenOfOwnerByIndex(address,uint256) view returns (uint256)',
+      ],
+      owner,
+    );
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, owner.address, PCA_COMMITMENT);
+    await (await token.approve(pcaAddr, PCA_COMMITMENT)).wait();
+    await (await pca.createAccount(PCA_COMMITMENT, 0)).wait();
+    const ownedCount = BigInt(await pca.balanceOf(owner.address));
+    return pca.tokenOfOwnerByIndex(owner.address, ownedCount - 1n);
   };
 
   // Count CORE_OP→ContextGraphs TRAC approvals since `fromBlock` — proves whether the
@@ -125,5 +170,27 @@ describe('EVMChainAdapter — OT-RFC-53 CG registration deposit approval', () =>
     // (or called ensureV10ApproveTrac(..., 0n)) would still pass the assertions above
     // but leave a stray CORE_OP→ContextGraphs approval, which this catches.
     expect(await approvalCount(coreOpAddress, fromBlock + 1)).toBe(0);
+  });
+
+  it('uses independent PCA coverage for an open graph without approval or stored authority', async () => {
+    await setDeposit(DEPOSIT);
+    const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
+    const accountId = await createPca(coreOp);
+    const waivedBefore = await waivedCount(accountId);
+    const fromBlock = await provider.getBlockNumber();
+
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const result = await adapter.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      registrationPcaAccountId: accountId,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.contextGraphId > 0n).toBe(true);
+    expect(await waivedCount(accountId)).toBe(waivedBefore + 1n);
+    expect(await getEscrow(result.contextGraphId)).toBe(0n);
+    expect(await getPublishAuthorityAccountId(result.contextGraphId)).toBe(0n);
+    expect(await approvalCount(coreOp.address, fromBlock + 1)).toBe(0);
   });
 });
