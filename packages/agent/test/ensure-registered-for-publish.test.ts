@@ -144,7 +144,7 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
     await expect(callEnsure(stub, 'cg-fail')).rejects.toThrow(/insufficient TRAC/i);
   });
 
-  it('prepares registration before curator preflight and uses the prepared signer', async () => {
+  it('rejects unauthorized local registration before expensive preparation', async () => {
     const order: string[] = [];
     const signerAddress = '0x00000000000000000000000000000000000000b2';
     const capability = {
@@ -178,6 +178,6 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
         registrationPcaAccountId: 17n,
       }),
     ).rejects.toThrow(/Only the context graph curator/);
-    expect(order).toEqual(['prepare', 'curator-preflight']);
+    expect(order).toEqual(['curator-preflight']);
   });
 });

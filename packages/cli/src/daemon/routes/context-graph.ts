@@ -63,6 +63,7 @@ import {
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
   loadOpWallets,
+  parsePositiveUint256,
   type ContextGraphSyncMode,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
@@ -416,19 +417,11 @@ function parseOptionalPcaAccountId(
 ): { value?: bigint; error?: string } {
   const raw = body[field];
   if (raw === undefined || raw === null || raw === '') return {};
-  if (typeof raw === 'number') {
-    if (!Number.isSafeInteger(raw) || raw <= 0) {
-      return { error: `${field} must be a positive safe integer` };
-    }
-    return { value: BigInt(raw) };
+  try {
+    return { value: parsePositiveUint256(raw, field) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
   }
-  if (typeof raw === 'string') {
-    if (!/^[1-9]\d*$/.test(raw)) {
-      return { error: `${field} must be a positive decimal integer string` };
-    }
-    return { value: BigInt(raw) };
-  }
-  return { error: `${field} must be a positive integer or decimal integer string` };
 }
 
 function respondReconcileError(res: ServerResponse, err: unknown): void {

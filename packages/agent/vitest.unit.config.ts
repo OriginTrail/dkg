@@ -54,6 +54,8 @@ export default defineConfig({
       "test/profile-fix-verify.test.ts",
       "test/pca-v10-facade.test.ts",
       "test/ensure-registered-for-publish.test.ts",
+      "test/context-graph-registration-preparation.test.ts",
+      "test/positive-uint256.test.ts",
       "test/sync-verify-collapsed.test.ts",
       "test/sync-verify-rootless.test.ts",
       "test/sync-control-metadata-admission.test.ts",

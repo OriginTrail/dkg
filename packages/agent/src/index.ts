@@ -1,4 +1,5 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export { parsePositiveUint256 } from './positive-uint256.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,

@@ -176,9 +176,22 @@ describe('POST /api/context-graph/register — effective publishPolicy resolutio
       {},
     );
     expect(status).toBe(400);
-    expect(json.error).toMatch(/registrationPcaAccountId must be a positive decimal integer string/);
+    expect(json.error).toMatch(/registrationPcaAccountId must be a positive integer within uint256 range/);
     expect(registerOpts).toBeNull();
   });
+
+  it.each(['pcaAccountId', 'registrationPcaAccountId'])(
+    'rejects %s above uint256 as HTTP 400 without invoking registration',
+    async (field) => {
+      const { status, json, registerOpts } = await runRegisterRouteCaptureOpts(
+        { id: `out-of-range-${field}`, [field]: (1n << 256n).toString() },
+        {},
+      );
+      expect(status).toBe(400);
+      expect(json.error).toBe(`${field} must be a positive integer within uint256 range.`);
+      expect(registerOpts).toBeNull();
+    },
+  );
 
   it('#1085 stored-read throw is best-effort AT THE ROUTE — 200, request/default policy, warns', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
