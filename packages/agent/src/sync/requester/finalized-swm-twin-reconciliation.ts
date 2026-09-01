@@ -6,14 +6,17 @@ import {
   knowledgeAssetLayerGraphUri,
   sparqlString,
   validateSubGraphName,
+  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
+  resolvePublishedKnowledgeAssetWorkspaceHead,
   swmKaWriteLockKey,
   withKeyedLocks,
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import {
+  GraphManager,
   invalidateSwmMaterializationWitness,
   type Quad,
   type TripleStore,
@@ -55,6 +58,53 @@ export interface FinalizedSwmTwinCatalogProjectionEvidence {
   readonly privateMerkleRoot?: string;
   /** Author-signed assertion root carried by the verified catalog seal. */
   readonly expectedMerkleRoot: string;
+}
+
+export interface ConfirmedGraphScopedSwmOrphanCandidate {
+  readonly contextGraphId: string;
+  readonly ual: string;
+  readonly agentAddress: string;
+  readonly kaNumber: bigint;
+  readonly assertionVersion: bigint;
+  readonly subGraphName?: string;
+}
+
+export type RetireConfirmedGraphScopedSwmTwinIfOrphaned = (
+  candidate: Readonly<ConfirmedGraphScopedSwmOrphanCandidate>,
+  ctx: OperationContext,
+) => Promise<void>;
+
+/**
+ * Build the single atomic boundary used by headless exact-VM recovery.
+ * The owner captures publisher locks and cleanup mechanics so finalization
+ * supplies policy only and can never accidentally select an unlocked mode.
+ */
+export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(params: {
+  readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly retire: RetireConfirmedGraphScopedSwmTwinIfOrphaned;
+}): RetireConfirmedGraphScopedSwmTwinIfOrphaned {
+  const graphManager = new GraphManager(params.store);
+  return async (candidate, ctx) => {
+    const lockKey = swmKaWriteLockKey(
+      candidate.contextGraphId,
+      candidate.subGraphName,
+      candidate.ual,
+    );
+    await withKeyedLocks(params.writeLocks, [lockKey], async () => {
+      const currentHead = await resolvePublishedKnowledgeAssetWorkspaceHead({
+        store: params.store,
+        graphManager,
+        contextGraphId: candidate.contextGraphId,
+        kaUal: candidate.ual,
+        subGraphName: candidate.subGraphName,
+      });
+      // Any current mutable head owns the stable per-KA SWM graph. Preserve it
+      // regardless of version; the verified VM copy remains independently safe.
+      if (currentHead !== undefined) return;
+      await params.retire(candidate, ctx);
+    });
+  };
 }
 
 /**

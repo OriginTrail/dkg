@@ -262,6 +262,7 @@ const blockedRfc64Modules = [
   'swm-recovery-coordinator-v1.js',
   'swm-recovery-plan-v1.js',
   'swm-inventory-catalog-reconciler-v1.js',
+  'swm-catalog-durable-asset-resolver-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',

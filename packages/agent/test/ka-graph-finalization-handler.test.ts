@@ -48,6 +48,8 @@ import {
   type ChainReconcilerDeps,
 } from '../src/chain-reconciler.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
+import { createRetireConfirmedGraphScopedSwmTwinIfOrphaned } from
+  '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 
 const CG = 'rootless-finalization';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -3177,8 +3179,12 @@ describe('graph-scoped finalization handler', () => {
       store,
       legacyFinalizationChain(),
       {
-        retireConfirmedGraphScopedSwmTwin: retire,
-        writeLocks: new Map(),
+        retireConfirmedGraphScopedSwmTwinIfOrphaned:
+          createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+            store,
+            writeLocks: new Map(),
+            retire,
+          }),
       },
     );
     const internals = recoveringHandler as unknown as {
@@ -3228,7 +3234,10 @@ describe('graph-scoped finalization handler', () => {
     const recoveringHandler = new FinalizationHandler(
       store,
       legacyFinalizationChain(),
-      { retireConfirmedGraphScopedSwmTwin: retire, writeLocks },
+      {
+        retireConfirmedGraphScopedSwmTwinIfOrphaned:
+          createRetireConfirmedGraphScopedSwmTwinIfOrphaned({ store, writeLocks, retire }),
+      },
     );
     const internals = recoveringHandler as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;
@@ -3298,7 +3307,14 @@ describe('graph-scoped finalization handler', () => {
     const recoveringHandler = new FinalizationHandler(
       store,
       legacyFinalizationChain(),
-      { retireConfirmedGraphScopedSwmTwin: retire, writeLocks: new Map() },
+      {
+        retireConfirmedGraphScopedSwmTwinIfOrphaned:
+          createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+            store,
+            writeLocks: new Map(),
+            retire,
+          }),
+      },
     );
     const internals = recoveringHandler as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;

@@ -65,8 +65,10 @@ export interface ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
   readonly signal?: AbortSignal;
 }
 
-interface ReconcileRfc64SwmInventoryCatalogExactSetParamsV1
+interface ReconcileRfc64SwmInventoryCatalogParamsV1
   extends ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
+  /** Lane-owned projection semantics; repair eligibility is resolved separately. */
+  readonly targetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
   /**
    * Projection-owned atomic boundary: verify the expected inventory head while
    * holding its scope lock, then execute the synchronous applied-head CAS
@@ -101,7 +103,7 @@ export interface ReconcileRfc64PublicRootCatalogExactSetResultV1 {
   readonly targetAssetCount: number;
 }
 
-interface ReconcileRfc64SwmInventoryCatalogExactSetResultV1
+interface ReconcileRfc64SwmInventoryCatalogResultV1
   extends ReconcileRfc64PublicRootCatalogExactSetResultV1 {
   readonly sourceCurrent: boolean;
 }
@@ -246,24 +248,13 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     });
   }
 
-  /** Typed projection boundary; direct exact-set callers remain source-neutral. */
-  async reconcileRfc64SwmInventoryCatalogExactSetV1(
+  /** One lane-owned projection boundary for exact replacement or monotonic union. */
+  async reconcileRfc64SwmInventoryCatalogV1(
     this: DKGAgent,
-    params: ReconcileRfc64SwmInventoryCatalogExactSetParamsV1,
-  ): Promise<ReconcileRfc64SwmInventoryCatalogExactSetResultV1> {
+    params: ReconcileRfc64SwmInventoryCatalogParamsV1,
+  ): Promise<ReconcileRfc64SwmInventoryCatalogResultV1> {
     return this.reconcileRfc64PublicRootCatalogProjectionCoreV1(params, {
-      targetPolicy: 'exact-replacement',
-      commitAppliedHead: params.commitAppliedHeadIfInventoryCurrent,
-    });
-  }
-
-  /** Finalized-private projection keeps authored rows independent of SWM/VM placement. */
-  async reconcileRfc64SwmInventoryCatalogUnionV1(
-    this: DKGAgent,
-    params: ReconcileRfc64SwmInventoryCatalogExactSetParamsV1,
-  ): Promise<ReconcileRfc64SwmInventoryCatalogExactSetResultV1> {
-    return this.reconcileRfc64PublicRootCatalogProjectionCoreV1(params, {
-      targetPolicy: 'monotonic-union',
+      targetPolicy: params.targetPolicy,
       commitAppliedHead: params.commitAppliedHeadIfInventoryCurrent,
     });
   }
@@ -272,7 +263,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
     options: Readonly<Rfc64CatalogProjectionMutationOptionsV1>,
-  ): Promise<ReconcileRfc64SwmInventoryCatalogExactSetResultV1> {
+  ): Promise<ReconcileRfc64SwmInventoryCatalogResultV1> {
     throwIfAbortedV1(params.signal);
     const authority = this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {

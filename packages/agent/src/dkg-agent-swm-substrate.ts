@@ -238,6 +238,8 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { createRetireConfirmedGraphScopedSwmTwinIfOrphaned } from
+  './sync/requester/finalized-swm-twin-reconciliation.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -1796,22 +1798,26 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           markContextGraphMetaDirtyFromQuads: (quads) => {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
-          writeLocks: this.writeLocks,
-          retireConfirmedGraphScopedSwmTwin: async (candidate, ctx) => {
-            await this.publisher.clearPublishedKnowledgeAssetSwm(
-              candidate.contextGraphId,
-              {
-                kind: 'named-lifecycle',
-                identity: {
-                  agentAddress: candidate.agentAddress,
-                  kaNumber: candidate.kaNumber,
-                },
+          retireConfirmedGraphScopedSwmTwinIfOrphaned:
+            createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+              store: this.store,
+              writeLocks: this.writeLocks,
+              retire: async (candidate, ctx) => {
+                await this.publisher.clearPublishedKnowledgeAssetSwm(
+                  candidate.contextGraphId,
+                  {
+                    kind: 'named-lifecycle',
+                    identity: {
+                      agentAddress: candidate.agentAddress,
+                      kaNumber: candidate.kaNumber,
+                    },
+                  },
+                  candidate.subGraphName,
+                  ctx,
+                  candidate.ual,
+                );
               },
-              candidate.subGraphName,
-              ctx,
-              candidate.ual,
-            );
-          },
+            }),
           runtime: this.finalizationRuntime,
         },
       );

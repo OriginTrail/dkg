@@ -5,15 +5,7 @@
 import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
-  assertSafeIri,
-  canonicalGraphScopedAuthorSealFromAssertionSealV1,
-  computeCanonicalGraphScopedAuthorSealDigestV1,
-  computeKaProjectionDigestV1,
   computeSwmAuthorInventoryScopeDigestV1,
-  createGraphKnowledgeAssetScope,
-  encodeCanonicalCgSharedPublicRootProjectionV1,
-  knowledgeAssetLayerGraphUri,
-  MemoryLayer,
   type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
@@ -21,19 +13,12 @@ import {
   type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
   type Digest32V1,
-  type DecimalU64V1,
   type EvmAddressV1,
   type NetworkIdV1,
   type PositiveDecimalU64V1,
-  type SwmAuthorInventoryRowV1,
   type SwmAuthorInventoryScopeV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager } from '@origintrail-official/dkg-storage';
-import {
-  resolveKnowledgeAssetOperationPublicQuads,
-  resolvePublishedKnowledgeAssetWorkspaceHead,
-} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -44,6 +29,7 @@ import type {
 } from './dkg-agent-rfc64-catalog.js';
 import type {
   ReconcileRfc64PublicRootCatalogExactSetResultV1,
+  Rfc64CatalogProjectionTargetPolicyV1,
 } from './dkg-agent-rfc64-catalog-upsert.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
@@ -52,14 +38,16 @@ import {
 } from './rfc64/abort-v1.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from
   './rfc64/swm-inventory-shadow-runtime-v1.js';
-import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
-  './durable-author-seal-resolver-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from
   './rfc64/public-catalog-service-v1.js';
 import { prepareRfc64SwmInventoryCatalogTargetV1 } from
   './rfc64/swm-inventory-catalog-reconciler-v1.js';
+import {
+  resolveRfc64ConfirmedVmRepairCatalogAssetV1,
+  resolveRfc64InventoryWorkspaceCatalogAssetV1,
+} from './rfc64/swm-catalog-durable-asset-resolver-v1.js';
 
 export interface ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
@@ -82,35 +70,16 @@ interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
 }
 
-export type Rfc64CatalogProjectionModeV1 =
-  | 'immediate-exact-replacement'
-  | 'confirmation-gated-monotonic-union';
-
-interface Rfc64DurableCatalogAssetIdentityV1 {
-  readonly assertionCoordinate: AssertionCoordinateV1;
-  readonly assertionVersion: DecimalU64V1;
-  readonly kaUal: CanonicalDeterministicUalV1;
-  readonly sealDigest: Digest32V1;
-}
-
-type Rfc64DurableCatalogAssetSourceV1 =
-  | Readonly<{
-    readonly kind: 'inventory-workspace';
-    readonly row: Readonly<SwmAuthorInventoryRowV1>;
-  }>
-  | Readonly<{
-    readonly kind: 'confirmed-vm-repair';
-    readonly identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>;
-  }>;
-
 type ResolvedRfc64CatalogAuthoringLaneV1 =
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'public';
-    readonly projectionMode: 'immediate-exact-replacement';
+    readonly projectionTargetPolicy: 'exact-replacement';
+    readonly acceptsFinalizedVmRepair: false;
   }>
   | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
     readonly kind: 'private';
-    readonly projectionMode: Rfc64CatalogProjectionModeV1;
+    readonly projectionTargetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
+    readonly acceptsFinalizedVmRepair: boolean;
   }>;
 
 type Rfc64CatalogAuthoringLaneDecisionV1 =
@@ -162,7 +131,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }>,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
-    if (lane === null || lane.projectionMode !== 'confirmation-gated-monotonic-union') {
+    if (lane === null || !lane.acceptsFinalizedVmRepair) {
       throw new Error('RFC-64 finalized-private placement repair lane is inactive');
     }
     const currentInventoryScope = Object.freeze({
@@ -201,19 +170,22 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         scope,
         expectedRow: params,
       })) return null;
-      asset = await this.resolveRfc64ConfirmedVmRepairCatalogAssetV1(
-        params.contextGraphId,
-        params.authorAddress,
-        lane,
-        params,
-      );
+      asset = await resolveRfc64ConfirmedVmRepairCatalogAssetV1({
+        store: this.store,
+        publicSnapshotStore: this.publicSnapshotStore,
+        contextGraphId: params.contextGraphId,
+        authorAddress: params.authorAddress,
+        identity: params,
+      });
     } else {
-      asset = await this.resolveRfc64SwmInventoryCatalogAssetV1(
-        params.contextGraphId,
-        params.authorAddress,
-        lane,
+      asset = await resolveRfc64InventoryWorkspaceCatalogAssetV1({
+        store: this.store,
+        publicSnapshotStore: this.publicSnapshotStore,
+        contextGraphId: params.contextGraphId,
+        authorAddress: params.authorAddress,
+        laneKind: lane.kind,
         row,
-      );
+      });
     }
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertConfirmedRfc64PublicRootCatalogAssetV1({
@@ -350,13 +322,15 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       throwIfAbortedV1(params.signal);
       const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
         snapshot,
-        resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
-          params.contextGraphId,
-          params.authorAddress,
-          lane,
+        resolveAsset: (row) => resolveRfc64InventoryWorkspaceCatalogAssetV1({
+          store: this.store,
+          publicSnapshotStore: this.publicSnapshotStore,
+          contextGraphId: params.contextGraphId,
+          authorAddress: params.authorAddress,
+          laneKind: lane.kind,
           row,
-          params.signal,
-        ),
+          signal: params.signal,
+        }),
       });
       throwIfAbortedV1(params.signal);
       lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
@@ -364,10 +338,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         lane.networkId,
       );
       throwIfAbortedV1(params.signal);
-      const reconcile = lane.projectionMode === 'confirmation-gated-monotonic-union'
-        ? this.reconcileRfc64SwmInventoryCatalogUnionV1.bind(this)
-        : this.reconcileRfc64SwmInventoryCatalogExactSetV1.bind(this);
-      const reconciled = await reconcile({
+      const reconciled = await this.reconcileRfc64SwmInventoryCatalogV1({
           scope: prepared.catalogScope,
           author: this.createRfc64CatalogAuthorSignerV1(
             params.authorAddress,
@@ -378,6 +349,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           peers: lane.announcementPeers,
           catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
           catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
+          targetPolicy: lane.projectionTargetPolicy,
           commitAppliedHeadIfInventoryCurrent: (commit) => (
             rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
               inventoryScopeKey,
@@ -498,14 +470,16 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ? Object.freeze({
         ...commonLane,
         kind: 'public',
-        projectionMode: 'immediate-exact-replacement',
+        projectionTargetPolicy: 'exact-replacement',
+        acceptsFinalizedVmRepair: false,
       })
       : Object.freeze({
         ...commonLane,
         kind: 'private',
-        projectionMode: acceptedPolicy.policy.source.kind === 'finalized-chain'
-          ? 'confirmation-gated-monotonic-union'
-          : 'immediate-exact-replacement',
+        projectionTargetPolicy: acceptedPolicy.policy.source.kind === 'finalized-chain'
+          ? 'monotonic-union'
+          : 'exact-replacement',
+        acceptsFinalizedVmRepair: acceptedPolicy.policy.source.kind === 'finalized-chain',
       });
     return Object.freeze({
       status: 'active',
@@ -513,147 +487,4 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     });
   }
 
-  private async resolveRfc64SwmInventoryCatalogAssetV1(
-    this: DKGAgent,
-    contextGraphId: ContextGraphIdV1,
-    authorAddress: EvmAddressV1,
-    lane: ResolvedRfc64CatalogAuthoringLaneV1,
-    row: Readonly<SwmAuthorInventoryRowV1>,
-    signal?: AbortSignal,
-  ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
-    return this.resolveRfc64CatalogAssetFromDurableSourceV1(
-      contextGraphId,
-      authorAddress,
-      lane,
-      Object.freeze({ kind: 'inventory-workspace', row }),
-      signal,
-    );
-  }
-
-  private async resolveRfc64ConfirmedVmRepairCatalogAssetV1(
-    this: DKGAgent,
-    contextGraphId: ContextGraphIdV1,
-    authorAddress: EvmAddressV1,
-    lane: ResolvedRfc64CatalogAuthoringLaneV1,
-    identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
-    signal?: AbortSignal,
-  ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
-    return this.resolveRfc64CatalogAssetFromDurableSourceV1(
-      contextGraphId,
-      authorAddress,
-      lane,
-      Object.freeze({ kind: 'confirmed-vm-repair', identity }),
-      signal,
-    );
-  }
-
-  /**
-   * Shared strict-seal and asset construction after a source-specific durable
-   * identity has been selected. Inventory sources require their exact
-   * workspace head; confirmed-VM repairs may recover from the finalized graph.
-   */
-  private async resolveRfc64CatalogAssetFromDurableSourceV1(
-    this: DKGAgent,
-    contextGraphId: ContextGraphIdV1,
-    authorAddress: EvmAddressV1,
-    lane: ResolvedRfc64CatalogAuthoringLaneV1,
-    source: Rfc64DurableCatalogAssetSourceV1,
-    signal?: AbortSignal,
-  ): Promise<Rfc64CatalogSuccessorAssetInputV1> {
-    throwIfAbortedV1(signal);
-    const identity = source.kind === 'inventory-workspace' ? source.row : source.identity;
-    const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({
-      store: this.store,
-      contextGraphId,
-      agentAddress: authorAddress,
-      assertionCoordinate: identity.assertionCoordinate,
-      source: 'agent.rfc64.swmInventory.catalogReconcile.seal',
-      signal,
-    });
-    if (candidate === undefined) {
-      throw new Error(`durable RFC-64 catalog asset ${identity.kaUal} has no strict author seal`);
-    }
-    if (
-      candidate.coordinate.scope !== contextGraphId
-      || candidate.coordinate.agentAddress.toLowerCase() !== authorAddress
-      || candidate.coordinate.name !== identity.assertionCoordinate
-    ) {
-      throw new Error(`durable RFC-64 catalog asset ${identity.kaUal} has a different seal coordinate`);
-    }
-    const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
-    if (
-      seal.assertionVersion !== identity.assertionVersion
-      || seal.kaUal !== identity.kaUal
-      || computeCanonicalGraphScopedAuthorSealDigestV1(seal) !== identity.sealDigest
-    ) {
-      throw new Error(`durable RFC-64 catalog asset ${identity.kaUal} has a different author seal`);
-    }
-    const graphManager = new GraphManager(this.store);
-    const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
-      store: this.store,
-      graphManager,
-      contextGraphId,
-      kaUal: identity.kaUal,
-    });
-    throwIfAbortedV1(signal);
-    let projectionBytes: Uint8Array;
-    if (head === undefined) {
-      if (source.kind !== 'confirmed-vm-repair') {
-        throw new Error(`durable RFC-64 workspace head is missing for ${identity.kaUal}`);
-      }
-      const vmGraph = knowledgeAssetLayerGraphUri(
-        contextGraphId,
-        MemoryLayer.VerifiableMemory,
-        createGraphKnowledgeAssetScope(identity.kaUal, identity.assertionVersion),
-      );
-      const result = await this.store.query(
-        `CONSTRUCT { ?subject ?predicate ?object } WHERE { GRAPH <${assertSafeIri(vmGraph)}> { ?subject ?predicate ?object } }`,
-        { source: 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection', signal },
-      );
-      throwIfAbortedV1(signal);
-      if (
-        result.type !== 'quads'
-        || result.quads.length !== Number(seal.publicTripleCount)
-      ) {
-        throw new Error(`durable finalized VM projection differs for ${identity.kaUal}`);
-      }
-      projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(result.quads);
-    } else {
-      if (
-        head.assertionVersion !== identity.assertionVersion
-        || head.publicTripleCount !== Number(seal.publicTripleCount)
-        || head.privateTripleCount !== Number(seal.privateTripleCount)
-        || (source.kind === 'inventory-workspace' && (
-          head.shareOperationId !== source.row.shareOperationId
-          || head.publicTripleCount !== Number(source.row.publicTripleCount)
-          || head.privateTripleCount !== Number(source.row.privateTripleCount)
-        ))
-        || !rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)
-      ) {
-        throw new Error(`durable RFC-64 workspace head differs for ${identity.kaUal}`);
-      }
-      const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
-        store: this.store,
-        graphManager,
-        contextGraphId,
-        shareOperationId: head.shareOperationId,
-        kaUal: identity.kaUal,
-        assertionVersion: identity.assertionVersion,
-        publicSnapshotStore: this.publicSnapshotStore,
-      });
-      throwIfAbortedV1(signal);
-      projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
-    }
-    if (
-      source.kind === 'inventory-workspace'
-      && computeKaProjectionDigestV1(projectionBytes) !== source.row.projectionDigest
-    ) {
-      throw new Error(`durable RFC-64 projection differs from signed inventory row ${identity.kaUal}`);
-    }
-    return Object.freeze({
-      assertionCoordinate: identity.assertionCoordinate,
-      projectionBytes,
-      seal,
-    });
-  }
 }

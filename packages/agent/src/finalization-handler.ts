@@ -53,8 +53,6 @@ import {
   withMaterializationLock,
   KnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
-  swmKaWriteLockKey,
-  withKeyedLocks,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
@@ -110,6 +108,8 @@ import {
   type VerifiedExactGraphContent,
 } from './exact-graph-content-verifier.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
+import type { RetireConfirmedGraphScopedSwmTwinIfOrphaned } from
+  './sync/requester/finalized-swm-twin-reconciliation.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -166,18 +166,6 @@ export type ResolveContextGraphOnChainId = (
 ) => Promise<string | null | undefined>;
 
 export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
-
-export type RetireConfirmedGraphScopedSwmTwin = (
-  input: Readonly<{
-    contextGraphId: string;
-    ual: string;
-    agentAddress: string;
-    kaNumber: bigint;
-    assertionVersion: bigint;
-    subGraphName?: string;
-  }>,
-  ctx: OperationContext,
-) => Promise<void>;
 
 function stripOptionalLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -320,9 +308,8 @@ export interface FinalizationHandlerOptions {
   eventBus?: EventBus;
   resolveContextGraphOnChainId?: ResolveContextGraphOnChainId;
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
-  retireConfirmedGraphScopedSwmTwin?: RetireConfirmedGraphScopedSwmTwin;
-  /** Shared publisher/SWM lock map; required for atomic orphan retirement. */
-  writeLocks?: Map<string, Promise<void>>;
+  retireConfirmedGraphScopedSwmTwinIfOrphaned?:
+    RetireConfirmedGraphScopedSwmTwinIfOrphaned;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
@@ -423,9 +410,8 @@ export class FinalizationHandler {
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
-  private readonly retireConfirmedGraphScopedSwmTwin:
-    RetireConfirmedGraphScopedSwmTwin | undefined;
-  private readonly writeLocks: Map<string, Promise<void>> | undefined;
+  private readonly retireConfirmedGraphScopedSwmTwinIfOrphaned:
+    RetireConfirmedGraphScopedSwmTwinIfOrphaned | undefined;
   private readonly recovery: FinalizationRecovery<PreparedGraphScopedMaterialization>;
   private readonly log = new Logger('FinalizationHandler');
   private readonly lifecycle: FinalizationLifecycleLogger;
@@ -485,8 +471,8 @@ export class FinalizationHandler {
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
-    this.retireConfirmedGraphScopedSwmTwin = options.retireConfirmedGraphScopedSwmTwin;
-    this.writeLocks = options.writeLocks;
+    this.retireConfirmedGraphScopedSwmTwinIfOrphaned =
+      options.retireConfirmedGraphScopedSwmTwinIfOrphaned;
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,
       options.runtime ?? options.lifecycleLogOptions,
@@ -1470,7 +1456,7 @@ export class FinalizationHandler {
     // only after the immutable VM envelope and chain binding have both verified.
     // A cleanup failure propagates so the ordinal retries rather than caching a
     // contaminated success.
-    const retire = this.retireConfirmedGraphScopedSwmTwin;
+    const retire = this.retireConfirmedGraphScopedSwmTwinIfOrphaned;
     if (retire !== undefined) {
       const candidate = Object.freeze({
         contextGraphId: input.contextGraphId,
@@ -1480,36 +1466,7 @@ export class FinalizationHandler {
         assertionVersion: BigInt(resolution.envelope.assertionVersion),
         ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
       });
-      const retireIfStillOrphaned = async (): Promise<void> => {
-        const currentHead = await resolveKnowledgeAssetWorkspaceHead({
-          store: this.store,
-          graphManager: new GraphManager(this.store),
-          contextGraphId: candidate.contextGraphId,
-          kaUal: candidate.ual,
-          subGraphName: candidate.subGraphName,
-        });
-        // Any newly committed mutable head owns this stable per-KA SWM graph.
-        // Preserve it regardless of version; deleting here would race a newer
-        // SHARE that acquired the same lock after VM verification.
-        if (currentHead !== undefined) return;
-        await retire(candidate, ctx);
-      };
-      if (this.writeLocks === undefined) {
-        // Compatibility for isolated embeddings. Production wiring always
-        // supplies the shared lock map; callers without one remain serialized
-        // only by their own retirement callback.
-        await retireIfStillOrphaned();
-      } else {
-        await withKeyedLocks(
-          this.writeLocks,
-          [swmKaWriteLockKey(
-            candidate.contextGraphId,
-            candidate.subGraphName,
-            candidate.ual,
-          )],
-          retireIfStillOrphaned,
-        );
-      }
+      await retire(candidate, ctx);
     }
     this.log.info(
       ctx,

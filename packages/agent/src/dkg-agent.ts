@@ -920,7 +920,7 @@ export class DKGAgent extends DKGAgentBase {
         },
         acceptsFinalizedPrivateLane: (contextGraphId) => (
           this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
-            ?.projectionMode === 'confirmation-gated-monotonic-union'
+            ?.acceptsFinalizedVmRepair === true
         ),
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
