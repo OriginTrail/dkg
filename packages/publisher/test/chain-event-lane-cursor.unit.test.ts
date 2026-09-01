@@ -287,6 +287,57 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(seen).toEqual([45_000, 45_000]);
   });
 
+  it('a REJECTED replay window is retained and retried until dispatch succeeds (review r19)', async () => {
+    // The replay is the only mechanism recovering events a lagging RPC hid,
+    // and its window trails the head: if the durable handler rejects during
+    // a replay and the failure is merely logged, the next scheduled tick
+    // derives a NEWER window and the mutation exits the trailing range
+    // forever — despite the callback documented redelivery contract.
+    let now = 0;
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
+    const seen: number[] = [];
+    let rejectReplays = 0;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      onKnowledgeAssetRootMutated: async (e) => {
+        seen.push(e.position.blockNumber);
+        // the FORWARD delivery succeeds; replay deliveries reject while armed
+        if (seen.length > 1 && rejectReplays > 0) {
+          rejectReplays -= 1;
+          throw new Error('consumer could not record the replayed event');
+        }
+      },
+    });
+
+    rejectReplays = 2; // the replay dispatch must survive MULTIPLE rejections
+    for (let tick = 1; tick <= 25; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    // Tick 25 replayed the window and the handler rejected: one forward
+    // delivery, one rejected replay delivery so far.
+    expect(seen).toEqual([45_000, 45_000]);
+
+    // The head advances far beyond the trailing window: a NEWLY derived
+    // window could never contain the mutation again.
+    chain.setHead(70_000);
+    await poll(poller);          // retry #1: still rejected
+    now += CADENCE_MS;
+    await poll(poller);          // retry #2: accepted
+    now += CADENCE_MS;
+
+    // The SAME retained window was retried on consecutive polls (not just
+    // every 25th) until the consumer took responsibility.
+    expect(seen).toEqual([45_000, 45_000, 45_000, 45_000]);
+    // …and a further poll does not re-dispatch: the retained window cleared.
+    await poll(poller);
+    now += CADENCE_MS;
+    expect(seen).toEqual([45_000, 45_000, 45_000, 45_000]);
+  });
+
   it('leaves the idle cost and cadence of the other lanes untouched', async () => {
     let now = 0;
     const chain = makeChain(50_000);

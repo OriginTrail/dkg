@@ -59,7 +59,7 @@ export interface KnowledgeAssetLifecycleUpdateEventV1 extends KnowledgeAssetRoot
    * chain legally emits the zero address there). Optional for the same
    * best-effort-decode reason as `merkleRoot`.
    */
-  author?: string | null;
+  author?: EvmAddressV1 | null;
 }
 
 /** `pushMerkleRoot` — append-only admin push. Carries no author field on chain. */
@@ -245,3 +245,18 @@ export function decodeKnowledgeAssetRootMutationEvent(
   }
   return { ok: true, mutation };
 }
+
+// Type-level proof (review r19; kept in SRC because package test directories
+// are not typechecked): an arbitrary string cannot populate the branded
+// payload fields — only the decoder canonical judgements mint them.
+const _plainStringsCannotForgePayloads: KnowledgeAssetLifecycleUpdateEventV1 = {
+  kind: 'lifecycle-update',
+  // @ts-expect-error -- a plain string is not KaIdV1
+  kaId: '42',
+  position: undefined as never, // the position module carries its own proof
+  // @ts-expect-error -- a plain string is not Digest32V1
+  merkleRoot: 'not-a-digest',
+  // @ts-expect-error -- a plain string is not EvmAddressV1
+  author: 'not-an-address',
+};
+void _plainStringsCannotForgePayloads;

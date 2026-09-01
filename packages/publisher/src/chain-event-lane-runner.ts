@@ -31,6 +31,13 @@ interface ChainEventPollerLaneState {
   failureBackoffMs?: number;
   /** Ticks on which this lane was due — drives `periodicRescan`. */
   pollCount?: number;
+  /**
+   * A periodic-replay window whose dispatch REJECTED, retained verbatim and
+   * retried every poll until it succeeds (review r19). Never advances or
+   * rewinds the forward cursor; at most one window is outstanding, and a
+   * due periodic window is superseded while a retry is pending.
+   */
+  pendingRescanRetry?: { fromBlock: number; toBlock: number };
   /** Chain head observed on the most recent due tick (diagnostics). */
   lastScanHead?: number;
   /** `clock()` at the most recent due tick (diagnostics). */
@@ -402,16 +409,26 @@ export class ChainEventLaneRunner {
     // failed — the one cursor movement the replay was documented never to
     // cause — and gating the forward scan on it would let a provider that
     // rejects wide history ranges starve fresh events every rescan tick.
-    // A failed re-scan is logged and simply waits for its next scheduled
-    // tick; the forward scan below proceeds regardless.
-    if (rescan) {
+    //
+    // But a failed replay window is NOT forgotten (review r19): the replay
+    // is the only mechanism recovering events a lagging RPC hid, and its
+    // window TRAILS the head — waiting for the next scheduled tick would
+    // re-derive a NEWER window, so a mutation whose durable dispatch
+    // rejected would silently exit the trailing range and be lost despite
+    // the callback documented redelivery contract. The EXACT failed window
+    // is retained on the lane and retried every poll until it dispatches
+    // cleanly; the forward cursor and forward scan stay untouched.
+    const replay = lane.state.pendingRescanRetry ?? rescan;
+    if (replay) {
       try {
-        await this.dispatchWindow(lane, rescan.fromBlock, rescan.toBlock, ctx);
+        await this.dispatchWindow(lane, replay.fromBlock, replay.toBlock, ctx);
+        lane.state.pendingRescanRetry = undefined;
       } catch (err) {
+        lane.state.pendingRescanRetry = { fromBlock: replay.fromBlock, toBlock: replay.toBlock };
         this.log.warn(
           ctx,
-          `Periodic re-scan failed (forward scan unaffected): lane=${lane.spec.name} ` +
-          `[${rescan.fromBlock}, ${rescan.toBlock}] ${err instanceof Error ? err.message : String(err)}`,
+          `Periodic re-scan failed (forward scan unaffected; window retained for retry): lane=${lane.spec.name} ` +
+          `[${replay.fromBlock}, ${replay.toBlock}] ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
