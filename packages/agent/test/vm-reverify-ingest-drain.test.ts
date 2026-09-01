@@ -365,6 +365,58 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     expect(await intents.countPending(CG)).toBe(0);
     expect(kicks.count, 'a held event must not kick the drain').toBe(0);
   }, 60_000);
+  it('the SWM peer loop continues past a partially useful first peer (review r1)', async () => {
+    // The production loop, driven directly: peer A writes something
+    // unrelated (verdict false), peer B serves the target (verdict true),
+    // traversal stops at B without trying C.
+    const { internals } = await boot();
+    internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b', 'peer-c'];
+    const attempts: string[] = [];
+    internals.recoverContextGraphSwmFromPeer = async (peerId: string) => {
+      attempts.push(peerId);
+      return {
+        insertedDataQuads: 0,
+        insertedMetaQuads: peerId === 'peer-c' ? 0 : 1,
+        replacedGraphs: 0,
+        replacedRoots: 0,
+      };
+    };
+    const verdicts = [false, true];
+    let verifications = 0;
+
+    await internals.recoverContextGraphSwmForReverify(
+      'w2r-loop-cg',
+      async () => verdicts[verifications++]!,
+    );
+
+    expect(attempts, 'the traversal stops at the peer that served the target')
+      .toEqual(['peer-a', 'peer-b']);
+    expect(verifications, 'one verification per PRODUCTIVE peer').toBe(2);
+  }, 60_000);
+
+  it('the SWM peer loop skips verification for peers that wrote nothing (review r1)', async () => {
+    const { internals } = await boot();
+    internals.resolveVmReverifySwmPeers = async () => ['peer-a', 'peer-b'];
+    const attempts: string[] = [];
+    internals.recoverContextGraphSwmFromPeer = async (peerId: string) => {
+      attempts.push(peerId);
+      return {
+        insertedDataQuads: 0,
+        insertedMetaQuads: peerId === 'peer-b' ? 1 : 0,
+        replacedGraphs: 0,
+        replacedRoots: 0,
+      };
+    };
+    let verifications = 0;
+
+    await internals.recoverContextGraphSwmForReverify(
+      'w2r-loop-cg',
+      async () => { verifications += 1; return true; },
+    );
+
+    expect(attempts).toEqual(['peer-a', 'peer-b']);
+    expect(verifications, 'the unproductive peer must not cost a fetch').toBe(1);
+  }, 60_000);
   it('records an intent for a HELD asset and kicks the drain exactly once per new event', async () => {
     const { internals, ualFor, kicks } = await boot();
     const ual = await ualFor(7n);
@@ -601,7 +653,7 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
       : Record<string, number> = {},
     now = 10_000,
     swm: {
-      recover?: (localCgId: string) => Promise<void>;
+      recover?: (localCgId: string, verifyRecovered: () => Promise<boolean>) => Promise<void>;
       durableSyncEnabled?: () => boolean;
     } = {},
   ) {
@@ -845,7 +897,13 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
       peerIds: ['peer-a'],
     });
     const { worker } = makeWorker(intents, fetch, {}, 10_000, {
-      recover: async (localCgId) => { recovered.push(localCgId); swmPresent = true; },
+      // The production loop shape (review r1): recover from a peer, then let
+      // the TARGET-specific verdict decide whether to stop.
+      recover: async (localCgId, verifyRecovered) => {
+        recovered.push(localCgId);
+        swmPresent = true;
+        expect(await verifyRecovered(), 'the recovery served the target').toBe(true);
+      },
       durableSyncEnabled: () => true,
     });
 
@@ -905,6 +963,40 @@ describe('vm-reverify drain — the repair, through the real exact-asset fetch',
     expect(await intents.countPending()).toBe(1);
   });
 
+  it('continues past a peer whose writes did not serve the TARGET (review r1)', async () => {
+    // A whole-graph recovery can make plenty of unrelated progress. The
+    // verdict is the stranded asset's own re-fetch: a first peer that keeps
+    // returning partial, unrelated writes must not stop the traversal before
+    // the peer that holds the needed version.
+    const intents = new InMemoryVmReverifyIntentStore();
+    const ual = await seed(intents, 64n, 100);
+    let served = false;
+    const fetch = makeFetch({
+      snapshotFor: () => snapshot(200),
+      localState: () => (served ? 'materialized' : 'missing'),
+    });
+    const verdicts: boolean[] = [];
+    const { worker } = makeWorker(intents, fetch, {}, 10_000, {
+      recover: async (_localCgId, verifyRecovered) => {
+        // Peer A: unrelated meta progress; the target stays stranded.
+        verdicts.push(await verifyRecovered());
+        // Peer B: supplies the version-scoped SWM the target needs.
+        served = true;
+        verdicts.push(await verifyRecovered());
+      },
+      durableSyncEnabled: () => true,
+    });
+
+    const run = await worker.runOnce();
+
+    expect(verdicts, 'stranded after peer A, served after peer B').toEqual([false, true]);
+    expect(run.items[0]).toMatchObject({ ual, action: 'resolve' });
+    expect(
+      fetch.requested.length,
+      'the chunk call plus one verification re-fetch per productive peer',
+    ).toBe(3);
+    expect(await intents.countPending()).toBe(0);
+  });
   it('abandons a chain-identity conflict instead of retrying it forever', async () => {
     const intents = new InMemoryVmReverifyIntentStore();
     const ual = await seed(intents, 14n, 100);

@@ -148,7 +148,7 @@ export interface VmReverifyWorkerDependencies {
     options: { inspectOnly?: boolean; admissionPriority?: number },
   ): Promise<ContextGraphAssetFetchResult>;
   /**
-   * Recover a Context Graph's shared working memory from a peer (ADR-W2R-10).
+   * Recover a Context Graph's shared working memory from peers (ADR-W2R-10).
    *
    * The exact-asset fetch transfers data and metadata only — it carries no SWM
    * — but chain-promotion refuses to materialize until the local version-scoped
@@ -158,8 +158,19 @@ export interface VmReverifyWorkerDependencies {
    * the whole-CG recovery's only other caller is the operator CLI route. So
    * without this pairing the drain detects perfectly and repairs nothing for
    * exactly the population the feature exists for.
+   *
+   * `verifyRecovered` is the TARGET-specific verdict (review r1): it re-runs
+   * the exact fetch for the still-stranded assets and reports whether they
+   * are all served. The implementation must judge each peer by THIS — a
+   * whole-graph recovery can write plenty without touching the one asset the
+   * intent is about, and a consistently-first, partially useful peer must
+   * not hide the peer that actually holds the needed version. Call it after
+   * a peer makes progress; stop when it reports true.
    */
-  recoverContextGraphSwm?(localCgId: string): Promise<void>;
+  recoverContextGraphSwm?(
+    localCgId: string,
+    verifyRecovered: () => Promise<boolean>,
+  ): Promise<void>;
   /**
    * Whether the durable plane that carries SWM is switched on.
    *
@@ -362,14 +373,14 @@ export class VmReverifyWorker {
   }
 
   /**
-   * ADR-W2R-10: an `unresolved` item is paired ONCE with a whole-Context-Graph
-   * SWM recovery, then the exact fetch is re-run ONCE.
+   * ADR-W2R-10: `unresolved` items are paired with a whole-Context-Graph SWM
+   * recovery whose per-peer verdict is a TARGET-specific re-fetch (review r1).
    *
    * Triggered on `unresolved` rather than on `no-swm` specifically, because the
    * repair primitive does not surface WHY inspection failed — `no-swm` and
    * "nobody had it" both arrive as `unresolved`. `unresolved` is the superset,
-   * and a recovery that turns out to have been unnecessary costs one bounded
-   * call under the ladder's throttling. Recording the narrower cause would mean
+   * and a recovery that turns out to have been unnecessary costs bounded
+   * calls under the ladder's throttling. Recording the narrower cause would mean
    * widening the primitive's result type; noted as the follow-up.
    *
    * Whole-CG is heavier than a per-KA scoped transfer would be. It is chosen
@@ -396,21 +407,32 @@ export class VmReverifyWorker {
     }
     this.swmRecoveryAvailable = true;
 
+    // Verification folds its re-fetch results in as it goes, so a later
+    // verdict only re-fetches what the earlier peers left stranded.
+    let merged = outcomes;
+    const stillStranded = () => stranded.filter((record) => {
+      const outcome = merged.get(record.ual);
+      return outcome?.kind === 'item' && outcome.status === 'unresolved';
+    });
+    const verifyRecovered = async (): Promise<boolean> => {
+      const remaining = stillStranded();
+      if (remaining.length === 0) return true;
+      const retried = await this.resolveChunkOutcomes(localCgId, remaining, summary);
+      const next = new Map(merged);
+      for (const [ual, outcome] of retried) next.set(ual, outcome);
+      merged = next;
+      return stillStranded().length === 0;
+    };
+
     try {
-      await this.deps.recoverContextGraphSwm(localCgId);
+      await this.deps.recoverContextGraphSwm(localCgId, verifyRecovered);
+      summary.swmRecoveries += 1;
     } catch (error) {
       this.deps.log.warn(
         `vm-reverify swm-recovery for cg=${localCgId} failed: `
         + `${error instanceof Error ? error.message : String(error)}`,
       );
-      return outcomes;
     }
-    summary.swmRecoveries += 1;
-
-    // ONE re-run, for the stranded UALs only.
-    const retried = await this.resolveChunkOutcomes(localCgId, stranded, summary);
-    const merged = new Map(outcomes);
-    for (const [ual, outcome] of retried) merged.set(ual, outcome);
     return merged;
   }
 

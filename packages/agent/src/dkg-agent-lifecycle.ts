@@ -672,7 +672,8 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
+import {
+  VmReconcileQueueClosedError, VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
 
@@ -3210,19 +3211,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // will not materialize without the local version-scoped projection —
           // so for a host-only core the drain would detect forever and repair
           // never. Peers are resolved the same way the exact fetch resolves
-          // them, and the first that yields a recovery wins.
-          recoverContextGraphSwm: async (localCgId) => {
-            for (const peerId of await this.resolveVmReverifySwmPeers(localCgId)) {
-              const r = await this.recoverContextGraphSwmFromPeer(peerId, localCgId);
-              // "Did this peer actually supply anything?" — any of the four
-              // write counters moving means yes. Stop at the first that did;
-              // trying the rest would re-fetch what we already hold.
-              if (
-                r.insertedDataQuads > 0 || r.insertedMetaQuads > 0
-                || r.replacedGraphs > 0 || r.replacedRoots > 0
-              ) return;
-            }
-          },
+          // them; each productive peer is judged by the TARGET-specific
+          // verdict (review r1).
+          recoverContextGraphSwm: (localCgId, verifyRecovered) =>
+            this.recoverContextGraphSwmForReverify(localCgId, verifyRecovered),
           // Read the switch rather than infer it from an empty recovery result:
           // `recoverContextGraphSwmFromPeer` warn-skips internally when the
           // durable plane is off and returns empty, which is indistinguishable
@@ -8006,17 +7998,59 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * the peer whose SWM we want, and two orderings would eventually disagree.
    */
   async resolveVmReverifySwmPeers(this: DKGAgent, localCgId: string): Promise<string[]> {
+    return (await this.resolveContextGraphRecoveryPeerIds(localCgId))
+      .slice(0, MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS);
+  }
+
+  /**
+   * Canonical recovery-peer ordering for ONE Context Graph (review r1): the
+   * CG's curators first, then the preferred sync peer, then whoever is
+   * connected — deduplicated, self excluded. Both the exact-asset fetch and
+   * the paired W2 SWM recovery resolve through THIS method: the pairing
+   * exists precisely because the two operations must chase the same peers,
+   * and two hand-mirrored orderings would eventually disagree.
+   */
+  async resolveContextGraphRecoveryPeerIds(
+    this: DKGAgent,
+    localCgId: string,
+    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
+  ): Promise<string[]> {
     const curators = await this.resolveCuratorPeerIdsForCg(localCgId, {
       maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.isCurrent ? { isCurrent: options.isCurrent } : {}),
     }).catch(() => ({ peerIds: [] as string[] }));
+    if (options.isCurrent && !options.isCurrent()) {
+      throw new VmReconcileQueueClosedError();
+    }
     const connected = this.node?.libp2p?.getConnections?.()
       ?.map((connection) => connection.remotePeer.toString()) ?? [];
     return [...new Set([
       ...curators.peerIds,
       this.preferredSyncPeers.get(localCgId),
       ...connected,
-    ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))]
-      .slice(0, MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS);
+    ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))];
+  }
+
+  /**
+   * The W2 SWM-recovery peer loop (review r1): try each recovery peer in the
+   * canonical order; a peer that WROTE something is a hint, and the verdict
+   * is the target-specific `verifyRecovered` — a partially useful peer that
+   * keeps writing unrelated assets must not hide a later peer that holds the
+   * version the stranded intent needs. Bounded by the recovery peer cap; a
+   * peer that wrote nothing is skipped without a verification fetch.
+   */
+  async recoverContextGraphSwmForReverify(
+    this: DKGAgent,
+    localCgId: string,
+    verifyRecovered: () => Promise<boolean>,
+  ): Promise<void> {
+    for (const peerId of await this.resolveVmReverifySwmPeers(localCgId)) {
+      const r = await this.recoverContextGraphSwmFromPeer(peerId, localCgId);
+      const wroteSomething = r.insertedDataQuads > 0 || r.insertedMetaQuads > 0
+        || r.replacedGraphs > 0 || r.replacedRoots > 0;
+      if (wroteSomething && await verifyRecovered()) return;
+    }
   }
 
   async recoverContextGraphSwmFromPeer(this: DKGAgent,

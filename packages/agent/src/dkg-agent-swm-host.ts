@@ -3575,21 +3575,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';
         return 'missing';
       },
-      resolvePeerIds: async () => {
-        const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId, {
-          maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
-          signal,
-          isCurrent,
-        }).catch(() => ({ peerIds: [] as string[] }));
-        if (!isCurrent()) throw new VmReconcileQueueClosedError();
-        const connectedPeerIds = this.node?.libp2p?.getConnections?.()
-          ?.map((connection) => connection.remotePeer.toString()) ?? [];
-        return [...new Set([
-          ...curatorResolution.peerIds,
-          this.preferredSyncPeers.get(localCgId),
-          ...connectedPeerIds,
-        ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))];
-      },
+      // The canonical recovery-peer ordering, shared with the paired W2 SWM
+      // recovery (review r1): two hand-mirrored orderings would eventually
+      // disagree, and the pairing only works while both chase the same peers.
+      resolvePeerIds: () => this.resolveContextGraphRecoveryPeerIds(localCgId, {
+        ...(signal ? { signal } : {}),
+        isCurrent,
+      }),
       preparePeer: async (peerId) => {
         await this.ensurePeerConnected(peerId, { signal });
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
