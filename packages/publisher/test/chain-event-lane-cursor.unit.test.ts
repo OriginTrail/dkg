@@ -456,24 +456,29 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(sequence[2]).toBe('save:clear');
   });
 
-  it('a transient replay-window load failure is retried on a later poll (review r24)', async () => {
+  it('a transient replay-window load failure is retried on a LATER poll (reviews r24/r26)', async () => {
     // A locked store at restore time must not read as nothing-retained for
-    // the lifetime of the runner.
+    // the lifetime of the runner — and the eligibility must survive a POLL
+    // BOUNDARY (review r26): every attempt of the first poll fails here, so
+    // an implementation that only retried once, immediately, and dropped the
+    // flag would deliver nothing. The store recovers only for the next due
+    // poll, which must retry, restore the exact window, and dispatch.
     let loadAttempts = 0;
+    let now = 0;
     const seen: number[] = [];
     const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
     const poller = new ChainEventPoller({
       chain: chain.adapter,
       publishHandler: makeHandler(),
       intervalMs: CADENCE_MS,
-      clock: () => 0,
+      clock: () => now,
       cursorPersistence: {
         async loadLane() { return 50_000; },
         async saveLane() { /* not under test */ },
         replayRetry: {
           async load() {
             loadAttempts += 1;
-            if (loadAttempts === 1) throw new Error('SQLITE_BUSY');
+            if (loadAttempts <= 2) throw new Error('SQLITE_BUSY');
             return { fromBlock: 41_001, toBlock: 50_000 };
           },
           async save() { /* not under test */ },
@@ -482,10 +487,14 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
       onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
     });
 
-    await poll(poller);   // restore: load throws once; flagged for retry
-    await poll(poller);   // retry loads the window and dispatches it
+    await poll(poller);   // restore throws; the in-scan retry throws too
+    expect(seen, 'the first poll had no window to dispatch').toHaveLength(0);
+    expect(loadAttempts).toBe(2);
 
-    expect(loadAttempts).toBeGreaterThanOrEqual(2);
+    now += CADENCE_MS;
+    await poll(poller);   // a LATER poll retries, restores, dispatches
+
+    expect(loadAttempts).toBe(3);
     expect(seen).toContain(45_000);
   });
 

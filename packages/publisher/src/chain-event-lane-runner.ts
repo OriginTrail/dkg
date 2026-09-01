@@ -1,6 +1,7 @@
 import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
+  type ChainEventRetiredCursorKey,
   createLaneCursorStore,
   type CursorPersistence,
   type LaneCursorStore,
@@ -120,7 +121,7 @@ export interface ChainEventPollerLaneSpec {
    * The adopted value goes through the same restore rewind and is
    * persisted under the NEW key immediately, so the handoff happens once.
    */
-  adoptCursorFromRetiredKeys?: readonly string[];
+  adoptCursorFromRetiredKeys?: readonly ChainEventRetiredCursorKey[];
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
 }
@@ -352,14 +353,14 @@ export class ChainEventLaneRunner {
       let saved = await this.loadPersistedLaneCursor(lane);
       if ((saved == null || saved <= 0) && this.cursorStore.kind === 'lane') {
         for (const retired of lane.spec.adoptCursorFromRetiredKeys ?? []) {
-          // A migration read of a RETIRED key (review r22): the store contract
-          // is key→block, so the retired spelling is passed through the same
-          // accessor. The adopted value is NOT re-homed here (review r25):
+          // A migration read of a RETIRED key (reviews r22/r26): the cursor-key
+          // union is wider than the scheduler union — reads may name a retired
+          // alias, writes never do. The adopted value is NOT re-homed here (r25):
           // it still needs the live-seed CAP, which requires the head — the
           // first successful forward scan persists the corrected cursor
           // under the new key instead, so a crash cannot freeze an uncapped
           // adoption into the new lane's own durable cursor.
-          const adopted = await this.cursorStore.loadLane(retired as ChainEventPollerLane);
+          const adopted = await this.cursorStore.loadLane(retired);
           if (adopted != null && adopted > 0) {
             saved = adopted;
             lane.state.cursorAdoptedFromRetiredKey = true;

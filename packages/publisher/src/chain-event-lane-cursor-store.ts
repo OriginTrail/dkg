@@ -24,6 +24,21 @@ export interface LaneReplayRetryPersistence {
 }
 
 /**
+ * Retired persistence keys a lane may ADOPT a durable cursor from (review
+ * r26): a CLOSED union, so the scheduler union stays reserved for lanes the
+ * scheduler can actually run, and a typo'd historical key fails to COMPILE
+ * instead of silently reading nothing and falling back to the live seed.
+ */
+export type ChainEventRetiredCursorKey = 'collectionUpdates';
+
+/**
+ * Every key the persistence layer can be asked to READ. Writes stay
+ * `ChainEventPollerLane`: a retired key is never written under its own name
+ * — the first forward scan re-homes an adopted cursor under the live key.
+ */
+export type ChainEventCursorKey = ChainEventPollerLane | ChainEventRetiredCursorKey;
+
+/**
  * Lane-aware cursor persistence for saving/loading independent lane cursors.
  *
  * `replayRetry` is OPTIONAL (reviews r20/r21): without it, the retained
@@ -32,7 +47,7 @@ export interface LaneReplayRetryPersistence {
  * nested capability, atomically.
  */
 export interface LaneCursorPersistence {
-  loadLane(lane: ChainEventPollerLane): Promise<number | undefined>;
+  loadLane(lane: ChainEventCursorKey): Promise<number | undefined>;
   saveLane(lane: ChainEventPollerLane, blockNumber: number): Promise<void>;
   replayRetry?: LaneReplayRetryPersistence;
 }
@@ -51,7 +66,7 @@ export type CursorPersistence = LegacyCursorPersistence | LaneCursorPersistence;
 export type LaneCursorStore =
   | {
       kind: 'lane';
-      loadLane(lane: ChainEventPollerLane): Promise<number | undefined>;
+      loadLane(lane: ChainEventCursorKey): Promise<number | undefined>;
       saveLane(lane: ChainEventPollerLane, blockNumber: number): Promise<void>;
       replayRetry?: LaneReplayRetryPersistence;
     }
