@@ -1185,6 +1185,15 @@ export class DKGAgentBase {
    * being reconstructed from logs.
    */
   vmReverifyIntentStoreFailure?: string;
+  /**
+   * The activation outcome this process actually ARMED (review r1): set by
+   * `prepareVmReverifyIntentStore` on every path, consulted FIRST by the
+   * effective-state resolver. Without it the resolver re-runs the capability
+   * probe on every call, and a Hub that recovers after boot would report an
+   * unwired feature as effective until the next restart. Cleared on store
+   * teardown so a same-object restart re-probes.
+   */
+  vmReverifyActivation?: { effective: boolean; reason?: string };
   /** Explicit owner for finalization persistence and network identity lifetimes. */
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /**
@@ -1853,17 +1862,25 @@ export class DKGAgentBase {
    */
   protected async prepareVmReverifyIntentStore(): Promise<void> {
     if (this.vmReverifyIntents) return;
+    // The effective gate runs FIRST, before an injected store is accepted
+    // (review r1): injection substitutes for the durable FILE, not for the
+    // operator flag, the reconciler, or the adapter capability set — an
+    // injected store with the switch off must wire neither lane nor worker.
+    const state = await (this as unknown as DKGAgent).vmUpdateConvergenceState();
+    if (!state.effective) {
+      this.vmReverifyActivation = state;
+      return;
+    }
     const injected = this.config.vmReverifyIntentStore;
     if (injected) {
       this.vmReverifyIntents = injected;
+      this.vmReverifyActivation = { effective: true };
       return;
     }
-    // The `dataDir` check is redundant at RUNTIME — the effective gate below
-    // already returns false without one — and is kept because it narrows the
-    // type for the open call. Reordering these two is an equivalent mutation;
-    // deleting the gate is not, and has its own test.
+    // Unreachable at RUNTIME — the effective gate above already returned
+    // without a dataDir or an injected substitute — kept because it narrows
+    // the type for the open call.
     if (!this.config.dataDir) return;
-    if (!(await (this as unknown as DKGAgent).vmUpdateConvergenceEnabled())) return;
     const databasePath = join(this.config.dataDir, VM_REVERIFY_INTENTS_DATABASE_FILENAME);
     // SCOPE: this catch covers the intent-store open and NOTHING else. It sits
     // inside this method, so it cannot soften the startup block that calls it —
@@ -1873,9 +1890,11 @@ export class DKGAgentBase {
     try {
       this.vmReverifyIntents = await openSqliteVmReverifyIntentStore(this.config.dataDir);
       this.vmReverifyIntentStoreFailure = undefined;
+      this.vmReverifyActivation = { effective: true };
     } catch (error) {
       this.vmReverifyIntentStoreFailure =
         error instanceof Error ? error.message : String(error);
+      this.vmReverifyActivation = { effective: false, reason: 'store-open-failed' };
       this.log.error(
         createOperationContext('system'),
         'DKG_VM_UPDATE_CONVERGENCE_ENABLED is on but the re-verification intent '
@@ -1926,6 +1945,8 @@ export class DKGAgentBase {
     await worker?.stop();
     const store = this.vmReverifyIntents;
     this.vmReverifyIntents = undefined;
+    // A same-object restart must re-run the activation probe (review r1).
+    this.vmReverifyActivation = undefined;
     if (!store || store === this.config.vmReverifyIntentStore) return;
     await store.close();
   }

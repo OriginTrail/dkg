@@ -339,6 +339,100 @@ describe('W2 kill switch — the effective gate and what it opens', () => {
     });
   }, 60_000);
 
+  it('an INJECTED store cannot bypass the kill switch (review r1)', async () => {
+    // Injection substitutes for the durable FILE, not for the operator flag:
+    // with the switch off, an injected store must wire neither lane nor
+    // worker, exactly like the SQLite path.
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    const injected = { close: async () => undefined, reviveForContextGraph: async () => 0 };
+    const { internals } = await boot({
+      vmUpdateConvergenceEnabled: false,
+      vmReverifyIntentStore: injected,
+    });
+
+    await internals.prepareVmReverifyIntentStore();
+
+    expect(internals.vmReverifyIntents, 'the injected store must NOT be armed').toBeUndefined();
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
+      effective: false,
+      reason: 'flag-off',
+    });
+  }, 60_000);
+
+  it('an INJECTED store satisfies the durability condition WITHOUT a dataDir (review r1)', async () => {
+    // The opposite polarity: injection IS a deliberate persistence
+    // substitute, so with every real gate open the absence of a dataDir must
+    // not disable the feature for a caller that supplied durable storage.
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    const injected = { close: async () => undefined, reviveForContextGraph: async () => 0 };
+    const agent = await DKGAgent.create({
+      name: 'W2RWiringInjectedNoDataDir',
+      chainAdapter: capableChain(),
+      vmReverifyIntentStore: injected,
+    } as any);
+    agents.push(agent);
+    stubNode(agent);
+    const internals = agent as any;
+
+    expect(await internals.vmUpdateConvergenceState()).toEqual({ effective: true });
+    await internals.prepareVmReverifyIntentStore();
+    expect(internals.vmReverifyIntents).toBe(injected);
+  }, 60_000);
+
+  it('a probe that recovers AFTER boot cannot report an unwired feature as effective (review r1)', async () => {
+    // Store, lane and worker are wired ONLY at startup. If the resolver
+    // re-probed live, a Hub that recovers after a failed boot-time probe
+    // would answer {effective: true} about a process in which nothing is
+    // armed — the operator-facing status lying in the optimistic direction.
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    const chain = new MockChainAdapter();
+    (chain as unknown as { supportsEventTypes: unknown }).supportsEventTypes =
+      async (): Promise<string[]> => { throw new Error('hub unreachable'); };
+    const { internals } = await boot({ chainAdapter: chain });
+
+    await internals.prepareVmReverifyIntentStore();
+    expect(internals.vmReverifyIntents).toBeUndefined();
+
+    // The Hub recovers. The latched startup outcome must still win…
+    (chain as unknown as { supportsEventTypes: unknown }).supportsEventTypes =
+      async (): Promise<string[]> => [];
+    expect(await internals.vmUpdateConvergenceState()).toEqual({
+      effective: false,
+      reason: 'abi-probe-failed',
+    });
+
+    // …until the store lifecycle is torn down, which is the restart
+    // boundary at which arming can actually happen again.
+    await internals.closeVmReverifyIntentStore();
+    expect(await internals.vmUpdateConvergenceState()).toEqual({ effective: true });
+  }, 60_000);
+
+  it('fails CLOSED for an adapter that can emit events but not map or repair them (review r1)', async () => {
+    // Solo removal per capability: event support alone would let the lane
+    // arm, then drop-and-acknowledge every mutation — the cursor advances
+    // forever past events that never became intents.
+    delete process.env[INTENT_ENV];
+    delete process.env[RECONCILER_ENV];
+    for (const capability of [
+      'getDKGKnowledgeAssetsAddress',
+      'getKAContextGraphId',
+      'readKnowledgeAssetVersionSnapshot',
+    ]) {
+      const chain = capableChain();
+      (chain as unknown as Record<string, unknown>)[capability] = undefined;
+      const { internals, intentFile } = await boot({ chainAdapter: chain });
+
+      expect(
+        await internals.vmUpdateConvergenceState(),
+        `an adapter without ${capability} must fail activation closed`,
+      ).toEqual({ effective: false, reason: `adapter-missing:${capability}` });
+      await internals.prepareVmReverifyIntentStore();
+      expect(existsSync(intentFile)).toBe(false);
+    }
+  }, 60_000);
   it('an INJECTED store is honoured and is never closed by the agent that borrowed it', async () => {
     delete process.env[INTENT_ENV];
     let closed = 0;

@@ -2927,11 +2927,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async vmUpdateConvergenceState(
     this: DKGAgent,
   ): Promise<{ effective: boolean; reason?: string }> {
+    // What this process actually ARMED wins over a live re-probe (review r1):
+    // once startup has decided, a capability that recovers later — the Hub
+    // reachable again after a failed boot-time probe — must not report a
+    // feature as effective that has no store, no lane and no worker until the
+    // next restart. Pre-start calls (and the gate inside store preparation
+    // itself) still see the live probe.
+    if (this.vmReverifyActivation) return { ...this.vmReverifyActivation };
     if (!this.vmReconcileEnabled()) return { effective: false, reason: 'reconcile-disabled' };
     if (!resolveVmUpdateConvergenceEnabled(this.config.vmUpdateConvergenceEnabled)) {
       return { effective: false, reason: 'flag-off' };
     }
-    if (!this.config.dataDir) return { effective: false, reason: 'no-data-dir' };
+    // An INJECTED store is a deliberate persistence substitute (review r1):
+    // it satisfies the durability condition the dataDir file otherwise
+    // provides, and nothing else — every other gate still applies to it.
+    if (!this.config.dataDir && !this.config.vmReverifyIntentStore) {
+      return { effective: false, reason: 'no-data-dir' };
+    }
     const requested: string[] = [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES];
     // `supportsEventTypes` is an OPTIONAL adapter capability (PR-A) and is
     // ASYNC — contract bindings resolve lazily from the Hub, so a probe that
@@ -2969,12 +2981,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (missing.length > 0) {
       return { effective: false, reason: `abi-missing:${String(missing[0])}` };
     }
-    // The feature is wanted and the chain can serve it, but the durable store
-    // this all rests on refused to open. Reported here rather than only logged,
-    // so an operator who enabled convergence can SEE that it never armed.
-    if (this.vmReverifyIntentStoreFailure !== undefined) {
-      return { effective: false, reason: 'store-open-failed' };
+    // Emitting events is not the whole capability (review r1): every mutation
+    // must also be MAPPED to a UAL (the storage address) and REPAIRED (the
+    // exact-snapshot reads). An adapter that can only emit would have every
+    // event dropped-and-acknowledged after the lane armed — the cursor
+    // advances forever past mutations that never became intents. Fail closed
+    // and name the missing method.
+    for (const capability of [
+      'getDKGKnowledgeAssetsAddress',
+      'getKAContextGraphId',
+      'readKnowledgeAssetVersionSnapshot',
+    ] as const) {
+      if (typeof (this.chain as unknown as Record<string, unknown>)[capability] !== 'function') {
+        return { effective: false, reason: `adapter-missing:${capability}` };
+      }
     }
+    // A failed store open reaches callers through the LATCH above — store
+    // preparation records `store-open-failed` on the same path that logs it,
+    // so no separate re-derivation from `vmReverifyIntentStoreFailure` exists
+    // here to drift from it.
     return { effective: true };
   }
 
@@ -3323,15 +3348,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw new VmReconcileQueueClosedError();
     }
 
-    const storageAddress = this.chain.getDKGKnowledgeAssetsAddress
-      ? await this.chain.getDKGKnowledgeAssetsAddress()
-      : undefined;
+    // Activation verified the METHOD exists (review r1); an address that does
+    // not RESOLVE yet is a transient contract-binding state, and the lane
+    // callback contract says a normal return means durable responsibility was
+    // taken. Dropping here would advance the cursor past a mutation that
+    // never became an intent — so the rejection holds the cursor instead.
+    const storageAddress = await this.chain.getDKGKnowledgeAssetsAddress?.();
     if (!storageAddress) {
-      this.log.warn(
-        ctx,
-        `vm-reverify ingest dropped ka=${event.kaId}: chain adapter exposes no Knowledge Asset storage address`,
+      throw new Error(
+        `vm-reverify ingest: Knowledge Asset storage address is not resolved yet (ka=${event.kaId})`,
       );
-      return;
     }
 
     let ual: string;

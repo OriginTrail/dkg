@@ -346,6 +346,25 @@ describe('vm-reverify ingest — what stalls the lane and what does not', () => 
     ).toBe('graph');
   }
 
+  it('HOLDS the cursor while the storage address is not resolved yet (review r1)', async () => {
+    // Activation verified the adapter HAS the method; an address that does
+    // not resolve yet is a transient contract-binding state. A drop here
+    // would acknowledge the event — the cursor advances past a mutation that
+    // never became an intent, permanently.
+    const { internals, kicks } = await boot();
+    internals.chain.getDKGKnowledgeAssetsAddress = async () => '';
+
+    await expect(internals.handleKaRootMutationEvent({
+      kind: 'lifecycle-update',
+      kaId: kaIdFor(70n).toString(),
+      merkleRoot: `0x${'1'.repeat(64)}`,
+      author: AUTHOR,
+      position: position(100),
+    }, ctx)).rejects.toThrow(/storage address is not resolved/i);
+
+    expect(await intents.countPending(CG)).toBe(0);
+    expect(kicks.count, 'a held event must not kick the drain').toBe(0);
+  }, 60_000);
   it('records an intent for a HELD asset and kicks the drain exactly once per new event', async () => {
     const { internals, ualFor, kicks } = await boot();
     const ual = await ualFor(7n);
