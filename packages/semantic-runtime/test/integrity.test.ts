@@ -35,6 +35,18 @@ describe('semantic runtime artifact integrity', () => {
         maxOldGenerationSizeMb: 256,
       },
     });
+    expect(verified.manifest.component.imports).toEqual(expect.arrayContaining([
+      'origintrail:semantic-runtime/investigator@0.1.0',
+      'origintrail:semantic-runtime/query-catalog@0.1.0',
+    ]));
+    const wit = fs.readFileSync(
+      path.join(defaultArtifactRoot(), 'component/wit/semantic-runtime.wit'),
+      'utf8',
+    );
+    expect(wit).toContain('import investigator;');
+    expect(wit).toContain('import query-catalog;');
+    expect(wit).not.toContain('effect-request');
+    expect(wit).not.toContain('arguments: list<string>');
     expect(verified.wasmSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(verified.componentSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(verified.witSha256).toMatch(/^[0-9a-f]{64}$/);

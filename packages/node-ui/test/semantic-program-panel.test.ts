@@ -88,7 +88,7 @@ describe('DKG-native semantic Program panel', () => {
         toolIri: 'urn:sr:tool:investigator-v1',
         operation: 'agent/investigate',
         semanticVersion: '1',
-        witInterface: 'origintrail:semantic-tools/investigator@1',
+        witInterface: 'origintrail:semantic-runtime/investigator@0.1.0',
         requested: true,
         offered: true,
         policyAllowed: true,

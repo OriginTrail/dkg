@@ -2,10 +2,12 @@ import { createHash } from 'node:crypto';
 import process from 'node:process';
 import { Worker, type ResourceLimits } from 'node:worker_threads';
 
-import { ABI_VERSION, SCHEMA_VERSION, type PlanApplyResult, type StartedPlanInspection, type StartedPlanReceipt } from './codec.js';
+import { ABI_VERSION, SCHEMA_VERSION, type StartedPlanInspection, type StartedPlanReceipt } from './codec.js';
 import {
   defaultExecutionCapability,
+  type ComponentExecutionResult,
   type ComponentOperationResult,
+  type ComponentToolDispatcher,
   type ExecutionCapabilityDescriptor,
 } from './component-types.js';
 import type {
@@ -13,6 +15,7 @@ import type {
   ComponentWorkerMessage,
   ComponentWorkerOperation,
   ComponentWorkerRequest,
+  ComponentWorkerToolCall,
 } from './component-worker-protocol.js';
 import { verifyRuntimeArtifacts } from './integrity.js';
 
@@ -34,7 +37,9 @@ export interface ComponentExecutionPoolOptions extends ComponentSupervisorOption
 }
 
 interface PendingRequest {
-  timer: NodeJS.Timeout;
+  timer: NodeJS.Timeout | null;
+  operation: ComponentWorkerOperation;
+  timeoutMs: number;
   resolve: (result: ComponentOperationResult) => void;
   reject: (error: Error) => void;
 }
@@ -51,7 +56,10 @@ export class ComponentWorkerClient {
   private stopped = false;
   private instanceIdValue: string | null = null;
 
-  constructor(options: ComponentSupervisorOptions = {}) {
+  constructor(
+    options: ComponentSupervisorOptions = {},
+    private readonly toolDispatcher?: ComponentToolDispatcher,
+  ) {
     this.options = {
       ...options,
       requestTimeoutMs: options.requestTimeoutMs ?? 10_000,
@@ -159,18 +167,19 @@ export class ComponentWorkerClient {
     const requestId = ++this.requestSequence;
     const request: ComponentWorkerRequest = { type: 'request', requestId, op, ...body };
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (!this.pending.delete(requestId)) return;
-        const error = new ComponentRequestTimeoutError(op, timeoutMs);
-        reject(error);
-        void this.stopWithFailure(error);
-      }, timeoutMs);
-      timer.unref?.();
-      this.pending.set(requestId, { timer, resolve, reject });
+      const pending: PendingRequest = {
+        timer: null,
+        operation: op,
+        timeoutMs,
+        resolve,
+        reject,
+      };
+      this.pending.set(requestId, pending);
+      this.armRequestTimer(requestId, pending);
       try {
         this.worker!.postMessage(request);
       } catch (error) {
-        clearTimeout(timer);
+        if (pending.timer) clearTimeout(pending.timer);
         this.pending.delete(requestId);
         reject(new ComponentUnavailableError(errorMessage(error)));
       }
@@ -191,11 +200,15 @@ export class ComponentWorkerClient {
       this.options.log?.(`semantic-component-fatal: ${message.message}`);
       return;
     }
+    if (message.type === 'tool-call') {
+      void this.handleToolCall(message);
+      return;
+    }
     if (message.type !== 'response') return;
     const pending = this.pending.get(message.requestId);
     if (!pending) return;
     this.pending.delete(message.requestId);
-    clearTimeout(pending.timer);
+    if (pending.timer) clearTimeout(pending.timer);
     if (message.ok) pending.resolve(message.result);
     else pending.reject(new ComponentOperationError(
       message.code,
@@ -203,6 +216,49 @@ export class ComponentWorkerClient {
       message.message,
       message.retryable,
     ));
+  }
+
+  private async handleToolCall(message: ComponentWorkerToolCall): Promise<void> {
+    const pending = this.pending.get(message.requestId);
+    const worker = this.worker;
+    if (!pending || !worker) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.timer = null;
+    try {
+      if (!this.toolDispatcher) throw toolDispatchError('COMPONENT_TOOL_NOT_CONFIGURED');
+      const result = await this.toolDispatcher(message.call);
+      if (!this.pending.has(message.requestId) || this.worker !== worker) return;
+      worker.postMessage({
+        type: 'tool-result',
+        toolCallId: message.toolCallId,
+        ok: true,
+        result,
+      });
+    } catch (error) {
+      if (!this.pending.has(message.requestId) || this.worker !== worker) return;
+      worker.postMessage({
+        type: 'tool-result',
+        toolCallId: message.toolCallId,
+        ok: false,
+        code: toolErrorCode(error),
+        message: errorMessage(error),
+        retryable: false,
+      });
+    } finally {
+      const active = this.pending.get(message.requestId);
+      if (active && active.timer === null) this.armRequestTimer(message.requestId, active);
+    }
+  }
+
+  private armRequestTimer(requestId: bigint, pending: PendingRequest): void {
+    const timer = setTimeout(() => {
+      if (!this.pending.delete(requestId)) return;
+      const error = new ComponentRequestTimeoutError(pending.operation, pending.timeoutMs);
+      pending.reject(error);
+      void this.stopWithFailure(error);
+    }, pending.timeoutMs);
+    timer.unref?.();
+    pending.timer = timer;
   }
 
   private async stopWithFailure(error: Error): Promise<void> {
@@ -215,7 +271,7 @@ export class ComponentWorkerClient {
 
   private failAll(error: Error): void {
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();
@@ -231,10 +287,10 @@ class ComponentExecutionPartition {
     readonly client: ComponentWorkerClient,
   ) {}
 
-  advance(effect?: { effectId: bigint; ok: boolean; value: string }): Promise<PlanApplyResult> {
+  advance(): Promise<ComponentExecutionResult> {
     return this.ordered(async () => {
-      const result = await this.client.call('advance', { effect });
-      return result as PlanApplyResult;
+      const result = await this.client.call('advance');
+      return result as ComponentExecutionResult;
     });
   }
 
@@ -291,6 +347,7 @@ export class ComponentExecutionPool {
     plan: Uint8Array,
     logicalTime: bigint,
     suppliedCapability?: ExecutionCapabilityDescriptor,
+    toolDispatcher?: ComponentToolDispatcher,
   ): Promise<StartedPlanReceipt> {
     const maxActive = this.options.maxActiveExecutions ?? 8;
     if (this.executions.size + this.starting >= maxActive) {
@@ -298,7 +355,7 @@ export class ComponentExecutionPool {
     }
     this.starting += 1;
     const handle = ++this.nextHandle;
-    const client = new ComponentWorkerClient(this.options);
+    const client = new ComponentWorkerClient(this.options, toolDispatcher);
     try {
       await client.start();
       const planHash = canonicalPlanHash(plan);
@@ -326,9 +383,8 @@ export class ComponentExecutionPool {
 
   async applyPlan(
     handle: number,
-    effect?: { effectId: bigint; ok: boolean; value: string },
-  ): Promise<PlanApplyResult> {
-    return this.require(handle).advance(effect);
+  ): Promise<ComponentExecutionResult> {
+    return this.require(handle).advance();
   }
 
   inspectPlan(handle: number): Promise<StartedPlanInspection> {
@@ -405,4 +461,16 @@ function canonicalPlanHash(plan: Uint8Array): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function toolErrorCode(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && code.length > 0) return code;
+  }
+  return 'COMPONENT_TOOL_FAILED';
+}
+
+function toolDispatchError(code: string): Error & { code: string } {
+  return Object.assign(new Error(code), { code });
 }

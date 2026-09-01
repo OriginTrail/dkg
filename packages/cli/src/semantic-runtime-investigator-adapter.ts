@@ -20,7 +20,7 @@ export function createInvestigatorAdapter(
   return {
     id: 'agent/investigate',
     version: '1',
-    witInterface: 'origintrail:semantic-tools/investigator@1',
+    witInterface: 'origintrail:semantic-runtime/investigator@0.1.0',
     implementationVersion: '1',
     implementationHash,
     enabled: () => useCodex || Boolean(llmConfig?.apiKey),

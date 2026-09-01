@@ -16,6 +16,7 @@ import {
   encodeCapabilityMetadata,
   startSemanticRuntimeHost,
   type AdmittedPlanSummary,
+  type ComponentToolDispatcher,
   type SemanticRuntimeConfig,
   type SemanticRuntimeHost,
   type SemanticRuntimeHostOptions,
@@ -771,10 +772,6 @@ async function invokeResolved(
     revoked: false,
     approvals: [...resolved.plan.approvalRequirements],
   };
-  const receipt = await runtime.host.startPlan(resolved.plan.canonicalPlan, 0n, capability);
-  if (!bytesEqual(receipt.canonicalHash, resolved.plan.canonicalHash)) {
-    throw new Error('materialized strategy hash differs from admitted strategy hash');
-  }
   const policyFactsDigest = Uint8Array.from(Buffer.from(resolved.policyHashHex, 'hex'));
   const broker = new RuntimeEffectBroker(
     runtime.store,
@@ -822,77 +819,96 @@ async function invokeResolved(
     });
   }
 
+  const toolDispatcher: ComponentToolDispatcher = async (call) => {
+    const binding = call.kind === 'investigator'
+      ? {
+        operation: 'agent/investigate',
+        version: '1',
+        normalizedInput: { prompt: call.prompt },
+      }
+      : {
+        operation: 'dkg/query',
+        version: '1',
+        normalizedInput: {
+          selector: call.queryId,
+          parameters: Object.fromEntries(call.parameters.map(({ name, value }) => [name, value])),
+        },
+      };
+    const tool = resolved.public.requiredTools.find((candidate) =>
+      candidate.operation === binding.operation
+      && candidate.semanticVersion === binding.version);
+    const descriptor = resolved.registry.describe(binding.operation, binding.version);
+    if (!tool || !descriptor) {
+      throw new SemanticProgramError('UNSUPPORTED_PROGRAM_TOOL', 'Unsupported WASI tool import', 422);
+    }
+    const effectId = `urn:sr:effect:${invocationId}:${call.effectId}`;
+    const proposal = {
+      effectId,
+      executionId: executionIri,
+      processId: `wasi:${call.kind}`,
+      stepId: `wasi-tool-${call.effectId}`,
+      attemptId: 'attempt-1',
+      principal: resolved.public.executingNode,
+      adapterId: binding.operation,
+      adapterVersion: binding.version,
+      verb: descriptor.verb,
+      resource: tool.toolIri,
+      normalizedInput: binding.normalizedInput,
+      capabilityId,
+      idempotencyKey: `${executionIri}:${call.effectId}`,
+      budgetReservation: 0n,
+      now: Date.now(),
+    };
+    let outcome;
+    if (descriptor.effectClass === 'read') {
+      try {
+        outcome = await broker.dispatchRead(proposal);
+      } catch (error) {
+        runtime.store.setExecutionStatus(executionIri, 'failed');
+        throw new SemanticProgramError(
+          'QUERY_REQUEST_FAILED',
+          `DKG query failed: ${safeMessage(error)}`,
+          502,
+        );
+      }
+    } else {
+      await broker.prepareEffect(proposal);
+      outcome = broker.readOutcome(effectId);
+      if (outcome?.state === 'prepared') {
+        await broker.dispatchPrepared(effectId, Date.now());
+        outcome = broker.readOutcome(effectId);
+      }
+    }
+    if (outcome?.state !== 'succeeded' || typeof outcome.output !== 'string') {
+      if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling') {
+        throw new SemanticProgramError(
+          'INVOCATION_REQUIRES_RECONCILIATION',
+          'The tool call may have reached its target; it will not be dispatched again automatically',
+          409,
+        );
+      }
+      runtime.store.setExecutionStatus(executionIri, 'failed');
+      throw new SemanticProgramError('TOOL_REQUEST_FAILED', 'WASI tool request failed', 502);
+    }
+    return call.kind === 'investigator'
+      ? { kind: 'investigator', output: outcome.output }
+      : { kind: 'query-catalog', json: outcome.output };
+  };
+
+  const receipt = await runtime.host.startPlan(
+    resolved.plan.canonicalPlan,
+    0n,
+    capability,
+    toolDispatcher,
+  );
+  if (!bytesEqual(receipt.canonicalHash, resolved.plan.canonicalHash)) {
+    throw new Error('materialized strategy hash differs from admitted strategy hash');
+  }
+
   let execution;
   let inspection;
   try {
     execution = await runtime.host.applyPlan(receipt.handle);
-    while (execution.kind === 'effect-requested') {
-      const effect = execution;
-      const tool = resolved.public.requiredTools.find((candidate) =>
-        candidate.operation === effect.operation
-        && candidate.semanticVersion === String(effect.version));
-      if (!tool) {
-        throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
-      }
-      const descriptor = resolved.registry.describe(effect.operation, String(effect.version));
-      if (!descriptor) {
-        throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
-      }
-      const effectId = `urn:sr:effect:${invocationId}:${effect.effectId}`;
-      const proposal = {
-        effectId,
-        executionId: executionIri,
-        processId: toHex(effect.processId),
-        stepId: `wasm-effect-${effect.effectId}`,
-        attemptId: 'attempt-1',
-        principal: resolved.public.executingNode,
-        adapterId: effect.operation,
-        adapterVersion: String(effect.version),
-        verb: descriptor.verb,
-        resource: tool.toolIri,
-        normalizedInput: normalizeEffectInput(effect.operation, effect.arguments),
-        capabilityId,
-        idempotencyKey: `${executionIri}:${effect.effectId}`,
-        budgetReservation: 0n,
-        now: Date.now(),
-      };
-      let outcome;
-      if (descriptor.effectClass === 'read') {
-        try {
-          outcome = await broker.dispatchRead(proposal);
-        } catch (error) {
-          runtime.store.setExecutionStatus(executionIri, 'failed');
-          throw new SemanticProgramError(
-            'QUERY_REQUEST_FAILED',
-            `DKG query failed: ${safeMessage(error)}`,
-            502,
-          );
-        }
-      } else {
-        await broker.prepareEffect(proposal);
-        outcome = broker.readOutcome(effectId);
-        if (outcome?.state === 'prepared') {
-          await broker.dispatchPrepared(effectId, Date.now());
-          outcome = broker.readOutcome(effectId);
-        }
-      }
-      if (outcome?.state !== 'succeeded' || typeof outcome.output !== 'string') {
-        if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling') {
-          throw new SemanticProgramError(
-            'INVOCATION_REQUIRES_RECONCILIATION',
-            'The LLM call may have reached Codex; it will not be dispatched again automatically',
-            409,
-          );
-        }
-        runtime.store.setExecutionStatus(executionIri, 'failed');
-        throw new SemanticProgramError('LLM_REQUEST_FAILED', 'LLM request failed', 502);
-      }
-      execution = await runtime.host.applyPlan(receipt.handle, {
-        effectId: effect.effectId,
-        ok: true,
-        value: outcome.output,
-      });
-    }
     inspection = await runtime.host.inspectPlan(receipt.handle);
   } finally {
     await runtime.host.dropPlan(receipt.handle).catch(() => undefined);
@@ -1254,35 +1270,6 @@ function resultRows(result: unknown): Array<Record<string, unknown>> {
   if (typeof result !== 'object' || result === null || !('bindings' in result)) return [];
   const rows = (result as { bindings?: unknown }).bindings;
   return Array.isArray(rows) ? rows as Array<Record<string, unknown>> : [];
-}
-
-function textArgument(value: string | undefined, code = 'INVALID_LLM_ARGUMENT'): string {
-  if (value?.startsWith('t:') || value?.startsWith('s:')) return value.slice(2);
-  throw new SemanticProgramError(code, 'Effect argument must be text', 422);
-}
-
-export function normalizeEffectInput(operation: string, arguments_: string[]): unknown {
-  if (operation === 'agent/investigate') {
-    if (arguments_.length !== 1) {
-      throw new SemanticProgramError(
-        'INVALID_LLM_ARGUMENT',
-        'agent/investigate@1 requires exactly one text prompt',
-        422,
-      );
-    }
-    return { prompt: textArgument(arguments_[0]) };
-  }
-  if (operation === 'dkg/query') {
-    if (arguments_.length !== 1) {
-      throw new SemanticProgramError(
-        'INVALID_QUERY_ARGUMENT',
-        'dkg/query@1 requires exactly one saved-query selector',
-        422,
-      );
-    }
-    return { selector: textArgument(arguments_[0], 'INVALID_QUERY_ARGUMENT') };
-  }
-  throw new SemanticProgramError('UNSUPPORTED_PROGRAM_EFFECT', 'Unsupported program effect', 422);
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

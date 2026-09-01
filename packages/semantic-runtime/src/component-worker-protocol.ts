@@ -2,6 +2,8 @@ import type { ResourceLimits } from 'node:worker_threads';
 
 import type {
   ComponentOperationResult,
+  ComponentToolCall,
+  ComponentToolResult,
   ExecutionCapabilityDescriptor,
 } from './component-types.js';
 
@@ -33,8 +35,35 @@ export interface ComponentWorkerRequest {
   plan?: Uint8Array;
   logicalTime?: bigint;
   capability?: ExecutionCapabilityDescriptor;
-  effect?: { effectId: bigint; ok: boolean; value: string };
 }
+
+export interface ComponentWorkerToolCall {
+  type: 'tool-call';
+  requestId: bigint;
+  toolCallId: bigint;
+  call: ComponentToolCall;
+}
+
+export interface ComponentWorkerToolSuccess {
+  type: 'tool-result';
+  toolCallId: bigint;
+  ok: true;
+  result: ComponentToolResult;
+}
+
+export interface ComponentWorkerToolFailure {
+  type: 'tool-result';
+  toolCallId: bigint;
+  ok: false;
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export type ComponentWorkerInbound =
+  | ComponentWorkerRequest
+  | ComponentWorkerToolSuccess
+  | ComponentWorkerToolFailure;
 
 export interface ComponentWorkerReady {
   type: 'ready';
@@ -69,6 +98,7 @@ export interface ComponentWorkerFatal {
 
 export type ComponentWorkerMessage =
   | ComponentWorkerReady
+  | ComponentWorkerToolCall
   | ComponentWorkerSuccess
   | ComponentWorkerFailure
   | ComponentWorkerFatal;

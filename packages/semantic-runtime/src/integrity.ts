@@ -63,6 +63,8 @@ const REQUIRED_FILES = [
   'cjs/runtime_bg.wasm',
   'cjs/runtime_bg.wasm.d.ts',
   'component/interfaces/origintrail-semantic-runtime-capability.d.ts',
+  'component/interfaces/origintrail-semantic-runtime-investigator.d.ts',
+  'component/interfaces/origintrail-semantic-runtime-query-catalog.d.ts',
   'component/interfaces/origintrail-semantic-runtime-runtime.d.ts',
   'component/interfaces/wasi-cli-environment.d.ts',
   'component/interfaces/wasi-cli-exit.d.ts',
@@ -89,6 +91,8 @@ const REQUIRED_FILES = [
 
 const EXPECTED_COMPONENT_IMPORTS = [
   'origintrail:semantic-runtime/capability@0.1.0',
+  'origintrail:semantic-runtime/investigator@0.1.0',
+  'origintrail:semantic-runtime/query-catalog@0.1.0',
   'wasi:cli/environment@0.2.12',
   'wasi:cli/exit@0.2.12',
   'wasi:cli/stderr@0.2.12',

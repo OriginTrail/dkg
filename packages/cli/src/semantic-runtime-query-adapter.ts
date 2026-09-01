@@ -19,6 +19,7 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export interface DkgQueryInput {
   selector: string;
+  parameters?: Record<string, string>;
 }
 
 export function createDkgQueryAdapter(
@@ -32,7 +33,7 @@ export function createDkgQueryAdapter(
   return {
     id: 'dkg/query',
     version: '1',
-    witInterface: 'origintrail:semantic-tools/dkg-query@1',
+    witInterface: 'origintrail:semantic-runtime/query-catalog@0.1.0',
     implementationVersion: '1',
     implementationHash,
     effectClass: 'read',
@@ -49,7 +50,10 @@ export function createDkgQueryAdapter(
         || value.selector.length === 0
         || Buffer.byteLength(value.selector, 'utf8') > MAX_SELECTOR_BYTES
       ) throw new Error('INVALID_QUERY_SELECTOR');
-      return { selector: value.selector };
+      const parameters = 'parameters' in value && value.parameters !== undefined
+        ? validateParameters(value.parameters)
+        : {};
+      return { selector: value.selector, parameters };
     },
     async dispatch(authorization, input) {
       traceTiming('start', authorization.effectId);
@@ -66,7 +70,7 @@ export function createDkgQueryAdapter(
           input.selector,
         );
         if (!item) throw new Error('QUERY_CATALOG_ENTRY_NOT_FOUND');
-        const execution = prepareQueryCatalogExecution(item);
+        const execution = prepareQueryCatalogExecution(item, input.parameters);
         const result = await agent.query(execution.sparql, {
           contextGraphId,
           source: 'semantic-runtime-dkg-query',
@@ -94,6 +98,24 @@ export function createDkgQueryAdapter(
     }),
     couldHaveReachedTarget: () => false,
   };
+}
+
+function validateParameters(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('INVALID_QUERY_PARAMETERS');
+  }
+  const entries = Object.entries(value);
+  if (entries.length > 32) throw new Error('INVALID_QUERY_PARAMETERS');
+  const normalized: Record<string, string> = {};
+  for (const [name, parameter] of entries) {
+    if (
+      !/^[A-Za-z][A-Za-z0-9_]*$/.test(name)
+      || typeof parameter !== 'string'
+      || Buffer.byteLength(parameter, 'utf8') > 4 * 1024
+    ) throw new Error('INVALID_QUERY_PARAMETERS');
+    normalized[name] = parameter;
+  }
+  return normalized;
 }
 
 function traceTiming(phase: 'start' | 'finish', effectId: string): void {

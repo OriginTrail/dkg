@@ -8,12 +8,17 @@ import { parentPort, workerData } from 'node:worker_threads';
 import type {
   AdmittedPlanSummary,
   AdmissionDiagnostic,
-  PlanApplyResult,
   StartedPlanInspection,
 } from './codec.js';
-import type { ExecutionCapabilityDescriptor } from './component-types.js';
+import type {
+  ComponentExecutionResult,
+  ComponentToolCall,
+  ComponentToolResult,
+  ExecutionCapabilityDescriptor,
+} from './component-types.js';
 import type {
   ComponentWorkerBootstrap,
+  ComponentWorkerInbound,
   ComponentWorkerMessage,
   ComponentWorkerRequest,
 } from './component-worker-protocol.js';
@@ -27,10 +32,7 @@ interface ComponentDiagnostic {
 }
 
 interface ComponentExecution {
-  advance(effect?: {
-    effectId: bigint;
-    outcome: { tag: 'ok'; val: string } | { tag: 'err'; val: ComponentDiagnostic };
-  }): Promise<unknown>;
+  advance(): Promise<unknown>;
   inspect(): unknown;
   [Symbol.dispose](): void;
 }
@@ -92,8 +94,15 @@ if (abi !== bootstrap.expectedAbi) {
 
 let execution: ComponentExecution | null = null;
 let capability: Readonly<ExecutionCapabilityDescriptor> | null = null;
+let capabilityResource: ExecutionCapability | null = null;
 let operationCount = 0;
 let requestTail = Promise.resolve();
+let activeRequestId: bigint | null = null;
+let toolCallSequence = 0n;
+const pendingToolCalls = new Map<bigint, {
+  resolve: (result: ComponentToolResult) => void;
+  reject: (error: Error) => void;
+}>();
 
 post({
   type: 'ready',
@@ -104,7 +113,12 @@ post({
 });
 
 port.on('message', (value: unknown) => {
-  const request = value as ComponentWorkerRequest;
+  const message = value as ComponentWorkerInbound;
+  if (message?.type === 'tool-result') {
+    handleToolResult(message);
+    return;
+  }
+  const request = message as ComponentWorkerRequest;
   requestTail = requestTail.then(
     () => handle(request),
     () => handle(request),
@@ -116,6 +130,7 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
     fatal(undefined, 'semantic component Worker received a malformed request envelope');
     return;
   }
+  activeRequestId = request.requestId;
   try {
     let result;
     switch (request.op) {
@@ -136,8 +151,9 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
       case 'start': {
         if (execution) throw componentFailure('COMPONENT_ALREADY_STARTED', 'lifecycle');
         const descriptor = validateCapability(request.capability);
+        const resource = new ExecutionCapability(descriptor);
         const [created, receiptValue] = component.runtime.start(
-          new ExecutionCapability(descriptor),
+          resource,
           requirePlan(request),
           request.logicalTime ?? 0n,
         );
@@ -148,6 +164,7 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
         }
         execution = created;
         capability = descriptor;
+        capabilityResource = resource;
         result = { ...receipt, instanceId };
         break;
       }
@@ -158,22 +175,7 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
         if (operationCount > Math.min(bootstrap.maxOperations, capability!.budgets.maxOperations)) {
           throw componentFailure('COMPONENT_OPERATION_BUDGET_EXHAUSTED', 'limit');
         }
-        result = normalizeStep(await active.advance(request.effect
-          ? {
-            effectId: request.effect.effectId,
-            outcome: request.effect.ok
-              ? { tag: 'ok', val: request.effect.value }
-              : {
-                tag: 'err',
-                val: {
-                  code: request.effect.value,
-                  message: 'host effect failed',
-                  category: 'effect',
-                  retryable: false,
-                },
-              },
-          }
-          : undefined));
+        result = normalizeStep(await active.advance());
         break;
       }
       case 'inspect':
@@ -184,6 +186,7 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
         execution?.[Symbol.dispose]();
         execution = null;
         capability = null;
+        capabilityResource = null;
         result = { dropped: true as const };
         break;
       case 'test_hang':
@@ -205,6 +208,8 @@ async function handle(request: ComponentWorkerRequest): Promise<void> {
     }
     const failure = normalizeFailure(error);
     post({ type: 'response', requestId: request.requestId, ok: false, ...failure });
+  } finally {
+    activeRequestId = null;
   }
 }
 
@@ -243,15 +248,147 @@ function componentImports(): object {
   return new Proxy(Object.create(null) as object, {
     get: (_target, property) => {
       const name = String(property);
-      if (name.startsWith('origintrail:semantic-runtime/capability')) {
+      if (
+        name === 'origintrail:semantic-runtime/capability'
+        || name === 'origintrail:semantic-runtime/capability@0.1.0'
+      ) {
         return { ExecutionCapability };
+      }
+      if (
+        name === 'origintrail:semantic-runtime/investigator'
+        || name === 'origintrail:semantic-runtime/investigator@0.1.0'
+      ) {
+        return {
+          investigate: async (
+            resource: ExecutionCapability,
+            request: { effectId: bigint; prompt: string },
+          ): Promise<string> => {
+            assertImportedTool(
+              resource,
+              'agent/investigate',
+              'origintrail:semantic-runtime/investigator@0.1.0',
+            );
+            if (typeof request?.effectId !== 'bigint' || request.effectId <= 0n) {
+              throw componentResultFailure('INVALID_LLM_EFFECT_ID');
+            }
+            if (typeof request.prompt !== 'string') {
+              throw componentResultFailure('INVALID_LLM_ARGUMENT');
+            }
+            const result = await invokeHostTool({
+              kind: 'investigator',
+              effectId: request.effectId,
+              prompt: request.prompt,
+            });
+            if (result.kind !== 'investigator') {
+              throw componentResultFailure('COMPONENT_TOOL_RESULT_MISMATCH');
+            }
+            return result.output;
+          },
+        };
+      }
+      if (
+        name === 'origintrail:semantic-runtime/query-catalog'
+        || name === 'origintrail:semantic-runtime/query-catalog@0.1.0'
+      ) {
+        return {
+          query: async (
+            resource: ExecutionCapability,
+            request: {
+              effectId: bigint;
+              queryId: string;
+              parameters: Array<{ name: string; value: string }>;
+            },
+          ): Promise<{ json: string }> => {
+            assertImportedTool(
+              resource,
+              'dkg/query',
+              'origintrail:semantic-runtime/query-catalog@0.1.0',
+            );
+            if (typeof request?.effectId !== 'bigint' || request.effectId <= 0n) {
+              throw componentResultFailure('INVALID_QUERY_EFFECT_ID');
+            }
+            if (
+              typeof request.queryId !== 'string'
+              || !Array.isArray(request.parameters)
+              || request.parameters.some((entry) =>
+                typeof entry?.name !== 'string' || typeof entry.value !== 'string')
+              || new Set(request.parameters.map((entry) => entry.name)).size
+                !== request.parameters.length
+            ) {
+              throw componentResultFailure('INVALID_QUERY_ARGUMENT');
+            }
+            const result = await invokeHostTool({
+              kind: 'query-catalog',
+              effectId: request.effectId,
+              queryId: request.queryId,
+              parameters: request.parameters.map((entry) => ({ ...entry })),
+            });
+            if (result.kind !== 'query-catalog') {
+              throw componentResultFailure('COMPONENT_TOOL_RESULT_MISMATCH');
+            }
+            return { json: result.json };
+          },
+        };
       }
       if (allowedCarrierImports.some((entry) => name.startsWith(entry))) {
         return deniedInterface;
       }
-      throw componentFailure('UNKNOWN_COMPONENT_IMPORT', 'component');
+      throw new Error(`UNKNOWN_COMPONENT_IMPORT:${name}`);
     },
   });
+}
+
+function invokeHostTool(call: ComponentToolCall): Promise<ComponentToolResult> {
+  const requestId = activeRequestId;
+  if (requestId === null) {
+    return Promise.reject(componentResultFailure('COMPONENT_TOOL_OUTSIDE_EXECUTION'));
+  }
+  const toolCallId = ++toolCallSequence;
+  return new Promise((resolve, reject) => {
+    pendingToolCalls.set(toolCallId, { resolve, reject });
+    post({ type: 'tool-call', requestId, toolCallId, call });
+  });
+}
+
+function handleToolResult(message: Extract<ComponentWorkerInbound, { type: 'tool-result' }>): void {
+  const pending = pendingToolCalls.get(message.toolCallId);
+  if (!pending) {
+    fatal(activeRequestId ?? undefined, 'semantic component Worker received an unknown tool result');
+    return;
+  }
+  pendingToolCalls.delete(message.toolCallId);
+  if (message.ok) pending.resolve(message.result);
+  else pending.reject(componentResultFailure(message.code, message.message, message.retryable));
+}
+
+function assertImportedTool(
+  resource: ExecutionCapability,
+  operation: string,
+  witInterface: string,
+): void {
+  assertCapabilityActive();
+  if (resource !== capabilityResource) {
+    throw componentResultFailure('CAPABILITY_RESOURCE_MISMATCH');
+  }
+  if (!capability!.tools.some((tool) =>
+    tool.operation === operation
+    && tool.version === '1'
+    && tool.witInterface === witInterface)) {
+    throw componentResultFailure('COMPONENT_TOOL_NOT_AUTHORIZED');
+  }
+}
+
+function componentResultFailure(
+  code: string,
+  message = code,
+  retryable = false,
+): Error {
+  const error = new Error(message);
+  Object.defineProperty(error, 'payload', {
+    value: { code, message, retryable },
+    enumerable: false,
+  });
+  return error;
 }
 
 function requirePlan(request: ComponentWorkerRequest): Uint8Array {
@@ -382,25 +519,8 @@ function normalizeInspection(value: unknown): StartedPlanInspection {
   };
 }
 
-function normalizeStep(value: unknown): PlanApplyResult {
+function normalizeStep(value: unknown): ComponentExecutionResult {
   const step = value as { tag: string; val: unknown };
-  if (step.tag === 'effect-requested') {
-    const effect = step.val as {
-      effectId: bigint;
-      processId: Uint8Array;
-      operation: string;
-      version: number;
-      arguments: string[];
-    };
-    return {
-      kind: 'effect-requested',
-      effectId: effect.effectId,
-      processId: Uint8Array.from(effect.processId),
-      operation: effect.operation,
-      version: effect.version,
-      arguments: [...effect.arguments],
-    };
-  }
   if (step.tag !== 'completed') throw componentFailure('UNKNOWN_COMPONENT_STEP', 'component');
   const completion = step.val as {
     events: Array<{ role: string; processId: Uint8Array; value: string }>;
