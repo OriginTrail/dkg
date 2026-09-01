@@ -21,7 +21,11 @@ export interface PublisherSigner {
 export interface PublisherAddressResolution {
   address?: string;
   planningPin?: string;
-  planningPinLabel?: 'publisherPrivateKey' | 'configured publisherAddress' | 'publisherAddressResolver';
+  /** Diagnostics only; signer policy is carried exclusively by registrationPin. */
+  planningPinLabel?: string;
+  registrationPin:
+    | { disposition: 'hard'; address: string }
+    | { disposition: 'advisory' };
 }
 
 interface PublisherPlanningStateLocal {

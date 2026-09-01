@@ -610,13 +610,6 @@ export interface CreateOnChainContextGraphParams {
     */
   registrationDepositPolicy?: ContextGraphRegistrationDepositPolicy;
   /**
-   * Attempt-scoped operational signer pin. This is primarily used by publisher
-   * execution contexts; callers should prefer
-   * `prepareOnChainContextGraphRegistration` so the selected signer cannot
-   * drift between preflight, allowance recovery, and submission.
-   */
-  registrationSignerAddress?: string;
-  /**
    * OT-RFC-38 / LU-6 Phase B — opt-in stable wire identifier the
    * curator commits to at create time. Intended to be
    * `keccak256(bytes(cleartextId))` so the SWM gossip topic, envelope
@@ -642,28 +635,27 @@ export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'context
 
 export type ContextGraphRegistrationCoverageSource = 'explicit' | 'owned' | 'agent' | 'none';
 
-export interface ContextGraphRegistrationCoverage {
-  source: ContextGraphRegistrationCoverageSource;
-  accountId?: bigint;
-}
+export type ContextGraphRegistrationCoverage =
+  | { source: 'none' }
+  | {
+      source: Exclude<ContextGraphRegistrationCoverageSource, 'none'>;
+      /** Positive PCA account id, validated when the capability is prepared. */
+      accountId: bigint;
+    };
 
 /**
  * Inputs consumed while selecting a context-graph registration capability.
  * `registrationSignerAddress` pins an operational signer when a publisher has
  * already selected one. `preferPcaCoveredSigner` is for an unpinned publisher
- * pool: the first configured signer with fully verified coverage is selected,
- * with the primary signer as the deterministic fallback.
+ * pool: fully verified owned coverage is preferred across the pool before
+ * consent-free agent bindings, with the primary signer as the deterministic
+ * fallback. An explicit PCA account always verifies the selected signer.
  */
 export interface PrepareContextGraphRegistrationOptions {
   registrationPcaAccountId?: bigint;
   registrationSignerAddress?: string;
   preferPcaCoveredSigner?: boolean;
 }
-
-export type PreparedCreateOnChainContextGraphParams = Omit<
-  CreateOnChainContextGraphParams,
-  'registrationPcaAccountId' | 'registrationSignerAddress'
->;
 
 /**
  * Immutable, signer-pinned registration capability. The implementation seals
@@ -674,7 +666,7 @@ export interface PreparedContextGraphRegistration {
   signerAddress: string;
   coverage: Readonly<ContextGraphRegistrationCoverage>;
   submit(
-    params: PreparedCreateOnChainContextGraphParams,
+    params: Omit<CreateOnChainContextGraphParams, 'registrationDepositPolicy'>,
   ): Promise<CreateOnChainContextGraphResult>;
 }
 
@@ -1613,7 +1605,16 @@ export interface ChainAdapter {
   prepareOnChainContextGraphRegistration?(
     options?: PrepareContextGraphRegistrationOptions,
   ): Promise<PreparedContextGraphRegistration>;
-  createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  /**
+   * Compatibility wrapper around prepared registration. The first argument is
+   * always canonical context-graph data; optional attempt policy is kept in a
+   * separate preparation-options object. Omitting `preparationOptions`
+   * preserves the historical primary-signer/no-discovery path.
+   */
+  createOnChainContextGraph?(
+    params: CreateOnChainContextGraphParams,
+    preparationOptions?: PrepareContextGraphRegistrationOptions,
+  ): Promise<CreateOnChainContextGraphResult>;
   verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 

@@ -96,6 +96,8 @@ export {
   CuratorRejectedError,
   assertValidPrecomputedUpdateAttestation,
   type DKGPublisherConfig,
+  type PublisherAddressResolverResult,
+  type PublisherAddressResolverSelection,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
   type ShareOptions,

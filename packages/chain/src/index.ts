@@ -148,9 +148,16 @@ export {
   PCA_COVERAGE_UNSUPPORTED_CODE,
   CONTEXT_GRAPH_FACADE_VERSION_UNKNOWN_CODE,
   CONTEXT_GRAPH_REGISTRATION_SIGNER_UNAVAILABLE_CODE,
+  CONTEXT_GRAPH_REGISTRATION_COVERAGE_SIGNER_UNAVAILABLE_CODE,
+  STALE_HUB_BINDING_CODE,
   PcaCoverageUnsupportedError,
   ContextGraphFacadeVersionUnknownError,
   ContextGraphRegistrationSignerUnavailableError,
+  ContextGraphRegistrationCoverageSignerUnavailableError,
+  StaleHubBindingError,
+  isHubStaleError,
+  parsePcaRegistrationCoverageAccount,
+  type PcaRegistrationCoverageAccount,
   type PublisherWalletBalance,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';

@@ -20,7 +20,6 @@ import type {
   CreateOnChainContextGraphResult,
   PrepareContextGraphRegistrationOptions,
   PreparedContextGraphRegistration,
-  PreparedCreateOnChainContextGraphParams,
   VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
@@ -1224,6 +1223,12 @@ export class MockChainAdapter implements ChainAdapter {
   async prepareOnChainContextGraphRegistration(
     options: PrepareContextGraphRegistrationOptions = {},
   ): Promise<PreparedContextGraphRegistration> {
+    if (
+      options.registrationPcaAccountId !== undefined
+      && options.registrationPcaAccountId <= 0n
+    ) {
+      throw new RangeError('registrationPcaAccountId must be a positive PCA account id.');
+    }
     let signerAddress: string;
     try {
       signerAddress = ethers.getAddress(await this.getSignerAddress());
@@ -1254,23 +1259,21 @@ export class MockChainAdapter implements ChainAdapter {
       ? { source: 'explicit' as const, accountId: options.registrationPcaAccountId }
       : { source: 'none' as const });
     const submit = async (
-      params: PreparedCreateOnChainContextGraphParams,
+      params: CreateOnChainContextGraphParams,
     ): Promise<CreateOnChainContextGraphResult> => {
-      const runtimeParams = params as CreateOnChainContextGraphParams;
-      if (
-        Object.prototype.hasOwnProperty.call(runtimeParams, 'registrationPcaAccountId')
-        || Object.prototype.hasOwnProperty.call(runtimeParams, 'registrationSignerAddress')
-      ) {
-        throw new Error(
-          'Prepared context-graph registration does not accept signer or PCA coverage overrides.',
-        );
-      }
       return this.createOnChainContextGraph(params);
     };
     return Object.freeze({ signerAddress, coverage, submit });
   }
 
-  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
+  async createOnChainContextGraph(
+    params: CreateOnChainContextGraphParams,
+    preparationOptions?: PrepareContextGraphRegistrationOptions,
+  ): Promise<CreateOnChainContextGraphResult> {
+    if (preparationOptions !== undefined) {
+      const prepared = await this.prepareOnChainContextGraphRegistration(preparationOptions);
+      return prepared.submit(params);
+    }
     if (params.accessPolicy === undefined || params.publishPolicy === undefined) {
       throw new Error(
         'Mock createOnChainContextGraph: `accessPolicy` and `publishPolicy` are required (SPEC_CG_MEMORY_MODEL).',

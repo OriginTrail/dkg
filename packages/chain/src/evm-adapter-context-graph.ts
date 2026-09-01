@@ -16,18 +16,21 @@ import {
 } from './evm-adapter-base.js';
 import {
   ContextGraphFacadeVersionUnknownError,
+  ContextGraphRegistrationCoverageSignerUnavailableError,
   ContextGraphRegistrationSignerUnavailableError,
-  HUB_STALE_ERROR_MARKERS,
   PcaCoverageUnsupportedError,
+  StaleHubBindingError,
+  isHubStaleError,
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider, type Wallet } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult, type ContextGraphRegistrationCoverage, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration, type PreparedCreateOnChainContextGraphParams } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult, type ContextGraphRegistrationCoverage, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphCreateDispatch,
   type ContextGraphLegacyCreateArgs,
 } from './context-graph-registration-dispatch.js';
+import { parsePcaRegistrationCoverageAccount } from './evm-adapter-conviction.js';
 
 export const MAX_AUTO_COVERAGE_CANDIDATES = 32;
 export const AUTO_COVERAGE_DISCOVERY_TIMEOUT_MS = 5_000;
@@ -46,6 +49,11 @@ type CoverageDiscoverySnapshot = {
   pca: Contract;
   waiverStorage: Contract;
   reads: CoverageReadLimiter;
+};
+
+type OwnedCoverageDiscovery = {
+  coverage: ContextGraphRegistrationCoverage;
+  allowAgentFallback: boolean;
 };
 
 type FacadeCapability =
@@ -148,10 +156,6 @@ function parsedFacadeVersion(version: unknown): FacadeCapability | undefined {
   // selector introduced in 10.0.5.
   const supported = comparison > 0 || (comparison === 0 && match[4] === undefined);
   return { state: supported ? 'supported' : 'unsupported', version: version.trim() };
-}
-
-function accountField(account: any, name: string, index: number): any {
-  return account?.[name] ?? account?.[index];
 }
 
 type ContextGraphRegistryScanPlan =
@@ -579,14 +583,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
 
     const explicitAccountId = options.registrationPcaAccountId;
-    const hasExplicitCoverage = explicitAccountId !== undefined && explicitAccountId > 0n;
+    if (explicitAccountId !== undefined && explicitAccountId <= 0n) {
+      throw new RangeError('registrationPcaAccountId must be a positive PCA account id.');
+    }
     const pinnedSigner = options.registrationSignerAddress
       ? this.registrationSignerByAddress(options.registrationSignerAddress)
       : undefined;
 
-    if (hasExplicitCoverage) {
+    if (explicitAccountId !== undefined) {
+      const candidates = pinnedSigner
+        ? [pinnedSigner]
+        : options.preferPcaCoveredSigner
+          ? this.signerPool
+          : [this.signer];
+      const signer = await this.resolveExplicitCoverageSigner(explicitAccountId, candidates);
       return this.sealContextGraphRegistration(
-        pinnedSigner ?? this.signer,
+        signer,
         { source: 'explicit', accountId: explicitAccountId },
       );
     }
@@ -599,9 +611,21 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       const deadline = Date.now() + AUTO_COVERAGE_DISCOVERY_TIMEOUT_MS;
       const snapshot = await this.prepareCoverageDiscoverySnapshot(deadline);
       if (snapshot) {
+        const agentCandidates: Wallet[] = [];
         for (const signer of this.signerPool) {
-          const coverage = await this.discoverCoverageForSigner(signer, snapshot);
-          if (coverage.source !== 'none') {
+          const owned = await this.discoverOwnedCoverageForSigner(signer, snapshot);
+          if (owned.coverage.source === 'owned') {
+            return this.sealContextGraphRegistration(signer, owned.coverage);
+          }
+          if (owned.allowAgentFallback) agentCandidates.push(signer);
+          if (Date.now() >= deadline) break;
+        }
+        // Ownership has stronger authority than a consent-free agent binding,
+        // so only consult agent mappings after every pool signer has had a
+        // bounded opportunity to prove owned coverage.
+        for (const signer of agentCandidates) {
+          const coverage = await this.discoverAgentCoverageForSigner(signer, snapshot);
+          if (coverage.source === 'agent') {
             return this.sealContextGraphRegistration(signer, coverage);
           }
           if (Date.now() >= deadline) break;
@@ -621,24 +645,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async createOnChainContextGraph(
     params: CreateOnChainContextGraphParams,
+    preparationOptions?: PrepareContextGraphRegistrationOptions,
   ): Promise<CreateOnChainContextGraphResult> {
-    const shouldPrepare =
-      params.registrationPcaAccountId !== undefined
-      || params.registrationSignerAddress !== undefined;
-    const prepared = shouldPrepare
-      ? await this.prepareOnChainContextGraphRegistration({
-          registrationPcaAccountId: params.registrationPcaAccountId,
-          registrationSignerAddress: params.registrationSignerAddress,
-        })
+    const prepared = preparationOptions !== undefined
+      ? await this.prepareOnChainContextGraphRegistration(preparationOptions)
       // Preserve the legacy direct-call path: callers that did not ask for a
       // registration execution context do not incur PCA discovery reads.
       : this.sealContextGraphRegistration(this.signer, { source: 'none' });
-    const {
-      registrationPcaAccountId: _registrationPcaAccountId,
-      registrationSignerAddress: _registrationSignerAddress,
-      ...submitParams
-    } = params;
-    return prepared.submit(submitParams);
+    return prepared.submit(params);
   }
 
   private registrationSignerByAddress(address: string): Wallet {
@@ -653,25 +667,71 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     return signer;
   }
 
+  /**
+   * Resolve one explicitly requested PCA against the configured signer pool.
+   * Ownership wins without per-signer reads; otherwise exact agent mappings
+   * are checked in deterministic pool order. Explicit intent fails closed and
+   * never silently degrades to the primary signer/deposit path.
+   */
+  private async resolveExplicitCoverageSigner(
+    accountId: bigint,
+    candidates: readonly Wallet[],
+  ): Promise<Wallet> {
+    const pca = this.contracts.dkgPublishingConvictionNFT;
+    if (!pca) {
+      throw new ContextGraphRegistrationCoverageSignerUnavailableError(accountId, {
+        cause: new Error('DKGPublishingConvictionNFT is not deployed.'),
+      });
+    }
+
+    let firstReadError: unknown;
+    try {
+      const owner = ethers.getAddress(String(await this.readContract(
+        pca,
+        'pca.ownerOf explicit registration coverage',
+        'ownerOf',
+        accountId,
+      )));
+      const ownerSigner = candidates.find(
+        (candidate) => ethers.getAddress(candidate.address) === owner,
+      );
+      if (ownerSigner) return ownerSigner;
+    } catch (err) {
+      firstReadError = err;
+    }
+
+    for (const signer of candidates) {
+      try {
+        const mappedAccountId = BigInt(await this.readContract(
+          pca,
+          'pca.agentToAccountId explicit registration coverage',
+          'agentToAccountId',
+          signer.address,
+        ));
+        if (mappedAccountId === accountId) return signer;
+      } catch (err) {
+        firstReadError ??= err;
+      }
+    }
+
+    throw new ContextGraphRegistrationCoverageSignerUnavailableError(accountId, {
+      cause: firstReadError,
+    });
+  }
+
   private sealContextGraphRegistration(
     signer: Wallet,
     coverage: ContextGraphRegistrationCoverage,
   ): PreparedContextGraphRegistration {
+    if (coverage.source !== 'none' && coverage.accountId <= 0n) {
+      throw new RangeError('Covered context-graph registration requires a positive PCA account id.');
+    }
     const signerAddress = ethers.getAddress(signer.address);
     const sealedCoverage = Object.freeze({ ...coverage });
     const submit = async (
-      params: PreparedCreateOnChainContextGraphParams,
+      params: CreateOnChainContextGraphParams,
     ): Promise<CreateOnChainContextGraphResult> => {
-      const runtimeParams = params as CreateOnChainContextGraphParams;
-      if (
-        runtimeParams == null
-        || Object.prototype.hasOwnProperty.call(runtimeParams, 'registrationPcaAccountId')
-        || Object.prototype.hasOwnProperty.call(runtimeParams, 'registrationSignerAddress')
-      ) {
-        throw new Error(
-          'Prepared context-graph registration does not accept signer or PCA coverage overrides.',
-        );
-      }
+      if (params == null) throw new TypeError('Prepared context-graph registration requires create parameters.');
       // A prepared capability may outlive adapter reconfiguration. Fail rather
       // than substituting another pool signer; the captured wallet remains the
       // only wallet this capability can use.
@@ -735,6 +795,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     signer: Wallet,
     snapshot: CoverageDiscoverySnapshot,
   ): Promise<ContextGraphRegistrationCoverage> {
+    const owned = await this.discoverOwnedCoverageForSigner(signer, snapshot);
+    if (owned.coverage.source === 'owned' || !owned.allowAgentFallback) {
+      return owned.coverage;
+    }
+    return this.discoverAgentCoverageForSigner(signer, snapshot);
+  }
+
+  private async discoverOwnedCoverageForSigner(
+    signer: Wallet,
+    snapshot: CoverageDiscoverySnapshot,
+  ): Promise<OwnedCoverageDiscovery> {
     try {
       const balance = BigInt(await snapshot.reads.run(() => this.readContract(
         snapshot.pca,
@@ -745,7 +816,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       if (balance > BigInt(MAX_AUTO_COVERAGE_CANDIDATES)) {
         // Do not consult an unsolicited agent binding after refusing amplified
         // owner enumeration. The operator can still supply an explicit PCA ID.
-        return { source: 'none' };
+        return { coverage: { source: 'none' }, allowAgentFallback: false };
       }
 
       const accountIds = await Promise.all(Array.from(
@@ -770,9 +841,28 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         ),
       })));
       const owned = ownerEligibility.find((candidate) => candidate.eligible);
-      if (owned) return { source: 'owned', accountId: owned.accountId };
-      if (snapshot.reads.expired()) return { source: 'none' };
+      if (owned) {
+        return {
+          coverage: { source: 'owned', accountId: owned.accountId },
+          allowAgentFallback: false,
+        };
+      }
+      return {
+        coverage: { source: 'none' },
+        allowAgentFallback: !snapshot.reads.expired(),
+      };
+    } catch {
+      // A signer-level owner-enumeration or total-budget failure cannot safely
+      // fall through to an unsolicited agent binding.
+      return { coverage: { source: 'none' }, allowAgentFallback: false };
+    }
+  }
 
+  private async discoverAgentCoverageForSigner(
+    signer: Wallet,
+    snapshot: CoverageDiscoverySnapshot,
+  ): Promise<ContextGraphRegistrationCoverage> {
+    try {
       const agentAccountId = BigInt(await snapshot.reads.run(() => this.readContract(
         snapshot.pca,
         'pca.agentToAccountId registration coverage',
@@ -791,8 +881,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         return { source: 'agent', accountId: agentAccountId };
       }
     } catch {
-      // Enumeration, agent resolution, or total-budget failure makes automatic
-      // coverage unavailable. Never guess a candidate.
+      // Agent resolution or total-budget failure makes automatic coverage
+      // unavailable. Never guess a candidate.
     }
     return { source: 'none' };
   }
@@ -828,9 +918,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       ]);
       if (ethers.getAddress(String(owner)) !== ethers.getAddress(signerAddress)) return false;
 
-      const committed = BigInt(accountField(account, 'committedTRAC', 0) ?? 0n);
-      const expiresAtTimestamp = BigInt(accountField(account, 'expiresAtTimestamp', 4) ?? 0n);
-      const fullySwept = Boolean(accountField(account, 'fullySwept', 8));
+      const parsedAccount = parsePcaRegistrationCoverageAccount(account);
+      if (!parsedAccount) return false;
+      const { committedTRAC: committed, expiresAtTimestamp, fullySwept } = parsedAccount;
       if (
         committed === 0n
         || fullySwept
@@ -858,8 +948,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         'version',
       );
     } catch (err) {
-      const message = err instanceof Error ? err.message : '';
-      if (HUB_STALE_ERROR_MARKERS.some((marker) => message.includes(marker))) throw err;
+      if (isHubStaleError(err)) throw err;
       throw new ContextGraphFacadeVersionUnknownError({ cause: err });
     }
     const capability = parsedFacadeVersion(rawVersion);
@@ -868,7 +957,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   }
 
   private async submitPreparedContextGraphRegistration(
-    params: PreparedCreateOnChainContextGraphParams,
+    params: CreateOnChainContextGraphParams,
     signer: Wallet,
     coverage: Readonly<ContextGraphRegistrationCoverage>,
   ): Promise<CreateOnChainContextGraphResult> {
@@ -894,7 +983,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       params.publishAuthorityAccountId ?? 0n,
       params.nameHash ?? ethers.ZeroHash,
     ];
-    const registrationAccountId = coverage.accountId ?? 0n;
+    const registrationAccountId = coverage.source === 'none' ? 0n : coverage.accountId;
     const legacyCoverageAccountId = params.publishAuthorityAccountId ?? 0n;
     let createDispatch = resolveContextGraphCreateDispatch(legacyCreateArgs);
 
@@ -913,16 +1002,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             await contextGraphs.getAddress(),
           );
         } catch (err) {
-          const message = err instanceof Error ? err.message : '';
-          if (HUB_STALE_ERROR_MARKERS.some((marker) => message.includes(marker))) throw err;
+          if (isHubStaleError(err)) throw err;
           throw new ContextGraphFacadeVersionUnknownError({ cause: err });
         }
         if (!currentBinding) {
-          // Feed the ordinary stale-Hub recovery path. Unlike a retired facade
-          // write, an early capability rejection would otherwise never expose
-          // the canonical Hub authorization marker.
-          throw new Error(
-            'UnauthorizedAccess(Only Contracts in Hub): stale ContextGraphs facade capability binding',
+          throw new StaleHubBindingError(
+            'ContextGraphs',
+            await contextGraphs.getAddress(),
           );
         }
         throw new PcaCoverageUnsupportedError(facade.version);
@@ -954,8 +1040,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
               ))
             : 0n;
         } catch (depositError) {
-          const message = depositError instanceof Error ? depositError.message : '';
-          if (HUB_STALE_ERROR_MARKERS.some((marker) => message.includes(marker))) throw depositError;
+          if (isHubStaleError(depositError)) throw depositError;
           deposit = 0n;
         }
         if (deposit === 0n) throw err;

@@ -94,6 +94,42 @@ export interface RawShardingTableNode extends ArrayLike<unknown> {
   stake?: unknown;
 }
 
+/** The only PCA `accounts()` fields needed by context-graph registration. */
+export interface PcaRegistrationCoverageAccount {
+  committedTRAC: bigint;
+  expiresAtTimestamp: bigint;
+  fullySwept: boolean;
+}
+
+/**
+ * Parse the narrow PCA `accounts()` projection used for registration-waiver
+ * eligibility. Ethers Results expose both named and positional fields, while
+ * lightweight RPC/test decoders may expose only one representation. Unknown,
+ * missing, wrongly typed, or impossible values return `undefined` so callers
+ * fail closed instead of manufacturing zero/false defaults.
+ */
+export function parsePcaRegistrationCoverageAccount(
+  raw: unknown,
+): PcaRegistrationCoverageAccount | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined;
+  try {
+    const record = raw as Record<string | number, unknown>;
+    const committedTRAC = record.committedTRAC ?? record[0];
+    const expiresAtTimestamp = record.expiresAtTimestamp ?? record[4];
+    const fullySwept = record.fullySwept ?? record[8];
+    if (
+      typeof committedTRAC !== 'bigint'
+      || committedTRAC < 0n
+      || typeof expiresAtTimestamp !== 'bigint'
+      || expiresAtTimestamp < 0n
+      || typeof fullySwept !== 'boolean'
+    ) return undefined;
+    return { committedTRAC, expiresAtTimestamp, fullySwept };
+  } catch {
+    return undefined;
+  }
+}
+
 export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNode {
   return {
     nodeId: String(raw.nodeId ?? raw[0]),

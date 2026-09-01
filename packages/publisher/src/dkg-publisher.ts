@@ -442,6 +442,18 @@ export interface KaIdAllocator {
   markReconciled(): void;
 }
 
+export interface PublisherAddressResolverSelection {
+  address: string;
+  registrationPin: 'hard' | 'advisory';
+  /** Human-readable diagnostics only; never interpreted as signer policy. */
+  source: string;
+}
+
+export type PublisherAddressResolverResult =
+  | string
+  | PublisherAddressResolverSelection
+  | undefined;
+
 export interface DKGPublisherConfig {
   store: TripleStore;
   chain: ChainAdapter;
@@ -449,15 +461,15 @@ export interface DKGPublisherConfig {
   keypair: Ed25519Keypair;
   publisherNodeIdentityId?: bigint;
   publisherAddress?: string;
-  /** Retryable publisher address resolver for adapter-backed signing. */
-  publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   /**
-   * Whether resolver output is a hard signer pin for CG registration. Defaults
-   * to true for custom resolvers. The agent's generic adapter-inference
-   * resolver sets this false so an unplanned sync publish can choose a
-   * PCA-covered signer from the adapter pool.
+   * Retryable publisher address resolver for adapter-backed signing. Legacy
+   * string results remain hard registration pins; new callers should return a
+   * typed result so curated authority can be hard while generic adapter
+   * inference remains advisory.
    */
-  publisherAddressResolverPinsRegistration?: boolean;
+  publisherAddressResolver?: (
+    contextGraphId?: bigint,
+  ) => Promise<PublisherAddressResolverResult>;
   /** EVM private key for signing publish requests (hex string with 0x prefix) */
   publisherPrivateKey?: string;
   /**
@@ -1153,8 +1165,9 @@ export class DKGPublisher implements Publisher {
   readonly knownBatchContextGraphs: Map<string, string>;
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress?: string;
-  private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
-  private readonly publisherAddressResolverPinsRegistration: boolean;
+  private readonly publisherAddressResolver?: (
+    contextGraphId?: bigint,
+  ) => Promise<PublisherAddressResolverResult>;
   private readonly publisherWallet?: ethers.Wallet;
   private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
@@ -1184,8 +1197,6 @@ export class DKGPublisher implements Publisher {
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
     this.publisherAddressResolver = config.publisherAddressResolver;
-    this.publisherAddressResolverPinsRegistration =
-      config.publisherAddressResolverPinsRegistration !== false;
 
     const configuredPublisherAddress = normalizePublisherAddress(config.publisherAddress);
     if (config.publisherPrivateKey) {
@@ -1458,19 +1469,49 @@ export class DKGPublisher implements Publisher {
         planningPinLabel: this.publisherWallet
           ? 'publisherPrivateKey'
           : 'configured publisherAddress',
+        registrationPin: { disposition: 'hard', address: this.publisherAddress },
       };
     }
     if (this.publisherAddressResolver) {
-      const resolved = normalizePublisherAddress(await this.publisherAddressResolver(contextGraphId));
+      const resolverResult = await this.publisherAddressResolver(contextGraphId);
+      const typedResult = typeof resolverResult === 'object' && resolverResult !== null
+        ? resolverResult
+        : undefined;
+      if (
+        typedResult
+        && (
+          (typedResult.registrationPin !== 'hard' && typedResult.registrationPin !== 'advisory')
+          || typeof typedResult.source !== 'string'
+          || typedResult.source.trim().length === 0
+        )
+      ) {
+        throw new Error(
+          'publisherAddressResolver returned an invalid typed result; expected ' +
+          `{ address, registrationPin: 'hard' | 'advisory', source }.`
+        );
+      }
+      const resolved = normalizePublisherAddress(
+        typeof resolverResult === 'string' ? resolverResult : typedResult?.address,
+      );
+      if (typedResult && !resolved) {
+        throw new Error('publisherAddressResolver returned an invalid typed address.');
+      }
       if (resolved) {
+        const registrationDisposition = typedResult?.registrationPin ?? 'hard';
         return {
           address: resolved,
           planningPin: resolved,
-          planningPinLabel: 'publisherAddressResolver',
+          planningPinLabel: typedResult?.source.trim() ?? 'publisherAddressResolver',
+          registrationPin: registrationDisposition === 'hard'
+            ? { disposition: 'hard', address: resolved }
+            : { disposition: 'advisory' },
         };
       }
     }
-    return { address: await this.inferAdapterPublisherAddress(contextGraphId, options) };
+    return {
+      address: await this.inferAdapterPublisherAddress(contextGraphId, options),
+      registrationPin: { disposition: 'advisory' },
+    };
   }
 
   /** RFC-001 §9 fallback author when no agent override is supplied. Returns undefined if no signer configured. */
@@ -1480,9 +1521,10 @@ export class DKGPublisher implements Publisher {
 
   /**
    * Prepare context-graph registration in this publisher's execution context.
-   * A configured/resolved publisher is pinned exactly; an unpinned signer pool
-   * asks the adapter for its deterministic PCA-aware registration selection.
-   * The private adapter and wallet never escape this boundary.
+   * A configured publisher or hard resolver result is pinned exactly; an
+   * advisory resolver leaves the signer pool unpinned so the adapter performs
+   * deterministic PCA-aware selection. The private adapter and wallet never
+   * escape this boundary.
    */
   async prepareContextGraphRegistration(
     options: PrepareContextGraphRegistrationOptions = {},
@@ -1503,24 +1545,21 @@ export class DKGPublisher implements Publisher {
         `prepareContextGraphRegistration: invalid registration signer address ${options.registrationSignerAddress}.`,
       );
     }
-    const resolverPinIsAdvisory =
-      selection.planningPinLabel === 'publisherAddressResolver'
-      && !this.publisherAddressResolverPinsRegistration;
+    const hardRegistrationPin = selection.registrationPin.disposition === 'hard'
+      ? selection.registrationPin.address
+      : undefined;
     if (
-      !resolverPinIsAdvisory
-      && selection.planningPin
+      hardRegistrationPin
       && requestedPin
-      && selection.planningPin.toLowerCase() !== requestedPin.toLowerCase()
+      && hardRegistrationPin.toLowerCase() !== requestedPin.toLowerCase()
     ) {
       throw new Error(
         `prepareContextGraphRegistration: requested signer ${requestedPin} does not match ` +
-        `${selection.planningPinLabel ?? 'the configured publisher'} ${selection.planningPin}.`,
+        `${selection.planningPinLabel ?? 'the configured publisher'} ${hardRegistrationPin}.`,
       );
     }
 
-    const registrationSignerAddress = resolverPinIsAdvisory
-      ? requestedPin
-      : selection.planningPin ?? requestedPin;
+    const registrationSignerAddress = hardRegistrationPin ?? requestedPin;
     return prepare.call(this.chain, {
       registrationPcaAccountId: options.registrationPcaAccountId,
       registrationSignerAddress,
