@@ -7,8 +7,8 @@ import {
   type CreateOnChainContextGraphResult,
   type PrepareContextGraphRegistrationOptions,
   type PreparedContextGraphRegistration,
-  type PreparedCreateOnChainContextGraphParams,
 } from '@origintrail-official/dkg-chain';
+import { ContextGraphRegistrationPreparationUnsupportedError } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 class LegacyDirectContextGraphAdapter extends MockChainAdapter {
@@ -34,7 +34,7 @@ class LegacyDirectContextGraphAdapter extends MockChainAdapter {
 
 class CuratedPoolPreparationAdapter extends MockChainAdapter {
   readonly prepareCalls: PrepareContextGraphRegistrationOptions[] = [];
-  readonly submitCalls: PreparedCreateOnChainContextGraphParams[] = [];
+  readonly submitCalls: CreateOnChainContextGraphParams[] = [];
 
   constructor(
     readonly authorizedSigner: string,
@@ -79,6 +79,37 @@ class CuratedPoolPreparationAdapter extends MockChainAdapter {
   }
 }
 
+class AdvisoryInferredPreparationAdapter extends MockChainAdapter {
+  readonly prepareCalls: PrepareContextGraphRegistrationOptions[] = [];
+  readonly submitCalls: CreateOnChainContextGraphParams[] = [];
+
+  constructor(
+    readonly inferredPrimarySigner: string,
+    readonly pcaCoveredSecondarySigner: string,
+  ) {
+    super('mock:31337', inferredPrimarySigner);
+  }
+
+  override async prepareOnChainContextGraphRegistration(
+    options: PrepareContextGraphRegistrationOptions = {},
+  ): Promise<PreparedContextGraphRegistration> {
+    this.prepareCalls.push({ ...options });
+    const signerAddress = options.registrationSignerAddress
+      ? ethers.getAddress(options.registrationSignerAddress)
+      : ethers.getAddress(this.pcaCoveredSecondarySigner);
+    return {
+      signerAddress,
+      coverage: signerAddress.toLowerCase() === this.pcaCoveredSecondarySigner.toLowerCase()
+        ? { source: 'owned' as const, accountId: 23n }
+        : { source: 'none' as const },
+      submit: async (params) => {
+        this.submitCalls.push({ ...params });
+        return { contextGraphId: 1n, txHash: `0x${'33'.repeat(32)}` };
+      },
+    };
+  }
+}
+
 const agents: DKGAgent[] = [];
 
 async function createAgent(name: string, chainAdapter: MockChainAdapter): Promise<DKGAgent> {
@@ -100,6 +131,39 @@ afterEach(async () => {
 });
 
 describe('context-graph registration preparation boundary', () => {
+  it('keeps generic adapter inference advisory in a normally constructed agent', async () => {
+    const inferredPrimarySigner = ethers.Wallet.createRandom();
+    const pcaCoveredSecondarySigner = ethers.Wallet.createRandom();
+    const chain = new AdvisoryInferredPreparationAdapter(
+      inferredPrimarySigner.address,
+      pcaCoveredSecondarySigner.address,
+    );
+    const agent = await createAgent('AdvisoryAdapterInference', chain);
+
+    await agent.createContextGraph({
+      id: 'advisory-adapter-inference',
+      name: 'Advisory adapter inference',
+      callerAgentAddress: inferredPrimarySigner.address,
+    });
+
+    await expect(agent.registerContextGraph('advisory-adapter-inference', {
+      callerAgentAddress: inferredPrimarySigner.address,
+      publisher: agent.publisher,
+    })).resolves.toMatchObject({ onChainId: '1' });
+
+    expect(chain.prepareCalls).toEqual([{
+      registrationPcaAccountId: undefined,
+      registrationSignerAddress: undefined,
+      preferPcaCoveredSigner: true,
+    }]);
+    expect(chain.submitCalls).toHaveLength(1);
+    expect(chain.submitCalls[0]).toMatchObject({
+      publishPolicy: 1,
+    });
+    expect(chain.submitCalls[0]).not.toHaveProperty('publishAuthority');
+    expect(chain.submitCalls[0]).not.toHaveProperty('publishAuthorityAccountId');
+  });
+
   it('preserves ordinary direct registration for a custom adapter without optional preparation', async () => {
     const signer = ethers.Wallet.createRandom();
     const chain = new LegacyDirectContextGraphAdapter(signer.address);
@@ -116,6 +180,29 @@ describe('context-graph registration preparation boundary', () => {
     })).resolves.toMatchObject({ onChainId: '1' });
     expect(chain.createCalls).toHaveLength(1);
 
+    await agent.createContextGraph({
+      id: 'legacy-auto-registration',
+      name: 'Legacy auto registration',
+      callerAgentAddress: signer.address,
+    });
+    await expect(agent.registerContextGraph('legacy-auto-registration', {
+      callerAgentAddress: signer.address,
+      publisher: agent.publisher,
+    })).resolves.toMatchObject({ onChainId: '2' });
+    expect(chain.createCalls).toHaveLength(2);
+
+    await agent.createContextGraph({
+      id: 'legacy-explicit-coverage',
+      name: 'Legacy explicit coverage',
+      callerAgentAddress: signer.address,
+    });
+    await expect(agent.registerContextGraph('legacy-explicit-coverage', {
+      callerAgentAddress: signer.address,
+      publisher: agent.publisher,
+      registrationPcaAccountId: 8n,
+    })).rejects.toBeInstanceOf(ContextGraphRegistrationPreparationUnsupportedError);
+    expect(chain.createCalls).toHaveLength(2);
+
     const selectedPreparer = {
       publisherFallbackAuthorAddress: vi.fn(async () => signer.address),
       prepareContextGraphRegistration: vi.fn(),
@@ -126,7 +213,7 @@ describe('context-graph registration preparation boundary', () => {
     })).rejects.toThrow(/already registered on-chain/i);
     expect(selectedPreparer.publisherFallbackAuthorAddress).not.toHaveBeenCalled();
     expect(selectedPreparer.prepareContextGraphRegistration).not.toHaveBeenCalled();
-    expect(chain.createCalls).toHaveLength(1);
+    expect(chain.createCalls).toHaveLength(2);
 
     await agent.createContextGraph({
       id: 'selected-preparer-no-fallback',
@@ -141,7 +228,7 @@ describe('context-graph registration preparation boundary', () => {
       publisher: selectedPreparer as never,
     })).rejects.toThrow('selected preparation unavailable');
     expect(selectedPreparer.prepareContextGraphRegistration).toHaveBeenCalledTimes(1);
-    expect(chain.createCalls).toHaveLength(1);
+    expect(chain.createCalls).toHaveLength(2);
   });
 
   it('pins PCA-curated preparation to the exact authorized signer and preserves paid fallback', async () => {
@@ -187,7 +274,7 @@ describe('context-graph registration preparation boundary', () => {
     const localCurator = ethers.Wallet.createRandom();
     const selectedPublisher = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', localCurator.address);
-    const submit = vi.fn(async (_params: PreparedCreateOnChainContextGraphParams) => ({
+    const submit = vi.fn(async (_params: CreateOnChainContextGraphParams) => ({
       contextGraphId: 1n,
       txHash: `0x${'22'.repeat(32)}`,
     }));

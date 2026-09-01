@@ -96,6 +96,7 @@ import {
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type PrepareContextGraphRegistrationOptions, type PreparedContextGraphRegistration, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
+  ContextGraphRegistrationPreparationUnsupportedError,
   PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
@@ -1305,7 +1306,40 @@ export class ContextGraphMethods extends DKGAgentBase {
     if (opts?.publisher) {
       // A supplied preparer carries a selected publisher binding (not merely an
       // optimization), so failure must not silently fall back to another signer.
-      preparedRegistration = await opts.publisher.prepareContextGraphRegistration(preparationOptions);
+      try {
+        preparedRegistration = await opts.publisher.prepareContextGraphRegistration(preparationOptions);
+      } catch (error) {
+        if (
+          !(error instanceof ContextGraphRegistrationPreparationUnsupportedError)
+          || registrationPcaAccountId !== undefined
+        ) {
+          throw error;
+        }
+
+        // Old adapters predate sealed registration preparation. Preserve their
+        // ordinary paid path only when direct submission cannot switch away
+        // from the selected publisher. Unknown-on-both-sides retains the exact
+        // legacy behavior; a mismatch or one-sided unknown fails closed.
+        const [selectedPublisherAddress, directSignerAddress] = await Promise.all([
+          opts.publisher.publisherFallbackAuthorAddress(),
+          this.getRegistrationTxSignerAddress(),
+        ]);
+        const normalizedSelected = selectedPublisherAddress
+          ? ethers.getAddress(selectedPublisherAddress)
+          : undefined;
+        const normalizedDirect = directSignerAddress
+          ? ethers.getAddress(directSignerAddress)
+          : undefined;
+        const preservesSelectedPublisher = normalizedSelected && normalizedDirect
+          ? normalizedSelected.toLowerCase() === normalizedDirect.toLowerCase()
+          : normalizedSelected === undefined && normalizedDirect === undefined;
+        if (!preservesSelectedPublisher) {
+          throw new Error(
+            'Selected publisher cannot prepare context-graph registration and cannot be proven to match ' +
+            'the legacy direct chain signer.',
+          );
+        }
+      }
     } else if (adapterPreparer) {
       preparedRegistration = await adapterPreparer.call(this.chain, preparationOptions);
     } else if (registrationPcaAccountId !== undefined) {

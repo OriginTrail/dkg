@@ -1289,12 +1289,20 @@ export class DKGAgent extends DKGAgentBase {
       publisherAddress: config.publisherAddress,
       publisherAddressResolver: config.publisherAddress || useLegacyAdapterOperationalKeyFallback
         ? undefined
-        : (contextGraphId?: bigint) => inferAdapterPublisherAddress(chain, contextGraphId),
+        : async (contextGraphId?: bigint) => {
+          const address = await inferAdapterPublisherAddress(chain, contextGraphId);
+          return address
+            ? {
+              address,
+              registrationPin: 'advisory' as const,
+              source: 'generic-adapter-inference',
+            }
+            : undefined;
+        },
       // Generic adapter inference is an address hint, not a publish execution
       // context. Leave sync CG registration unpinned so the adapter can choose
       // the first signer with verified PCA coverage; configured addresses and
       // private-key publishers remain hard pins.
-      publisherAddressResolverPinsRegistration: false,
       sharedMemoryOwnedEntities: workspaceOwnedEntities,
       writeLocks,
       publicSnapshotStore,
