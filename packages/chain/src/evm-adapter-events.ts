@@ -9,6 +9,8 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
+import { InvalidRpcLogResponseError } from './rpc-failover-client.js';
+import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { EventFilter, ChainEvent } from './chain-adapter.js';
@@ -218,6 +220,77 @@ export class EventsMethods extends EVMChainAdapterBase {
    * never parsed: no consumer wants the array — the repair path re-reads the
    * committed set from chain regardless.
    */
+  /**
+   * A VALIDATED wide raw-log scan (review r3-bot): one place owns the
+   * tip-sensitive routing (`readTipProvider` — the canonical carve-out for
+   * reads whose coverage must align with the head that advances a cursor),
+   * the `wideLogScan` timeout policy, request-envelope validation, and
+   * retry classification.
+   *
+   * Whole-response validation runs INSIDE the per-provider callback: an
+   * impossible EVM shape (review r14) or a log that violates the request it
+   * claims to answer (review r16 — wrong address, outside the window) is
+   * ENDPOINT corruption, thrown as the typed
+   * {@link InvalidRpcLogResponseError} and classified retryable EXPLICITLY
+   * through `ReadOpts.isRetryable` — no ethers error code is inspected or
+   * manufactured — so the read fails over and a lane cursor can never
+   * advance on an untrustworthy response. Logs outside the requested topic
+   * set remain droppable noise; only a matching topic0 asserts anything.
+   *
+   * Event-specific callers contribute their address/topics and a
+   * `validateMatchedLog` shape check, and DECODE what comes back.
+   */
+  private readValidatedTopicLogs(request: {
+    label: string;
+    address: string;
+    topics: (string | string[])[];
+    fromBlock: number;
+    toBlock?: number;
+    /** Return a corruption description to refuse the response, undefined to accept. */
+    validateMatchedLog?: (log: ethers.Log) => string | undefined;
+  }): Promise<ethers.Log[]> {
+    const matchable = new Set(
+      (Array.isArray(request.topics[0]) ? request.topics[0] : [request.topics[0]])
+        .filter((topic): topic is string => typeof topic === 'string')
+        .map((topic) => topic.toLowerCase()),
+    );
+    return this.readTipProvider(
+      request.label,
+      async (provider) => {
+        const raw = await provider.getLogs({
+          address: request.address,
+          topics: request.topics,
+          fromBlock: request.fromBlock,
+          toBlock: request.toBlock ?? 'latest',
+        });
+        for (const log of raw) {
+          const topic0 = log.topics[0]?.toLowerCase();
+          if (topic0 == null || !matchable.has(topic0)) continue;
+          if (log.address?.toLowerCase() !== request.address.toLowerCase()
+            || log.blockNumber < request.fromBlock
+            || (typeof request.toBlock === 'number' && log.blockNumber > request.toBlock)) {
+            throw new InvalidRpcLogResponseError(
+              `RPC endpoint returned a log outside the requested filter: `
+              + `address=${String(log.address).slice(0, 60)} block=${log.blockNumber} `
+              + `(requested ${request.address} blocks ${request.fromBlock}..${typeof request.toBlock === 'number' ? request.toBlock : 'latest'})`,
+            );
+          }
+          const corruption = request.validateMatchedLog?.(log);
+          if (corruption !== undefined) {
+            throw new InvalidRpcLogResponseError(
+              `RPC endpoint returned a malformed log at block ${log.blockNumber}: ${corruption}`,
+            );
+          }
+        }
+        return raw;
+      },
+      {
+        policy: 'wideLogScan',
+        isRetryable: (err) => err instanceof InvalidRpcLogResponseError || isRetryableRpcError(err),
+      },
+    );
+  }
+
   private async *yieldKnowledgeAssetRootMutationLogs(
     requested: readonly KnowledgeAssetRootMutationEventType[],
     filter: EventFilter,
@@ -241,67 +314,20 @@ export class EventsMethods extends EVMChainAdapterBase {
     if (nameByTopic.size === 0) return;
 
     const address = await kaStorage.getAddress();
-    const logs = await this.readProvider(
-      'kas.getLogs(KnowledgeAssetRootMutations)',
-      async (provider) => {
-        const raw = await provider.getLogs({
-          address,
-          topics: [[...nameByTopic.keys()]],
-          fromBlock: filter.fromBlock ?? 0,
-          toBlock: filter.toBlock ?? 'latest',
-        });
-        // An impossible EVM shape is ENDPOINT corruption, not event data
-        // (review r14): a real log topic is exactly one 32-byte word, so a
-        // wrong-sized indexed-id topic on a log the endpoint claims matches
-        // our filter cannot originate on-chain. Throwing HERE — inside the
-        // per-provider callback — makes it a scan failure the read-failover
-        // retries on another endpoint, and the lane cursor cannot advance on
-        // an untrustworthy response. (Logs OUTSIDE the requested filter stay
-        // droppable noise; only a matching topic0 asserts anything.)
-        const fromBound = filter.fromBlock ?? 0;
-        const toBound = filter.toBlock;
-        for (const log of raw) {
-          const topic0 = log.topics[0]?.toLowerCase();
-          if (topic0 == null || !nameByTopic.has(topic0)) continue;
-          // A matching log must also OBEY the request it claims to answer
-          // (review r16): `eth_getLogs` filters by address and block range,
-          // so a response log from another contract or outside the window
-          // proves the endpoint violated the request — accepting it would
-          // fabricate a root-mutation position and poison downstream
-          // ordering/de-duplication. Same retryable corruption path.
-          if (log.address?.toLowerCase() !== address.toLowerCase()
-            || log.blockNumber < fromBound
-            || (typeof toBound === 'number' && log.blockNumber > toBound)) {
-            const escaped = new Error(
-              `RPC endpoint returned a log outside the requested filter: `
-              + `address=${String(log.address).slice(0, 60)} block=${log.blockNumber} `
-              + `(requested ${address} blocks ${fromBound}..${typeof toBound === 'number' ? toBound : 'latest'})`,
-            );
-            (escaped as Error & { code?: string }).code = 'BAD_DATA';
-            throw escaped;
-          }
-          const kaIdTopic = log.topics[1];
-          if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) {
-            const corruption = new Error(
-              `RPC endpoint returned a malformed root-mutation log at block ${log.blockNumber}: `
-              + `indexed KA-id topic is ${kaIdTopic == null ? 'missing' : String(kaIdTopic).slice(0, 80)}`,
-            );
-            // `BAD_DATA` is what routes this through the failover (review r15):
-            // a plain Error is rejected by `isRetryableRpcError`, so the
-            // transport would stop AT the corrupt endpoint instead of trying
-            // the next one. Raw PROVIDER reads keep the unmodified classifier
-            // (the contract-view exclusion of BAD_DATA applies only to
-            // `readContract`, where it means a deterministic client-side ABI
-            // decode) — here it means exactly what ethers uses it for: the
-            // endpoint returned malformed data.
-            (corruption as Error & { code?: string }).code = 'BAD_DATA';
-            throw corruption;
-          }
+    const logs = await this.readValidatedTopicLogs({
+      label: 'kas.getLogs(KnowledgeAssetRootMutations)',
+      address,
+      topics: [[...nameByTopic.keys()]],
+      fromBlock: filter.fromBlock ?? 0,
+      toBlock: filter.toBlock,
+      validateMatchedLog: (log) => {
+        const kaIdTopic = log.topics[1];
+        if (kaIdTopic == null || !ethers.isHexString(kaIdTopic, 32)) {
+          return `indexed KA-id topic is ${kaIdTopic == null ? 'missing' : String(kaIdTopic).slice(0, 80)}`;
         }
-        return raw;
+        return undefined;
       },
-      { policy: 'wideLogScan', skipPreferred: true },
-    );
+    });
 
     for (const log of logs) {
       const topic0 = log.topics[0]?.toLowerCase();

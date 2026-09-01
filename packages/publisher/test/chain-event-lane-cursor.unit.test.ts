@@ -456,6 +456,57 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(sequence[2]).toBe('save:clear');
   });
 
+  it('an UNREAD durable replay window survives a load outage that spans the rescan tick (review r27-bot)', async () => {
+    // The dangerous collision: the store holds an OLDER window (30,001–40,000
+    // — outside anything a new rescan would compute) whose event at 35,000
+    // this process has never seen, and the load keeps failing PAST the 25th
+    // due tick where a fresh periodic rescan becomes due. The new rescan must
+    // neither overwrite nor clear the unread window; after the store
+    // recovers, the OLD window must dispatch its event.
+    let loadAttempts = 0;
+    let storeHealthy = false;
+    let now = 0;
+    const saves: Array<{ fromBlock: number; toBlock: number } | undefined> = [];
+    const seen: number[] = [];
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 35_000)]);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() {
+            loadAttempts += 1;
+            if (!storeHealthy) throw new Error('SQLITE_BUSY');
+            return { fromBlock: 30_001, toBlock: 40_000 };
+          },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            saves.push(w ? { ...w } : undefined);
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    // Through the 26th due tick: restore keeps failing, the periodic rescan
+    // becomes due at the 25th — and must not touch durable replay state.
+    for (let tick = 1; tick <= 26; tick += 1) {
+      await poll(poller);
+      now += CADENCE_MS;
+    }
+    expect(saves, 'nothing may be written over an UNREAD window').toHaveLength(0);
+    expect(seen, 'the unread window cannot have dispatched yet').not.toContain(35_000);
+    expect(loadAttempts).toBeGreaterThanOrEqual(26);
+
+    storeHealthy = true;
+    await poll(poller);
+
+    expect(seen, 'the OLDER window survives the outage and dispatches').toContain(35_000);
+    expect(saves[saves.length - 1], 'and is cleared only after its dispatch').toBeUndefined();
+  });
   it('a transient CURSOR read failure is not a successful restore (review r27)', async () => {
     // The maintainer’s repro: head 20,000, durable cursor 1,000, one-shot
     // SQLITE_BUSY on the load. Marking the lane restored anyway would seed
