@@ -41,8 +41,8 @@ import {
   boundedString,
   fail,
 } from './vm-update-errors.js';
+import { type KnowledgeAssetRootMutationKindV1 } from './knowledge-asset-root-mutation-v1.js';
 import {
-  type KnowledgeAssetRootMutationKindV1,
   canonicalEventPositionV1,
   compareEventPosition,
   sameEventIdentity,
@@ -421,8 +421,8 @@ export interface FinalizedUnsupportedKnowledgeAssetRootMutationV1 extends Finali
 // that reached it through this module.
 export {
   KNOWLEDGE_ASSET_ROOT_MUTATION_KINDS_V1,
-} from './finalized-event-position-v1.js';
-export type { KnowledgeAssetRootMutationKindV1 } from './finalized-event-position-v1.js';
+} from './knowledge-asset-root-mutation-v1.js';
+export type { KnowledgeAssetRootMutationKindV1 } from './knowledge-asset-root-mutation-v1.js';
 
 
 

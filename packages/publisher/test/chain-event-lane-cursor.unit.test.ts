@@ -97,10 +97,38 @@ describe('kaRootMutations — cursor restore and failure recovery', () => {
 
     await poll(poller);
 
-    // Adopted (1,000), re-homed under the new key, rewound by 50, and the
-    // first scan starts where the OLD cursor stood — not at head-9,000.
-    expect(saves.some((s2) => s2.lane === 'kaRootMutations' && s2.block === 1_000)).toBe(true);
+    // Adopted (1,000), rewound by 50; the first scan starts where the OLD
+    // cursor stood — not at head-9,000 — and the first forward-scan save
+    // re-homes the ADVANCED cursor under the new key (review r25: no
+    // restore-time save, so a crash cannot freeze an uncapped adoption).
     expect(filters[0].fromBlock).toBe(951);
+    const rehomed = saves.find((s2) => s2.lane === 'kaRootMutations');
+    expect(rehomed?.block).toBe(9_950);
+  });
+  it('an adopted cursor NEAR HEAD is capped at the activation lookback (review r25)', async () => {
+    // The retired cursor proves coverage for ONE event type. Treating it as
+    // all-four coverage would skip a recent root-added forever: with
+    // collectionUpdates=20,000 at head 20,000, a KnowledgeAssetMerkleRootAdded
+    // at 19,500 must still be delivered — the capped start (11,001) is what
+    // a cold activation would have scanned anyway.
+    const seen: number[] = [];
+    const chain = makeChain(20_000, [rootMutation('KnowledgeAssetMerkleRootAdded', 19_500)]);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => 0,
+      cursorPersistence: {
+        async loadLane(lane) { return (lane as string) === 'collectionUpdates' ? 20_000 : undefined; },
+        async saveLane() { /* not under test */ },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    await poll(poller);
+
+    expect(chain.filters[0].fromBlock).toBe(11_001);
+    expect(seen).toContain(19_500);
   });
   it('an existing kaRootMutations cursor WINS over the retired key (review r23)', async () => {
     // Precedence matters: always-adopting would move the lane to the
@@ -461,10 +489,13 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     expect(seen).toContain(45_000);
   });
 
-  it('a failed re-home write does not forfeit the adopted cursor (review r24)', async () => {
+  it('a failed re-home write does not forfeit the adopted cursor (review r24/r25)', async () => {
     // The adopted cursor must remain usable in memory when
     // saveLane('kaRootMutations', …) rejects — live-seeding instead would
-    // skip the very interval the migration preserves.
+    // skip the very interval the migration preserves. Since r25 the re-home
+    // write happens at the first forward-scan persist (post-cap), so the
+    // rejection now hits there; the scan itself must still run from the
+    // adopted position.
     const { adapter, filters } = makeChain(20_000);
     const poller = new ChainEventPoller({
       chain: adapter,

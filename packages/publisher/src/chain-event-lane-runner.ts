@@ -38,6 +38,10 @@ interface ChainEventPollerLaneState {
    * due periodic window is superseded while a retry is pending.
    */
   pendingRescanRetry?: { fromBlock: number; toBlock: number };
+  /** The restored cursor came from a RETIRED lane key (r22/r25): it must be
+   *  capped at the live-seed floor once the head is known, because it only
+   *  proves coverage for the retired lane's event type. */
+  cursorAdoptedFromRetiredKey?: boolean;
   /** A replay-window load failed transiently; retry it on a later poll (r24). */
   replayRestorePending?: boolean;
   /** Chain head observed on the most recent due tick (diagnostics). */
@@ -350,23 +354,15 @@ export class ChainEventLaneRunner {
         for (const retired of lane.spec.adoptCursorFromRetiredKeys ?? []) {
           // A migration read of a RETIRED key (review r22): the store contract
           // is key→block, so the retired spelling is passed through the same
-          // accessor. Adopted once — the save below re-homes it immediately.
+          // accessor. The adopted value is NOT re-homed here (review r25):
+          // it still needs the live-seed CAP, which requires the head — the
+          // first successful forward scan persists the corrected cursor
+          // under the new key instead, so a crash cannot freeze an uncapped
+          // adoption into the new lane's own durable cursor.
           const adopted = await this.cursorStore.loadLane(retired as ChainEventPollerLane);
           if (adopted != null && adopted > 0) {
             saved = adopted;
-            try {
-              await this.cursorStore.saveLane(lane.spec.name, adopted);
-            } catch (err) {
-              // The re-home is best-effort (review r24): the adopted cursor
-              // must remain usable IN MEMORY even when the write fails —
-              // falling through to the live seed would skip the very
-              // interval the migration exists to preserve.
-              this.log.warn(
-                ctx,
-                `Failed to re-home adopted cursor (adoption stands in memory): ${retired} -> ` +
-                `${lane.spec.name} ${err instanceof Error ? err.message : String(err)}`,
-              );
-            }
+            lane.state.cursorAdoptedFromRetiredKey = true;
             this.log.info(
               ctx,
               `Adopted durable cursor from retired lane key: ${retired} -> ${lane.spec.name} block ${adopted}`,
@@ -473,6 +469,20 @@ export class ChainEventLaneRunner {
 
     if (head != null && !state.headKnown) {
       state.headKnown = true;
+      // An ADOPTED cursor proves coverage for the retired lane's ONE event
+      // type, not for the three newly subscribed ones (review r25): cap it
+      // at the live-seed floor, so the new types get at least the normal
+      // activation lookback. Scanning the extra range only re-delivers
+      // idempotent events; skipping it loses mutations forever. An own
+      // (non-adopted) cursor is real all-type coverage and is never capped.
+      if (state.cursorAdoptedFromRetiredKey && !lane.requiresFullHistory) {
+        const seedFloor = Math.max(0, head - lane.liveSeedLookbackBlocks);
+        if (state.lastBlock > seedFloor) {
+          this.log.info(ctx, `Capping adopted cursor at the activation lookback: lane=${lane.spec.name} ${state.lastBlock} -> ${seedFloor}`);
+          state.lastBlock = seedFloor;
+        }
+        state.cursorAdoptedFromRetiredKey = false;
+      }
       if (state.lastBlock === 0 && !state.cursorRestored && !lane.requiresFullHistory) {
         state.lastBlock = Math.max(0, head - lane.liveSeedLookbackBlocks);
         this.log.info(ctx, `Seeded poller cursor near chain head: lane=${lane.spec.name} head=${head} scanning from ${state.lastBlock}`);
