@@ -461,9 +461,9 @@ export class ChainEventLaneRunner {
     // block has the configured confirmation depth — the rewind remains
     // reorg protection, not a substitute for finality.
     if (lane.spec.scanOnlyFinalizedHead && head != null) {
-      const confirmations = this.chain.finalizedEventScanConfirmations?.() ?? 1;
-      if (Number.isFinite(confirmations) && confirmations > 1) {
-        head = Math.max(0, head - (Math.floor(confirmations) - 1));
+      const bound = this.chain.finalizedEventScanBound?.(head);
+      if (bound !== undefined && Number.isFinite(bound)) {
+        head = Math.max(0, Math.min(head, Math.floor(bound)));
       }
     }
 

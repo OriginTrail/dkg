@@ -1313,13 +1313,15 @@ export interface ChainAdapter {
   supportsEventTypes?(names: readonly string[]): Promise<string[]>;
 
   /**
-   * The confirmation depth an event scan must respect before treating a
-   * position as FINAL (review r6-bot): confirmation 1 is the current head,
-   * larger values finalize at `head - confirmations + 1` — the same
-   * convention `readKnowledgeAssetVersionSnapshot` documents. Optional:
-   * an adapter without a policy (mock, tests) finalizes at the head.
+   * The highest block an event scan may treat as FINAL given the observed
+   * `head` (review r11-bot): the adapter owns its finality semantics — the
+   * EVM adapter applies its confirmation policy (`head - confirmations + 1`,
+   * the convention `readKnowledgeAssetVersionSnapshot` documents), a
+   * checkpoint-based chain would answer from its checkpoints — and the
+   * consumer takes the bound without knowing the arithmetic. Optional: an
+   * adapter without a policy finalizes at the head.
    */
-  finalizedEventScanConfirmations?(): number;
+  finalizedEventScanBound?(head: number): number;
 
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;

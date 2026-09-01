@@ -650,9 +650,9 @@ export class EVMChainAdapterBase {
   protected readonly receiptTimeoutMs: number;
   protected readonly finalityConfirmations: number;
 
-  /** The operator confirmation policy, exposed for finalized event scans. */
-  finalizedEventScanConfirmations(): number {
-    return this.finalityConfirmations;
+  /** The operator confirmation policy applied to an observed head. */
+  finalizedEventScanBound(head: number): number {
+    return Math.max(0, head - (this.finalityConfirmations - 1));
   }
 
   protected readonly maxFeePerGasWei?: bigint;

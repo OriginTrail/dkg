@@ -285,6 +285,24 @@ describe('EVMChainAdapter.listenForEvents — KA root mutations', () => {
     expect(req?.toBlock).toBe(9_000);
   });
 
+  it('a requested SUBSET narrows both the topic OR-set and the yielded events (review r11-bot)', async () => {
+    // A caller subscribing to one public kind must not receive the others,
+    // and must not even ASK the RPC for them: a regression that always
+    // requested all four would over-fetch and over-deliver while every
+    // all-four and single-kind fixture stayed green.
+    const iface = new Interface(KA_ABI as never);
+    const added = sampleLog(iface, 'KnowledgeAssetMerkleRootAdded');
+    const removed = sampleLog(iface, 'KnowledgeAssetMerkleRootRemoved');
+    const { adapter, scans } = makeAdapter({
+      logsByEvent: { KnowledgeAssetRootMutations: [added, removed] },
+    });
+
+    const events = await drain(adapter, ['KnowledgeAssetMerkleRootAdded']);
+
+    expect(events.map((e) => e.type), 'only the requested kind is yielded').toEqual(['KnowledgeAssetMerkleRootAdded']);
+    const topics = scans[0]!.request?.topics as string[][];
+    expect(topics[0], 'only the requested kind is asked for').toEqual([iface.getEvent('KnowledgeAssetMerkleRootAdded')!.topicHash]);
+  });
   it('yields logs in PROVIDER order, not requested-constant order (review r6-bot)', async () => {
     // The scan promises provider log order. Every other ordering-sensitive
     // fixture happens to follow the event-name constant, so an

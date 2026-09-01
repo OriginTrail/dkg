@@ -86,13 +86,15 @@ it('accepts an explicit confirmation depth and rejects invalid values', () => {
   }
 });
 
-it('exposes the configured depth through the event-scan API the lane consumes (review r9)', () => {
+it('applies the configured depth in the event-scan bound the lane consumes (review r9/r11)', () => {
   // The lane bounds finalized delivery by THIS method, so the bridge from
-  // the validated config field to the consumer-facing API is what keeps a
+  // the validated config field to the consumer-facing bound is what keeps a
   // tip event withheld until the operator's requested depth.
   expect(new EVMChainAdapter(minimalConfig({ finalityConfirmations: 5 }))
-    .finalizedEventScanConfirmations()).toBe(5);
-  expect(new EVMChainAdapter(minimalConfig()).finalizedEventScanConfirmations()).toBe(1);
+    .finalizedEventScanBound(100)).toBe(96);
+  expect(new EVMChainAdapter(minimalConfig()).finalizedEventScanBound(100)).toBe(100);
+  expect(new EVMChainAdapter(minimalConfig({ finalityConfirmations: 5 }))
+    .finalizedEventScanBound(2)).toBe(0);
 });
 
 it('uses one confirmation-depth calculation for receipts and pinned state', () => {

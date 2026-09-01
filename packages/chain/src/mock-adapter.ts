@@ -800,12 +800,12 @@ export class MockChainAdapter implements ChainAdapter {
    * vocabulary, not about which events a given scenario recorded.
    */
   /**
-   * CH-8 parity with `EVMChainAdapter.finalizedEventScanConfirmations` (review
-   * r6): the mock chain has no reorgs, so confirmation 1 — the current head —
-   * is the honest policy, and lanes bounded by it scan exactly to the head.
+   * CH-8 parity with `EVMChainAdapter.finalizedEventScanBound` (review r6/r11):
+   * the mock chain has no reorgs, so the head itself is final and lanes
+   * bounded by it scan exactly to the head.
    */
-  finalizedEventScanConfirmations(): number {
-    return 1;
+  finalizedEventScanBound(head: number): number {
+    return head;
   }
 
   async supportsEventTypes(names: readonly string[]): Promise<string[]> {

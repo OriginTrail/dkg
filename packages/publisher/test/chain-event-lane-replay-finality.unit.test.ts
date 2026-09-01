@@ -269,8 +269,8 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     let now = 0;
     const seen: number[] = [];
     const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_998)]);
-    (chain.adapter as { finalizedEventScanConfirmations?: () => number })
-      .finalizedEventScanConfirmations = () => 5;
+    (chain.adapter as { finalizedEventScanBound?: (head: number) => number })
+      .finalizedEventScanBound = (head) => head - 4;
     const saves: number[] = [];
     const poller = new ChainEventPoller({
       chain: chain.adapter,
@@ -306,8 +306,8 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     let now = 0;
     const seen: number[] = [];
     const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 49_945)]);
-    (chain.adapter as { finalizedEventScanConfirmations?: () => number })
-      .finalizedEventScanConfirmations = () => 60;
+    (chain.adapter as { finalizedEventScanBound?: (head: number) => number })
+      .finalizedEventScanBound = (head) => head - 59;
     const poller = new ChainEventPoller({
       chain: chain.adapter,
       publishHandler: makeHandler(),
@@ -360,8 +360,8 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     } satisfies LaneCursorPersistence;
     const withDepth = (head: number) => {
       const chain = makeChain(head, [rootMutation('KnowledgeAssetUpdated', 49_945)]);
-      (chain.adapter as { finalizedEventScanConfirmations?: () => number })
-        .finalizedEventScanConfirmations = () => 60;
+      (chain.adapter as { finalizedEventScanBound?: (head: number) => number })
+      .finalizedEventScanBound = (head) => head - 59;
       return chain;
     };
 
