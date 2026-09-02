@@ -1,8 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
-import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
-import { ChainEventPoller, type ChainEventPollerLane, type LaneCursorPersistence } from '../src/chain-event-poller.js';
+import {
+  KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
+  type ChainAdapter,
+  type ChainEvent,
+  type EventFilter,
+} from '@origintrail-official/dkg-chain';
+import {
+  ChainEventPoller,
+  type ChainEventPollerLane,
+  type KnowledgeAssetRootMutationEventV1,
+  type LaneCursorPersistence,
+} from '../src/chain-event-poller.js';
 import { ChainEventLaneRunner, type ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import type { JournalEntry } from '../src/publish-journal.js';
@@ -15,6 +25,7 @@ function makeChain(head: number, events: ChainEvent[]): {
   const adapter = {
     chainId: 'mock:0',
     getBlockNumber: async () => head,
+    supportsEventTypes: async () => [],
     listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
       filters.push(f);
       const fromBlock = f.fromBlock ?? 0;
@@ -299,6 +310,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         if (f.eventTypes.includes('ContextGraphCreated') && failContextLane) {
@@ -607,6 +619,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => head,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
       },
@@ -740,13 +753,18 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(confirmed).toEqual([0x11, 0x22]);
   });
 
-  it('dispatches collection update events and advances the collectionUpdates cursor', async () => {
+  it('dispatches KA root mutations and advances the kaRootMutations cursor', async () => {
     const event: ChainEvent = {
       type: 'KnowledgeAssetUpdated',
       blockNumber: 50,
       data: {
+        kaId: '42',
         merkleRoot: '0x' + '44'.repeat(32),
-        batchId: '42',
+        author: '0x' + '11'.repeat(20),
+        txHash: '0x' + 'aa'.repeat(32),
+        blockHash: '0x' + 'bb'.repeat(32),
+        txIndex: 2,
+        logIndex: 5,
       },
     };
     const { adapter, filters } = makeChain(100, [event]);
@@ -755,25 +773,36 @@ describe('ChainEventPoller lane runner and cursors', () => {
       async loadLane() { return undefined; },
       async saveLane(lane, block) { saveCalls.push({ lane, block }); },
     };
-    const seen: Array<{ merkleRoot: Uint8Array; batchId: bigint; blockNumber: number }> = [];
+    const seen: KnowledgeAssetRootMutationEventV1[] = [];
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
       intervalMs: 60_000,
       cursorPersistence: cursor,
-      onCollectionUpdated: async (info) => { seen.push(info); },
+      onKnowledgeAssetRootMutated: async (info) => { seen.push(info); },
     });
 
     await poller.start();
     await new Promise((r) => setTimeout(r, 50));
     await poller.stop();
 
-    expect(filters[0].eventTypes).toEqual(['KnowledgeAssetUpdated']);
+    // The lane subscribes with EXACTLY the chain package's join constant.
+    expect(filters[0].eventTypes).toEqual([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
     expect(seen).toHaveLength(1);
-    expect(Buffer.from(seen[0].merkleRoot).toString('hex')).toBe('44'.repeat(32));
-    expect(seen[0].batchId).toBe(42n);
-    expect(seen[0].blockNumber).toBe(50);
-    expect(saveCalls).toEqual([{ lane: 'collectionUpdates', block: 100 }]);
+    expect(seen[0]).toEqual({
+      kind: 'lifecycle-update',
+      kaId: '42',
+      merkleRoot: '0x' + '44'.repeat(32),
+      author: '0x' + '11'.repeat(20),
+      position: {
+        blockNumber: 50,
+        blockHash: '0x' + 'bb'.repeat(32),
+        transactionHash: '0x' + 'aa'.repeat(32),
+        transactionIndex: 2,
+        logIndex: 5,
+      },
+    });
+    expect(saveCalls).toEqual([{ lane: 'kaRootMutations', block: 100 }]);
   });
 
   it('tails context graph discovery on the normal poll cadence', async () => {
@@ -831,6 +860,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         calls++;
@@ -877,6 +907,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => head,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         calls++;
@@ -939,6 +970,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         calls++;
@@ -998,6 +1030,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => { throw new Error('head unavailable'); },
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
       },

@@ -81,6 +81,21 @@ export function assertCanonicalChainId(
 }
 
 /** Packed v10 KA IDs use the full DecimalU256V1 domain, never u64. */
+/**
+ * A non-negative SAFE integer — block numbers and log/transaction indices
+ * on this wire are JSON numbers. ONE transcription of the rule (PR #2436
+ * review r23): the event-position validator and the VM-update scalar layer
+ * both delegate here, so the accepted representation cannot drift apart.
+ */
+export function assertNonNegativeSafeInteger(
+  value: unknown,
+  label = 'value',
+): asserts value is number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+}
+
 export function assertCanonicalKaId(
   value: unknown,
   label = 'kaId',

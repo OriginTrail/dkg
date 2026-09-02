@@ -223,6 +223,21 @@ export interface StickinessOptions {
  * getCode/getBalance/getNetwork — never produce BAD_DATA, so they keep the
  * unmodified `isRetryableRpcError`.)
  */
+/**
+ * An RPC endpoint answered a raw-log request with a response that VIOLATES
+ * the request — a log outside the filter, or an impossible EVM shape
+ * (review r3-bot: previously expressed by forging an ethers `BAD_DATA` code
+ * onto a plain Error, which coupled feature code to the classifier's string
+ * vocabulary). Explicitly retryable via `ReadOpts.isRetryable`: the endpoint
+ * is untrustworthy, so the read fails over to the next one.
+ */
+export class InvalidRpcLogResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidRpcLogResponseError';
+  }
+}
+
 export function isContractViewRetryable(err: unknown): boolean {
   return isRetryableRpcError(err) && errorCode(err) !== 'BAD_DATA';
 }

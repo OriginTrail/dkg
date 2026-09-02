@@ -1,14 +1,33 @@
-import type { ChainAdapter, ChainEvent } from '@origintrail-official/dkg-chain';
-import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES,
+  type ChainAdapter,
+  type ChainEvent,
+} from '@origintrail-official/dkg-chain';
+import {
+  Logger,
+  createOperationContext,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
+import {
+  decodeKnowledgeAssetRootMutationEvent,
+  type OnKnowledgeAssetRootMutated,
+} from './ka-root-mutation-decode.js';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 import {
   ChainEventLaneRunner,
+  type ChainEventLaneHealth,
+  type ChainEventLaneMetrics,
   type ChainEventPollerLaneSpec,
 } from './chain-event-lane-runner.js';
 import type { CursorPersistence as RunnerCursorPersistence } from './chain-event-lane-cursor-store.js';
 
 export type { ChainEventPollerLane } from './chain-event-lane-runner.js';
+export type {
+  ChainEventLaneHealth,
+  ChainEventLaneMetrics,
+  ChainEventLanePollResult,
+} from './chain-event-lane-runner.js';
 export type {
   CursorPersistence,
   LaneCursorPersistence,
@@ -32,12 +51,6 @@ export type OnContextGraphCreated = (info: {
   blockNumber: number;
 }) => Promise<void>;
 
-/** Callback for KnowledgeAssetUpdated events (spec §5.1). */
-export type OnCollectionUpdated = (info: {
-  merkleRoot: Uint8Array;
-  batchId: bigint;
-  blockNumber: number;
-}) => Promise<void>;
 
 /** Callback for AllowListUpdated events (spec §5.1). */
 export type OnAllowListUpdated = (info: {
@@ -78,6 +91,23 @@ export type OnKARegisteredToContextGraph = (info: {
  */
 export type OnKnowledgeAssetCreated = (e: { kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number }) => void | Promise<void>;
 
+/**
+ * Blocks the `kaRootMutations` cursor steps back when restored from
+ * persistence, and after a lane failure.
+ *
+ * Matches the sibling rewind the EVM adapter already uses for reorg tolerance.
+ * The cost of over-scanning is a re-dispatch of events the consumer is required
+ * to treat idempotently; the cost of under-scanning is a permanently missed
+ * root mutation.
+ */
+const KA_ROOT_MUTATION_REWIND_ON_RESTORE_BLOCKS = 50;
+
+/**
+ * Due ticks of the `kaRootMutations` lane between wide trailing re-scans —
+ * ~5 minutes at the default 12 s cadence.
+ */
+const KA_ROOT_MUTATION_RESCAN_EVERY_POLLS = 25;
+
 export interface ChainEventPollerConfig {
   chain: ChainAdapter;
   publishHandler: PublishHandler;
@@ -87,8 +117,12 @@ export interface ChainEventPollerConfig {
   clock?: () => number;
   /** Called when a ContextGraphCreated event is detected on-chain. */
   onContextGraphCreated?: OnContextGraphCreated;
-  /** Called when a KnowledgeAssetUpdated event is detected. */
-  onCollectionUpdated?: OnCollectionUpdated;
+  /**
+   * Called for every on-chain mutation of a KA's committed Merkle-root set.
+   * A rejection HOLDS the lane cursor and re-scans the window; see
+   * {@link OnKnowledgeAssetRootMutated}.
+   */
+  onKnowledgeAssetRootMutated?: OnKnowledgeAssetRootMutated;
   /** Called when an AllowListUpdated event is detected. */
   onAllowListUpdated?: OnAllowListUpdated;
   /** Called when a ProfileCreated/Updated event is detected. */
@@ -99,13 +133,20 @@ export interface ChainEventPollerConfig {
   onKnowledgeAssetCreated?: OnKnowledgeAssetCreated;
   /** Persistent cursor for surviving restarts. */
   cursorPersistence?: RunnerCursorPersistence;
+  /**
+   * Lane-health recorder. Optional: without it the poller records nothing and
+   * behaves identically.
+   */
+  metrics?: ChainEventLaneMetrics;
 }
 
 /**
  * Background poller that watches for on-chain events (spec §5.1):
  * - KCCreated: promotes tentative publishes to confirmed (V10 batch creation)
  * - NameClaimed / ContextGraphCreated: notifies the agent of new CGs
- * - KnowledgeAssetUpdated: applies UPDATE to LTM
+ * - KA root mutations (`kaRootMutations` lane): the four events that change a
+ *   Knowledge Asset's committed Merkle-root set, so a node holding an older
+ *   version of that asset learns it must re-verify
  * - AllowListUpdated: updates subscription state
  * - ProfileCreated / ProfileUpdated: updates peer identity cache
  *
@@ -124,7 +165,7 @@ export class ChainEventPoller {
   private readonly intervalMs: number;
   private readonly clock: () => number;
   private readonly onContextGraphCreated?: OnContextGraphCreated;
-  private readonly onCollectionUpdated?: OnCollectionUpdated;
+  private readonly onKnowledgeAssetRootMutated?: OnKnowledgeAssetRootMutated;
   private readonly onAllowListUpdated?: OnAllowListUpdated;
   private readonly onProfileEvent?: OnProfileEvent;
   private readonly onKARegisteredToContextGraph?: OnKARegisteredToContextGraph;
@@ -145,6 +186,22 @@ export class ChainEventPoller {
    */
   private inFlightPoll: Promise<void> | null = null;
 
+  /**
+   * The in-flight `stop()` drain, when one is running. `start()` serializes
+   * behind it so a restart cannot re-arm scans the drain is still awaiting
+   * (review r10).
+   */
+  private stopPromise: Promise<void> | null = null;
+  /**
+   * The in-flight activation (review r18-bot): start() now awaits a
+   * capability probe BEFORE reserving `running`, so the whole transition is
+   * serialized through this promise — concurrent starts share one
+   * activation, and a stop() issued meanwhile cancels it before any timer
+   * is installed.
+   */
+  private startPromise: Promise<void> | null = null;
+  private startCancelled = false;
+
   /** Max blocks to scan per poll — stays within typical RPC range limits. */
   private static readonly MAX_RANGE = 9_000;
 
@@ -154,11 +211,23 @@ export class ChainEventPoller {
     this.intervalMs = config.intervalMs ?? 12_000;
     this.clock = config.clock ?? (() => Date.now());
     this.onContextGraphCreated = config.onContextGraphCreated;
-    this.onCollectionUpdated = config.onCollectionUpdated;
+    this.onKnowledgeAssetRootMutated = config.onKnowledgeAssetRootMutated;
     this.onAllowListUpdated = config.onAllowListUpdated;
     this.onProfileEvent = config.onProfileEvent;
     this.onKARegisteredToContextGraph = config.onKARegisteredToContextGraph;
     this.onKnowledgeAssetCreated = config.onKnowledgeAssetCreated;
+    // Removed-callback tripwire (review r3): `onCollectionUpdated` was deleted
+    // rather than aliased — it never functioned (no adapter branch served its
+    // event and no production caller passed it), so an alias would perpetuate
+    // a dead name. A TypeScript consumer gets a compile error; a JavaScript
+    // consumer would be silently ignored, so make that failure loud instead.
+    if ('onCollectionUpdated' in (config as unknown as Record<string, unknown>)) {
+      this.log.warn(
+        createOperationContext('system'),
+        `ChainEventPoller: 'onCollectionUpdated' was removed and never functioned; ` +
+        `use 'onKnowledgeAssetRootMutated' (kaRootMutations lane) instead`,
+      );
+    }
     this.laneRunner = new ChainEventLaneRunner({
       chain: this.chain,
       lanes: this.laneSpecs(),
@@ -166,11 +235,82 @@ export class ChainEventPoller {
       clock: this.clock,
       log: this.log,
       cursorPersistence: config.cursorPersistence,
+      metrics: config.metrics,
     });
   }
 
   async start(): Promise<void> {
     if (this.running) return;
+    if (this.startPromise) return this.startPromise;
+    const activation = this.activate();
+    this.startPromise = activation;
+    try {
+      await activation;
+    } finally {
+      if (this.startPromise === activation) this.startPromise = null;
+    }
+  }
+
+  private async activate(): Promise<void> {
+    if (this.running) return;    // Serialize a restart behind an unfinished stop() (review r10): without
+    // this await, a start() issued mid-drain re-arms the interval and
+    // overwrites `inFlightPoll` while the drain still awaits the old scan --
+    // exactly the overlapping-scan state stop() exists to prevent.
+    if (this.stopPromise) {
+      try { await this.stopPromise; } catch { /* stop() reports its own failures */ }
+    }
+    if (this.running) return; // a concurrent start won the race during the await
+    if (this.startCancelled) { this.startCancelled = false; return; }
+    // Fail FAST, not silent (review r14/r16-bot: after the idempotence guards, so a repeated start() on a running poller neither re-probes nor can fail): the root-mutation lane bounds
+    // its scans at the finalized head, which needs a readable head. Without
+    // `getBlockNumber` the lane would hold on every tick and the callback
+    // would simply never fire — an API break disguised as idleness.
+    if (this.onKnowledgeAssetRootMutated && typeof this.chain.getBlockNumber !== 'function') {
+      throw new Error(
+        'onKnowledgeAssetRootMutated requires a ChainAdapter with getBlockNumber: the '
+        + 'kaRootMutations lane scans only to the finalized head and cannot run without one',
+      );
+    }
+    // The capability probe exists so an empty scan is never mistaken for
+    // "no events" (review r15-bot): a binding that cannot serve one of the
+    // four kinds would let the cursor advance past mutations it never saw.
+    // Refuse activation and NAME the missing kinds.
+    if (this.onKnowledgeAssetRootMutated && typeof this.chain.supportsEventTypes !== 'function') {
+      // No probe means NO EVIDENCE that all four kinds are served (review
+      // r17-bot): an adapter emitting only lifecycle updates would let the
+      // cursor advance past root additions, replacements and removals it
+      // never yields — silent, permanent loss. This lane fails closed.
+      throw new Error(
+        'onKnowledgeAssetRootMutated requires a ChainAdapter with supportsEventTypes: the '
+        + 'kaRootMutations lane cannot verify that every root-mutation kind is served without it',
+      );
+    }
+    if (this.onKnowledgeAssetRootMutated && typeof this.chain.supportsEventTypes === 'function') {
+      let missing: string[];
+      try {
+        missing = await this.chain.supportsEventTypes([...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES]);
+      } catch (err) {
+        // A probe that could not answer (the Hub unreachable at boot) is not
+        // a negative answer, and must not take down the OTHER lanes with it
+        // — but a lane that scans without a known capability set is exactly
+        // the silent failure the probe exists to prevent. Fail the
+        // activation loudly and specifically; the embedder retries start().
+        throw new Error(
+          `onKnowledgeAssetRootMutated activation could not verify the adapter\u2019s event `
+          + `capability (probe failed: ${err instanceof Error ? err.message : String(err)}); `
+          + 'retry start() once the chain binding is reachable',
+        );
+      }
+      if (missing.length > 0) {
+        throw new Error(
+          `onKnowledgeAssetRootMutated cannot be served by this chain adapter: the ABI does `
+          + `not declare ${missing.join(', ')}; the kaRootMutations lane will not start`,
+        );
+      }
+    }
+    // A stop() issued while the probes were pending wins: no timer is
+    // installed and the poller stays stopped (review r18-bot).
+    if (this.startCancelled) { this.startCancelled = false; return; }
     this.running = true;
 
     const ctx = createOperationContext('system');
@@ -212,6 +352,15 @@ export class ChainEventPoller {
     if (pending) await pending;
   }
 
+
+  /**
+   * Per-lane liveness (last scanned block, chain head and wall clock at the
+   * lane's most recent due tick) for the currently-active lanes.
+   */
+  getLaneHealth(): ChainEventLaneHealth[] {
+    return this.laneRunner.laneHealth();
+  }
+
   /**
    * Stop the interval and wait for any in-flight poll to settle.
    *
@@ -227,6 +376,24 @@ export class ChainEventPoller {
    * void; they just lose the in-flight-await guarantee.
    */
   async stop(): Promise<void> {
+    const drain = this.drainAndStop();
+    this.stopPromise = drain;
+    try {
+      await drain;
+    } finally {
+      if (this.stopPromise === drain) this.stopPromise = null;
+    }
+  }
+
+  private async drainAndStop(): Promise<void> {
+    if (this.startPromise && !this.running) {
+      // Activation is mid-probe: mark it cancelled and wait for it to
+      // observe the mark, so stop() never returns while a start could still
+      // install a timer behind it.
+      this.startCancelled = true;
+      try { await this.startPromise; } catch { /* activation reports its own failures */ }
+      this.startCancelled = false;
+    }
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -295,12 +462,38 @@ export class ChainEventPoller {
         dispatch: (event, ctx) => this.handleKARegistered(event, ctx),
       },
       {
-        name: 'collectionUpdates',
-        enabled: () => !!this.onCollectionUpdated,
-        eventTypes: () => ['KnowledgeAssetUpdated'],
+        name: 'kaRootMutations',
+        enabled: () => !!this.onKnowledgeAssetRootMutated,
+        // Exactly the adapter's join constant — not a copy. A name added there
+        // is subscribed here with no second edit, and a name removed there
+        // cannot leave this lane asking for something nothing produces.
+        eventTypes: () => [...KNOWLEDGE_ASSET_ROOT_MUTATION_EVENT_TYPES],
         requiresFullHistory: () => false,
+        // A root mutation is only interesting for an asset this node already
+        // holds, and holdings come from elsewhere; replaying the chain from
+        // genesis would buy nothing. One full RPC page of lookback on first
+        // activation covers a restart that spanned a deploy.
+        liveSeedLookbackBlocks: ChainEventPoller.MAX_RANGE,
+        rewindOnRestoreBlocks: KA_ROOT_MUTATION_REWIND_ON_RESTORE_BLOCKS,
+        // FinalizedEventPositionV1 promises finality; the scan must supply
+        // it (review r6-bot). The other lanes keep their tip behavior —
+        // their consumers re-verify against live chain state instead of
+        // persisting positions durably.
+        scanOnlyFinalizedHead: true,
+        // The lane this one replaced (review r22): adopt its durable cursor
+        // so an embedder migrating across the rename does not fall back to
+        // the bounded live seed and silently skip blocks the old cursor had
+        // reached. For the three event types the old lane never scanned,
+        // adoption equals the old behavior; for deeper history the
+        // chain-driven reconcile remains the recovery path, exactly as for
+        // the live seed.
+        adoptCursorFromRetiredKeys: ['collectionUpdates'],
+        periodicRescan: {
+          everyPolls: KA_ROOT_MUTATION_RESCAN_EVERY_POLLS,
+          windowBlocks: ChainEventPoller.MAX_RANGE,
+        },
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleCollectionUpdated(event, ctx),
+        dispatch: (event, ctx) => this.handleKaRootMutation(event, ctx),
       },
       {
         name: 'allowListUpdates',
@@ -393,24 +586,47 @@ export class ChainEventPoller {
     }
   }
 
-  private async handleCollectionUpdated(event: ChainEvent, ctx: OperationContext): Promise<void> {
-    if (!this.onCollectionUpdated) return;
-    const { data } = event;
-    const merkleRoot = typeof data['merkleRoot'] === 'string'
-      ? ethers.getBytes(data['merkleRoot'] as string)
-      : data['merkleRoot'] as Uint8Array;
-    const batchId = BigInt(data['batchId'] as string ?? '0');
+  /**
+   * Dispatch one KA root mutation.
+   *
+   * **This handler does NOT catch.** Every other handler here wraps its
+   * callback in `try/catch` and logs, which means the lane cursor advances past
+   * an event the consumer failed to take — best-effort delivery, correct for a
+   * nudge whose work a later sweep repeats. There is no later sweep for a root
+   * mutation: the ordinal sweep short-circuits at `watermark >= head` and never
+   * re-examines a held asset. So a swallowed rejection here is a permanently
+   * lost convergence, and the rejection must instead reach `scanLane`, which
+   * leaves `lastBlock` where it was and re-scans the same window.
+   *
+   * A malformed event is dropped rather than thrown on: the payload is
+   * RPC-supplied, and a deterministic throw would stall the lane behind one bad
+   * log forever. The split is by role — the POSITION fields decide ordering and
+   * de-duplication downstream, so a malformed one makes the event unusable and
+   * it is dropped; `author` is advisory, so a malformed one degrades to `null`.
+   */
+  private async handleKaRootMutation(event: ChainEvent, ctx: OperationContext): Promise<void> {
+    if (!this.onKnowledgeAssetRootMutated) return;
 
+    // ONE decoder, on core's canonical boundary (review r5) — the poller
+    // orchestrates; it does not restate canonicalization rules that drift.
+    const decoded = decodeKnowledgeAssetRootMutationEvent(event);
+    if (!decoded.ok) {
+      if (decoded.reason !== 'unknown-event-type') {
+        this.log.warn(ctx, `Chain event: ${event.type} dropped, ${decoded.reason} (block=${event.blockNumber})`);
+      }
+      return;
+    }
+
+    const { mutation } = decoded;
     this.log.info(ctx,
-      `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,
+      `Chain event: ${event.type} block=${mutation.position.blockNumber} kind=${mutation.kind} kaId=${mutation.kaId}`,
     );
 
-    try {
-      await this.onCollectionUpdated({ merkleRoot, batchId, blockNumber: event.blockNumber });
-    } catch (err) {
-      this.log.warn(ctx, `onCollectionUpdated callback failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    await this.onKnowledgeAssetRootMutated(mutation);
   }
+
+
+
 
   private async handleAllowListUpdated(event: ChainEvent, ctx: OperationContext): Promise<void> {
     if (!this.onAllowListUpdated) return;

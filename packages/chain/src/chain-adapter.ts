@@ -1296,6 +1296,33 @@ export interface ChainAdapter {
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;
 
+  /**
+   * Which of `names` the bound contracts CANNOT produce (empty = all
+   * supported).
+   *
+   * `listenForEvents` is deliberately silent about names it does not serve —
+   * it yields nothing, which is indistinguishable from "there were no such
+   * events in this window". A feature that only works if its events actually
+   * arrive needs to ask BEFORE it starts trusting an empty scan, and needs the
+   * specific missing name to say so in its diagnostics.
+   *
+   * Optional: adapters that serve every name they are asked for (mocks, the
+   * no-chain adapter) may omit it, and a caller treats a missing method as
+   * "cannot verify" rather than as a negative.
+   */
+  supportsEventTypes?(names: readonly string[]): Promise<string[]>;
+
+  /**
+   * The highest block an event scan may treat as FINAL given the observed
+   * `head` (review r11-bot): the adapter owns its finality semantics — the
+   * EVM adapter applies its confirmation policy (`head - confirmations + 1`,
+   * the convention `readKnowledgeAssetVersionSnapshot` documents), a
+   * checkpoint-based chain would answer from its checkpoints — and the
+   * consumer takes the bound without knowing the arithmetic. Optional: an
+   * adapter without a policy finalizes at the head.
+   */
+  finalizedEventScanBound?(head: number): number;
+
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;
     submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;
