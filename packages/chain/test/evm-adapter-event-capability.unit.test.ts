@@ -12,6 +12,7 @@ import {
 
 import {
   ethers,
+  Interface,
 } from 'ethers';
 import {
 } from '../src/evm-adapter.js';
@@ -23,6 +24,10 @@ import {
   KA_ABI,
   makeAdapter,
   drain,
+  encodeLog,
+  KA_ID,
+  AUTHOR,
+  ROOT,
 } from './_helpers/root-mutation-scan-harness.js';
 
 describe('EVMChainAdapter — capability probe and alias families', () => {
@@ -149,6 +154,50 @@ describe('EVMChainAdapter — capability probe and alias families', () => {
   });
 });
 
+describe('alias families deliver DECODED events under the fallback ABI spelling (review r16-bot)', () => {
+  it('a KCCreated-only ABI yields the normalized KCCreated event from an encoded log', async () => {
+    const kcOnlyAbi = (KA_ABI as Array<Record<string, unknown>>).map((entry) =>
+      entry.type === 'event' && entry.name === 'KnowledgeAssetCreated'
+        ? { ...entry, name: 'KCCreated' }
+        : entry,
+    );
+    const iface = new Interface(kcOnlyAbi as never);
+    const log = encodeLog(iface, 'KCCreated', [KA_ID, AUTHOR, 'op-1', ROOT, 4_096n, 1n, 2n, 0n, false]);
+    const { adapter } = makeAdapter({ abi: kcOnlyAbi, logsByEvent: { KCCreated: [log] } });
+
+    const events = await drain(adapter, ['KCCreated']);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'KCCreated', blockNumber: 4_242 });
+    expect(events[0]!.data['kaId']).toBe(KA_ID.toString());
+    expect(String(events[0]!.data['merkleRoot']).toLowerCase()).toBe(ROOT);
+  });
+
+  it('a ContextGraphNameClaimed-only registry yields the normalized NameClaimed payload from an encoded log', async () => {
+    const claimOnlyAbi = [{
+      type: 'event',
+      name: 'ContextGraphNameClaimed',
+      anonymous: false,
+      inputs: [
+        { name: 'nameHash', type: 'uint256', indexed: true },
+        { name: 'creator', type: 'address', indexed: true },
+        { name: 'accessPolicy', type: 'uint8', indexed: false },
+      ],
+    }];
+    const iface = new Interface(claimOnlyAbi as never);
+    const log = encodeLog(iface, 'ContextGraphNameClaimed', [777n, AUTHOR, 1]);
+    const { adapter } = makeAdapter({ logsByEvent: { ContextGraphNameClaimed: [log] } });
+    const priv = adapter as unknown as { contracts: Record<string, unknown> };
+    priv.contracts.contextGraphNameRegistry = new ethers.Contract('0x' + '33'.repeat(20), claimOnlyAbi as never);
+
+    const events = await drain(adapter, ['ContextGraphNameClaimed']);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'NameClaimed', blockNumber: 4_242 });
+    expect(events[0]!.data).toMatchObject({ contextGraphId: '777', accessPolicy: 1 });
+    expect(String(events[0]!.data['creator']).toLowerCase()).toBe(AUTHOR);
+  });
+});
 describe('EVMChainAdapter.supportsEventTypes', () => {
   it('accepts EACH alias spelling independently, not only the primary (review r3-bot)', async () => {
     // Both fixtures previously carried the FIRST spelling only, so dropping
