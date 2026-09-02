@@ -359,6 +359,73 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     });
   }, 30_000);
 
+  it('accepts an exact projection when the store post-read returns a different row order', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const reorderedPostReadStore = new Proxy(fixture.receiverStore, {
+      get(target, property) {
+        if (property === 'query') {
+          return async (...args: Parameters<TripleStore['query']>) => {
+            const result = await target.query(...args);
+            if (
+              args[1]?.source === 'rfc64-public-catalog-native-post-read'
+              && result.type === 'bindings'
+              && result.bindings.length > 1
+            ) {
+              return { ...result, bindings: [...result.bindings].reverse() };
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const observed = fixture.createCasObservedReceiver(undefined, reorderedPostReadStore);
+
+    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+      .resolves.toMatchObject({
+        appliedHeadStatus: 'applied',
+        inventoryRowCount: 1,
+        activatedTripleCount: 2,
+      });
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).toHaveBeenCalledOnce();
+  }, 30_000);
+
+  it('rejects changed post-read content before the applied-head CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const changedPostReadStore = new Proxy(fixture.receiverStore, {
+      get(target, property) {
+        if (property === 'query') {
+          return async (...args: Parameters<TripleStore['query']>) => {
+            const result = await target.query(...args);
+            if (
+              args[1]?.source === 'rfc64-public-catalog-native-post-read'
+              && result.type === 'bindings'
+              && result.bindings.length > 1
+            ) {
+              const bindings = [...result.bindings];
+              bindings[1] = { ...bindings[1], o: '"Alixe"' };
+              return { ...result, bindings };
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const observed = fixture.createCasObservedReceiver(undefined, changedPostReadStore);
+
+    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-activation',
+        message: expect.stringContaining('exact SWM post-read differs'),
+      });
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+  }, 30_000);
+
   it('cold-bootstraps a zero-row successor on a fresh receiver', async () => {
     const fixture = await setupLiveReceiver();
 

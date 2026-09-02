@@ -85,6 +85,7 @@ function selectedFixture(resolved: bigint | null = 42n) {
         legacyContextGraphs: [],
         track2ContextGraphs: [],
         selectedAuthority: {},
+        selectedAuthorityByWireId: {},
         standaloneTrack2Enabled: false,
       },
     } as Record<string, unknown>,

@@ -61,14 +61,17 @@ import {
   type VerifiedCatalogSealBindingV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
+import { createHash } from 'node:crypto';
 import {
   verifyControlEnvelopeIssuerSignatureV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import {
+  quadToNQuad,
   quadsToNQuads,
   readExactGraphPaged,
   tryReplaceGraphAndSubjectAtomically,
+  type Quad,
   type TripleStore,
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
@@ -128,6 +131,7 @@ import {
   transitionLocationFromRfc64RemovalV1 as transitionLocationFromRemoval,
   type Rfc64SemanticTransitionLocationV1,
 } from './catalog-semantic-authority-transition-v1.js';
+
 import {
   assertDirectAuthorCatalogIssuerDelegationBindingV1,
   loadExactAppliedCatalogRowsV1 as loadExactCatalogRowsForHeadV1,
@@ -2163,8 +2167,22 @@ async function activateExactPublicProjection(
   } catch (cause) {
     fail('catalog-native-receiver-activation', 'exact SWM post-read failed', cause);
   }
-  if (`${quadsToNQuads(readBack)}\n` !== projectionText) {
-    fail('catalog-native-receiver-activation', 'exact SWM post-read differs from verified projection');
+  const readBackText = `${quadsToNQuads(readBack)}\n`;
+  if (readBackText !== projectionText) {
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+    const setEqual = canonicalQuadSetV1(quads) === canonicalQuadSetV1(readBack);
+    if (!setEqual) {
+      fail(
+        'catalog-native-receiver-activation',
+        `exact SWM post-read differs from verified projection for ${kaUal}`
+          + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
+          + ` expectedBytes=${Buffer.byteLength(projectionText)}`
+          + ` actualBytes=${Buffer.byteLength(readBackText)}`
+          + ` expectedSha256=${digest(projectionText)}`
+          + ` actualSha256=${digest(readBackText)}`
+          + ` canonicalSetEqual=${setEqual}`,
+      );
+    }
   }
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
@@ -2233,6 +2251,11 @@ function compareQuads(
     || left.object.localeCompare(right.object)
     || left.subject.localeCompare(right.subject)
     || left.graph.localeCompare(right.graph);
+}
+
+/** RDF graph equality is set equality; triple insertion does not retain row order. */
+function canonicalQuadSetV1(quads: readonly Readonly<Quad>[]): string {
+  return [...new Set(quads.map(quadToNQuad))].sort().join('\n');
 }
 
 export function rfc64CatalogSignatureVariantDigestV1(

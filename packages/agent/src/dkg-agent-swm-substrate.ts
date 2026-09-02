@@ -615,9 +615,21 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
-    const authorityContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
-      ? this.wireIdToLocalCgId.get(contextGraphId.toLowerCase()) ?? contextGraphId
-      : contextGraphId;
+    const wireContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
+      ? contextGraphId.toLowerCase()
+      : null;
+    const authorityContextGraphId = wireContextGraphId === null
+      ? contextGraphId
+      : this.wireIdToLocalCgId.get(wireContextGraphId) ?? wireContextGraphId;
+    if (wireContextGraphId !== null && authorityContextGraphId === wireContextGraphId) {
+      // The first live SHARE can arrive before the canonical subscription
+      // lifecycle installs its authenticated reverse binding. Consult the
+      // construction-time cleartext-name commitment index without mutating
+      // that lifecycle-owned identity map.
+      const wireAuthority = this.config.rfc64CatalogExecutionPlan
+        .selectedAuthorityByWireId[wireContextGraphId];
+      if (wireAuthority !== undefined) return wireAuthority.legacySyncAllowed;
+    }
     return resolveRfc64CatalogExecutionPlanAuthorityV1(
       this.config.rfc64CatalogExecutionPlan,
       authorityContextGraphId,
