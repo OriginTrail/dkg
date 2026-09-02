@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { ethers } from 'ethers';
+
 /** Restart-stable authority selection for one explicitly selected CG. */
 export type Rfc64CatalogRolloutModeV1 = 'legacy' | 'shadow' | 'catalog';
 
@@ -97,6 +99,9 @@ export interface Rfc64CatalogExecutionPlanV1 {
   readonly legacyContextGraphs: readonly string[];
   readonly track2ContextGraphs: readonly string[];
   readonly selectedAuthority: Readonly<Record<string, Rfc64CatalogAuthorityPolicyV1>>;
+  /** Selected authority keyed by the commitment of each cleartext CG id. */
+  readonly selectedAuthorityByWireId:
+    Readonly<Record<string, Rfc64CatalogAuthorityPolicyV1>>;
   /** Compatibility catalog controls remain available without selected-CG activation. */
   readonly standaloneTrack2Enabled: boolean;
 }
@@ -431,11 +436,18 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     });
     track2ContextGraphs.push(contextGraphId);
   }
+  const selectedAuthorityByWireId: Record<string, Rfc64CatalogAuthorityPolicyV1> =
+    Object.create(null);
+  for (const [contextGraphId, authority] of Object.entries(selectedAuthority)) {
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    selectedAuthorityByWireId[wireId] = authority;
+  }
   return Object.freeze({
     killSwitchActive: input.activation.rollout.killSwitch,
     legacyContextGraphs: resolveRfc64LegacySyncContextGraphsV1(input),
     track2ContextGraphs: Object.freeze(track2ContextGraphs),
     selectedAuthority: Object.freeze(selectedAuthority),
+    selectedAuthorityByWireId: Object.freeze(selectedAuthorityByWireId),
     standaloneTrack2Enabled: input.activation.enabled === false
       && !input.activation.rollout.killSwitch,
   });
