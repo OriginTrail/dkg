@@ -192,6 +192,15 @@ export class ChainEventPoller {
    * (review r10).
    */
   private stopPromise: Promise<void> | null = null;
+  /**
+   * The in-flight activation (review r18-bot): start() now awaits a
+   * capability probe BEFORE reserving `running`, so the whole transition is
+   * serialized through this promise — concurrent starts share one
+   * activation, and a stop() issued meanwhile cancels it before any timer
+   * is installed.
+   */
+  private startPromise: Promise<void> | null = null;
+  private startCancelled = false;
 
   /** Max blocks to scan per poll — stays within typical RPC range limits. */
   private static readonly MAX_RANGE = 9_000;
@@ -232,7 +241,18 @@ export class ChainEventPoller {
 
   async start(): Promise<void> {
     if (this.running) return;
-    // Serialize a restart behind an unfinished stop() (review r10): without
+    if (this.startPromise) return this.startPromise;
+    const activation = this.activate();
+    this.startPromise = activation;
+    try {
+      await activation;
+    } finally {
+      if (this.startPromise === activation) this.startPromise = null;
+    }
+  }
+
+  private async activate(): Promise<void> {
+    if (this.running) return;    // Serialize a restart behind an unfinished stop() (review r10): without
     // this await, a start() issued mid-drain re-arms the interval and
     // overwrites `inFlightPoll` while the drain still awaits the old scan --
     // exactly the overlapping-scan state stop() exists to prevent.
@@ -240,6 +260,7 @@ export class ChainEventPoller {
       try { await this.stopPromise; } catch { /* stop() reports its own failures */ }
     }
     if (this.running) return; // a concurrent start won the race during the await
+    if (this.startCancelled) { this.startCancelled = false; return; }
     // Fail FAST, not silent (review r14/r16-bot: after the idempotence guards, so a repeated start() on a running poller neither re-probes nor can fail): the root-mutation lane bounds
     // its scans at the finalized head, which needs a readable head. Without
     // `getBlockNumber` the lane would hold on every tick and the callback
@@ -287,6 +308,9 @@ export class ChainEventPoller {
         );
       }
     }
+    // A stop() issued while the probes were pending wins: no timer is
+    // installed and the poller stays stopped (review r18-bot).
+    if (this.startCancelled) { this.startCancelled = false; return; }
     this.running = true;
 
     const ctx = createOperationContext('system');
@@ -362,6 +386,14 @@ export class ChainEventPoller {
   }
 
   private async drainAndStop(): Promise<void> {
+    if (this.startPromise && !this.running) {
+      // Activation is mid-probe: mark it cancelled and wait for it to
+      // observe the mark, so stop() never returns while a start could still
+      // install a timer behind it.
+      this.startCancelled = true;
+      try { await this.startPromise; } catch { /* activation reports its own failures */ }
+      this.startCancelled = false;
+    }
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

@@ -360,6 +360,70 @@ describe('kaRootMutations — activation contract', () => {
     await expect(poller.start()).resolves.toBeUndefined();
     await poller.stop();
   });
+  it('concurrent start() calls share ONE activation: one probe, one interval (review r18-bot)', async () => {
+    let probes = 0;
+    let releaseProbe: (() => void) | undefined;
+    const chain = makeChain(50_000);
+    let heads = 0;
+    const realHead = chain.adapter.getBlockNumber!.bind(chain.adapter);
+    chain.adapter.getBlockNumber = async () => { heads += 1; return realHead(); };
+    (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
+      .supportsEventTypes = () => new Promise((resolve) => {
+        probes += 1;
+        releaseProbe = () => resolve([]);
+      });
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 10,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    const first = poller.start();
+    const second = poller.start();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(probes, 'the second start joins the first activation').toBe(1);
+    releaseProbe!();
+    await Promise.all([first, second]);
+    await new Promise((r) => setTimeout(r, 60));
+    const polledWhileRunning = heads;
+    expect(polledWhileRunning, 'the single interval polls').toBeGreaterThan(0);
+    await poller.stop();
+    const atStop = heads;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(heads, 'no orphaned second interval survives stop()').toBe(atStop);
+  });
+
+  it('a stop() during the capability probe cancels the activation: no timer is ever installed (review r18-bot)', async () => {
+    let releaseProbe: (() => void) | undefined;
+    const chain = makeChain(50_000);
+    let heads = 0;
+    const realHead = chain.adapter.getBlockNumber!.bind(chain.adapter);
+    chain.adapter.getBlockNumber = async () => { heads += 1; return realHead(); };
+    (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
+      .supportsEventTypes = () => new Promise((resolve) => { releaseProbe = () => resolve([]); });
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 10,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    const starting = poller.start();
+    await new Promise((r) => setTimeout(r, 5));
+    const stopping = poller.stop();
+    await new Promise((r) => setTimeout(r, 5));
+    releaseProbe!();
+    await Promise.all([starting, stopping]);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(heads, 'the cancelled activation never polled').toBe(0);
+    expect((poller as unknown as { running: boolean }).running, 'and the poller is stopped').toBe(false);
+    // The cancellation is not sticky: a later start() runs normally.
+    (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
+      .supportsEventTypes = async () => [];
+    await poller.start();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(heads).toBeGreaterThan(0);
+    await poller.stop();
+  });
   it('start() proceeds when the capability probe reports every kind served', async () => {
     const chain = makeChain(50_000);
     (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
