@@ -17,6 +17,11 @@ import {
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
+import {
+  createRecoveryExecutionBoundary,
+  type RecoveryExecutionBoundary,
+  type RecoveryExecutionGuard,
+} from './recovery-execution-guard.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -448,6 +453,8 @@ interface SharedMemorySyncContext {
    * oldest outstanding history. Ordinary sync preserves manifest order.
    */
   snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
+  /** Current-authority capability for selected recovery; ordinary sync omits it. */
+  recoveryGuard?: RecoveryExecutionGuard;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -490,6 +497,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     snapshotEvidencePolicy,
     metadataFetcher,
     snapshotRecoveryOrder = 'manifest',
+    recoveryGuard,
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -497,6 +505,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     logWarn,
     logDebug,
   } = context;
+  const recoveryBoundary = createRecoveryExecutionBoundary(recoveryGuard);
+  recoveryBoundary.assertCurrent();
 
   const summary: SharedMemorySyncSummary = {
     insertedTriples: 0,
@@ -526,6 +536,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     result: SyncPageResult,
     options: { updateCheckpoint?: boolean; emptyPhase?: boolean } = {},
   ) => {
+    recoveryBoundary.assertCurrent();
     const updateCheckpoint = options.updateCheckpoint ?? true;
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
@@ -544,9 +555,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     if (result.nextOffset > result.resumedFromOffset) {
       summary.checkpointAdvances += 1;
     }
-    if (result.completed) deleteCheckpoint(result.checkpointKey);
+    if (result.completed) recoveryBoundary.commit(() => deleteCheckpoint(result.checkpointKey));
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
-      setCheckpoint(result.checkpointKey, result.nextOffset);
+      recoveryBoundary.commit(() => setCheckpoint(result.checkpointKey, result.nextOffset));
     }
   };
 
@@ -614,6 +625,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   };
 
   for (const [index, pid] of contextGraphIds.entries()) {
+    recoveryBoundary.assertCurrent();
     let peerRespondedForContextGraph = false;
     // Hoisted out of the `try` so the `catch` can still say whether this peer's
     // manifest was whole. Without it a throwing round could only report a
@@ -634,15 +646,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const fetchStartedAt = Date.now();
       const metadataOutcome = metadataFetcher
-        ? await metadataFetcher.fetch({
+        ? await recoveryBoundary.wait(() => metadataFetcher.fetch({
           ctx,
           remotePeerId,
           contextGraphId: pid,
           graphUri: wsMetaGraph,
           deadline,
-        })
+        }))
         : {
-          result: await fetchSyncPages(
+          result: await recoveryBoundary.wait(() => fetchSyncPages(
             ctx,
             remotePeerId,
             pid,
@@ -650,7 +662,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             'meta',
             wsMetaGraph,
             deadline,
-          ),
+            { signal: recoveryBoundary.signal },
+          )),
           continuationYielded: false,
         };
       const wsMetaResult = metadataOutcome.result;
@@ -669,24 +682,33 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         recordPhaseOutcome(wsMetaResult, { updateCheckpoint: false });
         break;
       }
-      const wsDataResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
+      const wsDataResult = await recoveryBoundary.wait(() => fetchSyncPages(
+        ctx,
+        remotePeerId,
+        pid,
+        true,
+        'data',
+        wsGraph,
+        deadline,
+        { signal: recoveryBoundary.signal },
+      ));
       peerRespondedForContextGraph = true;
       const fetchDurationMs = Date.now() - fetchStartedAt;
 
       const verifyStartedAt = Date.now();
       const registeredSubGraphNames = getRegisteredSubGraphNames
-        ? await getRegisteredSubGraphNames(pid)
+        ? await recoveryBoundary.wait(() => getRegisteredSubGraphNames(pid))
         : undefined;
       const excludedSubGraphNames = getExcludedSubGraphNames
-        ? await getExcludedSubGraphNames(pid)
+        ? await recoveryBoundary.wait(() => getExcludedSubGraphNames(pid))
         : undefined;
-      const processed = await processSharedMemoryBatch(
+      const processed = await recoveryBoundary.wait(() => processSharedMemoryBatch(
         wsDataResult.quads,
         wsMetaResult.quads,
         pid,
         registeredSubGraphNames,
         excludedSubGraphNames,
-      );
+      ));
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
@@ -730,7 +752,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           && wsDataResult.completed
           && !wsDataResult.timedOut
         ) {
-          metadataFetcher?.release(pid);
+          if (metadataFetcher) {
+            recoveryBoundary.commit(() => metadataFetcher.release(pid));
+          }
         }
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
@@ -741,15 +765,16 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const validWsQuads = processed.verifiedData;
       const dropped = processed.droppedDataTriples;
       const hydrateOwnership = () => {
+        recoveryBoundary.assertCurrent();
         for (const { dataGraph, entity, creator } of processed.entityCreators) {
           const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
           if (!ownershipKey) {
             logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
             continue;
           }
-          const ownedMap = ensureOwnedMap(ownershipKey);
+          const ownedMap = recoveryBoundary.commit(() => ensureOwnedMap(ownershipKey));
           if (!ownedMap.has(entity)) {
-            ownedMap.set(entity, creator);
+            recoveryBoundary.commit(() => ownedMap.set(entity, creator));
           }
         }
       };
@@ -858,7 +883,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
-        await ensureContextGraph(pid);
+        await recoveryBoundary.wait(() => ensureContextGraph(pid));
         contextGraphEnsured = true;
       };
       /**
@@ -893,7 +918,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         const rows = snapshotCommit.unwrittenVerifiedRows(descriptor);
         if (rows.length === 0) return;
         await ensureContextGraphOnce();
-        await storeInsert([...rows]);
+        await recoveryBoundary.wait(() => storeInsert([...rows]));
+        recoveryBoundary.assertCurrent();
         snapshotCommit.recordWritten(rows);
         summary.insertedTriples += rows.length;
         summary.insertedMetaTriples += rows.length;
@@ -932,7 +958,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         descriptor: GraphScopedSwmRecoveryDescriptor,
         how: string,
       ): Promise<string | null> => {
-        const preserved = await snapshotMaterializer!.selectRepairIdentity(pid, descriptor);
+        const preserved = await recoveryBoundary.wait(
+          () => snapshotMaterializer!.selectRepairIdentity(pid, descriptor),
+        );
         if (!preserved) return null;
         // The materializer returns the complete plan: winner + the exact rows
         // to withhold. Suppression consumes that plan, not a re-derivation.
@@ -947,9 +975,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       ): Promise<void> => {
         const winner = await decideAndWithholdStoredIdentity(descriptor, 'repaired head');
         if (winner !== null) {
-          await snapshotMaterializer!.repairHeadPreservingIdentity(pid, descriptor, winner);
+          await recoveryBoundary.wait(
+            () => snapshotMaterializer!.repairHeadPreservingIdentity(pid, descriptor, winner),
+          );
         } else {
-          await snapshotMaterializer!.replaceHeadMetadata(pid, descriptor);
+          await recoveryBoundary.wait(
+            () => snapshotMaterializer!.replaceHeadMetadata(pid, descriptor),
+          );
         }
         await insertVerifiedDescriptorMeta(descriptor);
       };
@@ -993,11 +1025,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
           try {
-            await snapshotMaterializer.withKaWriteLock(
+            await recoveryBoundary.wait(() => snapshotMaterializer.withKaWriteLock(
               pid,
               descriptor.subGraphName,
               descriptor.kaUal,
               async () => {
+                recoveryBoundary.assertCurrent();
                 // ALL decisions live INSIDE the lock. Between our pre-lock view
                 // of the world and acquisition, live gossip may have committed
                 // this KA — the lock stops the interleaving, and the two
@@ -1012,7 +1045,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // about ordering we must not destroy. Nor may we "repair" the
                 // head rows here — gossip owns a newer head and its
                 // delete-then-insert already wrote it unambiguously.
-                const storedHead = await snapshotMaterializer.readStoredHead(descriptor);
+                const storedHead = await recoveryBoundary.wait(
+                  () => snapshotMaterializer.readStoredHead(descriptor),
+                );
                 if (
                   storedHead.version !== null
                   && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
@@ -1036,7 +1071,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // must be REPAIRED; an equal-count graph with a different
                 // digest is an OLDER version of the same size and must be
                 // replaced, not skipped.
-                if (await snapshotMaterializer.isGraphAssetMaterialized(descriptor)) {
+                if (await recoveryBoundary.wait(
+                  () => snapshotMaterializer.isGraphAssetMaterialized(descriptor),
+                )) {
                   // Content is already this descriptor's. Two states still need
                   // the head rewritten, and BOTH are invisible to a reader that
                   // only looks at content:
@@ -1089,19 +1126,23 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     // decide-and-enact shape the private recovery lane uses.
                     const winner = await decideAndWithholdStoredIdentity(descriptor, 'kept head');
                     if (winner !== null) {
-                      await snapshotMaterializer.repairHeadPreservingIdentity(pid, descriptor, winner);
+                      await recoveryBoundary.wait(
+                        () => snapshotMaterializer.repairHeadPreservingIdentity(pid, descriptor, winner),
+                      );
                     }
                   }
                   materializedKeys.add(graphKey);
                   return;
                 }
-                const asset = await materializeGraphScopedSwmRecoveryAsset({
+                const asset = await recoveryBoundary.wait(() => materializeGraphScopedSwmRecoveryAsset({
                   descriptor,
                   fetchedDataQuads: [],
                   publicSnapshotStore,
-                });
+                }));
                 await ensureContextGraphOnce();
-                await snapshotMaterializer.replaceGraph(asset.assertionGraph, [...asset.quads]);
+                await recoveryBoundary.wait(
+                  () => snapshotMaterializer.replaceGraph(asset.assertionGraph, [...asset.quads]),
+                );
                 // Graph first, THEN the head swap — a crash between the two
                 // leaves content newer than the head, which the next round
                 // repairs (digest matches → head rewritten above). The swap
@@ -1140,13 +1181,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 logInfo(ctx, `SWM sync for "${pid}": materialized snapshot ${snapshotRef} `
                   + `as ${asset.assertionGraph} (${asset.quads.length} triples)`);
               },
-            );
+            ));
             // The opposite ordering from durable VM catch-up is equally
             // possible: VM may already be present when this SWM snapshot
             // arrives. Reconcile only after releasing the materialization
             // lock; the production callback reacquires the same per-KA lock
             // and re-verifies current head + both graph digests before delete.
-            await snapshotCommit.reconcileAfterMaterialization({
+            await recoveryBoundary.wait(() => snapshotCommit.reconcileAfterMaterialization({
               contextGraphId: pid,
               descriptor,
               onDeferred: (cause) => logWarn(
@@ -1154,8 +1195,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 `SWM sync deferred finalized-twin reconciliation for ${descriptor.kaUal}: `
                   + `${cause instanceof Error ? cause.message : String(cause)}`,
               ),
-            });
+            }));
           } catch (err) {
+            // Revocation must escape this best-effort materialization catch;
+            // treating it as one failed snapshot would let the stale run keep
+            // walking and reach later commit points.
+            recoveryBoundary.assertCurrent();
             // A failed replace must never be able to look materialized later.
             // Suppressing it here while the surrounding sync still inserts the
             // graph-scoped head marker makes the loss PERMANENT: the next pass
@@ -1199,7 +1244,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       };
 
       const snapshotStartedAt = Date.now();
-      const snapshotSync = await syncPublicSnapshotsForMeta({
+      const snapshotSync = await recoveryBoundary.wait(() => syncPublicSnapshotsForMeta({
         ctx,
         remotePeerId,
         contextGraphId: pid,
@@ -1214,6 +1259,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         fetchSyncPages,
         deleteCheckpoint,
         setCheckpoint,
+        executionBoundary: recoveryBoundary,
         // Fires for BOTH 'cache' and 'network' sources, so a node whose earlier
         // runs already cached the blobs materializes them on the next pass
         // without refetching a byte.
@@ -1245,13 +1291,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // absent, so this costs nothing when there is genuinely no wiring.
         onSnapshotReady: async (snapshot: PublicSnapshotMetadata) => {
           await materializeReadySnapshot(snapshot.ref);
+          recoveryBoundary.assertCurrent();
           if (materializedRefs.has(snapshot.ref)) {
             const suppressedRows = (snapshotDescriptorsByRef.get(snapshot.ref) ?? [])
               .flatMap((descriptor) => snapshotCommit.suppressedRows(descriptor.metadataQuads));
             snapshotWalk?.markResolved(snapshot.ref, suppressedRows);
           }
         },
-      });
+      }));
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
         // write lock, so they survive a snapshot-phase throw. Adding them again
@@ -1350,8 +1397,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // up with dangling/missing public snapshot state.
         summary.failedPhases += 1;
         if (validWsQuads.length > 0) {
-          await ensureContextGraph(pid);
-          await storeInsert(validWsQuads);
+          await recoveryBoundary.wait(() => ensureContextGraph(pid));
+          await recoveryBoundary.wait(() => storeInsert(validWsQuads));
           summary.insertedTriples += validWsQuads.length;
           summary.insertedDataTriples += validWsQuads.length;
           recordPhaseOutcome(wsDataResult);
@@ -1364,10 +1411,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
 
       const storeStartedAt = Date.now();
-      await ensureContextGraph(pid);
+      await recoveryBoundary.wait(() => ensureContextGraph(pid));
 
       if (validWsQuads.length > 0) {
-        await storeInsert(validWsQuads);
+        await recoveryBoundary.wait(() => storeInsert(validWsQuads));
         summary.insertedTriples += validWsQuads.length;
         summary.insertedDataTriples += validWsQuads.length;
       }
@@ -1397,7 +1444,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // verified input and is subtracted solely when its row survives.
         const metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
         if (metaForBulkInsert.length > 0) {
-          await storeInsert(metaForBulkInsert);
+          await recoveryBoundary.wait(() => storeInsert(metaForBulkInsert));
         }
         const retainedAlreadyCounted = snapshotCommit.alreadyCountedRetainedRows();
         const newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
@@ -1406,7 +1453,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
-      metadataFetcher?.release(pid);
+      if (metadataFetcher) {
+        recoveryBoundary.commit(() => metadataFetcher.release(pid));
+      }
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
@@ -1519,6 +1568,8 @@ export async function syncPublicSnapshotsForMeta(params: {
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
+  /** Shared with the owning requester invocation so every effect uses one guard. */
+  executionBoundary?: RecoveryExecutionBoundary;
   /**
    * Optional recovery hook invoked only after the complete immutable snapshot
    * has passed its signed digest/count check. Callers may make that one KA
@@ -1554,6 +1605,9 @@ export async function syncPublicSnapshotsForMeta(params: {
    */
   yieldedAtDeadline: boolean;
 }> {
+  const executionBoundary = params.executionBoundary
+    ?? createRecoveryExecutionBoundary();
+  executionBoundary.assertCurrent();
   const manifestSnapshots = params.snapshotWalk
     ? []
     : collectPublicSnapshotMetadata(params.metaQuads);
@@ -1624,6 +1678,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   };
 
   for (const [index, snapshot] of snapshots.entries()) {
+    executionBoundary.assertCurrent();
     // A selected transfer owner may carry exact, manifest-bound evidence from
     // an earlier bounded slice. Skipping these refs is intentionally cheaper
     // than re-reading and re-hashing every snapshot blob and assertion graph:
@@ -1653,13 +1708,17 @@ export async function syncPublicSnapshotsForMeta(params: {
       break;
     }
     try {
-      if (await hasValidSnapshot(params.publicSnapshotStore, snapshot)) {
-        await params.onSnapshotReady?.(snapshot, 'cache');
+      if (await executionBoundary.wait(
+        () => hasValidSnapshot(params.publicSnapshotStore!, snapshot),
+      )) {
+        if (params.onSnapshotReady) {
+          await executionBoundary.wait(() => params.onSnapshotReady!(snapshot, 'cache'));
+        }
         readySnapshots += 1;
         continue;
       }
 
-      const result = await params.fetchSyncPages(
+      const result = await executionBoundary.wait(() => params.fetchSyncPages(
         params.ctx,
         params.remotePeerId,
         params.contextGraphId,
@@ -1667,12 +1726,14 @@ export async function syncPublicSnapshotsForMeta(params: {
         'snapshot',
         '',
         params.deadline,
-        { snapshotRef: snapshot.ref },
-      );
+        { snapshotRef: snapshot.ref, signal: executionBoundary.signal },
+      ));
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
       timedOutPhases += result.timedOut ? 1 : 0;
-      if (result.completed) params.deleteCheckpoint(result.checkpointKey);
+      if (result.completed) {
+        executionBoundary.commit(() => params.deleteCheckpoint(result.checkpointKey));
+      }
       else {
         // `fetchSyncPages` returns only the quads fetched during THIS call. We do
         // not persist an unverified prefix, so resuming a snapshot at nextOffset
@@ -1681,7 +1742,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // already completed snapshots remain cached and are skipped, preserving
         // monotonic recovery progress across the CG without accepting a partial
         // asset.
-        params.deleteCheckpoint(result.checkpointKey);
+        executionBoundary.commit(() => params.deleteCheckpoint(result.checkpointKey));
         abandonFrom(index);
         break;
       }
@@ -1703,7 +1764,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // repeat-pass design to a fixed point at zero progress. Skipping costs
         // this KA and nothing else — it stays uncached and unapplied, and is
         // retried from offset zero next pass.
-        params.deleteCheckpoint(result.checkpointKey);
+        executionBoundary.commit(() => params.deleteCheckpoint(result.checkpointKey));
         noteMissing(snapshot.ref);
         continue;
       }
@@ -1714,11 +1775,17 @@ export async function syncPublicSnapshotsForMeta(params: {
           `(expected ${snapshot.digest}/${snapshot.count}, got ${actualDigest}/${snapshotQuads.length})`,
         );
       }
-      await params.publicSnapshotStore.putSnapshot({ digest: snapshot.digest, quads: snapshotQuads });
-      await params.onSnapshotReady?.(snapshot, 'network');
+      await executionBoundary.wait(() => params.publicSnapshotStore!.putSnapshot({
+        digest: snapshot.digest,
+        quads: snapshotQuads,
+      }));
+      if (params.onSnapshotReady) {
+        await executionBoundary.wait(() => params.onSnapshotReady!(snapshot, 'network'));
+      }
       completedPhases += 1;
       readySnapshots += 1;
     } catch (err) {
+      executionBoundary.assertCurrent();
       // Any failure in this KA's work — the blob read, the fetch, the
       // digest check, the store write, or materialization — leaves the walk
       // here. Carry what earlier iterations achieved out with it.

@@ -438,8 +438,10 @@ import {
   Rfc64CatalogBootstrapMethods,
   Rfc64CatalogBootstrapOwnerV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
-import { Rfc64SwmRecoveryRuntimeMethods } from
-  './dkg-agent-rfc64-swm-recovery-runtime.js';
+import {
+  Rfc64SwmRecoveryLeaseRegistryV1,
+  Rfc64SwmRecoveryRuntimeMethods,
+} from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import {
@@ -845,6 +847,7 @@ export class DKGAgent extends DKGAgentBase {
       writeLocks,
       publicSnapshotStore,
     );
+    this.rfc64SwmRecoveryLeaseRegistryV1 = new Rfc64SwmRecoveryLeaseRegistryV1();
     const resolveCatalogPartition = () => {
       const bootstrap = resolveRfc64RuntimeCatalogBootstrapConfigV1(
         this.config.rfc64CatalogBootstrap,

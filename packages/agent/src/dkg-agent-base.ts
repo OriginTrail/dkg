@@ -36,6 +36,8 @@ import type {
   Rfc64SwmRecoveryCoordinatorV1,
 } from
   './rfc64/swm-recovery-coordinator-v1.js';
+import type { Rfc64SwmRecoveryLeaseRegistryV1 } from
+  './dkg-agent-rfc64-swm-recovery-runtime.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -1660,11 +1662,8 @@ export class DKGAgentBase {
     | null = null;
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
-  /** Per-CG cancellation owner for already-running live RFC-64 SWM recovery. */
-  protected readonly rfc64SwmRecoverySelectionControllers = new Map<
-    string,
-    AbortController
-  >();
+  /** Runtime owner of graph-scoped RFC-64 recovery lease generations. */
+  protected rfc64SwmRecoveryLeaseRegistryV1!: Rfc64SwmRecoveryLeaseRegistryV1;
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a

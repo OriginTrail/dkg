@@ -2,6 +2,7 @@ import {
   deleteByPatternWithoutCount,
   type Quad,
 } from '@origintrail-official/dkg-storage';
+import type { RecoveryExecutionBoundary } from './recovery-execution-guard.js';
 
 /**
  * WS-0.0: per-root REPLACE apply for SWM recovery.
@@ -60,19 +61,29 @@ export async function applySwmRecovery(params: {
   readonly store: SwmRecoveryStore;
   readonly verifiedData: readonly Quad[];
   readonly roots: readonly SwmRecoveryRoot[];
+  readonly executionBoundary?: RecoveryExecutionBoundary;
 }): Promise<SwmRecoveryApplyResult> {
+  const wait = <T>(operation: () => Promise<T>): Promise<T> => (
+    params.executionBoundary?.wait(operation) ?? operation()
+  );
   // Clear each (graph, root) exactly once — root rows + its skolemized children.
   const cleared = new Set<string>();
   for (const { dataGraph, entity } of params.roots) {
     const key = `${dataGraph}\u0000${entity}`;
     if (cleared.has(key)) continue;
     cleared.add(key);
-    await deleteByPatternWithoutCount(params.store, { graph: dataGraph, subject: entity });
-    await params.store.deleteBySubjectPrefix(dataGraph, `${entity}${SKOLEM_CHILD_INFIX}`);
+    await wait(() => deleteByPatternWithoutCount(
+      params.store,
+      { graph: dataGraph, subject: entity },
+    ));
+    await wait(() => params.store.deleteBySubjectPrefix(
+      dataGraph,
+      `${entity}${SKOLEM_CHILD_INFIX}`,
+    ));
   }
 
   if (params.verifiedData.length > 0) {
-    await params.store.insert([...params.verifiedData]);
+    await wait(() => params.store.insert([...params.verifiedData]));
   }
 
   return { replacedRoots: cleared.size, insertedQuads: params.verifiedData.length };

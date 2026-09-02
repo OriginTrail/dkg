@@ -344,7 +344,6 @@ import {
 } from './sync/selected-swm-meta-fetcher.js';
 import {
   createSharedMemorySnapshotMaterializer,
-  type SharedMemorySnapshotMaterializer,
 } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -1445,156 +1444,6 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   ensureOwnedMap: RecoverContextGraphSwmOptions['ensureOwnedMap'];
   logInfo: NonNullable<RecoverContextGraphSwmOptions['logInfo']>;
   logWarn: NonNullable<RecoverContextGraphSwmOptions['logWarn']>;
-}
-
-function leaseAsyncPort<Args extends unknown[], Result>(
-  lease: Rfc64SwmRecoveryTargetLeaseV1,
-  operation: (...args: Args) => Promise<Result>,
-): (...args: Args) => Promise<Result> {
-  return (...args) => lease.run(() => operation(...args));
-}
-
-function leaseSyncPort<Args extends unknown[], Result>(
-  lease: Rfc64SwmRecoveryTargetLeaseV1,
-  operation: (...args: Args) => Result,
-): (...args: Args) => Result {
-  return (...args) => lease.runSync(() => operation(...args));
-}
-
-function leaseWorkspacePublicSnapshotStore(
-  lease: Rfc64SwmRecoveryTargetLeaseV1,
-  store: WorkspacePublicSnapshotStore | undefined,
-): WorkspacePublicSnapshotStore | undefined {
-  if (store === undefined) return undefined;
-  return {
-    putSnapshot: leaseAsyncPort(lease, store.putSnapshot.bind(store)),
-    getSnapshot: leaseAsyncPort(lease, store.getSnapshot.bind(store)),
-    ...(store.getSnapshotPage === undefined
-      ? {}
-      : { getSnapshotPage: leaseAsyncPort(lease, store.getSnapshotPage.bind(store)) }),
-  };
-}
-
-function leaseSharedMemorySnapshotMaterializer(
-  lease: Rfc64SwmRecoveryTargetLeaseV1,
-  materializer: SharedMemorySnapshotMaterializer,
-): SharedMemorySnapshotMaterializer {
-  return {
-    withKaWriteLock: (contextGraphId, subGraphName, kaUal, operation) => lease.run(
-      () => materializer.withKaWriteLock(
-        contextGraphId,
-        subGraphName,
-        kaUal,
-        () => lease.run(operation),
-      ),
-    ),
-    readStoredHead: leaseAsyncPort(lease, materializer.readStoredHead.bind(materializer)),
-    isGraphAssetMaterialized: leaseAsyncPort(
-      lease,
-      materializer.isGraphAssetMaterialized.bind(materializer),
-    ),
-    replaceGraph: leaseAsyncPort(lease, materializer.replaceGraph.bind(materializer)),
-    replaceHeadMetadata: leaseAsyncPort(
-      lease,
-      materializer.replaceHeadMetadata.bind(materializer),
-    ),
-    selectRepairIdentity: leaseAsyncPort(
-      lease,
-      materializer.selectRepairIdentity.bind(materializer),
-    ),
-    repairHeadPreservingIdentity: leaseAsyncPort(
-      lease,
-      materializer.repairHeadPreservingIdentity.bind(materializer),
-    ),
-    preserveStoredIdentityForSkippedAsset: leaseAsyncPort(
-      lease,
-      materializer.preserveStoredIdentityForSkippedAsset.bind(materializer),
-    ),
-    replaceMetaForGraphAssets: leaseAsyncPort(
-      lease,
-      materializer.replaceMetaForGraphAssets.bind(materializer),
-    ),
-  };
-}
-
-function leaseOwnedMapPort(
-  lease: Rfc64SwmRecoveryTargetLeaseV1,
-  ensureOwnedMap: NonNullable<RecoverContextGraphSwmOptions['ensureOwnedMap']>,
-): NonNullable<RecoverContextGraphSwmOptions['ensureOwnedMap']> {
-  const leasedMaps = new WeakMap<Map<string, string>, Map<string, string>>();
-  return (ownershipKey) => lease.runSync(() => {
-    const ownedMap = ensureOwnedMap(ownershipKey);
-    const existing = leasedMaps.get(ownedMap);
-    if (existing !== undefined) return existing;
-    const leasedMap = new Proxy(ownedMap, {
-      get(target, property) {
-        if (property === 'set') {
-          return (key: string, value: string) => lease.runSync(() => {
-            target.set(key, value);
-            return leasedMap;
-          });
-        }
-        if (property === 'delete') {
-          return (key: string) => lease.runSync(() => target.delete(key));
-        }
-        if (property === 'clear') {
-          return () => lease.runSync(() => target.clear());
-        }
-        const value = Reflect.get(target, property, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
-    leasedMaps.set(ownedMap, leasedMap);
-    return leasedMap;
-  });
-}
-
-function leaseRecoverContextGraphSwmOptions(
-  lease: Rfc64SwmRecoveryTargetLeaseV1,
-  options: RecoverContextGraphSwmOptions,
-): RecoverContextGraphSwmOptions {
-  return {
-    ...options,
-    fetchSyncPages: leaseAsyncPort(lease, options.fetchSyncPages),
-    processSharedMemoryBatch: leaseAsyncPort(lease, options.processSharedMemoryBatch),
-    store: {
-      insert: leaseAsyncPort(lease, options.store.insert.bind(options.store)),
-      replaceGraph: leaseAsyncPort(lease, options.store.replaceGraph.bind(options.store)),
-      deleteByPattern: leaseAsyncPort(
-        lease,
-        options.store.deleteByPattern.bind(options.store),
-      ),
-      deleteBySubjectPrefix: leaseAsyncPort(
-        lease,
-        options.store.deleteBySubjectPrefix.bind(options.store),
-      ),
-    },
-    publicSnapshotStore: leaseWorkspacePublicSnapshotStore(
-      lease,
-      options.publicSnapshotStore,
-    ),
-    snapshotMaterializer: options.snapshotMaterializer === undefined
-      ? undefined
-      : leaseSharedMemorySnapshotMaterializer(lease, options.snapshotMaterializer),
-    replaceMetaForRoots: options.replaceMetaForRoots === undefined
-      ? undefined
-      : leaseAsyncPort(lease, options.replaceMetaForRoots),
-    replaceMetaForGraphAssets: options.replaceMetaForGraphAssets === undefined
-      ? undefined
-      : leaseAsyncPort(lease, options.replaceMetaForGraphAssets),
-    ensureContextGraph: leaseAsyncPort(lease, options.ensureContextGraph),
-    setCheckpoint: leaseSyncPort(lease, options.setCheckpoint),
-    deleteCheckpoint: leaseSyncPort(lease, options.deleteCheckpoint),
-    getRegisteredSubGraphNames: options.getRegisteredSubGraphNames === undefined
-      ? undefined
-      : leaseAsyncPort(lease, options.getRegisteredSubGraphNames),
-    getExcludedSubGraphNames: options.getExcludedSubGraphNames === undefined
-      ? undefined
-      : leaseAsyncPort(lease, options.getExcludedSubGraphNames),
-    ensureOwnedMap: options.ensureOwnedMap === undefined
-      ? undefined
-      : leaseOwnedMapPort(lease, options.ensureOwnedMap),
-  };
 }
 
 export interface ContextGraphCatchupOptions {
@@ -7573,7 +7422,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           phase,
           graphUri,
           deadline,
-          snapshotRef,
+          fetchOptions,
         ) => this.fetchSyncPages(
             ctx2,
             peerId,
@@ -7583,9 +7432,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             graphUri,
             deadline,
             {
-              snapshotRef,
+              ...fetchOptions,
               recovery: true,
-              ...(recoveryLease === undefined ? {} : { signal: recoveryLease.signal }),
             },
           ),
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
@@ -7701,7 +7549,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
         fetchPage: (request) => {
           const lease = recoveryLeaseFor(request.contextGraphId);
-          const fetchPage = () => this.fetchSyncPages(
+          return this.fetchSyncPages(
             request.ctx,
             request.remotePeerId,
             request.contextGraphId,
@@ -7718,7 +7566,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               ...(lease === undefined ? {} : { signal: lease.signal }),
             },
           );
-          return lease === undefined ? fetchPage() : lease.run(fetchPage);
         },
       });
     };
@@ -7843,24 +7690,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           createContextGraphSyncDeadline: () => createContextGraphSyncDeadline({
             remainingContextGraphs,
           }),
-          fetchSyncPages: recoveryLease === undefined
-            ? fetchPages
-            : leaseAsyncPort(recoveryLease, fetchPages),
-          processSharedMemoryBatch: recoveryLease === undefined
-            ? processSharedMemoryBatch
-            : leaseAsyncPort(recoveryLease, processSharedMemoryBatch),
-          getRegisteredSubGraphNames: recoveryLease === undefined
-            ? async (cgId) => (await getSubGraphAdmission(cgId)).registered
-            : leaseAsyncPort(
-              recoveryLease,
-              async (cgId: string) => (await getSubGraphAdmission(cgId)).registered,
-            ),
-          getExcludedSubGraphNames: recoveryLease === undefined
-            ? async (cgId) => (await getSubGraphAdmission(cgId)).excluded
-            : leaseAsyncPort(
-              recoveryLease,
-              async (cgId: string) => (await getSubGraphAdmission(cgId)).excluded,
-            ),
+          fetchSyncPages: fetchPages,
+          processSharedMemoryBatch,
+          getRegisteredSubGraphNames: async (cgId) => (
+            await getSubGraphAdmission(cgId)
+          ).registered,
+          getExcludedSubGraphNames: async (cgId) => (
+            await getSubGraphAdmission(cgId)
+          ).excluded,
           stopOnBackoffWorthyFailure,
           snapshotEvidencePolicy: selectedSwmEnabled
             ? {
@@ -7881,9 +7718,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             : undefined,
           metadataFetcher: selectedMetaFetcher?.strategy,
           snapshotRecoveryOrder: selectedSwmEnabled ? 'recent-balanced' : 'manifest',
-          ensureContextGraph: recoveryLease === undefined
-            ? ensureContextGraph
-            : leaseAsyncPort(recoveryLease, ensureContextGraph),
+          ensureContextGraph,
           // Everything needed to materialize verified public SWM snapshots,
           // as ONE dependency (a loose optional trio allowed a silent
           // half-configured mode). Graph-scoped (contentScopeVersion 2) KAs
@@ -7898,44 +7733,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // the SAME lock map injected into SharedMemoryHandler (sharing
           // the map + key helper is what closes the check-then-replace
           // race with gossip), and list-cache invalidation.
-          snapshotMaterializer: recoveryLease === undefined
-            ? snapshotMaterializer
-            : leaseSharedMemorySnapshotMaterializer(recoveryLease, snapshotMaterializer),
-          reconcileFinalizedTwin: recoveryLease === undefined
-            ? reconcileFinalizedTwin
-            : leaseAsyncPort(recoveryLease, reconcileFinalizedTwin),
-          storeInsert: recoveryLease === undefined
-            ? storeInsert
-            : leaseAsyncPort(recoveryLease, storeInsert),
-          publicSnapshotStore: recoveryLease === undefined
-            ? this.publicSnapshotStore
-            : leaseWorkspacePublicSnapshotStore(recoveryLease, this.publicSnapshotStore),
-          deleteCheckpoint: recoveryLease === undefined
-            ? (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key)
-            : leaseSyncPort(
-              recoveryLease,
-              (key: string) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
-            ),
-          setCheckpoint: recoveryLease === undefined
-            ? (key, offset) => this.syncCheckpoints.set(key, offset)
-            : leaseSyncPort(
-              recoveryLease,
-              (key: string, offset: number) => this.syncCheckpoints.set(key, offset),
-            ),
-          ensureOwnedMap: recoveryLease === undefined
-            ? ensureOwnedMap
-            : leaseOwnedMapPort(recoveryLease, ensureOwnedMap),
+          snapshotMaterializer,
+          reconcileFinalizedTwin,
+          storeInsert,
+          publicSnapshotStore: this.publicSnapshotStore,
+          deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
+          setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+          ensureOwnedMap,
+          recoveryGuard: recoveryLease,
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
           logWarn: (opCtx, message) => this.log.warn(opCtx, message),
           logDebug: (opCtx, message) => this.log.debug(opCtx, message),
         });
-        // The decorated dependency ports own every awaited read and mutation.
-        // Check admission before entering the generic algorithm, but let that
-        // algorithm classify a later lease revocation as an incomplete target
-        // instead of changing the selected-sync API into a thrown cancellation.
-        recoveryLease?.assertCurrent();
-        const result = await run();
-        return result;
+        return run();
       };
 
       const completedTargetKeys = new Set<string>();
@@ -7963,11 +7773,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             const recoveryLease = recoveryLeaseFor(contextGraphId);
             try {
               const recovered = await recoverContextGraphSwmWithProgressRetries({
-                recover: () => recoveryLease === undefined
-                  ? recoverPrivateContextGraph(contextGraphId)
-                  : recoveryLease.run(
-                    () => recoverPrivateContextGraph(contextGraphId, recoveryLease),
-                  ),
+                recover: () => recoverPrivateContextGraph(contextGraphId, recoveryLease),
                 onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
                   this.log.info(
                     ctx,
@@ -8225,9 +8031,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
             remainingContextGraphs: remaining,
           }),
-          fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
+          fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, fetchOptions) =>
             this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, {
-              snapshotRef,
+              ...fetchOptions,
               recovery: true,
             }),
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
@@ -10921,16 +10727,18 @@ async function runRecoverContextGraphSwmFromPeer(
     contextGraphId,
     dependencies.listSubGraphs(contextGraphId),
   );
-  const admission = recoveryLease === undefined
-    ? await readAdmission()
-    : await recoveryLease.run(readAdmission);
+  let admissionPromise: ReturnType<typeof readAdmission> | undefined;
+  const admission = () => {
+    admissionPromise ??= readAdmission();
+    return admissionPromise;
+  };
   const recoveryOptions: RecoverContextGraphSwmOptions = {
     ctx,
     remotePeerId,
     contextGraphId,
     deadline: dependencies.createContextGraphSyncDeadline(1),
-    // R9/R10 — pin recovery=true at the lifecycle boundary so swm-recovery's
-    // deps signature stays unchanged. This forks BOTH the checkpoint namespace
+    // R9/R10 — pin recovery=true at the lifecycle boundary. This forks BOTH
+    // the checkpoint namespace
     // (R10: a distinct `|recovery` cursor that never mutates the shared
     // incremental-sync cursor) AND the request envelope auth mode (R9: the
     // responder gates via the strict members-only `isMemberRecoveryAuthorized`).
@@ -11056,18 +10864,17 @@ async function runRecoverContextGraphSwmFromPeer(
     },
     setCheckpoint: (key, offset) => dependencies.setCheckpoint(key, offset),
     deleteCheckpoint: (key) => dependencies.deleteCheckpoint(key),
-    getRegisteredSubGraphNames: async () => admission.registered,
-    getExcludedSubGraphNames: async () => admission.excluded,
+    getRegisteredSubGraphNames: async () => (await admission()).registered,
+    getExcludedSubGraphNames: async () => (await admission()).excluded,
     // R2 — hydrate the Rule-4 ownership cache (same map runSharedMemorySync uses).
     ensureOwnedMap: dependencies.ensureOwnedMap,
     logInfo: (opCtx, message) => dependencies.logInfo(opCtx, message),
     logWarn: (opCtx, message) => dependencies.logWarn(opCtx, message),
   };
-  return recoverContextGraphSwm(
-    recoveryLease === undefined
-      ? recoveryOptions
-      : leaseRecoverContextGraphSwmOptions(recoveryLease, recoveryOptions),
-  );
+  return recoverContextGraphSwm({
+    ...recoveryOptions,
+    recoveryGuard: recoveryLease,
+  });
 }
 
 async function getSharedMemorySubGraphAdmission(

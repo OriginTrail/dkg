@@ -132,6 +132,14 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     expect(privateLease.signal.aborted).toBe(false);
     expect(privateLease.isCurrent()).toBe(true);
     expect(() => privateLease.assertCurrent()).not.toThrow();
+
+    const nextPublicLease = agent.acquireRfc64SwmRecoveryTargetLeaseV1({
+      contextGraphId: 'public-cg',
+      lane: 'selected-public',
+    });
+    expect(nextPublicLease.signal.aborted).toBe(false);
+    expect(nextPublicLease.isCurrent()).toBe(true);
+    expect(() => publicLease.assertCurrent()).toThrow('recovery authority was revoked');
   });
 
   it('reports a catalog recovery plan that is not authorized', async () => {

@@ -31,8 +31,6 @@ import {
   recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from '../src/sync/requester/swm-recovery.js';
-import { Rfc64SwmRecoveryTargetLeaseV1 } from
-  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 
 /**
  * integration. `recoverContextGraphSwm` fetches a CG's
@@ -525,56 +523,6 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(await statusValues(store)).toEqual(['"v2"']); // ONLY v2 — the bug would leave {v1,v2}
   });
 
-  it('does not replace private SWM when authority is revoked during verification', async () => {
-    const store = new OxigraphStore();
-    stores.push(store);
-    await store.insert([{ subject: SUBJ, predicate: STATUS, object: '"v1"', graph: WS }]);
-    let markVerificationEntered!: () => void;
-    let releaseVerification!: () => void;
-    const verificationEntered = new Promise<void>((resolve) => {
-      markVerificationEntered = resolve;
-    });
-    const verificationRelease = new Promise<void>((resolve) => {
-      releaseVerification = resolve;
-    });
-    let current = true;
-    const controller = new AbortController();
-    const lease = new Rfc64SwmRecoveryTargetLeaseV1(CG, controller.signal, () => current);
-    const dataFetch = vi.fn();
-    const deps = makeDeps(store, [
-      { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS },
-    ]);
-    const processSharedMemoryBatch = deps.processSharedMemoryBatch;
-    const recovery = recoverContextGraphSwm({
-      ...deps,
-      processSharedMemoryBatch: (...args) => lease.run(async () => {
-        markVerificationEntered();
-        await verificationRelease;
-        return processSharedMemoryBatch(...args);
-      }),
-      fetchSyncPages: async (
-        _c: OperationContext,
-        _p: string,
-        _cg: string,
-        _inc: boolean,
-        phase: 'data' | 'meta',
-      ): Promise<SyncPageResult> => {
-        if (phase === 'meta') return page([]);
-        dataFetch();
-        return page([{ subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS }]);
-      },
-    });
-
-    await verificationEntered;
-    current = false;
-    controller.abort(new Error('recovery authority revoked'));
-    releaseVerification();
-
-    await expect(recovery).rejects.toThrow('recovery authority revoked');
-    expect(dataFetch).not.toHaveBeenCalled();
-    expect(await statusValues(store)).toEqual(['"v1"']);
-  });
-
   it('is a clean recovery into an empty store (cold-start parity)', async () => {
     const store = new OxigraphStore();
     stores.push(store);
@@ -818,15 +766,17 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       contextGraphId: CG,
       deadline: Number.MAX_SAFE_INTEGER,
       fetchSyncPages: async (
-        _c, _p, _cg, _inc, phase, _graph, _deadline, snapshotRef,
+        _c, _p, _cg, _inc, phase, _graph, _deadline, fetchOptions,
       ): Promise<SyncPageResult> => {
         if (phase === 'meta') return page(sourceMeta);
         if (phase === 'data') {
           dataFetches += 1;
           throw new Error('rootless recovery must not request aggregate data');
         }
-        const asset = assets.find((candidate) => candidate.digest === snapshotRef);
-        if (!asset) throw new Error(`Unexpected snapshot ref ${snapshotRef}`);
+        const asset = assets.find(
+          (candidate) => candidate.digest === fetchOptions?.snapshotRef,
+        );
+        if (!asset) throw new Error(`Unexpected snapshot ref ${fetchOptions?.snapshotRef}`);
         snapshotFetches.set(asset.digest, (snapshotFetches.get(asset.digest) ?? 0) + 1);
         if (round === 1 && asset === assets[1]) {
           return { ...page([], false), checkpointKey: `snapshot:${asset.digest}` };

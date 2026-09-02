@@ -17,6 +17,8 @@ import {
   type Rfc64SwmRecoveryTargetV1,
   type Rfc64SwmRecoveryRuntimeAuthorityV1,
 } from './rfc64/swm-recovery-plan-v1.js';
+import type { RecoveryExecutionGuard } from
+  './sync/requester/recovery-execution-guard.js';
 
 export interface Rfc64SwmRecoverySelectionSnapshotV1 {
   readonly runtimeSelected: boolean;
@@ -41,12 +43,11 @@ export class Rfc64SwmRecoveryTargetRevokedErrorV1 extends Error {
 /**
  * One graph-scoped lease over the live RFC-64 recovery authority.
  *
- * Requester algorithms stay policy-agnostic: selected-recovery construction
- * decorates their dependency ports with this lease once, at the lifecycle
- * boundary. `run()` checks both sides of an awaited operation, while the
- * signal gives transport an immediate cancellation path.
+ * Requester algorithms stay policy-agnostic: they receive this capability and
+ * enforce it at their own await and commit boundaries. The signal gives
+ * transport an immediate cancellation path.
  */
-export class Rfc64SwmRecoveryTargetLeaseV1 {
+export class Rfc64SwmRecoveryTargetLeaseV1 implements RecoveryExecutionGuard {
   constructor(
     readonly contextGraphId: string,
     readonly signal: AbortSignal,
@@ -59,19 +60,44 @@ export class Rfc64SwmRecoveryTargetLeaseV1 {
     if (reason instanceof Error) throw reason;
     throw new Rfc64SwmRecoveryTargetRevokedErrorV1(this.contextGraphId);
   }
+}
 
-  runSync<T>(operation: () => T): T {
-    this.assertCurrent();
-    const result = operation();
-    this.assertCurrent();
-    return result;
+/**
+ * Own every graph lease generation and controller in one runtime object.
+ * Callers can acquire or invalidate; the mutable registry and generation
+ * identity are never exposed to the agent lifecycle or its tests.
+ */
+export class Rfc64SwmRecoveryLeaseRegistryV1 {
+  readonly #controllers = new Map<string, AbortController>();
+
+  acquire(
+    contextGraphId: string,
+    isAuthorityCurrent: () => boolean,
+  ): Rfc64SwmRecoveryTargetLeaseV1 {
+    let controller = this.#controllers.get(contextGraphId);
+    if (controller === undefined) {
+      controller = new AbortController();
+      this.#controllers.set(contextGraphId, controller);
+    }
+    const captured = controller;
+    return Object.freeze(new Rfc64SwmRecoveryTargetLeaseV1(
+      contextGraphId,
+      captured.signal,
+      () => (
+        !captured.signal.aborted
+        && this.#controllers.get(contextGraphId) === captured
+        && isAuthorityCurrent()
+      ),
+    ));
   }
 
-  async run<T>(operation: () => Promise<T>): Promise<T> {
-    this.assertCurrent();
-    const result = await operation();
-    this.assertCurrent();
-    return result;
+  invalidate(contextGraphId: string): void {
+    const current = this.#controllers.get(contextGraphId);
+    current?.abort(new Rfc64SwmRecoveryTargetRevokedErrorV1(contextGraphId));
+    // Install the next generation synchronously. A lease acquired by recovery
+    // queued after this transition can proceed, while every captured prior
+    // generation remains permanently stale.
+    this.#controllers.set(contextGraphId, new AbortController());
   }
 }
 
@@ -173,24 +199,15 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     this: DKGAgent,
     target: Readonly<Rfc64SwmRecoveryTargetV1>,
   ): Rfc64SwmRecoveryTargetLeaseV1 {
-    let controller = this.rfc64SwmRecoverySelectionControllers.get(target.contextGraphId);
-    if (controller === undefined) {
-      controller = new AbortController();
-      this.rfc64SwmRecoverySelectionControllers.set(target.contextGraphId, controller);
-    }
-    const isCurrent = () => {
-      if (
-        controller.signal.aborted
-        || this.rfc64SwmRecoverySelectionControllers.get(target.contextGraphId) !== controller
-      ) return false;
-      const authority = this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(target.contextGraphId);
-      return authority.active && authority.lane === target.lane;
-    };
-    return Object.freeze(new Rfc64SwmRecoveryTargetLeaseV1(
+    return this.rfc64SwmRecoveryLeaseRegistryV1.acquire(
       target.contextGraphId,
-      controller.signal,
-      isCurrent,
-    ));
+      () => {
+        const authority = this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(
+          target.contextGraphId,
+        );
+        return authority.active && authority.lane === target.lane;
+      },
+    );
   }
 
   /** Exact operator-pinned graph-complete SWM providers for one accepted policy. */
@@ -214,9 +231,7 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    const currentController = this.rfc64SwmRecoverySelectionControllers.get(contextGraphId);
-    currentController?.abort(new Rfc64SwmRecoveryTargetRevokedErrorV1(contextGraphId));
-    this.rfc64SwmRecoverySelectionControllers.set(contextGraphId, new AbortController());
+    this.rfc64SwmRecoveryLeaseRegistryV1.invalidate(contextGraphId);
     const affectedProviders = new Set([
       ...this.selectedSwmBootstrapAdmission.invalidateContextGraph(contextGraphId),
       ...this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId),

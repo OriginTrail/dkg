@@ -22,6 +22,8 @@ import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphLayerUri,
+  contextGraphWorkspaceGraphUri,
+  contextGraphWorkspaceMetaGraphUri,
   createGraphKnowledgeAssetScope,
   encodeCanonicalCgSharedPublicRootProjectionV1,
   knowledgeAssetLayerGraphUri,
@@ -2678,6 +2680,163 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     )).resolves.toEqual({
       targets: [{ contextGraphId: policy.contextGraphId, lane: 'ordinary-private' }],
     });
+  });
+
+  it('revokes an in-flight ordinary-private recovery through the real selection lifecycle', async () => {
+    const authority = privateCatalogAuthorityFixtureV1();
+    const providerPeerId = '12D3KooWPrivateRecoveryRevocationProvider';
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-recovery-revocation-'));
+    tempDirs.push(dataDir);
+    const store = new OxigraphStore();
+    const receiver = await DKGAgent.create({
+      name: 'private-recovery-revocation-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store,
+      durableSyncEnabled: true,
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      syncContextGraphs: [authority.policy.contextGraphId],
+      agentProfileHeartbeatMs: 0,
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: NATIVE_DEPLOYMENT.networkId,
+      },
+      rfc64CatalogActivation: selectedPrivateCatalogActivationV1(
+        providerPeerId,
+        authority,
+      ),
+    });
+    agents.push(receiver);
+    vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    vi.spyOn(receiver, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(true);
+    await receiver.start();
+    receiver.subscribeToContextGraph(authority.policy.contextGraphId);
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(receiver.resolveRfc64SwmRecoveryRuntimeAuthorityV1(
+      authority.policy.contextGraphId,
+    )).toMatchObject({ active: true, lane: 'ordinary-private' });
+
+    const workspaceGraph = contextGraphWorkspaceGraphUri(authority.policy.contextGraphId);
+    const workspaceMetaGraph = contextGraphWorkspaceMetaGraphUri(
+      authority.policy.contextGraphId,
+    );
+    const entity = 'https://example.org/private-recovery-revocation';
+    const predicate = 'https://schema.org/status';
+    await store.insert([{
+      subject: entity,
+      predicate,
+      object: '"v1"',
+      graph: workspaceGraph,
+    }]);
+    const metadataQuad: Quad = {
+      subject: 'urn:dkg:private-recovery-operation',
+      predicate: 'http://dkg.io/ontology/rootEntity',
+      object: entity,
+      graph: workspaceMetaGraph,
+    };
+    const replacementQuad: Quad = {
+      subject: entity,
+      predicate,
+      object: '"v2"',
+      graph: workspaceGraph,
+    };
+    const dataFetch = vi.fn();
+    vi.spyOn(receiver, 'fetchSyncPages').mockImplementation(async (
+      _ctx,
+      _peerId,
+      _contextGraphId,
+      _includeSharedMemory,
+      phase,
+    ) => {
+      let quads: Quad[] = [];
+      if (phase === 'meta') quads = [metadataQuad];
+      if (phase === 'data') {
+        dataFetch();
+        quads = [replacementQuad];
+      }
+      return {
+        quads,
+        bytesReceived: quads.length,
+        resumedFromOffset: 0,
+        nextOffset: quads.length,
+        checkpointKey: `private-revocation:${phase}`,
+        completed: true,
+        timedOut: false,
+      };
+    });
+    let markVerificationEntered!: () => void;
+    let releaseVerification!: () => void;
+    const verificationEntered = new Promise<void>((resolve) => {
+      markVerificationEntered = resolve;
+    });
+    const verificationRelease = new Promise<void>((resolve) => {
+      releaseVerification = resolve;
+    });
+    let firstVerification = true;
+    vi.spyOn(receiver, 'getOrCreateSyncVerifyWorker').mockReturnValue({
+      processSharedMemoryBatch: async (dataQuads: Quad[], metaQuads: Quad[]) => {
+        if (firstVerification) {
+          firstVerification = false;
+          markVerificationEntered();
+          await verificationRelease;
+        }
+        return {
+          verifiedData: dataQuads,
+          verifiedMeta: metaQuads,
+          totalFetchedDataQuads: dataQuads.length,
+          totalFetchedMetaQuads: metaQuads.length,
+          droppedDataTriples: 0,
+          emptyResponses: 0,
+          entityCreators: [{ dataGraph: workspaceGraph, entity, creator: AUTHOR }],
+        };
+      },
+    } as any);
+
+    const recovery = receiver.syncSelectedSharedMemoryFromPeerDetailed(
+      providerPeerId,
+      [authority.policy.contextGraphId],
+      {
+        selectedSwmPriority: true,
+        requestedScope: {
+          kind: 'rfc64-recovery-plan',
+          plan: {
+            kind: 'rfc64-authorized-swm-recovery-v1',
+            providerPeerId,
+            targets: [{
+              contextGraphId: authority.policy.contextGraphId,
+              lane: 'ordinary-private',
+            }],
+          },
+        },
+        stopOnBackoffWorthyFailure: true,
+        priority: 2_000,
+        source: 'on-connect',
+      },
+    );
+    await verificationEntered;
+
+    receiver.unsubscribeFromContextGraph(authority.policy.contextGraphId);
+    releaseVerification();
+
+    await expect(recovery).resolves.toMatchObject({
+      kind: 'selected-shared-memory',
+      scopeComplete: false,
+      targetDiagnostics: {
+        ordinaryPrivate: { completed: 0, total: 1 },
+      },
+    });
+    expect(dataFetch).not.toHaveBeenCalled();
+    const stored = await store.query(
+      `SELECT ?value WHERE { GRAPH <${workspaceGraph}> { <${entity}> <${predicate}> ?value } }`,
+    );
+    expect(stored.type).toBe('bindings');
+    expect(stored.type === 'bindings' ? stored.bindings.map((row) => row['value']) : [])
+      .toEqual(['"v1"']);
   });
 
   it('does not reseed a plane-proven SWM provider before anti-entropy staleness', async () => {

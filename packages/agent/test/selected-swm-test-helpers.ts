@@ -20,7 +20,10 @@ import type {
   SelectedSharedMemorySyncResult,
 } from '../src/sync/shared-memory-freshness.js';
 import type { Rfc64SwmRecoveryTargetV1 } from '../src/rfc64/swm-recovery-plan-v1.js';
-import { Rfc64SwmRecoveryTargetLeaseV1 } from
+import {
+  Rfc64SwmRecoveryLeaseRegistryV1,
+  type Rfc64SwmRecoveryTargetLeaseV1,
+} from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
@@ -653,7 +656,7 @@ export function createSelectedSwmLifecycleHarness(
   const processedMetaBatches: Quad[][] = [];
   const dateNow = vi.spyOn(Date, 'now').mockImplementation(options.clock.now);
   let selectedSwmMetaTransfers: SelectedSwmMetaTransferCoordinator | undefined;
-  const recoverySelectionControllers = new Map<string, AbortController>();
+  const recoveryLeaseRegistry = new Rfc64SwmRecoveryLeaseRegistryV1();
 
   const agent: SelectedSwmLifecycleAgentFixture = {
     config: {
@@ -850,19 +853,9 @@ export function createSelectedSwmLifecycleHarness(
         : []
     ),
     acquireRfc64SwmRecoveryTargetLeaseV1: (target) => {
-      let controller = recoverySelectionControllers.get(target.contextGraphId);
-      if (controller === undefined) {
-        controller = new AbortController();
-        recoverySelectionControllers.set(target.contextGraphId, controller);
-      }
-      const isCurrent = () => (
-        !controller.signal.aborted
-        && recoverySelectionControllers.get(target.contextGraphId) === controller
-      );
-      return new Rfc64SwmRecoveryTargetLeaseV1(
+      return recoveryLeaseRegistry.acquire(
         target.contextGraphId,
-        controller.signal,
-        isCurrent,
+        () => true,
       );
     },
     syncSharedMemoryFromPeerDetailedExecution:
