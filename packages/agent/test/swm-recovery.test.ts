@@ -523,6 +523,38 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(await statusValues(store)).toEqual(['"v2"']); // ONLY v2 — the bug would leave {v1,v2}
   });
 
+  it('does not report a final private apply as complete when its lease is revoked mid-commit', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([{ subject: SUBJ, predicate: STATUS, object: '"v1"', graph: WS }]);
+    const revoked = new Error('selection revoked during final recovery commit');
+    const controller = new AbortController();
+    let current = true;
+    const insert = store.insert.bind(store);
+    store.insert = async (quads) => {
+      const result = await insert(quads);
+      current = false;
+      controller.abort(revoked);
+      return result;
+    };
+
+    await expect(recoverContextGraphSwm({
+      ...makeDeps(store, [
+        { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS },
+      ]),
+      recoveryGuard: {
+        signal: controller.signal,
+        assertCurrent: () => {
+          if (!current) throw revoked;
+        },
+      },
+    })).rejects.toBe(revoked);
+
+    // The admitted replacement drains coherently, but the revoked invocation
+    // cannot be counted as a completed recovery target by its caller.
+    expect(await statusValues(store)).toEqual(['"v2"']);
+  });
+
   it('is a clean recovery into an empty store (cold-start parity)', async () => {
     const store = new OxigraphStore();
     stores.push(store);

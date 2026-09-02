@@ -56,6 +56,8 @@ import {
   type SharedMemorySnapshotWalkContinuation,
 } from '../src/sync/requester/shared-memory-sync.js';
 import type { SharedMemorySnapshotMaterializer, StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
+import type { RecoveryExecutionGuard } from
+  '../src/sync/requester/recovery-execution-guard.js';
 
 const CG = 'ws00-snapshot-materialization';
 const WS = contextGraphWorkspaceGraphUri(CG);
@@ -134,6 +136,7 @@ interface HarnessOverrides {
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
   metadataFetcher?: SharedMemoryMetadataFetcher;
+  recoveryGuard?: RecoveryExecutionGuard;
 }
 
 function harness(overrides: HarnessOverrides = {}) {
@@ -245,6 +248,7 @@ function harness(overrides: HarnessOverrides = {}) {
       deleteCheckpoint: () => {},
       setCheckpoint: () => {},
       ensureOwnedMap: () => new Map(),
+      recoveryGuard: overrides.recoveryGuard,
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
@@ -508,6 +512,33 @@ describe('public SWM snapshot materialization', () => {
     expect(lockReleased).toBeGreaterThan(-1);
     expect(metaInserted).toBeGreaterThan(headSwapped);
     expect(metaInserted).toBeLessThan(lockReleased);
+  });
+
+  it('finishes graph plus head metadata but fences later work when revoked mid-replacement', async () => {
+    const revoked = new Error('selected-public recovery revoked during graph replacement');
+    const controller = new AbortController();
+    let current = true;
+    const h = harness({
+      recoveryGuard: {
+        signal: controller.signal,
+        assertCurrent: () => {
+          if (!current) throw revoked;
+        },
+      },
+      replaceImpl: async () => {
+        current = false;
+        controller.abort(revoked);
+      },
+    });
+
+    const summary = await h.run();
+
+    expect(h.events).toContain('replaced');
+    expect(h.events.indexOf('head-swapped')).toBeGreaterThan(h.events.indexOf('replaced'));
+    expect(h.events.indexOf('meta-inserted')).toBeGreaterThan(h.events.indexOf('head-swapped'));
+    expect(h.events.indexOf('meta-inserted')).toBeLessThan(h.events.indexOf('lock-released'));
+    expect(h.events).not.toContain('finalized-twin-reconciled');
+    expect(summary.failedPhases).toBe(1);
   });
 
   it('withholds the meta insert when a replace fails, and marks the phase failed', async () => {

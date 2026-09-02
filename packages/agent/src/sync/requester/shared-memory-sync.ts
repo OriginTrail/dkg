@@ -507,6 +507,25 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   } = context;
   const recoveryBoundary = createRecoveryExecutionBoundary(recoveryGuard);
   recoveryBoundary.assertCurrent();
+  const fetchRecoveryPages = (
+    contextGraphId: string,
+    phase: SyncPhase,
+    graphUri: string,
+    deadline: number,
+  ): Promise<SyncPageResult> => {
+    const commonArgs = [
+      ctx,
+      remotePeerId,
+      contextGraphId,
+      true,
+      phase,
+      graphUri,
+      deadline,
+    ] as const;
+    return recoveryBoundary.signal === undefined
+      ? fetchSyncPages(...commonArgs)
+      : fetchSyncPages(...commonArgs, { signal: recoveryBoundary.signal });
+  };
 
   const summary: SharedMemorySyncSummary = {
     insertedTriples: 0,
@@ -654,15 +673,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           deadline,
         }))
         : {
-          result: await recoveryBoundary.read(() => fetchSyncPages(
-            ctx,
-            remotePeerId,
+          result: await recoveryBoundary.read(() => fetchRecoveryPages(
             pid,
-            true,
             'meta',
             wsMetaGraph,
             deadline,
-            { signal: recoveryBoundary.signal },
           )),
           continuationYielded: false,
         };
@@ -682,15 +697,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         recordPhaseOutcome(wsMetaResult, { updateCheckpoint: false });
         break;
       }
-      const wsDataResult = await recoveryBoundary.read(() => fetchSyncPages(
-        ctx,
-        remotePeerId,
+      const wsDataResult = await recoveryBoundary.read(() => fetchRecoveryPages(
         pid,
-        true,
         'data',
         wsGraph,
         deadline,
-        { signal: recoveryBoundary.signal },
       ));
       peerRespondedForContextGraph = true;
       const fetchDurationMs = Date.now() - fetchStartedAt;
@@ -1705,12 +1716,17 @@ export async function syncPublicSnapshotsForMeta(params: {
         () => hasValidSnapshot(params.publicSnapshotStore!, snapshot),
       )) {
         if (params.onSnapshotReady) {
-          await executionBoundary.commit(() => params.onSnapshotReady!(snapshot, 'cache'));
+          executionBoundary.assertCurrent();
+          await params.onSnapshotReady(snapshot, 'cache');
+          executionBoundary.assertCurrent();
         }
         readySnapshots += 1;
         continue;
       }
 
+      const snapshotOptions: SyncPageFetchOptions = executionBoundary.signal === undefined
+        ? { snapshotRef: snapshot.ref }
+        : { snapshotRef: snapshot.ref, signal: executionBoundary.signal };
       const result = await executionBoundary.read(() => params.fetchSyncPages(
         params.ctx,
         params.remotePeerId,
@@ -1719,7 +1735,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         'snapshot',
         '',
         params.deadline,
-        { snapshotRef: snapshot.ref, signal: executionBoundary.signal },
+        snapshotOptions,
       ));
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
@@ -1773,7 +1789,9 @@ export async function syncPublicSnapshotsForMeta(params: {
         quads: snapshotQuads,
       }));
       if (params.onSnapshotReady) {
-        await executionBoundary.commit(() => params.onSnapshotReady!(snapshot, 'network'));
+        executionBoundary.assertCurrent();
+        await params.onSnapshotReady(snapshot, 'network');
+        executionBoundary.assertCurrent();
       }
       completedPhases += 1;
       readySnapshots += 1;

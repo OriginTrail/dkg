@@ -1,8 +1,14 @@
 import {
   deleteByPatternWithoutCount,
+  invalidateSwmMaterializationWitness,
   type Quad,
 } from '@origintrail-official/dkg-storage';
+import {
+  canonicalizeGraphScopedSwmHeadRows,
+  type GraphScopedSwmRecoveryDescriptor,
+} from '../graph-scoped-swm-recovery.js';
 import type { RecoveryExecutionBoundary } from './recovery-execution-guard.js';
+import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 
 /**
  * WS-0.0: per-root REPLACE apply for SWM recovery.
@@ -48,6 +54,39 @@ export interface SwmRecoveryApplyResult {
   readonly insertedQuads: number;
 }
 
+export interface VerifiedSwmRecoveryGraphApply {
+  readonly descriptor: GraphScopedSwmRecoveryDescriptor;
+  /** null means content was already materialized before this final apply. */
+  readonly replacementQuads: readonly Quad[] | null;
+  /** Verified metadata disposition paired with this graph-content decision. */
+  readonly metadataDecision: 'replace' | 'preserve-if-equivalent';
+}
+
+export interface VerifiedSwmRecoveryOwnershipUpdate {
+  readonly ownershipKey: string;
+  readonly entity: string;
+  readonly creator: string;
+}
+
+/** Immutable, fully verified inputs for one complete recovery durability unit. */
+export interface VerifiedSwmRecoveryApplyPlan {
+  readonly contextGraphId: string;
+  readonly rootData: readonly Quad[];
+  readonly roots: readonly (SwmRecoveryRoot & { readonly creator: string })[];
+  readonly graphAssets: readonly VerifiedSwmRecoveryGraphApply[];
+  readonly verifiedMeta: readonly Quad[];
+  readonly rootMetaGraphs: readonly string[];
+  readonly ownershipUpdates: readonly VerifiedSwmRecoveryOwnershipUpdate[];
+}
+
+export interface VerifiedSwmRecoveryApplyResult {
+  readonly replacedRoots: number;
+  readonly replacedGraphs: number;
+  readonly insertedRootQuads: number;
+  readonly insertedGraphQuads: number;
+  readonly insertedMetaQuads: number;
+}
+
 const SKOLEM_CHILD_INFIX = '/.well-known/genid/';
 
 /**
@@ -91,4 +130,114 @@ export async function applySwmRecovery(params: {
   // point nothing mutates; if it is revoked after the first delete, the whole
   // root set still reaches its insert instead of being stranded half-applied.
   return params.executionBoundary?.commit(apply) ?? apply();
+}
+
+function quadKey(quad: Quad): string {
+  return `${quad.graph}\u0000${quad.subject}\u0000${quad.predicate}\u0000${quad.object}`;
+}
+
+/**
+ * Own the complete verified recovery write transaction. Fetching,
+ * verification and plan construction happen upstream; every related root,
+ * graph, metadata and ownership mutation is admitted exactly once here.
+ */
+export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
+  plan: VerifiedSwmRecoveryApplyPlan;
+  store: SwmRecoveryStore;
+  executionBoundary: RecoveryExecutionBoundary;
+  ensureContextGraph: (contextGraphId: string) => Promise<void>;
+  replaceMetaForRoots?: (
+    roots: readonly { readonly entity: string }[],
+    metaGraphs: readonly string[],
+  ) => Promise<void>;
+  replaceMetaForGraphAssets?: (
+    assets: readonly GraphScopedSwmRecoveryDescriptor[],
+  ) => Promise<void>;
+  snapshotMaterializer?: SharedMemorySnapshotMaterializer;
+  ensureOwnedMap?: (ownershipKey: string) => Map<string, string>;
+}>): Promise<VerifiedSwmRecoveryApplyResult> {
+  const { plan } = params;
+  return params.executionBoundary.commit(async () => {
+    await params.ensureContextGraph(plan.contextGraphId);
+
+    const roots = await applySwmRecovery({
+      store: params.store,
+      verifiedData: plan.rootData,
+      roots: plan.roots,
+    });
+
+    let replacedGraphs = 0;
+    let insertedGraphQuads = 0;
+    for (const asset of plan.graphAssets) {
+      replacedGraphs += 1;
+      if (asset.replacementQuads === null) {
+        insertedGraphQuads += asset.descriptor.publicQuadsCount;
+        continue;
+      }
+      await params.store.replaceGraph(
+        asset.descriptor.assertionGraph,
+        [...asset.replacementQuads],
+      );
+      await invalidateSwmMaterializationWitness(
+        params.store,
+        asset.descriptor.assertionGraph,
+        { source: 'agent.swmRecovery.witnessInvalidate' },
+      ).catch(() => {});
+      insertedGraphQuads += asset.replacementQuads.length;
+    }
+
+    if (plan.roots.length > 0 && params.replaceMetaForRoots) {
+      await params.replaceMetaForRoots(plan.roots, plan.rootMetaGraphs);
+    }
+
+    const preservedWithholdRows: Quad[] = [];
+    const metaReplaceTargets: GraphScopedSwmRecoveryDescriptor[] = [];
+    for (const asset of plan.graphAssets) {
+      if (asset.metadataDecision === 'replace' || !params.snapshotMaterializer) {
+        metaReplaceTargets.push(asset.descriptor);
+        continue;
+      }
+      const preservation = await params.snapshotMaterializer
+        .preserveStoredIdentityForSkippedAsset(plan.contextGraphId, asset.descriptor);
+      if (preservation.outcome === 'preserved') {
+        preservedWithholdRows.push(...preservation.withholdRows);
+      } else {
+        metaReplaceTargets.push(asset.descriptor);
+      }
+    }
+    if (metaReplaceTargets.length > 0 && params.replaceMetaForGraphAssets) {
+      await params.replaceMetaForGraphAssets(metaReplaceTargets);
+    }
+
+    let insertedMetaQuads = 0;
+    if (plan.verifiedMeta.length > 0) {
+      const preservedHeadIdRowKeys = new Set(preservedWithholdRows.map(quadKey));
+      const canonicalMeta = canonicalizeGraphScopedSwmHeadRows({
+        metaQuads: plan.verifiedMeta,
+        descriptors: plan.graphAssets.map(({ descriptor }) => descriptor),
+      });
+      const insertableMeta = preservedHeadIdRowKeys.size === 0
+        ? canonicalMeta
+        : canonicalMeta.filter((quad) => !preservedHeadIdRowKeys.has(quadKey(quad)));
+      if (insertableMeta.length > 0) {
+        await params.store.insert([...insertableMeta]);
+      }
+      insertedMetaQuads = insertableMeta.length;
+    }
+
+    if (params.ensureOwnedMap) {
+      for (const { ownershipKey, entity, creator } of plan.ownershipUpdates) {
+        const ownedMap = params.ensureOwnedMap(ownershipKey);
+        if (!ownedMap.has(entity)) ownedMap.set(entity, creator);
+      }
+    }
+
+    return {
+      replacedRoots: roots.replacedRoots,
+      replacedGraphs,
+      insertedRootQuads: roots.insertedQuads,
+      insertedGraphQuads,
+      insertedMetaQuads,
+    };
+  });
 }
