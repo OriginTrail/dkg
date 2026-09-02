@@ -5433,26 +5433,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
   }): Promise<VmRecoveryBatchExecutionResult> {
-    return this.rfc64CatalogMutationCoordinatorV1.runContextGraph(
-      this.chain.chainId,
-      input.localCgId,
-      () => this.executeVmRecoveryBatchUnderRfc64MutationFence(input),
-      input.signal,
-    );
-  }
-
-  private async executeVmRecoveryBatchUnderRfc64MutationFence(this: DKGAgent, input: {
-    localCgId: string;
-    onChainCgId: bigint;
-    peerId: string;
-    attempts: readonly VmRecoveryBatchAttempt[];
-    unavailablePeerIds: readonly string[];
-    headBlock: number | undefined;
-    signal?: AbortSignal;
-    isRecoveryCurrent: () => boolean;
-    revalidateTarget?: () => Promise<boolean>;
-    ctx: OperationContext;
-  }): Promise<VmRecoveryBatchExecutionResult> {
     const {
       localCgId,
       onChainCgId,

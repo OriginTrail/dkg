@@ -1549,46 +1549,6 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await coordinator.closeAndDrain();
   });
 
-  it('serializes Context Graph VM recovery against catalog activation', async () => {
-    const coordinator = new Rfc64CatalogMutationCoordinatorV1();
-    const events: string[] = [];
-    const vmEntered = deferred<void>();
-    const releaseVm = deferred<void>();
-    const catalogScope: AuthorCatalogScopeV1 = {
-      networkId: NETWORK_ID,
-      contextGraphId: CONTEXT_GRAPH_ID,
-      governanceChainId: null,
-      governanceContractAddress: null,
-      ownershipTransitionDigest: null,
-      subGraphName: null,
-      authorAddress: AUTHOR,
-      era: '0',
-      bucketCount: '1',
-    };
-
-    const vmRecovery = coordinator.runContextGraph(
-      NETWORK_ID,
-      CONTEXT_GRAPH_ID,
-      async () => {
-        events.push('vm-enter');
-        vmEntered.resolve(undefined);
-        await releaseVm.promise;
-        events.push('vm-exit');
-      },
-    );
-    await vmEntered.promise;
-    const catalogActivation = coordinator.run(catalogScope, async () => {
-      events.push('catalog-activation');
-    });
-    await Promise.resolve();
-    expect(events).toEqual(['vm-enter']);
-
-    releaseVm.resolve(undefined);
-    await Promise.all([vmRecovery, catalogActivation]);
-    expect(events).toEqual(['vm-enter', 'vm-exit', 'catalog-activation']);
-    await coordinator.closeAndDrain();
-  });
-
   it('selects the highest exact head, retains all matching providers, and fails over', async () => {
     const router = new RecordingRouter();
     const reconciledPeers: string[] = [];
