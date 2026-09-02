@@ -692,6 +692,43 @@ describe('kaRootMutations — idle cost and periodic re-scan', () => {
     await poll(poller);    // tick 26: the store recovers with no stored window
     expect([...new Set(seen)], 'the window due during the outage is recovered').toEqual([45_000]);
   });
+  it('a SCHEDULED replay window wholly above the finalized head is retained, not discarded (review r19-bot)', async () => {
+    // Depth 20,000 finalizes 30,001 at head 50,000; the cursor restores to
+    // 49,950, so tick 25 schedules [40,951, 49,950] — entirely unfinalized.
+    // It must become a retained obligation, and deliver once finalized.
+    let now = 0;
+    const seen: number[] = [];
+    let persisted: { fromBlock: number; toBlock: number } | undefined;
+    const chain = makeChain(50_000, [rootMutation('KnowledgeAssetUpdated', 45_000)]);
+    (chain.adapter as { finalizedEventScanBound?: (head: number) => number })
+      .finalizedEventScanBound = (head) => head - 19_999;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async loadLane() { return 50_000; },
+        async saveLane() { /* not under test */ },
+        replayRetry: {
+          async load() { return persisted; },
+          async save(_lane: ChainEventPollerLane, w: { fromBlock: number; toBlock: number } | undefined) {
+            persisted = w ? { ...w } : undefined;
+          },
+        },
+      } satisfies LaneCursorPersistence,
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    for (let tick = 1; tick <= 25; tick += 1) { await poll(poller); now += CADENCE_MS; }
+    expect(seen, 'nothing unfinalized dispatches').toEqual([]);
+    expect(persisted, 'the wholly unfinalized scheduled window is RETAINED').toEqual({ fromBlock: 40_951, toBlock: 49_950 });
+
+    chain.setHead(69_949); // bound 49,950: the window finalizes
+    await poll(poller);
+    expect([...new Set(seen)], 'and delivers once finalized').toEqual([45_000]);
+    expect(persisted, 'then clears').toBeUndefined();
+  });
   it('a failed replay-persistence write neither aborts dispatch nor discards the in-memory retry (review r5-bot)', async () => {
     // Best-effort contract: losing the save costs restart-safety for this
     // window, not the retry itself. A regression that lets the save

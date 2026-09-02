@@ -182,7 +182,18 @@ export class LaneReplayCoordinator {
     const original = window;
     let tail: LaneReplayRetryWindow | undefined;
     if (finalizedBound !== undefined && window.toBlock > finalizedBound) {
-      if (window.fromBlock > finalizedBound) return undefined;
+      if (window.fromBlock > finalizedBound) {
+        // WHOLLY unfinalized: nothing dispatches this tick, but the obligation
+        // is RETAINED (review r19-bot) — a freshly scheduled window would
+        // otherwise be dropped here before it was ever marked pending, and
+        // the periodic guarantee it carries with it.
+        const held = { fromBlock: original.fromBlock, toBlock: original.toBlock };
+        if (held.fromBlock !== this.#pendingRetry?.fromBlock || held.toBlock !== this.#pendingRetry.toBlock) {
+          this.#pendingRetry = held;
+          await this.persist(held);
+        }
+        return undefined;
+      }
       window = { fromBlock: window.fromBlock, toBlock: finalizedBound };
       tail = { fromBlock: finalizedBound + 1, toBlock: original.toBlock };
     }
