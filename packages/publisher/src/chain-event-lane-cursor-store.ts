@@ -99,7 +99,16 @@ export function createLaneCursorStore(cursorPersistence?: CursorPersistence): La
   return {
     kind: 'legacy',
     loadLegacyAggregate: async () => {
-      loaded ??= legacyStore.load();
+      // One fulfilled aggregate read is shared by every lane; a REJECTED
+      // read is evicted so the next poll retries it (review r16-bot) — a
+      // memoized rejection would hold every unrestored lane forever behind
+      // one transient SQLITE_BUSY.
+      if (!loaded) {
+        loaded = legacyStore.load().catch((err: unknown) => {
+          loaded = undefined;
+          throw err;
+        });
+      }
       return loaded;
     },
     saveLegacyAggregate: (blockNumber) => legacyStore.save(blockNumber),

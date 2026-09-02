@@ -231,7 +231,16 @@ export class ChainEventPoller {
   }
 
   async start(): Promise<void> {
-    // Fail FAST, not silent (review r14-bot): the root-mutation lane bounds
+    if (this.running) return;
+    // Serialize a restart behind an unfinished stop() (review r10): without
+    // this await, a start() issued mid-drain re-arms the interval and
+    // overwrites `inFlightPoll` while the drain still awaits the old scan --
+    // exactly the overlapping-scan state stop() exists to prevent.
+    if (this.stopPromise) {
+      try { await this.stopPromise; } catch { /* stop() reports its own failures */ }
+    }
+    if (this.running) return; // a concurrent start won the race during the await
+    // Fail FAST, not silent (review r14/r16-bot: after the idempotence guards, so a repeated start() on a running poller neither re-probes nor can fail): the root-mutation lane bounds
     // its scans at the finalized head, which needs a readable head. Without
     // `getBlockNumber` the lane would hold on every tick and the callback
     // would simply never fire — an API break disguised as idleness.
@@ -268,15 +277,6 @@ export class ChainEventPoller {
         );
       }
     }
-    if (this.running) return;
-    // Serialize a restart behind an unfinished stop() (review r10): without
-    // this await, a start() issued mid-drain re-arms the interval and
-    // overwrites `inFlightPoll` while the drain still awaits the old scan --
-    // exactly the overlapping-scan state stop() exists to prevent.
-    if (this.stopPromise) {
-      try { await this.stopPromise; } catch { /* stop() reports its own failures */ }
-    }
-    if (this.running) return; // a concurrent start won the race during the await
     this.running = true;
 
     const ctx = createOperationContext('system');

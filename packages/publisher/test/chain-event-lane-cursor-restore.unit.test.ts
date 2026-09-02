@@ -222,6 +222,42 @@ describe('kaRootMutations — cursor restore and failure recovery', () => {
   });
 });
 
+describe('legacy aggregate cursor — transient read failure', () => {
+  it('a rejected legacy load is retried on the next poll and scanning resumes from the restored cursor (review r16-bot)', async () => {
+    // The shared aggregate read used to memoize its FIRST promise, rejection
+    // included: one SQLITE_BUSY held every unrestored lane forever behind the
+    // fail-closed restore guard. A rejection must be evicted and retried.
+    let now = 0;
+    let loads = 0;
+    const seen: number[] = [];
+    const chain = makeChain(1_100, [rootMutation('KnowledgeAssetUpdated', 1_050)]);
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      clock: () => now,
+      cursorPersistence: {
+        async load() {
+          loads += 1;
+          if (loads === 1) throw new Error('SQLITE_BUSY');
+          return 1_000;
+        },
+        async save() { /* not under test */ },
+      },
+      onKnowledgeAssetRootMutated: async (e) => { seen.push(e.position.blockNumber); },
+    });
+
+    await poll(poller); // first read rejects: nothing may scan
+    expect(chain.filters, 'unrestored lanes hold').toHaveLength(0);
+    now += CADENCE_MS;
+    await poll(poller); // the read is RETRIED and succeeds
+    expect(loads, 'the rejected read was not memoized').toBe(2);
+    expect(chain.filters.length, 'scanning resumed').toBeGreaterThan(0);
+    // 1000 restored, then the documented 50-block reorg rewind: scanning starts at 951.
+    expect(Math.min(...chain.filters.map((f) => f.fromBlock ?? 0)), 'from the restored (rewound) cursor').toBe(951);
+    expect(seen, 'and events past it are delivered').toContain(1_050);
+  });
+});
 describe('kaRootMutations — activation contract', () => {
   it('start() fails LOUDLY when the root-mutation callback is wired on an adapter without getBlockNumber (review r14-bot)', async () => {
     // The lane scans only to the finalized head; without a readable head it
@@ -272,6 +308,29 @@ describe('kaRootMutations — activation contract', () => {
     (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
       .supportsEventTypes = async () => [];
     await expect(poller.start()).resolves.toBeUndefined();
+    await poller.stop();
+  });
+  it('a repeated start() on a running poller neither re-probes nor can fail (review r16-bot)', async () => {
+    // The probe answers once; a second answer would throw. start() is
+    // documented idempotent, so the second call must be a no-op that never
+    // reaches the probe.
+    let probes = 0;
+    const chain = makeChain(50_000);
+    (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })
+      .supportsEventTypes = async () => {
+        probes += 1;
+        if (probes > 1) throw new Error('probe must not run again');
+        return [];
+      };
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    await poller.start();
+    await expect(poller.start()).resolves.toBeUndefined();
+    expect(probes, 'exactly one probe across two starts').toBe(1);
     await poller.stop();
   });
   it('start() proceeds when the capability probe reports every kind served', async () => {
