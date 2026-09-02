@@ -7,6 +7,8 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { computeNetworkId, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
+import { Rfc64SwmRecoveryRuntimeV1 } from
+  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import {
   allowAllNetworkAdmission,
@@ -34,6 +36,62 @@ afterEach(async () => {
 });
 
 describe('RFC-64 recovery-plan queue authorization', () => {
+  it('uses one selection projection for current, previous, and next authority', () => {
+    let selection = {
+      selectedContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+      eligibleContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+      subscriptionDriven: true,
+    };
+    const recoveryConfig = {
+      retryIntervalMs: 0,
+      acceptedPublicPolicies: [{
+        policyEnvelope: rfc64RolloutPolicyEnvelope(),
+        targets: [],
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    const runtime = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => selection,
+        resolveConfigured: (contextGraphId) => ({
+          contextGraphId,
+          selected: true,
+          eligible: true,
+          active: true,
+          mode: 'catalog',
+          killSwitchActive: false,
+          legacySyncAllowed: false,
+          track2Enabled: true,
+          authoringAllowed: true,
+          reconciliationLane: 'catalog-apply',
+        }),
+        resolveRecoveryConfig: () => recoveryConfig,
+      },
+      admission: { invalidateContextGraph: () => [] },
+      cooldown: { deleteProvider: () => undefined },
+      queue: {
+        catalogPassMinimumTerminalAgeMs: () => 0,
+        authorizeForCatalogPass: () => null,
+        enqueueAuthorized: () => false,
+      },
+    });
+
+    expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+      .toMatchObject({ active: true, lane: 'selected-public' });
+    expect(runtime.selectionChanged(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+      previousSubscribed: true,
+      nextSubscribed: false,
+    })).toBe(true);
+
+    selection = { ...selection, selectedContextGraphs: [] };
+    expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+      .toMatchObject({ active: false, lane: 'selected-public' });
+    expect(runtime.selectionChanged(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+      previousSubscribed: false,
+      nextSubscribed: true,
+    })).toBe(true);
+  });
+
   it('queues a widened plan when a newly selected graph had no admission owner', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-recovery-queue-'));
     tempDirs.push(dataDir);
@@ -109,7 +167,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
 
   it('revokes only the changed graph in a mixed in-flight recovery plan', async () => {
     const agent = await createUnstartedAgent('Rfc64GraphScopedRecoveryRevocation');
-    vi.spyOn(agent, 'resolveRfc64SwmRecoveryRuntimeAuthorityV1')
+    vi.spyOn(agent.rfc64SwmRecoveryRuntimeV1, 'resolveRuntimeAuthority')
       .mockImplementation((contextGraphId) => ({
         kind: 'rfc64-swm-recovery-runtime-authority-v1',
         contextGraphId,

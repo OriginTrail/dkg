@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { applySwmRecovery } from '../src/sync/requester/swm-recovery-apply.js';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  applySwmRecovery,
+  type SwmRecoveryStore,
+} from '../src/sync/requester/swm-recovery-apply.js';
+import { createRecoveryExecutionBoundary } from
+  '../src/sync/requester/recovery-execution-guard.js';
 
 /**
  * Recovery must REPLACE per root, not blind-union.
@@ -86,5 +91,91 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
     });
     expect(result.insertedQuads).toBe(1);
     expect(await values(store, SUBJ, STATUS)).toEqual(['"v2"']);
+  });
+
+  it('finishes the admitted root replacement when authority is revoked after deletion starts', async () => {
+    const revoked = new Error('recovery revoked');
+    const controller = new AbortController();
+    let current = true;
+    let rows: Quad[] = [
+      { subject: SUBJ, predicate: STATUS, object: '"v1"', graph: G },
+      { subject: CHILD, predicate: VALUE, object: '"old-leg"', graph: G },
+    ];
+    const operations: string[] = [];
+    const store: SwmRecoveryStore = {
+      insert: async (quads) => {
+        operations.push('insert');
+        rows.push(...quads);
+      },
+      replaceGraph: async () => undefined,
+      deleteByPattern: async (pattern) => {
+        operations.push('delete-root');
+        rows = rows.filter((quad) => !(
+          quad.graph === pattern.graph && quad.subject === pattern.subject
+        ));
+        // Simulate unsubscribe after the backend committed the first delete.
+        current = false;
+        controller.abort(revoked);
+      },
+      deleteBySubjectPrefix: async (graph, prefix) => {
+        operations.push('delete-children');
+        rows = rows.filter((quad) => !(
+          quad.graph === graph && quad.subject.startsWith(prefix)
+        ));
+        return 1;
+      },
+    };
+    const executionBoundary = createRecoveryExecutionBoundary({
+      signal: controller.signal,
+      assertCurrent: () => {
+        if (!current) throw revoked;
+      },
+    });
+
+    await expect(applySwmRecovery({
+      store,
+      verifiedData: [
+        { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: G },
+        { subject: CHILD, predicate: VALUE, object: '"new-leg"', graph: G },
+      ],
+      roots: [{ dataGraph: G, entity: SUBJ }],
+      executionBoundary,
+    })).resolves.toEqual({ replacedRoots: 1, insertedQuads: 2 });
+
+    expect(operations).toEqual(['delete-root', 'delete-children', 'insert']);
+    expect(rows.filter((quad) => quad.subject === SUBJ)).toEqual([
+      { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: G },
+    ]);
+    expect(rows.filter((quad) => quad.subject === CHILD)).toEqual([
+      { subject: CHILD, predicate: VALUE, object: '"new-leg"', graph: G },
+    ]);
+  });
+
+  it('rejects a revoked lease before the root replacement mutates anything', async () => {
+    const revoked = new Error('recovery revoked');
+    const controller = new AbortController();
+    controller.abort(revoked);
+    const operations: string[] = [];
+    const store: SwmRecoveryStore = {
+      insert: async () => { operations.push('insert'); },
+      replaceGraph: async () => undefined,
+      deleteByPattern: async () => { operations.push('delete-root'); },
+      deleteBySubjectPrefix: async () => {
+        operations.push('delete-children');
+        return 0;
+      },
+    };
+    const executionBoundary = createRecoveryExecutionBoundary({
+      signal: controller.signal,
+      assertCurrent: () => { throw revoked; },
+    });
+
+    await expect(applySwmRecovery({
+      store,
+      verifiedData: [{ subject: SUBJ, predicate: STATUS, object: '"v2"', graph: G }],
+      roots: [{ dataGraph: G, entity: SUBJ }],
+      executionBoundary,
+    })).rejects.toBe(revoked);
+    expect(operations).toEqual([]);
   });
 });

@@ -646,7 +646,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const fetchStartedAt = Date.now();
       const metadataOutcome = metadataFetcher
-        ? await recoveryBoundary.wait(() => metadataFetcher.fetch({
+        ? await recoveryBoundary.read(() => metadataFetcher.fetch({
           ctx,
           remotePeerId,
           contextGraphId: pid,
@@ -654,7 +654,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           deadline,
         }))
         : {
-          result: await recoveryBoundary.wait(() => fetchSyncPages(
+          result: await recoveryBoundary.read(() => fetchSyncPages(
             ctx,
             remotePeerId,
             pid,
@@ -682,7 +682,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         recordPhaseOutcome(wsMetaResult, { updateCheckpoint: false });
         break;
       }
-      const wsDataResult = await recoveryBoundary.wait(() => fetchSyncPages(
+      const wsDataResult = await recoveryBoundary.read(() => fetchSyncPages(
         ctx,
         remotePeerId,
         pid,
@@ -697,12 +697,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const verifyStartedAt = Date.now();
       const registeredSubGraphNames = getRegisteredSubGraphNames
-        ? await recoveryBoundary.wait(() => getRegisteredSubGraphNames(pid))
+        ? await recoveryBoundary.read(() => getRegisteredSubGraphNames(pid))
         : undefined;
       const excludedSubGraphNames = getExcludedSubGraphNames
-        ? await recoveryBoundary.wait(() => getExcludedSubGraphNames(pid))
+        ? await recoveryBoundary.read(() => getExcludedSubGraphNames(pid))
         : undefined;
-      const processed = await recoveryBoundary.wait(() => processSharedMemoryBatch(
+      const processed = await recoveryBoundary.read(() => processSharedMemoryBatch(
         wsDataResult.quads,
         wsMetaResult.quads,
         pid,
@@ -765,18 +765,19 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const validWsQuads = processed.verifiedData;
       const dropped = processed.droppedDataTriples;
       const hydrateOwnership = () => {
-        recoveryBoundary.assertCurrent();
-        for (const { dataGraph, entity, creator } of processed.entityCreators) {
-          const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
-          if (!ownershipKey) {
-            logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
-            continue;
+        recoveryBoundary.commit(() => {
+          for (const { dataGraph, entity, creator } of processed.entityCreators) {
+            const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
+            if (!ownershipKey) {
+              logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
+              continue;
+            }
+            const ownedMap = ensureOwnedMap(ownershipKey);
+            if (!ownedMap.has(entity)) {
+              ownedMap.set(entity, creator);
+            }
           }
-          const ownedMap = recoveryBoundary.commit(() => ensureOwnedMap(ownershipKey));
-          if (!ownedMap.has(entity)) {
-            recoveryBoundary.commit(() => ownedMap.set(entity, creator));
-          }
-        }
+        });
       };
       if (dropped > 0) {
         logWarn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
@@ -883,7 +884,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
-        await recoveryBoundary.wait(() => ensureContextGraph(pid));
+        await ensureContextGraph(pid);
         contextGraphEnsured = true;
       };
       /**
@@ -918,8 +919,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         const rows = snapshotCommit.unwrittenVerifiedRows(descriptor);
         if (rows.length === 0) return;
         await ensureContextGraphOnce();
-        await recoveryBoundary.wait(() => storeInsert([...rows]));
-        recoveryBoundary.assertCurrent();
+        await storeInsert([...rows]);
         snapshotCommit.recordWritten(rows);
         summary.insertedTriples += rows.length;
         summary.insertedMetaTriples += rows.length;
@@ -958,9 +958,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         descriptor: GraphScopedSwmRecoveryDescriptor,
         how: string,
       ): Promise<string | null> => {
-        const preserved = await recoveryBoundary.wait(
-          () => snapshotMaterializer!.selectRepairIdentity(pid, descriptor),
-        );
+        const preserved = await snapshotMaterializer!.selectRepairIdentity(pid, descriptor);
         if (!preserved) return null;
         // The materializer returns the complete plan: winner + the exact rows
         // to withhold. Suppression consumes that plan, not a re-derivation.
@@ -975,13 +973,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       ): Promise<void> => {
         const winner = await decideAndWithholdStoredIdentity(descriptor, 'repaired head');
         if (winner !== null) {
-          await recoveryBoundary.wait(
-            () => snapshotMaterializer!.repairHeadPreservingIdentity(pid, descriptor, winner),
-          );
+          await snapshotMaterializer!.repairHeadPreservingIdentity(pid, descriptor, winner);
         } else {
-          await recoveryBoundary.wait(
-            () => snapshotMaterializer!.replaceHeadMetadata(pid, descriptor),
-          );
+          await snapshotMaterializer!.replaceHeadMetadata(pid, descriptor);
         }
         await insertVerifiedDescriptorMeta(descriptor);
       };
@@ -1025,7 +1019,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
           try {
-            await recoveryBoundary.wait(() => snapshotMaterializer.withKaWriteLock(
+            await recoveryBoundary.commit(() => snapshotMaterializer.withKaWriteLock(
               pid,
               descriptor.subGraphName,
               descriptor.kaUal,
@@ -1045,9 +1039,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // about ordering we must not destroy. Nor may we "repair" the
                 // head rows here — gossip owns a newer head and its
                 // delete-then-insert already wrote it unambiguously.
-                const storedHead = await recoveryBoundary.wait(
-                  () => snapshotMaterializer.readStoredHead(descriptor),
-                );
+                const storedHead = await snapshotMaterializer.readStoredHead(descriptor);
                 if (
                   storedHead.version !== null
                   && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
@@ -1071,9 +1063,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // must be REPAIRED; an equal-count graph with a different
                 // digest is an OLDER version of the same size and must be
                 // replaced, not skipped.
-                if (await recoveryBoundary.wait(
-                  () => snapshotMaterializer.isGraphAssetMaterialized(descriptor),
-                )) {
+                if (await snapshotMaterializer.isGraphAssetMaterialized(descriptor)) {
                   // Content is already this descriptor's. Two states still need
                   // the head rewritten, and BOTH are invisible to a reader that
                   // only looks at content:
@@ -1126,23 +1116,19 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     // decide-and-enact shape the private recovery lane uses.
                     const winner = await decideAndWithholdStoredIdentity(descriptor, 'kept head');
                     if (winner !== null) {
-                      await recoveryBoundary.wait(
-                        () => snapshotMaterializer.repairHeadPreservingIdentity(pid, descriptor, winner),
-                      );
+                      await snapshotMaterializer.repairHeadPreservingIdentity(pid, descriptor, winner);
                     }
                   }
                   materializedKeys.add(graphKey);
                   return;
                 }
-                const asset = await recoveryBoundary.wait(() => materializeGraphScopedSwmRecoveryAsset({
+                const asset = await materializeGraphScopedSwmRecoveryAsset({
                   descriptor,
                   fetchedDataQuads: [],
                   publicSnapshotStore,
-                }));
+                });
                 await ensureContextGraphOnce();
-                await recoveryBoundary.wait(
-                  () => snapshotMaterializer.replaceGraph(asset.assertionGraph, [...asset.quads]),
-                );
+                await snapshotMaterializer.replaceGraph(asset.assertionGraph, [...asset.quads]);
                 // Graph first, THEN the head swap — a crash between the two
                 // leaves content newer than the head, which the next round
                 // repairs (digest matches → head rewritten above). The swap
@@ -1187,7 +1173,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // arrives. Reconcile only after releasing the materialization
             // lock; the production callback reacquires the same per-KA lock
             // and re-verifies current head + both graph digests before delete.
-            await recoveryBoundary.wait(() => snapshotCommit.reconcileAfterMaterialization({
+            await recoveryBoundary.commit(() => snapshotCommit.reconcileAfterMaterialization({
               contextGraphId: pid,
               descriptor,
               onDeferred: (cause) => logWarn(
@@ -1244,7 +1230,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       };
 
       const snapshotStartedAt = Date.now();
-      const snapshotSync = await recoveryBoundary.wait(() => syncPublicSnapshotsForMeta({
+      recoveryBoundary.assertCurrent();
+      const snapshotSync = await syncPublicSnapshotsForMeta({
         ctx,
         remotePeerId,
         contextGraphId: pid,
@@ -1298,7 +1285,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             snapshotWalk?.markResolved(snapshot.ref, suppressedRows);
           }
         },
-      }));
+      });
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
         // write lock, so they survive a snapshot-phase throw. Adding them again
@@ -1397,8 +1384,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // up with dangling/missing public snapshot state.
         summary.failedPhases += 1;
         if (validWsQuads.length > 0) {
-          await recoveryBoundary.wait(() => ensureContextGraph(pid));
-          await recoveryBoundary.wait(() => storeInsert(validWsQuads));
+          await recoveryBoundary.commit(async () => {
+            await ensureContextGraph(pid);
+            await storeInsert(validWsQuads);
+          });
           summary.insertedTriples += validWsQuads.length;
           summary.insertedDataTriples += validWsQuads.length;
           recordPhaseOutcome(wsDataResult);
@@ -1411,10 +1400,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
 
       const storeStartedAt = Date.now();
-      await recoveryBoundary.wait(() => ensureContextGraph(pid));
+      await recoveryBoundary.commit(async () => {
+        await ensureContextGraph(pid);
+        if (validWsQuads.length > 0) {
+          await storeInsert(validWsQuads);
+        }
+      });
 
       if (validWsQuads.length > 0) {
-        await recoveryBoundary.wait(() => storeInsert(validWsQuads));
         summary.insertedTriples += validWsQuads.length;
         summary.insertedDataTriples += validWsQuads.length;
       }
@@ -1444,7 +1437,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // verified input and is subtracted solely when its row survives.
         const metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
         if (metaForBulkInsert.length > 0) {
-          await recoveryBoundary.wait(() => storeInsert(metaForBulkInsert));
+          await recoveryBoundary.commit(() => storeInsert(metaForBulkInsert));
         }
         const retainedAlreadyCounted = snapshotCommit.alreadyCountedRetainedRows();
         const newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
@@ -1708,17 +1701,17 @@ export async function syncPublicSnapshotsForMeta(params: {
       break;
     }
     try {
-      if (await executionBoundary.wait(
+      if (await executionBoundary.read(
         () => hasValidSnapshot(params.publicSnapshotStore!, snapshot),
       )) {
         if (params.onSnapshotReady) {
-          await executionBoundary.wait(() => params.onSnapshotReady!(snapshot, 'cache'));
+          await executionBoundary.commit(() => params.onSnapshotReady!(snapshot, 'cache'));
         }
         readySnapshots += 1;
         continue;
       }
 
-      const result = await executionBoundary.wait(() => params.fetchSyncPages(
+      const result = await executionBoundary.read(() => params.fetchSyncPages(
         params.ctx,
         params.remotePeerId,
         params.contextGraphId,
@@ -1775,12 +1768,12 @@ export async function syncPublicSnapshotsForMeta(params: {
           `(expected ${snapshot.digest}/${snapshot.count}, got ${actualDigest}/${snapshotQuads.length})`,
         );
       }
-      await executionBoundary.wait(() => params.publicSnapshotStore!.putSnapshot({
+      await executionBoundary.commit(() => params.publicSnapshotStore!.putSnapshot({
         digest: snapshot.digest,
         quads: snapshotQuads,
       }));
       if (params.onSnapshotReady) {
-        await executionBoundary.wait(() => params.onSnapshotReady!(snapshot, 'network'));
+        await executionBoundary.commit(() => params.onSnapshotReady!(snapshot, 'network'));
       }
       completedPhases += 1;
       readySnapshots += 1;

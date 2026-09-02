@@ -63,28 +63,32 @@ export async function applySwmRecovery(params: {
   readonly roots: readonly SwmRecoveryRoot[];
   readonly executionBoundary?: RecoveryExecutionBoundary;
 }): Promise<SwmRecoveryApplyResult> {
-  const wait = <T>(operation: () => Promise<T>): Promise<T> => (
-    params.executionBoundary?.wait(operation) ?? operation()
-  );
-  // Clear each (graph, root) exactly once — root rows + its skolemized children.
-  const cleared = new Set<string>();
-  for (const { dataGraph, entity } of params.roots) {
-    const key = `${dataGraph}\u0000${entity}`;
-    if (cleared.has(key)) continue;
-    cleared.add(key);
-    await wait(() => deleteByPatternWithoutCount(
-      params.store,
-      { graph: dataGraph, subject: entity },
-    ));
-    await wait(() => params.store.deleteBySubjectPrefix(
-      dataGraph,
-      `${entity}${SKOLEM_CHILD_INFIX}`,
-    ));
-  }
+  const apply = async (): Promise<SwmRecoveryApplyResult> => {
+    // Clear each (graph, root) exactly once — root rows + its skolemized children.
+    const cleared = new Set<string>();
+    for (const { dataGraph, entity } of params.roots) {
+      const key = `${dataGraph}\u0000${entity}`;
+      if (cleared.has(key)) continue;
+      cleared.add(key);
+      await deleteByPatternWithoutCount(
+        params.store,
+        { graph: dataGraph, subject: entity },
+      );
+      await params.store.deleteBySubjectPrefix(
+        dataGraph,
+        `${entity}${SKOLEM_CHILD_INFIX}`,
+      );
+    }
 
-  if (params.verifiedData.length > 0) {
-    await wait(() => params.store.insert([...params.verifiedData]));
-  }
+    if (params.verifiedData.length > 0) {
+      await params.store.insert([...params.verifiedData]);
+    }
 
-  return { replacedRoots: cleared.size, insertedQuads: params.verifiedData.length };
+    return { replacedRoots: cleared.size, insertedQuads: params.verifiedData.length };
+  };
+
+  // One per-recovery durability unit. If authority is revoked before this
+  // point nothing mutates; if it is revoked after the first delete, the whole
+  // root set still reaches its insert instead of being stranded half-applied.
+  return params.executionBoundary?.commit(apply) ?? apply();
 }

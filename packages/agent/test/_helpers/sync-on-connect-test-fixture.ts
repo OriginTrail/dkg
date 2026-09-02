@@ -3,6 +3,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, type DKGAgentConfig } from '../../src/index.js';
 import type { ContextGraphSub, SyncReconcilerBackoff } from '../../src/dkg-agent-types.js';
 import type { Rfc64SwmRecoveryCoordinatorV1 } from '../../src/rfc64/swm-recovery-coordinator-v1.js';
+import type { Rfc64SwmRecoveryRuntimeV1 } from '../../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import type { Rfc64AuthorizedSwmRecoveryPlanV1 } from '../../src/rfc64/swm-recovery-plan-v1.js';
 import type { SelectedSwmBootstrapAdmission } from '../../src/sync/selected-swm-bootstrap-admission.js';
 import {
@@ -37,6 +38,7 @@ interface SyncOnConnectPrivateSeam {
   syncReconcilerBackoff: Map<string, SyncReconcilerBackoff>;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
+  rfc64SwmRecoveryRuntimeV1: Rfc64SwmRecoveryRuntimeV1;
   syncOnConnectPeerScheduler: SyncOnConnectPeerScheduler<
     Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>
   > | null;

@@ -711,6 +711,121 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     }
   });
 
+  it('finishes an admitted exact graph and metadata replacement after revocation', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const assertionGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const operationId = 'rootless-mid-commit-revocation';
+    const operationSubject = `urn:dkg:share:${CG}:${operationId}`;
+    const headSubject = `${UAL}#dkg-swm-head`;
+    const payload: Quad[] = [
+      { subject: 'urn:rootless:atomic', predicate: STATUS, object: '"v2"', graph: '' },
+    ];
+    const digest = workspacePublicQuadsDigest(payload);
+    const sourceMeta: Quad[] = [
+      ...generateKnowledgeAssetShareMetadata({
+        shareOperationId: operationId,
+        contextGraphId: CG,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: payload.length,
+        privateTripleCount: 0,
+        publisherPeerId: 'peer-source',
+        timestamp: new Date(0),
+      }, WS_META),
+      {
+        subject: operationSubject,
+        predicate: `${DKG}publicQuadsDigest`,
+        object: `"${digest}"`,
+        graph: WS_META,
+      },
+      {
+        subject: headSubject,
+        predicate: `${DKG}contentScopeVersion`,
+        object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
+        graph: WS_META,
+      },
+      { subject: headSubject, predicate: `${DKG}kaUal`, object: UAL, graph: WS_META },
+      {
+        subject: headSubject,
+        predicate: `${DKG}assertionVersion`,
+        object: `"1"^^<${XSD_INTEGER}>`,
+        graph: WS_META,
+      },
+      {
+        subject: headSubject,
+        predicate: `${DKG}assertionGraph`,
+        object: assertionGraph,
+        graph: WS_META,
+      },
+      {
+        subject: headSubject,
+        predicate: `${DKG}shareOperationId`,
+        object: `"${operationId}"`,
+        graph: WS_META,
+      },
+    ];
+    await store.insert([
+      { subject: 'urn:rootless:atomic', predicate: STATUS, object: '"stale"', graph: assertionGraph },
+    ]);
+
+    const revoked = new Error('selection revoked during graph replacement');
+    const controller = new AbortController();
+    let current = true;
+    const replaceGraph = store.replaceGraph.bind(store);
+    store.replaceGraph = async (graphUri, quads, options) => {
+      const result = await replaceGraph(graphUri, quads, options);
+      if (graphUri === assertionGraph) {
+        current = false;
+        controller.abort(revoked);
+      }
+      return result;
+    };
+
+    await expect(recoverContextGraphSwm({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => {
+        if (phase === 'meta') return page(sourceMeta);
+        if (phase === 'snapshot') return page(payload);
+        return page([]);
+      },
+      processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
+        verifiedData: [],
+        verifiedMeta: metaQuads,
+        entityCreators: [],
+        droppedDataTriples: 0,
+      }),
+      writeLocks: new Map<string, Promise<void>>(),
+      store,
+      publicSnapshotStore: new MemorySnapshotStore(),
+      ensureContextGraph: async () => {},
+      setCheckpoint: () => {},
+      deleteCheckpoint: () => {},
+      recoveryGuard: {
+        signal: controller.signal,
+        assertCurrent: () => {
+          if (!current) throw revoked;
+        },
+      },
+    })).rejects.toBe(revoked);
+
+    // Revocation prevents the next recovery phase, but cannot strand the
+    // already-admitted graph swap without its matching metadata.
+    expect(await store.countQuads(assertionGraph)).toBe(payload.length);
+    expect(await store.countQuads(WS_META)).toBe(sourceMeta.length);
+    const recovered = await store.query(
+      `SELECT ?o WHERE { GRAPH <${assertionGraph}> { <urn:rootless:atomic> <${STATUS}> ?o } }`,
+    );
+    expect(recovered.type === 'bindings' ? recovered.bindings : []).toEqual([{ o: '"v2"' }]);
+  });
+
   it('makes monotonic per-KA progress across a deadline without rescanning aggregate SWM data', async () => {
     const store = new OxigraphStore();
     stores.push(store);

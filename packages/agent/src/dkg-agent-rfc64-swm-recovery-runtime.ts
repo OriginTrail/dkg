@@ -5,7 +5,6 @@
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
-  resolveRfc64RuntimeCatalogBootstrapConfigV1,
   projectRfc64CatalogReceiverAuthorityV1,
   type Rfc64CatalogAuthorityPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -14,15 +13,26 @@ import {
   resolveRfc64SwmRecoveryLaneV1,
   resolveRfc64SwmRecoveryRuntimeAuthorityV1,
   type Rfc64ActivePeerSwmRecoveryPlanV1,
+  type Rfc64AuthorizedSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
   type Rfc64SwmRecoveryRuntimeAuthorityV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 import type { RecoveryExecutionGuard } from
   './sync/requester/recovery-execution-guard.js';
 
-export interface Rfc64SwmRecoverySelectionSnapshotV1 {
-  readonly runtimeSelected: boolean;
-  readonly receiverActive: boolean;
+type Rfc64RecoveryConfigV1 = Parameters<
+  typeof resolveRfc64ActivePeerSwmRecoveryPlanV1
+>[0];
+
+export interface Rfc64SwmRecoverySelectionV1 {
+  /** The single canonical answer consumed by both public and private lanes. */
+  readonly selected: boolean;
+}
+
+interface Rfc64SwmRecoveryRuntimeSelectionV1 {
+  readonly selectedContextGraphs: readonly string[];
+  readonly eligibleContextGraphs: readonly string[];
+  readonly subscriptionDriven: boolean;
 }
 
 export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
@@ -40,13 +50,7 @@ export class Rfc64SwmRecoveryTargetRevokedErrorV1 extends Error {
   }
 }
 
-/**
- * One graph-scoped lease over the live RFC-64 recovery authority.
- *
- * Requester algorithms stay policy-agnostic: they receive this capability and
- * enforce it at their own await and commit boundaries. The signal gives
- * transport an immediate cancellation path.
- */
+/** One graph-scoped lease over the live RFC-64 recovery authority. */
 export class Rfc64SwmRecoveryTargetLeaseV1 implements RecoveryExecutionGuard {
   constructor(
     readonly contextGraphId: string,
@@ -63,50 +67,15 @@ export class Rfc64SwmRecoveryTargetLeaseV1 implements RecoveryExecutionGuard {
 }
 
 /**
- * Own every graph lease generation and controller in one runtime object.
- * Callers can acquire or invalidate; the mutable registry and generation
- * identity are never exposed to the agent lifecycle or its tests.
+ * One selection projection for current-state and explicit transition checks.
+ * `receiverActive` is derived here rather than accepted as a second boolean,
+ * so contradictory snapshots are unrepresentable.
  */
-export class Rfc64SwmRecoveryLeaseRegistryV1 {
-  readonly #controllers = new Map<string, AbortController>();
-
-  acquire(
-    contextGraphId: string,
-    isAuthorityCurrent: () => boolean,
-  ): Rfc64SwmRecoveryTargetLeaseV1 {
-    let controller = this.#controllers.get(contextGraphId);
-    if (controller === undefined) {
-      controller = new AbortController();
-      this.#controllers.set(contextGraphId, controller);
-    }
-    const captured = controller;
-    return Object.freeze(new Rfc64SwmRecoveryTargetLeaseV1(
-      contextGraphId,
-      captured.signal,
-      () => (
-        !captured.signal.aborted
-        && this.#controllers.get(contextGraphId) === captured
-        && isAuthorityCurrent()
-      ),
-    ));
-  }
-
-  invalidate(contextGraphId: string): void {
-    const current = this.#controllers.get(contextGraphId);
-    current?.abort(new Rfc64SwmRecoveryTargetRevokedErrorV1(contextGraphId));
-    // Install the next generation synchronously. A lease acquired by recovery
-    // queued after this transition can proceed, while every captured prior
-    // generation remains permanently stale.
-    this.#controllers.set(contextGraphId, new AbortController());
-  }
-}
-
-/** Pure selection projection shared by current-state and transition resolution. */
 export function projectRfc64SwmRecoveryAuthorityForSelectionV1(input: Readonly<{
   contextGraphId: string;
   lane: ReturnType<typeof resolveRfc64SwmRecoveryLaneV1>;
   configuredAuthority: Readonly<Rfc64CatalogAuthorityPolicyV1>;
-  selection: Readonly<Rfc64SwmRecoverySelectionSnapshotV1>;
+  selection: Readonly<Rfc64SwmRecoverySelectionV1>;
 }>): Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1> {
   return resolveRfc64SwmRecoveryRuntimeAuthorityV1({
     contextGraphId: input.contextGraphId,
@@ -114,43 +83,178 @@ export function projectRfc64SwmRecoveryAuthorityForSelectionV1(input: Readonly<{
     configuredAuthority: input.configuredAuthority,
     receiverAuthority: projectRfc64CatalogReceiverAuthorityV1(
       input.configuredAuthority,
-      { active: input.selection.receiverActive },
+      { active: input.configuredAuthority.eligible && input.selection.selected },
     ),
-    runtimeSelected: input.selection.runtimeSelected,
+    runtimeSelected: input.selection.selected,
   });
 }
 
-function resolveConfiguredRfc64SwmRecoveryLaneV1(
-  config: Parameters<typeof resolveRfc64SwmRecoveryLaneV1>[0],
-  contextGraphId: string,
-): ReturnType<typeof resolveRfc64SwmRecoveryLaneV1> {
-  return resolveRfc64SwmRecoveryLaneV1(config, contextGraphId);
+export interface Rfc64SwmRecoveryRuntimePortsV1 {
+  readonly authority: Readonly<{
+    resolveRuntimeSelection: () => Readonly<Rfc64SwmRecoveryRuntimeSelectionV1>;
+    resolveConfigured: (
+      contextGraphId: string,
+    ) => Readonly<Rfc64CatalogAuthorityPolicyV1>;
+    resolveRecoveryConfig: () => Rfc64RecoveryConfigV1;
+  }>;
+  readonly admission: Readonly<{
+    invalidateContextGraph: (contextGraphId: string) => readonly string[];
+  }>;
+  readonly cooldown: Readonly<{
+    deleteProvider: (providerPeerId: string) => void;
+  }>;
+  readonly queue: Readonly<{
+    catalogPassMinimumTerminalAgeMs: () => number;
+    authorizeForCatalogPass: (
+      plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
+      minimumTerminalAgeMs: number,
+    ) => Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null;
+    enqueueAuthorized: (
+      plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
+      onError: (peerId: string, error: unknown) => void,
+      delayMs: number,
+    ) => boolean;
+  }>;
 }
 
+/**
+ * Cohesive owner of recovery authority projection, lease generations,
+ * selection invalidation, provider cooldown reset and catalog queue admission.
+ * The agent supplies narrow ports and exposes only delegate methods.
+ */
+export class Rfc64SwmRecoveryRuntimeV1 {
+  readonly #controllers = new Map<string, AbortController>();
+
+  constructor(private readonly ports: Rfc64SwmRecoveryRuntimePortsV1) {}
+
+  resolveRuntimeAuthority(
+    contextGraphId: string,
+  ): Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1> {
+    const selection = this.ports.authority.resolveRuntimeSelection();
+    return this.projectAuthority(
+      contextGraphId,
+      selection.selectedContextGraphs.includes(contextGraphId),
+    );
+  }
+
+  selectionChanged(
+    contextGraphId: string,
+    transition: Readonly<{
+      previousSubscribed: boolean;
+      nextSubscribed: boolean;
+    }>,
+  ): boolean {
+    const selection = this.ports.authority.resolveRuntimeSelection();
+    const eligible = selection.eligibleContextGraphs.includes(contextGraphId);
+    const authorityFor = (subscribed: boolean) => this.projectAuthority(
+      contextGraphId,
+      eligible && (!selection.subscriptionDriven || subscribed),
+    );
+    return authorityFor(transition.previousSubscribed).active
+      !== authorityFor(transition.nextSubscribed).active;
+  }
+
+  resolveActivePlan(
+    providerPeerId: string,
+  ): Readonly<Rfc64ActivePeerSwmRecoveryPlanV1> {
+    return resolveRfc64ActivePeerSwmRecoveryPlanV1(
+      this.ports.authority.resolveRecoveryConfig(),
+      providerPeerId,
+      (contextGraphId) => this.resolveRuntimeAuthority(contextGraphId),
+    );
+  }
+
+  acquireTargetLease(
+    target: Readonly<Rfc64SwmRecoveryTargetV1>,
+  ): Rfc64SwmRecoveryTargetLeaseV1 {
+    let controller = this.#controllers.get(target.contextGraphId);
+    if (controller === undefined) {
+      controller = new AbortController();
+      this.#controllers.set(target.contextGraphId, controller);
+    }
+    const captured = controller;
+    return Object.freeze(new Rfc64SwmRecoveryTargetLeaseV1(
+      target.contextGraphId,
+      captured.signal,
+      () => {
+        const authority = this.resolveRuntimeAuthority(target.contextGraphId);
+        return !captured.signal.aborted
+          && this.#controllers.get(target.contextGraphId) === captured
+          && authority.active
+          && authority.lane === target.lane;
+      },
+    ));
+  }
+
+  resolveCompleteProviderPeerIds(contextGraphId: string): readonly string[] {
+    const config = this.ports.authority.resolveRecoveryConfig();
+    if (config === undefined) return Object.freeze([]);
+    const policies = 'acceptedPolicies' in config
+      ? config.acceptedPolicies
+      : config.acceptedPublicPolicies;
+    const policy = policies.find(
+      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
+    );
+    return policy?.completeSwmProviders ?? Object.freeze([]);
+  }
+
+  invalidateSelectionState(contextGraphId: string): readonly string[] {
+    const current = this.#controllers.get(contextGraphId);
+    current?.abort(new Rfc64SwmRecoveryTargetRevokedErrorV1(contextGraphId));
+    // Install the next generation synchronously so a recovery queued after the
+    // transition cannot capture a permanently-aborted controller.
+    this.#controllers.set(contextGraphId, new AbortController());
+
+    const affectedProviders = new Set([
+      ...this.ports.admission.invalidateContextGraph(contextGraphId),
+      ...this.resolveCompleteProviderPeerIds(contextGraphId),
+    ]);
+    for (const providerPeerId of affectedProviders) {
+      this.ports.cooldown.deleteProvider(providerPeerId);
+    }
+    return Object.freeze([...affectedProviders]);
+  }
+
+  queueCatalogPlan(
+    plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
+    onError: (peerId: string, error: unknown) => void,
+    delayMs: number,
+  ): Rfc64CatalogRecoveryQueueOutcomeV1 {
+    const authorizedPlan = this.ports.queue.authorizeForCatalogPass(
+      plan,
+      this.ports.queue.catalogPassMinimumTerminalAgeMs(),
+    );
+    if (authorizedPlan === null) return Object.freeze({ kind: 'not-authorized' });
+    return Object.freeze({
+      kind: this.ports.queue.enqueueAuthorized(authorizedPlan, onError, delayMs)
+        ? 'queued'
+        : 'rejected',
+    });
+  }
+
+  private projectAuthority(
+    contextGraphId: string,
+    selected: boolean,
+  ): Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1> {
+    const config = this.ports.authority.resolveRecoveryConfig();
+    return projectRfc64SwmRecoveryAuthorityForSelectionV1({
+      contextGraphId,
+      lane: resolveRfc64SwmRecoveryLaneV1(config, contextGraphId),
+      configuredAuthority: this.ports.authority.resolveConfigured(contextGraphId),
+      selection: { selected },
+    });
+  }
+}
+
+/** Thin compatibility delegates while DKGAgent remains mixin-composed. */
 export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
-  /** Resolve live graph authority from the canonical current selection registry. */
   resolveRfc64SwmRecoveryRuntimeAuthorityV1(
     this: DKGAgent,
     contextGraphId: string,
   ): Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1> {
-    const selection = this.readRfc64CatalogRuntimeSelectionV1();
-    const configuredAuthority = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId);
-    const runtimeSelected = selection.selectedContextGraphs.includes(contextGraphId);
-    return projectRfc64SwmRecoveryAuthorityForSelectionV1({
-      contextGraphId,
-      lane: resolveConfiguredRfc64SwmRecoveryLaneV1(
-        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-        contextGraphId,
-      ),
-      configuredAuthority,
-      selection: {
-        runtimeSelected,
-        receiverActive: configuredAuthority.eligible && runtimeSelected,
-      },
-    });
+    return this.rfc64SwmRecoveryRuntimeV1.resolveRuntimeAuthority(contextGraphId);
   }
 
-  /** Compare explicit pre/post subscription snapshots through the same authority policy. */
   rfc64SwmRecoverySelectionChangedV1(
     this: DKGAgent,
     contextGraphId: string,
@@ -159,107 +263,43 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
       nextSubscribed: boolean;
     }>,
   ): boolean {
-    const runtimeSelection = this.readRfc64CatalogRuntimeSelectionV1();
-    const configuredAuthority = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId);
-    const lane = resolveConfiguredRfc64SwmRecoveryLaneV1(
-      this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      contextGraphId,
-    );
-    const eligible = runtimeSelection.eligibleContextGraphs.includes(contextGraphId);
-    const authorityFor = (subscribed: boolean) => (
-      projectRfc64SwmRecoveryAuthorityForSelectionV1({
-        contextGraphId,
-        lane,
-        configuredAuthority,
-        selection: {
-          runtimeSelected: eligible && (!runtimeSelection.subscriptionDriven || subscribed),
-          receiverActive: configuredAuthority.eligible
-            && (!runtimeSelection.subscriptionDriven || subscribed),
-        },
-      })
-    );
-    return authorityFor(transition.previousSubscribed).active
-      !== authorityFor(transition.nextSubscribed).active;
+    return this.rfc64SwmRecoveryRuntimeV1.selectionChanged(contextGraphId, transition);
   }
 
-  /** One provider's configured recovery proof projected through live authority. */
   resolveActiveRfc64SwmRecoveryPlanV1(
     this: DKGAgent,
     providerPeerId: string,
   ): Readonly<Rfc64ActivePeerSwmRecoveryPlanV1> {
-    return resolveRfc64ActivePeerSwmRecoveryPlanV1(
-      this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      providerPeerId,
-      (contextGraphId) => this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId),
-    );
+    return this.rfc64SwmRecoveryRuntimeV1.resolveActivePlan(providerPeerId);
   }
 
-  /** Acquire one target's graph-scoped cancellation and live-authority lease. */
   acquireRfc64SwmRecoveryTargetLeaseV1(
     this: DKGAgent,
     target: Readonly<Rfc64SwmRecoveryTargetV1>,
   ): Rfc64SwmRecoveryTargetLeaseV1 {
-    return this.rfc64SwmRecoveryLeaseRegistryV1.acquire(
-      target.contextGraphId,
-      () => {
-        const authority = this.resolveRfc64SwmRecoveryRuntimeAuthorityV1(
-          target.contextGraphId,
-        );
-        return authority.active && authority.lane === target.lane;
-      },
-    );
+    return this.rfc64SwmRecoveryRuntimeV1.acquireTargetLease(target);
   }
 
-  /** Exact operator-pinned graph-complete SWM providers for one accepted policy. */
   resolveRfc64CompleteSwmProviderPeerIdsV1(
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
-      this.config.rfc64CatalogBootstrap,
-      this.config.rfc64PublicCatalogBootstrap,
-    );
-    if (config === undefined) return Object.freeze([]);
-    const policy = config.acceptedPolicies.find(
-      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
-    );
-    return policy?.completeSwmProviders ?? Object.freeze([]);
+    return this.rfc64SwmRecoveryRuntimeV1.resolveCompleteProviderPeerIds(contextGraphId);
   }
 
-  /** Fence stale owners and cooldowns for every provider affected by a selection change. */
   invalidateRfc64SwmRecoverySelectionStateV1(
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    this.rfc64SwmRecoveryLeaseRegistryV1.invalidate(contextGraphId);
-    const affectedProviders = new Set([
-      ...this.selectedSwmBootstrapAdmission.invalidateContextGraph(contextGraphId),
-      ...this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId),
-    ]);
-    for (const providerPeerId of affectedProviders) {
-      this.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
-    }
-    return Object.freeze([...affectedProviders]);
+    return this.rfc64SwmRecoveryRuntimeV1.invalidateSelectionState(contextGraphId);
   }
 
-  /** Authorize and queue one catalog-pass plan with an explicit orchestration outcome. */
   queueRfc64CatalogRecoveryPlanV1(
     this: DKGAgent,
     plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
     onError: (peerId: string, error: unknown) => void,
     delayMs: number,
   ): Rfc64CatalogRecoveryQueueOutcomeV1 {
-    const authorizedPlan = this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
-      plan,
-      this.config.syncReconcilerTiming.stalenessThresholdMs,
-    );
-    if (authorizedPlan === null) return Object.freeze({ kind: 'not-authorized' });
-    return Object.freeze({
-      kind: this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
-        authorizedPlan,
-        onError,
-        delayMs,
-      ) ? 'queued' : 'rejected',
-    });
+    return this.rfc64SwmRecoveryRuntimeV1.queueCatalogPlan(plan, onError, delayMs);
   }
 }

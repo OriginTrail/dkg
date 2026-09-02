@@ -439,7 +439,7 @@ import {
   Rfc64CatalogBootstrapOwnerV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import {
-  Rfc64SwmRecoveryLeaseRegistryV1,
+  Rfc64SwmRecoveryRuntimeV1,
   Rfc64SwmRecoveryRuntimeMethods,
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
@@ -847,7 +847,6 @@ export class DKGAgent extends DKGAgentBase {
       writeLocks,
       publicSnapshotStore,
     );
-    this.rfc64SwmRecoveryLeaseRegistryV1 = new Rfc64SwmRecoveryLeaseRegistryV1();
     const resolveCatalogPartition = () => {
       const bootstrap = resolveRfc64RuntimeCatalogBootstrapConfigV1(
         this.config.rfc64CatalogBootstrap,
@@ -958,6 +957,48 @@ export class DKGAgent extends DKGAgentBase {
         isPeerAccepted: (peerId) =>
           this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
         isStarted: () => this.started,
+      },
+    });
+    this.rfc64SwmRecoveryRuntimeV1 = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => this.readRfc64CatalogRuntimeSelectionV1(),
+        resolveConfigured: (contextGraphId) => (
+          this.resolveRfc64CatalogServingAuthorityV1(contextGraphId)
+        ),
+        resolveRecoveryConfig: () => (
+          resolveRfc64RuntimeCatalogBootstrapConfigV1(
+            this.config.rfc64CatalogBootstrap,
+            this.config.rfc64PublicCatalogBootstrap,
+          )
+        ),
+      },
+      admission: {
+        invalidateContextGraph: (contextGraphId) => (
+          this.selectedSwmBootstrapAdmission.invalidateContextGraph(contextGraphId)
+        ),
+      },
+      cooldown: {
+        deleteProvider: (providerPeerId) => {
+          this.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
+        },
+      },
+      queue: {
+        catalogPassMinimumTerminalAgeMs: () => (
+          this.config.syncReconcilerTiming.stalenessThresholdMs
+        ),
+        authorizeForCatalogPass: (plan, minimumTerminalAgeMs) => (
+          this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
+            plan,
+            minimumTerminalAgeMs,
+          )
+        ),
+        enqueueAuthorized: (plan, onError, delayMs) => (
+          this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+            plan,
+            onError,
+            delayMs,
+          )
+        ),
       },
     });
   }

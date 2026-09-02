@@ -239,7 +239,7 @@ async function fetchPhaseFully(
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
-    const page = await boundary.wait(() => deps.fetchSyncPages(
+    const page = await boundary.read(() => deps.fetchSyncPages(
       deps.ctx,
       deps.remotePeerId,
       deps.contextGraphId,
@@ -276,11 +276,11 @@ export async function recoverContextGraphSwm(
 ): Promise<RecoverContextGraphSwmResult> {
   const boundary = createRecoveryExecutionBoundary(deps.recoveryGuard);
   boundary.assertCurrent();
-  return boundary.wait(() => withKeyedLocks(
+  return withKeyedLocks(
     deps.writeLocks,
     [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
     () => recoverContextGraphSwmUnlocked(deps, boundary),
-  ));
+  );
 }
 
 /**
@@ -323,10 +323,10 @@ async function recoverContextGraphSwmUnlocked(
   }
 
   const registered = deps.getRegisteredSubGraphNames
-    ? await boundary.wait(() => deps.getRegisteredSubGraphNames!(deps.contextGraphId))
+    ? await boundary.read(() => deps.getRegisteredSubGraphNames!(deps.contextGraphId))
     : undefined;
   const excluded = deps.getExcludedSubGraphNames
-    ? await boundary.wait(() => deps.getExcludedSubGraphNames!(deps.contextGraphId))
+    ? await boundary.read(() => deps.getExcludedSubGraphNames!(deps.contextGraphId))
     : undefined;
   const recoveryRegistered = [
     ...new Set([
@@ -351,7 +351,7 @@ async function recoverContextGraphSwmUnlocked(
   // expensive aggregate `_shared_memory` query entirely. That query is both
   // redundant (the immutable snapshot is the canonical source for an exact
   // graph asset) and scales with every KA in the CG.
-  const metadataOnlyProcessed = await boundary.wait(() => deps.processSharedMemoryBatch(
+  const metadataOnlyProcessed = await boundary.read(() => deps.processSharedMemoryBatch(
     [], meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
   ));
   const hasLegacyRoots = metadataOnlyProcessed.entityCreators.length > 0;
@@ -382,7 +382,7 @@ async function recoverContextGraphSwmUnlocked(
     for (const descriptor of snapshotDescriptorsByRef.get(snapshotRef) ?? []) {
       const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
       if (incrementallyReadyGraphs.has(graphKey)) continue;
-      if (await boundary.wait(async () => (
+      if (await boundary.read(async () => (
         await deps.snapshotMaterializer?.isGraphAssetMaterialized(descriptor)
       ))) {
         incrementallyReadyGraphs.add(graphKey);
@@ -393,36 +393,38 @@ async function recoverContextGraphSwmUnlocked(
       if (verifiedAssetMeta.length !== descriptor.metadataQuads.length) {
         throw new Error(`Verified SWM metadata is incomplete for ${descriptor.kaUal}`);
       }
-      const asset = await boundary.wait(() => materializeGraphScopedSwmRecoveryAsset({
+      const asset = await boundary.read(() => materializeGraphScopedSwmRecoveryAsset({
         descriptor,
         fetchedDataQuads: [],
         publicSnapshotStore: deps.publicSnapshotStore,
       }));
-      if (!contextGraphEnsured) {
-        await boundary.wait(() => deps.ensureContextGraph(deps.contextGraphId));
-        contextGraphEnsured = true;
-      }
-      // The graph replacement completes before its metadata marker is written.
-      // A crash between the two therefore retries idempotently; it can never
-      // advertise a head whose graph was only partially transferred.
-      await boundary.wait(() => deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]));
-      // #2079: a REPLACE, so the public lane's count gate cannot see it. This
-      // lane is lane-disjoint from the public one in automatic operation
-      // (`planSharedMemorySyncContextGraphs` partitions on
-      // `isPrivateContextGraph`), but the ungated `recover-shared-memory` route
-      // reaches it for any graph — and it exists to repair a corrupt local copy,
-      // which is the worst possible moment to leave a stale memo standing.
-      await boundary.wait(() => invalidateSwmMaterializationWitness(
-        deps.store,
-        asset.assertionGraph,
-        { source: 'agent.swmRecovery.witnessInvalidate' },
-      ).catch(() => {}));
-      if (deps.replaceMetaForGraphAssets) {
-        await boundary.wait(() => deps.replaceMetaForGraphAssets!([descriptor]));
-      }
-      if (verifiedAssetMeta.length > 0) {
-        await boundary.wait(() => deps.store.insert([...verifiedAssetMeta]));
-      }
+      // One graph+metadata durability unit. A lease revoked before admission
+      // prevents every mutation; one revoked after replacement starts cannot
+      // interrupt the related witness/meta writes and strand a torn asset.
+      await boundary.commit(async () => {
+        if (!contextGraphEnsured) {
+          await deps.ensureContextGraph(deps.contextGraphId);
+          contextGraphEnsured = true;
+        }
+        await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
+        // #2079: a REPLACE, so the public lane's count gate cannot see it. This
+        // lane is lane-disjoint from the public one in automatic operation
+        // (`planSharedMemorySyncContextGraphs` partitions on
+        // `isPrivateContextGraph`), but the ungated `recover-shared-memory` route
+        // reaches it for any graph — and it exists to repair a corrupt local copy,
+        // which is the worst possible moment to leave a stale memo standing.
+        await invalidateSwmMaterializationWitness(
+          deps.store,
+          asset.assertionGraph,
+          { source: 'agent.swmRecovery.witnessInvalidate' },
+        ).catch(() => {});
+        if (deps.replaceMetaForGraphAssets) {
+          await deps.replaceMetaForGraphAssets([descriptor]);
+        }
+        if (verifiedAssetMeta.length > 0) {
+          await deps.store.insert([...verifiedAssetMeta]);
+        }
+      });
       incrementallyReadyGraphs.add(graphKey);
       rewrittenGraphKeys.add(graphKey);
       incrementallyReplacedGraphs += 1;
@@ -444,7 +446,8 @@ async function recoverContextGraphSwmUnlocked(
     const activeGraphMeta = graphScopedDescriptors.flatMap((descriptor) => [
       ...descriptor.metadataQuads,
     ]);
-    const snapshotSync = await boundary.wait(() => syncPublicSnapshotsForMeta({
+    boundary.assertCurrent();
+    const snapshotSync = await syncPublicSnapshotsForMeta({
       ctx: deps.ctx,
       remotePeerId: deps.remotePeerId,
       contextGraphId: deps.contextGraphId,
@@ -477,7 +480,7 @@ async function recoverContextGraphSwmUnlocked(
       setCheckpoint: (key, offset) => boundary.commit(() => deps.setCheckpoint(key, offset)),
       executionBoundary: boundary,
       onSnapshotReady: (snapshot) => materializeReadySnapshot(snapshot.ref),
-    }));
+    });
     snapshotProgress = {
       readySnapshots: snapshotSync.readySnapshots,
       totalSnapshots: snapshotSync.totalSnapshots,
@@ -543,125 +546,139 @@ async function recoverContextGraphSwmUnlocked(
   );
 
   const processed = needsAggregateData
-    ? await boundary.wait(() => deps.processSharedMemoryBatch(
+    ? await boundary.read(() => deps.processSharedMemoryBatch(
       legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
     ))
     : metadataOnlyProcessed;
 
-  await boundary.wait(() => deps.ensureContextGraph(deps.contextGraphId));
+  // All legacy roots, exact graphs, metadata and ownership changes form one
+  // logical recovery commit. The lease is checked immediately before entry;
+  // revocation after entry is observed only by later work, never between a
+  // delete and the insert/meta writes that make this commit self-consistent.
+  const {
+    applied,
+    replacedGraphs,
+    insertedGraphQuads,
+    insertedMetaQuads,
+  } = await boundary.commit(async () => {
+    await deps.ensureContextGraph(deps.contextGraphId);
 
-  // REPLACE per root (the recovery fix), applied over the COMPLETE fetched state.
-  const applied = await boundary.wait(() => applySwmRecovery({
-    store: deps.store,
-    verifiedData: processed.verifiedData,
-    roots: processed.entityCreators,
-    executionBoundary: boundary,
-  }));
-  let replacedGraphs = 0;
-  let insertedGraphQuads = 0;
-  for (const descriptor of graphScopedDescriptors) {
-    const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
-    if (incrementallyReadyGraphs.has(graphKey)) {
-      replacedGraphs += 1;
-      insertedGraphQuads += descriptor.publicQuadsCount;
-      continue;
-    }
-    const asset = await boundary.wait(() => materializeGraphScopedSwmRecoveryAsset({
-      descriptor,
-      fetchedDataQuads: data.quads,
-      publicSnapshotStore: deps.publicSnapshotStore,
-    }));
-    await boundary.wait(() => deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]));
-    await boundary.wait(() => invalidateSwmMaterializationWitness(
-      deps.store,
-      asset.assertionGraph,
-      { source: 'agent.swmRecovery.witnessInvalidate' },
-    ).catch(() => {})); // #2079: REPLACE, invisible to the count gate
-    rewrittenGraphKeys.add(graphKey);
-    replacedGraphs += 1;
-    insertedGraphQuads += asset.quads.length;
-  }
-  // Codex high: REPLACE the SWM meta for each recovered root (the data was
-  // REPLACEd above; the meta must be too). Otherwise a stale WorkspaceOperation
-  // pointing at the root survives and the TTL sweep later deletes the
-  // freshly-recovered root. Scope to the meta graphs the curator's fresh meta
-  // populates (+ the caller's base fallback when empty). Runs BEFORE the insert.
-  if (processed.entityCreators.length > 0 && deps.replaceMetaForRoots) {
-    const metaGraphs = [...new Set(processed.verifiedMeta.map((q) => q.graph))];
-    await boundary.wait(() => deps.replaceMetaForRoots!(processed.entityCreators, metaGraphs));
-  }
-  // GH#2273 — the meta replacement is DECISION-DRIVEN, no longer the full
-  // descriptor list: a KA whose graph was skipped as already materialized used
-  // to have its head + operation subjects deleted and re-installed under the
-  // curator's operation id anyway, rotating the identity of content that never
-  // changed and terminally killing queued VM-publish jobs frozen on the local
-  // id. A skipped KA is PRESERVED only when the local head is healthy,
-  // certifies the descriptor's version, and its operation is
-  // identity-equivalent (allow-list comparison under the KA write lock) —
-  // every other skipped state (absent, multi-valued, wrong-version,
-  // non-equivalent) is still replaced, so the curator stays authoritative for
-  // genuine changes and the #2050 G7 absent-head repair is untouched.
-  /** The materializer's withhold plans, consumed verbatim by the raw insert. */
-  const preservedWithholdRows: Quad[] = [];
-  const metaReplaceTargets: GraphScopedSwmRecoveryDescriptor[] = [];
-  for (const descriptor of graphScopedDescriptors) {
-    const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
-    if (rewrittenGraphKeys.has(graphKey) || !deps.snapshotMaterializer) {
-      metaReplaceTargets.push(descriptor);
-      continue;
-    }
-    // One owner: the materializer decides AND enacts (head already rewritten
-    // on 'preserved'); this lane only owes the returned rows an exclusion
-    // from the raw insert. See preserveStoredIdentityForSkippedAsset.
-    const preservation = await boundary.wait(() => deps.snapshotMaterializer!
-      .preserveStoredIdentityForSkippedAsset(deps.contextGraphId, descriptor));
-    if (preservation.outcome === 'preserved') {
-      preservedWithholdRows.push(...preservation.withholdRows);
-    } else {
-      metaReplaceTargets.push(descriptor);
-    }
-  }
-  if (metaReplaceTargets.length > 0 && deps.replaceMetaForGraphAssets) {
-    await boundary.wait(() => deps.replaceMetaForGraphAssets!(metaReplaceTargets));
-  }
-  let insertedMetaQuads = 0;
-  if (processed.verifiedMeta.length > 0) {
-    // The raw payload gets the same head-row canonicalization the public lane
-    // applies (the parser accepts equivalent two-id payloads, so an
-    // uncanonicalized insert could stack both ids), and each PRESERVED KA's
-    // head-id row is withheld so the union cannot re-stack the curator's id
-    // onto the preserved head. The curator's operation-subject rows still land
-    // as immutable history; the other head rows are byte-identical for
-    // identical content at the same version.
-    const preservedHeadIdRowKeys = new Set(preservedWithholdRows.map((quad) => quadKey(quad)));
-    const canonicalMeta = canonicalizeGraphScopedSwmHeadRows({
-      metaQuads: processed.verifiedMeta,
-      descriptors: graphScopedDescriptors,
+    // REPLACE per root (the recovery fix), applied over the COMPLETE fetched state.
+    const applied = await applySwmRecovery({
+      store: deps.store,
+      verifiedData: processed.verifiedData,
+      roots: processed.entityCreators,
     });
-    const insertableMeta = preservedHeadIdRowKeys.size === 0
-      ? canonicalMeta
-      : canonicalMeta.filter((quad) => !preservedHeadIdRowKeys.has(quadKey(quad)));
-    if (insertableMeta.length > 0) {
-      await boundary.wait(() => deps.store.insert([...insertableMeta]));
+    let replacedGraphs = 0;
+    let insertedGraphQuads = 0;
+    for (const descriptor of graphScopedDescriptors) {
+      const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
+      if (incrementallyReadyGraphs.has(graphKey)) {
+        replacedGraphs += 1;
+        insertedGraphQuads += descriptor.publicQuadsCount;
+        continue;
+      }
+      const asset = await materializeGraphScopedSwmRecoveryAsset({
+        descriptor,
+        fetchedDataQuads: data.quads,
+        publicSnapshotStore: deps.publicSnapshotStore,
+      });
+      await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
+      await invalidateSwmMaterializationWitness(
+        deps.store,
+        asset.assertionGraph,
+        { source: 'agent.swmRecovery.witnessInvalidate' },
+      ).catch(() => {}); // #2079: REPLACE, invisible to the count gate
+      rewrittenGraphKeys.add(graphKey);
+      replacedGraphs += 1;
+      insertedGraphQuads += asset.quads.length;
     }
-    // Canonicalization and withholding intentionally DROP rows; the reported
-    // count is what actually reached the store, not the payload size.
-    insertedMetaQuads = insertableMeta.length;
-  }
-
-  // R2 — hydrate the Rule-4 ownership cache for the recovered roots (parity with
-  // runSharedMemorySync); otherwise the member's next contended write to a
-  // recovered root is mis-arbitrated against an empty ownership map.
-  if (deps.ensureOwnedMap) {
-    for (const { dataGraph, entity, creator } of processed.entityCreators) {
-      const ownershipKey = sharedMemoryOwnershipKeyFromGraph(deps.contextGraphId, dataGraph);
-      if (!ownershipKey) continue;
-      const ownedMap = boundary.commit(() => deps.ensureOwnedMap!(ownershipKey));
-      if (!ownedMap.has(entity)) {
-        boundary.commit(() => ownedMap.set(entity, creator));
+    // Codex high: REPLACE the SWM meta for each recovered root (the data was
+    // REPLACEd above; the meta must be too). Otherwise a stale WorkspaceOperation
+    // pointing at the root survives and the TTL sweep later deletes the
+    // freshly-recovered root. Scope to the meta graphs the curator's fresh meta
+    // populates (+ the caller's base fallback when empty). Runs BEFORE the insert.
+    if (processed.entityCreators.length > 0 && deps.replaceMetaForRoots) {
+      const metaGraphs = [...new Set(processed.verifiedMeta.map((q) => q.graph))];
+      await deps.replaceMetaForRoots(processed.entityCreators, metaGraphs);
+    }
+    // GH#2273 — the meta replacement is DECISION-DRIVEN, no longer the full
+    // descriptor list: a KA whose graph was skipped as already materialized used
+    // to have its head + operation subjects deleted and re-installed under the
+    // curator's operation id anyway, rotating the identity of content that never
+    // changed and terminally killing queued VM-publish jobs frozen on the local
+    // id. A skipped KA is PRESERVED only when the local head is healthy,
+    // certifies the descriptor's version, and its operation is
+    // identity-equivalent (allow-list comparison under the KA write lock) —
+    // every other skipped state (absent, multi-valued, wrong-version,
+    // non-equivalent) is still replaced, so the curator stays authoritative for
+    // genuine changes and the #2050 G7 absent-head repair is untouched.
+    /** The materializer's withhold plans, consumed verbatim by the raw insert. */
+    const preservedWithholdRows: Quad[] = [];
+    const metaReplaceTargets: GraphScopedSwmRecoveryDescriptor[] = [];
+    for (const descriptor of graphScopedDescriptors) {
+      const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
+      if (rewrittenGraphKeys.has(graphKey) || !deps.snapshotMaterializer) {
+        metaReplaceTargets.push(descriptor);
+        continue;
+      }
+      // One owner: the materializer decides AND enacts (head already rewritten
+      // on 'preserved'); this lane only owes the returned rows an exclusion
+      // from the raw insert. See preserveStoredIdentityForSkippedAsset.
+      const preservation = await deps.snapshotMaterializer
+        .preserveStoredIdentityForSkippedAsset(deps.contextGraphId, descriptor);
+      if (preservation.outcome === 'preserved') {
+        preservedWithholdRows.push(...preservation.withholdRows);
+      } else {
+        metaReplaceTargets.push(descriptor);
       }
     }
-  }
+    if (metaReplaceTargets.length > 0 && deps.replaceMetaForGraphAssets) {
+      await deps.replaceMetaForGraphAssets(metaReplaceTargets);
+    }
+    let insertedMetaQuads = 0;
+    if (processed.verifiedMeta.length > 0) {
+      // The raw payload gets the same head-row canonicalization the public lane
+      // applies (the parser accepts equivalent two-id payloads, so an
+      // uncanonicalized insert could stack both ids), and each PRESERVED KA's
+      // head-id row is withheld so the union cannot re-stack the curator's id
+      // onto the preserved head. The curator's operation-subject rows still land
+      // as immutable history; the other head rows are byte-identical for
+      // identical content at the same version.
+      const preservedHeadIdRowKeys = new Set(
+        preservedWithholdRows.map((quad) => quadKey(quad)),
+      );
+      const canonicalMeta = canonicalizeGraphScopedSwmHeadRows({
+        metaQuads: processed.verifiedMeta,
+        descriptors: graphScopedDescriptors,
+      });
+      const insertableMeta = preservedHeadIdRowKeys.size === 0
+        ? canonicalMeta
+        : canonicalMeta.filter((quad) => !preservedHeadIdRowKeys.has(quadKey(quad)));
+      if (insertableMeta.length > 0) {
+        await deps.store.insert([...insertableMeta]);
+      }
+      // Canonicalization and withholding intentionally DROP rows; the reported
+      // count is what actually reached the store, not the payload size.
+      insertedMetaQuads = insertableMeta.length;
+    }
+
+    // R2 — hydrate the Rule-4 ownership cache for the recovered roots (parity with
+    // runSharedMemorySync); otherwise the member's next contended write to a
+    // recovered root is mis-arbitrated against an empty ownership map.
+    if (deps.ensureOwnedMap) {
+      for (const { dataGraph, entity, creator } of processed.entityCreators) {
+        const ownershipKey = sharedMemoryOwnershipKeyFromGraph(deps.contextGraphId, dataGraph);
+        if (!ownershipKey) continue;
+        const ownedMap = deps.ensureOwnedMap(ownershipKey);
+        if (!ownedMap.has(entity)) {
+          ownedMap.set(entity, creator);
+        }
+      }
+    }
+
+    return { applied, replacedGraphs, insertedGraphQuads, insertedMetaQuads };
+  });
 
   if (processed.droppedDataTriples > 0) {
     deps.logWarn?.(deps.ctx, `SWM recovery for "${deps.contextGraphId}" dropped ${processed.droppedDataTriples} triples with invalid subjects`);
