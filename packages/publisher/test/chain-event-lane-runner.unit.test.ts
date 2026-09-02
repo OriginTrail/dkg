@@ -25,6 +25,7 @@ function makeChain(head: number, events: ChainEvent[]): {
   const adapter = {
     chainId: 'mock:0',
     getBlockNumber: async () => head,
+    supportsEventTypes: async () => [],
     listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
       filters.push(f);
       const fromBlock = f.fromBlock ?? 0;
@@ -309,6 +310,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         if (f.eventTypes.includes('ContextGraphCreated') && failContextLane) {
@@ -617,6 +619,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => head,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
       },
@@ -857,6 +860,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         calls++;
@@ -903,6 +907,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => head,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         calls++;
@@ -965,6 +970,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         calls++;
@@ -1024,6 +1030,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => { throw new Error('head unavailable'); },
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
       },

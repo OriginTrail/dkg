@@ -254,6 +254,16 @@ export class ChainEventPoller {
     // "no events" (review r15-bot): a binding that cannot serve one of the
     // four kinds would let the cursor advance past mutations it never saw.
     // Refuse activation and NAME the missing kinds.
+    if (this.onKnowledgeAssetRootMutated && typeof this.chain.supportsEventTypes !== 'function') {
+      // No probe means NO EVIDENCE that all four kinds are served (review
+      // r17-bot): an adapter emitting only lifecycle updates would let the
+      // cursor advance past root additions, replacements and removals it
+      // never yields — silent, permanent loss. This lane fails closed.
+      throw new Error(
+        'onKnowledgeAssetRootMutated requires a ChainAdapter with supportsEventTypes: the '
+        + 'kaRootMutations lane cannot verify that every root-mutation kind is served without it',
+      );
+    }
     if (this.onKnowledgeAssetRootMutated && typeof this.chain.supportsEventTypes === 'function') {
       let missing: string[];
       try {

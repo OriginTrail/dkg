@@ -333,6 +333,33 @@ describe('kaRootMutations — activation contract', () => {
     expect(probes, 'exactly one probe across two starts').toBe(1);
     await poller.stop();
   });
+  it('start() refuses the root-mutation lane when the adapter offers NO capability probe (review r17-bot)', async () => {
+    // Absence is not evidence: an adapter that emits only lifecycle updates
+    // and omits the probe would let the cursor advance past root
+    // additions/replacements/removals it never yields.
+    const chain = makeChain(50_000);
+    delete (chain.adapter as { supportsEventTypes?: unknown }).supportsEventTypes;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+      onKnowledgeAssetRootMutated: async () => undefined,
+    });
+    await expect(poller.start()).rejects.toThrow(/requires a ChainAdapter with supportsEventTypes/);
+    expect(chain.filters, 'no scan may run under unverified coverage').toHaveLength(0);
+  });
+
+  it('an adapter without the probe still starts when the root-mutation callback is not wired', async () => {
+    const chain = makeChain(50_000);
+    delete (chain.adapter as { supportsEventTypes?: unknown }).supportsEventTypes;
+    const poller = new ChainEventPoller({
+      chain: chain.adapter,
+      publishHandler: makeHandler(),
+      intervalMs: CADENCE_MS,
+    });
+    await expect(poller.start()).resolves.toBeUndefined();
+    await poller.stop();
+  });
   it('start() proceeds when the capability probe reports every kind served', async () => {
     const chain = makeChain(50_000);
     (chain.adapter as { supportsEventTypes?: (n: readonly string[]) => Promise<string[]> })

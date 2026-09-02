@@ -40,6 +40,9 @@ export function makeChain(head: number, events: ChainEvent[] = []): Harness {
   const adapter = {
     chainId: 'mock:0',
     getBlockNumber: async () => currentHead,
+    // A capable adapter serves every root-mutation kind (review r17): rows
+    // that test an absent or negative probe override this explicitly.
+    supportsEventTypes: async () => [],
     listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
       filters.push(f);
       if (failWith) {

@@ -42,6 +42,7 @@ describe('ChainEventPoller — lifecycle', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 50_000,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (): AsyncIterable<ChainEvent> {
         scansStarted += 1;
         await gate; // hold the startup scan open across stop()
@@ -112,6 +113,7 @@ describe('ChainEventPoller — lifecycle', () => {
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => head,
+      supportsEventTypes: async () => [],
       listenForEvents: async function* (): AsyncIterable<ChainEvent> {
         active += 1;
         maxActive = Math.max(maxActive, active);
