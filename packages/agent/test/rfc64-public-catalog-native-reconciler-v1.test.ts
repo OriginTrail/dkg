@@ -18,6 +18,7 @@ import {
 import { deriveRfc64PublicOpenCatalogScopeV1 } from '../src/rfc64/public-open-catalog-scope-v1.js';
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
+  rfc64ExactProjectionSetEqualsV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import type {
   Rfc64PublicCatalogHeadAnnouncementV1,
@@ -133,6 +134,23 @@ function stagedHead(
 }
 
 describe('RFC-64 bounded public root native reconciler v1', () => {
+  it('compares exact RDF projections as sets rather than serialization order', () => {
+    const first = '<urn:s> <urn:p> "first" .';
+    const second = '<urn:s> <urn:q> "second" .';
+    expect(rfc64ExactProjectionSetEqualsV1(
+      `${first}\n${second}\n`,
+      `${second}\n${first}\n`,
+    )).toBe(true);
+    expect(rfc64ExactProjectionSetEqualsV1(
+      `${first}\n${second}\n${second}\n`,
+      `${second}\n${first}\n`,
+    )).toBe(true);
+    expect(rfc64ExactProjectionSetEqualsV1(
+      `${first}\n${second}\n`,
+      `${first}\n<urn:s> <urn:q> "changed" .\n`,
+    )).toBe(false);
+  });
+
   it('maps both genesis and successor evidence to applied and passes deployment plus cancellation', async () => {
     const synchronize = vi.fn(async () => ({ inventoryRowCount: 0 } as never));
     const resolveDeployment = vi.fn(async () => DEPLOYMENT);

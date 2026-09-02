@@ -61,6 +61,7 @@ import {
   type VerifiedCatalogSealBindingV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
+import { createHash } from 'node:crypto';
 import {
   verifyControlEnvelopeIssuerSignatureV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
@@ -128,6 +129,7 @@ import {
   transitionLocationFromRfc64RemovalV1 as transitionLocationFromRemoval,
   type Rfc64SemanticTransitionLocationV1,
 } from './catalog-semantic-authority-transition-v1.js';
+
 import {
   assertDirectAuthorCatalogIssuerDelegationBindingV1,
   loadExactAppliedCatalogRowsV1 as loadExactCatalogRowsForHeadV1,
@@ -146,6 +148,24 @@ export {
   readRfc64AppliedCatalogContextGraphIdV1,
   type DeactivateRfc64AppliedCatalogAuthorityInputV1,
 } from './applied-catalog-authority-transition-v1.js';
+
+/** RDF graph equality is set equality; triple insertion does not retain line order. */
+export function rfc64ExactProjectionSetEqualsV1(
+  expectedNQuads: string,
+  actualNQuads: string,
+): boolean {
+  if (expectedNQuads === actualNQuads) return true;
+  const lines = (value: string): ReadonlySet<string> => {
+    const withoutTrailingNewline = value.endsWith('\n') ? value.slice(0, -1) : value;
+    return withoutTrailingNewline.length === 0
+      ? new Set()
+      : new Set(withoutTrailingNewline.split('\n'));
+  };
+  const expected = lines(expectedNQuads);
+  const actual = lines(actualNQuads);
+  return expected.size === actual.size
+    && [...expected].every((line) => actual.has(line));
+}
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 type Rfc64BoundedSuccessorTargetV1 =
@@ -2163,8 +2183,22 @@ async function activateExactPublicProjection(
   } catch (cause) {
     fail('catalog-native-receiver-activation', 'exact SWM post-read failed', cause);
   }
-  if (`${quadsToNQuads(readBack)}\n` !== projectionText) {
-    fail('catalog-native-receiver-activation', 'exact SWM post-read differs from verified projection');
+  const readBackText = `${quadsToNQuads(readBack)}\n`;
+  if (readBackText !== projectionText) {
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+    const setEqual = rfc64ExactProjectionSetEqualsV1(projectionText, readBackText);
+    if (!setEqual) {
+      fail(
+        'catalog-native-receiver-activation',
+        `exact SWM post-read differs from verified projection for ${kaUal}`
+          + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
+          + ` expectedBytes=${Buffer.byteLength(projectionText)}`
+          + ` actualBytes=${Buffer.byteLength(readBackText)}`
+          + ` expectedSha256=${digest(projectionText)}`
+          + ` actualSha256=${digest(readBackText)}`
+          + ` canonicalSetEqual=${setEqual}`,
+      );
+    }
   }
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
