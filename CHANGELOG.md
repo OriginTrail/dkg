@@ -4,6 +4,49 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.16] - 2026-09-03
+
+A default-responsibility RFC-64 release. When RFC-64 controls are omitted, every Context Graph the node is already responsible for uses signed catalogs as the sole Shared Memory discovery and recovery authority: Core nodes host their public CGs, Edge nodes follow only their public subscriptions, and private CGs follow current verified membership. Registered CG authority is rebuilt from finalized chain state; unregistered CGs use owner-signed local authority. Ordinary SHARE/update operations advance the durable author catalog, restart reconciliation restores it, and receivers recover by catalog pull without static provider lists. Finalized Verifiable Memory remains independently chain-authoritative. **No smart-contract changes or deployments are required.**
+
+### Upgrading from 10.0.15
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| RFC-64 catalog recovery is the omitted-configuration default | A node now selects catalog authority from its existing Core hosting, Edge subscription, or verified private-membership responsibility; this does not auto-subscribe an Edge to additional CGs | Remove compatibility activation manifests after confirming the default status for each intended CG. Keep Edge subscriptions scoped to the CGs the node should maintain |
+| Legacy SWM recovery is excluded from default catalog lanes | Pre-10.0.16 SWM heads remain readable but are reported as a known-incomplete boundary until an ordinary SHARE/update republishes them into a current catalog | Republish any legacy-only asset that must participate in complete default recovery; monitor `legacyReadOnlyCount` and the per-CG operational phase |
+| Authority resolution is fail closed and freshness-bearing | A responsible CG cannot serve, receive, or claim completion while its registered chain snapshot, owner authority, private roster, or freshness is unresolved | Investigate `resolving-authority`, `blocked`, `known-incomplete`, or `unknown-freshness` status before promotion |
+| Rollback controls remain explicit | Per-CG `shadow` and `legacy` overrides and the process kill switch remain available; using them is visible in startup warnings and status evidence | Use only as bounded rollback controls. The release harness rejects injected controls and legacy fallback as default-release evidence |
+
+### Added
+
+- **Responsibility-derived default selection:** one live registry derives catalog work from public Core hosting, public Edge subscriptions, and current private membership without expanding subscription scope.
+- **Release-native authority bootstrap:** registered CGs compose policy from finalized chain snapshots; unregistered CGs compose owner-signed policy and private member rosters from ordinary node state.
+- **Default catalog lifecycle:** ordinary durable SWM promotions author and announce signed catalogs, receivers discover current providers from catalog evidence, and restart reconciliation repairs durable heads without static peer configuration.
+- **Upgrade-boundary accounting:** legacy SWM heads are captured durably, exposed as `legacyReadOnlyCount`, retained read-only, and retired only after a normal current-catalog publication.
+- **Release observability:** `/api/status` exposes privacy-safe configuration evidence, responsibility, authority/freshness, parity digests and counts, provider health, stable reason, and the phases `inactive`, `resolving-authority`, `bootstrapping`, `applying`, `blocked`, `known-incomplete`, `unknown-freshness`, and `complete`.
+
+### Changed
+
+- Omitted RFC-64 configuration now resolves to catalog mode; the deprecated explicit disabled override remains a compatibility rollback rather than the default.
+- Catalog mode disallows legacy SWM synchronization. `legacy`, `shadow`, and kill-switch lanes remain operator-controlled and status-visible.
+- Public and private authoring share the same tier-neutral signed catalog. Private policy and roster material remain authorization-bound and are never exposed in configuration evidence.
+- Catalog head application rechecks durable state inside the mutation lock, closing the scheduler-to-commit race while preserving restart repair.
+
+### Deployment
+
+- **No contract or deployment changes.** Existing finalized Context Graph state supplies registered authority; the release changes node and harness behavior only.
+- All workspace package manifests are aligned at `10.0.16`.
+
+### Validation
+
+- Focused DKG integration coverage exercises omitted configuration, all authority sources, public/private catalog authoring, cold recovery, restart parity, provider retry/failover, legacy-boundary retirement, rollout modes, kill switch, and fail-closed unresolved authority.
+- The black-box release matrix uses ordinary node APIs and sanitized omitted configuration for policy cells `00`, `01`, `10`, and `11`; it requires exact final head/inventory/row parity, current authority, no legacy fallback, no retained legacy boundary, and private nonmember denial where applicable.
+
+### Known limitations
+
+- Pre-10.0.16 SWM history is deliberately not inferred into a signed current catalog. Until an ordinary update republishes it, status remains `known-incomplete` and release certification fails closed.
+- Matrix evidence is valid only for the frozen DKG and harness commits under test. Distributed testnet execution remains a separately authorized promotion gate.
+
 ## [10.0.15] - 2026-09-03
 
 A selected-Context-Graph recovery, query, and operational-hardening release. For public and private Context Graphs that an Edge node explicitly selects, RFC-64 makes signed SWM catalogs the recovery authority while finalized VM remains independently derived from blockchain inventory. Ordinary SHARE operations advance the author's durable catalog, receivers verify policy and provider authority before atomic application, restart repair restores catalog state, and private receivers can bootstrap from the accepted on-chain roster without pre-existing local metadata. This release does **not** subscribe an Edge node to additional Context Graphs and does **not** make RFC-64 automatic for every CG; unselected graphs keep their existing behavior. **No smart-contract changes or deployments are required.**

@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-local-llm",
-  "version": "10.0.15",
+  "version": "10.0.16",
   "description": "Bounded local-LLM tool runtime for the DKG MCP surface.",
   "type": "module",
   "main": "dist/index.js",

@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.15",
+  "version": "10.0.16",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -46,6 +46,8 @@
     "./dist/rfc64/catalog-authority-config-v1.js": null,
     "./dist/rfc64/catalog-rollout-authority-v1.js": null,
     "./dist/rfc64/catalog-responsibility-registry-v1.js": null,
+    "./dist/rfc64/release-native-catalog-authority-v1.js": null,
+    "./dist/rfc64/legacy-swm-boundary-v1.js": null,
     "./dist/rfc64/catalog-rollout-authority-reconciliation-v1.js": null,
     "./dist/rfc64/applied-catalog-authority-transition-v1.js": null,
     "./dist/rfc64/catalog-semantic-authority-transition-v1.js": null,
