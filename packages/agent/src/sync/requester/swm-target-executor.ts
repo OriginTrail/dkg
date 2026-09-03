@@ -179,27 +179,6 @@ export class SwmTargetExecutorV1 {
     const recoveryGuard = target.mode.kind === 'selected-recovery'
       ? target.mode.recoveryGuard
       : undefined;
-    const fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'] = (
-      requestCtx,
-      peerId,
-      contextGraphId,
-      includeSharedMemory,
-      phase,
-      graphUri,
-      deadline,
-      fetchOptions,
-    ) => this.#ports.fetchSyncPages(
-      requestCtx,
-      peerId,
-      contextGraphId,
-      includeSharedMemory,
-      phase,
-      graphUri,
-      deadline,
-      recoveryGuard === undefined
-        ? fetchOptions
-        : { ...fetchOptions, signal: recoveryGuard.signal },
-    );
     const storeInsert = async (quads: Quad[]) => {
       const inserted = await insertWithOversizeGuard(
         (kept) => this.#ports.store.insert(kept, {
@@ -219,7 +198,9 @@ export class SwmTargetExecutorV1 {
       createContextGraphSyncDeadline: () => (
         this.#ports.createContextGraphSyncDeadline(target.remainingContextGraphs)
       ),
-      fetchSyncPages,
+      // Raw port: runSharedMemorySync owns all recovery-boundary checks and
+      // attaches the selected lease signal at the deepest fetch call.
+      fetchSyncPages: this.#ports.fetchSyncPages,
       processSharedMemoryBatch: this.#ports.processSharedMemoryBatch,
       getRegisteredSubGraphNames: async (contextGraphId) => (
         await this.#getSubGraphAdmission(contextGraphId)
