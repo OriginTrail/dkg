@@ -16,8 +16,6 @@ export type NpmRegistryFetch = (
   init?: RequestInit,
 ) => Promise<Pick<Response, 'ok' | 'status' | 'json'>>;
 
-export type NpmRegistryDeps = { fetch?: NpmRegistryFetch };
-
 export type NpmVersionResolution =
   | { status: 'resolved'; version: string }
   | { status: 'no-target'; reason: NpmVersionNoTargetReason }
@@ -41,6 +39,9 @@ export type NpmVersionNoTargetReason =
 export type NpmDistTagsResult =
   | { status: 'ok'; tags: Record<string, unknown> }
   | { status: 'error'; failure: NpmRegistryFailure };
+
+/** The sole injected registry boundary used by all target resolvers. */
+export type NpmDistTagsLoader = () => Promise<NpmDistTagsResult>;
 
 export function decodeNpmDistTags(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -79,7 +80,7 @@ export function classifyNpmDistTag(
 
 /** Canonical npm-registry boundary shared by automatic and explicit updates. */
 export async function fetchNpmDistTags(
-  deps: NpmRegistryDeps = {},
+  deps: { fetch?: NpmRegistryFetch } = {},
 ): Promise<NpmDistTagsResult> {
   const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
   try {
@@ -104,11 +105,9 @@ export async function fetchNpmDistTags(
 
 export async function resolveNpmDistTag(
   tag: string,
-  deps: NpmRegistryDeps & {
-    fetchNpmDistTags?: () => Promise<NpmDistTagsResult>;
-  } = {},
+  loadDistTags: NpmDistTagsLoader = fetchNpmDistTags,
 ): Promise<NpmDistTagResult> {
-  const result = await (deps.fetchNpmDistTags ?? (() => fetchNpmDistTags(deps)))();
+  const result = await loadDistTags();
   if (result.status === 'error') {
     return { status: 'error', failure: result.failure };
   }
@@ -122,9 +121,7 @@ export async function resolveNpmDistTag(
 export async function resolveExplicitNpmUpdateTarget(
   target: string,
   allowPrerelease: boolean,
-  deps: NpmRegistryDeps & {
-    fetchNpmDistTags?: () => Promise<NpmDistTagsResult>;
-  } = {},
+  loadDistTags: NpmDistTagsLoader = fetchNpmDistTags,
 ): Promise<ExplicitNpmUpdateTargetDecision> {
   const normalizedTarget = target.trim().replace(/^v/, '');
   const exactVersion = validCanonicalSemver(normalizedTarget);
@@ -138,7 +135,7 @@ export async function resolveExplicitNpmUpdateTarget(
     return { status: 'allowed', version: normalizedTarget };
   }
 
-  const resolved = await resolveNpmDistTag(normalizedTarget, deps);
+  const resolved = await resolveNpmDistTag(normalizedTarget, loadDistTags);
   if (resolved.status === 'error') {
     return {
       status: 'registry-error',
@@ -167,15 +164,12 @@ export async function resolveExplicitNpmUpdateTarget(
   return { status: 'allowed', version: resolved.version };
 }
 
-/** Select the version followed by automatic polling or an explicit channel pin. */
-export async function resolveNpmVersionTarget(
+/** Pure channel/default selection over one already-decoded registry response. */
+export function selectNpmVersionTarget(
+  result: NpmDistTagsResult,
   allowPrerelease = true,
   channel?: string,
-  deps: NpmRegistryDeps & {
-    fetchNpmDistTags?: () => Promise<NpmDistTagsResult>;
-  } = {},
-): Promise<NpmVersionResolution> {
-  const result = await (deps.fetchNpmDistTags ?? (() => fetchNpmDistTags(deps)))();
+): NpmVersionResolution {
   if (result.status === 'error') {
     return { status: 'error', failure: result.failure };
   }
@@ -233,6 +227,15 @@ export async function resolveNpmVersionTarget(
   }
   candidates.sort((a, b) => compareSemver(b, a));
   return { status: 'resolved', version: candidates[0] };
+}
+
+/** Select the version followed by automatic polling or an explicit channel pin. */
+export async function resolveNpmVersionTarget(
+  allowPrerelease = true,
+  channel?: string,
+  loadDistTags: NpmDistTagsLoader = fetchNpmDistTags,
+): Promise<NpmVersionResolution> {
+  return selectNpmVersionTarget(await loadDistTags(), allowPrerelease, channel);
 }
 
 export function compareSemver(a: string, b: string): number {

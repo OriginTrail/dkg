@@ -5,15 +5,15 @@ import {
   resolveUpdatePreferences,
 } from '../config.js';
 import {
-  getCurrentCliVersion,
   performNpmUpdate,
   performNpmUpdateEdge,
-  resolveStandaloneInstall,
-} from '../daemon.js';
-import { stopDaemonIfRunning } from '../cli-helpers.js';
+} from '../daemon/auto-update.js';
+import { resolveStandaloneInstall } from '../daemon/state.js';
 import { UPDATE_PREFLIGHT_CHECKS } from '../doctor/policy.js';
 import type { RunDoctorOptions } from '../doctor/index.js';
 import type { DoctorDeps, DoctorReport } from '../doctor/types.js';
+import { getCurrentCliVersion } from './npm-version.js';
+import { stopDaemonIfRunning } from './stop-daemon.js';
 
 export type LoadedManualUpdateConfig = Awaited<ReturnType<typeof loadConfig>>;
 
@@ -40,7 +40,7 @@ export type ManualUpdateDoctorOps = {
   runDoctor: (deps: DoctorDeps, options?: RunDoctorOptions) => Promise<DoctorReport>;
 };
 
-type ManualUpdateInstallerOps = {
+export type ManualUpdateInstallerOps = {
   applyCore: typeof performNpmUpdate;
   applyEdge: typeof performNpmUpdateEdge;
   currentCliVersion: typeof getCurrentCliVersion;

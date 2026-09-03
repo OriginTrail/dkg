@@ -1583,7 +1583,7 @@ describe('deriveUpdateCheckState (runCheck → /api/status mapping)', () => {
 
   it('up-to-date → upToDate:true, clears channelTargetMissing AND clears stale latestVersion', async () => {
     const { deriveUpdateCheckState } = await import('../src/daemon.js');
-    expect(deriveUpdateCheckState({ status: 'up-to-date', version: 'should-be-ignored' }))
+    expect(deriveUpdateCheckState({ status: 'up-to-date' }))
       .toEqual({ upToDate: true, channelTargetMissing: false, latestVersion: '' });
   });
 

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { Command } from 'commander';
 import {
   registerUpdateCommand,
@@ -10,6 +10,7 @@ import {
   loadManualUpdateState,
   runDefaultUpdatePreflight,
   type ManualUpdateDoctorOps,
+  type ManualUpdateInstallerOps,
   type ManualUpdatePreflightResult,
 } from '../src/update/manual-update.js';
 import {
@@ -21,6 +22,7 @@ import {
   type NpmRegistryFetch,
   type NpmDistTagsResult,
 } from '../src/update/npm-registry.js';
+import type { NpmVersionStatus } from '../src/update/npm-version.js';
 import { UPDATE_PREFLIGHT_CHECKS } from '../src/doctor/policy.js';
 import type { DoctorDeps, DoctorReport } from '../src/doctor/types.js';
 import { type DkgConfig, type NetworkConfig } from '../src/config.js';
@@ -30,17 +32,15 @@ describe('resolveExplicitNpmUpdateTarget', () => {
 
   it('allows an exact prerelease only when allowPrerelease=true', async () => {
     const fetchNpmDistTags = gatewayReturning({ status: 'ok', tags: {} });
-    expect(await resolveExplicitNpmUpdateTarget('10.1.0-rc.1', true, {
-      fetchNpmDistTags,
-    })).toEqual({ status: 'allowed', version: '10.1.0-rc.1' });
+    expect(await resolveExplicitNpmUpdateTarget('10.1.0-rc.1', true, fetchNpmDistTags))
+      .toEqual({ status: 'allowed', version: '10.1.0-rc.1' });
     expect(fetchNpmDistTags).not.toHaveBeenCalled();
   });
 
   it('allows an exact stable version without a registry lookup', async () => {
     const fetchNpmDistTags = gatewayReturning({ status: 'ok', tags: {} });
-    expect(await resolveExplicitNpmUpdateTarget('10.1.0', false, {
-      fetchNpmDistTags,
-    })).toEqual({ status: 'allowed', version: '10.1.0' });
+    expect(await resolveExplicitNpmUpdateTarget('10.1.0', false, fetchNpmDistTags))
+      .toEqual({ status: 'allowed', version: '10.1.0' });
     expect(fetchNpmDistTags).not.toHaveBeenCalled();
   });
 
@@ -54,9 +54,8 @@ describe('resolveExplicitNpmUpdateTarget', () => {
       status: 'ok',
       tags: { latest: '10.0.0' },
     });
-    expect(await resolveExplicitNpmUpdateTarget('latest', false, {
-      fetchNpmDistTags,
-    })).toEqual({ status: 'allowed', version: '10.0.0' });
+    expect(await resolveExplicitNpmUpdateTarget('latest', false, fetchNpmDistTags))
+      .toEqual({ status: 'allowed', version: '10.0.0' });
     expect(fetchNpmDistTags).toHaveBeenCalledOnce();
   });
 
@@ -67,7 +66,8 @@ describe('resolveExplicitNpmUpdateTarget', () => {
       json: async () => ({ 'dist-tags': { latest: '10.0.2' } }),
     })) as NpmRegistryFetch;
 
-    await expect(resolveExplicitNpmUpdateTarget('latest', false, { fetch }))
+    const loadDistTags = () => fetchNpmDistTags({ fetch });
+    await expect(resolveExplicitNpmUpdateTarget('latest', false, loadDistTags))
       .resolves.toEqual({ status: 'allowed', version: '10.0.2' });
     expect(fetch).toHaveBeenCalledOnce();
   });
@@ -77,9 +77,8 @@ describe('resolveExplicitNpmUpdateTarget', () => {
       status: 'ok',
       tags: { next: '10.1.0-rc.1' },
     });
-    expect(await resolveExplicitNpmUpdateTarget('next', true, {
-      fetchNpmDistTags,
-    })).toEqual({ status: 'allowed', version: '10.1.0-rc.1' });
+    expect(await resolveExplicitNpmUpdateTarget('next', true, fetchNpmDistTags))
+      .toEqual({ status: 'allowed', version: '10.1.0-rc.1' });
   });
 
   it('rejects a dist-tag resolving to a prerelease on a stable-only node', async () => {
@@ -87,9 +86,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
       status: 'ok',
       tags: { latest: '10.1.0-rc.1' },
     });
-    const result = await resolveExplicitNpmUpdateTarget('latest', false, {
-      fetchNpmDistTags,
-    });
+    const result = await resolveExplicitNpmUpdateTarget('latest', false, fetchNpmDistTags);
     expect(result.status).toBe('rejected');
   });
 
@@ -98,9 +95,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
       status: 'error',
       failure: { kind: 'http-error', status: 503 },
     });
-    const result = await resolveExplicitNpmUpdateTarget('latest', false, {
-      fetchNpmDistTags,
-    });
+    const result = await resolveExplicitNpmUpdateTarget('latest', false, fetchNpmDistTags);
     expect(result.status).toBe('registry-error');
   });
 
@@ -108,9 +103,7 @@ describe('resolveExplicitNpmUpdateTarget', () => {
     'rejects unresolved or non-exact npm target %s',
     async (target) => {
       const fetchNpmDistTags = gatewayReturning({ status: 'ok', tags: {} });
-      const result = await resolveExplicitNpmUpdateTarget(target, false, {
-        fetchNpmDistTags,
-      });
+      const result = await resolveExplicitNpmUpdateTarget(target, false, fetchNpmDistTags);
       expect(result.status).toBe('rejected');
     },
   );
@@ -157,9 +150,8 @@ describe('resolveNpmDistTag registry boundary', () => {
       tags: { latest: '10.0.1', next: '10.1.0-rc.1' },
     }));
 
-    await expect(resolveNpmDistTag('next', {
-      fetchNpmDistTags,
-    })).resolves.toEqual({ status: 'resolved', version: '10.1.0-rc.1' });
+    await expect(resolveNpmDistTag('next', fetchNpmDistTags))
+      .resolves.toEqual({ status: 'resolved', version: '10.1.0-rc.1' });
     expect(fetchNpmDistTags).toHaveBeenCalledOnce();
   });
 
@@ -171,9 +163,8 @@ describe('resolveNpmDistTag registry boundary', () => {
         tags: { latest: '10.0.1' },
       }));
 
-      await expect(resolveNpmDistTag(tag, {
-        fetchNpmDistTags,
-      })).resolves.toEqual({ status: 'missing' });
+      await expect(resolveNpmDistTag(tag, fetchNpmDistTags))
+        .resolves.toEqual({ status: 'missing' });
     },
   );
 
@@ -183,9 +174,8 @@ describe('resolveNpmDistTag registry boundary', () => {
       tags: { latest: 10_000_001 } as unknown as Record<string, string>,
     }));
 
-    await expect(resolveNpmDistTag('latest', {
-      fetchNpmDistTags,
-    })).resolves.toEqual({ status: 'invalid', value: 10_000_001 });
+    await expect(resolveNpmDistTag('latest', fetchNpmDistTags))
+      .resolves.toEqual({ status: 'invalid', value: 10_000_001 });
   });
 
   it.each(['constructor', '__proto__'])(
@@ -196,9 +186,7 @@ describe('resolveNpmDistTag registry boundary', () => {
         tags: { latest: '10.0.1' },
       }));
 
-      await expect(resolveNpmVersionTarget(true, channel, {
-        fetchNpmDistTags,
-      })).resolves.toEqual({
+      await expect(resolveNpmVersionTarget(true, channel, fetchNpmDistTags)).resolves.toEqual({
         status: 'no-target',
         reason: { kind: 'missing-channel', channel },
       });
@@ -263,7 +251,55 @@ describe('dkg update doctor adapter', () => {
   });
 });
 
+describe('manual update installer adapter', () => {
+  const config = {
+    name: 'installer-test',
+    apiPort: 9200,
+    listenPort: 0,
+    nodeRole: 'edge',
+  } as DkgConfig;
+
+  function installerOps(
+    edgeResult: 'updated' | 'failed',
+    daemonStopped: boolean,
+  ): ManualUpdateInstallerOps {
+    return {
+      applyCore: vi.fn(async () => edgeResult),
+      applyEdge: vi.fn(async () => edgeResult),
+      currentCliVersion: vi.fn(() => '10.0.0'),
+      stopDaemon: vi.fn(async () => daemonStopped),
+    };
+  }
+
+  it('does not stop the daemon after an installer failure', async () => {
+    const ops = installerOps('failed', true);
+
+    await expect(applyManualUpdate(config, '10.0.1', () => {}, ops))
+      .resolves.toBe('failed');
+    expect(ops.applyEdge).toHaveBeenCalledOnce();
+    expect(ops.stopDaemon).not.toHaveBeenCalled();
+  });
+
+  it('surfaces daemon-stop failure after a successful install', async () => {
+    const ops = installerOps('updated', false);
+
+    await expect(applyManualUpdate(config, '10.0.1', () => {}, ops))
+      .resolves.toBe('daemon-running');
+    expect(ops.applyEdge).toHaveBeenCalledOnce();
+    expect(ops.stopDaemon).toHaveBeenCalledOnce();
+  });
+});
+
 describe('dkg update command stable-only wiring', () => {
+  it('requires payloads for available and no-target update states', () => {
+    expectTypeOf<{ status: 'available' }>().not.toMatchTypeOf<NpmVersionStatus>();
+    expectTypeOf<{ status: 'no-target' }>().not.toMatchTypeOf<NpmVersionStatus>();
+    expectTypeOf<{ status: 'available'; version: string }>()
+      .toMatchTypeOf<NpmVersionStatus>();
+    expectTypeOf<{ status: 'no-target'; channel: string }>()
+      .toMatchTypeOf<NpmVersionStatus>();
+  });
+
   const conflictingNetworkUpdatePolicy: NetworkConfig = {
     networkName: 'Testnet',
     genesisId: 'testnet-genesis',
@@ -305,7 +341,7 @@ describe('dkg update command stable-only wiring', () => {
       status: 'ok',
       tags: resolvedTag === null ? {} : { latest: resolvedTag },
     }));
-    const installerOps = {
+    const installerOps: ManualUpdateInstallerOps = {
       applyCore: performNpmUpdate,
       applyEdge: performNpmUpdateEdge,
       currentCliVersion: () => '10.0.0',
@@ -320,9 +356,7 @@ describe('dkg update command stable-only wiring', () => {
         },
       })),
       resolveExplicitTarget: (target, allowPrerelease) =>
-        resolveExplicitNpmUpdateTarget(target, allowPrerelease, {
-          fetchNpmDistTags,
-        }),
+        resolveExplicitNpmUpdateTarget(target, allowPrerelease, fetchNpmDistTags),
       checkForUpdate: vi.fn(async () => ({ status: 'up-to-date' })),
       runPreflight,
       applyUpdate: (updateConfig, version, log) =>
@@ -451,7 +485,7 @@ describe('dkg update command stable-only wiring', () => {
 
   it('emits failure diagnostics before setting the command exit code', async () => {
     const harness = commandHarness();
-    harness.deps.applyUpdate = vi.fn(async () => 'failed' as const);
+    harness.installerOps.applyEdge = vi.fn(async () => 'failed' as const);
     const writeStdout = vi.fn();
     const writeStderr = vi.fn();
     const setExitCode = vi.fn();
@@ -465,9 +499,26 @@ describe('dkg update command stable-only wiring', () => {
     await program.parseAsync(['node', 'dkg', 'update', '10.0.1']);
 
     expect(writeStderr).toHaveBeenCalledWith('Update failed. Check logs and retry.');
+    expect(harness.installerOps.stopDaemon).not.toHaveBeenCalled();
     expect(setExitCode).toHaveBeenCalledWith(1);
     expect(writeStderr.mock.invocationCallOrder.at(-1))
       .toBeLessThan(setExitCode.mock.invocationCallOrder[0]);
+  });
+
+  it('reports a successful install whose old daemon could not be stopped', async () => {
+    const harness = commandHarness();
+    harness.installerOps.stopDaemon = vi.fn(async () => false);
+
+    const outcome = await runManualUpdateWorkflow({
+      versionOrRef: '10.0.1',
+    }, harness.deps, harness.reporter);
+
+    expect(outcome).toEqual({ exitCode: 1 });
+    expect(harness.performNpmUpdateEdge).toHaveBeenCalledOnce();
+    expect(harness.installerOps.stopDaemon).toHaveBeenCalledOnce();
+    expect(harness.reporter.writeStderr).toHaveBeenCalledWith(
+      'Update applied but old daemon is still running. Stop it manually and run "dkg start".',
+    );
   });
 
   it('lets --allow-prerelease override stable-only config through installer dispatch', async () => {

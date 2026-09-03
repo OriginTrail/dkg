@@ -1,7 +1,10 @@
 import { Command } from 'commander';
 
-import { checkForNpmVersionUpdate } from '../daemon.js';
 import { resolveExplicitNpmUpdateTarget } from '../update/npm-registry.js';
+import {
+  checkForNpmVersionUpdate,
+  type NpmVersionStatus,
+} from '../update/npm-version.js';
 import {
   applyManualUpdate,
   loadManualUpdateState,
@@ -56,27 +59,31 @@ function createDefaultManualUpdateDependencies(): ManualUpdateDependencies {
 }
 
 function consumeAutomaticCheck(
-  check: Awaited<ReturnType<typeof checkForNpmVersionUpdate>>,
+  check: NpmVersionStatus,
   checkOnly: boolean,
   reporter: ManualUpdateReporter,
 ): { status: 'target'; version: string } | { status: 'complete'; exitCode: 0 | 1 } {
-  if (check.status === 'available' && check.version) {
-    if (checkOnly) {
-      reporter.writeStdout(`Update available: ${check.version}`);
+  switch (check.status) {
+    case 'available':
+      if (checkOnly) {
+        reporter.writeStdout(`Update available: ${check.version}`);
+        return { status: 'complete', exitCode: 0 };
+      }
+      return { status: 'target', version: check.version };
+    case 'no-target':
+      reporter.writeStdout(`No acceptable target for channel "${check.channel}" (tag unpublished, or a pre-release rejected by allowPrerelease=false) — nothing to update to.`);
       return { status: 'complete', exitCode: 0 };
+    case 'up-to-date':
+      reporter.writeStdout(checkOnly ? 'No updates available.' : 'No update needed — already on latest.');
+      return { status: 'complete', exitCode: 0 };
+    case 'error':
+      reporter.writeStderr('Update check failed. See logs above for details.');
+      return { status: 'complete', exitCode: 1 };
+    default: {
+      const exhaustive: never = check;
+      return exhaustive;
     }
-    return { status: 'target', version: check.version };
   }
-  if (check.status === 'no-target') {
-    reporter.writeStdout(`No acceptable target for channel "${check.channel}" (tag unpublished, or a pre-release rejected by allowPrerelease=false) — nothing to update to.`);
-    return { status: 'complete', exitCode: 0 };
-  }
-  if (check.status === 'up-to-date') {
-    reporter.writeStdout(checkOnly ? 'No updates available.' : 'No update needed — already on latest.');
-    return { status: 'complete', exitCode: 0 };
-  }
-  reporter.writeStderr('Update check failed. See logs above for details.');
-  return { status: 'complete', exitCode: 1 };
 }
 
 export async function runManualUpdateWorkflow(

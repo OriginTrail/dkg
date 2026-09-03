@@ -70,16 +70,22 @@ import {
   runtimeBuildCommandFromPackageJson,
 } from '../node-ui-static.js';
 import {
-  compareSemver,
-  resolveNpmVersionTarget,
-  type NpmRegistryFailure,
-  type NpmVersionNoTargetReason,
+  fetchNpmDistTags,
 } from '../update/npm-registry.js';
+import {
+  checkForNpmVersionUpdate as checkForNpmVersionUpdateShared,
+  getCurrentCliVersion as getCurrentCliVersionShared,
+  resolveLatestNpmVersion as resolveLatestNpmVersionShared,
+  type NpmVersionResult,
+  type NpmVersionStatus,
+} from '../update/npm-version.js';
 export {
   compareSemver,
   isPrerelease,
   isValidSemver,
 } from '../update/npm-registry.js';
+export { deriveUpdateCheckState } from '../update/npm-version.js';
+export type { NpmVersionResult, NpmVersionStatus } from '../update/npm-version.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -288,172 +294,50 @@ export async function writePendingUpdateState(
 // ─── NPM-based auto-update helpers ──────────────────────────────────
 
 export function getCurrentCliVersion(): string {
-  const { readFileSync } = _autoUpdateIo;
+  return getCurrentCliVersionShared(_autoUpdateIo.readFileSync);
+}
+
+function loadNpmDistTagsForDaemon() {
+  return fetchNpmDistTags({ fetch: _autoUpdateIo.fetch });
+}
+
+async function readCurrentNpmVersionForDaemon(): Promise<string> {
   try {
-    const pkg = JSON.parse(
-      readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
-    );
-    return String(pkg.version ?? "").trim();
+    return (
+      await _autoUpdateIo.readFile(
+        join(_autoUpdateIo.dkgDir(), '.current-version'),
+        'utf-8',
+      )
+    ).trim();
   } catch {
-    return "";
+    return getCurrentCliVersion();
   }
 }
 
-function logNpmRegistryFailure(
-  log: (message: string) => void,
-  failure: NpmRegistryFailure,
-): void {
-  if (failure.kind === 'http-error') {
-    log(`Auto-update (npm): registry returned ${failure.status} for ${CLI_NPM_PACKAGE}`);
-    return;
-  }
-  if (failure.kind === 'invalid-response') {
-    log(`Auto-update (npm): registry returned malformed dist-tags for ${CLI_NPM_PACKAGE}`);
-    return;
-  }
-  log(`Auto-update (npm): registry check failed (${failure.message})`);
-}
-
-function logNpmNoTarget(
-  log: (message: string) => void,
-  reason: NpmVersionNoTargetReason,
-): void {
-  switch (reason.kind) {
-    case 'no-valid-candidates':
-      return;
-    case 'missing-channel':
-      log(`Auto-update (npm): channel "${reason.channel}" has no published version, skipping`);
-      return;
-    case 'invalid-channel-version':
-      log(`Auto-update (npm): channel "${reason.channel}" → "${reason.version}" is not a valid semver, skipping`);
-      return;
-    case 'prerelease-channel':
-      log(`Auto-update (npm): channel "${reason.channel}" points at a pre-release and allowPrerelease=false, skipping`);
-      return;
-    case 'unacceptable-latest':
-      log('Auto-update (npm): latest dist-tag is absent, invalid, or a pre-release while allowPrerelease=false, skipping');
-      return;
-    default: {
-      const exhaustive: never = reason;
-      void exhaustive;
-    }
-  }
-}
-
-/**
- * Compatibility contract for callers that import the daemon's historical
- * npm-version helper. The structured registry result stays internal to the
- * update boundary; this facade preserves the old arguments, result shape,
- * and operator-facing log messages.
- */
-export type NpmVersionResult =
-  | { version: string; error?: false }
-  | { version: null; error: true }
-  | { version: null; error: false };
-
-type ReportedNpmVersionResolution =
-  | { status: 'resolved'; version: string }
-  | { status: 'no-target'; channel?: string }
-  | { status: 'error' };
-
-/** One owner for registry-resolution interpretation and operator-facing logging. */
-async function resolveAndReportNpmVersion(
-  log: (message: string) => void,
-  allowPrerelease: boolean,
-  channel?: string,
-): Promise<ReportedNpmVersionResolution> {
-  const result = await resolveNpmVersionTarget(allowPrerelease, channel, {
-    fetch: _autoUpdateIo.fetch,
-  });
-  if (result.status === 'resolved') return result;
-  if (result.status === 'error') {
-    logNpmRegistryFailure(log, result.failure);
-    return { status: 'error' };
-  }
-  logNpmNoTarget(log, result.reason);
-  return { status: 'no-target', ...(channel ? { channel } : {}) };
-}
-
+/** Compatibility alias over the canonical update-module implementation. */
 export async function resolveLatestNpmVersion(
   log: (message: string) => void,
   allowPrerelease = true,
   channel?: string,
 ): Promise<NpmVersionResult> {
-  const result = await resolveAndReportNpmVersion(log, allowPrerelease, channel);
-  if (result.status === 'resolved') return { version: result.version };
-  return result.status === 'error'
-    ? { version: null, error: true }
-    : { version: null, error: false };
+  return resolveLatestNpmVersionShared(
+    log,
+    allowPrerelease,
+    channel,
+    loadNpmDistTagsForDaemon,
+  );
 }
 
-export type NpmVersionStatus = {
-  status: "available" | "up-to-date" | "error" | "no-target";
-  version?: string;
-  /** Set on "no-target": the pinned channel that has no acceptable version. */
-  channel?: string;
-};
-
+/** Compatibility alias over the canonical update-module implementation. */
 export async function checkForNpmVersionUpdate(
   log: (msg: string) => void,
   allowPrerelease = true,
   channel?: string,
 ): Promise<NpmVersionStatus> {
-  const { dkgDir, readFile } = _autoUpdateIo;
-  const versionFile = join(dkgDir(), ".current-version");
-  let currentVersion = "";
-  try {
-    currentVersion = (await readFile(versionFile, "utf-8")).trim();
-  } catch {
-    currentVersion = getCurrentCliVersion();
-  }
-
-  if (!currentVersion) {
-    log("Auto-update (npm): unable to determine current version");
-    return { status: "error" };
-  }
-
-  const result = await resolveAndReportNpmVersion(log, allowPrerelease, channel);
-  if (result.status !== 'resolved') {
-    if (result.status === 'error') return { status: "error" };
-    // A pinned channel with no acceptable target (tag missing / prerelease
-    // rejected / non-semver) is NOT a clean "up-to-date" — surface it so a
-    // misconfigured or unpublished channel (e.g. mainnet) is visible rather
-    // than silently reported as current.
-    if (result.channel) return { status: "no-target", channel: result.channel };
-    return { status: "up-to-date" };
-  }
-
-  const { version } = result;
-
-  if (version === currentVersion) return { status: "up-to-date" };
-  if (compareSemver(version, currentVersion) <= 0)
-    return { status: "up-to-date" };
-
-  return { status: "available", version };
-}
-
-/**
- * Pure mapping from an {@link NpmVersionStatus} to the daemon's
- * `lastUpdateCheck` fields. Extracted so the runCheck → /api/status
- * derivation is unit-testable. The `no-target` case in particular MUST report
- * `upToDate: true` (there is no update to apply) so `/api/status` does not flip
- * to `updateAvailable: true`; `channelTargetMissing` carries the distinct
- * signal. Returns null for `error` — the caller leaves prior state unchanged.
- */
-export function deriveUpdateCheckState(
-  npmStatus: NpmVersionStatus,
-): { upToDate: boolean; channelTargetMissing: boolean; latestVersion: string } | null {
-  if (npmStatus.status === "error") return null;
-  if (npmStatus.status === "no-target")
-    return { upToDate: true, channelTargetMissing: true, latestVersion: "" };
-  return {
-    upToDate: npmStatus.status === "up-to-date",
-    channelTargetMissing: false,
-    // Only an "available" result has a newer version to report; clear it on
-    // up-to-date / no-target so `/api/status` never shows a stale latestVersion.
-    latestVersion:
-      npmStatus.status === "available" ? npmStatus.version ?? "" : "",
-  };
+  return checkForNpmVersionUpdateShared(log, allowPrerelease, channel, {
+    loadDistTags: loadNpmDistTagsForDaemon,
+    readCurrentVersion: readCurrentNpmVersionForDaemon,
+  });
 }
 
 /**
