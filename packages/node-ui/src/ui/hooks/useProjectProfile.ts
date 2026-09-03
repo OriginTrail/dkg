@@ -23,6 +23,7 @@ import {
 } from '@origintrail-official/dkg-core/query-catalog';
 import { executeQuery, readProfileQueryCatalog, type QueryExecutionView } from '../api.js';
 import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
+import { metaGraphPrefixFilter } from '../lib/sparql.js';
 
 async function runProjectQuery(
   sparql: string,
@@ -232,12 +233,6 @@ function parseInt10(value: unknown): number {
 // SWM/VM or is still sitting in WM as an assertion. This makes the UI
 // responsive to the profile as soon as `import-profile.mjs` finishes,
 // without requiring a separate promote step.
-function metaGraphFilter(contextGraphId: string): string {
-  const prefix = `did:dkg:context-graph:${contextGraphId}/meta`;
-  // SPARQL string escape of `?g` prefix: double-quotes + backslash.
-  return `FILTER(strstarts(str(?g), "${prefix.replace(/"/g, '\\"')}"))`;
-}
-
 function buildProfileRootQuery(contextGraphId: string): string {
   return `PREFIX prof: <${PROFILE_NS}>
 PREFIX schema: <http://schema.org/>
@@ -250,7 +245,7 @@ WHERE {
     OPTIONAL { ?profile prof:primaryColor ?primary }
     OPTIONAL { ?profile prof:accentColor ?accent }
   }
-  ${metaGraphFilter(contextGraphId)}
+  ${metaGraphPrefixFilter(contextGraphId)}
 } LIMIT 1`;
 }
 
@@ -270,7 +265,7 @@ WHERE {
     OPTIONAL { ?b prof:timelinePredicate ?timelinePredicate }
     OPTIONAL { ?b prof:sourceAssertion ?sourceAssertion }
   }
-  ${metaGraphFilter(contextGraphId)}
+  ${metaGraphPrefixFilter(contextGraphId)}
 }`;
 }
 
@@ -287,7 +282,7 @@ WHERE {
           prof:chipValue ?v .
     OPTIONAL { ?chip prof:label ?label }
   }
-  ${metaGraphFilter(contextGraphId)}
+  ${metaGraphPrefixFilter(contextGraphId)}
 }
 GROUP BY ?chip ?subGraph ?type ?predicate ?label`;
 }
@@ -398,7 +393,7 @@ WHERE {
     OPTIONAL { ?b prof:publishLabel ?publishLabel }
     OPTIONAL { ?b prof:publishHint  ?publishHint }
   }
-  ${metaGraphFilter(contextGraphId)}
+  ${metaGraphPrefixFilter(contextGraphId)}
 }`;
 }
 
@@ -417,7 +412,7 @@ WHERE {
     OPTIONAL { ?view prof:includeType ?incType }
     OPTIONAL { ?view prof:emphasizePredicate ?empPred }
   }
-  ${metaGraphFilter(contextGraphId)}
+  ${metaGraphPrefixFilter(contextGraphId)}
 }
 GROUP BY ?view ?name ?description ?nodeSize`;
 }

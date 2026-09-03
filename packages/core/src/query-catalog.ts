@@ -144,6 +144,30 @@ export function prepareQueryCatalogExecution(
   };
 }
 
+function quotedRdfLiteral(value: string): string | undefined {
+  if (!value.startsWith('"')) return undefined;
+  let escaped = false;
+  for (let index = 1; index < value.length; index++) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (character !== '"') continue;
+
+    const suffix = value.slice(index + 1);
+    if (suffix && !suffix.startsWith('@') && !suffix.startsWith('^^')) {
+      return undefined;
+    }
+    return value.slice(0, index + 1);
+  }
+  return undefined;
+}
+
 export function queryCatalogBindingValue(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'object' && !Array.isArray(value)) {
@@ -151,14 +175,14 @@ export function queryCatalogBindingValue(value: unknown): string {
     if (typeof raw === 'string') return raw;
   }
   const raw = String(value);
-  const literalMatch = raw.match(/^("[\s\S]*")(?:\^\^.*|@.*)?$/);
-  if (!literalMatch) return raw.startsWith('<') && raw.endsWith('>')
+  const literal = quotedRdfLiteral(raw);
+  if (!literal) return raw.startsWith('<') && raw.endsWith('>')
     ? raw.slice(1, -1)
     : raw;
   try {
-    return JSON.parse(literalMatch[1]);
+    return JSON.parse(literal);
   } catch {
-    return literalMatch[1].slice(1, -1);
+    return literal.slice(1, -1);
   }
 }
 

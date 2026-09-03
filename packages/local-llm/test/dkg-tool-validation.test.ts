@@ -62,6 +62,33 @@ describe('DKG SPARQL preflight', () => {
       .toBe(true);
   });
 
+  it('handles long prefix whitespace and aggregate lookalikes without backtracking', () => {
+    const paddedQuery = `PREFIX ex: <https://example.com/>${' '.repeat(20_000)}SELECT ?x WHERE { ?x ex:name ?name }`;
+    expect(validateSparqlForDkg(paddedQuery).ok).toBe(true);
+
+    const lookalikes = `SELECT ?x WHERE { ?x ?p ?o } ${' COUNTx('.repeat(4_000)}`;
+    const result = validateSparqlForDkg(lookalikes);
+    expect(result.errors).toContain('balance SPARQL parentheses');
+    expect(result.errors).not.toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
+  });
+
+  it('rejects oversized SPARQL before preflight parsing', () => {
+    const result = validateSparqlForDkg(`SELECT * WHERE {}${' '.repeat(70_000)}`);
+    expect(result).toEqual({
+      ok: false,
+      errors: ['sparql must not exceed 65536 characters'],
+    });
+  });
+
+  it('detects aggregate aliases that need an outer expression wrapper', () => {
+    expect(validateSparqlForDkg(
+      'SELECT COUNT(?item) AS ?count WHERE { ?item ?predicate ?object }',
+    ).errors).toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
+    expect(validateSparqlForDkg(
+      'SELECT (COUNT(?item) AS ?count) WHERE { ?item ?predicate ?object }',
+    ).ok).toBe(true);
+  });
+
   it('validates both raw and saved-catalog query tools', () => {
     expect(validateDkgToolCall('dkg_query_catalog_save', {
       sparql: 'SELECT ?x WHERE { ?x <schema:category> {{category}} }',

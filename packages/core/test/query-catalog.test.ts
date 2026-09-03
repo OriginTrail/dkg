@@ -8,6 +8,7 @@ import {
   prepareQueryCatalogExecution,
   QUERY_CATALOG_READ_CAPABILITIES,
   QUERY_CATALOG_SCHEMA_VERSION,
+  queryCatalogBindingValue,
   queryCatalogScopeGraphUri,
   queryCatalogSubGraphFromScopeGraph,
 } from '../src/query-catalog.js';
@@ -15,6 +16,14 @@ import {
 const binding = (value: string) => ({ type: 'literal', value });
 
 describe('query catalog codec', () => {
+  it('decodes escaped RDF literals with language and datatype suffixes in linear time', () => {
+    expect(queryCatalogBindingValue('"line\\n\\"quoted\\""@en')).toBe('line\n"quoted"');
+    expect(queryCatalogBindingValue('"42"^^<http://www.w3.org/2001/XMLSchema#integer>')).toBe('42');
+
+    const unterminated = '"' + '\\"'.repeat(50_000);
+    expect(queryCatalogBindingValue(unterminated)).toBe(unterminated);
+  });
+
   it('decodes RDFJS bindings once and preserves execution metadata', () => {
     const items = decodeQueryCatalogBindings([{
       q: { type: 'uri', value: 'urn:dkg:profile:test:query:trace' },

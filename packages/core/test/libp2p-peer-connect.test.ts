@@ -45,6 +45,17 @@ describe('planLibp2pPeerConnectionAddresses', () => {
     ], [CONFIGURED_RELAYS[0]!])).toEqual([CIRCUIT_A]);
   });
 
+  it('normalizes long trailing-slash runs on configured relay addresses', () => {
+    expect(planLibp2pPeerConnectionAddresses(
+      TARGET,
+      [],
+      [{
+        peerId: RELAY_A.split('/').at(-1)!,
+        addresses: [`${RELAY_A}${'/'.repeat(8_192)}`],
+      }],
+    )).toEqual([CIRCUIT_A]);
+  });
+
   it('preserves configured relay order and caps fallback at four circuits', () => {
     const planned = planLibp2pPeerConnectionAddresses(
       TARGET,

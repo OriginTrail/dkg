@@ -30,6 +30,12 @@ const DEFAULT_CANDIDATE_TIMEOUT_MS = 5_000;
 const CONNECTION_OBSERVATION_INTERVAL_MS = 100;
 const MAX_CONFIGURED_RELAY_FALLBACKS = 4;
 
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) end--;
+  return end === value.length ? value : value.slice(0, end);
+}
+
 export interface Libp2pPeerConnectOpts extends PeerConnectOpts {
   /** Canonical relay targets owned by the libp2p transport. */
   configuredRelayTargets?: readonly ConfiguredRelayTarget[];
@@ -133,9 +139,10 @@ function planLibp2pPeerConnectionCandidates(
   for (const target of configuredRelayTargets) {
     if (fallbackCount >= MAX_CONFIGURED_RELAY_FALLBACKS) break;
     if (target.peerId === canonicalPeerId) continue;
-    const relay = target.addresses.find(
+    const rawRelay = target.addresses.find(
       (address) => !address.includes('/p2p-circuit') && isPublicLikeAddress(address),
-    )?.replace(/\/+$/, '');
+    );
+    const relay = rawRelay === undefined ? undefined : trimTrailingSlashes(rawRelay);
     if (!relay) continue;
     const circuit = `${relay}/p2p-circuit/p2p/${canonicalPeerId}`;
     const before = planned.length;

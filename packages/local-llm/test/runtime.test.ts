@@ -133,6 +133,20 @@ function makeMcp(tools: McpToolDefinition[] = [catalogList, catalogRun]): McpCli
   };
 }
 
+describe('local model response bounds', () => {
+  it('rejects an oversized HTTP response before parsing it as JSON', async () => {
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp: makeMcp(),
+      fetch: vi.fn().mockResolvedValue(answerResponse('x'.repeat(1_024))) as typeof fetch,
+      maxModelResponseBytes: 128,
+    });
+
+    await expect(runtime.run('Summarize the project.')).rejects.toThrow(
+      'Local LLM response exceeds 128 bytes',
+    );
+  });
+});
+
 describe('DkgLocalLlmRuntime', () => {
   it('executes a real catalog tool loop while exposing only the catalog profile', async () => {
     const mcp = makeMcp();
