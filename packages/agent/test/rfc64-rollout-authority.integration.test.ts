@@ -122,6 +122,34 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
+  it('reconciles default responsibility when a live subscription is bound late', async () => {
+    const contextGraphId = `${AUTHOR}/late-verified-binding`;
+    const edge = await startAgent('late-verified-binding', undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    vi.spyOn(edge, 'getContextGraphOnChainPolicy').mockResolvedValue({
+      accessPolicy: 0,
+      publishPolicy: 0,
+    });
+
+    edge.subscribeToContextGraph(contextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+
+    const subscription = edge.getSubscribedContextGraphs().get(contextGraphId);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(contextGraphId, subscription, '3');
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId,
+        responsibilityReason: 'edge-subscription',
+        mode: 'catalog',
+        selectionSource: 'default',
+      }),
+    ]);
+  });
+
   it('requires verified current membership for private responsibility', async () => {
     const privateContextGraphId = `${AUTHOR}/private-responsibility`;
     const edge = await startAgent('private-responsibility', undefined);

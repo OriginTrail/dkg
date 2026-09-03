@@ -2580,6 +2580,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
       newOnChainId,
     );
     if (!transition.changed) return;
+    // Some verified late-binding paths intentionally mutate the canonical
+    // in-memory subscription only after their durable write commits. They do
+    // not subsequently pass through setContextGraphSubscription(), so without
+    // this notification a subscribed Edge can remain outside the RFC-64
+    // responsibility registry until restart even though its chain id is now
+    // authoritative. Clone-based callers still let the canonical setter own
+    // the transition and avoid an eager decision against the old row.
+    if (this.subscribedContextGraphs.get(localCgId) === sub) {
+      void this.reconcileRfc64CatalogResponsibilityV1(localCgId).catch((error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 responsibility resolution failed after binding "${localCgId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     if (!transition.onChainIdChanged) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).
     // Any prior reconcile progress refers to the OLD chain graph and must be

@@ -37,6 +37,7 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, every
 - Omitted-deployment catalog authority and author inventory use the chain adapter's namespaced network identity, matching deterministic KA UALs instead of the unrelated DKG genesis hash; post-commit inventory warnings retain their bounded cause chain for operator diagnosis.
 - Local devnet snapshot storage keeps capacity admission with explicit low-disk watermarks, avoiding dependence on production-scale free-space reserves during release certification.
 - Subscription catch-up re-evaluates RFC-64 responsibility after authoritative metadata lands, so a cold Edge join cannot remain fully synced but absent from the default catalog status until restart.
+- Late verified on-chain binding now notifies the responsibility registry, covering cold subscriptions whose numeric Context Graph ID arrives after their initial fail-closed policy check.
 
 ### Deployment
 
