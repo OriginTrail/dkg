@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   readSparqlVariable as readCoreVariable,
   skipSparqlIriRef as skipCoreGrammarIriRef,
-  skipSparqlIriRefForStructuralScan as skipCoreStructuralIriRef,
   skipSparqlStringLiteral as skipCoreStringLiteral,
-} from '@origintrail-official/dkg-core/sparql-cursors';
+} from '@origintrail-official/dkg-rdf-utils/sparql';
 import {
+  findMatchingSparqlCloseBrace,
+  prepareSparql,
   readSparqlVariable,
   skipSparqlIriRef,
-  skipSparqlIriRefForStructuralScan,
   skipSparqlStringLiteral,
 } from '../src/sparql-utils.js';
 
@@ -27,6 +27,15 @@ describe('shared SPARQL lexical cursor primitives', () => {
     },
   );
 
+  it('matches UCHAR-escaped braces using prepared raw offsets', () => {
+    const source = String.raw`SELECT * WHERE \u007B ?s ?p ?o \u007D`;
+    const prepared = prepareSparql(source);
+    const open = source.indexOf(String.raw`\u007B`);
+
+    expect(findMatchingSparqlCloseBrace(source, open, prepared))
+      .toBe(source.indexOf(String.raw`\u007D`));
+  });
+
   it.each([
     ['xx<urn:test>tail', 2, 12],
     [String.raw`xx\u003Curn:test\u003Etail`, 2, 22],
@@ -38,18 +47,6 @@ describe('shared SPARQL lexical cursor primitives', () => {
     (source, start, expected) => {
       expect(skipCoreGrammarIriRef(source, start)).toBe(expected);
       expect(skipSparqlIriRef(source, start)).toBe(expected);
-    },
-  );
-
-  it.each([
-    ['xx<urn:test>tail', 2, null],
-    [' <1#item> tail', 1, 9],
-    ['xx< 5', 2, null],
-  ] as const)(
-    'keeps structural comparison-vs-IRI decisions explicit for %s',
-    (source, start, expected) => {
-      expect(skipCoreStructuralIriRef(source, start)).toBe(expected);
-      expect(skipSparqlIriRefForStructuralScan(source, start)).toBe(expected);
     },
   );
 

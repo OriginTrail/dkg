@@ -7,7 +7,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   collectSparqlWordTokens,
-  preprocessSparqlCodePointEscapes,
+  prepareSparql,
 } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
@@ -401,13 +401,11 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing sparql');
     }
 
-    const preprocessedSparql = preprocessSparqlCodePointEscapes(sparql);
-    if (preprocessedSparql === null) {
+    const prepared = prepareSparql(sparql);
+    if (prepared.normalized === null) {
       return errorResponse(opId, 'ERROR', 'SPARQL rejected: malformed Unicode code-point escape');
     }
-    // Inspect exactly the one-pass normalization the engine will derive, but
-    // pass the original source so the execution boundary does not decode it twice.
-    const codeWords = collectSparqlWordTokens(preprocessedSparql);
+    const codeWords = collectSparqlWordTokens(prepared);
 
     if (codeWords.has('SERVICE')) {
       return errorResponse(opId, 'ERROR', 'SERVICE clauses are not allowed in remote queries');
@@ -421,7 +419,7 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
-    const guard = validateReadOnlySparql(preprocessedSparql);
+    const guard = validateReadOnlySparql(prepared);
     if (!guard.safe) {
       return errorResponse(opId, 'ERROR', `SPARQL rejected: ${guard.reason}`);
     }

@@ -12,6 +12,7 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@origintrail-official/dkg-http-utils": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "ethers": "^6"
   },

@@ -264,6 +264,37 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     expect(result.bindings.map((binding) => binding['name'])).toEqual(['"Relative item"']);
   });
 
+  it('keeps an adjacent fragment IRI inside the requested context graph', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const requestedGraph = contextGraphDataUri(CG);
+    const otherGraph = contextGraphDataUri('other-cg');
+    const predicate = 'http://example.com/p#name';
+    await store.insert([
+      quad('urn:requested', predicate, '"Requested"', requestedGraph),
+      quad('urn:other', predicate, '"Other"', otherGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?o WHERE{?s<http://example.com/p#name>?o}',
+      { contextGraphId: CG },
+    );
+
+    expect(result.bindings).toEqual([{ o: '"Requested"' }]);
+  });
+
+  it('rejects a scoped query when its graph wrapper cannot prove the WHERE boundary', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+
+    await expect(engine.query(
+      'SELECT ?o WHERE { ?s <http://example.com/p#name> ?o',
+      { contextGraphId: CG },
+    )).rejects.toThrow(
+      /Scoped query violation: unable to locate (?:a graph-scopable WHERE block|the end of the scoped WHERE block)/,
+    );
+  });
+
   it('preprocesses escaped IRI and string delimiters before scoped minTrust rewriting', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);

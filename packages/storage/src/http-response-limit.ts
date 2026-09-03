@@ -1,7 +1,7 @@
 import {
   BoundedResponseBodyLimitError,
   readResponseBodyBytesBounded,
-} from '@origintrail-official/dkg-core/bounded-response-body';
+} from '@origintrail-official/dkg-http-utils';
 
 export class StoreResponseTooLargeError extends Error {
   readonly code = 'STORE_RESPONSE_TOO_LARGE';

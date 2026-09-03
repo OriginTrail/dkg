@@ -5,6 +5,7 @@ export default defineConfig({
     exclude: [...configDefaults.exclude, 'bench/**', '**/*.bench.ts'],
     projects: [
       'packages/core',
+      'packages/http-utils',
       'packages/storage',
       'packages/query',
       'packages/chain',

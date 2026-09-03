@@ -6,7 +6,7 @@ import type {
 import {
   BoundedResponseBodyLimitError,
   readResponseBodyBytesBounded,
-} from '@origintrail-official/dkg-core/bounded-response-body';
+} from '@origintrail-official/dkg-http-utils';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
 import {

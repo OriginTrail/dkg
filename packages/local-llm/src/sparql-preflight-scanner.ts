@@ -1,7 +1,7 @@
 import {
-  scanSparqlLexically,
+  prepareSparql,
   type SparqlLexicalToken,
-} from '@origintrail-official/dkg-rdf-utils/sparql-lexical-scanner';
+} from '@origintrail-official/dkg-rdf-utils/sparql';
 
 const ABSOLUTE_IRI_SCHEMES = new Set([
   'urn',
@@ -154,7 +154,7 @@ function hasUnwrappedAggregateAlias(
 
 /** Derive local-model policy facts from core's canonical lexical artifacts. */
 export function scanSparqlPreflight(value: string): SparqlPreflightScan {
-  const lexical = scanSparqlLexically(value);
+  const lexical = prepareSparql(value);
   const tokens = lexical.tokens.slice(lexical.prologue.endTokenIndex);
   const parentheses = indexParentheses(tokens);
   const first = tokens[0];

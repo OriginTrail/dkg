@@ -2,10 +2,10 @@ import {
   asGraphWriteRevisionSource,
   isSparqlHttpResponseError,
 } from '@origintrail-official/dkg-storage';
-import { CallerSparqlRejectedError } from './caller-sparql-error.js';
-
-/** Upstream statuses that mean the SUBMITTED query was malformed. */
-const MALFORMED_CALLER_QUERY_STATUSES = new Set([400, 422]);
+import type {
+  PreparedSparql,
+  SparqlLexicalToken,
+} from '@origintrail-official/dkg-rdf-utils/sparql';
 import type {
   TripleStore,
   Quad,
@@ -55,11 +55,10 @@ import {
   isSparqlKeyword,
   isSparqlKeywordStart as isKeywordStart,
   isSparqlWordContinuation as isWordContinuation,
-  preprocessSparqlCodePointEscapes,
+  prepareSparql,
   readSparqlVariable,
   skipSparqlStringLiteral as scanSparqlStringLiteral,
   skipSparqlIriRef,
-  skipSparqlIriRefForStructuralScan,
   skipSparqlSpaceAndLineComments,
   stripLiteralsAndComments,
 } from './sparql-utils.js';
@@ -70,8 +69,12 @@ import {
   resolveSparqlPrefixedName,
   type SparqlPrefixName,
 } from './sparql-graph-scope.js';
+import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
+
+/** Upstream statuses that mean the SUBMITTED query was malformed. */
+const MALFORMED_CALLER_QUERY_STATUSES = new Set([400, 422]);
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -367,19 +370,19 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
-    const preprocessedSparql = preprocessSparqlCodePointEscapes(sparql);
-    if (preprocessedSparql === null) {
+    const prepared = prepareSparql(sparql);
+    if (prepared.normalized === null) {
       throw new Error('SPARQL rejected: malformed Unicode code-point escape');
     }
-    sparql = preprocessedSparql;
-    if (collectSparqlWordTokens(sparql).has('SERVICE')) {
+    if (collectSparqlWordTokens(prepared).has('SERVICE')) {
       throw new Error('SPARQL rejected: SERVICE clauses are not allowed');
     }
     const reads = createQueryStoreReadContext(this.store, options);
-    const guard = validateReadOnlySparql(sparql);
+    const guard = validateReadOnlySparql(prepared);
     if (!guard.safe) {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
     }
+    sparql = prepared.normalized;
 
     // ── V10 view-based routing ────────────────────────────────────────
     const effectiveContextGraphId = options?.contextGraphId;
@@ -1637,7 +1640,7 @@ function constrainGraphVariablesToAllowedSet(sparql: string, allowedGraphs: stri
   const graphVariables = collectGraphVariables(sparql);
   if (graphVariables.length === 0) return sparql;
 
-  const braceStart = findWhereBraceStart(sparql);
+  const braceStart = findWhereBraceStartUsingTokens(sparql);
   if (braceStart === -1) {
     throw new ScopedQueryViolationError(
       'GRAPH variables cannot be constrained because the WHERE block could not be located',
@@ -1979,38 +1982,11 @@ function collectExplicitGraphIris(sparql: string): string[] {
   return iris;
 }
 
-function hasGraphClause(sparql: string): boolean {
-  const n = sparql.length;
-  let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        return true;
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-
-  return false;
+function hasGraphClause(
+  sparql: string,
+  prepared: PreparedSparql = prepareSparql(sparql),
+): boolean {
+  return prepared.wordTokens.has('GRAPH');
 }
 
 function collectGraphVariables(sparql: string): string[] {
@@ -2135,7 +2111,7 @@ function skipValuesClause(sparql: string, start: number, limit: number): number 
  *
  * dkg-query-engine.ts:848). The
  * previous helpers (`stripSparqlLineComments`, `scrubStringsAndComments`,
- * `findMatchingCloseBrace`, `findWhereBraceStart`, and
+ * `findMatchingCloseBrace`, the former WHERE locator, and
  * `splitTopLevelTripleStatements`) all had their own copy of the
  * single-line literal scanner and NONE recognised triple-quoted
  * literals, so a long-form payload like
@@ -2154,203 +2130,68 @@ export function skipSparqlStringLiteral(src: string, i: number): number {
   return scanSparqlStringLiteral(src, i);
 }
 
-/**
- * Token-aware locator for the explicit `WHERE` keyword at the
- * top-level of a SPARQL query. Mirrors the lex rules used by
- * {@link findMatchingCloseBrace} / the fallback path in
- * {@link findWhereBraceStart}: skips line comments (`# ... \n`),
- * single/double/triple-quoted string literals (via
- * {@link skipSparqlStringLiteral}), and IRIREFs (`<...>`) so the
- * `WHERE` substring can NOT be sourced from inside any of those
- * payload contexts. This locator explicitly uses the structural
- * comparison-vs-IRI cursor; grammar consumers use the grammar cursor instead.
- *
- * Returns the index of the `W` of the `WHERE` keyword, or `-1` if
- * none is found at top level. Case-insensitive on the keyword
- * itself, but the surrounding word boundary is enforced (so
- * identifiers like `WHEREVER` / `aWHERE` do NOT match).
- */
-function findExplicitWhereTokenIdx(sparql: string): number {
-  const n = sparql.length;
-  const isWordStart = (c: string): boolean =>
-    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_';
-  const isWordCont = (c: string): boolean =>
-    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-    (c >= '0' && c <= '9') || c === '_';
-
-  let i = 0;
-  let braceDepth = 0;
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRefForStructuralScan(sparql, i);
-      if (iriEnd !== null) {
-        i = iriEnd;
-        continue;
-      }
-      i++;
-      continue;
-    }
-    if (ch === '{') {
-      braceDepth++;
-      i++;
-      continue;
-    }
-    if (ch === '}') {
-      braceDepth = Math.max(0, braceDepth - 1);
-      i++;
-      continue;
-    }
-    if (isWordStart(ch)) {
-      // Word boundary check: previous char (if any) must NOT be a
-      // word-continuation byte. The outer lexer already skipped
-      // comments/strings/IRIs, so a non-word predecessor means we're
-      // at a real keyword start.
-      const prev = i > 0 ? sparql[i - 1] : '';
-      if (prev && isWordCont(prev)) {
-        // Mid-identifier — skip the rest of the word.
-        let j = i + 1;
-        while (j < n && isWordCont(sparql[j])) j++;
-        i = j;
-        continue;
-      }
-      let j = i + 1;
-      while (j < n && isWordCont(sparql[j])) j++;
-      const word = sparql.substring(i, j);
-      if (braceDepth === 0 && word.length === 5 && word.toUpperCase() === 'WHERE') {
-        return i;
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-  return -1;
+/** Locate the WHERE group from canonical prepared tokens. */
+function preparedTokenOffset(
+  sparql: string,
+  prepared: PreparedSparql,
+  token: SparqlLexicalToken,
+): number {
+  return prepared.source === sparql ? token.start : token.normalizedStart;
 }
 
-/**
- * Find the next significant `{` after a given index, skipping
- * whitespace AND line comments (`# … \n`) but NOT string literals
- * — SPARQL grammar does not allow a string literal between the
- * `WHERE` keyword and its opening `{`, so encountering one means
- * the input is malformed and we should bail (return `-1`).
- */
-function nextSignificantBraceAfter(sparql: string, startIdx: number): number {
-  const n = sparql.length;
-  let i = startIdx;
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (/\s/.test(ch)) { i++; continue; }
-    if (ch === '{') return i;
-    return -1;
-  }
-  return -1;
-}
-
-/**
- * Locate the opening `{` of the WHERE clause in a SPARQL query.
- *
- * SPARQL 1.1 (§16) allows the `WHERE` keyword to be omitted from
- * `SELECT`, `DESCRIBE`, and `ASK` queries, and from the second
- * `GroupGraphPattern` of a `CONSTRUCT`. The legacy callers (`wrapWithGraph`,
- * `wrapWithGraphUnion`, `injectMinTrustFilter`) all matched only
- * `WHERE\s*\{`, so any of those legitimate shorthand forms left the
- * query untouched (no GRAPH wrapping, no trust filter injection) and —
- * on a `verifiable-memory` view whose data lives in a named sub-graph —
- * silently returned `[]` instead of executing against the right graph.
- *
- * Strategy:
- *   1. Prefer the explicit `WHERE { ... }` form.
- *   2. Otherwise, walk top-level braces (skipping IRIs / quoted
- *      strings / comments) and use the LAST top-level `{...}`. This
- *      is correct for every form:
- *        - `SELECT ?x { ... }`           (1 top-level brace)
- *        - `ASK { ... }`                 (1)
- *        - `DESCRIBE ?x { ... }`         (1)
- *        - `CONSTRUCT { tmpl } { where }`(2 — last is the WHERE)
- *      `CONSTRUCT WHERE { ... }` already matches the primary path.
- *
- * Returns `null` when no top-level `{...}` block is balanced.
- */
-function findWhereBraceStart(sparql: string): number {
-  // The earlier fast path used a raw regex `/\bWHERE\s*\{/i` which
-  // matches ANY `WHERE` followed by `{` — including ones embedded inside
-  // string literals or comments. Adversarial / obfuscated input
-  // like
-  //   SELECT ("WHERE {" AS ?x) WHERE { ... }
-  // would have the regex hit the literal substring inside the
-  // SELECT projection, then `sparql.indexOf('{', whereIdx)` would
-  // grab the brace just past the literal — and every later
-  // injection (`wrapWithGraph` / `injectMinTrustFilter`) would
-  // rewrite the wrong block, in some cases producing an invalid
-  // query and in others silently filtering against a string-literal
-  // expression rather than the actual WHERE clause.
-  //
-  // Fix: locate the explicit `WHERE` token using the SAME token-
-  // aware scanner the fallback already uses (skips line comments,
-  // single/double/triple-quoted string literals, and IRIREFs through
-  // the shared cursor). Then advance past inter-keyword whitespace
-  // (and any line comments) before reading the `{`.
-  const whereTokenIdx = findExplicitWhereTokenIdx(sparql);
-  if (whereTokenIdx !== -1) {
-    const idx = nextSignificantBraceAfter(sparql, whereTokenIdx + 'WHERE'.length);
-    return idx;
-  }
-
-  // Fallback: scan for top-level `{` while honouring SPARQL token
-  // boundaries — IRIs (`<...>`), quoted literals, and `#` comments
-  // can all contain stray `{` chars that the regex would
-  // misinterpret as block openers.
-  //
-  const n = sparql.length;
-  const opens: number[] = [];
+function findWhereBraceStartUsingTokens(
+  sparql: string,
+  prepared: PreparedSparql = prepareSparql(sparql),
+): number {
   let depth = 0;
-  let i = 0;
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
+  const opens: number[] = [];
+  for (let tokenIndex = 0; tokenIndex < prepared.tokens.length; tokenIndex++) {
+    const token = prepared.tokens[tokenIndex];
+    if ('value' in token && token.kind === 'word' && depth === 0 && token.upper === 'WHERE') {
+      const next = prepared.tokens[tokenIndex + 1];
+      return next && 'value' in next && next.kind === 'symbol' && next.logicalValue === '{'
+        ? preparedTokenOffset(sparql, prepared, next)
+        : -1;
     }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRefForStructuralScan(sparql, i);
-      if (iriEnd !== null) {
-        i = iriEnd;
-        continue;
-      }
-      // Comparison operator — advance one byte and keep scanning.
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      // dkg-query-engine.ts:848).
-      // Centralised triple-quoted-aware skip — see skipSparqlStringLiteral.
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '{') {
-      if (depth === 0) opens.push(i);
+    if (!('value' in token) || token.kind !== 'symbol') continue;
+    if (token.logicalValue === '{') {
+      if (depth === 0) opens.push(preparedTokenOffset(sparql, prepared, token));
       depth++;
-    } else if (ch === '}') {
+    } else if (token.logicalValue === '}') {
       depth--;
       if (depth < 0) return -1;
     }
-    i++;
   }
-  if (depth !== 0 || opens.length === 0) return -1;
-  return opens[opens.length - 1];
+  return depth === 0 && opens.length > 0 ? opens[opens.length - 1] : -1;
+}
+
+function scopeGraphlessDescribe(
+  sparql: string,
+  graphUris: readonly string[],
+  prepared: PreparedSparql = prepareSparql(sparql),
+): string | null {
+  if (prepared.normalized === null) return null;
+  const tokens = prepared.tokens.slice(prepared.prologue.endTokenIndex);
+  const operation = tokens[0];
+  if (!operation || !('value' in operation) || operation.kind !== 'word' || operation.upper !== 'DESCRIBE') {
+    return null;
+  }
+  if (tokens.some(
+    (token: SparqlLexicalToken) => 'value' in token && token.kind === 'symbol' && token.logicalValue === '{',
+  )) return null;
+
+  const modifiers = new Set(['GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET']);
+  const modifier = tokens.slice(1).find(
+    (token: SparqlLexicalToken) => 'value' in token && token.kind === 'word' && modifiers.has(token.upper),
+  );
+  const last = tokens[tokens.length - 1];
+  const insertion = modifier
+    ? preparedTokenOffset(sparql, prepared, modifier)
+    : last
+      ? (prepared.source === sparql ? last.end : last.normalizedEnd)
+      : (prepared.source === sparql ? operation.end : operation.normalizedEnd);
+  const clauses = graphUris.map((graph) => `FROM <${assertSafeIri(graph)}>`).join(' ');
+  return `${sparql.slice(0, insertion)} ${clauses} ${sparql.slice(insertion)}`;
 }
 
 /**
@@ -2358,17 +2199,24 @@ function findWhereBraceStart(sparql: string): number {
  * If the query already uses GRAPH patterns, returns it unchanged.
  */
 function wrapWithGraph(sparql: string, graphUri: string): string {
-  if (hasGraphClause(sparql)) return sparql;
+  const prepared = prepareSparql(sparql);
+  if (hasGraphClause(sparql, prepared)) return sparql;
 
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) return sparql;
+  const braceStart = findWhereBraceStartUsingTokens(sparql, prepared);
+  if (braceStart === -1) {
+    const scopedDescribe = scopeGraphlessDescribe(sparql, [graphUri], prepared);
+    if (scopedDescribe !== null) return scopedDescribe;
+    throw new ScopedQueryViolationError('unable to locate a graph-scopable WHERE block');
+  }
 
   // — dkg-query-engine.ts:939). Use the
   // literal/comment/IRI-aware helper so a `{` or `}` inside a SPARQL
   // string literal, line comment, or IRI does NOT confuse the depth
   // counter and we stop wrapping queries with literal-heavy bodies.
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return sparql;
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart, prepared);
+  if (braceEnd === -1) {
+    throw new ScopedQueryViolationError('unable to locate the end of the scoped WHERE block');
+  }
 
   const before = sparql.slice(0, braceStart + 1);
   const inner = sparql.slice(braceStart + 1, braceEnd);
@@ -2407,16 +2255,23 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
  * per-graph execution.
  */
 function wrapWithGraphUnion(sparql: string, graphUris: string[]): string | null {
-  if (hasGraphClause(sparql)) return sparql;
+  const prepared = prepareSparql(sparql);
+  if (hasGraphClause(sparql, prepared)) return sparql;
   if (graphUris.length === 0) return sparql;
 
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) return sparql;
+  const braceStart = findWhereBraceStartUsingTokens(sparql, prepared);
+  if (braceStart === -1) {
+    const scopedDescribe = scopeGraphlessDescribe(sparql, graphUris, prepared);
+    if (scopedDescribe !== null) return scopedDescribe;
+    throw new ScopedQueryViolationError('unable to locate a graph-scopable WHERE block');
+  }
 
   // — dkg-query-engine.ts:939). See
   // `findMatchingCloseBrace` and the `wrapWithGraph` cousin above.
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return sparql;
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart, prepared);
+  if (braceEnd === -1) {
+    throw new ScopedQueryViolationError('unable to locate the end of the scoped WHERE block');
+  }
 
   const before = sparql.slice(0, braceStart + 1);
   const inner = sparql.slice(braceStart + 1, braceEnd);
@@ -2458,12 +2313,13 @@ function wrapWithProjectedGraphSubselect(
   buildGraphPattern: (inner: string, graphs: string[]) => string,
   acceptsInner: (inner: string) => boolean = () => true,
 ): string | null {
-  if (hasGraphClause(sparql)) return sparql;
+  const prepared = prepareSparql(sparql);
+  if (hasGraphClause(sparql, prepared)) return sparql;
   if (graphUris.length === 0) return sparql;
 
-  const braceStart = findWhereBraceStart(sparql);
+  const braceStart = findWhereBraceStartUsingTokens(sparql, prepared);
   if (braceStart === -1) return null;
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart, prepared);
   if (braceEnd === -1) return null;
 
   const before = sparql.slice(0, braceStart + 1);
@@ -2825,15 +2681,16 @@ function splitTopLevelTripleStatements(body: string): string[] {
 }
 
 function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
+  const prepared = prepareSparql(sparql);
   // The
   // pre-fix rewriter only recognised `WHERE\s*\{`, so SPARQL 1.1
   // shorthand forms (`SELECT ?x { … }`, `ASK { … }`,
   // `DESCRIBE ?x { … }`, `CONSTRUCT { tmpl } { where }`) returned
   // `null` and the `minTrust > Endorsed` caller silently fell
-  // through to an empty result. `findWhereBraceStart` normalises
+  // through to an empty result. The token locator normalises
   // every shape to the WHERE-clause brace position before we apply
   // the existing depth-counting pass below.
-  const braceStart = findWhereBraceStart(sparql);
+  const braceStart = findWhereBraceStartUsingTokens(sparql, prepared);
   if (braceStart === -1) return null;
 
   // — dkg-query-engine.ts:939). The
@@ -2844,7 +2701,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   // and silently fails closed. Use the literal/comment/IRI-aware
   // helper so the brace boundaries match what SPARQL actually
   // parses.
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart, prepared);
   if (braceEnd === -1) return null;
 
   const inner = sparql.slice(braceStart + 1, braceEnd);

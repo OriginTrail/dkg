@@ -1,5 +1,5 @@
 {
-  "name": "@origintrail-official/dkg-rdf-utils",
+  "name": "@origintrail-official/dkg-http-utils",
   "version": "10.0.15",
   "type": "module",
   "main": "dist/index.js",
@@ -9,11 +9,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
-    },
-    "./sparql": {
-      "types": "./dist/sparql.d.ts",
-      "import": "./dist/sparql.js",
-      "default": "./dist/sparql.js"
     },
     "./package.json": "./package.json"
   },
@@ -38,6 +33,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/OriginTrail/dkg.git",
-    "directory": "packages/rdf-utils"
+    "directory": "packages/http-utils"
   }
 }

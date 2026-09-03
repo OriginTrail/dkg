@@ -1,4 +1,4 @@
-import { scanSparqlLexically } from '@origintrail-official/dkg-rdf-utils/sparql-lexical-scanner';
+import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { McpToolDefinition } from './schema.js';
 import { scanSparqlPreflight } from './sparql-preflight-scanner.js';
 
@@ -151,7 +151,7 @@ export function validateDkgToolCall(
  * used only after the original, syntactically-valid read returned no evidence.
  */
 export function rewriteCompactPredicatesForDkg(sparql: string): string {
-  const scan = scanSparqlLexically(sparql);
+  const scan = prepareSparql(sparql);
   if (scan.unterminated) return sparql;
   const edits: Array<{ start: number; end: number; value: string }> = [];
 

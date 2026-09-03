@@ -48,17 +48,58 @@ export function readSparqlLogicalCodePoint(
   return { codePoint, rawWidth: 2 + digits };
 }
 
+export interface SparqlNormalizedSpan {
+  readonly rawStart: number;
+  readonly rawEnd: number;
+}
+
+export interface SparqlNormalizedSource {
+  readonly value: string;
+  /** One raw-source span for every UTF-16 code unit in `value`. */
+  readonly spans: readonly SparqlNormalizedSpan[];
+}
+
+interface SparqlNormalizationBuilder {
+  readonly decoded: string[];
+  readonly spans: SparqlNormalizedSpan[];
+}
+
+function appendLogicalCodePoint(
+  builder: SparqlNormalizationBuilder,
+  codePoint: number,
+  rawStart: number,
+  rawWidth: number,
+): void {
+  const value = String.fromCodePoint(codePoint);
+  builder.decoded.push(value);
+  for (let index = 0; index < value.length; index++) {
+    builder.spans.push({ rawStart, rawEnd: rawStart + rawWidth });
+  }
+}
+
+function appendRawRegion(
+  source: string,
+  start: number,
+  end: number,
+  builder: SparqlNormalizationBuilder,
+): void {
+  builder.decoded.push(source.slice(start, end));
+  for (let index = start; index < end; index++) {
+    builder.spans.push({ rawStart: index, rawEnd: index + 1 });
+  }
+}
+
 function appendDecodedRegion(
   source: string,
   start: number,
   end: number,
-  decoded: string[],
+  builder: SparqlNormalizationBuilder,
 ): boolean {
   let index = start;
   while (index < end) {
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical || index + logical.rawWidth > end) return false;
-    decoded.push(String.fromCodePoint(logical.codePoint));
+    appendLogicalCodePoint(builder, logical.codePoint, index, logical.rawWidth);
     index += logical.rawWidth;
   }
   return true;
@@ -68,7 +109,7 @@ function appendDecodedStringRegion(
   source: string,
   start: number,
   end: number,
-  decoded: string[],
+  builder: SparqlNormalizationBuilder,
 ): boolean {
   let index = start;
   while (index < end) {
@@ -82,14 +123,15 @@ function appendDecodedStringRegion(
     ) {
       const escapedCodePoint = source.codePointAt(index + 1);
       const escapedWidth = escapedCodePoint !== undefined && escapedCodePoint > 0xffff ? 2 : 1;
-      decoded.push(source.slice(index, Math.min(index + 1 + escapedWidth, end)));
-      index += 1 + escapedWidth;
+      const escapedEnd = Math.min(index + 1 + escapedWidth, end);
+      appendRawRegion(source, index, escapedEnd, builder);
+      index = escapedEnd;
       continue;
     }
 
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical || index + logical.rawWidth > end) return false;
-    decoded.push(String.fromCodePoint(logical.codePoint));
+    appendLogicalCodePoint(builder, logical.codePoint, index, logical.rawWidth);
     index += logical.rawWidth;
   }
   return true;
@@ -99,27 +141,27 @@ function appendDecodedStringRegion(
  * Apply SPARQL UCHAR preprocessing without reinterpreting text inside an
  * already-open comment or the second slash of a string ECHAR.
  */
-export function decodeSparqlCodePointEscapes(source: string): string | null {
-  const decoded: string[] = [];
+export function normalizeSparqlCodePointEscapes(source: string): SparqlNormalizedSource | null {
+  const builder: SparqlNormalizationBuilder = { decoded: [], spans: [] };
   let index = 0;
   while (index < source.length) {
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical) return null;
 
     if (logical.codePoint === 0x23) {
-      decoded.push('#');
+      appendLogicalCodePoint(builder, logical.codePoint, index, logical.rawWidth);
       index += logical.rawWidth;
       const commentStart = index;
       while (index < source.length && source[index] !== '\n' && source[index] !== '\r') {
         index++;
       }
-      decoded.push(source.slice(commentStart, index));
+      appendRawRegion(source, commentStart, index, builder);
       continue;
     }
 
     if (logical.codePoint === 0x22 || logical.codePoint === 0x27) {
       const string = scanSparqlStringLiteral(source, index);
-      if (!string || !appendDecodedStringRegion(source, index, string.end, decoded)) return null;
+      if (!string || !appendDecodedStringRegion(source, index, string.end, builder)) return null;
       index = string.end;
       continue;
     }
@@ -127,16 +169,20 @@ export function decodeSparqlCodePointEscapes(source: string): string | null {
     if (logical.codePoint === 0x3c) {
       const iriEnd = skipSparqlIriRef(source, index);
       if (iriEnd !== null) {
-        if (!appendDecodedRegion(source, index, iriEnd, decoded)) return null;
+        if (!appendDecodedRegion(source, index, iriEnd, builder)) return null;
         index = iriEnd;
         continue;
       }
     }
 
-    decoded.push(String.fromCodePoint(logical.codePoint));
+    appendLogicalCodePoint(builder, logical.codePoint, index, logical.rawWidth);
     index += logical.rawWidth;
   }
-  return decoded.join('');
+  return { value: builder.decoded.join(''), spans: builder.spans };
+}
+
+export function decodeSparqlCodePointEscapes(source: string): string | null {
+  return normalizeSparqlCodePointEscapes(source)?.value ?? null;
 }
 
 export function isSparqlPnCharsBaseCodePoint(codePoint: number): boolean {
@@ -334,42 +380,6 @@ export function skipSparqlIriRef(source: string, start: number): number | null {
   const opening = readSparqlLogicalCodePoint(source, start);
   if (!opening || opening.codePoint !== 0x3c) return null;
   return skipSparqlIriRefBody(source, start + opening.rawWidth);
-}
-
-function followsIriIntroducingKeyword(source: string, start: number): boolean {
-  let wordStart = start;
-  while (wordStart > 0 && /[A-Za-z]/.test(source[wordStart - 1])) wordStart--;
-  if (wordStart === start) return false;
-  const before = wordStart > 0 ? source[wordStart - 1] : '';
-  if (before && /[A-Za-z0-9_?$]/.test(before)) return false;
-  return /^(?:BASE|FROM|GRAPH|INTO|LOAD|NAMED|PREFIX|SERVICE|TO|USING|WITH)$/i
-    .test(source.slice(wordStart, start));
-}
-
-/**
- * Query structural rewrites must distinguish a grammar-valid relative IRI
- * such as `<1#item>` from a compact comparison such as `?n<10&&?m>5`.
- * A grammar-valid `<...>` is therefore treated as a comparison only when its
- * opening delimiter is directly adjacent to a plausible left-hand operand.
- */
-export function skipSparqlIriRefForStructuralScan(
-  source: string,
-  start: number,
-): number | null {
-  const opening = readSparqlLogicalCodePoint(source, start);
-  if (!opening || opening.codePoint !== 0x3c) return null;
-  const bodyStart = start + opening.rawWidth;
-  const iriEnd = skipSparqlIriRefBody(source, bodyStart);
-  if (iriEnd === null || start === 0) return iriEnd;
-  if (followsIriIntroducingKeyword(source, start)) return iriEnd;
-
-  const previousCodeUnit = source.charCodeAt(start - 1);
-  const previousStart = previousCodeUnit >= 0xdc00 && previousCodeUnit <= 0xdfff
-    && start >= 2
-    ? start - 2
-    : start - 1;
-  const previous = source.slice(previousStart, start);
-  return /[\p{L}\p{N}_?$)\]>"']/u.test(previous) ? null : iriEnd;
 }
 
 /** Skip whitespace and `#` line comments between SPARQL tokens. */

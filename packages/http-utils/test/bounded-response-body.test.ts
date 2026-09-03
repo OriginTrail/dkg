@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BoundedResponseBodyLimitError,
   readResponseBodyBytesBounded,
-} from '../src/bounded-response-body.js';
+} from '../src/index.js';
 
 describe('bounded response body collection', () => {
   it('cancels immediately when Content-Length exceeds the ceiling', async () => {

@@ -321,11 +321,6 @@ export {
   type EnsureDkgNodeConfigOptions,
 } from './ensure-dkg-node-config.js';
 export {
-  BoundedResponseBodyLimitError,
-  readResponseBodyBytesBounded,
-  type BoundedResponseBodyLimitSource,
-} from './bounded-response-body.js';
-export {
   DEFAULT_SETUP_NETWORK,
   LEGACY_FALLBACK_NETWORK,
   SELECTABLE_SETUP_NETWORKS,
@@ -344,13 +339,6 @@ export {
   sparqlInt,
   assertSafeRdfTerm,
 } from './sparql-safe.js';
-export {
-  maskSparqlLexicalRegions,
-  scanSparqlLexically,
-  type SparqlLexicalMask,
-  type SparqlLexicalScan,
-  type SparqlLexicalToken,
-} from './sparql-lexical-scanner.js';
 export {
   JAVA_WRITE_UTF_MAX_BYTES,
   DKG_RDF_LITERAL_SAFE_MUTF8_BYTES,

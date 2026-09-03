@@ -1,35 +1,29 @@
 import {
-  preprocessSparqlCodePointEscapes,
+  prepareSparql,
   readSparqlVariable,
   skipSparqlIriRef,
-  skipSparqlIriRefForStructuralScan,
   skipSparqlSpaceAndLineComments,
   skipSparqlStringLiteral,
-} from '@origintrail-official/dkg-core/sparql-cursors';
-import { scanSparqlLexically } from '@origintrail-official/dkg-core/sparql-lexical-scanner';
+  type PreparedSparql,
+} from '@origintrail-official/dkg-rdf-utils/sparql';
 
 export {
   stripSparqlLiteralsAndComments as stripLiteralsAndComments,
 } from '@origintrail-official/dkg-core';
 
-// Keep the query package's cursor APIs stable while delegating their grammar
-// and raw-offset handling to core's canonical low-level primitives.
 export {
-  preprocessSparqlCodePointEscapes,
+  prepareSparql,
   readSparqlVariable,
   skipSparqlIriRef,
-  skipSparqlIriRefForStructuralScan,
   skipSparqlSpaceAndLineComments,
   skipSparqlStringLiteral,
 };
 
-/** Collect logical word tokens while keeping strings, IRIs, and comments inert. */
-export function collectSparqlWordTokens(source: string): ReadonlySet<string> {
-  const words = new Set<string>();
-  for (const token of scanSparqlLexically(source).tokens) {
-    if ('value' in token && token.kind === 'word') words.add(token.upper);
-  }
-  return words;
+/** Return the word facts already derived by canonical SPARQL preparation. */
+export function collectSparqlWordTokens(
+  source: string | PreparedSparql,
+): ReadonlySet<string> {
+  return typeof source === 'string' ? prepareSparql(source).wordTokens : source.wordTokens;
 }
 
 export function isSparqlKeywordStart(src: string, idx: number): boolean {
@@ -67,40 +61,36 @@ function isWordStart(ch: string | undefined): boolean {
 }
 
 export function isSparqlWordContinuation(ch: string | undefined): ch is string {
-  return isWordStart(ch) || (!!ch && ch >= '0' && ch <= '9');
+  return isWordStart(ch) || !!ch && ch >= '0' && ch <= '9';
 }
 
-/** Find the closing brace while treating strings, comments, and IRIREFs as opaque. */
-export function findMatchingSparqlCloseBrace(sparql: string, openIdx: number): number {
-  if (sparql[openIdx] !== '{') return -1;
+/** Find a matching brace from prepared symbol tokens, never from payload text. */
+export function findMatchingSparqlCloseBrace(
+  sparql: string,
+  openIdx: number,
+  prepared: PreparedSparql = prepareSparql(sparql),
+): number {
   let depth = 0;
-  let i = openIdx;
-  while (i < sparql.length) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < sparql.length && sparql[i] !== '\n') i++;
+  let opened = false;
+  for (const token of prepared.tokens) {
+    if (!('value' in token) || token.kind !== 'symbol') continue;
+    const index = prepared.source === sparql ? token.start : token.normalizedStart;
+    if (index < openIdx) continue;
+
+    if (!opened) {
+      if (index !== openIdx || token.logicalValue !== '{') return -1;
+      opened = true;
+      depth = 1;
       continue;
     }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRefForStructuralScan(sparql, i);
-      if (iriEnd) {
-        i = iriEnd;
-        continue;
-      }
-      i++;
-      continue;
-    }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
+
+    if (token.logicalValue === '{') {
+      depth++;
+    } else if (token.logicalValue === '}') {
       depth--;
-      if (depth === 0) return i;
+      if (depth === 0) return index;
       if (depth < 0) return -1;
     }
-    i++;
   }
   return -1;
 }

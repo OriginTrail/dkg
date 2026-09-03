@@ -1,9 +1,8 @@
 import { BoundedLruCache } from './bounded-lru-cache.js';
 import {
-  maskSparqlLexicalRegions,
-  scanSparqlLexically,
-  type SparqlLexicalScan,
-} from './sparql-lexical-scanner.js';
+  prepareSparql,
+  type PreparedSparql,
+} from '@origintrail-official/dkg-rdf-utils/sparql';
 
 const SPARQL_READ_ONLY_OPERATIONS = ['SELECT', 'CONSTRUCT', 'ASK', 'DESCRIBE'] as const;
 const SPARQL_MUTATING_KEYWORDS = [
@@ -55,10 +54,10 @@ const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
 const READ_ONLY_OPERATION_SET = new Set<string>(SPARQL_READ_ONLY_OPERATIONS);
 
 export function stripSparqlLiteralsAndComments(sparql: string): string {
-  return maskSparqlLexicalRegions(sparql).masked;
+  return prepareSparql(sparql).masked;
 }
 
-function detectSparqlOperationForm(scan: SparqlLexicalScan): SparqlDetectedOperation {
+function detectSparqlOperationForm(scan: PreparedSparql): SparqlDetectedOperation {
   const token = scan.tokens[scan.prologue.endTokenIndex];
   if (!token || !('value' in token) || token.kind !== 'word') return 'UNKNOWN';
   const operation = token.upper;
@@ -90,25 +89,34 @@ function materializeSparqlOperationAnalysis(
   };
 }
 
-export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis {
-  const cached = sparqlAnalysisCache.get(sparql);
-  if (cached) return materializeSparqlOperationAnalysis(cached);
-
-  const scan = scanSparqlLexically(sparql);
+function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
   const form = detectSparqlOperationForm(scan);
   const mutatingToken = scan.tokens.find(
     (token) => 'value' in token
       && token.kind === 'word'
       && MUTATING_KEYWORD_SET.has(token.upper),
   );
-  const facts: SparqlOperationFacts = {
+  return {
     form,
     mutatingKeyword: mutatingToken && 'value' in mutatingToken
       ? mutatingToken.value
       : null,
   };
+}
 
-  sparqlAnalysisCache.set(sparql, facts);
+export function analyzeSparqlOperation(
+  input: string | PreparedSparql,
+): SparqlOperationAnalysis {
+  if (typeof input !== 'string') {
+    return materializeSparqlOperationAnalysis(analyzePreparedSparql(input));
+  }
+
+  const cached = sparqlAnalysisCache.get(input);
+  if (cached) return materializeSparqlOperationAnalysis(cached);
+
+  const facts = analyzePreparedSparql(prepareSparql(input));
+
+  sparqlAnalysisCache.set(input, facts);
   // The cache owns only immutable scalar facts. Materializing at the public
   // boundary preserves the API's mutable, caller-isolated response objects.
   return materializeSparqlOperationAnalysis(facts);

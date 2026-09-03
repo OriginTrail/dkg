@@ -1,5 +1,5 @@
 import {
-  decodeSparqlCodePointEscapes,
+  normalizeSparqlCodePointEscapes,
   readSparqlLogicalCodePoint,
   readSparqlVariableEnd,
   scanSparqlStringLiteral,
@@ -20,28 +20,39 @@ export type SparqlLexicalToken =
     readonly upper: string;
     readonly start: number;
     readonly end: number;
+    readonly normalizedStart: number;
+    readonly normalizedEnd: number;
   }
   | {
     readonly kind: 'iri' | 'string';
     readonly start: number;
     readonly end: number;
+    readonly normalizedStart: number;
+    readonly normalizedEnd: number;
   };
 
-export interface SparqlLexicalScan {
+export interface PreparedSparql {
+  /** Exact unprocessed input. */
+  readonly source: string;
+  /** SPARQL UCHAR-normalized input, or `null` when a UCHAR is malformed. */
+  readonly normalized: string | null;
   /** Source-length-preserving view with strings, IRIs, and comments blanked. */
   readonly masked: string;
+  /** Mask aligned to `normalized`. */
+  readonly normalizedMasked: string | null;
   /** Tokens outside comments, including opaque string and IRI boundary tokens. */
   readonly tokens: readonly SparqlLexicalToken[];
   readonly unterminated: boolean;
+  readonly lexicalStatus: {
+    readonly valid: boolean;
+    readonly unterminated: boolean;
+  };
+  /** Upper-cased logical word tokens, computed once for policy checks. */
+  readonly wordTokens: ReadonlySet<string>;
   readonly prologue: {
     readonly endTokenIndex: number;
     readonly declaredPrefixes: readonly string[];
   };
-}
-
-export interface SparqlLexicalMask {
-  readonly masked: string;
-  readonly unterminated: boolean;
 }
 
 function logicalCodePointWidth(value: string, index: number, expected: number): number {
@@ -155,7 +166,7 @@ function lexicalToken(
   value: string,
   start: number,
   end: number,
-  logicalValue = decodeSparqlCodePointEscapes(value) ?? value,
+  logicalValue = value,
 ): SparqlLexicalToken {
   return {
     kind,
@@ -164,6 +175,8 @@ function lexicalToken(
     upper: logicalValue.toUpperCase(),
     start,
     end,
+    normalizedStart: start,
+    normalizedEnd: end,
   };
 }
 
@@ -173,7 +186,7 @@ function valuedToken(
   return token !== undefined && 'value' in token;
 }
 
-function scanPrologue(tokens: readonly SparqlLexicalToken[]): SparqlLexicalScan['prologue'] {
+function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['prologue'] {
   const declaredPrefixes: string[] = [];
   let cursor = 0;
   while (cursor < tokens.length) {
@@ -204,7 +217,7 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): SparqlLexicalScan[
  * higher-level policy checks. It is deliberately not a parser: it owns only
  * lexical regions, PN_PREFIX-aware names, source offsets, and masking.
  */
-function scanSparql(value: string): SparqlLexicalScan {
+function scanSparql(value: string): PreparedSparql {
   const masked = value.split('');
   const tokens: SparqlLexicalToken[] = [];
   let unterminated = false;
@@ -225,15 +238,9 @@ function scanSparql(value: string): SparqlLexicalScan {
     if (logical.codePoint === 0x23) {
       const start = index;
       index += logical.rawWidth;
-      while (index < value.length) {
-        const comment = readSparqlLogicalCodePoint(value, index);
-        if (!comment) {
-          index++;
-          continue;
-        }
-        if (comment.codePoint === 0x0a || comment.codePoint === 0x0d) break;
-        index += comment.rawWidth;
-      }
+      // UCHAR-looking text is inert once the comment has opened. Only an
+      // actual source line ending closes the comment.
+      while (index < value.length && value[index] !== '\n' && value[index] !== '\r') index++;
       blank(masked, start, index);
       continue;
     }
@@ -247,7 +254,13 @@ function scanSparql(value: string): SparqlLexicalScan {
       }
       index = stringScan.end;
       blank(masked, start, index);
-      tokens.push({ kind: 'string', start, end: index });
+      tokens.push({
+        kind: 'string',
+        start,
+        end: index,
+        normalizedStart: start,
+        normalizedEnd: index,
+      });
       if (!stringScan.closed) unterminated = true;
       continue;
     }
@@ -258,7 +271,13 @@ function scanSparql(value: string): SparqlLexicalScan {
         const start = index;
         index = iriEnd;
         blank(masked, start, index);
-        tokens.push({ kind: 'iri', start, end: index });
+        tokens.push({
+          kind: 'iri',
+          start,
+          end: index,
+          normalizedStart: start,
+          normalizedEnd: index,
+        });
         continue;
       }
     }
@@ -312,20 +331,94 @@ function scanSparql(value: string): SparqlLexicalScan {
     ));
   }
 
+  const maskedValue = masked.join('');
+  const wordTokens = new Set<string>();
+  for (const token of tokens) {
+    if ('value' in token && token.kind === 'word') wordTokens.add(token.upper);
+  }
   return {
-    masked: masked.join(''),
+    source: value,
+    normalized: value,
+    masked: maskedValue,
+    normalizedMasked: maskedValue,
     tokens,
     unterminated,
+    lexicalStatus: { valid: true, unterminated },
+    wordTokens,
     prologue: scanPrologue(tokens),
   };
 }
 
-export function scanSparqlLexically(value: string): SparqlLexicalScan {
-  return scanSparql(value);
+function normalizedBoundaryToRaw(
+  normalizedIndex: number,
+  spans: readonly { rawStart: number; rawEnd: number }[],
+  sourceLength: number,
+  boundary: 'start' | 'end',
+): number {
+  if (normalizedIndex <= 0) return 0;
+  if (normalizedIndex >= spans.length) return sourceLength;
+  return boundary === 'start'
+    ? spans[normalizedIndex].rawStart
+    : spans[normalizedIndex - 1].rawEnd;
 }
 
-/** Derive the public mask view from the same complete lexical artifact. */
-export function maskSparqlLexicalRegions(value: string): SparqlLexicalMask {
-  const scan = scanSparql(value);
-  return { masked: scan.masked, unterminated: scan.unterminated };
+/**
+ * Canonical SPARQL preparation boundary. Normalization, tokenization, masking,
+ * lexical status, prologue facts, and policy words are returned as one
+ * immutable analysis object. Token `start`/`end` offsets address the original
+ * source; `normalizedStart`/`normalizedEnd` address `normalized`.
+ */
+export function prepareSparql(source: string): PreparedSparql {
+  const normalized = normalizeSparqlCodePointEscapes(source);
+  if (normalized === null) {
+    return {
+      source,
+      normalized: null,
+      masked: ' '.repeat(source.length),
+      normalizedMasked: null,
+      tokens: [],
+      unterminated: false,
+      lexicalStatus: { valid: false, unterminated: false },
+      wordTokens: new Set(),
+      prologue: { endTokenIndex: 0, declaredPrefixes: [] },
+    };
+  }
+
+  const scan = scanSparql(normalized.value);
+  const tokens = scan.tokens.map((token): SparqlLexicalToken => {
+    const start = normalizedBoundaryToRaw(
+      token.normalizedStart,
+      normalized.spans,
+      source.length,
+      'start',
+    );
+    const end = normalizedBoundaryToRaw(
+      token.normalizedEnd,
+      normalized.spans,
+      source.length,
+      'end',
+    );
+    if ('value' in token) {
+      return { ...token, value: source.slice(start, end), start, end };
+    }
+    return { ...token, start, end };
+  });
+
+  const masked = source.split('');
+  for (let index = 0; index < scan.masked.length; index++) {
+    if (scan.masked[index] !== ' ') continue;
+    const span = normalized.spans[index];
+    if (!span) continue;
+    blank(masked, span.rawStart, span.rawEnd);
+  }
+
+  return {
+    ...scan,
+    source,
+    normalized: normalized.value,
+    masked: masked.join(''),
+    normalizedMasked: scan.masked,
+    tokens,
+    wordTokens: new Set(scan.wordTokens),
+  };
 }

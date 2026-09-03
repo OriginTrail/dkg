@@ -5,9 +5,5 @@
     "rootDir": "src",
     "composite": true
   },
-  "include": ["src"],
-  "references": [
-    { "path": "../http-utils" },
-    { "path": "../rdf-utils" }
-  ]
+  "include": ["src"]
 }
